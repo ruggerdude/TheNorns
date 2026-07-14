@@ -67,6 +67,8 @@
 - [ ] NORN-012 — Verify `@openai/codex-sdk` lifecycle coverage at Phase 5; CLI/app-server subprocess fallback
 - [ ] NORN-015 — Phase-gate reviews after 1A, 3, 5, 7, pre-pilot (standing)
 
+- [x] NORN-040 — **UI feedback document** for a dedicated design/frontend pass → [docs/UI-FEEDBACK.md](docs/UI-FEEDBACK.md). Evidence-based audit (22 unique hardcoded hex colors/0 shared, 71 inline style objects, no design system, no responsive layout, Login's visual identity doesn't carry through the rest of the app, QC review doesn't scale past a few modules, node inspector dumps raw JSON, Dashboard shows the unrelated demo project not the open one) plus hard constraints (what must not regress), screen-by-screen notes, suggested priority order, and the full API surface
+
 ## Backlog (post-MVP)
 - [ ] NORN-016 — Prompt library (REVIEW-002 P2-6)
 - [ ] NORN-017 — Transcript search across all agents (P2-7)
