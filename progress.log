@@ -11,3 +11,5 @@
 2026-07-14T01:00Z | NORN-004 | Phase 0B: contracts v1 frozen, tagged contracts-v1.0.0; 31 tests incl. reducer determinism/idempotency harness
 2026-07-14T01:20Z | NORN-020 | Phase 1A local half: relay+daemon+8 integration tests (disconnect replay, restart recovery, fencing); contracts 1.1.0
 2026-07-14T01:20Z | NORN-022 | Phase 1B: engine/budget/dispatch/git/sandbox, 58 tests green; deployed 1A acceptance gated on NORN-008
+2026-07-14T08:10Z | NORN-025 | Phase 2: @norns/adapters (Anthropic+OpenAI, taxonomy, usage normalization), 10-test conformance via mock; live smoke gated on keys
+2026-07-14T08:10Z | NORN-026 | Phase 3: contracts 1.2.0 review schemas; runPlanning loop (convergence/cap, dispositions, validation round-trips, memory injection); 76 tests total
