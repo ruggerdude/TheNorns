@@ -12,11 +12,12 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@fastify/static": "^10.1.0",
     "@fastify/websocket": "^11.0.0",
+    "@norns/adapters": "workspace:*",
     "@norns/contracts": "workspace:*",
     "fastify": "^5.0.0",
-    "zod": "^3.23.8",
-    "@norns/adapters": "workspace:*"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@norns/runner": "workspace:*",

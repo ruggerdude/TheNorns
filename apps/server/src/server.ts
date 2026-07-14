@@ -8,6 +8,7 @@
 //   GET  /          (minimal control page, Phase 1A)
 // Connection state is never trusted solely in process memory: every decision
 // reads/writes RelayStores, which snapshots to durable storage.
+import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import {
   CommandPayload,
@@ -58,6 +59,8 @@ export interface ServerOptions {
   graphSession?: GraphSession;
   /** Phase 6: dashboard provider (engine + ledger composition) */
   dashboard?: () => unknown;
+  /** Deploy: absolute path to the built web app (apps/web/dist) to serve. */
+  webDist?: string;
 }
 
 export interface NornsServer {
@@ -238,9 +241,30 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     return reply.send({ engaged: body.data.engaged });
   });
 
-  app.get("/", (_req, reply) => {
+  app.get("/health", (_req, reply) => {
+    reply.send({ ok: true, contracts: "1.2.0" });
+  });
+
+  // Legacy Phase 1A control page; the React app (when built) owns "/".
+  app.get("/control", (_req, reply) => {
     reply.type("text/html").send(controlPageHtml());
   });
+
+  if (options.webDist) {
+    // Single-service deploy: serve the built React app + SPA fallback.
+    // Static assets are public; the page authenticates to /api with a token.
+    await app.register(fastifyStatic, { root: options.webDist, wildcard: false });
+    app.setNotFoundHandler((req, reply) => {
+      if (req.raw.method === "GET" && !req.url.startsWith("/api") && !req.url.startsWith("/ws")) {
+        return reply.sendFile("index.html");
+      }
+      return reply.code(404).send({ error: "not_found" });
+    });
+  } else {
+    app.get("/", (_req, reply) => {
+      reply.type("text/html").send(controlPageHtml());
+    });
+  }
 
   if (options.dashboard) {
     const provider = options.dashboard;

@@ -1,7 +1,19 @@
 # ADR-002: Relay Topology, Hosting & Data Services (Phase 1A)
 
-**Status:** Accepted 2026-07-14 (human direction to proceed with Phase 0A) · **Date:** 2026-07-13
+**Status:** Accepted 2026-07-14; **hosting amended to Railway 2026-07-14** (human chose Railway) · **Date:** 2026-07-13
 **Resolves:** NORN-003 · **Amended by:** `docs/reviews/REVIEW-001-disposition.md`
+
+> **Amendment (2026-07-14) — Railway supersedes Fly.io + Neon.** The operator
+> created a GitHub repo (`TheNorns`) and a Railway project, so hosting moves
+> to **Railway** (app **and** Postgres on one platform). This is not a
+> reversal — Railway was the explicit designated fallback in this ADR ("app +
+> DB together"); it is now the primary. What is unchanged: the outbound-only
+> runner topology, the backend-is-the-relay decision, and that connection
+> state is never trusted solely in process memory. Deploy shape is a single
+> Docker service (`Dockerfile` + `railway.json`) that serves the built web
+> app and the API/relay from one process; add a Railway Postgres plugin and
+> wire `DATABASE_URL` for the NORN-024 store port. Neon remains a valid
+> alternative if a separate DB is ever wanted.
 
 ## Context
 

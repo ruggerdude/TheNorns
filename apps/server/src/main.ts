@@ -73,10 +73,22 @@ const ledger = [
 const complexityOf = (nodeId: string): "S" | "M" | "L" | "XL" =>
   graphSession.plan.modules.find((mod) => mod.id === nodeId)?.estimated_complexity ?? "M";
 
+// A public URL must not run on the default dev token. Fail loudly instead.
+const isProd = process.env.NODE_ENV === "production";
+const token = process.env.NORNS_TOKEN ?? (isProd ? undefined : "dev-token");
+if (!token) {
+  console.error("NORNS_TOKEN is required in production — set it as an environment variable.");
+  process.exit(1);
+}
+
+// When NORNS_WEB_DIST points at the built web app, serve it from this service.
+const webDist = process.env.NORNS_WEB_DIST;
+
 const server = await buildServer({
   stores,
-  sessionToken: process.env.NORNS_TOKEN ?? "dev-token",
+  sessionToken: token,
   graphSession,
+  ...(webDist !== undefined ? { webDist } : {}),
   dashboard: () =>
     buildDashboard({
       engine,
@@ -87,5 +99,8 @@ const server = await buildServer({
       graphVersion: graphSession.graph.version,
     }),
 });
-await server.app.listen({ port: Number(process.env.PORT ?? 8787), host: "127.0.0.1" });
-console.log("norns server on http://127.0.0.1:8787");
+
+const port = Number(process.env.PORT ?? 8787);
+const host = process.env.NORNS_HOST ?? (isProd ? "0.0.0.0" : "127.0.0.1");
+await server.app.listen({ port, host });
+console.log(`norns server on ${host}:${port}${webDist ? " (serving web)" : ""}`);
