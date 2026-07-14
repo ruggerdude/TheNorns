@@ -1,8 +1,7 @@
 // Phase 6 dashboard view: renders /api/dashboard — engine-derived state only,
 // source-labeled cost, experimental ETA, timeline from the audit trail.
 import { useEffect, useState } from "react";
-
-const TOKEN = new URLSearchParams(window.location.search).get("token") ?? "dev-token";
+import { authHeaders } from "./auth";
 
 interface DashboardDto {
   graph_version: number;
@@ -39,7 +38,7 @@ export function Dashboard(): React.ReactElement {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/dashboard", { headers: { authorization: `Bearer ${TOKEN}` } })
+    fetch("/api/dashboard", { headers: authHeaders() })
       .then(async (res) => {
         if (!res.ok) throw new Error(`dashboard: ${res.status}`);
         setDto((await res.json()) as DashboardDto);

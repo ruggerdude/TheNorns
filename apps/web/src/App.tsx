@@ -13,8 +13,8 @@ import {
 import "@xyflow/react/dist/style.css";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Dashboard } from "./Dashboard";
-
-const TOKEN = new URLSearchParams(window.location.search).get("token") ?? "dev-token";
+import { Login } from "./Login";
+import { UnauthorizedError, authHeaders, clearToken, getToken, setToken } from "./auth";
 
 interface Assignment {
   provider: string;
@@ -44,12 +44,10 @@ interface GraphDto {
 async function api(path: string, method = "GET", body?: unknown): Promise<GraphDto> {
   const res = await fetch(path, {
     method,
-    headers: {
-      authorization: `Bearer ${TOKEN}`,
-      ...(body !== undefined ? { "content-type": "application/json" } : {}),
-    },
+    headers: authHeaders(body !== undefined),
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
+  if (res.status === 401) throw new UnauthorizedError();
   const json = (await res.json()) as GraphDto & { message?: string };
   if (!res.ok) throw new Error(json.message ?? `request failed: ${res.status}`);
   return json;
@@ -91,20 +89,41 @@ export function App(): React.ReactElement {
   const [approvalHash, setApprovalHash] = useState<string | null>(null);
   const [overrideModel, setOverrideModel] = useState("");
   const [overrideBudget, setOverrideBudget] = useState("");
+  const [token, setTok] = useState<string | null>(getToken());
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  const call = useCallback(async (path: string, method = "GET", body?: unknown) => {
-    try {
-      setError(null);
-      const next = await api(path, method, body);
-      setGraph(next);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
+  const login = useCallback((value: string) => {
+    setToken(value);
+    setAuthError(null);
+    setTok(value);
   }, []);
 
+  const logout = useCallback((message: string) => {
+    clearToken();
+    setTok(null);
+    setAuthError(message);
+  }, []);
+
+  const call = useCallback(
+    async (path: string, method = "GET", body?: unknown) => {
+      try {
+        setError(null);
+        const next = await api(path, method, body);
+        setGraph(next);
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          logout("That token was rejected. Try again.");
+        } else {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      }
+    },
+    [logout],
+  );
+
   useEffect(() => {
-    void call("/api/graph");
-  }, [call]);
+    if (token) void call("/api/graph");
+  }, [call, token]);
 
   const { nodes, edges } = useMemo(() => {
     if (!graph) return { nodes: [] as Node[], edges: [] as Edge[] };
@@ -169,6 +188,10 @@ export function App(): React.ReactElement {
   const selectedNode = graph?.nodes.find((n) => n.id === selected) ?? null;
   const [view, setView] = useState<"graph" | "dashboard">("graph");
 
+  if (!token) {
+    return <Login onLogin={login} error={authError} />;
+  }
+
   if (view === "dashboard") {
     return (
       <div>
@@ -200,7 +223,16 @@ export function App(): React.ReactElement {
         </ReactFlow>
       </div>
       <div style={{ width: 320, padding: 16, borderLeft: "1px solid #ddd", overflow: "auto" }}>
-        <h2 style={{ marginTop: 0 }}>TheNorns graph</h2>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h2 style={{ margin: 0 }}>TheNorns graph</h2>
+          <button
+            type="button"
+            onClick={() => logout("Signed out.")}
+            style={{ fontSize: 11, color: "#666" }}
+          >
+            sign out
+          </button>
+        </div>
         <button type="button" onClick={() => setView("dashboard")}>
           PM Dashboard →
         </button>
@@ -236,8 +268,12 @@ export function App(): React.ReactElement {
               setError(null);
               const res = await fetch("/api/graph/approve-allocation", {
                 method: "POST",
-                headers: { authorization: `Bearer ${TOKEN}` },
+                headers: authHeaders(),
               });
+              if (res.status === 401) {
+                logout("Session expired. Sign in again.");
+                return;
+              }
               const body = (await res.json()) as { content_hash?: string; message?: string };
               if (!res.ok) throw new Error(body.message ?? "approval refused");
               setApprovalHash(body.content_hash ?? null);
