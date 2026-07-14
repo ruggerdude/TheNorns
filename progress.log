@@ -9,3 +9,5 @@
 2026-07-14T01:00Z | NORN-007 | ADR-001/002/003 + STAFFING accepted (human direction to proceed)
 2026-07-14T01:00Z | NORN-014 | Phase 0A: git repo + pnpm monorepo scaffold (server/runner/web/contracts), Biome, CI; pnpm run ci green
 2026-07-14T01:00Z | NORN-004 | Phase 0B: contracts v1 frozen, tagged contracts-v1.0.0; 31 tests incl. reducer determinism/idempotency harness
+2026-07-14T01:20Z | NORN-020 | Phase 1A local half: relay+daemon+8 integration tests (disconnect replay, restart recovery, fencing); contracts 1.1.0
+2026-07-14T01:20Z | NORN-022 | Phase 1B: engine/budget/dispatch/git/sandbox, 58 tests green; deployed 1A acceptance gated on NORN-008
