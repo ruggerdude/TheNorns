@@ -1,8 +1,6 @@
-// Phase 6 dashboard view: renders /api/dashboard — engine-derived state only,
-// source-labeled cost, experimental ETA, timeline from the audit trail.
 import { useEffect, useState } from "react";
 import { authHeaders } from "./auth";
-
+import { Alert, Badge, Spinner } from "./ui";
 interface DashboardDto {
   graph_version: number;
   nodes: Record<string, string>;
@@ -25,113 +23,140 @@ interface DashboardDto {
   timeline: { at: string; actor: string; action: string; detail: string }[];
   pm_summary: string;
 }
-
-const card: React.CSSProperties = {
-  border: "1px solid #ddd",
-  borderRadius: 8,
-  padding: 12,
-  marginBottom: 12,
-};
-
-export function Dashboard(): React.ReactElement {
+const money = (n: number) =>
+  new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(n);
+const humanDetail = (s: string) => s.replace(/proj_[\w-]{16,}/g, "this project").replace(/_/g, " ");
+export function Dashboard({ onUnauthorized }: { onUnauthorized?: () => void }): React.ReactElement {
   const [dto, setDto] = useState<DashboardDto | null>(null);
   const [error, setError] = useState<string | null>(null);
-
   useEffect(() => {
     fetch("/api/dashboard", { headers: authHeaders() })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`dashboard: ${res.status}`);
-        setDto((await res.json()) as DashboardDto);
+      .then(async (r) => {
+        if (r.status === 401) {
+          onUnauthorized?.();
+          return;
+        }
+        if (!r.ok) throw new Error(`Dashboard could not load (${r.status})`);
+        setDto((await r.json()) as DashboardDto);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, []);
-
-  if (error) return <div style={{ padding: 24, color: "#b91c1c" }}>{error}</div>;
-  if (!dto) return <div style={{ padding: 24 }}>loading…</div>;
-
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, [onUnauthorized]);
+  if (error)
+    return (
+      <main className="page">
+        <Alert>{error}</Alert>
+      </main>
+    );
+  if (!dto)
+    return (
+      <main className="page">
+        <Spinner label="Building dashboard…" />
+      </main>
+    );
   return (
-    <div
-      style={{
-        padding: 24,
-        fontFamily: "ui-monospace, monospace",
-        maxWidth: 900,
-        overflow: "auto",
-        height: "100vh",
-        boxSizing: "border-box",
-      }}
-    >
-      <h2 style={{ marginTop: 0 }}>
-        PM Dashboard{" "}
-        {dto.kill_switch ? (
-          <span data-testid="kill-switch" style={{ color: "#b91c1c" }}>
-            ■ KILL SWITCH
-          </span>
-        ) : null}
-      </h2>
-      <div style={card} data-testid="pm-summary">
-        <strong>PM summary:</strong> {dto.pm_summary}
+    <main className="page dashboard">
+      <div className="page-intro">
+        <div className="eyebrow">Program intelligence</div>
+        <h1>PM Dashboard</h1>
       </div>
-      <div style={{ display: "flex", gap: 12 }}>
-        <div style={{ ...card, flex: 1 }} data-testid="progress">
-          <strong>Progress</strong>
-          <div style={{ fontSize: 28 }}>{dto.progress_pct}%</div>
-          <div style={{ color: "#666" }}>gate-derived · ETA: {dto.eta.label}</div>
-        </div>
-        <div style={{ ...card, flex: 2 }} data-testid="cost">
-          <strong>Cost</strong>
-          <div>
-            settled ${dto.cost.settled_usd} · reserved ${dto.cost.active_reservations_usd} ·
-            approved ${dto.cost.approved_usd} · cap ${dto.cost.project_cap_usd}
+      <div className="demo-banner">
+        <strong>Demo data</strong> · This dashboard is not yet scoped to the project you opened. Its
+        metrics come from the execution-engine demo environment.
+      </div>
+      {dto.kill_switch ? (
+        <Alert>
+          <span data-testid="kill-switch">Kill switch is active. Execution is halted.</span>
+        </Alert>
+      ) : null}
+      <div className="dashboard-grid">
+        <section className="card span-8" data-testid="pm-summary">
+          <div className="eyebrow">PM brief</div>
+          <h2>{dto.pm_summary}</h2>
+        </section>
+        <section className="card span-4" data-testid="progress">
+          <div className="muted">Progress</div>
+          <div className="metric">{dto.progress_pct}%</div>
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: `${dto.progress_pct}%` }} />
           </div>
-          <div style={{ color: "#047857" }}>burn: +${dto.cost.burn_rate_usd_per_hour}/hr</div>
-          {Object.entries(dto.usage_by_source).map(([source, usage]) => (
-            <div key={source} style={{ fontSize: 12, color: "#666" }}>
-              [{source}] {usage.input_tokens} in / {usage.output_tokens} out · ${usage.cost_usd}
-            </div>
-          ))}
-        </div>
-      </div>
-      <div style={{ display: "flex", gap: 12 }}>
-        <div style={{ ...card, flex: 1 }} data-testid="nodes">
-          <strong>Nodes (graph v{dto.graph_version})</strong>
+          <span className="meta">GATE-DERIVED · {dto.eta.label}</span>
+        </section>
+        <section className="card span-6" data-testid="cost">
+          <div className="section-head">
+            <h3>Budget</h3>
+            <Badge tone="success">{money(dto.cost.burn_rate_usd_per_hour)}/hr</Badge>
+          </div>
+          <div className="metric">{money(dto.cost.settled_usd)}</div>
+          <p className="muted">settled of {money(dto.cost.project_cap_usd)} cap</p>
+          <div className="assignment">
+            <span>Reserved</span>
+            <strong>{money(dto.cost.active_reservations_usd)}</strong>
+            <span>Approved</span>
+            <strong>{money(dto.cost.approved_usd)}</strong>
+            {Object.entries(dto.usage_by_source).map(([s, u]) => (
+              <>
+                <span key={`${s}-l`}>
+                  {s} · {u.input_tokens + u.output_tokens} tokens
+                </span>
+                <strong key={`${s}-v`}>{money(u.cost_usd)}</strong>
+              </>
+            ))}
+          </div>
+        </section>
+        <section className="card span-6" data-testid="nodes">
+          <div className="section-head">
+            <h3>Modules</h3>
+            <span className="meta">GRAPH V{dto.graph_version}</span>
+          </div>
           {Object.entries(dto.nodes).map(([id, state]) => (
-            <div key={id}>
-              <span
-                style={{
-                  color:
-                    state === "integrated" ? "#047857" : state === "blocked" ? "#b91c1c" : "#333",
-                }}
+            <div className="assignment" key={id}>
+              <strong>{id}</strong>
+              <Badge
+                tone={
+                  state === "integrated" ? "success" : state === "blocked" ? "danger" : "default"
+                }
               >
                 {state}
-              </span>{" "}
-              {id}
+              </Badge>
             </div>
           ))}
-        </div>
-        <div style={{ ...card, flex: 1 }}>
-          <strong>Blocked</strong>
-          {dto.blocked.length === 0 ? <div>none</div> : null}
-          {dto.blocked.map((entry) => (
-            <div key={entry.node_id} style={{ color: "#b91c1c" }}>
-              {entry.node_id}: {entry.reason}
-            </div>
-          ))}
-          <strong>Review queue</strong>
-          {dto.review_queue.length === 0 ? <div>empty</div> : null}
-          {dto.review_queue.map((id) => (
-            <div key={id}>{id}</div>
-          ))}
-        </div>
+        </section>
+        <section className="card span-4">
+          <h3>Attention</h3>
+          {dto.blocked.length === 0 ? (
+            <p className="muted">No blocked modules.</p>
+          ) : (
+            dto.blocked.map((x) => (
+              <p key={x.node_id}>
+                <Badge tone="danger">Blocked</Badge> {x.node_id}: {x.reason}
+              </p>
+            ))
+          )}
+          <div className="divider" />
+          <h3>Review queue</h3>
+          {dto.review_queue.length === 0 ? (
+            <p className="muted">Queue is clear.</p>
+          ) : (
+            dto.review_queue.map((x) => <p key={x}>{x}</p>)
+          )}
+        </section>
+        <section className="card span-8" data-testid="timeline">
+          <h3>Timeline</h3>
+          {dto.timeline.length === 0 ? (
+            <p className="muted">No events yet.</p>
+          ) : (
+            dto.timeline.map((x, i) => (
+              <div className="timeline-row" key={`${x.at}-${i}`}>
+                <span className="mono muted">{x.at.slice(11, 16)}</span>
+                <strong>{x.actor}</strong>
+                <span>
+                  {x.action.replace(/\./g, " ")} · {humanDetail(x.detail)}
+                </span>
+              </div>
+            ))
+          )}
+        </section>
       </div>
-      <div style={card} data-testid="timeline">
-        <strong>Timeline</strong>
-        {dto.timeline.length === 0 ? <div style={{ color: "#666" }}>no events yet</div> : null}
-        {dto.timeline.map((entry, index) => (
-          <div key={`${entry.at}-${index}`} style={{ fontSize: 12 }}>
-            {entry.at.slice(11, 19)} · {entry.actor} · {entry.action} {entry.detail}
-          </div>
-        ))}
-      </div>
-    </div>
+    </main>
   );
 }

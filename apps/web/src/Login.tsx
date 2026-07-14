@@ -1,84 +1,69 @@
 import { useEffect, useRef, useState } from "react";
+import { Alert, Brand, Button, Field, Input } from "./ui";
 
 export function Login({
   onLogin,
   error,
-}: {
-  onLogin: (token: string) => void;
-  error: string | null;
-}): React.ReactElement {
+}: { onLogin: (token: string) => void; error: string | null }): React.ReactElement {
   const [value, setValue] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+  const [submitting, setSubmitting] = useState(false);
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => ref.current?.focus(), []);
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        height: "100vh",
-        fontFamily: "ui-monospace, monospace",
-        background: "#111",
-        color: "#ddd",
-      }}
-    >
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (value.trim()) onLogin(value.trim());
-        }}
-        style={{
-          border: "1px solid #333",
-          borderRadius: 10,
-          padding: 32,
-          width: 340,
-          background: "#181818",
-        }}
-      >
-        <h1 style={{ marginTop: 0, fontSize: 20 }}>TheNorns</h1>
-        <p style={{ color: "#999", fontSize: 13 }}>Enter your access token to continue.</p>
-        <input
-          ref={inputRef}
-          type="password"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder="access token"
-          aria-label="access token"
-          style={{
-            width: "100%",
-            boxSizing: "border-box",
-            padding: "8px 10px",
-            marginBottom: 10,
-            background: "#000",
-            border: "1px solid #444",
-            borderRadius: 6,
-            color: "#ddd",
-            fontFamily: "inherit",
-          }}
-        />
-        <button
-          type="submit"
-          style={{
-            width: "100%",
-            padding: "8px 10px",
-            background: "#d97706",
-            border: "none",
-            borderRadius: 6,
-            color: "#111",
-            fontWeight: 600,
-            cursor: "pointer",
+    <main className="login">
+      <section className="login-art">
+        <Brand />
+        <div className="login-copy">
+          <div className="eyebrow">AI program management</div>
+          <h1>
+            Shape the work.
+            <br />
+            Keep the thread.
+          </h1>
+          <p>
+            Turn an objective into an accountable execution graph—with a second model reviewing
+            every plan before it ships.
+          </p>
+        </div>
+        <div className="meta">HUMAN-GATED · CROSS-PROVIDER · AUDITABLE</div>
+      </section>
+      <section className="login-panel">
+        <form
+          className="login-card card"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (value.trim()) {
+              setSubmitting(true);
+              onLogin(value.trim());
+            }
           }}
         >
-          Sign in
-        </button>
-        {error ? (
-          <div data-testid="login-error" style={{ color: "#f87171", marginTop: 10, fontSize: 13 }}>
-            {error}
-          </div>
-        ) : null}
-      </form>
-    </div>
+          <div className="eyebrow">Welcome back</div>
+          <h2>Enter your workspace</h2>
+          <p className="muted">
+            Use your access token to continue. It stays in this browser session.
+          </p>
+          <Field label="Access token">
+            <Input
+              ref={ref}
+              type="password"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder="Enter access token"
+              autoComplete="current-password"
+            />
+          </Field>
+          {error ? <Alert testId="login-error">{error}</Alert> : null}
+          <Button
+            variant="primary"
+            className="btn-block"
+            type="submit"
+            disabled={!value.trim() || submitting}
+          >
+            {submitting ? "Signing in…" : "Sign in"}
+          </Button>
+        </form>
+      </section>
+    </main>
   );
 }

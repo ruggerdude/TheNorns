@@ -1,30 +1,25 @@
-// QC review: before a live-planned result becomes the project's live graph,
-// show every module's acceptance criteria (the verification the planner
-// proposed) and let the human edit them. Nothing is committed until "Load
-// into graph" is pressed.
 import { useState } from "react";
-
+import { Badge, Button, Field, Input, Select } from "./ui";
 export interface AcceptanceCriterion {
   id: string;
   statement: string;
   verification_type: "test" | "command" | "inspection" | "human";
   verification: string;
 }
-
 export interface PlanModule {
   id: string;
   title: string;
   acceptance: AcceptanceCriterion[];
   dependencies: string[];
+  complexity?: string;
+  risk?: string;
   [key: string]: unknown;
 }
-
 export interface PlanLike {
   objective: string;
   modules: PlanModule[];
   [key: string]: unknown;
 }
-
 export function PlanReview({
   plan,
   onCommit,
@@ -32,86 +27,143 @@ export function PlanReview({
   committing,
 }: {
   plan: PlanLike;
-  onCommit: (plan: PlanLike) => void;
+  onCommit: (p: PlanLike) => void;
   onCancel: () => void;
   committing: boolean;
 }): React.ReactElement {
-  const [modules, setModules] = useState<PlanModule[]>(plan.modules);
-
-  const updateCriterion = (
-    moduleIndex: number,
-    critIndex: number,
-    patch: Partial<AcceptanceCriterion>,
-  ): void => {
-    setModules((prev) =>
-      prev.map((m, mi) =>
-        mi !== moduleIndex
+  const [modules, setModules] = useState(plan.modules);
+  const update = (mi: number, ci: number, patch: Partial<AcceptanceCriterion>) =>
+    setModules((p) =>
+      p.map((m, i) =>
+        i !== mi
+          ? m
+          : { ...m, acceptance: m.acceptance.map((c, j) => (j !== ci ? c : { ...c, ...patch })) },
+      ),
+    );
+  const remove = (mi: number, ci: number) =>
+    setModules((p) =>
+      p.map((m, i) =>
+        i !== mi ? m : { ...m, acceptance: m.acceptance.filter((_, j) => j !== ci) },
+      ),
+    );
+  const add = (mi: number) =>
+    setModules((p) =>
+      p.map((m, i) =>
+        i !== mi
           ? m
           : {
               ...m,
-              acceptance: m.acceptance.map((c, ci) => (ci !== critIndex ? c : { ...c, ...patch })),
+              acceptance: [
+                ...m.acceptance,
+                {
+                  id: `ac-${Date.now()}`,
+                  statement: "",
+                  verification_type: "test",
+                  verification: "",
+                },
+              ],
             },
       ),
     );
-  };
-
   return (
-    <div data-testid="plan-review" style={{ fontSize: 12 }}>
-      <p style={{ color: "#666" }}>
-        QC: review each module's acceptance criteria before this becomes your live graph. Edit
-        anything, then load it.
+    <div data-testid="plan-review">
+      <p className="muted">
+        Review every acceptance criterion. Nothing enters the graph until you approve this QC pass.
       </p>
-      {modules.map((mod, mi) => (
-        <div
-          key={mod.id}
-          style={{ border: "1px solid #ddd", borderRadius: 6, padding: 8, marginBottom: 8 }}
-        >
-          <strong>{mod.id}</strong> — {mod.title}
-          {mod.acceptance.map((crit, ci) => (
-            <div
-              key={crit.id}
-              style={{ marginTop: 6, paddingLeft: 8, borderLeft: "2px solid #eee" }}
-            >
-              <input
-                data-testid={`ac-statement-${mod.id}-${ci}`}
-                value={crit.statement}
-                onChange={(e) => updateCriterion(mi, ci, { statement: e.target.value })}
-                style={{ width: "100%", marginBottom: 2, fontFamily: "inherit" }}
-              />
-              <select
-                value={crit.verification_type}
-                onChange={(e) =>
-                  updateCriterion(mi, ci, {
-                    verification_type: e.target.value as AcceptanceCriterion["verification_type"],
-                  })
-                }
-              >
-                <option value="test">test</option>
-                <option value="command">command</option>
-                <option value="inspection">inspection</option>
-                <option value="human">human</option>
-              </select>{" "}
-              <input
-                data-testid={`ac-verification-${mod.id}-${ci}`}
-                value={crit.verification}
-                onChange={(e) => updateCriterion(mi, ci, { verification: e.target.value })}
-                style={{ width: "55%", fontFamily: "inherit" }}
-              />
+      {modules.map((m, mi) => (
+        <details className="card review-module" key={m.id} open={mi === 0}>
+          <summary>
+            <div className="review-title">
+              <div>
+                <strong>{m.title}</strong>
+                <div className="meta">
+                  {m.id} · {m.acceptance.length} criteria
+                </div>
+              </div>
+              <div className="actions">
+                <Badge tone={m.risk === "critical" || m.risk === "high" ? "danger" : "info"}>
+                  {m.risk ?? "risk n/a"}
+                </Badge>
+                <Badge>{m.complexity ?? "complexity n/a"}</Badge>
+              </div>
             </div>
-          ))}
-        </div>
+            <div className="dependency-list">
+              {m.dependencies.length ? (
+                m.dependencies.map((d) => (
+                  <span className="badge" key={d}>
+                    ← {d}
+                  </span>
+                ))
+              ) : (
+                <span className="meta">No dependencies</span>
+              )}
+            </div>
+          </summary>
+          <div className="review-body">
+            {m.acceptance.map((c, ci) => (
+              <div className="criterion" key={c.id}>
+                <Field label={`Criterion ${ci + 1}`}>
+                  <Input
+                    data-testid={`ac-statement-${m.id}-${ci}`}
+                    value={c.statement}
+                    onChange={(e) => update(mi, ci, { statement: e.target.value })}
+                  />
+                </Field>
+                <div className="criterion-grid">
+                  <Field label="Verification">
+                    <Select
+                      value={c.verification_type}
+                      onChange={(e) =>
+                        update(mi, ci, {
+                          verification_type: e.target
+                            .value as AcceptanceCriterion["verification_type"],
+                        })
+                      }
+                    >
+                      <option value="test">Automated test</option>
+                      <option value="command">Command</option>
+                      <option value="inspection">Inspection</option>
+                      <option value="human">Human review</option>
+                    </Select>
+                  </Field>
+                  <Field label="Evidence or command">
+                    <Input
+                      className="mono"
+                      data-testid={`ac-verification-${m.id}-${ci}`}
+                      value={c.verification}
+                      onChange={(e) => update(mi, ci, { verification: e.target.value })}
+                    />
+                  </Field>
+                </div>
+                <Button variant="ghost" className="btn-small" onClick={() => remove(mi, ci)}>
+                  Remove criterion
+                </Button>
+              </div>
+            ))}
+            <Button className="btn-small" onClick={() => add(mi)}>
+              + Add criterion
+            </Button>
+          </div>
+        </details>
       ))}
-      <button type="button" onClick={onCancel} disabled={committing}>
-        Cancel
-      </button>{" "}
-      <button
-        type="button"
-        data-testid="load-into-graph"
-        onClick={() => onCommit({ ...plan, modules })}
-        disabled={committing}
-      >
-        {committing ? "Loading…" : "Load into graph"}
-      </button>
+      <div className="actions">
+        <Button onClick={onCancel} disabled={committing}>
+          Cancel
+        </Button>
+        <Button
+          variant="primary"
+          data-testid="load-into-graph"
+          onClick={() => onCommit({ ...plan, modules })}
+          disabled={
+            committing ||
+            modules.some((m) =>
+              m.acceptance.some((c) => !c.statement.trim() || !c.verification.trim()),
+            )
+          }
+        >
+          {committing ? "Loading…" : "Load into graph →"}
+        </Button>
+      </div>
     </div>
   );
 }

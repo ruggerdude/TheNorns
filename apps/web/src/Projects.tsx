@@ -1,9 +1,6 @@
-// The sole point of entry: list your projects, create a new one (name,
-// description, PM provider — the reviewer always auto-flips to the other
-// provider so cross-provider review holds), and open one to plan/edit/allocate.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
-
+import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 export interface ProjectSummary {
   id: string;
   name: string;
@@ -14,33 +11,23 @@ export interface ProjectSummary {
   created_at: string;
   plan_objective: string | null;
 }
-
-async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(path, { headers: authHeaders() });
-  if (res.status === 401) throw new UnauthorizedError();
-  const json = (await res.json()) as T & { message?: string };
-  if (!res.ok) throw new ApiError(json.message ?? `request failed: ${res.status}`, res.status);
-  return json;
-}
-
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function request<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
-    method: "POST",
-    headers: authHeaders(true),
-    body: JSON.stringify(body),
+    method: body ? "POST" : "GET",
+    headers: authHeaders(body !== undefined),
+    ...(body ? { body: JSON.stringify(body) } : {}),
   });
   if (res.status === 401) throw new UnauthorizedError();
   const json = (await res.json()) as T & { message?: string };
   if (!res.ok) throw new ApiError(json.message ?? `request failed: ${res.status}`, res.status);
   return json;
 }
-
 export function Projects({
   onOpenProject,
   onUnauthorized,
   onSignOut,
 }: {
-  onOpenProject: (project: ProjectSummary) => void;
+  onOpenProject: (p: ProjectSummary) => void;
   onUnauthorized: () => void;
   onSignOut: () => void;
 }): React.ReactElement {
@@ -50,142 +37,175 @@ export function Projects({
   const [description, setDescription] = useState("");
   const [pmProvider, setPmProvider] = useState<"anthropic" | "openai">("anthropic");
   const [creating, setCreating] = useState(false);
-
+  const [query, setQuery] = useState("");
   const refresh = useCallback(async () => {
     try {
       setError(null);
-      setProjects(await getJson<ProjectSummary[]>("/api/projects"));
-    } catch (err) {
-      if (err instanceof UnauthorizedError) onUnauthorized();
-      else setError(err instanceof Error ? err.message : String(err));
+      setProjects(await request<ProjectSummary[]>("/api/projects"));
+    } catch (e) {
+      e instanceof UnauthorizedError
+        ? onUnauthorized()
+        : setError(e instanceof Error ? e.message : String(e));
     }
   }, [onUnauthorized]);
-
   useEffect(() => {
     void refresh();
   }, [refresh]);
-
   const create = useCallback(async () => {
     setCreating(true);
     setError(null);
     try {
-      const project = await postJson<ProjectSummary>("/api/projects", {
+      const p = await request<ProjectSummary>("/api/projects", {
         name,
         description,
         pm_provider: pmProvider,
       });
-      setName("");
-      setDescription("");
-      onOpenProject(project);
-    } catch (err) {
-      if (err instanceof UnauthorizedError) onUnauthorized();
-      else setError(err instanceof Error ? err.message : String(err));
+      onOpenProject(p);
+    } catch (e) {
+      e instanceof UnauthorizedError
+        ? onUnauthorized()
+        : setError(e instanceof Error ? e.message : String(e));
     } finally {
       setCreating(false);
     }
   }, [name, description, pmProvider, onOpenProject, onUnauthorized]);
-
+  const visible = useMemo(
+    () =>
+      projects
+        ?.filter((p) => (p.name + p.description).toLowerCase().includes(query.toLowerCase()))
+        .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)),
+    [projects, query],
+  );
   return (
-    <div
-      style={{
-        maxWidth: 720,
-        margin: "40px auto",
-        fontFamily: "ui-monospace, monospace",
-        padding: "0 16px 40px",
-      }}
-    >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h1 style={{ margin: 0 }}>TheNorns</h1>
-        <button type="button" onClick={onSignOut} style={{ fontSize: 11, color: "#666" }}>
-          sign out
-        </button>
-      </div>
-      {error ? (
-        <div data-testid="projects-error" style={{ color: "#b91c1c", margin: "8px 0" }}>
-          {error}
+    <div className="app-shell">
+      <header className="topbar">
+        <Brand />
+        <Button variant="ghost" className="btn-small" onClick={onSignOut}>
+          Sign out
+        </Button>
+      </header>
+      <main className="page">
+        <div className="page-intro">
+          <div className="eyebrow">Program workspace</div>
+          <h1>Work, made legible.</h1>
+          <p>
+            Create a program, convene a cross-provider planning pair, and turn the result into a
+            graph your team can actually execute.
+          </p>
         </div>
-      ) : null}
-
-      <h3>New Project</h3>
-      <input
-        data-testid="project-name"
-        placeholder="Project name"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        style={{ width: "100%", marginBottom: 6, fontFamily: "inherit" }}
-      />
-      <textarea
-        data-testid="project-description"
-        placeholder="Describe what this project should build"
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-        style={{ width: "100%", height: 60, fontFamily: "inherit", fontSize: 13 }}
-      />
-      <div style={{ margin: "6px 0" }}>
-        PM:{" "}
-        <select
-          data-testid="pm-provider"
-          value={pmProvider}
-          onChange={(e) => setPmProvider(e.target.value as "anthropic" | "openai")}
-        >
-          <option value="anthropic">Anthropic (Claude)</option>
-          <option value="openai">OpenAI</option>
-        </select>{" "}
-        <span style={{ color: "#666", fontSize: 12 }}>
-          reviewer: {pmProvider === "anthropic" ? "OpenAI" : "Anthropic"} (cross-provider by policy)
-        </span>
-      </div>
-      <button
-        type="button"
-        disabled={creating || !name.trim() || !description.trim()}
-        onClick={() => void create()}
-      >
-        {creating ? "Creating…" : "Create Project"}
-      </button>
-
-      <h3 style={{ marginTop: 24 }}>Your Projects</h3>
-      {projects === null ? (
-        <p style={{ color: "#666" }}>Loading…</p>
-      ) : projects.length === 0 ? (
-        <p style={{ color: "#666" }}>No projects yet — create one above.</p>
-      ) : (
-        <ul style={{ listStyle: "none", padding: 0 }} data-testid="project-list">
-          {projects.map((p) => (
-            <li key={p.id}>
-              <button
-                type="button"
-                onClick={() => onOpenProject(p)}
-                style={{
-                  display: "block",
-                  width: "100%",
-                  textAlign: "left",
-                  border: "1px solid #ddd",
-                  borderRadius: 8,
-                  padding: 12,
-                  marginBottom: 8,
-                  cursor: "pointer",
-                  background: "#fff",
-                  fontFamily: "inherit",
-                }}
+        {error ? <Alert testId="projects-error">{error}</Alert> : null}
+        <div className="projects-layout">
+          <section className="card">
+            <div className="section-head">
+              <div>
+                <h2>Start a project</h2>
+                <span className="muted">Define the outcome and choose its lead.</span>
+              </div>
+              <span className="badge badge-warn">New</span>
+            </div>
+            <div className="form-stack">
+              <Field label="Project name">
+                <Input
+                  data-testid="project-name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. Notifications service"
+                />
+              </Field>
+              <Field label="Objective">
+                <TextArea
+                  data-testid="project-description"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="What should this project deliver?"
+                />
+              </Field>
+              <Field label="Program manager">
+                <Select
+                  data-testid="pm-provider"
+                  value={pmProvider}
+                  onChange={(e) => setPmProvider(e.target.value as typeof pmProvider)}
+                >
+                  <option value="anthropic">Anthropic · Claude</option>
+                  <option value="openai">OpenAI</option>
+                </Select>
+              </Field>
+              <div className="policy">
+                <strong>Cross-provider review is always on.</strong>
+                <br />
+                {pmProvider === "anthropic" ? "OpenAI" : "Anthropic"} will independently review the
+                plan before you see it.
+              </div>
+              <Button
+                variant="primary"
+                className="btn-block"
+                disabled={creating || !name.trim() || !description.trim()}
+                onClick={() => void create()}
               >
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <strong>{p.name}</strong>
-                  <span
-                    style={{ fontSize: 11, color: p.status === "planned" ? "#047857" : "#999" }}
-                  >
-                    {p.status}
-                  </span>
+                {creating ? "Creating…" : "Create project →"}
+              </Button>
+            </div>
+          </section>
+          <section className="card">
+            <div className="section-head">
+              <div>
+                <h2>Your projects</h2>
+                <span className="muted">{projects?.length ?? 0} programs in this workspace</span>
+              </div>
+              {projects?.length ? (
+                <Input
+                  aria-label="Search projects"
+                  placeholder="Search"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  style={{ width: 150 }}
+                />
+              ) : null}
+            </div>
+            {projects === null ? (
+              <Spinner label="Loading projects…" />
+            ) : visible?.length === 0 ? (
+              <div className="empty">
+                <div>
+                  <div className="empty-icon">◇</div>
+                  <strong>
+                    {query ? "No matching projects" : "Your first program starts here"}
+                  </strong>
+                  <p>
+                    {query
+                      ? "Try a different search."
+                      : "Use the form to define an outcome and assemble its planning pair."}
+                  </p>
                 </div>
-                <div style={{ fontSize: 12, color: "#666" }}>{p.description}</div>
-                <div style={{ fontSize: 11, color: "#999" }}>
-                  PM: {p.pm_provider} · reviewer: {p.reviewer_provider}
-                  {p.plan_objective ? ` · "${p.plan_objective}"` : ""}
-                </div>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
+              </div>
+            ) : (
+              <ul className="project-list" data-testid="project-list">
+                {visible?.map((p) => (
+                  <li key={p.id}>
+                    <button type="button" className="project-row" onClick={() => onOpenProject(p)}>
+                      <div className="project-row-top">
+                        <strong>{p.name}</strong>
+                        <Badge tone={p.status === "planned" ? "success" : "default"}>
+                          {p.status}
+                        </Badge>
+                      </div>
+                      <p>{p.description}</p>
+                      <div className="meta">
+                        {new Intl.DateTimeFormat(undefined, {
+                          month: "short",
+                          day: "numeric",
+                          year: "numeric",
+                        }).format(new Date(p.created_at))}{" "}
+                        · {p.pm_provider} PM · {p.reviewer_provider} review
+                      </div>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </div>
+      </main>
     </div>
   );
 }

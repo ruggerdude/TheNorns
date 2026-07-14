@@ -20,6 +20,7 @@ import { Login } from "./Login";
 import { type PlanLike, PlanReview } from "./PlanReview";
 import { type ProjectSummary, Projects } from "./Projects";
 import { ApiError, UnauthorizedError, authHeaders, clearToken, getToken, setToken } from "./auth";
+import { Alert, Badge, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 
 interface Assignment {
   provider: string;
@@ -215,25 +216,35 @@ function ProjectGraph({
       id: node.id,
       position: positions.get(node.id) ?? { x: 0, y: 0 },
       style: {
-        border: node.id === selected ? "2px solid #d97706" : "1px solid #666",
-        borderRadius: 8,
-        padding: 6,
+        border:
+          node.id === selected
+            ? "2px solid #e59b45"
+            : `1px solid ${node.risk === "critical" ? "#a34f56" : node.risk === "high" ? "#9a6a32" : "#39414a"}`,
+        borderLeft: `5px solid ${node.risk === "critical" ? "#ff8585" : node.risk === "high" ? "#e59b45" : node.risk === "medium" ? "#86b9ef" : "#76d3a0"}`,
+        borderRadius: 12,
+        padding: 10,
         width: 210,
         fontSize: 12,
-        background: node.assignment ? "#ecfdf5" : "#fff",
+        background: node.assignment ? "#132019" : "#14181d",
+        color: "#f3f1eb",
+        boxShadow:
+          node.id === selected ? "0 0 0 5px rgba(229,155,69,.12)" : "0 10px 30px rgba(0,0,0,.2)",
       },
       data: {
         label: (
           <div>
-            <strong>{node.id}</strong> ({node.complexity}/{node.risk})
+            <strong>{node.title}</strong>
+            <div style={{ color: "#9ba4ae", fontSize: 10, marginTop: 3 }}>
+              {node.id} · {node.complexity} · {node.risk} risk
+            </div>
             {node.assignment ? (
-              <div>
+              <div style={{ marginTop: 7, color: "#9edbb8", fontSize: 10 }}>
                 {node.assignment.model} · {node.assignment.worker_count}w · $
                 {node.assignment.budget_usd}
                 {node.assignment.source === "override" ? " · OVERRIDE" : ""}
               </div>
             ) : (
-              <div style={{ color: "#999" }}>unallocated</div>
+              <div style={{ color: "#ffcf91", marginTop: 7, fontSize: 10 }}>○ Needs allocation</div>
             )}
           </div>
         ),
@@ -245,6 +256,8 @@ function ProjectGraph({
         source: dep,
         target: node.id,
         markerEnd: "arrowclosed" as const,
+        style: { stroke: "#66717d", strokeWidth: 1.7 },
+        animated: node.id === selected || dep === selected,
       })),
     );
     return { nodes: flowNodes, edges: flowEdges };
@@ -275,22 +288,22 @@ function ProjectGraph({
 
   if (view === "dashboard") {
     return (
-      <div>
-        <button
-          type="button"
-          style={{ position: "fixed", top: 8, right: 8, zIndex: 10 }}
+      <div className="dashboard">
+        <Button
+          className="btn-small"
+          style={{ position: "fixed", top: 16, right: 16, zIndex: 30 }}
           onClick={() => setView("graph")}
         >
-          ← Graph
-        </button>
-        <Dashboard />
+          ← Graph workspace
+        </Button>
+        <Dashboard onUnauthorized={() => onLogout("Session expired. Sign in again.")} />
       </div>
     );
   }
 
   return (
-    <div style={{ display: "flex", height: "100vh", fontFamily: "ui-monospace, monospace" }}>
-      <div style={{ flex: 1 }} data-testid="graph-canvas">
+    <div className="graph-shell">
+      <div className="graph-canvas" data-testid="graph-canvas">
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -299,193 +312,311 @@ function ProjectGraph({
           onNodeClick={(_event, node) => setSelected(node.id)}
           fitView
         >
-          <Background />
+          <Background color="#353c44" gap={24} size={1} />
           <Controls />
         </ReactFlow>
       </div>
-      <div style={{ width: 340, padding: 16, borderLeft: "1px solid #ddd", overflow: "auto" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <button type="button" onClick={onBack} style={{ fontSize: 11 }}>
+      <aside className="sidebar">
+        <div className="sidebar-head">
+          <Button className="btn-small" variant="ghost" onClick={onBack}>
             ← Projects
-          </button>
-          <button
-            type="button"
-            onClick={() => onLogout("Signed out.")}
-            style={{ fontSize: 11, color: "#666" }}
-          >
-            sign out
-          </button>
+          </Button>
+          <Button className="btn-small" variant="ghost" onClick={() => onLogout("Signed out.")}>
+            Sign out
+          </Button>
         </div>
-        <h2 style={{ margin: "8px 0 0" }}>{project.name}</h2>
-        <div style={{ fontSize: 11, color: "#666" }}>
-          PM: {project.pm_provider} · reviewer: {project.reviewer_provider}
+        <div className="project-heading">
+          <div className="eyebrow">Graph workspace</div>
+          <h1>{project.name}</h1>
+          <div className="meta">
+            {project.pm_provider} PM · {project.reviewer_provider} REVIEW
+          </div>
         </div>
-        {graph ? (
-          <button type="button" onClick={() => setView("dashboard")} style={{ marginTop: 8 }}>
-            PM Dashboard →
-          </button>
-        ) : null}
         {graph ? (
           <>
-            <div data-testid="graph-version">graph v{graph.version}</div>
-            <div data-testid="cost-total">
-              cost preview: ${graph.cost.total_usd}
-              {graph.cost.unallocated.length > 0
-                ? ` (${graph.cost.unallocated.length} unallocated)`
-                : ""}
+            <div className="actions">
+              <Button className="btn-small" onClick={() => setView("dashboard")}>
+                Dashboard ↗
+              </Button>
+              <Badge tone={graph.cost.unallocated.length ? "warn" : "success"}>
+                {graph.cost.unallocated.length
+                  ? `${graph.cost.unallocated.length} unallocated`
+                  : "Ready"}
+              </Badge>
+            </div>
+            <div className="stat-strip">
+              <div className="stat" data-testid="graph-version">
+                <strong>v{graph.version}</strong>
+                <span>GRAPH VERSION</span>
+              </div>
+              <div className="stat" data-testid="cost-total">
+                <strong>${graph.cost.total_usd}</strong>
+                <span>COST PREVIEW</span>
+              </div>
             </div>
           </>
         ) : draftOnly ? (
-          <p data-testid="draft-hint" style={{ color: "#666", fontSize: 12 }}>
-            No plan yet — describe the project below and run Live Planning to get started.
-          </p>
-        ) : null}
-        {error ? (
-          <div data-testid="error" style={{ color: "#b91c1c", margin: "8px 0" }}>
-            {error}
+          <div className="empty" data-testid="draft-hint">
+            <div>
+              <div className="empty-icon">◇</div>
+              <strong>No plan yet</strong>
+              <p>Describe the outcome below to begin live planning.</p>
+            </div>
           </div>
-        ) : null}
-
-        <h3>Live Planning</h3>
-        {planResult ? (
-          <PlanReview
-            plan={planResult.plan}
-            committing={committing}
-            onCancel={() => setPlanResult(null)}
-            onCommit={(plan) => void commitPlan(plan)}
-          />
         ) : (
-          <>
-            <textarea
-              data-testid="plan-objective"
-              placeholder="Describe what to build — e.g. 'Add OAuth login with Google and GitHub'"
-              value={planObjective}
-              onChange={(e) => setPlanObjective(e.target.value)}
-              style={{ width: "100%", height: 56, fontFamily: "inherit", fontSize: 12 }}
-            />
-            <button
-              type="button"
-              disabled={planLoading || !planObjective.trim()}
-              onClick={() => void runPlanning()}
-            >
-              {planLoading ? "Planning with real models… (30–90s)" : "Run Live Planning"}
-            </button>
-            {planError ? (
-              <div
-                data-testid="plan-error"
-                style={{ color: "#b91c1c", margin: "8px 0", fontSize: 12 }}
-              >
-                {planError}
-              </div>
-            ) : null}
-          </>
+          <Spinner label="Loading graph…" />
         )}
+        {error ? <Alert testId="error">{error}</Alert> : null}
+
+        <details className="card side-section" open>
+          <summary>01 · Live planning</summary>
+          <div className="side-body">
+            {planResult ? (
+              <PlanReview
+                plan={planResult.plan}
+                committing={committing}
+                onCancel={() => setPlanResult(null)}
+                onCommit={(plan) => void commitPlan(plan)}
+              />
+            ) : (
+              <div className="form-stack">
+                <Field label="What should this program deliver?">
+                  <TextArea
+                    data-testid="plan-objective"
+                    placeholder="Describe the outcome, constraints, and success conditions…"
+                    value={planObjective}
+                    onChange={(e) => setPlanObjective(e.target.value)}
+                  />
+                </Field>
+                <Button
+                  variant="primary"
+                  className="btn-block"
+                  disabled={planLoading || !planObjective.trim()}
+                  onClick={() => void runPlanning()}
+                >
+                  {planLoading ? "Planning with both providers…" : "Run live planning →"}
+                </Button>
+                {planLoading ? <Spinner label="Usually takes 30–90 seconds" /> : null}
+                {planError ? <Alert testId="plan-error">{planError}</Alert> : null}
+              </div>
+            )}
+          </div>
+        </details>
 
         {graph ? (
           <>
-            <h3>Auto Allocate</h3>
-            <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
-              <option value="quality">quality</option>
-              <option value="balanced">balanced</option>
-              <option value="cost">cost</option>
-            </select>{" "}
-            <button
-              type="button"
-              onClick={() => void call(`${base}/graph/allocate`, "POST", { strategy })}
-            >
-              Auto Allocate
-            </button>
-            <h3>Approval</h3>
-            <button
-              type="button"
-              onClick={async () => {
-                try {
-                  setError(null);
-                  const res = await fetch(`${base}/graph/approve-allocation`, {
-                    method: "POST",
-                    headers: authHeaders(),
-                  });
-                  if (res.status === 401) {
-                    onLogout("Session expired. Sign in again.");
-                    return;
-                  }
-                  const body = (await res.json()) as { content_hash?: string; message?: string };
-                  if (!res.ok) throw new Error(body.message ?? "approval refused");
-                  setApprovalHash(body.content_hash ?? null);
-                } catch (err) {
-                  setError(err instanceof Error ? err.message : String(err));
-                }
-              }}
-            >
-              Approve allocation (budget)
-            </button>
-            {approvalHash ? (
-              <div data-testid="approval-hash" style={{ wordBreak: "break-all", color: "#047857" }}>
-                approved: {approvalHash}
+            <details className="card side-section" open>
+              <summary>02 · Allocate</summary>
+              <div className="side-body form-stack">
+                <Field label="Allocation strategy">
+                  <Select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
+                    <option value="quality">Quality · strongest models</option>
+                    <option value="balanced">Balanced · cost and capability</option>
+                    <option value="cost">Cost · leanest viable models</option>
+                  </Select>
+                </Field>
+                <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                  {strategy === "quality"
+                    ? "Prioritizes capability on every module."
+                    : strategy === "cost"
+                      ? "Minimizes spend while meeting module needs."
+                      : "Balances model strength against total budget."}
+                </p>
+                <Button
+                  variant="primary"
+                  onClick={() => void call(`${base}/graph/allocate`, "POST", { strategy })}
+                >
+                  Auto allocate
+                </Button>
               </div>
-            ) : null}
-            {selectedNode ? (
-              <div data-testid="node-panel">
-                <h3>{selectedNode.id}</h3>
-                <div>{selectedNode.title}</div>
-                <div>
-                  deps: {selectedNode.dependencies.join(", ") || "none"} · {selectedNode.complexity}
-                  /{selectedNode.risk}
-                </div>
-                {selectedNode.assignment ? (
-                  <pre style={{ whiteSpace: "pre-wrap", fontSize: 11 }}>
-                    {JSON.stringify(selectedNode.assignment, null, 1)}
-                  </pre>
-                ) : null}
-                <h4>Override</h4>
-                <input
-                  placeholder="model"
-                  value={overrideModel}
-                  onChange={(e) => setOverrideModel(e.target.value)}
-                  style={{ width: "100%" }}
-                />
-                <input
-                  placeholder="budget usd"
-                  value={overrideBudget}
-                  onChange={(e) => setOverrideBudget(e.target.value)}
-                  style={{ width: "100%", marginTop: 4 }}
-                />
-                <button
-                  type="button"
-                  style={{ marginTop: 4 }}
-                  onClick={() => {
-                    const patch: Record<string, unknown> = {};
-                    if (overrideModel) patch.model = overrideModel;
-                    if (overrideBudget) patch.budget_usd = Number(overrideBudget);
-                    void call(`${base}/graph/nodes/${selectedNode.id}/assignment`, "POST", patch);
+            </details>
+            <details className="card side-section" open>
+              <summary>03 · Approve</summary>
+              <div className="side-body">
+                <p className="muted" style={{ fontSize: 12 }}>
+                  Locks the current graph and budget with a verifiable content hash. Every node must
+                  be allocated first.
+                </p>
+                <Button
+                  className="btn-block"
+                  disabled={graph.cost.unallocated.length > 0}
+                  onClick={async () => {
+                    try {
+                      setError(null);
+                      const res = await fetch(`${base}/graph/approve-allocation`, {
+                        method: "POST",
+                        headers: authHeaders(),
+                      });
+                      if (res.status === 401) {
+                        onLogout("Session expired. Sign in again.");
+                        return;
+                      }
+                      const body = (await res.json()) as {
+                        content_hash?: string;
+                        message?: string;
+                      };
+                      if (!res.ok) throw new Error(body.message ?? "approval refused");
+                      setApprovalHash(body.content_hash ?? null);
+                    } catch (e) {
+                      setError(e instanceof Error ? e.message : String(e));
+                    }
                   }}
                 >
-                  Apply override
-                </button>
-                <h4>Delete node</h4>
-                <button
-                  type="button"
-                  onClick={() =>
-                    void call(`${base}/graph/nodes/${selectedNode.id}?mode=reparent`, "DELETE")
-                  }
-                >
-                  Delete (re-parent)
-                </button>{" "}
-                <button
-                  type="button"
-                  onClick={() =>
-                    void call(`${base}/graph/nodes/${selectedNode.id}?mode=cascade`, "DELETE")
-                  }
-                >
-                  Delete (cascade)
-                </button>
+                  Approve graph & budget
+                </Button>
+                {approvalHash ? (
+                  <div
+                    data-testid="approval-hash"
+                    className="policy mono"
+                    style={{ marginTop: 8, wordBreak: "break-all" }}
+                  >
+                    ✓ Approved
+                    <br />
+                    {approvalHash}
+                  </div>
+                ) : null}
               </div>
-            ) : (
-              <p style={{ color: "#666" }}>Click a node to inspect, override, or delete it.</p>
-            )}
+            </details>
+            <section
+              className="card side-section"
+              data-testid={selectedNode ? "node-panel" : undefined}
+            >
+              <div className="section-head">
+                <div>
+                  <div className="eyebrow">Node inspector</div>
+                  <h3>{selectedNode?.title ?? "No node selected"}</h3>
+                </div>
+                {selectedNode ? (
+                  <Badge
+                    tone={
+                      selectedNode.risk === "critical" || selectedNode.risk === "high"
+                        ? "danger"
+                        : "info"
+                    }
+                  >
+                    {selectedNode.risk}
+                  </Badge>
+                ) : null}
+              </div>
+              {selectedNode ? (
+                <div className="form-stack">
+                  <div className="meta">
+                    {selectedNode.id} · {selectedNode.complexity} COMPLEXITY
+                    <br />
+                    DEPENDS ON: {selectedNode.dependencies.join(", ") || "NOTHING"}
+                  </div>
+                  {selectedNode.assignment ? (
+                    <div className="assignment">
+                      <span>Provider</span>
+                      <strong>{selectedNode.assignment.provider}</strong>
+                      <span>Model</span>
+                      <strong>{selectedNode.assignment.model}</strong>
+                      <span>Workers</span>
+                      <strong>{selectedNode.assignment.worker_count}</strong>
+                      <span>Reviewer</span>
+                      <strong>{selectedNode.assignment.reviewer_model}</strong>
+                      <span>Budget</span>
+                      <strong>${selectedNode.assignment.budget_usd}</strong>
+                      <span>Source</span>
+                      <Badge
+                        tone={selectedNode.assignment.source === "override" ? "success" : "default"}
+                      >
+                        {selectedNode.assignment.source}
+                      </Badge>
+                      <span>Rationale</span>
+                      <strong>{selectedNode.assignment.rationale}</strong>
+                    </div>
+                  ) : (
+                    <p className="muted">This node has not been allocated.</p>
+                  )}
+                  <div className="divider" />
+                  <Field label="Override model">
+                    <Input
+                      placeholder="Model identifier"
+                      value={overrideModel}
+                      onChange={(e) => setOverrideModel(e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Override budget (USD)">
+                    <Input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="0.00"
+                      value={overrideBudget}
+                      onChange={(e) => setOverrideBudget(e.target.value)}
+                    />
+                  </Field>
+                  <Button
+                    disabled={!overrideModel && !overrideBudget}
+                    onClick={() => {
+                      const patch: Record<string, unknown> = {};
+                      if (overrideModel) patch.model = overrideModel;
+                      if (overrideBudget) patch.budget_usd = Number(overrideBudget);
+                      void call(`${base}/graph/nodes/${selectedNode.id}/assignment`, "POST", patch);
+                    }}
+                  >
+                    Apply override
+                  </Button>
+                  <div className="divider" />
+                  <div>
+                    <div className="field-label">Delete node</div>
+                    <p className="muted" style={{ fontSize: 12 }}>
+                      Re-parent preserves dependents. Cascade also removes everything that depends
+                      on this node.
+                    </p>
+                    <div className="actions">
+                      <Button
+                        variant="danger"
+                        className="btn-small"
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              `Delete ${selectedNode.title} and re-parent its dependents?`,
+                            )
+                          )
+                            void call(
+                              `${base}/graph/nodes/${selectedNode.id}?mode=reparent`,
+                              "DELETE",
+                            );
+                        }}
+                      >
+                        Re-parent
+                      </Button>
+                      <Button
+                        variant="danger"
+                        className="btn-small"
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              `Cascade delete ${selectedNode.title} and all dependent nodes? This cannot be undone.`,
+                            )
+                          )
+                            void call(
+                              `${base}/graph/nodes/${selectedNode.id}?mode=cascade`,
+                              "DELETE",
+                            );
+                        }}
+                      >
+                        Cascade delete
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="empty" style={{ minHeight: 140 }}>
+                  <div>
+                    <div className="empty-icon">⌖</div>
+                    <p>
+                      Select a node to inspect its assignment, override its budget, or delete it.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </section>
           </>
         ) : null}
-      </div>
+      </aside>
     </div>
   );
 }
