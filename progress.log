@@ -14,3 +14,6 @@
 2026-07-14T08:10Z | NORN-025 | Phase 2: @norns/adapters (Anthropic+OpenAI, taxonomy, usage normalization), 10-test conformance via mock; live smoke gated on keys
 2026-07-14T08:10Z | NORN-026 | Phase 3: contracts 1.2.0 review schemas; runPlanning loop (convergence/cap, dispositions, validation round-trips, memory injection); 76 tests total
 2026-07-14T09:30Z | NORN-028 | Phase 4: graph editing + allocation engine + React Flow editor; browser-verified; 93 tests green
+2026-07-14T10:30Z | NORN-029 | Phase 5: runtime adapters (claude-code/codex/process) + executeNode pipeline w/ runner verification; NORN-012 closed
+2026-07-14T10:30Z | NORN-030 | Phase 6: dashboard (engine-derived, source-labeled), API + web view, browser-verified
+2026-07-14T10:30Z | NORN-031 | Phase 7: multi-worker coordination, conflict nodes w/ human gate, induced conflict+failure tests; 108 tests green
