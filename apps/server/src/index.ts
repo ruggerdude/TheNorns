@@ -37,3 +37,26 @@ export {
   type NodeAssignmentT,
 } from "./graph/allocation.js";
 export { DEMO_PLAN, GraphSession } from "./graph/session.js";
+export {
+  executeNode,
+  runVerification,
+  type ExecuteNodeOptions,
+  type ExecuteNodeResult,
+  type VerificationPlan,
+} from "./engine/execution.js";
+export {
+  HumanConfirmationRequiredError,
+  integrateBranch,
+  integrateNode,
+  spawnConflictNode,
+  type IntegrateNodeResult,
+  type MergeResult,
+} from "./engine/integration.js";
+export {
+  executeMultiWorkerNode,
+  type ModuleLead,
+  type MultiWorkerOptions,
+  type MultiWorkerResult,
+  type WorkerSpec,
+} from "./engine/coordination.js";
+export { buildDashboard, type DashboardDto, type DashboardInputs } from "./dashboard.js";

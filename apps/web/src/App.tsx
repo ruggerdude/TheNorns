@@ -12,6 +12,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Dashboard } from "./Dashboard";
 
 const TOKEN = new URLSearchParams(window.location.search).get("token") ?? "dev-token";
 
@@ -166,6 +167,22 @@ export function App(): React.ReactElement {
   );
 
   const selectedNode = graph?.nodes.find((n) => n.id === selected) ?? null;
+  const [view, setView] = useState<"graph" | "dashboard">("graph");
+
+  if (view === "dashboard") {
+    return (
+      <div>
+        <button
+          type="button"
+          style={{ position: "fixed", top: 8, right: 8, zIndex: 10 }}
+          onClick={() => setView("graph")}
+        >
+          ← Graph
+        </button>
+        <Dashboard />
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: "flex", height: "100vh", fontFamily: "ui-monospace, monospace" }}>
@@ -184,6 +201,9 @@ export function App(): React.ReactElement {
       </div>
       <div style={{ width: 320, padding: 16, borderLeft: "1px solid #ddd", overflow: "auto" }}>
         <h2 style={{ marginTop: 0 }}>TheNorns graph</h2>
+        <button type="button" onClick={() => setView("dashboard")}>
+          PM Dashboard →
+        </button>
         <div data-testid="graph-version">graph v{graph?.version ?? "…"}</div>
         <div data-testid="cost-total">
           cost preview: ${graph?.cost.total_usd ?? 0}

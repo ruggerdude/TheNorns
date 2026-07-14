@@ -87,4 +87,9 @@ export class LocalGitRepo {
   async branchExists(branch: string): Promise<boolean> {
     return (await git(this.repoDir, ["branch", "--list", branch])) !== "";
   }
+
+  /** Used when a failed worker retries from a fresh worktree. */
+  async deleteBranch(branch: string): Promise<void> {
+    await git(this.repoDir, ["branch", "-D", branch]).catch(() => undefined);
+  }
 }

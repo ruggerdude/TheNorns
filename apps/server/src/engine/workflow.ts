@@ -29,7 +29,7 @@ export class KillSwitchEngagedError extends EngineError {
 }
 
 interface NodeMeta {
-  dependencies: readonly string[];
+  dependencies: string[];
   blockedFrom: NodeState | null;
   activeReservation: string | null;
 }
@@ -76,6 +76,33 @@ export class WorkflowEngine {
 
   killSwitchEngaged(): boolean {
     return this.killSwitch;
+  }
+
+  // -- graph mutations during execution (conflict nodes) -------------------------
+
+  /** Register a node created after planning — e.g. a conflict-resolution node. */
+  registerNode(nodeId: string, dependencies: readonly string[]): void {
+    if (this.meta.has(nodeId)) throw new EngineError(`node ${nodeId} already exists`);
+    this.meta.set(nodeId, {
+      dependencies: [...dependencies],
+      blockedFrom: null,
+      activeReservation: null,
+    });
+    this.cascadeReady();
+  }
+
+  /** Rewire a dependent from the superseded node to its replacement. */
+  replaceDependency(nodeId: string, oldDep: string, newDep: string): void {
+    const meta = this.requireMeta(nodeId);
+    meta.dependencies = meta.dependencies.map((dep) => (dep === oldDep ? newDep : dep));
+  }
+
+  dependenciesOf(nodeId: string): readonly string[] {
+    return this.requireMeta(nodeId).dependencies;
+  }
+
+  nodeIds(): string[] {
+    return [...this.meta.keys()];
   }
 
   // -- lifecycle drives -----------------------------------------------------------

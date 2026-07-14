@@ -56,6 +56,8 @@ export interface ServerOptions {
   clock?: () => Date;
   /** Phase 4: graph editing + allocation for one project */
   graphSession?: GraphSession;
+  /** Phase 6: dashboard provider (engine + ledger composition) */
+  dashboard?: () => unknown;
 }
 
 export interface NornsServer {
@@ -239,6 +241,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   app.get("/", (_req, reply) => {
     reply.type("text/html").send(controlPageHtml());
   });
+
+  if (options.dashboard) {
+    const provider = options.dashboard;
+    app.get("/api/dashboard", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      reply.send(provider());
+    });
+  }
 
   // ---- graph editing + allocation (Phase 4) -----------------------------------
 

@@ -88,6 +88,23 @@ export class BudgetLedger {
     return this.projectSettledUsd() + this.projectActiveUsd() >= this.projectCapUsd;
   }
 
+  /** Ledger rollup for the dashboard — settled, held, approved, cap. */
+  summary(): {
+    settled_usd: number;
+    active_reservations_usd: number;
+    approved_usd: number;
+    project_cap_usd: number;
+  } {
+    let approved = 0;
+    for (const node of this.nodes.values()) approved += node.approvedUsd;
+    return {
+      settled_usd: this.projectSettledUsd(),
+      active_reservations_usd: this.projectActiveUsd(),
+      approved_usd: approved,
+      project_cap_usd: this.projectCapUsd,
+    };
+  }
+
   private require(nodeId: string): NodeBudget {
     const node = this.nodes.get(nodeId);
     if (!node) throw new Error(`no approved budget for node ${nodeId}`);
