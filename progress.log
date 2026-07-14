@@ -1,0 +1,8 @@
+2026-07-13T00:00Z | NORN-001 | Reviewed original MVP PRD; wrote corrected R2 to TheNorns_MVP_PRD.md
+2026-07-13T00:00Z | NORN-002 | ADR-001: tech stack — TypeScript monorepo, Fastify+Postgres, React Flow, Node runner (proposed)
+2026-07-13T00:00Z | NORN-003 | ADR-002: relay folded into backend server, hosted on Fly.io (proposed)
+2026-07-13T00:00Z | NORN-009 | PLAN.md: self-contained review packet (PRD R2 + ADRs + execution plan + risks) for external vetting
+2026-07-13T00:00Z | NORN-010 | REVIEW-001 dispositioned: PRD R3, ADR-001/002 amended, ADR-003 sandbox added, estimate revised to 40-65 sessions
+2026-07-13T00:00Z | NORN-011 | Regenerated PLAN.md as R3 review packet; archived R2 snapshot to docs/reviews/PLAN-R2-snapshot.md
+2026-07-13T00:00Z | NORN-013 | REVIEW-002 dispositioned: approved no blockers; PRD R4 (trust contract, required verification, conflict-node semantics, project memory); phase-gate reviews from here
+2026-07-13T00:00Z | NORN-019 | STAFFING.md: dev-agent assignments (Fable 5 lead, Sonnet 5 backend/frontend, Codex runner, OpenAI reviewer, Haiku bulk) + phase matrix
