@@ -6,3 +6,6 @@
 2026-07-13T00:00Z | NORN-011 | Regenerated PLAN.md as R3 review packet; archived R2 snapshot to docs/reviews/PLAN-R2-snapshot.md
 2026-07-13T00:00Z | NORN-013 | REVIEW-002 dispositioned: approved no blockers; PRD R4 (trust contract, required verification, conflict-node semantics, project memory); phase-gate reviews from here
 2026-07-13T00:00Z | NORN-019 | STAFFING.md: dev-agent assignments (Fable 5 lead, Sonnet 5 backend/frontend, Codex runner, OpenAI reviewer, Haiku bulk) + phase matrix
+2026-07-14T01:00Z | NORN-007 | ADR-001/002/003 + STAFFING accepted (human direction to proceed)
+2026-07-14T01:00Z | NORN-014 | Phase 0A: git repo + pnpm monorepo scaffold (server/runner/web/contracts), Biome, CI; pnpm run ci green
+2026-07-14T01:00Z | NORN-004 | Phase 0B: contracts v1 frozen, tagged contracts-v1.0.0; 31 tests incl. reducer determinism/idempotency harness
