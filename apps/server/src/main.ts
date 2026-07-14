@@ -19,7 +19,7 @@ const graphSession = GraphSession.demo();
 // persistence, it does not take down the control plane.
 const databaseUrl = process.env.DATABASE_URL;
 let stores = new RelayStores();
-let flusher: SnapshotFlusher | null = null;
+const flushers: SnapshotFlusher[] = [];
 
 if (databaseUrl) {
   try {
@@ -35,14 +35,28 @@ if (databaseUrl) {
       query: (sql, params) => pool.query(sql, params as unknown[]),
     });
     await persistence.init();
-    const restored = await persistence.load("relay");
-    if (restored) stores = RelayStores.restore(restored);
-    flusher = new SnapshotFlusher(persistence, "relay", () => stores.snapshot());
-    flusher.start();
-    console.log(restored ? "relay state restored from postgres" : "relay state: fresh (postgres)");
+
+    // relay state (runners, outbox, events, audit)
+    const relaySnap = await persistence.load("relay");
+    if (relaySnap) stores = RelayStores.restore(relaySnap);
+
+    // graph/project state (nodes, dependencies, allocations) — your edits
+    const graphSnap = await persistence.load("graph");
+    if (graphSnap) graphSession.graph.restoreFrom(JSON.parse(graphSnap));
+
+    flushers.push(
+      new SnapshotFlusher(persistence, "relay", () => stores.snapshot()),
+      new SnapshotFlusher(persistence, "graph", () =>
+        JSON.stringify(graphSession.graph.snapshot()),
+      ),
+    );
+    for (const f of flushers) f.start();
+    console.log(
+      `postgres: relay ${relaySnap ? "restored" : "fresh"}, graph ${graphSnap ? "restored" : "fresh"}`,
+    );
     for (const signal of ["SIGTERM", "SIGINT"] as const) {
       process.on(signal, () => {
-        void flusher?.stop().then(() => process.exit(0));
+        void Promise.all(flushers.map((f) => f.stop())).then(() => process.exit(0));
       });
     }
   } catch (error) {
@@ -52,7 +66,7 @@ if (databaseUrl) {
       }`,
     );
     stores = new RelayStores();
-    flusher = null;
+    flushers.length = 0;
   }
 }
 

@@ -89,6 +89,23 @@ export class WorkflowGraph {
     };
   }
 
+  /**
+   * Repopulate this graph in place from a persisted snapshot (Tier-2 graph
+   * persistence). Mutates the existing instance — the server already holds a
+   * reference to it — so edits survive a restart.
+   */
+  restoreFrom(snapshot: GraphSnapshot): void {
+    this.nodes.clear();
+    for (const node of snapshot.nodes) {
+      this.nodes.set(node.id, {
+        ...node,
+        dependencies: [...node.dependencies],
+        assignment: node.assignment ? { ...node.assignment } : null,
+      });
+    }
+    this.graphVersion = snapshot.version;
+  }
+
   dependentsOf(id: string): string[] {
     return [...this.nodes.values()].filter((n) => n.dependencies.includes(id)).map((n) => n.id);
   }

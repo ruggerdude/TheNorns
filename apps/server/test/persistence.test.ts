@@ -5,6 +5,8 @@
 import { PGlite } from "@electric-sql/pglite";
 import type { EventEnvelopeT } from "@norns/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { autoAllocate, overrideAssignment } from "../src/graph/allocation.js";
+import { GraphSession } from "../src/graph/session.js";
 import { type PgClient, PgPersistence, SnapshotFlusher } from "../src/persistence/pg.js";
 import { RelayStores } from "../src/stores.js";
 
@@ -108,6 +110,45 @@ describe("Tier-2 postgres persistence", () => {
     store.registerRunner("r", "pem"); // mutate
     await flusher.flush(); // changed -> write
     expect(writes).toBe(2);
+  });
+
+  it("reconstructs the workflow graph (edits + allocations) across a restart", async () => {
+    const persistence = new PgPersistence(client);
+    await persistence.init();
+
+    // --- instance A: edit the graph, allocate, override, then flush ---------
+    const sessionA = GraphSession.demo();
+    sessionA.graph.addNode({
+      id: "extra",
+      title: "Extra",
+      complexity: "L",
+      dependencies: ["contracts"],
+    });
+    autoAllocate(sessionA.graph, "quality");
+    overrideAssignment(sessionA.graph, "contracts", { model: "claude-opus-4-8", budget_usd: 42 });
+    const versionA = sessionA.graph.version;
+
+    const flusher = new SnapshotFlusher(persistence, "graph", () =>
+      JSON.stringify(sessionA.graph.snapshot()),
+    );
+    await flusher.flush();
+
+    // --- instance B: fresh demo graph, restored from postgres ---------------
+    const loaded = await persistence.load("graph");
+    expect(loaded).not.toBeNull();
+    const sessionB = GraphSession.demo();
+    sessionB.graph.restoreFrom(JSON.parse(loaded as string));
+
+    // the manual node, its dependency, the allocation, and the override all survive
+    expect(sessionB.graph.node("extra")?.dependencies).toEqual(["contracts"]);
+    expect(sessionB.graph.version).toBe(versionA);
+    const contracts = sessionB.graph.node("contracts");
+    expect(contracts?.assignment?.source).toBe("override");
+    expect(contracts?.assignment?.model).toBe("claude-opus-4-8");
+    expect(contracts?.assignment?.budget_usd).toBe(42);
+    expect(sessionB.graph.node("api-core")?.assignment).not.toBeNull(); // auto-allocated
+    // full fidelity
+    expect(sessionB.graph.snapshot()).toEqual(sessionA.graph.snapshot());
   });
 
   it("upsert keeps a single row per key across many saves", async () => {
