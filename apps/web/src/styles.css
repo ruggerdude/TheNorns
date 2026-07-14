@@ -533,6 +533,46 @@ button:disabled {
   gap: .35rem;
   margin-top: .45rem;
 }
+.plan-status-banner {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  padding: .8rem 1rem;
+  border-radius: 12px;
+  margin-bottom: .7rem;
+  font-weight: 700;
+}
+.plan-status-converged {
+  background: #10251a;
+  border: 1px solid #28583d;
+  color: var(--success);
+}
+.plan-status-capped {
+  background: #261719;
+  border: 1px solid #663a3e;
+  color: var(--danger);
+}
+.plan-meta-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem 1.2rem;
+  margin-bottom: .35rem;
+  font-size: .8rem;
+  color: var(--muted);
+}
+.outstanding-panel {
+  display: grid;
+  gap: .55rem;
+  margin: .9rem 0;
+}
+.outstanding-item {
+  padding: .75rem .85rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #14171b;
+  line-height: 1.5;
+  font-size: .85rem;
+}
 .dashboard {
   height: 100vh;
   overflow: auto;
