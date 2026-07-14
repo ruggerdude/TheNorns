@@ -107,10 +107,30 @@ export class WorkflowEngine {
 
   // -- lifecycle drives -----------------------------------------------------------
 
-  /** Approval gate: execution starts only with plan + allocation approvals. */
-  start(): void {
-    if (!this.approvals.has("plan") || !this.approvals.has("allocation")) {
+  /**
+   * Approval gate: execution starts only with plan + allocation approvals.
+   * When expected content hashes are supplied (the strict path — GATE-1
+   * deviation #4 closed), the recorded approvals must match EXACTLY what the
+   * human saw; a stale or mismatched approval refuses to start.
+   */
+  start(expected?: { planHash?: string; allocationHash?: string }): void {
+    const plan = this.approvals.get("plan");
+    const allocation = this.approvals.get("allocation");
+    if (!plan || !allocation) {
       throw new EngineError("cannot start: plan and allocation approvals are required");
+    }
+    if (expected?.planHash !== undefined && plan.content_hash !== expected.planHash) {
+      throw new EngineError(
+        "cannot start: plan approval hash does not match the approved plan content",
+      );
+    }
+    if (
+      expected?.allocationHash !== undefined &&
+      allocation.content_hash !== expected.allocationHash
+    ) {
+      throw new EngineError(
+        "cannot start: allocation approval hash does not match the approved allocation content",
+      );
     }
     this.started = true;
     this.cascadeReady();

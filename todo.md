@@ -27,8 +27,10 @@
 - [x] NORN-031 — **Phase 7 complete**: clean-merge-only integration agent; conflict-resolution nodes with replacement semantics + human-confirmation gate; executeMultiWorkerNode (Module Lead bounded decomposition, parallel -w<k> worktrees, PM-routed questions, retry-once + escalation, lead assembly); 5-node/2-worker graph end-to-end on real git incl. induced conflict + induced failure
 - [x] NORN-012 — @openai/codex-sdk lifecycle verified at Phase 5 (closed under NORN-029)
 
+- [x] NORN-021 — GATE-1 phase-gate review packet assembled → [docs/reviews/GATE-1-packet.md](docs/reviews/GATE-1-packet.md) (covers 1A through 7; supersedes the 1A-only packet plan)
+
 ## In Progress
-- (nothing — next up: Phase 8 security gate + phase-gate review)
+- [ ] NORN-015 — 🔄 GATE-1 review **awaiting the human to ferry the packet** to the external reviewer and return findings; disposition follows
 
 ## Open — gates (human)
 - [ ] NORN-008 — Create Fly.io and Neon accounts + payment methods (**blocks 1A deployed acceptance**: cross-device test, passkey auth, Postgres adapter for RelayStores/dispatch)

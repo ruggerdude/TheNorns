@@ -60,3 +60,9 @@ export {
   type WorkerSpec,
 } from "./engine/coordination.js";
 export { buildDashboard, type DashboardDto, type DashboardInputs } from "./dashboard.js";
+export { DispatchLoop, type Deliverer, type DispatchLoopOptions } from "./engine/dispatchLoop.js";
+export {
+  MergeApprovalError,
+  integrationHeadHash,
+  mergeIntegrationToMain,
+} from "./engine/release.js";

@@ -9,5 +9,6 @@ export type {
   RuntimeUsage,
 } from "./runtimes/types.js";
 export { ProcessRuntime } from "./runtimes/process.js";
+export { REDACTED, Redactor } from "./redact.js";
 export { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
 export { CodexRuntime } from "./runtimes/codex.js";

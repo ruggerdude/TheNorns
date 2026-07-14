@@ -14,6 +14,7 @@ import {
 } from "@norns/contracts";
 import WebSocket from "ws";
 import { FixtureExecutor } from "./fixture.js";
+import { Redactor } from "./redact.js";
 import { RunnerStateFile } from "./state.js";
 
 export interface DaemonOptions {
@@ -35,6 +36,7 @@ export class RunnerDaemon {
   private fenced = false;
   private readonly executor: FixtureExecutor;
   private serverAckSeq = 0;
+  readonly redactor = new Redactor();
 
   constructor(options: DaemonOptions) {
     this.opts = {
@@ -273,6 +275,11 @@ export class RunnerDaemon {
   /** Buffer durably, then send if connected. Replay covers the rest. */
   private emit(payload: EventPayloadT, meta: { correlation?: string; causation?: string }): void {
     if (this.fenced) return;
+    // redaction happens BEFORE buffering: secrets never persist, never leave
+    const safePayload: EventPayloadT =
+      payload.kind === "run_log"
+        ? { ...payload, chunk: this.redactor.redact(payload.chunk) }
+        : payload;
     const state = this.requireState();
     const event: EventEnvelopeT = {
       protocol: PROTOCOL_VERSION as 1,
@@ -282,7 +289,7 @@ export class RunnerDaemon {
       correlation_id: meta.correlation ?? `runner:${this.opts.runnerId}`,
       causation_id: meta.causation ?? null,
       occurred_at: new Date().toISOString(),
-      payload,
+      payload: safePayload,
     };
     state.bufferEvent(event);
     if (this.connected) {

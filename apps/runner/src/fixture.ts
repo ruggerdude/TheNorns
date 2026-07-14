@@ -34,6 +34,16 @@ export class FixtureExecutor {
 
   launch(runId: string, fixture: string, meta: RunMeta = {}): void {
     if (this.runs.has(runId)) return; // dedup safety net; daemon also guards
+    if (fixture.startsWith("leak:")) {
+      // Phase 8 planted-secret fixture: logs a secret, exercising redaction
+      this.emit({ kind: "run_status", run_id: runId, status: "started" }, meta);
+      this.emit(
+        { kind: "run_log", run_id: runId, chunk: `credential dump: ${fixture.slice(5)}` },
+        meta,
+      );
+      this.emit({ kind: "run_status", run_id: runId, status: "completed" }, meta);
+      return;
+    }
     const [, ticksRaw, intervalRaw] = fixture.split(":");
     const run: ActiveRun = {
       timer: null,
