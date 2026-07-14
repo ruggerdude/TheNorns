@@ -42,7 +42,8 @@
 
 ## Remaining — every item requires the human
 - [ ] NORN-034b — Tier 1: push repo to GitHub `TheNorns` + Railway "Deploy from repo" + set NORNS_TOKEN → live URL (steps in DEPLOY.md). **Only I cannot do this — it's your accounts**
-- [ ] NORN-024b — Tier 2 activation: add the Railway Postgres plugin (one click; code is done)
+- [x] NORN-036 — Graph/project persistence built + verified (your graph edits persist, not just relay). Deployed. Activates with the Postgres plugin
+- [ ] NORN-024b — Tier 2 activation: add the Railway Postgres plugin + DATABASE_URL reference (one click; all code done — persists relay AND graph)
 - [ ] NORN-027 — Tier 3 live: API keys + a Docker host for real Claude Code/Codex execution
 - [ ] NORN-006 — Pick the pilot project (mechanics already rehearsed)
 - [ ] NORN-015 — Ferry the GATE-1 review packet to the external reviewer; disposition on return

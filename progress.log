@@ -23,3 +23,4 @@
 2026-07-14T12:30Z | NORN-034 | Railway Tier-1 deploy scaffold: single-service Docker (web+API), prod hardening, /health, DEPLOY.md; ADR-002 -> Railway
 2026-07-14T12:45Z | NORN-024 | Tier 2: Postgres snapshot persistence (PgPersistence/SnapshotFlusher), pglite-verified restart reconstruction; activates on DATABASE_URL
 2026-07-14T12:45Z | NORN-035 | Tier 3: norns-runner CLI (pair/start), verified pairing+connect+execute against a live relay; 131 tests green
+2026-07-14T18:15Z | NORN-036 | Graph/project persistence: WorkflowGraph.restoreFrom + main.ts graph flusher; pglite-verified round-trip; deployed
