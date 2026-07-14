@@ -14,30 +14,46 @@ const graphSession = GraphSession.demo();
 
 // Tier-2 persistence: when DATABASE_URL is set (Railway Postgres plugin),
 // hydrate relay state from the last snapshot and flush changes back durably.
-// Without it, the store is in-memory only (dev / demo).
+// Without it — or if the database is unreachable — the store is in-memory,
+// and the site stays up rather than crash-looping. A DB problem degrades
+// persistence, it does not take down the control plane.
 const databaseUrl = process.env.DATABASE_URL;
-let stores: RelayStores;
+let stores = new RelayStores();
 let flusher: SnapshotFlusher | null = null;
 
 if (databaseUrl) {
-  const { Pool } = await import("pg");
-  const pool = new Pool({ connectionString: databaseUrl });
-  const persistence = new PgPersistence({
-    query: (sql, params) => pool.query(sql, params as unknown[]),
-  });
-  await persistence.init();
-  const restored = await persistence.load("relay");
-  stores = restored ? RelayStores.restore(restored) : new RelayStores();
-  flusher = new SnapshotFlusher(persistence, "relay", () => stores.snapshot());
-  flusher.start();
-  console.log(restored ? "relay state restored from postgres" : "relay state: fresh (postgres)");
-  for (const signal of ["SIGTERM", "SIGINT"] as const) {
-    process.on(signal, () => {
-      void flusher?.stop().then(() => process.exit(0));
+  try {
+    const { Pool } = await import("pg");
+    // Railway's private URL (…railway.internal) needs no SSL; any public
+    // endpoint does. node-postgres won't attempt SSL unless told.
+    const isInternal = /railway\.internal|localhost|127\.0\.0\.1/.test(databaseUrl);
+    const pool = new Pool({
+      connectionString: databaseUrl,
+      ...(isInternal ? {} : { ssl: { rejectUnauthorized: false } }),
     });
+    const persistence = new PgPersistence({
+      query: (sql, params) => pool.query(sql, params as unknown[]),
+    });
+    await persistence.init();
+    const restored = await persistence.load("relay");
+    if (restored) stores = RelayStores.restore(restored);
+    flusher = new SnapshotFlusher(persistence, "relay", () => stores.snapshot());
+    flusher.start();
+    console.log(restored ? "relay state restored from postgres" : "relay state: fresh (postgres)");
+    for (const signal of ["SIGTERM", "SIGINT"] as const) {
+      process.on(signal, () => {
+        void flusher?.stop().then(() => process.exit(0));
+      });
+    }
+  } catch (error) {
+    console.error(
+      `postgres persistence unavailable — continuing in-memory. reason: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    stores = new RelayStores();
+    flusher = null;
   }
-} else {
-  stores = new RelayStores();
 }
 
 // demo engine over the same plan, driven partway for a live-looking dashboard
