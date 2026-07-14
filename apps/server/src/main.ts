@@ -6,11 +6,39 @@ import { buildDashboard } from "./dashboard.js";
 import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
 import { GraphSession } from "./graph/session.js";
+import { PgPersistence, SnapshotFlusher } from "./persistence/pg.js";
 import { buildServer } from "./server.js";
 import { RelayStores } from "./stores.js";
 
 const graphSession = GraphSession.demo();
-const stores = new RelayStores();
+
+// Tier-2 persistence: when DATABASE_URL is set (Railway Postgres plugin),
+// hydrate relay state from the last snapshot and flush changes back durably.
+// Without it, the store is in-memory only (dev / demo).
+const databaseUrl = process.env.DATABASE_URL;
+let stores: RelayStores;
+let flusher: SnapshotFlusher | null = null;
+
+if (databaseUrl) {
+  const { Pool } = await import("pg");
+  const pool = new Pool({ connectionString: databaseUrl });
+  const persistence = new PgPersistence({
+    query: (sql, params) => pool.query(sql, params as unknown[]),
+  });
+  await persistence.init();
+  const restored = await persistence.load("relay");
+  stores = restored ? RelayStores.restore(restored) : new RelayStores();
+  flusher = new SnapshotFlusher(persistence, "relay", () => stores.snapshot());
+  flusher.start();
+  console.log(restored ? "relay state restored from postgres" : "relay state: fresh (postgres)");
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.on(signal, () => {
+      void flusher?.stop().then(() => process.exit(0));
+    });
+  }
+} else {
+  stores = new RelayStores();
+}
 
 // demo engine over the same plan, driven partway for a live-looking dashboard
 const budget = new BudgetLedger(2000);

@@ -66,3 +66,4 @@ export {
   integrationHeadHash,
   mergeIntegrationToMain,
 } from "./engine/release.js";
+export { PgPersistence, SnapshotFlusher, type PgClient } from "./persistence/pg.js";
