@@ -1,6 +1,10 @@
-// Dev entrypoint: relay + graph API + dashboard on :8787 with the demo
-// project, including a demo engine driven through a few gates so the
-// dashboard shows real derived state.
+// Dev entrypoint: relay + graph API on :8787, plus a self-contained DEMO
+// dashboard. The demo is a hardcoded scripted walkthrough (its own engine
+// driven through a few gates) that exists purely to illustrate what a fully-
+// populated PM Dashboard looks like before live execution exists for real
+// projects (NORN-027b). It is exposed at GET /api/demo/dashboard and is wholly
+// separate from the real, user-created projects in `ProjectStore` — no real
+// project's data ever flows into it, and none of its state ever flows back.
 import { UsageEvent } from "@norns/contracts";
 import { buildDashboard } from "./dashboard.js";
 import { BudgetLedger } from "./engine/budget.js";
@@ -11,9 +15,10 @@ import { ProjectStore } from "./projects/store.js";
 import { buildServer } from "./server.js";
 import { RelayStores } from "./stores.js";
 
-// The scripted demo walkthrough that drives the PM Dashboard's example view —
-// separate from the real, user-created projects below. Recreated fresh every
-// boot; never persisted.
+// The scripted demo walkthrough that drives the DEMO dashboard's example view
+// (GET /api/demo/dashboard) — deliberately NOT a real project. It never enters
+// `ProjectStore`, is never persisted, and is recreated fresh every boot. Do not
+// wire a real project through this; real dashboards must read ProjectStore.
 const demoSession = GraphSession.demo();
 
 // Multi-project management: the sole point of entry — create, list, plan,

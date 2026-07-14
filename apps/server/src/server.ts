@@ -66,7 +66,12 @@ export interface ServerOptions {
   clock?: () => Date;
   /** Multi-project management: create/list projects, plan + edit + allocate each one's graph. */
   projects?: ProjectStore;
-  /** Phase 6: dashboard provider (engine + ledger composition) */
+  /**
+   * DEMO-ONLY dashboard provider (engine + ledger composition). When set, it is
+   * exposed at GET /api/demo/dashboard and returns the same illustrative demo
+   * data for every caller. It is intentionally unscoped: no project_id reaches
+   * it. This is not, and must not become, a per-project dashboard.
+   */
   dashboard?: () => unknown;
   /** Deploy: absolute path to the built web app (apps/web/dist) to serve. */
   webDist?: string;
@@ -277,11 +282,21 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
   }
 
+  // ---- DEMO dashboard (NOT project-scoped) -----------------------------------
+  // This is the illustrative "what a fully-populated PM Dashboard looks like"
+  // surface, backed by main.ts's hardcoded `demoSession` walkthrough. It is
+  // deliberately mounted under /api/demo/* and takes NO project_id: there is no
+  // route, parameter, or code path by which a real project can reach it or
+  // influence its output. It always returns the same scripted demo data.
+  //
+  // Do NOT repurpose this into a per-project dashboard. A durable, project-
+  // scoped dashboard (GET /api/projects/:id/dashboard) is a separate, gated
+  // future pass — wire that as its own route reading ProjectStore, never here.
   if (options.dashboard) {
-    const provider = options.dashboard;
-    app.get("/api/dashboard", (req, reply) => {
+    const demoDashboard = options.dashboard;
+    app.get("/api/demo/dashboard", (req, reply) => {
       if (!requireSession(req, reply)) return;
-      reply.send(provider());
+      reply.send(demoDashboard());
     });
   }
 
