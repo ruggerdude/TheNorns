@@ -18,3 +18,5 @@
 2026-07-14T10:30Z | NORN-030 | Phase 6: dashboard (engine-derived, source-labeled), API + web view, browser-verified
 2026-07-14T10:30Z | NORN-031 | Phase 7: multi-worker coordination, conflict nodes w/ human gate, induced conflict+failure tests; 108 tests green
 2026-07-14T11:00Z | NORN-015 | GATE-1 review packet assembled (phases 0A-7 implementation vs R4 architecture; 10-file source appendix)
+2026-07-14T11:45Z | NORN-032 | Phase 8 local set: redaction e2e, audit completeness, races/replay, restore fidelity, dispatch loop, strict hashes, release gate
+2026-07-14T11:45Z | NORN-033 | Pilot dress rehearsal green: full MVP flow plan-to-merged-main on real git; 117 tests total

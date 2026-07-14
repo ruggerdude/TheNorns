@@ -29,8 +29,17 @@
 
 - [x] NORN-021 — GATE-1 phase-gate review packet assembled → [docs/reviews/GATE-1-packet.md](docs/reviews/GATE-1-packet.md) (covers 1A through 7; supersedes the 1A-only packet plan)
 
+- [x] NORN-032 — **Phase 8 complete (locally provable set)**: secret redaction at the runner boundary (planted-secret e2e), audit completeness, first-terminal-commits race, replay/out-of-order rejection, snapshot restore fidelity, DispatchLoop (closes GATE-1 deviation #3) w/ kill-switch refusal + lease retry, strict approval hash-match (closes deviation #4), merge-to-main release gate. Gated remainder: live sandbox-escape (Docker host), deployed backup-restore (Neon)
+- [x] NORN-033 — **Pilot dress rehearsal**: full MVP flow in one test on real git — planning loop → hashed approvals → allocation w/ override → strict engine start → all nodes executed (2-worker + budget-block/resume) → dashboard 100% → human-gated merge to main. The live pilot re-runs this with real models + the chosen project
+
 ## In Progress
-- [ ] NORN-015 — 🔄 GATE-1 review **awaiting the human to ferry the packet** to the external reviewer and return findings; disposition follows
+- [ ] NORN-015 — 🔄 GATE-1 review **awaiting the human to ferry the packet** to the external reviewer and return findings; disposition follows (note for reviewer: packet deviations #3 and #4 were closed after packet generation)
+
+## Remaining — every item requires the human
+- [ ] NORN-027 — API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, NORNS_OPENAI_MODEL) → unlocks live adapter conformance, live Phase 3 prompt iteration, live Phase 5 Claude Code/Codex nodes
+- [ ] NORN-008 — Fly.io + Neon accounts → unlocks NORN-024 (Postgres port), deployment, NORN-023 (cross-device 1A acceptance), passkeys, deployed restore test
+- [ ] NORN-006 — Pick the pilot project → unlocks the live Phase 9 pilot (mechanics already rehearsed under NORN-033)
+- [ ] (env) A Docker host → unlocks live sandbox-escape tests and containerized execution
 
 ## Open — gates (human)
 - [ ] NORN-008 — Create Fly.io and Neon accounts + payment methods (**blocks 1A deployed acceptance**: cross-device test, passkey auth, Postgres adapter for RelayStores/dispatch)
