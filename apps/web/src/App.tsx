@@ -1,7 +1,10 @@
-// Phase 4 graph editor: React Flow rendering of the workflow graph with
-// editing (edges with cycle rejection, node deletion with re-parent/cascade
-// confirmation), Auto Allocate under three strategies, per-node overrides,
-// cost preview, and allocation approval — all through the server API.
+// TheNorns web app: sole point of entry. Login gates everything; Projects is
+// the landing view (list/create); opening a project shows its graph editor —
+// React Flow rendering with editing (edges with cycle rejection, node
+// deletion with re-parent/cascade confirmation), live cross-provider
+// planning with a QC/acceptance-criteria review step before committing, Auto
+// Allocate, per-node overrides, cost preview, and allocation approval — all
+// through the project-scoped server API.
 import {
   Background,
   type Connection,
@@ -14,7 +17,9 @@ import "@xyflow/react/dist/style.css";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Dashboard } from "./Dashboard";
 import { Login } from "./Login";
-import { UnauthorizedError, authHeaders, clearToken, getToken, setToken } from "./auth";
+import { type PlanLike, PlanReview } from "./PlanReview";
+import { type ProjectSummary, Projects } from "./Projects";
+import { ApiError, UnauthorizedError, authHeaders, clearToken, getToken, setToken } from "./auth";
 
 interface Assignment {
   provider: string;
@@ -49,14 +54,14 @@ async function api(path: string, method = "GET", body?: unknown): Promise<GraphD
   });
   if (res.status === 401) throw new UnauthorizedError();
   const json = (await res.json()) as GraphDto & { message?: string };
-  if (!res.ok) throw new Error(json.message ?? `request failed: ${res.status}`);
+  if (!res.ok) throw new ApiError(json.message ?? `request failed: ${res.status}`, res.status);
   return json;
 }
 
 interface PlanResult {
   status: "converged" | "cap_reached";
   rounds: number;
-  plan: { objective: string; modules: { id: string; title: string }[] };
+  plan: PlanLike;
   content_hash: string;
   total_cost_usd: number;
   outstanding: { statement: string }[];
@@ -71,7 +76,10 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   if (res.status === 401) throw new UnauthorizedError();
   const json = (await res.json()) as T & { message?: string };
   if (!res.ok)
-    throw new Error((json as { message?: string }).message ?? `request failed: ${res.status}`);
+    throw new ApiError(
+      (json as { message?: string }).message ?? `request failed: ${res.status}`,
+      res.status,
+    );
   return json;
 }
 
@@ -103,32 +111,30 @@ function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
   return positions;
 }
 
-export function App(): React.ReactElement {
+function ProjectGraph({
+  project,
+  onBack,
+  onLogout,
+}: {
+  project: ProjectSummary;
+  onBack: () => void;
+  onLogout: (message: string) => void;
+}): React.ReactElement {
+  const base = `/api/projects/${project.id}`;
   const [graph, setGraph] = useState<GraphDto | null>(null);
+  const [draftOnly, setDraftOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [strategy, setStrategy] = useState("balanced");
   const [error, setError] = useState<string | null>(null);
   const [approvalHash, setApprovalHash] = useState<string | null>(null);
   const [overrideModel, setOverrideModel] = useState("");
   const [overrideBudget, setOverrideBudget] = useState("");
-  const [token, setTok] = useState<string | null>(getToken());
-  const [authError, setAuthError] = useState<string | null>(null);
   const [planObjective, setPlanObjective] = useState("");
   const [planLoading, setPlanLoading] = useState(false);
   const [planResult, setPlanResult] = useState<PlanResult | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
-
-  const login = useCallback((value: string) => {
-    setToken(value);
-    setAuthError(null);
-    setTok(value);
-  }, []);
-
-  const logout = useCallback((message: string) => {
-    clearToken();
-    setTok(null);
-    setAuthError(message);
-  }, []);
+  const [committing, setCommitting] = useState(false);
+  const [view, setView] = useState<"graph" | "dashboard">("graph");
 
   const call = useCallback(
     async (path: string, method = "GET", body?: unknown) => {
@@ -136,44 +142,71 @@ export function App(): React.ReactElement {
         setError(null);
         const next = await api(path, method, body);
         setGraph(next);
+        setDraftOnly(false);
       } catch (err) {
         if (err instanceof UnauthorizedError) {
-          logout("That token was rejected. Try again.");
+          onLogout("That token was rejected. Try again.");
         } else {
           setError(err instanceof Error ? err.message : String(err));
         }
       }
     },
-    [logout],
+    [onLogout],
   );
 
   useEffect(() => {
-    if (token) void call("/api/graph");
-  }, [call, token]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const g = await api(`${base}/graph`);
+        if (!cancelled) {
+          setGraph(g);
+          setDraftOnly(false);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof UnauthorizedError) {
+          onLogout("Session expired. Sign in again.");
+        } else if (err instanceof ApiError && err.status === 409) {
+          setDraftOnly(true); // a fresh project simply has no plan yet
+        } else {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [base, onLogout]);
 
   const runPlanning = useCallback(async () => {
     setPlanLoading(true);
     setPlanError(null);
     setPlanResult(null);
     try {
-      const result = await postJson<PlanResult>("/api/plan", { objective: planObjective });
+      const result = await postJson<PlanResult>(`${base}/plan`, { objective: planObjective });
       setPlanResult(result);
     } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        logout("Session expired. Sign in again.");
-      } else {
-        setPlanError(err instanceof Error ? err.message : String(err));
-      }
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else setPlanError(err instanceof Error ? err.message : String(err));
     } finally {
       setPlanLoading(false);
     }
-  }, [planObjective, logout]);
+  }, [planObjective, base, onLogout]);
 
-  const loadPlan = useCallback(async () => {
-    if (!planResult) return;
-    await call("/api/plan/load", "POST", { plan: planResult.plan });
-    setPlanResult(null);
-  }, [call, planResult]);
+  const commitPlan = useCallback(
+    async (plan: PlanLike) => {
+      setCommitting(true);
+      try {
+        await call(`${base}/plan/load`, "POST", { plan });
+        setPlanResult(null);
+        setPlanObjective("");
+      } finally {
+        setCommitting(false);
+      }
+    },
+    [call, base],
+  );
 
   const { nodes, edges } = useMemo(() => {
     if (!graph) return { nodes: [] as Node[], edges: [] as Edge[] };
@@ -220,27 +253,25 @@ export function App(): React.ReactElement {
   const onConnect = useCallback(
     (connection: Connection) => {
       if (connection.source && connection.target) {
-        void call("/api/graph/edges", "POST", { from: connection.source, to: connection.target });
+        void call(`${base}/graph/edges`, "POST", {
+          from: connection.source,
+          to: connection.target,
+        });
       }
     },
-    [call],
+    [call, base],
   );
 
   const onEdgesDelete = useCallback(
     (deleted: Edge[]) => {
       for (const edge of deleted) {
-        void call("/api/graph/edges", "DELETE", { from: edge.source, to: edge.target });
+        void call(`${base}/graph/edges`, "DELETE", { from: edge.source, to: edge.target });
       }
     },
-    [call],
+    [call, base],
   );
 
   const selectedNode = graph?.nodes.find((n) => n.id === selected) ?? null;
-  const [view, setView] = useState<"graph" | "dashboard">("graph");
-
-  if (!token) {
-    return <Login onLogin={login} error={authError} />;
-  }
 
   if (view === "dashboard") {
     return (
@@ -272,173 +303,226 @@ export function App(): React.ReactElement {
           <Controls />
         </ReactFlow>
       </div>
-      <div style={{ width: 320, padding: 16, borderLeft: "1px solid #ddd", overflow: "auto" }}>
+      <div style={{ width: 340, padding: 16, borderLeft: "1px solid #ddd", overflow: "auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h2 style={{ margin: 0 }}>TheNorns graph</h2>
+          <button type="button" onClick={onBack} style={{ fontSize: 11 }}>
+            ← Projects
+          </button>
           <button
             type="button"
-            onClick={() => logout("Signed out.")}
+            onClick={() => onLogout("Signed out.")}
             style={{ fontSize: 11, color: "#666" }}
           >
             sign out
           </button>
         </div>
-        <button type="button" onClick={() => setView("dashboard")}>
-          PM Dashboard →
-        </button>
-        <div data-testid="graph-version">graph v{graph?.version ?? "…"}</div>
-        <div data-testid="cost-total">
-          cost preview: ${graph?.cost.total_usd ?? 0}
-          {graph && graph.cost.unallocated.length > 0
-            ? ` (${graph.cost.unallocated.length} unallocated)`
-            : ""}
+        <h2 style={{ margin: "8px 0 0" }}>{project.name}</h2>
+        <div style={{ fontSize: 11, color: "#666" }}>
+          PM: {project.pm_provider} · reviewer: {project.reviewer_provider}
         </div>
+        {graph ? (
+          <button type="button" onClick={() => setView("dashboard")} style={{ marginTop: 8 }}>
+            PM Dashboard →
+          </button>
+        ) : null}
+        {graph ? (
+          <>
+            <div data-testid="graph-version">graph v{graph.version}</div>
+            <div data-testid="cost-total">
+              cost preview: ${graph.cost.total_usd}
+              {graph.cost.unallocated.length > 0
+                ? ` (${graph.cost.unallocated.length} unallocated)`
+                : ""}
+            </div>
+          </>
+        ) : draftOnly ? (
+          <p data-testid="draft-hint" style={{ color: "#666", fontSize: 12 }}>
+            No plan yet — describe the project below and run Live Planning to get started.
+          </p>
+        ) : null}
         {error ? (
           <div data-testid="error" style={{ color: "#b91c1c", margin: "8px 0" }}>
             {error}
           </div>
         ) : null}
+
         <h3>Live Planning</h3>
-        <textarea
-          data-testid="plan-objective"
-          placeholder="Objective — e.g. 'Add OAuth login with Google and GitHub'"
-          value={planObjective}
-          onChange={(e) => setPlanObjective(e.target.value)}
-          style={{ width: "100%", height: 56, fontFamily: "inherit", fontSize: 12 }}
-        />
-        <button
-          type="button"
-          disabled={planLoading || !planObjective.trim()}
-          onClick={() => void runPlanning()}
-        >
-          {planLoading ? "Planning with real models… (30–90s)" : "Run Live Planning"}
-        </button>
-        {planError ? (
-          <div data-testid="plan-error" style={{ color: "#b91c1c", margin: "8px 0", fontSize: 12 }}>
-            {planError}
-          </div>
-        ) : null}
         {planResult ? (
-          <div data-testid="plan-result" style={{ margin: "8px 0", fontSize: 12 }}>
-            <div>
-              {planResult.status} in {planResult.rounds} round(s) · $
-              {planResult.total_cost_usd.toFixed(4)}
-            </div>
-            <div>
-              {planResult.plan.modules.length} modules:{" "}
-              {planResult.plan.modules.map((m) => m.id).join(", ")}
-            </div>
-            {planResult.outstanding.length > 0 ? (
-              <div style={{ color: "#b45309" }}>
-                {planResult.outstanding.length} outstanding must-fix finding(s)
+          <PlanReview
+            plan={planResult.plan}
+            committing={committing}
+            onCancel={() => setPlanResult(null)}
+            onCommit={(plan) => void commitPlan(plan)}
+          />
+        ) : (
+          <>
+            <textarea
+              data-testid="plan-objective"
+              placeholder="Describe what to build — e.g. 'Add OAuth login with Google and GitHub'"
+              value={planObjective}
+              onChange={(e) => setPlanObjective(e.target.value)}
+              style={{ width: "100%", height: 56, fontFamily: "inherit", fontSize: 12 }}
+            />
+            <button
+              type="button"
+              disabled={planLoading || !planObjective.trim()}
+              onClick={() => void runPlanning()}
+            >
+              {planLoading ? "Planning with real models… (30–90s)" : "Run Live Planning"}
+            </button>
+            {planError ? (
+              <div
+                data-testid="plan-error"
+                style={{ color: "#b91c1c", margin: "8px 0", fontSize: 12 }}
+              >
+                {planError}
               </div>
             ) : null}
-            <button type="button" onClick={() => void loadPlan()}>
-              Load into graph
-            </button>
-          </div>
-        ) : null}
-        <h3>Auto Allocate</h3>
-        <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
-          <option value="quality">quality</option>
-          <option value="balanced">balanced</option>
-          <option value="cost">cost</option>
-        </select>{" "}
-        <button
-          type="button"
-          onClick={() => void call("/api/graph/allocate", "POST", { strategy })}
-        >
-          Auto Allocate
-        </button>
-        <h3>Approval</h3>
-        <button
-          type="button"
-          onClick={async () => {
-            try {
-              setError(null);
-              const res = await fetch("/api/graph/approve-allocation", {
-                method: "POST",
-                headers: authHeaders(),
-              });
-              if (res.status === 401) {
-                logout("Session expired. Sign in again.");
-                return;
-              }
-              const body = (await res.json()) as { content_hash?: string; message?: string };
-              if (!res.ok) throw new Error(body.message ?? "approval refused");
-              setApprovalHash(body.content_hash ?? null);
-            } catch (err) {
-              setError(err instanceof Error ? err.message : String(err));
-            }
-          }}
-        >
-          Approve allocation (budget)
-        </button>
-        {approvalHash ? (
-          <div data-testid="approval-hash" style={{ wordBreak: "break-all", color: "#047857" }}>
-            approved: {approvalHash}
-          </div>
-        ) : null}
-        {selectedNode ? (
-          <div data-testid="node-panel">
-            <h3>{selectedNode.id}</h3>
-            <div>{selectedNode.title}</div>
-            <div>
-              deps: {selectedNode.dependencies.join(", ") || "none"} · {selectedNode.complexity}/
-              {selectedNode.risk}
-            </div>
-            {selectedNode.assignment ? (
-              <pre style={{ whiteSpace: "pre-wrap", fontSize: 11 }}>
-                {JSON.stringify(selectedNode.assignment, null, 1)}
-              </pre>
-            ) : null}
-            <h4>Override</h4>
-            <input
-              placeholder="model"
-              value={overrideModel}
-              onChange={(e) => setOverrideModel(e.target.value)}
-              style={{ width: "100%" }}
-            />
-            <input
-              placeholder="budget usd"
-              value={overrideBudget}
-              onChange={(e) => setOverrideBudget(e.target.value)}
-              style={{ width: "100%", marginTop: 4 }}
-            />
+          </>
+        )}
+
+        {graph ? (
+          <>
+            <h3>Auto Allocate</h3>
+            <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
+              <option value="quality">quality</option>
+              <option value="balanced">balanced</option>
+              <option value="cost">cost</option>
+            </select>{" "}
             <button
               type="button"
-              style={{ marginTop: 4 }}
-              onClick={() => {
-                const patch: Record<string, unknown> = {};
-                if (overrideModel) patch.model = overrideModel;
-                if (overrideBudget) patch.budget_usd = Number(overrideBudget);
-                void call(`/api/graph/nodes/${selectedNode.id}/assignment`, "POST", patch);
+              onClick={() => void call(`${base}/graph/allocate`, "POST", { strategy })}
+            >
+              Auto Allocate
+            </button>
+            <h3>Approval</h3>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  setError(null);
+                  const res = await fetch(`${base}/graph/approve-allocation`, {
+                    method: "POST",
+                    headers: authHeaders(),
+                  });
+                  if (res.status === 401) {
+                    onLogout("Session expired. Sign in again.");
+                    return;
+                  }
+                  const body = (await res.json()) as { content_hash?: string; message?: string };
+                  if (!res.ok) throw new Error(body.message ?? "approval refused");
+                  setApprovalHash(body.content_hash ?? null);
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : String(err));
+                }
               }}
             >
-              Apply override
+              Approve allocation (budget)
             </button>
-            <h4>Delete node</h4>
-            <button
-              type="button"
-              onClick={() =>
-                void call(`/api/graph/nodes/${selectedNode.id}?mode=reparent`, "DELETE")
-              }
-            >
-              Delete (re-parent)
-            </button>{" "}
-            <button
-              type="button"
-              onClick={() =>
-                void call(`/api/graph/nodes/${selectedNode.id}?mode=cascade`, "DELETE")
-              }
-            >
-              Delete (cascade)
-            </button>
-          </div>
-        ) : (
-          <p style={{ color: "#666" }}>Click a node to inspect, override, or delete it.</p>
-        )}
+            {approvalHash ? (
+              <div data-testid="approval-hash" style={{ wordBreak: "break-all", color: "#047857" }}>
+                approved: {approvalHash}
+              </div>
+            ) : null}
+            {selectedNode ? (
+              <div data-testid="node-panel">
+                <h3>{selectedNode.id}</h3>
+                <div>{selectedNode.title}</div>
+                <div>
+                  deps: {selectedNode.dependencies.join(", ") || "none"} · {selectedNode.complexity}
+                  /{selectedNode.risk}
+                </div>
+                {selectedNode.assignment ? (
+                  <pre style={{ whiteSpace: "pre-wrap", fontSize: 11 }}>
+                    {JSON.stringify(selectedNode.assignment, null, 1)}
+                  </pre>
+                ) : null}
+                <h4>Override</h4>
+                <input
+                  placeholder="model"
+                  value={overrideModel}
+                  onChange={(e) => setOverrideModel(e.target.value)}
+                  style={{ width: "100%" }}
+                />
+                <input
+                  placeholder="budget usd"
+                  value={overrideBudget}
+                  onChange={(e) => setOverrideBudget(e.target.value)}
+                  style={{ width: "100%", marginTop: 4 }}
+                />
+                <button
+                  type="button"
+                  style={{ marginTop: 4 }}
+                  onClick={() => {
+                    const patch: Record<string, unknown> = {};
+                    if (overrideModel) patch.model = overrideModel;
+                    if (overrideBudget) patch.budget_usd = Number(overrideBudget);
+                    void call(`${base}/graph/nodes/${selectedNode.id}/assignment`, "POST", patch);
+                  }}
+                >
+                  Apply override
+                </button>
+                <h4>Delete node</h4>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void call(`${base}/graph/nodes/${selectedNode.id}?mode=reparent`, "DELETE")
+                  }
+                >
+                  Delete (re-parent)
+                </button>{" "}
+                <button
+                  type="button"
+                  onClick={() =>
+                    void call(`${base}/graph/nodes/${selectedNode.id}?mode=cascade`, "DELETE")
+                  }
+                >
+                  Delete (cascade)
+                </button>
+              </div>
+            ) : (
+              <p style={{ color: "#666" }}>Click a node to inspect, override, or delete it.</p>
+            )}
+          </>
+        ) : null}
       </div>
     </div>
+  );
+}
+
+export function App(): React.ReactElement {
+  const [token, setTok] = useState<string | null>(getToken());
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [activeProject, setActiveProject] = useState<ProjectSummary | null>(null);
+
+  const login = useCallback((value: string) => {
+    setToken(value);
+    setAuthError(null);
+    setTok(value);
+  }, []);
+
+  const logout = useCallback((message: string) => {
+    clearToken();
+    setTok(null);
+    setAuthError(message);
+    setActiveProject(null);
+  }, []);
+
+  if (!token) {
+    return <Login onLogin={login} error={authError} />;
+  }
+
+  if (!activeProject) {
+    return (
+      <Projects
+        onOpenProject={setActiveProject}
+        onUnauthorized={() => logout("Session expired. Sign in again.")}
+        onSignOut={() => logout("Signed out.")}
+      />
+    );
+  }
+
+  return (
+    <ProjectGraph project={activeProject} onBack={() => setActiveProject(null)} onLogout={logout} />
   );
 }

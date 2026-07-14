@@ -1,11 +1,13 @@
-// Live planning (Tier 3 unlock): POST /api/plan runs the real cross-provider
-// planning loop against Anthropic + OpenAI; POST /api/plan/load commits a
-// reviewed plan into the graph editor. The guard/load paths run in CI always;
-// the actual live-model round trip auto-enables when real keys are present
-// in the environment (same pattern as packages/adapters/test/live.test.ts).
+// Live planning (Tier 3 unlock), scoped to a project: POST
+// /api/projects/:id/plan runs the real cross-provider planning loop against
+// whichever provider the project's PM is set to; POST /api/projects/:id/plan/load
+// commits a reviewed plan into that project's graph. The guard/load paths run
+// in CI always; the actual live-model round trip auto-enables when real keys
+// are present in the environment (same pattern as
+// packages/adapters/test/live.test.ts).
 import type { UsageEventT } from "@norns/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { GraphSession } from "../src/graph/session.js";
+import { ProjectStore } from "../src/projects/store.js";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
 
@@ -21,7 +23,7 @@ async function start(recordUsage?: (events: UsageEventT[]) => void): Promise<Nor
   server = await buildServer({
     stores: new RelayStores(),
     sessionToken: TOKEN,
-    graphSession: GraphSession.demo(),
+    projects: new ProjectStore(),
     ...(recordUsage ? { recordUsage } : {}),
   });
   return server;
@@ -45,6 +47,18 @@ async function inject(
     ...(body !== undefined ? { payload: body as Record<string, unknown> } : {}),
   });
   return response as unknown as InjectedResponse;
+}
+
+async function createProject(
+  s: NornsServer,
+  pmProvider: "anthropic" | "openai" = "anthropic",
+): Promise<string> {
+  const res = await inject(s, "POST", "/api/projects", {
+    name: "Test project",
+    description: "d",
+    pm_provider: pmProvider,
+  });
+  return (res.json() as { id: string }).id;
 }
 
 const TWO_NODE_PLAN = {
@@ -90,7 +104,7 @@ const TWO_NODE_PLAN = {
 };
 
 describe("live planning — guard + load (no keys required)", () => {
-  it("POST /api/plan refuses with 501 when provider keys are absent", async () => {
+  it("POST /api/projects/:id/plan refuses with 501 when provider keys are absent", async () => {
     const saved = {
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
       OPENAI_API_KEY: process.env.OPENAI_API_KEY,
@@ -99,7 +113,10 @@ describe("live planning — guard + load (no keys required)", () => {
     for (const key of Object.keys(saved)) Reflect.deleteProperty(process.env, key);
     try {
       const s = await start();
-      const res = await inject(s, "POST", "/api/plan", { objective: "Build a thing" });
+      const id = await createProject(s);
+      const res = await inject(s, "POST", `/api/projects/${id}/plan`, {
+        objective: "Build a thing",
+      });
       expect(res.statusCode).toBe(501);
       const body = res.json() as { error: string; message: string };
       expect(body.error).toBe("live_planning_unavailable");
@@ -114,33 +131,39 @@ describe("live planning — guard + load (no keys required)", () => {
     }
   });
 
-  it("POST /api/plan/load commits a reviewed plan into the graph, replacing the demo", async () => {
+  it("POST /api/projects/:id/plan 404s on an unknown project before even checking keys", async () => {
     const s = await start();
-    const before = await inject(s, "GET", "/api/graph");
-    expect((before.json() as { nodes: unknown[] }).nodes).toHaveLength(10); // demo plan
+    const res = await inject(s, "POST", "/api/projects/proj-ghost/plan", { objective: "x" });
+    expect(res.statusCode).toBe(404);
+  });
 
-    const res = await inject(s, "POST", "/api/plan/load", { plan: TWO_NODE_PLAN });
+  it("POST /api/projects/:id/plan/load commits a reviewed plan, turning a draft into planned", async () => {
+    const s = await start();
+    const id = await createProject(s);
+    expect((await inject(s, "GET", `/api/projects/${id}/graph`)).statusCode).toBe(409); // not planned yet
+
+    const res = await inject(s, "POST", `/api/projects/${id}/plan/load`, { plan: TWO_NODE_PLAN });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { nodes: { id: string; dependencies: string[] }[]; version: number };
     expect(body.nodes.map((n) => n.id).sort()).toEqual(["feature", "foundation"]);
     expect(body.nodes.find((n) => n.id === "feature")?.dependencies).toEqual(["foundation"]);
-    expect(body.version).toBe(1); // fresh graph from the new plan
+    expect(body.version).toBe(1);
 
     const audit = await inject(s, "GET", "/api/audit");
     const actions = (audit.json() as { action: string }[]).map((a) => a.action);
     expect(actions).toContain("graph.plan_loaded");
   });
 
-  it("POST /api/plan/load rejects an invalid plan with 422", async () => {
+  it("POST /api/projects/:id/plan/load rejects an invalid plan with 422, leaving the project a draft", async () => {
     const s = await start();
+    const id = await createProject(s);
     const badPlan = { ...TWO_NODE_PLAN, modules: [{ ...TWO_NODE_PLAN.modules[1] }] }; // dangling dependency
-    const res = await inject(s, "POST", "/api/plan/load", { plan: badPlan });
+    const res = await inject(s, "POST", `/api/projects/${id}/plan/load`, { plan: badPlan });
     expect(res.statusCode).toBe(422);
     expect((res.json() as { error: string }).error).toBe("plan_invalid");
-
-    // the graph is untouched by the rejected load
-    const after = await inject(s, "GET", "/api/graph");
-    expect((after.json() as { nodes: unknown[] }).nodes).toHaveLength(10);
+    expect((await inject(s, "GET", `/api/projects/${id}`)).json()).toMatchObject({
+      status: "draft",
+    });
   });
 });
 
@@ -150,11 +173,12 @@ const openaiModel = process.env.NORNS_OPENAI_MODEL;
 
 describe("live planning — real provider round trip", () => {
   it.skipIf(!anthropicKey || !openaiKey || !openaiModel)(
-    "POST /api/plan runs a real cross-provider planning loop and records usage",
+    "POST /api/projects/:id/plan runs a real cross-provider planning loop and records usage",
     async () => {
       const recorded: UsageEventT[] = [];
       const s = await start((events) => recorded.push(...events));
-      const res = await inject(s, "POST", "/api/plan", {
+      const id = await createProject(s, "anthropic");
+      const res = await inject(s, "POST", `/api/projects/${id}/plan`, {
         objective: "A single health-check HTTP endpoint that returns { ok: true }",
         maxRounds: 1,
       });

@@ -10,7 +10,7 @@
 // reads/writes RelayStores, which snapshots to durable storage.
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { AdapterError, AnthropicAdapter, OpenAiAdapter } from "@norns/adapters";
+import { AdapterError, AnthropicAdapter, OpenAiAdapter, type ProviderName } from "@norns/adapters";
 import {
   CommandPayload,
   type CommandStateT,
@@ -35,9 +35,14 @@ import {
   overrideAssignment,
 } from "./graph/allocation.js";
 import { GraphEditError } from "./graph/graph.js";
-import type { GraphSession } from "./graph/session.js";
 import { newId, nonce, pairingCode } from "./ids.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
+import {
+  ProjectNotFoundError,
+  ProjectNotPlannedError,
+  type ProjectStore,
+  reviewerFor,
+} from "./projects/store.js";
 import type { RelayStores } from "./stores.js";
 
 const PAIRING_TTL_MS = 10 * 60 * 1000;
@@ -59,8 +64,8 @@ export interface ServerOptions {
   stores: RelayStores;
   sessionToken: string;
   clock?: () => Date;
-  /** Phase 4: graph editing + allocation for one project */
-  graphSession?: GraphSession;
+  /** Multi-project management: create/list projects, plan + edit + allocate each one's graph. */
+  projects?: ProjectStore;
   /** Phase 6: dashboard provider (engine + ledger composition) */
   dashboard?: () => unknown;
   /** Deploy: absolute path to the built web app (apps/web/dist) to serve. */
@@ -247,86 +252,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     return reply.send({ engaged: body.data.engaged });
   });
 
-  // ---- live planning (Tier 3: real cross-provider planning loop) -------------
-  // Requires ANTHROPIC_API_KEY + OPENAI_API_KEY + NORNS_OPENAI_MODEL in the
-  // environment. Never invents an OpenAI model id — it must come from config.
-  const PlanRequest = z.object({
-    objective: z.string().min(1),
-    maxRounds: z.number().int().min(1).max(5).optional(),
-  });
-  app.post("/api/plan", async (req, reply) => {
-    if (!requireSession(req, reply)) return;
-    const body = PlanRequest.safeParse(req.body);
-    if (!body.success) return reply.code(400).send({ error: "bad_request" });
-
-    const anthropicKey = process.env.ANTHROPIC_API_KEY;
-    const openaiKey = process.env.OPENAI_API_KEY;
-    const openaiModel = process.env.NORNS_OPENAI_MODEL;
-    const missing = [
-      !anthropicKey && "ANTHROPIC_API_KEY",
-      !openaiKey && "OPENAI_API_KEY",
-      !openaiModel && "NORNS_OPENAI_MODEL",
-    ].filter((v): v is string => typeof v === "string");
-    if (missing.length > 0) {
-      return reply.code(501).send({
-        error: "live_planning_unavailable",
-        message: `live planning requires ${missing.join(", ")} to be set as environment variables`,
-      });
-    }
-
-    const pm = new AnthropicAdapter({
-      apiKey: anthropicKey as string,
-      model: process.env.NORNS_PM_MODEL ?? "claude-sonnet-5",
-    });
-    const reviewer = new OpenAiAdapter({
-      apiKey: openaiKey as string,
-      model: openaiModel as string,
-    });
-
-    stores.audit("operator", "planning.started", body.data.objective, now());
-    try {
-      const result = await runPlanning({
-        pm,
-        reviewer,
-        objective: body.data.objective,
-        projectId: "proj-live",
-        ...(body.data.maxRounds !== undefined ? { maxRounds: body.data.maxRounds } : {}),
-      });
-      options.recordUsage?.(result.usage);
-      const totalCost = result.usage.reduce((sum, u) => sum + u.estimated_cost_usd, 0);
-      stores.audit(
-        "operator",
-        "planning.completed",
-        `${result.status} rounds=${result.rounds} cost_usd=${totalCost.toFixed(4)}`,
-        now(),
-      );
-      reply.send({
-        status: result.status,
-        rounds: result.rounds,
-        plan: result.finalPlan,
-        content_hash: planContentHash(result.finalPlan),
-        outstanding: result.outstanding,
-        policy: result.policy,
-        usage: result.usage,
-        total_cost_usd: totalCost,
-      });
-    } catch (error) {
-      stores.audit(
-        "operator",
-        "planning.failed",
-        error instanceof Error ? error.message : String(error),
-        now(),
-      );
-      if (error instanceof PlanningError) {
-        return reply.code(422).send({ error: error.code, message: error.message });
-      }
-      if (error instanceof AdapterError) {
-        return reply.code(502).send({ error: error.kind, message: error.message });
-      }
-      throw error;
-    }
-  });
-
   app.get("/health", (_req, reply) => {
     reply.send({ ok: true, contracts: "1.2.0" });
   });
@@ -360,14 +285,20 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
   }
 
-  // ---- graph editing + allocation (Phase 4) -----------------------------------
+  // ---- multi-project management: create/list projects; plan, edit, and ------
+  // ---- allocate each one's own graph ------------------------------------------
 
-  const graph = options.graphSession;
-  if (graph) {
-    const sendGraph = (reply: FastifyReply): void => {
-      reply.send({ ...graph.graph.snapshot(), cost: costPreview(graph.graph) });
-    };
-    const graphError = (reply: FastifyReply, error: unknown): void => {
+  const projects = options.projects;
+  if (projects) {
+    const projectError = (reply: FastifyReply, error: unknown): void => {
+      if (error instanceof ProjectNotFoundError) {
+        reply.code(404).send({ error: "not_found", message: error.message });
+        return;
+      }
+      if (error instanceof ProjectNotPlannedError) {
+        reply.code(409).send({ error: "not_planned", message: error.message });
+        return;
+      }
       if (error instanceof GraphEditError) {
         reply.code(409).send({
           error: error.code,
@@ -383,35 +314,90 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       throw error;
     };
 
-    app.get("/api/graph", (req, reply) => {
+    const sendGraph = (reply: FastifyReply, id: string): void => {
+      const graph = projects.session(id).graph;
+      reply.send({ ...graph.snapshot(), cost: costPreview(graph) });
+    };
+
+    app.get("/api/projects", (req, reply) => {
       if (!requireSession(req, reply)) return;
-      sendGraph(reply);
+      reply.send(projects.list());
     });
 
-    const EdgeBody = z.object({ from: z.string().min(1), to: z.string().min(1) });
-    app.post("/api/graph/edges", (req, reply) => {
+    const CreateProjectBody = z.object({
+      name: z.string().min(1),
+      description: z.string().min(1),
+      pm_provider: z.enum(["anthropic", "openai"]),
+    });
+    app.post("/api/projects", (req, reply) => {
       if (!requireSession(req, reply)) return;
-      const body = EdgeBody.safeParse(req.body);
+      const body = CreateProjectBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      const project = projects.create({
+        name: body.data.name,
+        description: body.data.description,
+        pmProvider: body.data.pm_provider,
+      });
+      stores.audit("operator", "project.created", `${project.id} ${project.name}`, now());
+      reply.code(201).send(project);
+    });
+
+    app.get("/api/projects/:id", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      const { id } = req.params as { id: string };
       try {
-        graph.graph.addEdge(body.data.from, body.data.to);
-        stores.audit("operator", "graph.edge_added", `${body.data.from}->${body.data.to}`, now());
-        sendGraph(reply);
+        reply.send(projects.summary(id));
       } catch (error) {
-        graphError(reply, error);
+        projectError(reply, error);
       }
     });
 
-    app.delete("/api/graph/edges", (req, reply) => {
+    app.get("/api/projects/:id/graph", (req, reply) => {
       if (!requireSession(req, reply)) return;
+      const { id } = req.params as { id: string };
+      try {
+        sendGraph(reply, id);
+      } catch (error) {
+        projectError(reply, error);
+      }
+    });
+
+    const EdgeBody = z.object({ from: z.string().min(1), to: z.string().min(1) });
+    app.post("/api/projects/:id/graph/edges", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      const { id } = req.params as { id: string };
       const body = EdgeBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
       try {
-        graph.graph.removeEdge(body.data.from, body.data.to);
-        stores.audit("operator", "graph.edge_removed", `${body.data.from}->${body.data.to}`, now());
-        sendGraph(reply);
+        projects.session(id).graph.addEdge(body.data.from, body.data.to);
+        stores.audit(
+          "operator",
+          "graph.edge_added",
+          `${id}:${body.data.from}->${body.data.to}`,
+          now(),
+        );
+        sendGraph(reply, id);
       } catch (error) {
-        graphError(reply, error);
+        projectError(reply, error);
+      }
+    });
+
+    app.delete("/api/projects/:id/graph/edges", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      const { id } = req.params as { id: string };
+      const body = EdgeBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      try {
+        projects.session(id).graph.removeEdge(body.data.from, body.data.to);
+        stores.audit(
+          "operator",
+          "graph.edge_removed",
+          `${id}:${body.data.from}->${body.data.to}`,
+          now(),
+        );
+        sendGraph(reply, id);
+      } catch (error) {
+        projectError(reply, error);
       }
     });
 
@@ -422,39 +408,45 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       risk: z.enum(["low", "medium", "high", "critical"]).optional(),
       dependencies: z.array(z.string().min(1)).optional(),
     });
-    app.post("/api/graph/nodes", (req, reply) => {
+    app.post("/api/projects/:id/graph/nodes", (req, reply) => {
       if (!requireSession(req, reply)) return;
+      const { id } = req.params as { id: string };
       const body = NodeBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
       try {
-        graph.graph.addNode(body.data);
-        stores.audit("operator", "graph.node_added", body.data.id, now());
-        sendGraph(reply);
+        projects.session(id).graph.addNode(body.data);
+        stores.audit("operator", "graph.node_added", `${id}:${body.data.id}`, now());
+        sendGraph(reply, id);
       } catch (error) {
-        graphError(reply, error);
+        projectError(reply, error);
       }
     });
 
-    app.delete("/api/graph/nodes/:id", (req, reply) => {
+    app.delete("/api/projects/:id/graph/nodes/:nodeId", (req, reply) => {
       if (!requireSession(req, reply)) return;
-      const { id } = req.params as { id: string };
+      const { id, nodeId } = req.params as { id: string; nodeId: string };
       const { mode } = req.query as { mode?: "reparent" | "cascade" };
       try {
-        const removed = graph.graph.removeNode(id, mode);
-        stores.audit("operator", "graph.node_removed", removed.join(","), now());
-        sendGraph(reply);
+        const removed = projects.session(id).graph.removeNode(nodeId, mode);
+        stores.audit("operator", "graph.node_removed", `${id}:${removed.join(",")}`, now());
+        sendGraph(reply, id);
       } catch (error) {
-        graphError(reply, error);
+        projectError(reply, error);
       }
     });
 
-    app.post("/api/graph/allocate", (req, reply) => {
+    app.post("/api/projects/:id/graph/allocate", (req, reply) => {
       if (!requireSession(req, reply)) return;
+      const { id } = req.params as { id: string };
       const body = z.object({ strategy: AllocationStrategy }).safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
-      autoAllocate(graph.graph, body.data.strategy);
-      stores.audit("operator", "graph.auto_allocated", body.data.strategy, now());
-      sendGraph(reply);
+      try {
+        autoAllocate(projects.session(id).graph, body.data.strategy);
+        stores.audit("operator", "graph.auto_allocated", `${id}:${body.data.strategy}`, now());
+        sendGraph(reply, id);
+      } catch (error) {
+        projectError(reply, error);
+      }
     });
 
     const OverrideBody = z.object({
@@ -465,43 +457,155 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       budget_usd: z.number().positive().optional(),
       rationale: z.string().min(1).optional(),
     });
-    app.post("/api/graph/nodes/:id/assignment", (req, reply) => {
+    app.post("/api/projects/:id/graph/nodes/:nodeId/assignment", (req, reply) => {
       if (!requireSession(req, reply)) return;
-      const { id } = req.params as { id: string };
+      const { id, nodeId } = req.params as { id: string; nodeId: string };
       const body = OverrideBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
       try {
-        overrideAssignment(graph.graph, id, body.data);
-        stores.audit("operator", "graph.assignment_overridden", id, now());
-        sendGraph(reply);
+        overrideAssignment(projects.session(id).graph, nodeId, body.data);
+        stores.audit("operator", "graph.assignment_overridden", `${id}:${nodeId}`, now());
+        sendGraph(reply, id);
       } catch (error) {
-        graphError(reply, error);
+        projectError(reply, error);
       }
     });
 
-    app.post("/api/graph/approve-allocation", (req, reply) => {
+    app.post("/api/projects/:id/graph/approve-allocation", (req, reply) => {
       if (!requireSession(req, reply)) return;
+      const { id } = req.params as { id: string };
       try {
-        const approval = approveAllocation(graph.graph, "operator");
-        stores.audit("operator", "allocation.approved", approval.content_hash, now());
+        const approval = approveAllocation(projects.session(id).graph, "operator");
+        stores.audit("operator", "allocation.approved", `${id}:${approval.content_hash}`, now());
         reply.send(approval);
       } catch (error) {
-        graphError(reply, error);
+        projectError(reply, error);
       }
     });
 
-    // Commit a (human-reviewed) plan — typically the output of POST /api/plan
-    // — into the live graph editor, replacing the current nodes/edges.
-    const LoadPlanBody = z.object({ plan: PlanContract });
-    app.post("/api/plan/load", (req, reply) => {
+    // ---- live planning, scoped to the project's chosen PM provider -----------
+    // Requires ANTHROPIC_API_KEY + OPENAI_API_KEY + NORNS_OPENAI_MODEL in the
+    // environment. Never invents an OpenAI model id — it must come from config.
+    const PlanRequest = z.object({
+      objective: z.string().min(1),
+      maxRounds: z.number().int().min(1).max(5).optional(),
+    });
+    const buildAdapter = (
+      provider: ProviderName,
+      anthropicKey: string,
+      openaiKey: string,
+      openaiModel: string,
+    ) =>
+      provider === "anthropic"
+        ? new AnthropicAdapter({
+            apiKey: anthropicKey,
+            model: process.env.NORNS_PM_MODEL ?? "claude-sonnet-5",
+          })
+        : new OpenAiAdapter({ apiKey: openaiKey, model: openaiModel });
+
+    app.post("/api/projects/:id/plan", async (req, reply) => {
       if (!requireSession(req, reply)) return;
+      const { id } = req.params as { id: string };
+      let pmProvider: ProviderName;
+      try {
+        pmProvider = projects.pmProviderOf(id);
+      } catch (error) {
+        projectError(reply, error);
+        return;
+      }
+      const body = PlanRequest.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+
+      const anthropicKey = process.env.ANTHROPIC_API_KEY;
+      const openaiKey = process.env.OPENAI_API_KEY;
+      const openaiModel = process.env.NORNS_OPENAI_MODEL;
+      const missing = [
+        !anthropicKey && "ANTHROPIC_API_KEY",
+        !openaiKey && "OPENAI_API_KEY",
+        !openaiModel && "NORNS_OPENAI_MODEL",
+      ].filter((v): v is string => typeof v === "string");
+      if (missing.length > 0) {
+        return reply.code(501).send({
+          error: "live_planning_unavailable",
+          message: `live planning requires ${missing.join(", ")} to be set as environment variables`,
+        });
+      }
+
+      const reviewerProvider = reviewerFor(pmProvider);
+      const pm = buildAdapter(
+        pmProvider,
+        anthropicKey as string,
+        openaiKey as string,
+        openaiModel as string,
+      );
+      const reviewer = buildAdapter(
+        reviewerProvider,
+        anthropicKey as string,
+        openaiKey as string,
+        openaiModel as string,
+      );
+
+      stores.audit("operator", "planning.started", `${id}:${body.data.objective}`, now());
+      try {
+        const result = await runPlanning({
+          pm,
+          reviewer,
+          objective: body.data.objective,
+          projectId: id,
+          ...(body.data.maxRounds !== undefined ? { maxRounds: body.data.maxRounds } : {}),
+        });
+        options.recordUsage?.(result.usage);
+        const totalCost = result.usage.reduce((sum, u) => sum + u.estimated_cost_usd, 0);
+        stores.audit(
+          "operator",
+          "planning.completed",
+          `${id}:${result.status} rounds=${result.rounds} cost_usd=${totalCost.toFixed(4)}`,
+          now(),
+        );
+        reply.send({
+          status: result.status,
+          rounds: result.rounds,
+          plan: result.finalPlan,
+          content_hash: planContentHash(result.finalPlan),
+          outstanding: result.outstanding,
+          policy: result.policy,
+          usage: result.usage,
+          total_cost_usd: totalCost,
+        });
+      } catch (error) {
+        stores.audit(
+          "operator",
+          "planning.failed",
+          `${id}:${error instanceof Error ? error.message : String(error)}`,
+          now(),
+        );
+        if (error instanceof PlanningError) {
+          return reply.code(422).send({ error: error.code, message: error.message });
+        }
+        if (error instanceof AdapterError) {
+          return reply.code(502).send({ error: error.kind, message: error.message });
+        }
+        throw error;
+      }
+    });
+
+    // Commit a (human-reviewed) plan — typically the output of POST
+    // /api/projects/:id/plan — into that project's graph.
+    const LoadPlanBody = z.object({ plan: PlanContract });
+    app.post("/api/projects/:id/plan/load", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      const { id } = req.params as { id: string };
       const body = LoadPlanBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
       try {
-        graph.loadPlan(body.data.plan);
-        stores.audit("operator", "graph.plan_loaded", body.data.plan.objective, now());
-        sendGraph(reply);
+        projects.loadPlan(id, body.data.plan);
+        stores.audit("operator", "graph.plan_loaded", `${id}:${body.data.plan.objective}`, now());
+        sendGraph(reply, id);
       } catch (error) {
+        if (error instanceof ProjectNotFoundError) {
+          projectError(reply, error);
+          return;
+        }
         reply.code(422).send({
           error: "plan_invalid",
           message: error instanceof Error ? error.message : String(error),

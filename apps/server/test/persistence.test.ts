@@ -3,11 +3,12 @@
 // written by one store instance is reconstructed by a fresh instance pointed
 // at the same database, with full fidelity.
 import { PGlite } from "@electric-sql/pglite";
-import type { EventEnvelopeT } from "@norns/contracts";
+import { type EventEnvelopeT, PlanContract } from "@norns/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { autoAllocate, overrideAssignment } from "../src/graph/allocation.js";
 import { GraphSession } from "../src/graph/session.js";
 import { type PgClient, PgPersistence, SnapshotFlusher } from "../src/persistence/pg.js";
+import { ProjectStore } from "../src/projects/store.js";
 import { RelayStores } from "../src/stores.js";
 
 let pg: PGlite;
@@ -149,6 +150,70 @@ describe("Tier-2 postgres persistence", () => {
     expect(sessionB.graph.node("api-core")?.assignment).not.toBeNull(); // auto-allocated
     // full fidelity
     expect(sessionB.graph.snapshot()).toEqual(sessionA.graph.snapshot());
+  });
+
+  it("reconstructs the whole ProjectStore (many projects, plans, allocations) across a restart", async () => {
+    const persistence = new PgPersistence(client);
+    await persistence.init();
+
+    // --- instance A: two projects, one still a draft, one planned+allocated -
+    const storeA = new ProjectStore();
+    storeA.create({ name: "Draft only", description: "no plan yet", pmProvider: "openai" });
+    const planned = storeA.create({
+      name: "Health check",
+      description: "Add a health-check endpoint",
+      pmProvider: "anthropic",
+    });
+    const session = storeA.loadPlan(
+      planned.id,
+      PlanContract.parse({
+        objective: "Add a health-check endpoint",
+        modules: [
+          {
+            id: "foundation",
+            title: "Foundation",
+            description: "Foundation module",
+            deliverables: ["foundation deliverable"],
+            acceptance: [
+              {
+                id: "AC-1",
+                statement: "foundation passes",
+                verification_type: "command",
+                verification: "pnpm test",
+              },
+            ],
+            dependencies: [],
+            estimated_complexity: "M",
+            risk: "low",
+            parallelization: { safe: false },
+          },
+        ],
+      }),
+    );
+    autoAllocate(session.graph, "balanced");
+    overrideAssignment(session.graph, "foundation", { budget_usd: 42 });
+
+    const flusher = new SnapshotFlusher(persistence, "projects", () =>
+      JSON.stringify(storeA.snapshot()),
+    );
+    await flusher.flush();
+
+    // --- instance B: fresh ProjectStore, restored from postgres -------------
+    const loaded = await persistence.load("projects");
+    expect(loaded).not.toBeNull();
+    const storeB = new ProjectStore();
+    storeB.restoreFrom(JSON.parse(loaded as string));
+
+    const listed = storeB.list();
+    expect(listed).toHaveLength(2);
+    const draftEntry = listed.find((p) => p.name === "Draft only");
+    expect(draftEntry?.status).toBe("draft");
+    expect(() => storeB.session(draftEntry?.id as string)).toThrow();
+
+    const restoredSession = storeB.session(planned.id);
+    expect(restoredSession.graph.node("foundation")?.assignment?.budget_usd).toBe(42);
+    expect(restoredSession.graph.node("foundation")?.assignment?.source).toBe("override");
+    expect(restoredSession.graph.snapshot()).toEqual(session.graph.snapshot());
   });
 
   it("upsert keeps a single row per key across many saves", async () => {

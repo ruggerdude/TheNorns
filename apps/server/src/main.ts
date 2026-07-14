@@ -7,10 +7,18 @@ import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
 import { GraphSession } from "./graph/session.js";
 import { PgPersistence, SnapshotFlusher } from "./persistence/pg.js";
+import { ProjectStore } from "./projects/store.js";
 import { buildServer } from "./server.js";
 import { RelayStores } from "./stores.js";
 
-const graphSession = GraphSession.demo();
+// The scripted demo walkthrough that drives the PM Dashboard's example view —
+// separate from the real, user-created projects below. Recreated fresh every
+// boot; never persisted.
+const demoSession = GraphSession.demo();
+
+// Multi-project management: the sole point of entry — create, list, plan,
+// and edit real projects. Empty until you create your first one.
+const projects = new ProjectStore();
 
 // Tier-2 persistence: when DATABASE_URL is set (Railway Postgres plugin),
 // hydrate relay state from the last snapshot and flush changes back durably.
@@ -40,19 +48,17 @@ if (databaseUrl) {
     const relaySnap = await persistence.load("relay");
     if (relaySnap) stores = RelayStores.restore(relaySnap);
 
-    // graph/project state (nodes, dependencies, allocations) — your edits
-    const graphSnap = await persistence.load("graph");
-    if (graphSnap) graphSession.graph.restoreFrom(JSON.parse(graphSnap));
+    // your real projects: metadata, plans, graph edits, allocations
+    const projectsSnap = await persistence.load("projects");
+    if (projectsSnap) projects.restoreFrom(JSON.parse(projectsSnap));
 
     flushers.push(
       new SnapshotFlusher(persistence, "relay", () => stores.snapshot()),
-      new SnapshotFlusher(persistence, "graph", () =>
-        JSON.stringify(graphSession.graph.snapshot()),
-      ),
+      new SnapshotFlusher(persistence, "projects", () => JSON.stringify(projects.snapshot())),
     );
     for (const f of flushers) f.start();
     console.log(
-      `postgres: relay ${relaySnap ? "restored" : "fresh"}, graph ${graphSnap ? "restored" : "fresh"}`,
+      `postgres: relay ${relaySnap ? "restored" : "fresh"}, projects ${projectsSnap ? "restored" : "fresh"}`,
     );
     for (const signal of ["SIGTERM", "SIGINT"] as const) {
       process.on(signal, () => {
@@ -72,8 +78,8 @@ if (databaseUrl) {
 
 // demo engine over the same plan, driven partway for a live-looking dashboard
 const budget = new BudgetLedger(2000);
-for (const mod of graphSession.plan.modules) budget.approve(mod.id, 150);
-const engine = new WorkflowEngine({ plan: graphSession.plan, budget });
+for (const mod of demoSession.plan.modules) budget.approve(mod.id, 150);
+const engine = new WorkflowEngine({ plan: demoSession.plan, budget });
 for (const kind of ["plan", "allocation"] as const) {
   engine.recordApproval({
     id: `ap-${kind}`,
@@ -129,7 +135,7 @@ const ledger = [
 ];
 
 const complexityOf = (nodeId: string): "S" | "M" | "L" | "XL" =>
-  graphSession.plan.modules.find((mod) => mod.id === nodeId)?.estimated_complexity ?? "M";
+  demoSession.plan.modules.find((mod) => mod.id === nodeId)?.estimated_complexity ?? "M";
 
 // A public URL must not run on the default dev token. Fail loudly instead.
 const isProd = process.env.NODE_ENV === "production";
@@ -145,7 +151,7 @@ const webDist = process.env.NORNS_WEB_DIST;
 const server = await buildServer({
   stores,
   sessionToken: token,
-  graphSession,
+  projects,
   recordUsage: (events) => ledger.push(...events),
   ...(webDist !== undefined ? { webDist } : {}),
   dashboard: () =>
@@ -155,7 +161,7 @@ const server = await buildServer({
       ledger,
       audit: stores.auditEntries(),
       complexityOf,
-      graphVersion: graphSession.graph.version,
+      graphVersion: demoSession.graph.version,
     }),
 });
 

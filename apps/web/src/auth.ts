@@ -11,6 +11,19 @@ export class UnauthorizedError extends Error {
   }
 }
 
+/** A non-2xx API response that wasn't a 401 — carries the status for callers
+ *  that need to branch on it (e.g. 409 "project has no plan yet" isn't an
+ *  error worth alarming the user with, it's just where a fresh project starts). */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export function getToken(): string | null {
   const params = new URLSearchParams(window.location.search);
   const fromUrl = params.get("token");
