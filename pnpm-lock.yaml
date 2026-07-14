@@ -42,9 +42,6 @@ importers:
       '@fastify/websocket':
         specifier: ^11.0.0
         version: 11.3.0
-      '@norns/adapters':
-        specifier: workspace:*
-        version: link:../../packages/adapters
       '@norns/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -61,6 +58,9 @@ importers:
       '@electric-sql/pglite':
         specifier: ^0.5.4
         version: 0.5.4
+      '@norns/adapters':
+        specifier: workspace:*
+        version: link:../../packages/adapters
       '@norns/runner':
         specifier: workspace:*
         version: link:../runner
