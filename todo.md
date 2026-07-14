@@ -37,10 +37,15 @@
 
 - [x] NORN-034 — **Railway Tier-1 deploy scaffold**: single-service Docker build (server serves built web + API), host/token prod-hardening, /health, railway.json, ADR-002 amended to Railway, [DEPLOY.md](DEPLOY.md) with the 3-tier path. Verified locally in the prod model
 
+- [x] NORN-024 — **Tier-2 Postgres persistence built + verified** (pglite): PgPersistence + SnapshotFlusher; main.ts hydrates/flushes when DATABASE_URL set; relay/outbox/audit survive restart. Activates via the Railway Postgres plugin
+- [x] NORN-035 — **Tier-3 runner CLI built + verified** end-to-end: `norns-runner pair/start` connects a local runner to a live relay and executes commands. Live LLM execution still needs keys + Docker
+
 ## Remaining — every item requires the human
-- [ ] NORN-034b — Push repo to GitHub `TheNorns` + Railway "Deploy from repo" + set NORNS_TOKEN → live demo URL (Tier 1; steps in DEPLOY.md)
-- [ ] NORN-024 — Postgres store port for Tier-2 persistence (Railway Postgres plugin → DATABASE_URL; port the tested in-memory RelayStores/DispatchStore to Drizzle)
-- [ ] NORN-035 — Runner CLI (`norns-runner pair/start`) so a local runner can connect to the deployed relay (Tier 3; also the standalone-runner gap from the earlier issues list)
+- [ ] NORN-034b — Tier 1: push repo to GitHub `TheNorns` + Railway "Deploy from repo" + set NORNS_TOKEN → live URL (steps in DEPLOY.md). **Only I cannot do this — it's your accounts**
+- [ ] NORN-024b — Tier 2 activation: add the Railway Postgres plugin (one click; code is done)
+- [ ] NORN-027 — Tier 3 live: API keys + a Docker host for real Claude Code/Codex execution
+- [ ] NORN-006 — Pick the pilot project (mechanics already rehearsed)
+- [ ] NORN-015 — Ferry the GATE-1 review packet to the external reviewer; disposition on return
 - [ ] NORN-027 — API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, NORNS_OPENAI_MODEL) → unlocks live adapter conformance, live Phase 3 prompt iteration, live Phase 5 Claude Code/Codex nodes
 - [ ] NORN-008 — Fly.io + Neon accounts → unlocks NORN-024 (Postgres port), deployment, NORN-023 (cross-device 1A acceptance), passkeys, deployed restore test
 - [ ] NORN-006 — Pick the pilot project → unlocks the live Phase 9 pilot (mechanics already rehearsed under NORN-033)
