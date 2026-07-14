@@ -10,3 +10,12 @@ export {
   buildDockerArgs,
   type SandboxSpec,
 } from "./engine/sandbox.js";
+export {
+  PlanningError,
+  approvePlan,
+  planContentHash,
+  runPlanning,
+  type PlanningOptions,
+  type PlanningResult,
+  type PlanVersionRecord,
+} from "./planning/session.js";

@@ -1,9 +1,9 @@
 {
-  "name": "@norns/contracts",
+  "name": "@norns/adapters",
   "private": true,
-  "version": "1.2.0",
+  "version": "0.1.0",
   "type": "module",
-  "description": "TheNorns shared contracts: Plan Contract, node lifecycle, runner protocol, usage, approvals (single source of truth)",
+  "description": "TheNorns LLM adapters: Anthropic + OpenAI behind one interface, usage normalization, failure taxonomy",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
@@ -12,6 +12,9 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "@norns/contracts": "workspace:*",
+    "openai": "latest",
     "zod": "^3.23.8"
   },
   "devDependencies": {
