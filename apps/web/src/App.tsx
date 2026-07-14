@@ -53,6 +53,28 @@ async function api(path: string, method = "GET", body?: unknown): Promise<GraphD
   return json;
 }
 
+interface PlanResult {
+  status: "converged" | "cap_reached";
+  rounds: number;
+  plan: { objective: string; modules: { id: string; title: string }[] };
+  content_hash: string;
+  total_cost_usd: number;
+  outstanding: { statement: string }[];
+}
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: authHeaders(true),
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  const json = (await res.json()) as T & { message?: string };
+  if (!res.ok)
+    throw new Error((json as { message?: string }).message ?? `request failed: ${res.status}`);
+  return json;
+}
+
 /** Layered layout: x by longest-path depth, y by index within the layer. */
 function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
   const depths = new Map<string, number>();
@@ -91,6 +113,10 @@ export function App(): React.ReactElement {
   const [overrideBudget, setOverrideBudget] = useState("");
   const [token, setTok] = useState<string | null>(getToken());
   const [authError, setAuthError] = useState<string | null>(null);
+  const [planObjective, setPlanObjective] = useState("");
+  const [planLoading, setPlanLoading] = useState(false);
+  const [planResult, setPlanResult] = useState<PlanResult | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
 
   const login = useCallback((value: string) => {
     setToken(value);
@@ -124,6 +150,30 @@ export function App(): React.ReactElement {
   useEffect(() => {
     if (token) void call("/api/graph");
   }, [call, token]);
+
+  const runPlanning = useCallback(async () => {
+    setPlanLoading(true);
+    setPlanError(null);
+    setPlanResult(null);
+    try {
+      const result = await postJson<PlanResult>("/api/plan", { objective: planObjective });
+      setPlanResult(result);
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        logout("Session expired. Sign in again.");
+      } else {
+        setPlanError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      setPlanLoading(false);
+    }
+  }, [planObjective, logout]);
+
+  const loadPlan = useCallback(async () => {
+    if (!planResult) return;
+    await call("/api/plan/load", "POST", { plan: planResult.plan });
+    setPlanResult(null);
+  }, [call, planResult]);
 
   const { nodes, edges } = useMemo(() => {
     if (!graph) return { nodes: [] as Node[], edges: [] as Edge[] };
@@ -246,6 +296,46 @@ export function App(): React.ReactElement {
         {error ? (
           <div data-testid="error" style={{ color: "#b91c1c", margin: "8px 0" }}>
             {error}
+          </div>
+        ) : null}
+        <h3>Live Planning</h3>
+        <textarea
+          data-testid="plan-objective"
+          placeholder="Objective — e.g. 'Add OAuth login with Google and GitHub'"
+          value={planObjective}
+          onChange={(e) => setPlanObjective(e.target.value)}
+          style={{ width: "100%", height: 56, fontFamily: "inherit", fontSize: 12 }}
+        />
+        <button
+          type="button"
+          disabled={planLoading || !planObjective.trim()}
+          onClick={() => void runPlanning()}
+        >
+          {planLoading ? "Planning with real models… (30–90s)" : "Run Live Planning"}
+        </button>
+        {planError ? (
+          <div data-testid="plan-error" style={{ color: "#b91c1c", margin: "8px 0", fontSize: 12 }}>
+            {planError}
+          </div>
+        ) : null}
+        {planResult ? (
+          <div data-testid="plan-result" style={{ margin: "8px 0", fontSize: 12 }}>
+            <div>
+              {planResult.status} in {planResult.rounds} round(s) · $
+              {planResult.total_cost_usd.toFixed(4)}
+            </div>
+            <div>
+              {planResult.plan.modules.length} modules:{" "}
+              {planResult.plan.modules.map((m) => m.id).join(", ")}
+            </div>
+            {planResult.outstanding.length > 0 ? (
+              <div style={{ color: "#b45309" }}>
+                {planResult.outstanding.length} outstanding must-fix finding(s)
+              </div>
+            ) : null}
+            <button type="button" onClick={() => void loadPlan()}>
+              Load into graph
+            </button>
           </div>
         ) : null}
         <h3>Auto Allocate</h3>

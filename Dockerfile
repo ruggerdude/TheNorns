@@ -29,7 +29,9 @@ ENV NORNS_WEB_DIST=/app/apps/web/dist
 
 # production dependencies only — all workspace manifests present so the
 # frozen lockfile validates; --filter installs just the server's prod closure
-# (contracts + fastify + pg + zod), not the type-only adapters/runner devdeps.
+# (contracts + adapters + fastify + pg + zod — adapters is a real runtime dep
+# now that the server calls Anthropic/OpenAI directly for live planning),
+# not the type-only runner devdep.
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
 COPY packages/contracts/package.json packages/contracts/
 COPY packages/adapters/package.json packages/adapters/
@@ -39,6 +41,7 @@ COPY apps/web/package.json apps/web/
 RUN pnpm install --frozen-lockfile --prod --filter @norns/server...
 
 COPY --from=build /app/packages/contracts/dist packages/contracts/dist
+COPY --from=build /app/packages/adapters/dist packages/adapters/dist
 COPY --from=build /app/apps/server/dist apps/server/dist
 COPY --from=build /app/apps/web/dist apps/web/dist
 

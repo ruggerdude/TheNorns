@@ -146,6 +146,7 @@ const server = await buildServer({
   stores,
   sessionToken: token,
   graphSession,
+  recordUsage: (events) => ledger.push(...events),
   ...(webDist !== undefined ? { webDist } : {}),
   dashboard: () =>
     buildDashboard({

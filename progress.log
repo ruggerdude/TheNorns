@@ -24,3 +24,4 @@
 2026-07-14T12:45Z | NORN-024 | Tier 2: Postgres snapshot persistence (PgPersistence/SnapshotFlusher), pglite-verified restart reconstruction; activates on DATABASE_URL
 2026-07-14T12:45Z | NORN-035 | Tier 3: norns-runner CLI (pair/start), verified pairing+connect+execute against a live relay; 131 tests green
 2026-07-14T18:15Z | NORN-036 | Graph/project persistence: WorkflowGraph.restoreFrom + main.ts graph flusher; pglite-verified round-trip; deployed
+2026-07-14T19:30Z | NORN-037 | Live planning: POST /api/plan (real Anthropic PM + OpenAI reviewer) + POST /api/plan/load (commit into graph editor) + web UI trigger; adapters moved to a real server dep; browser-verified guard + load paths; 128 tests green (live round-trip skips without keys)

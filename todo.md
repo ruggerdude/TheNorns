@@ -39,18 +39,18 @@
 
 - [x] NORN-024 — **Tier-2 Postgres persistence built + verified** (pglite): PgPersistence + SnapshotFlusher; main.ts hydrates/flushes when DATABASE_URL set; relay/outbox/audit survive restart. Activates via the Railway Postgres plugin
 - [x] NORN-035 — **Tier-3 runner CLI built + verified** end-to-end: `norns-runner pair/start` connects a local runner to a live relay and executes commands. Live LLM execution still needs keys + Docker
+- [x] NORN-037 — **Live planning endpoint built + verified**: `POST /api/plan` runs the real cross-provider planning loop (Anthropic PM + OpenAI reviewer) against live models; `POST /api/plan/load` commits the reviewed plan into the graph editor (replaces demo graph, resets version, full node/dependency fidelity). Web UI trigger in the graph sidebar (objective box → run → review → load). Guard path (missing keys → 501 naming exactly which vars) and load path (valid + invalid plan) covered by CI tests; live round-trip test auto-enables with real keys (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`NORNS_OPENAI_MODEL`), same pattern as the Phase 2 live smoke suite. `@norns/adapters` moved back to a real server dependency (was type-only; now the server calls the SDKs directly for planning)
 
 ## Remaining — every item requires the human
 - [ ] NORN-034b — Tier 1: push repo to GitHub `TheNorns` + Railway "Deploy from repo" + set NORNS_TOKEN → live URL (steps in DEPLOY.md). **Only I cannot do this — it's your accounts**
 - [x] NORN-036 — Graph/project persistence built + verified (your graph edits persist, not just relay). Deployed. Activates with the Postgres plugin
 - [ ] NORN-024b — Tier 2 activation: add the Railway Postgres plugin + DATABASE_URL reference (one click; all code done — persists relay AND graph)
-- [ ] NORN-027 — Tier 3 live: API keys + a Docker host for real Claude Code/Codex execution
+- [x] NORN-027a — API keys added to Railway (ANTHROPIC_API_KEY, OPENAI_API_KEY, NORNS_OPENAI_MODEL) → live planning (NORN-037) is now usable on the deployed site
+- [ ] NORN-027b — Tier 3 live coding execution: still needs a Docker host on the runner machine (ADR-003 sandbox fails closed without it — confirmed absent on the dev machine 2026-07-14) + the daemon-to-real-runtime wiring (daemon currently only executes fixtures; ClaudeCodeRuntime/CodexRuntime exist and are tested but aren't wired into `norns-runner`'s command handling yet)
 - [ ] NORN-006 — Pick the pilot project (mechanics already rehearsed)
 - [ ] NORN-015 — Ferry the GATE-1 review packet to the external reviewer; disposition on return
-- [ ] NORN-027 — API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, NORNS_OPENAI_MODEL) → unlocks live adapter conformance, live Phase 3 prompt iteration, live Phase 5 Claude Code/Codex nodes
 - [ ] NORN-008 — Fly.io + Neon accounts → unlocks NORN-024 (Postgres port), deployment, NORN-023 (cross-device 1A acceptance), passkeys, deployed restore test
-- [ ] NORN-006 — Pick the pilot project → unlocks the live Phase 9 pilot (mechanics already rehearsed under NORN-033)
-- [ ] (env) A Docker host → unlocks live sandbox-escape tests and containerized execution
+- [ ] (env) A Docker host → unlocks live sandbox-escape tests, containerized execution, and NORN-027b
 
 ## Open — gates (human)
 - [ ] NORN-008 — Create Fly.io and Neon accounts + payment methods (**blocks 1A deployed acceptance**: cross-device test, passkey auth, Postgres adapter for RelayStores/dispatch)

@@ -10,13 +10,16 @@
 // reads/writes RelayStores, which snapshots to durable storage.
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
+import { AdapterError, AnthropicAdapter, OpenAiAdapter } from "@norns/adapters";
 import {
   CommandPayload,
   type CommandStateT,
   type EventEnvelopeT,
   PROTOCOL_VERSION,
+  PlanContract,
   ReconcileRequest,
   type ServerFrameT,
+  type UsageEventT,
   parseRunnerFrame,
 } from "@norns/contracts";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -34,6 +37,7 @@ import {
 import { GraphEditError } from "./graph/graph.js";
 import type { GraphSession } from "./graph/session.js";
 import { newId, nonce, pairingCode } from "./ids.js";
+import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
 import type { RelayStores } from "./stores.js";
 
 const PAIRING_TTL_MS = 10 * 60 * 1000;
@@ -61,6 +65,8 @@ export interface ServerOptions {
   dashboard?: () => unknown;
   /** Deploy: absolute path to the built web app (apps/web/dist) to serve. */
   webDist?: string;
+  /** Live planning (Tier 3): append real provider usage to the cost ledger. */
+  recordUsage?: (events: UsageEventT[]) => void;
 }
 
 export interface NornsServer {
@@ -241,6 +247,86 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     return reply.send({ engaged: body.data.engaged });
   });
 
+  // ---- live planning (Tier 3: real cross-provider planning loop) -------------
+  // Requires ANTHROPIC_API_KEY + OPENAI_API_KEY + NORNS_OPENAI_MODEL in the
+  // environment. Never invents an OpenAI model id — it must come from config.
+  const PlanRequest = z.object({
+    objective: z.string().min(1),
+    maxRounds: z.number().int().min(1).max(5).optional(),
+  });
+  app.post("/api/plan", async (req, reply) => {
+    if (!requireSession(req, reply)) return;
+    const body = PlanRequest.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: "bad_request" });
+
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    const openaiKey = process.env.OPENAI_API_KEY;
+    const openaiModel = process.env.NORNS_OPENAI_MODEL;
+    const missing = [
+      !anthropicKey && "ANTHROPIC_API_KEY",
+      !openaiKey && "OPENAI_API_KEY",
+      !openaiModel && "NORNS_OPENAI_MODEL",
+    ].filter((v): v is string => typeof v === "string");
+    if (missing.length > 0) {
+      return reply.code(501).send({
+        error: "live_planning_unavailable",
+        message: `live planning requires ${missing.join(", ")} to be set as environment variables`,
+      });
+    }
+
+    const pm = new AnthropicAdapter({
+      apiKey: anthropicKey as string,
+      model: process.env.NORNS_PM_MODEL ?? "claude-sonnet-5",
+    });
+    const reviewer = new OpenAiAdapter({
+      apiKey: openaiKey as string,
+      model: openaiModel as string,
+    });
+
+    stores.audit("operator", "planning.started", body.data.objective, now());
+    try {
+      const result = await runPlanning({
+        pm,
+        reviewer,
+        objective: body.data.objective,
+        projectId: "proj-live",
+        ...(body.data.maxRounds !== undefined ? { maxRounds: body.data.maxRounds } : {}),
+      });
+      options.recordUsage?.(result.usage);
+      const totalCost = result.usage.reduce((sum, u) => sum + u.estimated_cost_usd, 0);
+      stores.audit(
+        "operator",
+        "planning.completed",
+        `${result.status} rounds=${result.rounds} cost_usd=${totalCost.toFixed(4)}`,
+        now(),
+      );
+      reply.send({
+        status: result.status,
+        rounds: result.rounds,
+        plan: result.finalPlan,
+        content_hash: planContentHash(result.finalPlan),
+        outstanding: result.outstanding,
+        policy: result.policy,
+        usage: result.usage,
+        total_cost_usd: totalCost,
+      });
+    } catch (error) {
+      stores.audit(
+        "operator",
+        "planning.failed",
+        error instanceof Error ? error.message : String(error),
+        now(),
+      );
+      if (error instanceof PlanningError) {
+        return reply.code(422).send({ error: error.code, message: error.message });
+      }
+      if (error instanceof AdapterError) {
+        return reply.code(502).send({ error: error.kind, message: error.message });
+      }
+      throw error;
+    }
+  });
+
   app.get("/health", (_req, reply) => {
     reply.send({ ok: true, contracts: "1.2.0" });
   });
@@ -401,6 +487,25 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         reply.send(approval);
       } catch (error) {
         graphError(reply, error);
+      }
+    });
+
+    // Commit a (human-reviewed) plan — typically the output of POST /api/plan
+    // — into the live graph editor, replacing the current nodes/edges.
+    const LoadPlanBody = z.object({ plan: PlanContract });
+    app.post("/api/plan/load", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      const body = LoadPlanBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      try {
+        graph.loadPlan(body.data.plan);
+        stores.audit("operator", "graph.plan_loaded", body.data.plan.objective, now());
+        sendGraph(reply);
+      } catch (error) {
+        reply.code(422).send({
+          error: "plan_invalid",
+          message: error instanceof Error ? error.message : String(error),
+        });
       }
     });
   }

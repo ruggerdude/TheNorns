@@ -5,7 +5,7 @@ import { WorkflowGraph } from "./graph.js";
 
 export class GraphSession {
   readonly graph: WorkflowGraph;
-  readonly plan: PlanContractT;
+  plan: PlanContractT;
 
   constructor(plan: PlanContractT) {
     this.plan = plan;
@@ -18,6 +18,20 @@ export class GraphSession {
       throw new Error(`demo plan invalid: ${result.errors.map((e) => e.message).join("; ")}`);
     }
     return new GraphSession(result.plan);
+  }
+
+  /**
+   * Replace the live plan+graph with the output of a (human-reviewed) live
+   * planning run. Mutates the existing graph instance in place — the server
+   * already holds a reference to it — so the change is visible immediately.
+   */
+  loadPlan(plan: PlanContractT): void {
+    const result = validatePlan(plan);
+    if (!result.ok) {
+      throw new Error(`plan failed validation: ${result.errors.map((e) => e.message).join("; ")}`);
+    }
+    this.plan = result.plan;
+    this.graph.restoreFrom(WorkflowGraph.fromPlan(result.plan).snapshot());
   }
 }
 
