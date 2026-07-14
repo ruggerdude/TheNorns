@@ -35,7 +35,12 @@
 ## In Progress
 - [ ] NORN-015 — 🔄 GATE-1 review **awaiting the human to ferry the packet** to the external reviewer and return findings; disposition follows (note for reviewer: packet deviations #3 and #4 were closed after packet generation)
 
+- [x] NORN-034 — **Railway Tier-1 deploy scaffold**: single-service Docker build (server serves built web + API), host/token prod-hardening, /health, railway.json, ADR-002 amended to Railway, [DEPLOY.md](DEPLOY.md) with the 3-tier path. Verified locally in the prod model
+
 ## Remaining — every item requires the human
+- [ ] NORN-034b — Push repo to GitHub `TheNorns` + Railway "Deploy from repo" + set NORNS_TOKEN → live demo URL (Tier 1; steps in DEPLOY.md)
+- [ ] NORN-024 — Postgres store port for Tier-2 persistence (Railway Postgres plugin → DATABASE_URL; port the tested in-memory RelayStores/DispatchStore to Drizzle)
+- [ ] NORN-035 — Runner CLI (`norns-runner pair/start`) so a local runner can connect to the deployed relay (Tier 3; also the standalone-runner gap from the earlier issues list)
 - [ ] NORN-027 — API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, NORNS_OPENAI_MODEL) → unlocks live adapter conformance, live Phase 3 prompt iteration, live Phase 5 Claude Code/Codex nodes
 - [ ] NORN-008 — Fly.io + Neon accounts → unlocks NORN-024 (Postgres port), deployment, NORN-023 (cross-device 1A acceptance), passkeys, deployed restore test
 - [ ] NORN-006 — Pick the pilot project → unlocks the live Phase 9 pilot (mechanics already rehearsed under NORN-033)

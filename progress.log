@@ -20,3 +20,4 @@
 2026-07-14T11:00Z | NORN-015 | GATE-1 review packet assembled (phases 0A-7 implementation vs R4 architecture; 10-file source appendix)
 2026-07-14T11:45Z | NORN-032 | Phase 8 local set: redaction e2e, audit completeness, races/replay, restore fidelity, dispatch loop, strict hashes, release gate
 2026-07-14T11:45Z | NORN-033 | Pilot dress rehearsal green: full MVP flow plan-to-merged-main on real git; 117 tests total
+2026-07-14T12:30Z | NORN-034 | Railway Tier-1 deploy scaffold: single-service Docker (web+API), prod hardening, /health, DEPLOY.md; ADR-002 -> Railway
