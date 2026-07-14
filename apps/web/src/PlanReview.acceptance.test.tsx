@@ -8,7 +8,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test } from "vitest";
 import { PlanReview } from "./PlanReview";
-import { makeCoreApiModule, makePlan, makeWebUiModule } from "./test/fixtures";
+import { makeCoreApiModule, makePlan, makePlanResult, makeWebUiModule } from "./test/fixtures";
 
 describe("UI-4: empty-acceptance module must block commit", () => {
   test("removing every criterion from a module keeps 'Load into graph' disabled", async () => {
@@ -30,7 +30,14 @@ describe("UI-4: empty-acceptance module must block commit", () => {
       ],
     });
 
-    render(<PlanReview plan={plan} committing={false} onCancel={() => {}} onCommit={() => {}} />);
+    render(
+      <PlanReview
+        result={makePlanResult({ plan })}
+        committing={false}
+        onCancel={() => {}}
+        onCommit={() => {}}
+      />,
+    );
 
     // The Core API module is the first (open={mi === 0}) — its "Remove
     // criterion" button is already visible without expanding anything.

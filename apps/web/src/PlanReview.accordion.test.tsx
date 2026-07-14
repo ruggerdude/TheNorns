@@ -8,7 +8,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test } from "vitest";
 import { PlanReview } from "./PlanReview";
-import { makeCoreApiModule, makePlan, makeWebUiModule } from "./test/fixtures";
+import { makeCoreApiModule, makePlan, makePlanResult, makeWebUiModule } from "./test/fixtures";
 
 describe("UI-5: manual accordion expansion survives unrelated edits", () => {
   test("expanding the second module, then editing the first, leaves the second expanded", async () => {
@@ -17,7 +17,14 @@ describe("UI-5: manual accordion expansion survives unrelated edits", () => {
       modules: [makeCoreApiModule(), makeWebUiModule()],
     });
 
-    render(<PlanReview plan={plan} committing={false} onCancel={() => {}} onCommit={() => {}} />);
+    render(
+      <PlanReview
+        result={makePlanResult({ plan })}
+        committing={false}
+        onCancel={() => {}}
+        onCommit={() => {}}
+      />,
+    );
 
     // web-ui (module index 1) starts collapsed (open={mi === 0} only opens
     // index 0) — jsdom keeps <details> children in the DOM tree regardless

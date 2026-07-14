@@ -6,6 +6,7 @@
 // them, and persist all of them under Tier-2.
 import type { ProviderName } from "@norns/adapters";
 import { type PlanContractT, validatePlan } from "@norns/contracts";
+import type { AllocationApprovalRecord } from "../graph/allocation.js";
 import { type GraphSnapshot, WorkflowGraph } from "../graph/graph.js";
 import { GraphSession } from "../graph/session.js";
 import { newId } from "../ids.js";
@@ -55,6 +56,7 @@ export interface ProjectStoreSnapshot {
     createdAt: string;
     plan: PlanContractT | null;
     graph: GraphSnapshot | null;
+    approval: AllocationApprovalRecord | null;
   }[];
 }
 
@@ -130,6 +132,7 @@ export class ProjectStore {
         createdAt: r.createdAt,
         plan: r.session?.plan ?? null,
         graph: r.session?.graph.snapshot() ?? null,
+        approval: r.session?.storedApproval ?? null,
       })),
     };
   }
@@ -141,6 +144,7 @@ export class ProjectStore {
       if (p.plan) {
         session = new GraphSession(p.plan);
         if (p.graph) session.graph.restoreFrom(p.graph);
+        session.restoreApproval(p.approval ?? null);
       }
       this.projects.set(p.id, {
         id: p.id,

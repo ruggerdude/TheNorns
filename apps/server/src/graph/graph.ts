@@ -3,6 +3,7 @@
 // with explicit re-parent/cascade confirmation, edit restrictions once
 // execution starts, and a graph version bumped on every structural edit
 // (execution references a specific version).
+import { createHash } from "node:crypto";
 import type { NodeState, PlanContractT } from "@norns/contracts";
 import type { NodeAssignmentT } from "./allocation.js";
 
@@ -67,6 +68,23 @@ export class WorkflowGraph {
 
   get version(): number {
     return this.graphVersion;
+  }
+
+  /**
+   * ADR-1: a content hash of every node's *allocation* (id -> assignment),
+   * separate from graph.version. graph.version tracks structural edits
+   * (add/remove node/edge) and other code depends on that meaning; this
+   * fingerprint tracks allocation changes (auto-allocate / override) instead.
+   * Derived on read, so it always reflects the current assignments after
+   * autoAllocate()/overrideAssignment() mutate them — no cache to invalidate.
+   */
+  get allocationFingerprint(): string {
+    const canonical = JSON.stringify(
+      [...this.nodes.values()]
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .map((n) => ({ id: n.id, assignment: n.assignment })),
+    );
+    return createHash("sha256").update(canonical).digest("hex");
   }
 
   /** Wire the engine's live node states in; edits then respect them. */

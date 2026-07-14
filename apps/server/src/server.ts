@@ -315,8 +315,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     };
 
     const sendGraph = (reply: FastifyReply, id: string): void => {
-      const graph = projects.session(id).graph;
-      reply.send({ ...graph.snapshot(), cost: costPreview(graph) });
+      const session = projects.session(id);
+      const graph = session.graph;
+      // ADR-1: every graph response carries the server-authoritative approval
+      // status, with `current` computed against the live version/fingerprint.
+      reply.send({
+        ...graph.snapshot(),
+        cost: costPreview(graph),
+        approval: session.approvalStatus(),
+      });
     };
 
     app.get("/api/projects", (req, reply) => {
@@ -475,7 +482,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       if (!requireSession(req, reply)) return;
       const { id } = req.params as { id: string };
       try {
-        const approval = approveAllocation(projects.session(id).graph, "operator");
+        const session = projects.session(id);
+        const approval = approveAllocation(session.graph, "operator");
+        // Persist the approval server-side (ADR-1) so staleness is judged by
+        // the server, not reconstructed from client memory.
+        session.recordApproval(approval);
         stores.audit("operator", "allocation.approved", `${id}:${approval.content_hash}`, now());
         reply.send(approval);
       } catch (error) {

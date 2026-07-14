@@ -4,7 +4,7 @@
 // persistence test proved, now for N independently-managed projects.
 import { PlanContract, type PlanContractT } from "@norns/contracts";
 import { describe, expect, it } from "vitest";
-import { autoAllocate, overrideAssignment } from "../src/graph/allocation.js";
+import { approveAllocation, autoAllocate, overrideAssignment } from "../src/graph/allocation.js";
 import { ProjectNotFoundError, ProjectStore, reviewerFor } from "../src/projects/store.js";
 
 const SMALL_PLAN: PlanContractT = PlanContract.parse({
@@ -112,5 +112,26 @@ describe("ProjectStore", () => {
     expect(restoredSession.graph.node("foundation")?.assignment?.budget_usd).toBe(55);
     expect(restoredSession.graph.node("foundation")?.assignment?.source).toBe("override");
     expect(restoredSession.graph.snapshot()).toEqual(session.graph.snapshot());
+  });
+
+  it("round-trips a persisted allocation approval and re-derives staleness after restore (ADR-1)", () => {
+    const store = new ProjectStore();
+    const project = store.create({ name: "P", description: "d", pmProvider: "anthropic" });
+    const session = store.loadPlan(project.id, SMALL_PLAN);
+    autoAllocate(session.graph, "balanced");
+    session.recordApproval(approveAllocation(session.graph, "operator"));
+    expect(session.approvalStatus()).toMatchObject({ current: true, actor: "operator" });
+
+    const restored = new ProjectStore();
+    restored.restoreFrom(store.snapshot());
+    const restoredSession = restored.session(project.id);
+
+    // The approval survived the snapshot and is still current (nothing changed).
+    expect(restoredSession.approvalStatus()).toMatchObject({ current: true, actor: "operator" });
+
+    // A later override on the restored graph makes it stale — staleness is
+    // computed live against the current fingerprint, not persisted as a flag.
+    overrideAssignment(restoredSession.graph, "foundation", { budget_usd: 999 });
+    expect(restoredSession.approvalStatus()).toMatchObject({ current: false });
   });
 });

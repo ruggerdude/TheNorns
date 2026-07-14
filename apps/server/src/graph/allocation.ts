@@ -144,6 +144,30 @@ export function costPreview(graph: WorkflowGraph): CostPreview {
 
 export class AllocationError extends Error {}
 
+/**
+ * Server-authoritative record of the last allocation approval (ADR-1). Binds
+ * to both graph.version (structural edits) and allocation_fingerprint
+ * (allocation edits), so we can decide server-side whether an approval is
+ * still current. Persisted on the GraphSession (see graph/session.ts) and
+ * round-tripped through ProjectStore snapshots.
+ */
+export interface AllocationApprovalRecord {
+  content_hash: string;
+  graph_version: number;
+  allocation_fingerprint: string;
+  actor: string;
+  approved_at: string;
+}
+
+/** What the graph API returns to the client for the approval banner. `current`
+ *  is computed server-side; the hash is evidence, never the source of truth. */
+export interface AllocationApprovalStatus {
+  content_hash: string;
+  approved_at: string;
+  actor: string;
+  current: boolean;
+}
+
 /** Human approval — refuses partial allocations, hashes exactly what was shown. */
 export function approveAllocation(graph: WorkflowGraph, actor: string): ApprovalT {
   const preview = costPreview(graph);

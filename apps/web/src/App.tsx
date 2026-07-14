@@ -14,8 +14,7 @@ import {
   ReactFlow,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Dashboard } from "./Dashboard";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Login } from "./Login";
 import { type PlanLike, PlanReview } from "./PlanReview";
 import { type ProjectSummary, Projects } from "./Projects";
@@ -41,11 +40,30 @@ interface GraphNodeDto {
   assignment: Assignment | null;
 }
 
+/** ADR-1: server-authoritative approval status attached to every graph
+ *  response. `current` is computed server-side (graph.version +
+ *  allocation_fingerprint match); the hash is displayed evidence only. */
+interface ApprovalResponse {
+  content_hash: string;
+  approved_at: string;
+  actor: string;
+  current: boolean;
+}
+
 interface GraphDto {
   version: number;
   nodes: GraphNodeDto[];
   cost: { total_usd: number; unallocated: string[] };
+  approval?: ApprovalResponse | null;
 }
+
+/** Client-side approval banner state. Distinct from "all nodes allocated" —
+ *  those remain different states (a full allocation is not an approval). */
+type ApprovalState =
+  | { kind: "never" }
+  | { kind: "pending" }
+  | { kind: "current"; hash: string; approvedAt: string; actor: string }
+  | { kind: "stale"; hash: string };
 
 async function api(path: string, method = "GET", body?: unknown): Promise<GraphDto> {
   const res = await fetch(path, {
@@ -59,7 +77,13 @@ async function api(path: string, method = "GET", body?: unknown): Promise<GraphD
   return json;
 }
 
-interface PlanResult {
+/**
+ * Frozen contract between App.tsx (orchestration) and PlanReview.tsx
+ * (presentation): the *whole* planning result the QC screen needs, not just
+ * the plan. Agent B builds PlanReview to accept exactly this as `result`.
+ * `outstanding` is already pre-filtered to must-fix findings by the server.
+ */
+export interface PlanReviewResult {
   status: "converged" | "cap_reached";
   rounds: number;
   plan: PlanLike;
@@ -127,32 +151,76 @@ function ProjectGraph({
   const [selected, setSelected] = useState<string | null>(null);
   const [strategy, setStrategy] = useState("balanced");
   const [error, setError] = useState<string | null>(null);
-  const [approvalHash, setApprovalHash] = useState<string | null>(null);
-  const [overrideModel, setOverrideModel] = useState("");
-  const [overrideBudget, setOverrideBudget] = useState("");
+  const [approval, setApproval] = useState<ApprovalState>({ kind: "never" });
+  // UI-7: override drafts are keyed by node id (not flat state) so a half-typed
+  // override for one node never leaks into another; switching selection shows
+  // that node's own pending draft or a clean slate, never the previous node's.
+  const [overrideDrafts, setOverrideDrafts] = useState<
+    Record<string, { model: string; budget: string }>
+  >({});
+  const [overrideError, setOverrideError] = useState<string | null>(null);
   const [planObjective, setPlanObjective] = useState("");
   const [planLoading, setPlanLoading] = useState(false);
-  const [planResult, setPlanResult] = useState<PlanResult | null>(null);
+  const [planResult, setPlanResult] = useState<PlanReviewResult | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [committing, setCommitting] = useState(false);
-  const [view, setView] = useState<"graph" | "dashboard">("graph");
+  const [commitError, setCommitError] = useState<string | null>(null);
+
+  // Last-known-*good* approval state (never "pending"): what we revert to when
+  // an in-flight mutation fails, so the banner is never left stuck at pending.
+  const lastGoodApprovalRef = useRef<ApprovalState>({ kind: "never" });
+  // Guards against double-submit of a plan/load while one is already in flight.
+  const committingRef = useRef(false);
+  // The exact (still-edited) plan last handed to commitPlan, so Retry resubmits
+  // it rather than a stale copy.
+  const lastCommitPlanRef = useRef<PlanLike | null>(null);
+
+  const applyApproval = useCallback((next: ApprovalState) => {
+    lastGoodApprovalRef.current = next;
+    setApproval(next);
+  }, []);
+
+  // ADR-1: mount/refresh and every mutation response reconcile the banner from
+  // the server's `approval` field — the source of truth — not client memory.
+  const reconcileApproval = useCallback(
+    (g: GraphDto) => {
+      const a = g.approval;
+      if (a?.current) {
+        applyApproval({
+          kind: "current",
+          hash: a.content_hash,
+          approvedAt: a.approved_at,
+          actor: a.actor,
+        });
+      } else if (a) {
+        applyApproval({ kind: "stale", hash: a.content_hash });
+      } else {
+        applyApproval({ kind: "never" });
+      }
+    },
+    [applyApproval],
+  );
 
   const call = useCallback(
     async (path: string, method = "GET", body?: unknown) => {
+      const prevApproval = lastGoodApprovalRef.current;
       try {
         setError(null);
+        setApproval({ kind: "pending" }); // a mutation is in flight
         const next = await api(path, method, body);
         setGraph(next);
         setDraftOnly(false);
+        reconcileApproval(next);
       } catch (err) {
         if (err instanceof UnauthorizedError) {
           onLogout("That token was rejected. Try again.");
         } else {
           setError(err instanceof Error ? err.message : String(err));
+          setApproval(prevApproval); // revert; never leave the banner at pending
         }
       }
     },
-    [onLogout],
+    [onLogout, reconcileApproval],
   );
 
   useEffect(() => {
@@ -163,6 +231,7 @@ function ProjectGraph({
         if (!cancelled) {
           setGraph(g);
           setDraftOnly(false);
+          reconcileApproval(g);
         }
       } catch (err) {
         if (cancelled) return;
@@ -178,14 +247,15 @@ function ProjectGraph({
     return () => {
       cancelled = true;
     };
-  }, [base, onLogout]);
+  }, [base, onLogout, reconcileApproval]);
 
   const runPlanning = useCallback(async () => {
     setPlanLoading(true);
     setPlanError(null);
+    setCommitError(null);
     setPlanResult(null);
     try {
-      const result = await postJson<PlanResult>(`${base}/plan`, { objective: planObjective });
+      const result = await postJson<PlanReviewResult>(`${base}/plan`, { objective: planObjective });
       setPlanResult(result);
     } catch (err) {
       if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
@@ -195,19 +265,146 @@ function ProjectGraph({
     }
   }, [planObjective, base, onLogout]);
 
+  // UI-2: commit is error-aware — it does NOT go through call() (which swallows
+  // errors). QC review state (planResult/planObjective) is cleared only after a
+  // confirmed-successful load; a failure keeps everything the human edited.
   const commitPlan = useCallback(
     async (plan: PlanLike) => {
+      if (committingRef.current) return; // no double-submit while in flight
+      committingRef.current = true;
+      lastCommitPlanRef.current = plan;
       setCommitting(true);
+      setCommitError(null);
+      const prevApproval = lastGoodApprovalRef.current;
+      setApproval({ kind: "pending" });
       try {
-        await call(`${base}/plan/load`, "POST", { plan });
-        setPlanResult(null);
+        const next = await api(`${base}/plan/load`, "POST", { plan });
+        setGraph(next);
+        setDraftOnly(false);
+        setError(null);
+        reconcileApproval(next);
+        setPlanResult(null); // success only: safe to leave the QC screen
         setPlanObjective("");
+        setCommitError(null);
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          onLogout("Session expired. Sign in again."); // 401 still signs out
+          return;
+        }
+        setCommitError(err instanceof Error ? err.message : String(err));
+        setApproval(prevApproval);
+        // planResult / planObjective deliberately untouched -> edits survive
       } finally {
+        committingRef.current = false;
         setCommitting(false);
       }
     },
-    [call, base],
+    [base, onLogout, reconcileApproval],
   );
+
+  const retryCommit = useCallback(async () => {
+    const plan = lastCommitPlanRef.current;
+    if (plan) await commitPlan(plan); // committingRef guard blocks concurrent retries
+  }, [commitPlan]);
+
+  // ADR-1: approval is a POST that persists server-side; on success the server
+  // reports it as current, so we show the hash as evidence.
+  const approveAllocationAction = useCallback(async () => {
+    const prevApproval = lastGoodApprovalRef.current;
+    setError(null);
+    setApproval({ kind: "pending" });
+    try {
+      const res = await fetch(`${base}/graph/approve-allocation`, {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      if (res.status === 401) {
+        onLogout("Session expired. Sign in again.");
+        return;
+      }
+      const body = (await res.json()) as {
+        content_hash?: string;
+        approved_at?: string;
+        actor?: string;
+        message?: string;
+      };
+      if (!res.ok) throw new Error(body.message ?? "approval refused");
+      applyApproval({
+        kind: "current",
+        hash: body.content_hash ?? "",
+        approvedAt: body.approved_at ?? new Date().toISOString(),
+        actor: body.actor ?? "operator",
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setApproval(prevApproval);
+    }
+  }, [base, onLogout, applyApproval]);
+
+  // UI-7 draft helpers (keyed by node id).
+  const draft = (selected ? overrideDrafts[selected] : undefined) ?? { model: "", budget: "" };
+  const setDraft = useCallback(
+    (patch: Partial<{ model: string; budget: string }>) => {
+      if (!selected) return;
+      setOverrideDrafts((drafts) => ({
+        ...drafts,
+        [selected]: { ...(drafts[selected] ?? { model: "", budget: "" }), ...patch },
+      }));
+    },
+    [selected],
+  );
+  const clearDraft = useCallback((nodeId: string) => {
+    setOverrideDrafts((drafts) => {
+      const next = { ...drafts };
+      delete next[nodeId];
+      return next;
+    });
+  }, []);
+
+  const saveOverride = useCallback(async () => {
+    if (!selected) return;
+    const nodeId = selected;
+    const d = overrideDrafts[nodeId] ?? { model: "", budget: "" };
+    setOverrideError(null);
+    const patch: Record<string, unknown> = {};
+    if (d.model.trim()) patch.model = d.model.trim();
+    if (d.budget.trim()) {
+      // UI-7.6: validate client-side; never call the API with an invalid budget.
+      const budget = Number(d.budget);
+      if (!Number.isFinite(budget) || budget <= 0) {
+        setOverrideError("Budget must be a positive number.");
+        return;
+      }
+      patch.budget_usd = budget;
+    }
+    if (Object.keys(patch).length === 0) {
+      setOverrideError("Enter a model or budget to override.");
+      return;
+    }
+    const prevApproval = lastGoodApprovalRef.current;
+    setError(null);
+    setApproval({ kind: "pending" });
+    try {
+      const next = await api(`${base}/graph/nodes/${nodeId}/assignment`, "POST", patch);
+      setGraph(next);
+      setDraftOnly(false);
+      clearDraft(nodeId); // success clears the draft
+      // Override changed the allocation -> server marks approval not-current.
+      reconcileApproval(next);
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        onLogout("That token was rejected. Try again.");
+      } else {
+        setOverrideError(err instanceof Error ? err.message : String(err)); // failed save keeps the draft
+        setApproval(prevApproval);
+      }
+    }
+  }, [selected, overrideDrafts, base, onLogout, clearDraft, reconcileApproval]);
+
+  const cancelOverride = useCallback(() => {
+    if (selected) clearDraft(selected); // restore server-known values (empty draft = no pending override)
+    setOverrideError(null);
+  }, [selected, clearDraft]);
 
   const { nodes, edges } = useMemo(() => {
     if (!graph) return { nodes: [] as Node[], edges: [] as Edge[] };
@@ -286,20 +483,11 @@ function ProjectGraph({
 
   const selectedNode = graph?.nodes.find((n) => n.id === selected) ?? null;
 
-  if (view === "dashboard") {
-    return (
-      <div className="dashboard">
-        <Button
-          className="btn-small"
-          style={{ position: "fixed", top: 16, right: 16, zIndex: 30 }}
-          onClick={() => setView("graph")}
-        >
-          ← Graph workspace
-        </Button>
-        <Dashboard onUnauthorized={() => onLogout("Session expired. Sign in again.")} />
-      </div>
-    );
-  }
+  // UI-6: the "Dashboard" entry is intentionally not rendered for a real
+  // project — it fetched a hardcoded global demo session's data (now moved to
+  // its own /api/demo/dashboard surface by Agent C). A durable per-project
+  // dashboard is deferred; until then a real project's workspace exposes no
+  // dashboard entry and fires no dashboard fetch.
 
   return (
     <div className="graph-shell">
@@ -335,9 +523,6 @@ function ProjectGraph({
         {graph ? (
           <>
             <div className="actions">
-              <Button className="btn-small" onClick={() => setView("dashboard")}>
-                Dashboard ↗
-              </Button>
               <Badge tone={graph.cost.unallocated.length ? "warn" : "success"}>
                 {graph.cost.unallocated.length
                   ? `${graph.cost.unallocated.length} unallocated`
@@ -372,12 +557,30 @@ function ProjectGraph({
           <summary>01 · Live planning</summary>
           <div className="side-body">
             {planResult ? (
-              <PlanReview
-                plan={planResult.plan}
-                committing={committing}
-                onCancel={() => setPlanResult(null)}
-                onCommit={(plan) => void commitPlan(plan)}
-              />
+              <>
+                <PlanReview
+                  result={planResult}
+                  committing={committing}
+                  onCancel={() => {
+                    setPlanResult(null);
+                    setCommitError(null);
+                  }}
+                  onCommit={(plan) => void commitPlan(plan)}
+                />
+                {commitError ? (
+                  <Alert testId="commit-error">
+                    <div>Couldn’t load the plan: {commitError}</div>
+                    <Button
+                      className="btn-small"
+                      data-testid="commit-retry"
+                      disabled={committing}
+                      onClick={() => void retryCommit()}
+                    >
+                      {committing ? "Retrying…" : "Retry load"}
+                    </Button>
+                  </Alert>
+                ) : null}
+              </>
             ) : (
               <div className="form-stack">
                 <Field label="What should this program deliver?">
@@ -439,42 +642,40 @@ function ProjectGraph({
                 </p>
                 <Button
                   className="btn-block"
-                  disabled={graph.cost.unallocated.length > 0}
-                  onClick={async () => {
-                    try {
-                      setError(null);
-                      const res = await fetch(`${base}/graph/approve-allocation`, {
-                        method: "POST",
-                        headers: authHeaders(),
-                      });
-                      if (res.status === 401) {
-                        onLogout("Session expired. Sign in again.");
-                        return;
-                      }
-                      const body = (await res.json()) as {
-                        content_hash?: string;
-                        message?: string;
-                      };
-                      if (!res.ok) throw new Error(body.message ?? "approval refused");
-                      setApprovalHash(body.content_hash ?? null);
-                    } catch (e) {
-                      setError(e instanceof Error ? e.message : String(e));
-                    }
-                  }}
+                  disabled={graph.cost.unallocated.length > 0 || approval.kind === "pending"}
+                  onClick={() => void approveAllocationAction()}
                 >
                   Approve graph & budget
                 </Button>
-                {approvalHash ? (
+                {/* Status is conveyed with visible text, not colour alone (UI-1.6). */}
+                {approval.kind === "current" ? (
                   <div
                     data-testid="approval-hash"
                     className="policy mono"
                     style={{ marginTop: 8, wordBreak: "break-all" }}
                   >
-                    ✓ Approved
+                    ✓ Approved · current
                     <br />
-                    {approvalHash}
+                    {approval.hash}
                   </div>
-                ) : null}
+                ) : approval.kind === "stale" ? (
+                  <output data-testid="approval-stale" className="policy" style={{ marginTop: 8 }}>
+                    ⚠ Approval out of date — the graph or allocation changed since it was approved.
+                    Re-approve to lock the current graph and budget.
+                  </output>
+                ) : approval.kind === "pending" ? (
+                  <output
+                    data-testid="approval-pending"
+                    className="policy"
+                    style={{ marginTop: 8 }}
+                  >
+                    Checking approval status…
+                  </output>
+                ) : (
+                  <output data-testid="approval-none" className="policy" style={{ marginTop: 8 }}>
+                    Not yet approved.
+                  </output>
+                )}
               </div>
             </details>
             <section
@@ -533,8 +734,8 @@ function ProjectGraph({
                   <Field label="Override model">
                     <Input
                       placeholder="Model identifier"
-                      value={overrideModel}
-                      onChange={(e) => setOverrideModel(e.target.value)}
+                      value={draft.model}
+                      onChange={(e) => setDraft({ model: e.target.value })}
                     />
                   </Field>
                   <Field label="Override budget (USD)">
@@ -543,21 +744,31 @@ function ProjectGraph({
                       min="0"
                       step="0.01"
                       placeholder="0.00"
-                      value={overrideBudget}
-                      onChange={(e) => setOverrideBudget(e.target.value)}
+                      value={draft.budget}
+                      onChange={(e) => setDraft({ budget: e.target.value })}
                     />
                   </Field>
-                  <Button
-                    disabled={!overrideModel && !overrideBudget}
-                    onClick={() => {
-                      const patch: Record<string, unknown> = {};
-                      if (overrideModel) patch.model = overrideModel;
-                      if (overrideBudget) patch.budget_usd = Number(overrideBudget);
-                      void call(`${base}/graph/nodes/${selectedNode.id}/assignment`, "POST", patch);
-                    }}
-                  >
-                    Apply override
-                  </Button>
+                  {overrideError ? <Alert testId="override-error">{overrideError}</Alert> : null}
+                  <div className="actions">
+                    <Button
+                      variant="primary"
+                      className="btn-small"
+                      disabled={
+                        approval.kind === "pending" || (!draft.model.trim() && !draft.budget.trim())
+                      }
+                      onClick={() => void saveOverride()}
+                    >
+                      Save override
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      className="btn-small"
+                      disabled={!draft.model.trim() && !draft.budget.trim()}
+                      onClick={cancelOverride}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
                   <div className="divider" />
                   <div>
                     <div className="field-label">Delete node</div>

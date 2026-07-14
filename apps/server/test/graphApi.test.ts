@@ -158,6 +158,58 @@ describe("project graph API", () => {
     expect(res.statusCode).toBe(409);
   });
 
+  it("reports approval status server-side: null before approval, current after, stale after a change (ADR-1)", async () => {
+    const { server: s, projectId } = await startWithDemoProject();
+    const graphUrl = `/api/projects/${projectId}/graph`;
+    type GraphWithApproval = {
+      version: number;
+      approval: { content_hash: string; current: boolean; actor: string } | null;
+    };
+
+    // Never approved -> null.
+    expect((await inject(s, "GET", graphUrl)).json()).toMatchObject({ approval: null });
+
+    await inject(s, "POST", `/api/projects/${projectId}/graph/allocate`, { strategy: "balanced" });
+    const approved = await inject(s, "POST", `/api/projects/${projectId}/graph/approve-allocation`);
+    expect(approved.statusCode).toBe(200);
+
+    // Immediately after approval it is current.
+    const afterApprove = (await inject(s, "GET", graphUrl)).json() as GraphWithApproval;
+    expect(afterApprove.approval).toMatchObject({ current: true, actor: "operator" });
+    expect(afterApprove.approval?.content_hash).toMatch(/^[a-f0-9]{64}$/);
+
+    // A post-approval override changes an assignment: the approval is not lost,
+    // it goes stale (allocation_fingerprint no longer matches).
+    await inject(s, "POST", `/api/projects/${projectId}/graph/nodes/auth/assignment`, {
+      budget_usd: 999,
+    });
+    const afterOverride = (await inject(s, "GET", graphUrl)).json() as GraphWithApproval;
+    expect(afterOverride.approval).toMatchObject({ current: false });
+    // The evidence hash of what was approved is still surfaced.
+    expect(afterOverride.approval?.content_hash).toBe(afterApprove.approval?.content_hash);
+  });
+
+  it("marks approval stale after a structural edit bumps graph.version (ADR-1)", async () => {
+    const { server: s, projectId } = await startWithDemoProject();
+    const graphUrl = `/api/projects/${projectId}/graph`;
+    await inject(s, "POST", `/api/projects/${projectId}/graph/allocate`, { strategy: "balanced" });
+    await inject(s, "POST", `/api/projects/${projectId}/graph/approve-allocation`);
+    expect((await inject(s, "GET", graphUrl)).json()).toMatchObject({
+      approval: { current: true },
+    });
+
+    // A structural edit (new edge) bumps graph.version even though no
+    // assignment changed — the approval binds to version too, so it goes stale.
+    const edge = await inject(s, "POST", `/api/projects/${projectId}/graph/edges`, {
+      from: "db-schema",
+      to: "auth",
+    });
+    expect(edge.statusCode).toBe(200);
+    expect((await inject(s, "GET", graphUrl)).json()).toMatchObject({
+      approval: { current: false },
+    });
+  });
+
   it("keeps two projects' graphs fully independent", async () => {
     const { server: s, projectId: projectA } = await startWithDemoProject();
     const createdB = await inject(s, "POST", "/api/projects", {

@@ -1,15 +1,55 @@
 // A graph-editing session over one project's workflow graph, plus the
 // 10-node demo plan the Phase 4 exit criterion is demonstrated against.
-import { type PlanContractT, validatePlan } from "@norns/contracts";
+import type { ApprovalT, PlanContractT } from "@norns/contracts";
+import { validatePlan } from "@norns/contracts";
+import type { AllocationApprovalRecord, AllocationApprovalStatus } from "./allocation.js";
 import { WorkflowGraph } from "./graph.js";
 
 export class GraphSession {
   readonly graph: WorkflowGraph;
   plan: PlanContractT;
+  /** ADR-1: server-authoritative last-approved allocation, persisted (not just
+   *  held in the client). null until the human approves an allocation. */
+  private approvalRecord: AllocationApprovalRecord | null = null;
 
   constructor(plan: PlanContractT) {
     this.plan = plan;
     this.graph = WorkflowGraph.fromPlan(plan);
+  }
+
+  /** Record a fresh allocation approval, binding it to the graph's current
+   *  version + allocation fingerprint so staleness can be judged later. */
+  recordApproval(approval: ApprovalT): void {
+    this.approvalRecord = {
+      content_hash: approval.content_hash,
+      graph_version: this.graph.version,
+      allocation_fingerprint: this.graph.allocationFingerprint,
+      actor: approval.actor,
+      approved_at: approval.approved_at,
+    };
+  }
+
+  /** The approval banner payload for the graph API: null if never approved,
+   *  else the stored evidence plus a server-computed `current` flag. */
+  approvalStatus(): AllocationApprovalStatus | null {
+    if (!this.approvalRecord) return null;
+    const current =
+      this.approvalRecord.graph_version === this.graph.version &&
+      this.approvalRecord.allocation_fingerprint === this.graph.allocationFingerprint;
+    return {
+      content_hash: this.approvalRecord.content_hash,
+      approved_at: this.approvalRecord.approved_at,
+      actor: this.approvalRecord.actor,
+      current,
+    };
+  }
+
+  /** Persistence hooks (Tier-2 snapshot round-trip via ProjectStore). */
+  get storedApproval(): AllocationApprovalRecord | null {
+    return this.approvalRecord;
+  }
+  restoreApproval(record: AllocationApprovalRecord | null): void {
+    this.approvalRecord = record;
   }
 
   static demo(): GraphSession {
@@ -32,6 +72,9 @@ export class GraphSession {
     }
     this.plan = result.plan;
     this.graph.restoreFrom(WorkflowGraph.fromPlan(result.plan).snapshot());
+    // A brand-new plan replaces the graph wholesale; any prior approval no
+    // longer describes anything real.
+    this.approvalRecord = null;
   }
 }
 

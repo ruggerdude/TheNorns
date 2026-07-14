@@ -20,17 +20,34 @@ export interface PlanLike {
   modules: PlanModule[];
   [key: string]: unknown;
 }
+/**
+ * Frozen contract with App.tsx's orchestration (UI-3): PlanReview receives the
+ * whole planning result, not just the plan, so the QC screen can show
+ * convergence status, round count, planning cost, and outstanding reviewer
+ * findings. Shape mirrors App.tsx's exported `PlanReviewResult` — kept as a
+ * local interface (not imported) to avoid a circular App <-> PlanReview import.
+ */
+export interface PlanReviewResult {
+  status: "converged" | "cap_reached";
+  rounds: number;
+  plan: PlanLike;
+  content_hash: string;
+  total_cost_usd: number;
+  outstanding: { statement: string }[];
+}
 export function PlanReview({
-  plan,
+  result,
   onCommit,
   onCancel,
   committing,
 }: {
-  plan: PlanLike;
+  result: PlanReviewResult;
   onCommit: (p: PlanLike) => void;
   onCancel: () => void;
   committing: boolean;
 }): React.ReactElement {
+  const plan = result.plan;
+  const converged = result.status === "converged";
   const [modules, setModules] = useState(plan.modules);
   const update = (mi: number, ci: number, patch: Partial<AcceptanceCriterion>) =>
     setModules((p) =>
@@ -67,6 +84,29 @@ export function PlanReview({
     );
   return (
     <div data-testid="plan-review">
+      <div data-testid="plan-meta" className="review-meta">
+        <Badge tone={converged ? "success" : "danger"}>{result.status}</Badge>
+        <span className="meta">
+          {result.rounds} planning round{result.rounds === 1 ? "" : "s"} · ${result.total_cost_usd}{" "}
+          planning cost
+        </span>
+      </div>
+      {!converged ? (
+        <output data-testid="cap-reached-notice" className="alert">
+          Planning hit the round cap without the reviewer signing off. Resolve the outstanding
+          findings below and re-run planning — this result can’t be loaded into the graph.
+        </output>
+      ) : null}
+      {result.outstanding.length > 0 ? (
+        <div data-testid="plan-outstanding" className="card">
+          <strong>Outstanding reviewer findings ({result.outstanding.length})</strong>
+          <ul>
+            {result.outstanding.map((finding) => (
+              <li key={finding.statement}>{finding.statement}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       <p className="muted">
         Review every acceptance criterion. Nothing enters the graph until you approve this QC pass.
       </p>
@@ -150,19 +190,23 @@ export function PlanReview({
         <Button onClick={onCancel} disabled={committing}>
           Cancel
         </Button>
-        <Button
-          variant="primary"
-          data-testid="load-into-graph"
-          onClick={() => onCommit({ ...plan, modules })}
-          disabled={
-            committing ||
-            modules.some((m) =>
-              m.acceptance.some((c) => !c.statement.trim() || !c.verification.trim()),
-            )
-          }
-        >
-          {committing ? "Loading…" : "Load into graph →"}
-        </Button>
+        {/* ADR-2: a cap_reached result never exposes the load-into-graph path.
+            No "approve anyway" exception — re-run planning instead. */}
+        {converged ? (
+          <Button
+            variant="primary"
+            data-testid="load-into-graph"
+            onClick={() => onCommit({ ...plan, modules })}
+            disabled={
+              committing ||
+              modules.some((m) =>
+                m.acceptance.some((c) => !c.statement.trim() || !c.verification.trim()),
+              )
+            }
+          >
+            {committing ? "Loading…" : "Load into graph →"}
+          </Button>
+        ) : null}
       </div>
     </div>
   );
