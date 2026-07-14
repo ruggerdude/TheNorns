@@ -1,0 +1,19 @@
+{
+  "name": "@norns/server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TheNorns backend: API, relay (browser + runner WebSockets), workflow engine, dispatch",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo '@norns/server: no tests yet (Phase 1A)'"
+  },
+  "dependencies": {
+    "@norns/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

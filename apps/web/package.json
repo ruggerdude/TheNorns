@@ -1,0 +1,19 @@
+{
+  "name": "@norns/web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TheNorns browser frontend: PM workspace, plan review, workflow graph, dashboard",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo '@norns/web: no tests yet (Phase 1A)'"
+  },
+  "dependencies": {
+    "@norns/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

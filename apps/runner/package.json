@@ -1,0 +1,22 @@
+{
+  "name": "@norns/runner",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TheNorns Local Runner: outbound relay client, sandbox launcher, worktrees, runtime adapters",
+  "main": "dist/index.js",
+  "bin": {
+    "norns-runner": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo '@norns/runner: no tests yet (Phase 1A)'"
+  },
+  "dependencies": {
+    "@norns/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

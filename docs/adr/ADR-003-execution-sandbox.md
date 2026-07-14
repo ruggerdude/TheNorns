@@ -1,6 +1,6 @@
 # ADR-003: Execution Sandbox
 
-**Status:** Proposed · **Date:** 2026-07-13
+**Status:** Accepted 2026-07-14 (human direction to proceed with Phase 0A) · **Date:** 2026-07-13
 **Origin:** REVIEW-001 finding P0-1
 
 ## Context

@@ -1,6 +1,6 @@
 # TheNorns — Development Agent Staffing Plan
 
-**Status:** Proposed (awaiting human approval) · **Date:** 2026-07-13
+**Status:** Accepted 2026-07-14 (human direction to proceed with Phase 0A) · **Date:** 2026-07-13
 **Governs:** PRD R4 §Recommended Development Agents; adopts REVIEW-002's
 role structure with concrete, current model assignments.
 

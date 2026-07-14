@@ -1,6 +1,6 @@
 # ADR-001: Technology Stack
 
-**Status:** Proposed (amended per REVIEW-001) · **Date:** 2026-07-13
+**Status:** Accepted 2026-07-14 (human direction to proceed with Phase 0A) · **Date:** 2026-07-13
 **Resolves:** NORN-002 · **Amended by:** `docs/reviews/REVIEW-001-disposition.md`
 
 ## Context
