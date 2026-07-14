@@ -22,6 +22,16 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { z } from "zod";
 import { bearerToken, verifyRunnerSignature } from "./auth.js";
 import { controlPageHtml } from "./controlPage.js";
+import {
+  AllocationError,
+  AllocationStrategy,
+  approveAllocation,
+  autoAllocate,
+  costPreview,
+  overrideAssignment,
+} from "./graph/allocation.js";
+import { GraphEditError } from "./graph/graph.js";
+import type { GraphSession } from "./graph/session.js";
 import { newId, nonce, pairingCode } from "./ids.js";
 import type { RelayStores } from "./stores.js";
 
@@ -44,6 +54,8 @@ export interface ServerOptions {
   stores: RelayStores;
   sessionToken: string;
   clock?: () => Date;
+  /** Phase 4: graph editing + allocation for one project */
+  graphSession?: GraphSession;
 }
 
 export interface NornsServer {
@@ -227,6 +239,137 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   app.get("/", (_req, reply) => {
     reply.type("text/html").send(controlPageHtml());
   });
+
+  // ---- graph editing + allocation (Phase 4) -----------------------------------
+
+  const graph = options.graphSession;
+  if (graph) {
+    const sendGraph = (reply: FastifyReply): void => {
+      reply.send({ ...graph.graph.snapshot(), cost: costPreview(graph.graph) });
+    };
+    const graphError = (reply: FastifyReply, error: unknown): void => {
+      if (error instanceof GraphEditError) {
+        reply.code(409).send({
+          error: error.code,
+          message: error.message,
+          ...(error.cyclePath !== undefined ? { cycle_path: error.cyclePath } : {}),
+        });
+        return;
+      }
+      if (error instanceof AllocationError) {
+        reply.code(409).send({ error: "allocation", message: error.message });
+        return;
+      }
+      throw error;
+    };
+
+    app.get("/api/graph", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      sendGraph(reply);
+    });
+
+    const EdgeBody = z.object({ from: z.string().min(1), to: z.string().min(1) });
+    app.post("/api/graph/edges", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      const body = EdgeBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      try {
+        graph.graph.addEdge(body.data.from, body.data.to);
+        stores.audit("operator", "graph.edge_added", `${body.data.from}->${body.data.to}`, now());
+        sendGraph(reply);
+      } catch (error) {
+        graphError(reply, error);
+      }
+    });
+
+    app.delete("/api/graph/edges", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      const body = EdgeBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      try {
+        graph.graph.removeEdge(body.data.from, body.data.to);
+        stores.audit("operator", "graph.edge_removed", `${body.data.from}->${body.data.to}`, now());
+        sendGraph(reply);
+      } catch (error) {
+        graphError(reply, error);
+      }
+    });
+
+    const NodeBody = z.object({
+      id: z.string().min(1),
+      title: z.string().min(1),
+      complexity: z.enum(["S", "M", "L", "XL"]).optional(),
+      risk: z.enum(["low", "medium", "high", "critical"]).optional(),
+      dependencies: z.array(z.string().min(1)).optional(),
+    });
+    app.post("/api/graph/nodes", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      const body = NodeBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      try {
+        graph.graph.addNode(body.data);
+        stores.audit("operator", "graph.node_added", body.data.id, now());
+        sendGraph(reply);
+      } catch (error) {
+        graphError(reply, error);
+      }
+    });
+
+    app.delete("/api/graph/nodes/:id", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      const { id } = req.params as { id: string };
+      const { mode } = req.query as { mode?: "reparent" | "cascade" };
+      try {
+        const removed = graph.graph.removeNode(id, mode);
+        stores.audit("operator", "graph.node_removed", removed.join(","), now());
+        sendGraph(reply);
+      } catch (error) {
+        graphError(reply, error);
+      }
+    });
+
+    app.post("/api/graph/allocate", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      const body = z.object({ strategy: AllocationStrategy }).safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      autoAllocate(graph.graph, body.data.strategy);
+      stores.audit("operator", "graph.auto_allocated", body.data.strategy, now());
+      sendGraph(reply);
+    });
+
+    const OverrideBody = z.object({
+      provider: z.enum(["anthropic", "openai"]).optional(),
+      model: z.string().min(1).optional(),
+      worker_count: z.number().int().min(1).max(3).optional(),
+      reviewer_model: z.string().min(1).optional(),
+      budget_usd: z.number().positive().optional(),
+      rationale: z.string().min(1).optional(),
+    });
+    app.post("/api/graph/nodes/:id/assignment", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      const { id } = req.params as { id: string };
+      const body = OverrideBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      try {
+        overrideAssignment(graph.graph, id, body.data);
+        stores.audit("operator", "graph.assignment_overridden", id, now());
+        sendGraph(reply);
+      } catch (error) {
+        graphError(reply, error);
+      }
+    });
+
+    app.post("/api/graph/approve-allocation", (req, reply) => {
+      if (!requireSession(req, reply)) return;
+      try {
+        const approval = approveAllocation(graph.graph, "operator");
+        stores.audit("operator", "allocation.approved", approval.content_hash, now());
+        reply.send(approval);
+      } catch (error) {
+        graphError(reply, error);
+      }
+    });
+  }
 
   // ---- runner websocket ----------------------------------------------------------
 

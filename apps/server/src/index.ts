@@ -19,3 +19,21 @@ export {
   type PlanningResult,
   type PlanVersionRecord,
 } from "./planning/session.js";
+export {
+  GraphEditError,
+  WorkflowGraph,
+  type GraphNode,
+  type GraphSnapshot,
+} from "./graph/graph.js";
+export {
+  AllocationError,
+  AllocationStrategy,
+  NodeAssignment,
+  approveAllocation,
+  autoAllocate,
+  costPreview,
+  overrideAssignment,
+  type AllocationStrategyT,
+  type NodeAssignmentT,
+} from "./graph/allocation.js";
+export { DEMO_PLAN, GraphSession } from "./graph/session.js";
