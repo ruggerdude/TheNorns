@@ -1,8 +1,12 @@
-// @norns/server — backend entrypoint.
-// Phase 1A builds the Fastify app, /ws/session and /ws/runner endpoints,
-// the durable command outbox, and the audit log on top of @norns/contracts.
-import { CONTRACTS_VERSION } from "@norns/contracts";
-
-export function serverInfo(): { name: string; contracts: string } {
-  return { name: "@norns/server", contracts: CONTRACTS_VERSION };
-}
+export { buildServer, type NornsServer, type ServerOptions } from "./server.js";
+export { RelayStores, type AuditEntry, type CommandRecord, type RunnerRecord } from "./stores.js";
+export { WorkflowEngine, EngineError, KillSwitchEngagedError } from "./engine/workflow.js";
+export { BudgetLedger, BudgetExceededError } from "./engine/budget.js";
+export { DispatchStore, type DispatchJob } from "./engine/dispatch.js";
+export { LocalGitRepo } from "./engine/git.js";
+export {
+  SandboxLauncher,
+  SandboxUnavailableError,
+  buildDockerArgs,
+  type SandboxSpec,
+} from "./engine/sandbox.js";

@@ -3,20 +3,23 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "TheNorns Local Runner: outbound relay client, sandbox launcher, worktrees, runtime adapters",
+  "description": "TheNorns Local Runner: outbound relay client, buffered replay, command dedup, fixture executor",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
     "norns-runner": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "echo '@norns/runner: no tests yet (Phase 1A)'"
+    "test": "echo '@norns/runner: covered by @norns/server integration tests'"
   },
   "dependencies": {
-    "@norns/contracts": "workspace:*"
+    "@norns/contracts": "workspace:*",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/ws": "^8.5.0",
     "typescript": "^5.5.0"
   }
 }

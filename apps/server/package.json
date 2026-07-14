@@ -5,15 +5,23 @@
   "type": "module",
   "description": "TheNorns backend: API, relay (browser + runner WebSockets), workflow engine, dispatch",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "echo '@norns/server: no tests yet (Phase 1A)'"
+    "test": "vitest run"
   },
   "dependencies": {
-    "@norns/contracts": "workspace:*"
+    "@fastify/websocket": "^11.0.0",
+    "@norns/contracts": "workspace:*",
+    "fastify": "^5.0.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
-    "typescript": "^5.5.0"
+    "@norns/runner": "workspace:*",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.5.0",
+    "vitest": "^3.0.0",
+    "ws": "^8.18.0"
   }
 }
