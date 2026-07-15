@@ -5,7 +5,7 @@
 TheNorns is split across two places, by design (ADR-002):
 
 - **The control plane runs on Railway** — the relay, HTTP API, dashboard, and
-  (once ported) the database. This is the public website.
+  PostgreSQL-backed account/project state. This is the public website.
 - **The runner runs on your own machine** — it checks out git worktrees and
   launches coding agents (Claude Code / Codex). It makes an **outbound-only**
   connection to the Railway URL, so your machine needs no open ports and is
@@ -18,15 +18,15 @@ local runner that pairs with it.
 
 | Tier | You get | Needs |
 |---|---|---|
-| **1 — Live demo** | The Railway URL serves the graph editor + dashboard against the built-in demo project. | Nothing but the deploy below. |
-| **2 — Persistent** | Relay/outbox/audit state survives restarts + redeploys. | ✅ Built. Just add the Railway Postgres plugin (injects `DATABASE_URL`). |
+| **1 — Control plane** | The Railway URL serves the project workspace, graph editor, and demo dashboard with durable user accounts. | The app service, PostgreSQL, and a one-time first-admin setup key. |
+| **2 — Persistent state** | Users, projects, relay/outbox, and audit state survive restarts + redeploys. | ✅ Automatic once `DATABASE_URL` points at PostgreSQL. |
 | **3 — Run work via your runner** | Pair a local runner to the deployed relay and drive it. | ✅ Runner CLI built + verified. Live coding agents also need API keys (NORN-027) + a local Docker host. |
 
-Tier 1 is your deploy. Tiers 2 and 3 are built and tested — Tier 2 activates
-automatically when `DATABASE_URL` is present; Tier 3's runner CLI works today
-(live LLM execution is the only part still gated on your keys + Docker).
+Production requires durable account storage: the server deliberately refuses
+to start if PostgreSQL is missing or unavailable. This prevents a restart from
+silently forgetting the admin account and reopening first-time setup.
 
-## Tier 1 — deploy the demo to Railway
+## Tier 1 — deploy the control plane to Railway
 
 1. **Push this repo to your `TheNorns` GitHub repo:**
    ```sh
@@ -36,31 +36,36 @@ automatically when `DATABASE_URL` is present; Tier 3's runner CLI works today
 2. **In Railway:** New Project → Deploy from GitHub repo → pick `TheNorns`.
    Railway detects `railway.json` and builds the `Dockerfile` (single service,
    serves web + API).
-3. **Set one environment variable** in the Railway service:
-   - `NORNS_TOKEN` = a long random string (this is the session password;
-     the server refuses to start in production without it).
+3. **Add PostgreSQL before creating the first account:** Railway project →
+   **New → Database → Add PostgreSQL**. Confirm the app service receives a
+   non-empty `DATABASE_URL` reference. The database must be in the same
+   Railway project when using its private hostname.
+4. **Set a one-time setup key** in the app service:
+   - `NORNS_TOKEN` = a long random string used only to authorize creation of
+     the very first admin. It is not a login password or an API session token.
    Railway provides `PORT`, `NODE_ENV=production`, and the Dockerfile sets
    `NORNS_WEB_DIST` — you don't set those.
-4. **Open the URL** Railway gives you, with the token as a query param:
-   `https://<your-app>.up.railway.app/?token=<NORNS_TOKEN>`
-   You should see the workflow graph; the **PM Dashboard** button shows the
-   demo engine's derived state.
-5. **Health check:** `GET /health` returns `{"ok":true,...}` (Railway uses it).
+5. **Open the plain Railway URL** — never put `NORNS_TOKEN` in the URL. The
+   one-time setup screen asks for the setup key, admin email, and a new
+   password. Create the first admin and verify you reach the project list.
+6. **Make setup permanent:** wait for the `users` snapshot to be saved, remove
+   `NORNS_TOKEN` from the app service, and redeploy. From this point onward,
+   sign-in uses only the admin email and password. The browser manages its
+   server-issued session credential; users never copy or type one.
+7. **Health check:** `GET /health` returns `{"ok":true,...}` (Railway uses it).
 
-> ⚠️ **Single-user only, for now.** The token travels in the URL and is a
-> shared secret — fine for you testing privately, not for real users. Proper
-> per-user auth (passkeys) is Tier-3 work; do not share the URL+token as if it
-> were multi-user.
+If the first-admin setup screen ever returns after this, do not create another
+account. Check the deployment logs and `DATABASE_URL`: it means PostgreSQL did
+not restore the existing user snapshot. Production should fail closed rather
+than serve an empty identity store.
 
-## Tier 2 — persistence (built; one click to activate)
+## Tier 2 — persistence details
 
-1. In the Railway project: **New → Database → Add PostgreSQL**. Railway
-   injects `DATABASE_URL` into your service automatically.
-2. Redeploy (or it redeploys on the variable change). On boot the server now
-   prints `relay state restored from postgres` (or `fresh` the first time),
-   creates its `norns_state` table, and flushes state on a 1s cadence and on
-   shutdown. Relay/outbox/audit/runner state now survives restarts and
-   redeploys.
+On boot, the server prints a `postgres:` line showing whether relay, project,
+and user snapshots were restored or are fresh. It creates the `norns_state`
+table automatically and flushes state on a 1s cadence and on graceful
+shutdown. First-admin creation is flushed before the successful setup response
+is returned.
 
 Durability shape: state is snapshotted to a JSONB row and reconstructed via
 the same `snapshot()`/`restore()` that's unit-tested against a real Postgres
@@ -72,11 +77,19 @@ the scale follow-on when you need it.
 
 The runner runs on **your machine**, not Railway. It's built and verified.
 
-1. **Get a pairing code** — from the web UI's runner panel, or directly:
+1. **Get a pairing code** from the authenticated web UI's runner panel. No
+   manual session token is required. For API-only automation, first exchange
+   the account credentials for a short-lived session credential, then use it:
    ```sh
-   curl -X POST -H "authorization: Bearer $NORNS_TOKEN" \
+   SESSION_TOKEN="$(curl -fsS -X POST \
+     -H 'content-type: application/json' \
+     -d '{"email":"you@example.com","password":"your-password"}' \
+     https://<your-app>.up.railway.app/api/auth/login | jq -r .token)"
+   curl -X POST -H "authorization: Bearer $SESSION_TOKEN" \
      https://<your-app>.up.railway.app/api/pairing/start
    ```
+   `SESSION_TOKEN` is an API automation detail, not `NORNS_TOKEN`, and it is
+   never entered on the normal login screen.
 2. **Pair and start the runner locally** (needs Node 24 + git):
    ```sh
    # from a clone of the repo, after: pnpm install && pnpm --filter @norns/runner build
@@ -107,11 +120,11 @@ required because every plan receives cross-provider review.
 - `NORNS_PM_MODEL` is retained only as an Anthropic fallback for projects
   persisted before exact PM model selection was introduced.
 
-## Local development (unchanged)
+## Local development
 
 ```sh
 pnpm install
 pnpm --filter @norns/server run build && node apps/server/dist/main.js   # :8787
 pnpm --filter @norns/web dev                                             # :5173 (proxies /api)
-# open http://localhost:5173?token=dev-token
+# open http://localhost:5173 and sign in with dev@local.test / dev-password
 ```

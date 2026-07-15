@@ -7,5 +7,8 @@ import { expect, test } from "@playwright/test";
 test("unauthenticated visitor sees the login screen", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: /enter your workspace/i })).toBeVisible();
-  await expect(page.getByPlaceholder("Enter access token")).toBeVisible();
+  await expect(page.getByLabel("Email")).toBeVisible();
+  await expect(page.getByLabel("Password")).toBeVisible();
+  await expect(page.getByLabel("Deploy setup key")).toHaveCount(0);
+  await expect(page.getByPlaceholder("NORNS_TOKEN")).toHaveCount(0);
 });

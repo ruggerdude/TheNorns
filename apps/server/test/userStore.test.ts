@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   InvalidCredentialsError,
   InvalidInviteError,
+  LastActiveAdminError,
   UserExistsError,
   UserNotFoundError,
   UserStore,
@@ -60,11 +61,27 @@ describe("UserStore — accounts and sessions", () => {
 
   it("removing a user also invalidates their sessions", () => {
     const store = new UserStore();
-    const created = store.createActive({ email: "a@x.com", password: "password1", role: "admin" });
+    store.createActive({ email: "admin@x.com", password: "password1", role: "admin" });
+    const created = store.createActive({ email: "a@x.com", password: "password1", role: "member" });
     const { token } = store.login("a@x.com", "password1");
     store.remove(created.id);
     expect(store.userForToken(token)).toBeUndefined();
     expect(() => store.remove(created.id)).toThrow(UserNotFoundError);
+  });
+
+  it("does not allow removal of the last active administrator", () => {
+    const store = new UserStore();
+    const admin = store.createActive({
+      email: "admin@x.com",
+      password: "password1",
+      role: "admin",
+    });
+
+    expect(() => store.remove(admin.id)).toThrow(LastActiveAdminError);
+    expect(store.hasActiveAdmin).toBe(true);
+
+    store.createActive({ email: "backup@x.com", password: "password2", role: "admin" });
+    expect(() => store.remove(admin.id)).not.toThrow();
   });
 
   it("email invite: no password until accepted, then a real session is possible", () => {

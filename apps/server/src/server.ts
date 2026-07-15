@@ -5,7 +5,7 @@
 //   POST /api/kill-switch
 //   WS   /ws/runner  (challenge -> auth -> reconcile -> commands/events)
 //   WS   /ws/session (live observation for the browser)
-//   GET  /          (minimal control page, Phase 1A)
+//   GET  /          (React app in production; API notice in server-only dev)
 // Connection state is never trusted solely in process memory: every decision
 // reads/writes RelayStores, which snapshots to durable storage.
 import fastifyStatic from "@fastify/static";
@@ -34,7 +34,6 @@ import {
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
 import { bearerToken, verifyRunnerSignature } from "./auth.js";
-import { controlPageHtml } from "./controlPage.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 import {
   AllocationError,
@@ -54,7 +53,7 @@ import {
   reviewerFor,
 } from "./projects/store.js";
 import type { RelayStores } from "./stores.js";
-import type { UserRecord, UserStore } from "./users/store.js";
+import { LastActiveAdminError, type UserRecord, type UserStore } from "./users/store.js";
 
 const PAIRING_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_COMMAND_TTL_MS = 5 * 60 * 1000;
@@ -83,6 +82,13 @@ export interface ServerOptions {
    * Omit to disable bootstrap (e.g. once you're certain it's no longer needed).
    */
   deployToken?: string;
+  /**
+   * Optional durability barrier for the one-time first-admin bootstrap.
+   * When supplied, bootstrap is not acknowledged until the user snapshot is
+   * durable. A failed write rolls the UserStore back to its pre-bootstrap
+   * state so the operator can safely retry.
+   */
+  persistUsers?: () => Promise<void>;
   clock?: () => Date;
   /** Multi-project management: create/list projects, plan + edit + allocate each one's graph. */
   projects?: ProjectStore;
@@ -184,7 +190,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // below; every other route resolves a real per-user session.
 
   app.get("/api/auth/status", (_req, reply) => {
-    reply.send({ needs_bootstrap: users.count === 0 });
+    reply.send({ needs_bootstrap: !users.hasActiveAdmin });
   });
 
   const BootstrapBody = z.object({
@@ -193,11 +199,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     password: z.string().min(8),
     name: z.string().min(1).optional(),
   });
-  app.post("/api/auth/bootstrap", (req, reply) => {
-    // The zero-users check is the real gate — it means this route can never
-    // be used to mint a SECOND admin later, even by someone who knows the
-    // deploy token. It's a one-time bootstrap, not a standing back door.
-    if (users.count > 0) return reply.code(403).send({ error: "already_bootstrapped" });
+  app.post("/api/auth/bootstrap", async (req, reply) => {
+    // An active-admin check is the real gate — it means this route can never
+    // be used to mint a SECOND active admin later, even by someone who knows
+    // the deploy token. Members and unaccepted admin invites do not strand a
+    // workspace that still has nobody able to administer it.
+    if (users.hasActiveAdmin) {
+      return reply.code(403).send({ error: "already_bootstrapped" });
+    }
     if (!deployToken) return reply.code(501).send({ error: "bootstrap_disabled" });
     const body = BootstrapBody.safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: "bad_request" });
@@ -205,6 +214,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       stores.audit("anonymous", "auth.bootstrap_rejected", "bad deploy token", now());
       return reply.code(403).send({ error: "invalid_deploy_token" });
     }
+    const beforeBootstrap = users.snapshot();
     const summary = users.createActive({
       email: body.data.email,
       name: body.data.name,
@@ -212,6 +222,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       role: "admin",
     });
     const { token } = users.login(body.data.email, body.data.password);
+    try {
+      await options.persistUsers?.();
+    } catch {
+      users.restoreFrom(beforeBootstrap);
+      stores.audit("anonymous", "auth.bootstrap_persistence_failed", summary.id, now());
+      return reply.code(503).send({ error: "auth_persistence_unavailable" });
+    }
     stores.audit(summary.email, "auth.bootstrapped", summary.id, now());
     reply.code(201).send({ token, user: summary });
   });
@@ -351,7 +368,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       users.remove(id);
       stores.audit(admin.email, "admin.user_removed", id, now());
       reply.send({ ok: true });
-    } catch {
+    } catch (error) {
+      if (error instanceof LastActiveAdminError) {
+        return reply.code(409).send({
+          error: "last_active_admin",
+          message: error.message,
+        });
+      }
       reply.code(404).send({ error: "not_found" });
     }
   });
@@ -487,14 +510,17 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     reply.send({ ok: true, contracts: "1.2.0" });
   });
 
-  // Legacy Phase 1A control page; the React app (when built) owns "/".
+  // The legacy Phase 1A page asked operators to paste a raw session token.
+  // Account auth in the React app supersedes it; keep old bookmarks safe by
+  // sending them to the normal email/password entry point.
   app.get("/control", (_req, reply) => {
-    reply.type("text/html").send(controlPageHtml());
+    reply.redirect("/");
   });
 
   if (options.webDist) {
     // Single-service deploy: serve the built React app + SPA fallback.
-    // Static assets are public; the page authenticates to /api with a token.
+    // Static assets are public; the page authenticates with an account-backed
+    // browser session issued after email/password login.
     await app.register(fastifyStatic, { root: options.webDist, wildcard: false });
     app.setNotFoundHandler((req, reply) => {
       if (req.raw.method === "GET" && !req.url.startsWith("/api") && !req.url.startsWith("/ws")) {
@@ -504,7 +530,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
   } else {
     app.get("/", (_req, reply) => {
-      reply.type("text/html").send(controlPageHtml());
+      reply.type("text/html").send(`<!doctype html>
+<meta charset="utf-8"><title>TheNorns API</title>
+<h1>TheNorns API is running</h1>
+<p>Start <code>@norns/web</code> and sign in there with your email and password.</p>`);
     });
   }
 

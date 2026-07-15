@@ -10,6 +10,7 @@ import { GraphSession } from "../src/graph/session.js";
 import { type PgClient, PgPersistence, SnapshotFlusher } from "../src/persistence/pg.js";
 import { ProjectStore } from "../src/projects/store.js";
 import { RelayStores } from "../src/stores.js";
+import { UserStore } from "../src/users/store.js";
 
 let pg: PGlite;
 let client: PgClient;
@@ -214,6 +215,33 @@ describe("Tier-2 postgres persistence", () => {
     expect(restoredSession.graph.node("foundation")?.assignment?.budget_usd).toBe(42);
     expect(restoredSession.graph.node("foundation")?.assignment?.source).toBe("override");
     expect(restoredSession.graph.snapshot()).toEqual(session.graph.snapshot());
+  });
+
+  it("restores an admin who can sign in with email and password after a restart", async () => {
+    const persistence = new PgPersistence(client);
+    await persistence.init();
+
+    const usersA = new UserStore();
+    usersA.createActive({
+      email: "admin@example.com",
+      name: "Admin",
+      password: "durable-password",
+      role: "admin",
+    });
+    const flusher = new SnapshotFlusher(persistence, "users", () =>
+      JSON.stringify(usersA.snapshot()),
+    );
+    await flusher.flush();
+
+    const loaded = await persistence.load("users");
+    expect(loaded).not.toBeNull();
+    const usersB = new UserStore();
+    usersB.restoreFrom(JSON.parse(loaded as string));
+
+    expect(usersB.hasActiveAdmin).toBe(true);
+    const session = usersB.login("admin@example.com", "durable-password");
+    expect(session.user).toMatchObject({ email: "admin@example.com", role: "admin" });
+    expect(usersB.userForToken(session.token)?.email).toBe("admin@example.com");
   });
 
   it("upsert keeps a single row per key across many saves", async () => {

@@ -28,6 +28,10 @@ describe("App — pre-auth screen selection", () => {
     expect(
       await screen.findByRole("heading", { name: /enter your workspace/i }),
     ).toBeInTheDocument();
+    expect(screen.getByLabelText("Email")).toBeInTheDocument();
+    expect(screen.getByLabelText("Password")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Deploy setup key")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("NORNS_TOKEN")).not.toBeInTheDocument();
   });
 
   test("shows the first-admin bootstrap form when no users exist yet", async () => {

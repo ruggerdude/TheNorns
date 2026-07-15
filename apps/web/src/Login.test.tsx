@@ -16,6 +16,15 @@ describe("Login — sign in", () => {
     mock = new MockFetch();
   });
 
+  test("shows only email and password credentials, never the deploy setup key", () => {
+    render(<Login mode="login" onAuthenticated={vi.fn()} error={null} />);
+
+    expect(screen.getByLabelText("Email")).toBeInTheDocument();
+    expect(screen.getByLabelText("Password")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Deploy setup key")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("NORNS_TOKEN")).not.toBeInTheDocument();
+  });
+
   test("submits email + password and reports the session to the caller", async () => {
     const session: AuthSession = {
       token: "tok-123",

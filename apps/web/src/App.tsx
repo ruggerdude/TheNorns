@@ -241,7 +241,7 @@ function ProjectGraph({
         reconcileApproval(next);
       } catch (err) {
         if (err instanceof UnauthorizedError) {
-          onLogout("That token was rejected. Try again.");
+          onLogout("Session expired. Sign in again.");
         } else {
           setError(err instanceof Error ? err.message : String(err));
           setApproval(prevApproval); // revert; never leave the banner at pending
@@ -421,7 +421,7 @@ function ProjectGraph({
       reconcileApproval(next);
     } catch (err) {
       if (err instanceof UnauthorizedError) {
-        onLogout("That token was rejected. Try again.");
+        onLogout("Session expired. Sign in again.");
       } else {
         setOverrideError(err instanceof Error ? err.message : String(err)); // failed save keeps the draft
         setApproval(prevApproval);

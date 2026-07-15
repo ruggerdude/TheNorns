@@ -35,28 +35,53 @@ async function inject(
   return response as unknown as InjectedResponse;
 }
 
-async function start(opts?: { deployToken?: string; users?: UserStore }): Promise<NornsServer> {
+async function start(opts?: {
+  deployToken?: string;
+  users?: UserStore;
+  persistUsers?: () => Promise<void>;
+}): Promise<NornsServer> {
   server = await buildServer({
     stores: new RelayStores(),
     users: opts?.users ?? new UserStore(),
     ...(opts?.deployToken !== undefined ? { deployToken: opts.deployToken } : {}),
+    ...(opts?.persistUsers !== undefined ? { persistUsers: opts.persistUsers } : {}),
   });
   return server;
 }
 
 describe("GET /api/auth/status", () => {
-  it("reports needs_bootstrap true with zero users, false once one exists", async () => {
+  it("requires bootstrap until an active administrator exists", async () => {
     const users = new UserStore();
     const s = await start({ users });
     expect((await inject(s, "GET", "/api/auth/status")).json()).toEqual({ needs_bootstrap: true });
 
-    users.createActive({ email: "a@x.com", password: "password1", role: "admin" });
+    users.createActive({ email: "member@x.com", password: "password1", role: "member" });
+    expect((await inject(s, "GET", "/api/auth/status")).json()).toEqual({ needs_bootstrap: true });
+
+    users.createInvite({ email: "invited-admin@x.com", role: "admin" });
+    expect((await inject(s, "GET", "/api/auth/status")).json()).toEqual({ needs_bootstrap: true });
+
+    users.createActive({ email: "admin@x.com", password: "password1", role: "admin" });
     expect((await inject(s, "GET", "/api/auth/status")).json()).toEqual({ needs_bootstrap: false });
   });
 });
 
+describe("legacy control-page authentication", () => {
+  it("redirects /control to account login and serves no manual token prompt", async () => {
+    const s = await start();
+
+    const control = await s.app.inject({ method: "GET", url: "/control" });
+    expect(control.statusCode).toBe(302);
+    expect(control.headers.location).toBe("/");
+
+    const root = await s.app.inject({ method: "GET", url: "/" });
+    expect(root.body).toContain("email and password");
+    expect(root.body).not.toMatch(/session token|access token/i);
+  });
+});
+
 describe("POST /api/auth/bootstrap", () => {
-  it("creates the first admin and logs them in when zero users exist", async () => {
+  it("creates the first admin and logs them in when no active admin exists", async () => {
     const s = await start({ deployToken: "deploy-secret" });
     const res = await inject(s, "POST", "/api/auth/bootstrap", {
       deploy_token: "deploy-secret",
@@ -73,6 +98,25 @@ describe("POST /api/auth/bootstrap", () => {
     const me = await inject(s, "GET", "/api/auth/me", undefined, body.token);
     expect(me.statusCode).toBe(200);
     expect((me.json() as { email: string }).email).toBe("root@x.com");
+  });
+
+  it("allows bootstrap when only members and unaccepted admin invites exist", async () => {
+    const users = new UserStore();
+    users.createActive({ email: "member@x.com", password: "password1", role: "member" });
+    users.createInvite({ email: "invited-admin@x.com", role: "admin" });
+    const s = await start({ users, deployToken: "deploy-secret" });
+
+    const res = await inject(s, "POST", "/api/auth/bootstrap", {
+      deploy_token: "deploy-secret",
+      email: "root@x.com",
+      password: "password123",
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect((res.json() as { user: { role: string } }).user.role).toBe("admin");
+    expect((await inject(s, "GET", "/api/auth/status")).json()).toEqual({
+      needs_bootstrap: false,
+    });
   });
 
   it("refuses a second bootstrap once an admin already exists, even with the right token", async () => {
@@ -122,9 +166,107 @@ describe("POST /api/auth/bootstrap", () => {
     });
     expect(res.statusCode).toBe(400);
   });
+
+  it("waits for durable user persistence before acknowledging bootstrap", async () => {
+    const users = new UserStore();
+    let releasePersistence!: () => void;
+    let persistenceStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      persistenceStarted = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      releasePersistence = resolve;
+    });
+    const s = await start({
+      users,
+      deployToken: "deploy-secret",
+      persistUsers: async () => {
+        expect(users.hasActiveAdmin).toBe(true);
+        persistenceStarted();
+        await held;
+      },
+    });
+
+    let settled = false;
+    const pending = inject(s, "POST", "/api/auth/bootstrap", {
+      deploy_token: "deploy-secret",
+      email: "root@x.com",
+      password: "password123",
+    }).then((response) => {
+      settled = true;
+      return response;
+    });
+
+    await started;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    releasePersistence();
+    expect((await pending).statusCode).toBe(201);
+  });
+
+  it("rolls bootstrap back and returns 503 when user persistence fails", async () => {
+    const users = new UserStore();
+    users.createActive({ email: "member@x.com", password: "password1", role: "member" });
+    const beforeBootstrap = users.snapshot();
+    const s = await start({
+      users,
+      deployToken: "deploy-secret",
+      persistUsers: async () => {
+        throw new Error("database unavailable");
+      },
+    });
+
+    const res = await inject(s, "POST", "/api/auth/bootstrap", {
+      deploy_token: "deploy-secret",
+      email: "root@x.com",
+      password: "password123",
+    });
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({ error: "auth_persistence_unavailable" });
+    expect(users.snapshot()).toEqual(beforeBootstrap);
+    expect(users.hasActiveAdmin).toBe(false);
+    expect((await inject(s, "GET", "/api/auth/status")).json()).toEqual({
+      needs_bootstrap: true,
+    });
+    expect(
+      (
+        await inject(s, "POST", "/api/auth/login", {
+          email: "root@x.com",
+          password: "password123",
+        })
+      ).statusCode,
+    ).toBe(401);
+  });
 });
 
 describe("POST /api/auth/login + /api/auth/logout", () => {
+  it("logs a restored admin in with email/password when no deploy token is configured", async () => {
+    const seeded = new UserStore();
+    seeded.createActive({ email: "admin@x.com", password: "admin-password", role: "admin" });
+    const users = new UserStore();
+    users.restoreFrom(seeded.snapshot());
+    const s = await start({ users });
+
+    expect((await inject(s, "GET", "/api/auth/status")).json()).toEqual({
+      needs_bootstrap: false,
+    });
+    const loginResponse = await inject(s, "POST", "/api/auth/login", {
+      email: "admin@x.com",
+      password: "admin-password",
+    });
+    expect(loginResponse.statusCode).toBe(200);
+
+    const bootstrapResponse = await inject(s, "POST", "/api/auth/bootstrap", {
+      deploy_token: "unused",
+      email: "second@x.com",
+      password: "password123",
+    });
+    expect(bootstrapResponse.statusCode).toBe(403);
+    expect(bootstrapResponse.json()).toEqual({ error: "already_bootstrapped" });
+  });
+
   it("logs in with the right password and issues a working session", async () => {
     const users = new UserStore();
     users.createActive({ email: "a@x.com", password: "password1", role: "member" });
@@ -325,5 +467,31 @@ describe("admin user management — requires the admin role", () => {
       adminToken,
     );
     expect(notFound.statusCode).toBe(404);
+  });
+
+  it("refuses to remove the last active administrator", async () => {
+    const users = new UserStore();
+    const admin = users.createActive({
+      email: "admin@x.com",
+      password: "admin-password",
+      role: "admin",
+    });
+    const adminToken = users.login("admin@x.com", "admin-password").token;
+    const s = await start({ users });
+
+    const response = await inject(
+      s,
+      "DELETE",
+      `/api/admin/users/${admin.id}`,
+      undefined,
+      adminToken,
+    );
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({
+      error: "last_active_admin",
+      message: "the last active administrator cannot be removed",
+    });
+    expect(users.hasActiveAdmin).toBe(true);
   });
 });

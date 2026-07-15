@@ -69,6 +69,12 @@ export class UserNotFoundError extends Error {
     this.name = "UserNotFoundError";
   }
 }
+export class LastActiveAdminError extends Error {
+  constructor() {
+    super("the last active administrator cannot be removed");
+    this.name = "LastActiveAdminError";
+  }
+}
 export class InvalidInviteError extends Error {
   constructor() {
     super("invite link is invalid or has already been used");
@@ -82,6 +88,15 @@ export class UserStore {
 
   get count(): number {
     return this.users.size;
+  }
+
+  /** Whether the workspace has an administrator who can actually sign in.
+   *  Invited admins and ordinary members must not permanently close the
+   *  first-admin bootstrap path. */
+  get hasActiveAdmin(): boolean {
+    return [...this.users.values()].some(
+      (user) => user.role === "admin" && user.status === "active" && user.passwordHash !== null,
+    );
   }
 
   private byEmail(email: string): UserRecord | undefined {
@@ -154,7 +169,17 @@ export class UserStore {
   }
 
   remove(id: string): void {
-    if (!this.users.has(id)) throw new UserNotFoundError(id);
+    const record = this.users.get(id);
+    if (!record) throw new UserNotFoundError(id);
+    if (
+      record.role === "admin" &&
+      record.status === "active" &&
+      [...this.users.values()].filter(
+        (user) => user.role === "admin" && user.status === "active" && user.passwordHash !== null,
+      ).length === 1
+    ) {
+      throw new LastActiveAdminError();
+    }
     this.users.delete(id);
     for (const [token, session] of this.sessions) {
       if (session.userId === id) this.sessions.delete(token);

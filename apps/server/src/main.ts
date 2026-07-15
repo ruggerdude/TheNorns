@@ -13,6 +13,7 @@ import { GraphSession } from "./graph/session.js";
 import { PgPersistence, SnapshotFlusher } from "./persistence/pg.js";
 import { ProjectStore } from "./projects/store.js";
 import { buildServer } from "./server.js";
+import { evaluateAuthStartup } from "./startup/authPolicy.js";
 import { RelayStores } from "./stores.js";
 import { UserStore } from "./users/store.js";
 
@@ -31,14 +32,18 @@ const projects = new ProjectStore();
 // auto-seeded below).
 const users = new UserStore();
 
+const isProd = process.env.NODE_ENV === "production";
+
 // Tier-2 persistence: when DATABASE_URL is set (Railway Postgres plugin),
 // hydrate relay state from the last snapshot and flush changes back durably.
-// Without it — or if the database is unreachable — the store is in-memory,
-// and the site stays up rather than crash-looping. A DB problem degrades
-// persistence, it does not take down the control plane.
+// Development can still run in memory. Production identity state must never
+// degrade to an empty in-memory store: doing so would make an existing admin
+// disappear and incorrectly reopen first-time setup after a restart.
 const databaseUrl = process.env.DATABASE_URL;
 let stores = new RelayStores();
 const flushers: SnapshotFlusher[] = [];
+let usersFlusher: SnapshotFlusher | undefined;
+let persistenceReady = false;
 
 if (databaseUrl) {
   try {
@@ -67,12 +72,16 @@ if (databaseUrl) {
     const usersSnap = await persistence.load("users");
     if (usersSnap) users.restoreFrom(JSON.parse(usersSnap));
 
+    usersFlusher = new SnapshotFlusher(persistence, "users", () =>
+      JSON.stringify(users.snapshot()),
+    );
     flushers.push(
       new SnapshotFlusher(persistence, "relay", () => stores.snapshot()),
       new SnapshotFlusher(persistence, "projects", () => JSON.stringify(projects.snapshot())),
-      new SnapshotFlusher(persistence, "users", () => JSON.stringify(users.snapshot())),
+      usersFlusher,
     );
     for (const f of flushers) f.start();
+    persistenceReady = true;
     console.log(
       `postgres: relay ${relaySnap ? "restored" : "fresh"}, projects ${projectsSnap ? "restored" : "fresh"}, users ${usersSnap ? "restored" : "fresh"}`,
     );
@@ -83,12 +92,14 @@ if (databaseUrl) {
     }
   } catch (error) {
     console.error(
-      `postgres persistence unavailable — continuing in-memory. reason: ${
+      `postgres persistence unavailable${isProd ? " — production startup will be refused" : " — continuing in-memory"}. reason: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
     stores = new RelayStores();
     flushers.length = 0;
+    usersFlusher = undefined;
+    persistenceReady = false;
   }
 }
 
@@ -153,13 +164,12 @@ const ledger = [
 const complexityOf = (nodeId: string): "S" | "M" | "L" | "XL" =>
   demoSession.plan.modules.find((mod) => mod.id === nodeId)?.estimated_complexity ?? "M";
 
-const isProd = process.env.NODE_ENV === "production";
 // NORNS_TOKEN's only remaining job is gating one-time first-admin bootstrap
 // (POST /api/auth/bootstrap) — it is never accepted as a day-to-day session
 // credential anymore. Real accounts replace that entirely.
 const deployToken = process.env.NORNS_TOKEN;
 
-if (!isProd && users.count === 0) {
+if (!isProd && !users.hasActiveAdmin) {
   // Local dev convenience: skip the bootstrap ceremony so `pnpm dev` keeps
   // working out of the box, same spirit as the old default dev token.
   users.createActive({
@@ -171,15 +181,22 @@ if (!isProd && users.count === 0) {
   console.log("dev mode: seeded dev@local.test / dev-password as the first admin");
 }
 
-// A public URL with zero users and no deploy token would be permanently
-// unreachable — nobody could ever create an account. Fail loudly at boot
-// instead of shipping a site nobody can sign into.
-if (isProd && users.count === 0 && !deployToken) {
-  console.error(
-    "NORNS_TOKEN is required in production until the first admin exists — set it as an environment variable, then use it once at /api/auth/bootstrap.",
-  );
+const authStartup = evaluateAuthStartup({
+  isProduction: isProd,
+  persistenceConfigured: Boolean(databaseUrl),
+  persistenceReady,
+  hasActiveAdmin: users.hasActiveAdmin,
+  hasDeployToken: Boolean(deployToken),
+});
+
+if (!authStartup.allowed) {
+  console.error(`auth startup refused [${authStartup.code}]: ${authStartup.message}`);
   process.exit(1);
 }
+
+// Even if NORNS_TOKEN is still present in Railway, do not retain it as a
+// runtime capability after a durable active admin has been restored.
+const bootstrapDeployToken = authStartup.bootstrapRequired ? deployToken : undefined;
 
 // When NORNS_WEB_DIST points at the built web app, serve it from this service.
 const webDist = process.env.NORNS_WEB_DIST;
@@ -189,7 +206,8 @@ const server = await buildServer({
   users,
   projects,
   recordUsage: (events) => ledger.push(...events),
-  ...(deployToken !== undefined ? { deployToken } : {}),
+  ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),
+  ...(usersFlusher !== undefined ? { persistUsers: () => usersFlusher.flush() } : {}),
   ...(webDist !== undefined ? { webDist } : {}),
   dashboard: () =>
     buildDashboard({
