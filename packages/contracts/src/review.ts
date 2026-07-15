@@ -38,7 +38,11 @@ export function mustFixCount(findings: readonly ReviewFindingT[]): number {
 export const ReviewPolicyRecord = z.object({
   requested_policy: z.literal("cross_provider"),
   pm_provider: z.string().min(1),
+  /** Added in contracts 1.3; optional so stored 1.2 policy records still parse. */
+  pm_model: z.string().min(1).optional(),
   reviewer_provider: z.string().min(1),
+  /** Added in contracts 1.3; optional so stored 1.2 policy records still parse. */
+  reviewer_model: z.string().min(1).optional(),
   exception_reason: z.string().nullable(),
   exception_approved_by: z.string().nullable(),
 });

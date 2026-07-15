@@ -10,11 +10,20 @@
 // reads/writes RelayStores, which snapshots to durable storage.
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { AdapterError, AnthropicAdapter, OpenAiAdapter, type ProviderName } from "@norns/adapters";
 import {
+  AdapterError,
+  AnthropicAdapter,
+  type LlmAdapter,
+  OpenAiAdapter,
+  type ProviderName,
+} from "@norns/adapters";
+import {
+  AnthropicPmModel,
   CommandPayload,
   type CommandStateT,
+  DEFAULT_PM_MODEL,
   type EventEnvelopeT,
+  OpenAiPmModel,
   PROTOCOL_VERSION,
   PlanContract,
   ReconcileRequest,
@@ -88,6 +97,8 @@ export interface ServerOptions {
   webDist?: string;
   /** Live planning (Tier 3): append real provider usage to the cost ledger. */
   recordUsage?: (events: UsageEventT[]) => void;
+  /** Test/deployment seam for constructing an adapter for an exact provider model. */
+  createPlanningAdapter?: (provider: ProviderName, model: string, apiKey: string) => LlmAdapter;
 }
 
 export interface NornsServer {
@@ -561,11 +572,22 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       reply.send(projects.list());
     });
 
-    const CreateProjectBody = z.object({
+    const CreateProjectFields = {
       name: z.string().min(1),
       description: z.string().min(1),
-      pm_provider: z.enum(["anthropic", "openai"]),
-    });
+    };
+    const CreateProjectBody = z.discriminatedUnion("pm_provider", [
+      z.object({
+        ...CreateProjectFields,
+        pm_provider: z.literal("anthropic"),
+        pm_model: AnthropicPmModel.default(DEFAULT_PM_MODEL.anthropic),
+      }),
+      z.object({
+        ...CreateProjectFields,
+        pm_provider: z.literal("openai"),
+        pm_model: OpenAiPmModel.default(DEFAULT_PM_MODEL.openai),
+      }),
+    ]);
     app.post("/api/projects", (req, reply) => {
       if (!requireSession(req, reply)) return;
       const body = CreateProjectBody.safeParse(req.body);
@@ -574,8 +596,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         name: body.data.name,
         description: body.data.description,
         pmProvider: body.data.pm_provider,
+        pmModel: body.data.pm_model,
       });
-      stores.audit("operator", "project.created", `${project.id} ${project.name}`, now());
+      stores.audit(
+        "operator",
+        "project.created",
+        `${project.id} ${project.name} pm=${project.pm_provider}:${project.pm_model}`,
+        now(),
+      );
       reply.code(201).send(project);
     });
 
@@ -724,32 +752,35 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       }
     });
 
-    // ---- live planning, scoped to the project's chosen PM provider -----------
-    // Requires ANTHROPIC_API_KEY + OPENAI_API_KEY + NORNS_OPENAI_MODEL in the
-    // environment. Never invents an OpenAI model id — it must come from config.
+    // ---- live planning, scoped to the project's chosen PM model --------------
+    // Both provider keys are required for cross-provider review. An OpenAI
+    // reviewer model remains deployment-configured; the PM model is always the
+    // exact model persisted on the project.
     const PlanRequest = z.object({
       objective: z.string().min(1),
       maxRounds: z.number().int().min(1).max(5).optional(),
     });
     const buildAdapter = (
       provider: ProviderName,
+      model: string,
       anthropicKey: string,
       openaiKey: string,
-      openaiModel: string,
-    ) =>
-      provider === "anthropic"
-        ? new AnthropicAdapter({
-            apiKey: anthropicKey,
-            model: process.env.NORNS_PM_MODEL ?? "claude-sonnet-5",
-          })
-        : new OpenAiAdapter({ apiKey: openaiKey, model: openaiModel });
+    ): LlmAdapter => {
+      const apiKey = provider === "anthropic" ? anthropicKey : openaiKey;
+      if (options.createPlanningAdapter) {
+        return options.createPlanningAdapter(provider, model, apiKey);
+      }
+      return provider === "anthropic"
+        ? new AnthropicAdapter({ apiKey, model })
+        : new OpenAiAdapter({ apiKey, model });
+    };
 
     app.post("/api/projects/:id/plan", async (req, reply) => {
       if (!requireSession(req, reply)) return;
       const { id } = req.params as { id: string };
-      let pmProvider: ProviderName;
+      let pmSelection: { provider: ProviderName; model: string | null };
       try {
-        pmProvider = projects.pmProviderOf(id);
+        pmSelection = projects.pmSelectionOf(id);
       } catch (error) {
         projectError(reply, error);
         return;
@@ -759,12 +790,26 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
       const anthropicKey = process.env.ANTHROPIC_API_KEY;
       const openaiKey = process.env.OPENAI_API_KEY;
-      const openaiModel = process.env.NORNS_OPENAI_MODEL;
+      const reviewerProvider = reviewerFor(pmSelection.provider);
+      const pmModel =
+        pmSelection.model ??
+        (pmSelection.provider === "anthropic"
+          ? (process.env.NORNS_PM_MODEL ?? DEFAULT_PM_MODEL.anthropic)
+          : process.env.NORNS_OPENAI_MODEL);
+      const reviewerModel =
+        reviewerProvider === "openai"
+          ? process.env.NORNS_OPENAI_MODEL
+          : (process.env.NORNS_REVIEWER_ANTHROPIC_MODEL ??
+            process.env.NORNS_PM_MODEL ??
+            DEFAULT_PM_MODEL.anthropic);
       const missing = [
         !anthropicKey && "ANTHROPIC_API_KEY",
         !openaiKey && "OPENAI_API_KEY",
-        !openaiModel && "NORNS_OPENAI_MODEL",
-      ].filter((v): v is string => typeof v === "string");
+        !pmModel && "NORNS_OPENAI_MODEL",
+        reviewerProvider === "openai" && !reviewerModel && "NORNS_OPENAI_MODEL",
+      ].filter(
+        (v, index, values): v is string => typeof v === "string" && values.indexOf(v) === index,
+      );
       if (missing.length > 0) {
         return reply.code(501).send({
           error: "live_planning_unavailable",
@@ -772,21 +817,25 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         });
       }
 
-      const reviewerProvider = reviewerFor(pmProvider);
       const pm = buildAdapter(
-        pmProvider,
+        pmSelection.provider,
+        pmModel as string,
         anthropicKey as string,
         openaiKey as string,
-        openaiModel as string,
       );
       const reviewer = buildAdapter(
         reviewerProvider,
+        reviewerModel as string,
         anthropicKey as string,
         openaiKey as string,
-        openaiModel as string,
       );
 
-      stores.audit("operator", "planning.started", `${id}:${body.data.objective}`, now());
+      stores.audit(
+        "operator",
+        "planning.started",
+        `${id} pm=${pm.provider}:${pm.model} reviewer=${reviewer.provider}:${reviewer.model} objective=${body.data.objective}`,
+        now(),
+      );
       try {
         const result = await runPlanning({
           pm,
@@ -800,7 +849,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         stores.audit(
           "operator",
           "planning.completed",
-          `${id}:${result.status} rounds=${result.rounds} cost_usd=${totalCost.toFixed(4)}`,
+          `${id}:${result.status} pm=${pm.provider}:${pm.model} reviewer=${reviewer.provider}:${reviewer.model} rounds=${result.rounds} cost_usd=${totalCost.toFixed(4)}`,
           now(),
         );
         reply.send({

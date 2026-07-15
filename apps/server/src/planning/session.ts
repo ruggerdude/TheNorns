@@ -91,7 +91,9 @@ export async function runPlanning(options: PlanningOptions): Promise<PlanningRes
   const policy: ReviewPolicyRecordT = {
     requested_policy: "cross_provider",
     pm_provider: options.pm.provider,
+    pm_model: options.pm.model,
     reviewer_provider: options.reviewer.provider,
+    reviewer_model: options.reviewer.model,
     exception_reason: options.reviewException?.reason ?? null,
     exception_approved_by: options.reviewException?.approvedBy ?? null,
   };

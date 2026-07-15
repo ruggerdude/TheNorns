@@ -5,7 +5,8 @@
 // in CI always; the actual live-model round trip auto-enables when real keys
 // are present in the environment (same pattern as
 // packages/adapters/test/live.test.ts).
-import type { UsageEventT } from "@norns/contracts";
+import { FakeAdapter, type LlmAdapter, type ProviderName } from "@norns/adapters";
+import type { PmModelT, UsageEventT } from "@norns/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { ProjectStore } from "../src/projects/store.js";
 import { type NornsServer, buildServer } from "../src/server.js";
@@ -21,7 +22,10 @@ afterEach(async () => {
   server = null;
 });
 
-async function start(recordUsage?: (events: UsageEventT[]) => void): Promise<NornsServer> {
+async function start(
+  recordUsage?: (events: UsageEventT[]) => void,
+  createPlanningAdapter?: (provider: ProviderName, model: string, apiKey: string) => LlmAdapter,
+): Promise<NornsServer> {
   const users = new UserStore();
   TOKEN = testAdminToken(users);
   server = await buildServer({
@@ -29,6 +33,7 @@ async function start(recordUsage?: (events: UsageEventT[]) => void): Promise<Nor
     users,
     projects: new ProjectStore(),
     ...(recordUsage ? { recordUsage } : {}),
+    ...(createPlanningAdapter ? { createPlanningAdapter } : {}),
   });
   return server;
 }
@@ -56,11 +61,13 @@ async function inject(
 async function createProject(
   s: NornsServer,
   pmProvider: "anthropic" | "openai" = "anthropic",
+  pmModel?: PmModelT,
 ): Promise<string> {
   const res = await inject(s, "POST", "/api/projects", {
     name: "Test project",
     description: "d",
     pm_provider: pmProvider,
+    ...(pmModel ? { pm_model: pmModel } : {}),
   });
   return (res.json() as { id: string }).id;
 }
@@ -106,6 +113,70 @@ const TWO_NODE_PLAN = {
     },
   ],
 };
+
+describe("live planning — persisted PM model routing", () => {
+  it("uses each project's exact PM model and an opposite-provider reviewer model", async () => {
+    const saved = {
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+      NORNS_OPENAI_MODEL: process.env.NORNS_OPENAI_MODEL,
+      NORNS_REVIEWER_ANTHROPIC_MODEL: process.env.NORNS_REVIEWER_ANTHROPIC_MODEL,
+    };
+    process.env.ANTHROPIC_API_KEY = "test-anthropic";
+    process.env.OPENAI_API_KEY = "test-openai";
+    process.env.NORNS_OPENAI_MODEL = "gpt-5.6-luna";
+    process.env.NORNS_REVIEWER_ANTHROPIC_MODEL = "claude-opus-4-8";
+
+    const constructed: { provider: ProviderName; model: string }[] = [];
+    const factory = (provider: ProviderName, model: string): LlmAdapter => {
+      const adapter = new FakeAdapter(provider, model);
+      adapter.enqueue(constructed.length % 2 === 0 ? TWO_NODE_PLAN : { findings: [] });
+      constructed.push({ provider, model });
+      return adapter;
+    };
+
+    try {
+      const s = await start(undefined, factory);
+      const fableId = await createProject(s, "anthropic", "claude-fable-5");
+      const fable = await inject(s, "POST", `/api/projects/${fableId}/plan`, {
+        objective: "Build with Fable",
+        maxRounds: 1,
+      });
+      expect(fable.statusCode).toBe(200);
+      expect((fable.json() as { policy: unknown }).policy).toMatchObject({
+        pm_provider: "anthropic",
+        pm_model: "claude-fable-5",
+        reviewer_provider: "openai",
+        reviewer_model: "gpt-5.6-luna",
+      });
+
+      const solId = await createProject(s, "openai", "gpt-5.6-sol");
+      const sol = await inject(s, "POST", `/api/projects/${solId}/plan`, {
+        objective: "Build with Sol",
+        maxRounds: 1,
+      });
+      expect(sol.statusCode).toBe(200);
+      expect((sol.json() as { policy: unknown }).policy).toMatchObject({
+        pm_provider: "openai",
+        pm_model: "gpt-5.6-sol",
+        reviewer_provider: "anthropic",
+        reviewer_model: "claude-opus-4-8",
+      });
+
+      expect(constructed).toEqual([
+        { provider: "anthropic", model: "claude-fable-5" },
+        { provider: "openai", model: "gpt-5.6-luna" },
+        { provider: "openai", model: "gpt-5.6-sol" },
+        { provider: "anthropic", model: "claude-opus-4-8" },
+      ]);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) Reflect.deleteProperty(process.env, key);
+        else process.env[key] = value;
+      }
+    }
+  });
+});
 
 describe("live planning — guard + load (no keys required)", () => {
   it("POST /api/projects/:id/plan refuses with 501 when provider keys are absent", async () => {

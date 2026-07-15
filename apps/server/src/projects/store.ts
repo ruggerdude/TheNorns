@@ -5,7 +5,13 @@
 // server can now hold many projects at once, list/create/switch between
 // them, and persist all of them under Tier-2.
 import type { ProviderName } from "@norns/adapters";
-import { type PlanContractT, validatePlan } from "@norns/contracts";
+import {
+  DEFAULT_PM_MODEL,
+  type PlanContractT,
+  type PmModelT,
+  isPmModelForProvider,
+  validatePlan,
+} from "@norns/contracts";
 import type { AllocationApprovalRecord } from "../graph/allocation.js";
 import { type GraphSnapshot, WorkflowGraph } from "../graph/graph.js";
 import { GraphSession } from "../graph/session.js";
@@ -18,6 +24,7 @@ export interface ProjectSummary {
   name: string;
   description: string;
   pm_provider: ProviderName;
+  pm_model: PmModelT | null;
   reviewer_provider: ProviderName;
   status: ProjectStatus;
   created_at: string;
@@ -43,6 +50,7 @@ interface ProjectRecord {
   name: string;
   description: string;
   pmProvider: ProviderName;
+  pmModel: PmModelT | null;
   createdAt: string;
   session: GraphSession | null;
 }
@@ -53,6 +61,8 @@ export interface ProjectStoreSnapshot {
     name: string;
     description: string;
     pmProvider: ProviderName;
+    /** Optional only so snapshots written before model selection can still be restored. */
+    pmModel?: PmModelT | null;
     createdAt: string;
     plan: PlanContractT | null;
     graph: GraphSnapshot | null;
@@ -65,15 +75,29 @@ export function reviewerFor(pmProvider: ProviderName): ProviderName {
   return pmProvider === "anthropic" ? "openai" : "anthropic";
 }
 
+function resolvePmModel(provider: ProviderName, model?: string): PmModelT {
+  const selected = model ?? DEFAULT_PM_MODEL[provider];
+  if (!isPmModelForProvider(provider, selected)) {
+    throw new Error(`model "${selected}" is not available for provider "${provider}"`);
+  }
+  return selected;
+}
+
 export class ProjectStore {
   private readonly projects = new Map<string, ProjectRecord>();
 
-  create(input: { name: string; description: string; pmProvider: ProviderName }): ProjectSummary {
+  create(input: {
+    name: string;
+    description: string;
+    pmProvider: ProviderName;
+    pmModel?: PmModelT;
+  }): ProjectSummary {
     const record: ProjectRecord = {
       id: newId("proj"),
       name: input.name,
       description: input.description,
       pmProvider: input.pmProvider,
+      pmModel: resolvePmModel(input.pmProvider, input.pmModel),
       createdAt: new Date().toISOString(),
       session: null,
     };
@@ -107,6 +131,11 @@ export class ProjectStore {
     return this.record(id).pmProvider;
   }
 
+  pmSelectionOf(id: string): { provider: ProviderName; model: PmModelT | null } {
+    const record = this.record(id);
+    return { provider: record.pmProvider, model: record.pmModel };
+  }
+
   /** Commit a (validated, possibly human-edited) plan as this project's live graph. */
   loadPlan(id: string, plan: PlanContractT): GraphSession {
     const record = this.record(id);
@@ -129,6 +158,7 @@ export class ProjectStore {
         name: r.name,
         description: r.description,
         pmProvider: r.pmProvider,
+        pmModel: r.pmModel,
         createdAt: r.createdAt,
         plan: r.session?.plan ?? null,
         graph: r.session?.graph.snapshot() ?? null,
@@ -151,6 +181,12 @@ export class ProjectStore {
         name: p.name,
         description: p.description,
         pmProvider: p.pmProvider,
+        // A missing field is a legacy provider-only project. Keep it null so
+        // the UI and audit trail do not imply a model was historically chosen.
+        pmModel:
+          p.pmModel === undefined || p.pmModel === null
+            ? null
+            : resolvePmModel(p.pmProvider, p.pmModel),
         createdAt: p.createdAt,
         session,
       });
@@ -169,6 +205,7 @@ export class ProjectStore {
       name: record.name,
       description: record.description,
       pm_provider: record.pmProvider,
+      pm_model: record.pmModel,
       reviewer_provider: reviewerFor(record.pmProvider),
       status: record.session ? "planned" : "draft",
       created_at: record.createdAt,

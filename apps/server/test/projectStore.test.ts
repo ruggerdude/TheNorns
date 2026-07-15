@@ -46,11 +46,36 @@ describe("ProjectStore", () => {
 
     expect(a.status).toBe("draft");
     expect(a.pm_provider).toBe("anthropic");
+    expect(a.pm_model).toBe("claude-sonnet-5");
     expect(a.reviewer_provider).toBe("openai");
     expect(a.plan_objective).toBeNull();
 
     const listed = store.list();
     expect(listed.map((p) => p.id)).toEqual([b.id, a.id]);
+  });
+
+  it("stores an explicit provider-matched model and rejects a mismatch", () => {
+    const store = new ProjectStore();
+    const project = store.create({
+      name: "Fable project",
+      description: "d",
+      pmProvider: "anthropic",
+      pmModel: "claude-fable-5",
+    });
+
+    expect(project.pm_model).toBe("claude-fable-5");
+    expect(store.pmSelectionOf(project.id)).toEqual({
+      provider: "anthropic",
+      model: "claude-fable-5",
+    });
+    expect(() =>
+      store.create({
+        name: "Mismatch",
+        description: "d",
+        pmProvider: "anthropic",
+        pmModel: "gpt-5.6-sol",
+      }),
+    ).toThrow(/not available for provider/);
   });
 
   it("throws ProjectNotFoundError for an unknown id", () => {
@@ -105,6 +130,7 @@ describe("ProjectStore", () => {
     const restoredList = restored.list().sort((a, b) => a.name.localeCompare(b.name));
     expect(restoredList.map((p) => p.name)).toEqual(["Draft only", "Planned"]);
     expect(restored.summary(draft.id).status).toBe("draft");
+    expect(restored.summary(draft.id).pm_model).toBe("gpt-5.6-terra");
     expect(() => restored.session(draft.id)).toThrow();
 
     const restoredSession = restored.session(planned.id);
@@ -112,6 +138,21 @@ describe("ProjectStore", () => {
     expect(restoredSession.graph.node("foundation")?.assignment?.budget_usd).toBe(55);
     expect(restoredSession.graph.node("foundation")?.assignment?.source).toBe("override");
     expect(restoredSession.graph.snapshot()).toEqual(session.graph.snapshot());
+  });
+
+  it("restores a provider-only legacy snapshot without inventing historical model provenance", () => {
+    const store = new ProjectStore();
+    store.create({ name: "Legacy", description: "d", pmProvider: "openai" });
+    const snapshot = store.snapshot();
+    const saved = snapshot.projects[0];
+    if (!saved) throw new Error("expected project snapshot");
+    Reflect.deleteProperty(saved, "pmModel");
+
+    const restored = new ProjectStore();
+    restored.restoreFrom(snapshot);
+
+    expect(restored.list()[0]?.pm_model).toBeNull();
+    expect(restored.pmSelectionOf(saved.id)).toEqual({ provider: "openai", model: null });
   });
 
   it("round-trips a persisted allocation approval and re-derives staleness after restore (ADR-1)", () => {

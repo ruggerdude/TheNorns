@@ -93,6 +93,20 @@ The runner runs on **your machine**, not Railway. It's built and verified.
    Then create a project, run the planning loop, approve, allocate, and
    execute — the local runner does the coding and streams results back.
 
+### Planning model configuration
+
+New projects store the exact project-manager model selected in the UI (for
+example, `claude-fable-5` or `gpt-5.6-sol`). Both provider API keys are still
+required because every plan receives cross-provider review.
+
+- `NORNS_OPENAI_MODEL` selects the OpenAI reviewer for Anthropic-led projects
+  and remains the OpenAI fallback for legacy provider-only projects.
+- `NORNS_REVIEWER_ANTHROPIC_MODEL` optionally selects the Anthropic reviewer
+  for OpenAI-led projects. It falls back to `NORNS_PM_MODEL`, then
+  `claude-sonnet-5`.
+- `NORNS_PM_MODEL` is retained only as an Anthropic fallback for projects
+  persisted before exact PM model selection was introduced.
+
 ## Local development (unchanged)
 
 ```sh

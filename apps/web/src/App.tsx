@@ -1,3 +1,4 @@
+import { pmModelOption } from "@norns/contracts";
 // TheNorns web app: sole point of entry. Login gates everything; Projects is
 // the landing view (list/create); opening a project shows its graph editor —
 // React Flow rendering with editing (edges with cycle rejection, node
@@ -19,7 +20,7 @@ import { Account } from "./Account";
 import { Admin } from "./Admin";
 import { Login, type LoginMode } from "./Login";
 import { type PlanLike, PlanReview } from "./PlanReview";
-import { type ProjectSummary, Projects } from "./Projects";
+import { type ProjectSummary, ProjectTabs, Projects } from "./Projects";
 import {
   ApiError,
   type AuthSession,
@@ -154,6 +155,9 @@ function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
 function ProjectGraph({
   project,
   onBack,
+  openProjects,
+  onOpenProject,
+  onCloseProject,
   onLogout,
   user,
   onOpenAccount,
@@ -161,6 +165,9 @@ function ProjectGraph({
 }: {
   project: ProjectSummary;
   onBack: () => void;
+  openProjects: ProjectSummary[];
+  onOpenProject: (project: ProjectSummary) => void;
+  onCloseProject: (id: string) => void;
   onLogout: (message: string) => void;
   user: CurrentUser | null;
   onOpenAccount: () => void;
@@ -526,9 +533,15 @@ function ProjectGraph({
         </ReactFlow>
       </div>
       <aside className="sidebar">
+        <ProjectTabs
+          projects={openProjects}
+          activeId={project.id}
+          onSelect={onOpenProject}
+          onClose={onCloseProject}
+        />
         <div className="sidebar-head">
           <Button className="btn-small" variant="ghost" onClick={onBack}>
-            ← Projects
+            ← Main menu
           </Button>
           <div className="header-actions">
             <Button className="btn-small" variant="ghost" onClick={onOpenAccount}>
@@ -548,7 +561,10 @@ function ProjectGraph({
           <div className="eyebrow">Graph workspace</div>
           <h1>{project.name}</h1>
           <div className="meta">
-            {project.pm_provider} PM · {project.reviewer_provider} REVIEW
+            {project.pm_model
+              ? (pmModelOption(project.pm_model)?.label ?? project.pm_model)
+              : `${project.pm_provider} default (legacy)`}{" "}
+            PM · {project.pm_provider} · {project.reviewer_provider} REVIEW
           </div>
         </div>
         {graph ? (
@@ -867,6 +883,7 @@ export function App(): React.ReactElement {
   const [token, setTok] = useState<string | null>(getToken());
   const [authError, setAuthError] = useState<string | null>(null);
   const [activeProject, setActiveProject] = useState<ProjectSummary | null>(null);
+  const [openProjects, setOpenProjects] = useState<ProjectSummary[]>([]);
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [needsBootstrap, setNeedsBootstrap] = useState(false);
   const [inviteToken] = useState<string | null>(() => consumeInviteToken());
@@ -914,8 +931,23 @@ export function App(): React.ReactElement {
     setUser(null);
     setAuthError(message);
     setActiveProject(null);
+    setOpenProjects([]);
     setShowAccount(false);
     setShowAdmin(false);
+  }, []);
+
+  const openProject = useCallback((project: ProjectSummary) => {
+    setOpenProjects((current) =>
+      current.some((p) => p.id === project.id)
+        ? current.map((p) => (p.id === project.id ? project : p))
+        : [...current, project],
+    );
+    setActiveProject(project);
+  }, []);
+
+  const closeProject = useCallback((id: string) => {
+    setOpenProjects((current) => current.filter((project) => project.id !== id));
+    setActiveProject((active) => (active?.id === id ? null : active));
   }, []);
 
   if (!token) {
@@ -934,7 +966,9 @@ export function App(): React.ReactElement {
     <>
       {!activeProject ? (
         <Projects
-          onOpenProject={setActiveProject}
+          onOpenProject={openProject}
+          openProjects={openProjects}
+          onCloseProject={closeProject}
           onUnauthorized={() => logout("Session expired. Sign in again.")}
           onSignOut={() => logout("Signed out.")}
           user={user}
@@ -945,6 +979,9 @@ export function App(): React.ReactElement {
         <ProjectGraph
           project={activeProject}
           onBack={() => setActiveProject(null)}
+          openProjects={openProjects}
+          onOpenProject={openProject}
+          onCloseProject={closeProject}
           onLogout={logout}
           user={user}
           onOpenAccount={() => setShowAccount(true)}

@@ -79,7 +79,9 @@ describe("planning loop — three objectives", () => {
     expect(result.rounds).toBe(1);
     expect(result.versions).toHaveLength(1);
     expect(result.policy.pm_provider).toBe("anthropic");
+    expect(result.policy.pm_model).toBe("mock-anthropic");
     expect(result.policy.reviewer_provider).toBe("openai");
+    expect(result.policy.reviewer_model).toBe("mock-openai");
     expect(result.usage).toHaveLength(2); // one PM call, one reviewer call — all metered
 
     // memory directives visibly honored in EVERY agent context

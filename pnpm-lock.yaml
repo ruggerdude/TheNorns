@@ -82,6 +82,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@norns/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@xyflow/react':
         specifier: ^12.0.0
         version: 12.11.2(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -92,9 +95,6 @@ importers:
         specifier: ^19.0.0
         version: 19.2.7(react@19.2.7)
     devDependencies:
-      '@norns/contracts':
-        specifier: workspace:*
-        version: link:../../packages/contracts
       '@playwright/test':
         specifier: ^1.61.1
         version: 1.61.1

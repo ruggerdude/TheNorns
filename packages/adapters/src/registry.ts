@@ -14,29 +14,65 @@ export interface ModelEntry {
 }
 
 export const DEFAULT_MODEL_REGISTRY: Record<string, ModelEntry> = {
-  // Anthropic published rates (2026-06 price table)
+  // Anthropic published rates (2026-07 price table)
+  "claude-fable-5": {
+    provider: "anthropic",
+    input_per_mtok: 10,
+    output_per_mtok: 50,
+    pricing_version: "anthropic-2026-07",
+    pricing_is_estimate: false,
+  },
   "claude-opus-4-8": {
     provider: "anthropic",
     input_per_mtok: 5,
     output_per_mtok: 25,
-    pricing_version: "anthropic-2026-06",
+    pricing_version: "anthropic-2026-07",
     pricing_is_estimate: false,
   },
   "claude-sonnet-5": {
     provider: "anthropic",
-    input_per_mtok: 3,
-    output_per_mtok: 15,
-    pricing_version: "anthropic-2026-06",
+    input_per_mtok: 2,
+    output_per_mtok: 10,
+    pricing_version: "anthropic-2026-07-intro",
+    pricing_is_estimate: false,
+  },
+  "claude-haiku-4-5-20251001": {
+    provider: "anthropic",
+    input_per_mtok: 1,
+    output_per_mtok: 5,
+    pricing_version: "anthropic-2026-07",
     pricing_is_estimate: false,
   },
   "claude-haiku-4-5": {
     provider: "anthropic",
     input_per_mtok: 1,
     output_per_mtok: 5,
-    pricing_version: "anthropic-2026-06",
+    pricing_version: "anthropic-2026-07",
     pricing_is_estimate: false,
   },
-  // OpenAI entries are deployment config: set real ids/rates at deploy time
+  // OpenAI published rates (2026-07 price table)
+  "gpt-5.6-sol": {
+    provider: "openai",
+    input_per_mtok: 5,
+    output_per_mtok: 30,
+    pricing_version: "openai-2026-07",
+    pricing_is_estimate: false,
+  },
+  "gpt-5.6-terra": {
+    provider: "openai",
+    input_per_mtok: 2.5,
+    output_per_mtok: 15,
+    pricing_version: "openai-2026-07",
+    pricing_is_estimate: false,
+  },
+  "gpt-5.6-luna": {
+    provider: "openai",
+    input_per_mtok: 1,
+    output_per_mtok: 6,
+    pricing_version: "openai-2026-07",
+    pricing_is_estimate: false,
+  },
+  // Backward-compatible deployment placeholder.
   "openai-reasoning-default": {
     provider: "openai",
     input_per_mtok: 10,

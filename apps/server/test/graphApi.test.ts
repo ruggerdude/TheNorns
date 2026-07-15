@@ -70,16 +70,19 @@ describe("projects API", () => {
       name: "OAuth Login",
       description: "Add OAuth login with Google and GitHub",
       pm_provider: "openai",
+      pm_model: "gpt-5.6-sol",
     });
     expect(created.statusCode).toBe(201);
     const project = created.json() as {
       id: string;
       status: string;
       pm_provider: string;
+      pm_model: string;
       reviewer_provider: string;
     };
     expect(project.status).toBe("draft");
     expect(project.pm_provider).toBe("openai");
+    expect(project.pm_model).toBe("gpt-5.6-sol");
     expect(project.reviewer_provider).toBe("anthropic"); // always the opposite provider
 
     const list = await inject(server, "GET", "/api/projects");
@@ -96,6 +99,32 @@ describe("projects API", () => {
       status: "planned",
       plan_objective: DEMO_PLAN.objective,
     });
+  });
+
+  it("rejects unknown and provider-mismatched PM models", async () => {
+    const users = new UserStore();
+    TOKEN = testAdminToken(users);
+    server = await buildServer({
+      stores: new RelayStores(),
+      users,
+      projects: new ProjectStore(),
+    });
+
+    const mismatch = await inject(server, "POST", "/api/projects", {
+      name: "Mismatch",
+      description: "d",
+      pm_provider: "anthropic",
+      pm_model: "gpt-5.6-sol",
+    });
+    const unknown = await inject(server, "POST", "/api/projects", {
+      name: "Unknown",
+      description: "d",
+      pm_provider: "openai",
+      pm_model: "not-a-real-model",
+    });
+
+    expect(mismatch.statusCode).toBe(400);
+    expect(unknown.statusCode).toBe(400);
   });
 
   it("404s on an unknown project id", async () => {

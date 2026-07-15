@@ -15,6 +15,7 @@ import {
   type PlanContractT,
   PlanModule,
   type PlanModuleT,
+  type PmModelT,
 } from "@norns/contracts";
 import { z } from "zod";
 import type { MockResponseInit } from "./mockFetch";
@@ -314,6 +315,7 @@ export interface ProjectSummaryFixture {
   name: string;
   description: string;
   pm_provider: "anthropic" | "openai";
+  pm_model: PmModelT;
   reviewer_provider: "anthropic" | "openai";
   status: "draft" | "planned";
   created_at: string;
@@ -326,6 +328,7 @@ export function makeProject(overrides: Partial<ProjectSummaryFixture> = {}): Pro
     name: "Notifications Service",
     description: "Cross-provider notification delivery for the platform.",
     pm_provider: "anthropic",
+    pm_model: "claude-sonnet-5",
     reviewer_provider: "openai",
     status: "planned",
     created_at: "2026-07-01T00:00:00.000Z",
@@ -342,6 +345,7 @@ export const projectBeta: ProjectSummaryFixture = makeProject({
   name: "Billing Reconciliation",
   description: "Automates monthly billing reconciliation across ledgers.",
   pm_provider: "openai",
+  pm_model: "gpt-5.6-terra",
   reviewer_provider: "anthropic",
   created_at: "2026-07-05T00:00:00.000Z",
   plan_objective: "Reconcile billing discrepancies automatically",
