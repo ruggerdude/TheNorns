@@ -604,19 +604,44 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     const CreateProjectFields = {
       name: z.string().min(1),
       description: z.string().min(1),
+      source_type: z.enum(["local", "github"]).optional(),
+      source_location: z.string().trim().min(1).optional(),
     };
-    const CreateProjectBody = z.discriminatedUnion("pm_provider", [
-      z.object({
-        ...CreateProjectFields,
-        pm_provider: z.literal("anthropic"),
-        pm_model: AnthropicPmModel.default(DEFAULT_PM_MODEL.anthropic),
-      }),
-      z.object({
-        ...CreateProjectFields,
-        pm_provider: z.literal("openai"),
-        pm_model: OpenAiPmModel.default(DEFAULT_PM_MODEL.openai),
-      }),
-    ]);
+    const CreateProjectBody = z
+      .discriminatedUnion("pm_provider", [
+        z.object({
+          ...CreateProjectFields,
+          pm_provider: z.literal("anthropic"),
+          pm_model: AnthropicPmModel.default(DEFAULT_PM_MODEL.anthropic),
+        }),
+        z.object({
+          ...CreateProjectFields,
+          pm_provider: z.literal("openai"),
+          pm_model: OpenAiPmModel.default(DEFAULT_PM_MODEL.openai),
+        }),
+      ])
+      .superRefine((value, context) => {
+        if (value.source_type && !value.source_location) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["source_location"],
+            message: "source location is required",
+          });
+        }
+        if (
+          value.source_type === "github" &&
+          value.source_location &&
+          !/^(https:\/\/github\.com\/[^/]+\/[^/]+(?:\.git)?|git@github\.com:[^/]+\/[^/]+(?:\.git)?)$/.test(
+            value.source_location,
+          )
+        ) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["source_location"],
+            message: "enter a GitHub repository URL",
+          });
+        }
+      });
     app.post("/api/projects", (req, reply) => {
       if (!requireSession(req, reply)) return;
       const body = CreateProjectBody.safeParse(req.body);
@@ -626,6 +651,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         description: body.data.description,
         pmProvider: body.data.pm_provider,
         pmModel: body.data.pm_model,
+        ...(body.data.source_type ? { sourceType: body.data.source_type } : {}),
+        ...(body.data.source_location ? { sourceLocation: body.data.source_location } : {}),
       });
       stores.audit(
         "operator",

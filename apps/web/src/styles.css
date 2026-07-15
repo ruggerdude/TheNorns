@@ -442,6 +442,85 @@ button:disabled {
   letter-spacing: .07em;
   margin-bottom: .3rem;
 }
+.project-source {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  min-width: 0;
+  margin: 0 0 1rem;
+  padding: .5rem .65rem;
+  border-radius: 8px;
+  background: #0d1013;
+  color: var(--muted);
+  font-size: .68rem;
+}
+.project-source span {
+  flex: none;
+  color: var(--accent2);
+  font-weight: 700;
+}
+.project-source strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.source-picker {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  gap: .65rem;
+}
+.source-picker legend {
+  padding: 0;
+  margin-bottom: .45rem;
+  color: #cbd0d5;
+  font-size: .78rem;
+  font-weight: 600;
+}
+.source-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: .6rem;
+}
+.source-options button {
+  display: grid;
+  gap: .25rem;
+  text-align: left;
+  padding: .75rem;
+  border: 1px solid var(--line2);
+  border-radius: 10px;
+  background: #0d1013;
+  color: var(--text);
+}
+.source-options button.is-selected {
+  border-color: var(--accent);
+  background: #211a11;
+  box-shadow: 0 0 0 2px rgba(229, 155, 69, 0.1);
+}
+.source-options span {
+  color: var(--muted);
+  font-size: .68rem;
+  line-height: 1.35;
+}
+.project-detail-source {
+  margin-top: .6rem;
+  padding: .5rem .6rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font: 400 .67rem "DM Mono", monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-detail-source span {
+  color: var(--accent2);
+  margin-right: .5rem;
+  text-transform: uppercase;
+}
 .project-facts {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

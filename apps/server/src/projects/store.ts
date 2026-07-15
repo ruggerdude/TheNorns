@@ -18,6 +18,7 @@ import { GraphSession } from "../graph/session.js";
 import { newId } from "../ids.js";
 
 export type ProjectStatus = "draft" | "planned";
+export type ProjectSourceType = "local" | "github";
 
 export interface ProjectSummary {
   id: string;
@@ -29,6 +30,8 @@ export interface ProjectSummary {
   status: ProjectStatus;
   created_at: string;
   plan_objective: string | null;
+  source_type: ProjectSourceType | null;
+  source_location: string | null;
 }
 
 export class ProjectNotFoundError extends Error {
@@ -51,6 +54,8 @@ interface ProjectRecord {
   description: string;
   pmProvider: ProviderName;
   pmModel: PmModelT | null;
+  sourceType: ProjectSourceType | null;
+  sourceLocation: string | null;
   createdAt: string;
   session: GraphSession | null;
 }
@@ -63,6 +68,9 @@ export interface ProjectStoreSnapshot {
     pmProvider: ProviderName;
     /** Optional only so snapshots written before model selection can still be restored. */
     pmModel?: PmModelT | null;
+    /** Optional for snapshots created before repository connections were supported. */
+    sourceType?: ProjectSourceType | null;
+    sourceLocation?: string | null;
     createdAt: string;
     plan: PlanContractT | null;
     graph: GraphSnapshot | null;
@@ -91,6 +99,8 @@ export class ProjectStore {
     description: string;
     pmProvider: ProviderName;
     pmModel?: PmModelT;
+    sourceType?: ProjectSourceType;
+    sourceLocation?: string;
   }): ProjectSummary {
     const record: ProjectRecord = {
       id: newId("proj"),
@@ -98,6 +108,8 @@ export class ProjectStore {
       description: input.description,
       pmProvider: input.pmProvider,
       pmModel: resolvePmModel(input.pmProvider, input.pmModel),
+      sourceType: input.sourceType ?? null,
+      sourceLocation: input.sourceLocation?.trim() || null,
       createdAt: new Date().toISOString(),
       session: null,
     };
@@ -159,6 +171,8 @@ export class ProjectStore {
         description: r.description,
         pmProvider: r.pmProvider,
         pmModel: r.pmModel,
+        sourceType: r.sourceType,
+        sourceLocation: r.sourceLocation,
         createdAt: r.createdAt,
         plan: r.session?.plan ?? null,
         graph: r.session?.graph.snapshot() ?? null,
@@ -187,6 +201,8 @@ export class ProjectStore {
           p.pmModel === undefined || p.pmModel === null
             ? null
             : resolvePmModel(p.pmProvider, p.pmModel),
+        sourceType: p.sourceType ?? null,
+        sourceLocation: p.sourceLocation ?? null,
         createdAt: p.createdAt,
         session,
       });
@@ -210,6 +226,8 @@ export class ProjectStore {
       status: record.session ? "planned" : "draft",
       created_at: record.createdAt,
       plan_objective: record.session?.plan.objective ?? null,
+      source_type: record.sourceType,
+      source_location: record.sourceLocation,
     };
   }
 }

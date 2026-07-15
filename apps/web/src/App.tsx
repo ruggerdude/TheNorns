@@ -566,6 +566,12 @@ function ProjectGraph({
               : `${project.pm_provider} default (legacy)`}{" "}
             PM · {project.pm_provider} · {project.reviewer_provider} REVIEW
           </div>
+          {project.source_location ? (
+            <div className="project-detail-source" title={project.source_location}>
+              <span>{project.source_type === "github" ? "GitHub" : "Local"}</span>
+              {project.source_location}
+            </div>
+          ) : null}
         </div>
         {graph ? (
           <>

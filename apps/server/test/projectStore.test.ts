@@ -78,6 +78,27 @@ describe("ProjectStore", () => {
     ).toThrow(/not available for provider/);
   });
 
+  it("stores and restores a connected project source", () => {
+    const store = new ProjectStore();
+    const project = store.create({
+      name: "Connected",
+      description: "d",
+      pmProvider: "openai",
+      sourceType: "github",
+      sourceLocation: "https://github.com/example/connected.git",
+    });
+
+    expect(project.source_type).toBe("github");
+    expect(project.source_location).toBe("https://github.com/example/connected.git");
+
+    const restored = new ProjectStore();
+    restored.restoreFrom(store.snapshot());
+    expect(restored.summary(project.id)).toMatchObject({
+      source_type: "github",
+      source_location: "https://github.com/example/connected.git",
+    });
+  });
+
   it("throws ProjectNotFoundError for an unknown id", () => {
     const store = new ProjectStore();
     expect(() => store.summary("proj-does-not-exist")).toThrow(ProjectNotFoundError);
