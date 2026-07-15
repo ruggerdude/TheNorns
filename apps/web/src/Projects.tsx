@@ -11,6 +11,8 @@ export interface ProjectSummary {
   status: "draft" | "planned";
   created_at: string;
   plan_objective: string | null;
+  source_type?: "local" | "github" | null;
+  source_location?: string | null;
 }
 
 async function request<T>(path: string, body?: unknown): Promise<T> {
@@ -89,6 +91,8 @@ export function Projects({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [pmProvider, setPmProvider] = useState<"anthropic" | "openai">("anthropic");
+  const [sourceType, setSourceType] = useState<"local" | "github">("local");
+  const [sourceLocation, setSourceLocation] = useState("");
   const [creating, setCreating] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -112,11 +116,15 @@ export function Projects({
         name: name.trim(),
         description: description.trim(),
         pm_provider: pmProvider,
+        ...(sourceLocation.trim()
+          ? { source_type: sourceType, source_location: sourceLocation.trim() }
+          : {}),
       });
       setProjects((current) => (current ? [project, ...current] : [project]));
       setDialog(null);
       setName("");
       setDescription("");
+      setSourceLocation("");
       onOpenProject(project);
     } catch (e) {
       e instanceof UnauthorizedError
@@ -125,7 +133,7 @@ export function Projects({
     } finally {
       setCreating(false);
     }
-  }, [name, description, pmProvider, onOpenProject, onUnauthorized]);
+  }, [name, description, pmProvider, sourceType, sourceLocation, onOpenProject, onUnauthorized]);
 
   const openIds = useMemo(() => new Set(openProjects.map((p) => p.id)), [openProjects]);
   const visible = useMemo(
@@ -243,6 +251,12 @@ export function Projects({
                       {project.plan_objective}
                     </div>
                   ) : null}
+                  {project.source_location ? (
+                    <div className="project-source" title={project.source_location}>
+                      <span>{project.source_type === "github" ? "GitHub" : "Local folder"}</span>
+                      <strong>{project.source_location}</strong>
+                    </div>
+                  ) : null}
                   <dl className="project-facts">
                     <div>
                       <dt>Lead</dt>
@@ -274,9 +288,9 @@ export function Projects({
       </main>
 
       {dialog ? (
-        <div
+        <dialog
+          open
           className="modal-overlay"
-          role="dialog"
           aria-modal="true"
           aria-label={dialog === "new" ? "New project" : "Add existing project"}
         >
@@ -315,6 +329,51 @@ export function Projects({
                     placeholder="What should this project deliver?"
                   />
                 </Field>
+                <fieldset className="source-picker">
+                  <legend>Connect project source</legend>
+                  <div className="source-options">
+                    <button
+                      type="button"
+                      className={sourceType === "local" ? "is-selected" : ""}
+                      onClick={() => {
+                        setSourceType("local");
+                        setSourceLocation("");
+                      }}
+                    >
+                      <strong>Local folder</strong>
+                      <span>A folder available to TheNorns server</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={sourceType === "github" ? "is-selected" : ""}
+                      onClick={() => {
+                        setSourceType("github");
+                        setSourceLocation("");
+                      }}
+                    >
+                      <strong>GitHub</strong>
+                      <span>Connect an existing repository</span>
+                    </button>
+                  </div>
+                  <Field label={sourceType === "local" ? "Folder path" : "Repository URL"}>
+                    <Input
+                      data-testid="project-source-location"
+                      type={sourceType === "github" ? "url" : "text"}
+                      value={sourceLocation}
+                      onChange={(event) => setSourceLocation(event.target.value)}
+                      placeholder={
+                        sourceType === "local"
+                          ? "/Users/you/projects/my-app"
+                          : "https://github.com/owner/repository"
+                      }
+                    />
+                  </Field>
+                  <span className="field-help">
+                    {sourceType === "local"
+                      ? "Use an absolute path on the machine running TheNorns."
+                      : "Private repositories use the Git credentials configured on the server."}
+                  </span>
+                </fieldset>
                 <Field label="Program manager">
                   <Select
                     data-testid="pm-provider"
@@ -369,7 +428,7 @@ export function Projects({
               </div>
             )}
           </section>
-        </div>
+        </dialog>
       ) : null}
     </div>
   );

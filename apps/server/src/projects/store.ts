@@ -12,6 +12,7 @@ import { GraphSession } from "../graph/session.js";
 import { newId } from "../ids.js";
 
 export type ProjectStatus = "draft" | "planned";
+export type ProjectSourceType = "local" | "github";
 
 export interface ProjectSummary {
   id: string;
@@ -22,6 +23,8 @@ export interface ProjectSummary {
   status: ProjectStatus;
   created_at: string;
   plan_objective: string | null;
+  source_type: ProjectSourceType | null;
+  source_location: string | null;
 }
 
 export class ProjectNotFoundError extends Error {
@@ -43,6 +46,8 @@ interface ProjectRecord {
   name: string;
   description: string;
   pmProvider: ProviderName;
+  sourceType: ProjectSourceType | null;
+  sourceLocation: string | null;
   createdAt: string;
   session: GraphSession | null;
 }
@@ -53,6 +58,8 @@ export interface ProjectStoreSnapshot {
     name: string;
     description: string;
     pmProvider: ProviderName;
+    sourceType?: ProjectSourceType | null;
+    sourceLocation?: string | null;
     createdAt: string;
     plan: PlanContractT | null;
     graph: GraphSnapshot | null;
@@ -68,12 +75,20 @@ export function reviewerFor(pmProvider: ProviderName): ProviderName {
 export class ProjectStore {
   private readonly projects = new Map<string, ProjectRecord>();
 
-  create(input: { name: string; description: string; pmProvider: ProviderName }): ProjectSummary {
+  create(input: {
+    name: string;
+    description: string;
+    pmProvider: ProviderName;
+    sourceType?: ProjectSourceType;
+    sourceLocation?: string;
+  }): ProjectSummary {
     const record: ProjectRecord = {
       id: newId("proj"),
       name: input.name,
       description: input.description,
       pmProvider: input.pmProvider,
+      sourceType: input.sourceType ?? null,
+      sourceLocation: input.sourceLocation?.trim() || null,
       createdAt: new Date().toISOString(),
       session: null,
     };
@@ -129,6 +144,8 @@ export class ProjectStore {
         name: r.name,
         description: r.description,
         pmProvider: r.pmProvider,
+        sourceType: r.sourceType,
+        sourceLocation: r.sourceLocation,
         createdAt: r.createdAt,
         plan: r.session?.plan ?? null,
         graph: r.session?.graph.snapshot() ?? null,
@@ -151,6 +168,8 @@ export class ProjectStore {
         name: p.name,
         description: p.description,
         pmProvider: p.pmProvider,
+        sourceType: p.sourceType ?? null,
+        sourceLocation: p.sourceLocation ?? null,
         createdAt: p.createdAt,
         session,
       });
@@ -173,6 +192,8 @@ export class ProjectStore {
       status: record.session ? "planned" : "draft",
       created_at: record.createdAt,
       plan_objective: record.session?.plan.objective ?? null,
+      source_type: record.sourceType,
+      source_location: record.sourceLocation,
     };
   }
 }

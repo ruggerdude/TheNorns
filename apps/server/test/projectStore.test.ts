@@ -58,6 +58,25 @@ describe("ProjectStore", () => {
     expect(() => store.summary("proj-does-not-exist")).toThrow(ProjectNotFoundError);
   });
 
+  it("stores and restores a connected project source", () => {
+    const store = new ProjectStore();
+    const project = store.create({
+      name: "Connected",
+      description: "d",
+      pmProvider: "openai",
+      sourceType: "github",
+      sourceLocation: "https://github.com/example/connected.git",
+    });
+    expect(project.source_type).toBe("github");
+    expect(project.source_location).toBe("https://github.com/example/connected.git");
+    const restored = new ProjectStore();
+    restored.restoreFrom(store.snapshot());
+    expect(restored.summary(project.id)).toMatchObject({
+      source_type: "github",
+      source_location: "https://github.com/example/connected.git",
+    });
+  });
+
   it("loadPlan turns a draft project into a planned one with a real graph", () => {
     const store = new ProjectStore();
     const project = store.create({ name: "P", description: "d", pmProvider: "anthropic" });
