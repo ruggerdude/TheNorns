@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ApiError, UnauthorizedError, authHeaders } from "./auth";
+import { ApiError, type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 export interface ProjectSummary {
   id: string;
@@ -26,10 +26,16 @@ export function Projects({
   onOpenProject,
   onUnauthorized,
   onSignOut,
+  user,
+  onOpenAccount,
+  onOpenAdmin,
 }: {
   onOpenProject: (p: ProjectSummary) => void;
   onUnauthorized: () => void;
   onSignOut: () => void;
+  user: CurrentUser | null;
+  onOpenAccount: () => void;
+  onOpenAdmin: () => void;
 }): React.ReactElement {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -80,9 +86,19 @@ export function Projects({
     <div className="app-shell">
       <header className="topbar">
         <Brand />
-        <Button variant="ghost" className="btn-small" onClick={onSignOut}>
-          Sign out
-        </Button>
+        <div className="header-actions">
+          <Button variant="ghost" className="btn-small" onClick={onOpenAccount}>
+            Account
+          </Button>
+          {user?.role === "admin" ? (
+            <Button variant="ghost" className="btn-small" onClick={onOpenAdmin}>
+              Admin
+            </Button>
+          ) : null}
+          <Button variant="ghost" className="btn-small" onClick={onSignOut}>
+            Sign out
+          </Button>
+        </div>
       </header>
       <main className="page">
         <div className="page-intro">

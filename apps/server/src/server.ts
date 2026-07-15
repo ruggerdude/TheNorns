@@ -26,6 +26,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { z } from "zod";
 import { bearerToken, verifyRunnerSignature } from "./auth.js";
 import { controlPageHtml } from "./controlPage.js";
+import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 import {
   AllocationError,
   AllocationStrategy,
@@ -44,6 +45,7 @@ import {
   reviewerFor,
 } from "./projects/store.js";
 import type { RelayStores } from "./stores.js";
+import type { UserRecord, UserStore } from "./users/store.js";
 
 const PAIRING_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_COMMAND_TTL_MS = 5 * 60 * 1000;
@@ -62,7 +64,16 @@ function asSocket(conn: unknown): WsLike {
 
 export interface ServerOptions {
   stores: RelayStores;
-  sessionToken: string;
+  /** Real user accounts — session auth resolves against this, not a shared secret. */
+  users: UserStore;
+  /**
+   * Deploy-level secret (Railway env var). Its ONLY job is gating the
+   * one-time POST /api/auth/bootstrap that creates the first admin account
+   * when zero users exist yet. It is never accepted as a session credential
+   * for any other route — real per-user sessions replace that entirely.
+   * Omit to disable bootstrap (e.g. once you're certain it's no longer needed).
+   */
+  deployToken?: string;
   clock?: () => Date;
   /** Multi-project management: create/list projects, plan + edit + allocate each one's graph. */
   projects?: ProjectStore;
@@ -87,7 +98,7 @@ export interface NornsServer {
 }
 
 export async function buildServer(options: ServerOptions): Promise<NornsServer> {
-  const { stores, sessionToken } = options;
+  const { stores, users, deployToken } = options;
   const now = options.clock ?? (() => new Date());
   const app = Fastify({ logger: false });
   await app.register(websocket);
@@ -110,14 +121,40 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     }
   };
 
-  const requireSession = (req: FastifyRequest, reply: FastifyReply): boolean => {
+  /** Resolve the caller's bearer token to a real user, or undefined. Real
+   *  per-user sessions are the only session credential — the deploy token is
+   *  never accepted here, only by the bootstrap route below. */
+  const resolveUser = (req: FastifyRequest): UserRecord | undefined => {
     const token = bearerToken(req.headers.authorization);
-    if (token !== sessionToken) {
+    if (!token) return undefined;
+    return users.userForToken(token);
+  };
+
+  const requireSession = (req: FastifyRequest, reply: FastifyReply): boolean => {
+    if (!resolveUser(req)) {
       stores.audit("anonymous", "auth.rejected", `${req.method} ${req.url}`, now());
       reply.code(401).send({ error: "unauthorized" });
       return false;
     }
     return true;
+  };
+
+  /** Like requireSession, but also enforces the admin role. Returns the
+   *  resolved admin user (so the caller can attribute audit entries), or
+   *  null if it already sent a 401/403. */
+  const requireAdmin = (req: FastifyRequest, reply: FastifyReply): UserRecord | null => {
+    const user = resolveUser(req);
+    if (!user) {
+      stores.audit("anonymous", "auth.rejected", `${req.method} ${req.url}`, now());
+      reply.code(401).send({ error: "unauthorized" });
+      return null;
+    }
+    if (user.role !== "admin") {
+      stores.audit(user.email, "auth.forbidden", `${req.method} ${req.url}`, now());
+      reply.code(403).send({ error: "forbidden", message: "admin role required" });
+      return null;
+    }
+    return user;
   };
 
   const deliverPending = (runnerId: string, executed: ReadonlySet<string>): void => {
@@ -129,6 +166,184 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       stores.audit("server", "command.delivered", envelope.command_id, now());
     }
   };
+
+  // ---- auth: real user accounts -------------------------------------------------
+  // Replaces the single shared deploy token as the day-to-day login mechanism.
+  // The deploy token's only remaining job is gating the one-time bootstrap
+  // below; every other route resolves a real per-user session.
+
+  app.get("/api/auth/status", (_req, reply) => {
+    reply.send({ needs_bootstrap: users.count === 0 });
+  });
+
+  const BootstrapBody = z.object({
+    deploy_token: z.string().min(1),
+    email: z.string().email(),
+    password: z.string().min(8),
+    name: z.string().min(1).optional(),
+  });
+  app.post("/api/auth/bootstrap", (req, reply) => {
+    // The zero-users check is the real gate — it means this route can never
+    // be used to mint a SECOND admin later, even by someone who knows the
+    // deploy token. It's a one-time bootstrap, not a standing back door.
+    if (users.count > 0) return reply.code(403).send({ error: "already_bootstrapped" });
+    if (!deployToken) return reply.code(501).send({ error: "bootstrap_disabled" });
+    const body = BootstrapBody.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: "bad_request" });
+    if (body.data.deploy_token !== deployToken) {
+      stores.audit("anonymous", "auth.bootstrap_rejected", "bad deploy token", now());
+      return reply.code(403).send({ error: "invalid_deploy_token" });
+    }
+    const summary = users.createActive({
+      email: body.data.email,
+      name: body.data.name,
+      password: body.data.password,
+      role: "admin",
+    });
+    const { token } = users.login(body.data.email, body.data.password);
+    stores.audit(summary.email, "auth.bootstrapped", summary.id, now());
+    reply.code(201).send({ token, user: summary });
+  });
+
+  const LoginBody = z.object({ email: z.string().email(), password: z.string().min(1) });
+  app.post("/api/auth/login", (req, reply) => {
+    const body = LoginBody.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: "bad_request" });
+    try {
+      const { token, user } = users.login(body.data.email, body.data.password);
+      stores.audit(user.email, "auth.login", user.id, now());
+      reply.send({ token, user });
+    } catch {
+      stores.audit("anonymous", "auth.login_failed", body.data.email, now());
+      reply.code(401).send({ error: "invalid_credentials" });
+    }
+  });
+
+  app.post("/api/auth/logout", (req, reply) => {
+    const token = bearerToken(req.headers.authorization);
+    if (token) users.logout(token);
+    reply.send({ ok: true });
+  });
+
+  app.get("/api/auth/me", (req, reply) => {
+    const user = resolveUser(req);
+    if (!user) return reply.code(401).send({ error: "unauthorized" });
+    reply.send({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      status: user.status,
+    });
+  });
+
+  const AcceptInviteBody = z.object({
+    invite_token: z.string().min(1),
+    password: z.string().min(8),
+  });
+  app.post("/api/auth/accept-invite", (req, reply) => {
+    const body = AcceptInviteBody.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: "bad_request" });
+    try {
+      const summary = users.acceptInvite(body.data.invite_token, body.data.password);
+      const { token } = users.login(summary.email, body.data.password);
+      stores.audit(summary.email, "auth.invite_accepted", summary.id, now());
+      reply.send({ token, user: summary });
+    } catch (error) {
+      reply.code(400).send({
+        error: "invalid_invite",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  // ---- admin: user management (admin role required) ---------------------------
+
+  app.get("/api/admin/users", (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    reply.send(users.list());
+  });
+
+  const CreateUserBody = z.object({
+    email: z.string().email(),
+    name: z.string().min(1).optional(),
+    password: z.string().min(8),
+    role: z.enum(["admin", "member"]).default("member"),
+  });
+  app.post("/api/admin/users", (req, reply) => {
+    const admin = requireAdmin(req, reply);
+    if (!admin) return;
+    const body = CreateUserBody.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: "bad_request" });
+    try {
+      const summary = users.createActive(body.data);
+      stores.audit(admin.email, "admin.user_created", summary.id, now());
+      reply.code(201).send(summary);
+    } catch (error) {
+      reply.code(409).send({
+        error: "user_exists",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  const InviteUserBody = z.object({
+    email: z.string().email(),
+    name: z.string().min(1).optional(),
+    role: z.enum(["admin", "member"]).default("member"),
+  });
+  app.post("/api/admin/users/invite", async (req, reply) => {
+    const admin = requireAdmin(req, reply);
+    if (!admin) return;
+    const body = InviteUserBody.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: "bad_request" });
+    let created: { summary: ReturnType<UserStore["list"]>[number]; inviteToken: string };
+    try {
+      created = users.createInvite(body.data);
+    } catch (error) {
+      return reply.code(409).send({
+        error: "user_exists",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const origin = `${req.protocol}://${req.headers.host}`;
+    const acceptUrl = `${origin}/?invite=${created.inviteToken}`;
+    try {
+      await sendEmail({
+        to: created.summary.email,
+        subject: "You're invited to TheNorns",
+        html:
+          `<p>${admin.name ?? admin.email} invited you to TheNorns.</p>` +
+          `<p><a href="${acceptUrl}">Accept the invite</a> to set your password.</p>`,
+      });
+    } catch (error) {
+      // The user record exists either way — the admin can share the link
+      // manually or resend later. Not fatal, just reported clearly.
+      stores.audit(admin.email, "admin.invite_email_failed", created.summary.id, now());
+      return reply.code(502).send({
+        error:
+          error instanceof EmailNotConfiguredError ? "email_not_configured" : "email_send_failed",
+        message: error instanceof Error ? error.message : String(error),
+        user: created.summary,
+        invite_url: acceptUrl,
+      });
+    }
+    stores.audit(admin.email, "admin.user_invited", created.summary.id, now());
+    reply.code(201).send({ user: created.summary });
+  });
+
+  app.delete("/api/admin/users/:id", (req, reply) => {
+    const admin = requireAdmin(req, reply);
+    if (!admin) return;
+    const { id } = req.params as { id: string };
+    try {
+      users.remove(id);
+      stores.audit(admin.email, "admin.user_removed", id, now());
+      reply.send({ ok: true });
+    } catch {
+      reply.code(404).send({ error: "not_found" });
+    }
+  });
 
   // ---- pairing ---------------------------------------------------------------
 
@@ -794,7 +1009,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   app.get("/ws/session", { websocket: true }, (conn, req) => {
     const socket = asSocket(conn);
     const token = (req.query as { token?: string }).token;
-    if (token !== sessionToken) {
+    if (!token || !users.userForToken(token)) {
       socket.close();
       return;
     }

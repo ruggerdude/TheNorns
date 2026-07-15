@@ -15,10 +15,25 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Login } from "./Login";
+import { Account } from "./Account";
+import { Admin } from "./Admin";
+import { Login, type LoginMode } from "./Login";
 import { type PlanLike, PlanReview } from "./PlanReview";
 import { type ProjectSummary, Projects } from "./Projects";
-import { ApiError, UnauthorizedError, authHeaders, clearToken, getToken, setToken } from "./auth";
+import {
+  ApiError,
+  type AuthSession,
+  type CurrentUser,
+  UnauthorizedError,
+  authHeaders,
+  clearToken,
+  consumeInviteToken,
+  fetchAuthStatus,
+  fetchMe,
+  getToken,
+  requestLogout,
+  setToken,
+} from "./auth";
 import { Alert, Badge, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 
 interface Assignment {
@@ -140,10 +155,16 @@ function ProjectGraph({
   project,
   onBack,
   onLogout,
+  user,
+  onOpenAccount,
+  onOpenAdmin,
 }: {
   project: ProjectSummary;
   onBack: () => void;
   onLogout: (message: string) => void;
+  user: CurrentUser | null;
+  onOpenAccount: () => void;
+  onOpenAdmin: () => void;
 }): React.ReactElement {
   const base = `/api/projects/${project.id}`;
   const [graph, setGraph] = useState<GraphDto | null>(null);
@@ -509,9 +530,19 @@ function ProjectGraph({
           <Button className="btn-small" variant="ghost" onClick={onBack}>
             ← Projects
           </Button>
-          <Button className="btn-small" variant="ghost" onClick={() => onLogout("Signed out.")}>
-            Sign out
-          </Button>
+          <div className="header-actions">
+            <Button className="btn-small" variant="ghost" onClick={onOpenAccount}>
+              Account
+            </Button>
+            {user?.role === "admin" ? (
+              <Button className="btn-small" variant="ghost" onClick={onOpenAdmin}>
+                Admin
+              </Button>
+            ) : null}
+            <Button className="btn-small" variant="ghost" onClick={() => onLogout("Signed out.")}>
+              Sign out
+            </Button>
+          </div>
         </div>
         <div className="project-heading">
           <div className="eyebrow">Graph workspace</div>
@@ -836,35 +867,103 @@ export function App(): React.ReactElement {
   const [token, setTok] = useState<string | null>(getToken());
   const [authError, setAuthError] = useState<string | null>(null);
   const [activeProject, setActiveProject] = useState<ProjectSummary | null>(null);
+  const [user, setUser] = useState<CurrentUser | null>(null);
+  const [needsBootstrap, setNeedsBootstrap] = useState(false);
+  const [inviteToken] = useState<string | null>(() => consumeInviteToken());
+  const [showAccount, setShowAccount] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
 
-  const login = useCallback((value: string) => {
-    setToken(value);
+  useEffect(() => {
+    // An invite link always wins, regardless of bootstrap state — no need to
+    // ask the server at all in that case.
+    if (token || inviteToken) return;
+    fetchAuthStatus()
+      .then((status) => setNeedsBootstrap(status.needs_bootstrap))
+      .catch(() => setNeedsBootstrap(false));
+  }, [token, inviteToken]);
+
+  useEffect(() => {
+    if (!token) {
+      setUser(null);
+      return;
+    }
+    let cancelled = false;
+    fetchMe()
+      .then((u) => {
+        if (!cancelled) setUser(u);
+      })
+      .catch(() => {
+        if (!cancelled) setUser(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  const authenticated = useCallback((session: AuthSession) => {
+    setToken(session.token);
+    setUser(session.user);
     setAuthError(null);
-    setTok(value);
+    setTok(session.token);
   }, []);
 
   const logout = useCallback((message: string) => {
+    void requestLogout();
     clearToken();
     setTok(null);
+    setUser(null);
     setAuthError(message);
     setActiveProject(null);
+    setShowAccount(false);
+    setShowAdmin(false);
   }, []);
 
   if (!token) {
-    return <Login onLogin={login} error={authError} />;
-  }
-
-  if (!activeProject) {
+    const mode: LoginMode = inviteToken ? "invite" : needsBootstrap ? "bootstrap" : "login";
     return (
-      <Projects
-        onOpenProject={setActiveProject}
-        onUnauthorized={() => logout("Session expired. Sign in again.")}
-        onSignOut={() => logout("Signed out.")}
+      <Login
+        mode={mode}
+        inviteToken={inviteToken}
+        onAuthenticated={authenticated}
+        error={authError}
       />
     );
   }
 
   return (
-    <ProjectGraph project={activeProject} onBack={() => setActiveProject(null)} onLogout={logout} />
+    <>
+      {!activeProject ? (
+        <Projects
+          onOpenProject={setActiveProject}
+          onUnauthorized={() => logout("Session expired. Sign in again.")}
+          onSignOut={() => logout("Signed out.")}
+          user={user}
+          onOpenAccount={() => setShowAccount(true)}
+          onOpenAdmin={() => setShowAdmin(true)}
+        />
+      ) : (
+        <ProjectGraph
+          project={activeProject}
+          onBack={() => setActiveProject(null)}
+          onLogout={logout}
+          user={user}
+          onOpenAccount={() => setShowAccount(true)}
+          onOpenAdmin={() => setShowAdmin(true)}
+        />
+      )}
+      {showAccount && user ? (
+        <Account
+          user={user}
+          onClose={() => setShowAccount(false)}
+          onSignOut={() => logout("Signed out.")}
+        />
+      ) : null}
+      {showAdmin && user?.role === "admin" ? (
+        <Admin
+          onClose={() => setShowAdmin(false)}
+          onUnauthorized={() => logout("Session expired. Sign in again.")}
+        />
+      ) : null}
+    </>
   );
 }

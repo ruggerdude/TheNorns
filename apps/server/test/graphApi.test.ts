@@ -6,8 +6,10 @@ import { DEMO_PLAN } from "../src/graph/session.js";
 import { ProjectStore } from "../src/projects/store.js";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
+import { UserStore } from "../src/users/store.js";
+import { testAdminToken } from "./helpers.js";
 
-const TOKEN = "graph-test-token";
+let TOKEN = "";
 let server: NornsServer | null = null;
 
 afterEach(async () => {
@@ -37,9 +39,11 @@ async function inject(
 
 /** A fresh server with one project already carrying the 10-node demo plan. */
 async function startWithDemoProject(): Promise<{ server: NornsServer; projectId: string }> {
+  const users = new UserStore();
+  TOKEN = testAdminToken(users);
   server = await buildServer({
     stores: new RelayStores(),
-    sessionToken: TOKEN,
+    users,
     projects: new ProjectStore(),
   });
   const created = await inject(server, "POST", "/api/projects", {
@@ -55,9 +59,11 @@ async function startWithDemoProject(): Promise<{ server: NornsServer; projectId:
 
 describe("projects API", () => {
   it("creates a project as a draft, then plan/load turns it into planned", async () => {
+    const users = new UserStore();
+    TOKEN = testAdminToken(users);
     server = await buildServer({
       stores: new RelayStores(),
-      sessionToken: TOKEN,
+      users,
       projects: new ProjectStore(),
     });
     const created = await inject(server, "POST", "/api/projects", {
@@ -93,9 +99,11 @@ describe("projects API", () => {
   });
 
   it("404s on an unknown project id", async () => {
+    const users = new UserStore();
+    TOKEN = testAdminToken(users);
     server = await buildServer({
       stores: new RelayStores(),
-      sessionToken: TOKEN,
+      users,
       projects: new ProjectStore(),
     });
     const res = await inject(server, "GET", "/api/projects/proj-does-not-exist");

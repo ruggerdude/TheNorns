@@ -8,8 +8,10 @@ import { DEMO_PLAN } from "../src/graph/session.js";
 import { ProjectStore } from "../src/projects/store.js";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
+import { UserStore } from "../src/users/store.js";
+import { testAdminToken } from "./helpers.js";
 
-const TOKEN = "demo-dash-token";
+let TOKEN = "";
 let server: NornsServer | null = null;
 
 afterEach(async () => {
@@ -55,9 +57,11 @@ function trackingProvider() {
 describe("UI-6 containment — demo dashboard is structurally isolated from real projects", () => {
   it("serves demo data at /api/demo/dashboard and invokes the provider with no arguments", async () => {
     const { provider, calls } = trackingProvider();
+    const users = new UserStore();
+    TOKEN = testAdminToken(users);
     server = await buildServer({
       stores: new RelayStores(),
-      sessionToken: TOKEN,
+      users,
       projects: new ProjectStore(),
       dashboard: provider,
     });
@@ -74,9 +78,11 @@ describe("UI-6 containment — demo dashboard is structurally isolated from real
 
   it("requires session auth like every other /api route", async () => {
     const { provider } = trackingProvider();
+    const users = new UserStore();
+    TOKEN = testAdminToken(users);
     server = await buildServer({
       stores: new RelayStores(),
-      sessionToken: TOKEN,
+      users,
       dashboard: provider,
     });
 
@@ -86,9 +92,11 @@ describe("UI-6 containment — demo dashboard is structurally isolated from real
 
   it("no longer exposes the old unscoped /api/dashboard route", async () => {
     const { provider } = trackingProvider();
+    const users = new UserStore();
+    TOKEN = testAdminToken(users);
     server = await buildServer({
       stores: new RelayStores(),
-      sessionToken: TOKEN,
+      users,
       dashboard: provider,
     });
 
@@ -98,9 +106,11 @@ describe("UI-6 containment — demo dashboard is structurally isolated from real
 
   it("exposes no project-scoped dashboard route — a real project_id has nowhere to route", async () => {
     const { provider } = trackingProvider();
+    const users = new UserStore();
+    TOKEN = testAdminToken(users);
     server = await buildServer({
       stores: new RelayStores(),
-      sessionToken: TOKEN,
+      users,
       projects: new ProjectStore(),
       dashboard: provider,
     });
@@ -122,9 +132,11 @@ describe("UI-6 containment — demo dashboard is structurally isolated from real
 
   it("returns byte-identical output regardless of query params a caller might append", async () => {
     const { provider } = trackingProvider();
+    const users = new UserStore();
+    TOKEN = testAdminToken(users);
     server = await buildServer({
       stores: new RelayStores(),
-      sessionToken: TOKEN,
+      users,
       projects: new ProjectStore(),
       dashboard: provider,
     });
@@ -137,9 +149,11 @@ describe("UI-6 containment — demo dashboard is structurally isolated from real
   });
 
   it("omits the demo dashboard route entirely when no demo provider is configured", async () => {
+    const users = new UserStore();
+    TOKEN = testAdminToken(users);
     server = await buildServer({
       stores: new RelayStores(),
-      sessionToken: TOKEN,
+      users,
       projects: new ProjectStore(),
       // no `dashboard` provider
     });

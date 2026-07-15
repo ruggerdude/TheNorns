@@ -4,8 +4,18 @@ import { join } from "node:path";
 import { RunnerDaemon } from "@norns/runner";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
+import { UserStore } from "../src/users/store.js";
 
-export const TOKEN = "test-session-token";
+/** A real session token for a seeded test admin — real accounts replaced
+ *  the old shared deploy token as the day-to-day session credential. */
+export function testAdminToken(users: UserStore): string {
+  users.createActive({
+    email: "test-admin@example.com",
+    password: "test-password-1",
+    role: "admin",
+  });
+  return users.login("test-admin@example.com", "test-password-1").token;
+}
 
 export async function waitFor(
   condition: () => boolean | Promise<boolean>,
@@ -28,6 +38,11 @@ export interface Stack {
   api: (path: string, init?: RequestInit) => Promise<Response>;
   issue: (payload: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<string>;
   stop: () => Promise<void>;
+  /** The seeded test admin's live session — reuse `users` (not a fresh
+   *  UserStore) when a test needs to build a second server instance (e.g.
+   *  simulating a restart) that should still accept `token`. */
+  users: UserStore;
+  token: string;
 }
 
 export async function listen(server: NornsServer): Promise<string> {
@@ -39,14 +54,16 @@ export async function listen(server: NornsServer): Promise<string> {
 
 export async function startStack(runnerId = "runner-1"): Promise<Stack> {
   const stores = new RelayStores();
-  const server = await buildServer({ stores, sessionToken: TOKEN });
+  const users = new UserStore();
+  const token = testAdminToken(users);
+  const server = await buildServer({ stores, users });
   const url = await listen(server);
 
   const api = (path: string, init?: RequestInit) =>
     fetch(`${url}${path}`, {
       ...init,
       headers: {
-        authorization: `Bearer ${TOKEN}`,
+        authorization: `Bearer ${token}`,
         // content-type only with a body: Fastify 400s an empty JSON body
         ...(init?.body !== undefined ? { "content-type": "application/json" } : {}),
         ...(init?.headers ?? {}),
@@ -89,6 +106,8 @@ export async function startStack(runnerId = "runner-1"): Promise<Stack> {
     dataDir,
     api,
     issue,
+    users,
+    token,
     stop: async () => {
       daemon.stop();
       await server.app.close();

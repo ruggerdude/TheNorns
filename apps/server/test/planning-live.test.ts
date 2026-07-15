@@ -10,8 +10,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ProjectStore } from "../src/projects/store.js";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
+import { UserStore } from "../src/users/store.js";
+import { testAdminToken } from "./helpers.js";
 
-const TOKEN = "plan-test-token";
+let TOKEN = "";
 let server: NornsServer | null = null;
 
 afterEach(async () => {
@@ -20,9 +22,11 @@ afterEach(async () => {
 });
 
 async function start(recordUsage?: (events: UsageEventT[]) => void): Promise<NornsServer> {
+  const users = new UserStore();
+  TOKEN = testAdminToken(users);
   server = await buildServer({
     stores: new RelayStores(),
-    sessionToken: TOKEN,
+    users,
     projects: new ProjectStore(),
     ...(recordUsage ? { recordUsage } : {}),
   });

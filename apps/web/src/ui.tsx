@@ -38,7 +38,7 @@ export function Select(props: SelectHTMLAttributes<HTMLSelectElement>) {
 export function Alert({ children, testId }: { children: ReactNode; testId?: string }) {
   return (
     <div className="alert" data-testid={testId}>
-      {children}
+      <span className="alert-body">{children}</span>
     </div>
   );
 }

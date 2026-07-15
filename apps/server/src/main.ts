@@ -14,6 +14,7 @@ import { PgPersistence, SnapshotFlusher } from "./persistence/pg.js";
 import { ProjectStore } from "./projects/store.js";
 import { buildServer } from "./server.js";
 import { RelayStores } from "./stores.js";
+import { UserStore } from "./users/store.js";
 
 // The scripted demo walkthrough that drives the DEMO dashboard's example view
 // (GET /api/demo/dashboard) — deliberately NOT a real project. It never enters
@@ -24,6 +25,11 @@ const demoSession = GraphSession.demo();
 // Multi-project management: the sole point of entry — create, list, plan,
 // and edit real projects. Empty until you create your first one.
 const projects = new ProjectStore();
+
+// Real user accounts — replaces the shared deploy token as the day-to-day
+// login mechanism. Empty until the first admin is bootstrapped (or, in dev,
+// auto-seeded below).
+const users = new UserStore();
 
 // Tier-2 persistence: when DATABASE_URL is set (Railway Postgres plugin),
 // hydrate relay state from the last snapshot and flush changes back durably.
@@ -57,13 +63,18 @@ if (databaseUrl) {
     const projectsSnap = await persistence.load("projects");
     if (projectsSnap) projects.restoreFrom(JSON.parse(projectsSnap));
 
+    // user accounts + live sessions
+    const usersSnap = await persistence.load("users");
+    if (usersSnap) users.restoreFrom(JSON.parse(usersSnap));
+
     flushers.push(
       new SnapshotFlusher(persistence, "relay", () => stores.snapshot()),
       new SnapshotFlusher(persistence, "projects", () => JSON.stringify(projects.snapshot())),
+      new SnapshotFlusher(persistence, "users", () => JSON.stringify(users.snapshot())),
     );
     for (const f of flushers) f.start();
     console.log(
-      `postgres: relay ${relaySnap ? "restored" : "fresh"}, projects ${projectsSnap ? "restored" : "fresh"}`,
+      `postgres: relay ${relaySnap ? "restored" : "fresh"}, projects ${projectsSnap ? "restored" : "fresh"}, users ${usersSnap ? "restored" : "fresh"}`,
     );
     for (const signal of ["SIGTERM", "SIGINT"] as const) {
       process.on(signal, () => {
@@ -142,11 +153,31 @@ const ledger = [
 const complexityOf = (nodeId: string): "S" | "M" | "L" | "XL" =>
   demoSession.plan.modules.find((mod) => mod.id === nodeId)?.estimated_complexity ?? "M";
 
-// A public URL must not run on the default dev token. Fail loudly instead.
 const isProd = process.env.NODE_ENV === "production";
-const token = process.env.NORNS_TOKEN ?? (isProd ? undefined : "dev-token");
-if (!token) {
-  console.error("NORNS_TOKEN is required in production — set it as an environment variable.");
+// NORNS_TOKEN's only remaining job is gating one-time first-admin bootstrap
+// (POST /api/auth/bootstrap) — it is never accepted as a day-to-day session
+// credential anymore. Real accounts replace that entirely.
+const deployToken = process.env.NORNS_TOKEN;
+
+if (!isProd && users.count === 0) {
+  // Local dev convenience: skip the bootstrap ceremony so `pnpm dev` keeps
+  // working out of the box, same spirit as the old default dev token.
+  users.createActive({
+    email: "dev@local.test",
+    name: "Dev Admin",
+    password: "dev-password",
+    role: "admin",
+  });
+  console.log("dev mode: seeded dev@local.test / dev-password as the first admin");
+}
+
+// A public URL with zero users and no deploy token would be permanently
+// unreachable — nobody could ever create an account. Fail loudly at boot
+// instead of shipping a site nobody can sign into.
+if (isProd && users.count === 0 && !deployToken) {
+  console.error(
+    "NORNS_TOKEN is required in production until the first admin exists — set it as an environment variable, then use it once at /api/auth/bootstrap.",
+  );
   process.exit(1);
 }
 
@@ -155,9 +186,10 @@ const webDist = process.env.NORNS_WEB_DIST;
 
 const server = await buildServer({
   stores,
-  sessionToken: token,
+  users,
   projects,
   recordUsage: (events) => ledger.push(...events),
+  ...(deployToken !== undefined ? { deployToken } : {}),
   ...(webDist !== undefined ? { webDist } : {}),
   dashboard: () =>
     buildDashboard({

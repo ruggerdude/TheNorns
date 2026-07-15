@@ -6,7 +6,7 @@ import { RunnerDaemon } from "@norns/runner";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
-import { type Stack, TOKEN, commandState, listen, startStack, waitFor } from "./helpers.js";
+import { type Stack, commandState, listen, startStack, waitFor } from "./helpers.js";
 
 let stack: Stack | null = null;
 
@@ -160,11 +160,12 @@ describe("phase 1A — remote control", () => {
 
     const restored = await buildServer({
       stores: RelayStores.restore(snapshot),
-      sessionToken: TOKEN,
+      users: stack.users, // same UserStore instance -> stack.token is still a live session
     });
     const url = await listen(restored);
+    const restoredToken = stack.token;
     const api = (path: string) =>
-      fetch(`${url}${path}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+      fetch(`${url}${path}`, { headers: { authorization: `Bearer ${restoredToken}` } });
 
     // same runner identity, same durable runner state, new connection
     const revived = new RunnerDaemon({
