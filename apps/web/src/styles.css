@@ -122,6 +122,11 @@ button:disabled {
   color: #cbd0d5;
   font-weight: 600;
 }
+.field-help {
+  color: var(--muted);
+  font-size: .72rem;
+  line-height: 1.45;
+}
 .input,
 .select,
 .textarea {
@@ -306,6 +311,251 @@ button:disabled {
   gap: 1.5rem;
   align-items: start;
 }
+.project-dashboard {
+  padding-top: clamp(2rem, 4vw, 3.5rem);
+}
+.dashboard-hero {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 2rem;
+  margin-bottom: 2rem;
+}
+.dashboard-hero h1 {
+  margin: .45rem 0 .35rem;
+  font-size: clamp(2.2rem, 5vw, 4rem);
+  letter-spacing: -.06em;
+}
+.dashboard-hero p {
+  color: var(--muted);
+  margin: 0;
+  max-width: 610px;
+}
+.dashboard-actions {
+  display: flex;
+  gap: .65rem;
+  flex: none;
+}
+.project-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(18, 21, 25, 0.75);
+  margin-bottom: 2rem;
+}
+.project-stats div {
+  padding: 1rem 1.2rem;
+  border-right: 1px solid var(--line);
+}
+.project-stats div:last-child {
+  border-right: 0;
+}
+.project-stats strong {
+  display: block;
+  font-size: 1.5rem;
+}
+.project-stats span {
+  color: var(--muted);
+  font-size: .72rem;
+}
+.project-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+.project-toolbar h2 {
+  margin: 0 0 .2rem;
+}
+.project-toolbar .input {
+  width: min(270px, 100%);
+}
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+.project-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(18, 21, 25, 0.9);
+  overflow: hidden;
+  transition: .18s ease;
+}
+.project-card:hover {
+  border-color: #665137;
+  transform: translateY(-3px);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
+}
+.project-card-main {
+  width: 100%;
+  height: 100%;
+  padding: 1.15rem;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+}
+.project-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.project-monogram {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  color: var(--accent2);
+  background: #2b2114;
+  font: 600 .72rem "DM Mono", monospace;
+}
+.project-card h3 {
+  margin: 1rem 0 .4rem;
+  font-size: 1.05rem;
+}
+.project-card p {
+  color: var(--muted);
+  font-size: .8rem;
+  line-height: 1.5;
+  margin: 0 0 1rem;
+  min-height: 3.6em;
+}
+.project-objective {
+  padding: .65rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  font-size: .75rem;
+  margin-bottom: 1rem;
+}
+.project-objective span {
+  display: block;
+  color: var(--muted);
+  font-size: .62rem;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  margin-bottom: .3rem;
+}
+.project-facts {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: .5rem;
+  margin: auto 0 1rem;
+}
+.project-facts dt {
+  color: var(--muted);
+  font-size: .61rem;
+  text-transform: uppercase;
+}
+.project-facts dd {
+  margin: .25rem 0 0;
+  font: 500 .67rem "DM Mono", monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+}
+.project-open-link {
+  display: flex;
+  justify-content: space-between;
+  border-top: 1px solid var(--line);
+  padding-top: .8rem;
+  color: var(--accent2);
+  font-size: .75rem;
+  font-weight: 700;
+}
+.project-tabs {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  overflow-x: auto;
+  padding: .35rem clamp(1rem, 3vw, 2.5rem);
+  border-bottom: 1px solid var(--line);
+  background: #0d1013;
+}
+.project-tabs-label {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .09em;
+  font-size: .6rem;
+  margin-right: .25rem;
+}
+.project-tab {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #13171b;
+  white-space: nowrap;
+}
+.project-tab.is-active {
+  border-color: #765a34;
+  background: #211b13;
+}
+.project-tab button {
+  border: 0;
+  background: transparent;
+  color: #cbd0d5;
+  padding: .4rem .3rem .4rem .6rem;
+  font-size: .7rem;
+}
+.project-tab-close {
+  color: var(--muted) !important;
+  padding: .4rem .55rem .4rem .25rem !important;
+}
+.status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: .4rem;
+  background: var(--accent);
+}
+.status-planned {
+  background: var(--success);
+}
+.existing-list {
+  display: grid;
+  gap: .55rem;
+}
+.existing-list > button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  text-align: left;
+  color: var(--text);
+  border: 1px solid var(--line);
+  background: #111419;
+  border-radius: 10px;
+  padding: .8rem;
+}
+.existing-list > button:hover {
+  border-color: #665137;
+}
+.existing-list span {
+  min-width: 0;
+}
+.existing-list strong,
+.existing-list small {
+  display: block;
+}
+.existing-list small {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: .2rem;
+}
+.compact-empty {
+  min-height: 150px;
+}
 .form-stack {
   display: grid;
   gap: 1rem;
@@ -425,6 +675,10 @@ button:disabled {
   background: #101317;
   overflow: auto;
   padding: 1rem;
+}
+.sidebar > .project-tabs {
+  margin: -1rem -1rem 1rem;
+  padding: .35rem .6rem;
 }
 .sidebar-head {
   display: flex;
@@ -690,6 +944,9 @@ button:disabled {
   .projects-layout {
     grid-template-columns: 1fr;
   }
+  .project-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .admin-layout {
     grid-template-columns: 1fr;
   }
@@ -736,6 +993,27 @@ button:disabled {
   }
 }
 @media (max-width: 520px) {
+  .dashboard-hero,
+  .project-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .dashboard-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .project-stats {
+    grid-template-columns: 1fr 1fr;
+  }
+  .project-stats div:nth-child(2) {
+    border-right: 0;
+  }
+  .project-stats div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
+  }
+  .project-grid {
+    grid-template-columns: 1fr;
+  }
   .section-head {
     align-items: flex-start;
     flex-direction: column;
