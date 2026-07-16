@@ -3,6 +3,7 @@ import {
   V2ActorType,
   V2EntityId,
   V2EntityRef,
+  V2EntityRefType,
   V2IsoDateTime,
   V2NonEmptyString,
   V2PositiveVersion,
@@ -25,6 +26,7 @@ export const V2DomainStreamType = z.enum([
   "decision_point",
   "budget_reservation",
   "dispatch_job",
+  "migration",
 ]);
 export type V2DomainStreamTypeT = z.infer<typeof V2DomainStreamType>;
 
@@ -112,6 +114,18 @@ export const V2DomainEventPayload = z.discriminatedUnion("kind", [
       task_id: V2EntityId,
       run_id: V2EntityId,
       budget_reservation_id: V2EntityId,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("legacy_entity_imported"),
+      migration_run_id: V2EntityId,
+      import_batch_id: V2EntityId,
+      legacy_entity_type: V2NonEmptyString,
+      legacy_entity_id: V2NonEmptyString,
+      v2_entity_type: V2EntityRefType,
+      v2_entity_id: V2EntityId,
+      source_hash: V2Sha256Hex,
     })
     .strict(),
 ]);
@@ -229,6 +243,18 @@ export const V2DomainEvent = z
         ) {
           linkageIssue(
             "Dispatch creation requires its matching DispatchJob stream and Task identity",
+          );
+        }
+        break;
+      case "legacy_entity_imported":
+        if (
+          event.stream_type !== "migration" ||
+          event.stream_id !== event.payload.import_batch_id ||
+          event.actor_type !== "legacy" ||
+          event.actor_id !== null
+        ) {
+          linkageIssue(
+            "Legacy import requires its migration batch stream and an unattributed legacy actor",
           );
         }
         break;

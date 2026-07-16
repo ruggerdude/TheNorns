@@ -1,0 +1,57 @@
+{
+  "id": "proj-multi-worker-assignment",
+  "name": "Multi-worker assignment",
+  "description": "One legacy graph node requests more than one worker",
+  "pmProvider": "openai",
+  "createdAt": "2026-07-15T12:00:00.000Z",
+  "plan": {
+    "objective": "Detect a non-representable worker count",
+    "assumptions": [],
+    "modules": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "description": "Implement task A",
+        "deliverables": ["Task A output"],
+        "acceptance": [
+          {
+            "id": "AC-A",
+            "statement": "Task A passes",
+            "verification_type": "command",
+            "verification": "pnpm test"
+          }
+        ],
+        "dependencies": [],
+        "estimated_complexity": "M",
+        "risk": "low",
+        "parallelization": { "safe": false }
+      }
+    ],
+    "risks": [],
+    "out_of_scope": []
+  },
+  "graph": {
+    "version": 1,
+    "nodes": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "complexity": "M",
+        "risk": "low",
+        "parallel_safe": false,
+        "dependencies": [],
+        "assignment": {
+          "provider": "openai",
+          "model": "gpt-5.6-terra",
+          "role": "implementation",
+          "worker_count": 2,
+          "reviewer_model": "claude-sonnet-5",
+          "budget_usd": 75,
+          "rationale": "legacy parallel allocation",
+          "source": "override"
+        }
+      }
+    ]
+  },
+  "approval": null
+}

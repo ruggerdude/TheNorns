@@ -15,7 +15,6 @@ postgresDescribe("V2 real PostgreSQL concurrency evidence", () => {
   let privilegedRunner: NodePgTransactionRunner;
   let runtimeRunner: NodePgTransactionRunner;
   let databaseUser: string;
-  let runtimeRoleCreated = false;
   let runtimeRoleMembershipAdded = false;
   let schemaName: string;
 
@@ -26,13 +25,18 @@ postgresDescribe("V2 real PostgreSQL concurrency evidence", () => {
       "SELECT current_user",
     );
     databaseUser = identity.rows[0]?.current_user ?? "";
-    const role = await administrationPool.query<{ exists: boolean }>(
-      "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = 'norns_app') AS exists",
-    );
-    runtimeRoleCreated = !role.rows[0]?.exists;
-    if (runtimeRoleCreated) {
-      await administrationPool.query("CREATE ROLE norns_app NOLOGIN");
-    }
+    // norns_app is a deployment-level role shared by all isolated real-PG
+    // suites. Provision it race-safely and leave it in place for peer files.
+    await administrationPool.query(`
+      DO $role$
+      BEGIN
+        CREATE ROLE norns_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+          NOREPLICATION NOBYPASSRLS;
+      EXCEPTION WHEN duplicate_object THEN
+        NULL;
+      END
+      $role$;
+    `);
     const membership = await administrationPool.query<{ exists: boolean }>(
       `SELECT EXISTS(
          SELECT 1
@@ -85,9 +89,6 @@ postgresDescribe("V2 real PostgreSQL concurrency evidence", () => {
       await administrationPool.query(
         `REVOKE norns_app FROM "${databaseUser.replaceAll('"', '""')}"`,
       );
-    }
-    if (runtimeRoleCreated) {
-      await administrationPool.query("DROP ROLE norns_app");
     }
     await administrationPool.end();
   });

@@ -218,6 +218,44 @@ describe("V2 domain and audit history", () => {
     expect(V2AuditEvent.safeParse(audit).success).toBe(true);
     expect(V2AuditEvent.safeParse({ ...audit, actor_id: null }).success).toBe(false);
   });
+
+  it("records legacy import provenance without fabricating a human actor", () => {
+    const event = {
+      schema_version: 2,
+      event_id: "event-import-1",
+      stream_type: "migration",
+      stream_id: "migration-batch-1",
+      stream_version: 1,
+      event_type: "legacy_entity_imported",
+      project_id: "project-1",
+      phase_id: "phase-1",
+      task_id: "task-1",
+      actor_type: "legacy",
+      actor_id: null,
+      correlation_id: "migration-run-1",
+      causation_id: null,
+      occurred_at: NOW,
+      payload: {
+        kind: "legacy_entity_imported",
+        migration_run_id: "migration-run-1",
+        import_batch_id: "migration-batch-1",
+        legacy_entity_type: "graph_node",
+        legacy_entity_id: "legacy-task-1",
+        v2_entity_type: "task",
+        v2_entity_id: "task-1",
+        source_hash: HASH,
+      },
+    } as const;
+
+    expect(V2DomainEvent.safeParse(event).success).toBe(true);
+    expect(V2DomainEvent.safeParse({ ...event, actor_type: "system" }).success).toBe(false);
+    expect(
+      V2DomainEvent.safeParse({
+        ...event,
+        payload: { ...event.payload, import_batch_id: "other-batch" },
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe("V2 budget reservation terminal outcomes", () => {

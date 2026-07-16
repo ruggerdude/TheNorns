@@ -1,4 +1,6 @@
 export * from "./common.js";
+export * from "./identity.js";
+export * from "./migration.js";
 export * from "./lifecycle.js";
 export * from "./domain.js";
 export * from "./repository.js";

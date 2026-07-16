@@ -5,6 +5,7 @@ import {
   bigint,
   boolean,
   check,
+  customType,
   foreignKey,
   index,
   integer,
@@ -24,6 +25,9 @@ const updatedAt = () =>
 const aggregateVersion = () => integer("aggregate_version").notNull().default(1);
 const schemaVersion = () => integer("schema_version").notNull().default(2);
 const money = (name: string) => numeric(name, { precision: 18, scale: 6 }).notNull().default("0");
+const bytea = customType<{ data: Uint8Array }>({
+  dataType: () => "bytea",
+});
 const lazyForeignKey = (
   name: string,
   columns: () => AnyPgColumn[],
@@ -1649,4 +1653,908 @@ export const phase1V2Schema = {
   projectionCheckpoints,
   migrationRuns,
   legacyIdMappings,
+};
+
+/**
+ * Phase 2 overlays for tables whose forward migration adds preservation
+ * columns. The Phase 1 declarations above remain frozen so the 0001 schema
+ * evidence can still compare against the exact reviewed migration.
+ */
+export const phase2Users = pgTable(
+  "users",
+  {
+    id: text("id").primaryKey(),
+    username: text("username").notNull(),
+    displayName: text("display_name").notNull(),
+    email: text("email").notNull(),
+    name: text("name"),
+    passwordHash: text("password_hash"),
+    passwordHashScheme: text("password_hash_scheme"),
+    passwordRehashedAt: timestamp("password_rehashed_at", {
+      withTimezone: true,
+      mode: "string",
+    }),
+    role: text("role").notNull(),
+    status: text("status").notNull().default("active"),
+    source: text("source").notNull().default("native"),
+    sourceRecordId: text("source_record_id"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("users_username_unique").on(table.username),
+    uniqueIndex("users_email_normalized_unique").on(sql`lower(${table.email})`),
+    check("users_role_check", sql`${table.role} IN ('admin', 'member')`),
+    check("users_status_check", sql`${table.status} IN ('active', 'invited', 'disabled')`),
+    check(
+      "users_password_hash_shape_check",
+      sql`(${table.passwordHash} IS NULL) = (${table.passwordHashScheme} IS NULL)`,
+    ),
+    check(
+      "users_active_password_check",
+      sql`${table.status} <> 'active' OR ${table.passwordHash} IS NOT NULL`,
+    ),
+    check(
+      "users_invited_password_check",
+      sql`${table.status} <> 'invited' OR ${table.passwordHash} IS NULL`,
+    ),
+    check(
+      "users_password_hash_scheme_check",
+      sql`${table.passwordHashScheme} IS NULL
+        OR ${table.passwordHashScheme} IN ('legacy-scrypt-v0', 'scrypt-v1')`,
+    ),
+    check("users_email_normalized_check", sql`${table.email} = lower(btrim(${table.email}))`),
+    check("users_source_check", sql`${table.source} IN ('native', 'legacy_snapshot')`),
+  ],
+);
+
+export const phase2Sessions = pgTable(
+  "sessions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    tokenHash: text("token_hash").notNull(),
+    tokenHashScheme: text("token_hash_scheme").notNull().default("sha256"),
+    tokenKeyId: text("token_key_id"),
+    status: text("status").notNull().default("active"),
+    createdAt: createdAt(),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true, mode: "string" }),
+    revocationReason: text("revocation_reason"),
+    source: text("source").notNull().default("native"),
+    sourceRecordId: text("source_record_id"),
+  },
+  (table) => [
+    uniqueIndex("sessions_token_hash_unique").on(table.tokenHash),
+    index("sessions_user_status_idx").on(table.userId, table.revokedAt, table.expiresAt),
+    check("sessions_status_check", sql`${table.status} IN ('active', 'revoked', 'expired')`),
+    check(
+      "sessions_token_hash_scheme_check",
+      sql`${table.tokenHashScheme} IN ('sha256', 'hmac-sha256')`,
+    ),
+    check(
+      "sessions_token_key_check",
+      sql`${table.tokenHashScheme} <> 'hmac-sha256' OR ${table.tokenKeyId} IS NOT NULL`,
+    ),
+    check(
+      "sessions_revocation_shape_check",
+      sql`${table.status} <> 'revoked' OR ${table.revokedAt} IS NOT NULL`,
+    ),
+    check("sessions_source_check", sql`${table.source} IN ('native', 'legacy_snapshot')`),
+    check(
+      "sessions_legacy_revoked_check",
+      sql`${table.source} <> 'legacy_snapshot' OR ${table.status} = 'revoked'`,
+    ),
+  ],
+);
+
+export const invitations = pgTable(
+  "invitations",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    tokenHash: text("token_hash").notNull(),
+    tokenHashScheme: text("token_hash_scheme").notNull().default("sha256"),
+    tokenKeyId: text("token_key_id"),
+    status: text("status").notNull(),
+    createdAt: createdAt(),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true, mode: "string" }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }),
+    revocationReason: text("revocation_reason"),
+    source: text("source").notNull().default("native"),
+    sourceRecordId: text("source_record_id"),
+  },
+  (table) => [
+    uniqueIndex("invitations_token_hash_unique").on(table.tokenHash),
+    index("invitations_user_status_idx").on(table.userId, table.status, table.expiresAt),
+    check(
+      "invitations_status_check",
+      sql`${table.status} IN ('pending', 'accepted', 'revoked', 'expired')`,
+    ),
+    check(
+      "invitations_token_hash_scheme_check",
+      sql`${table.tokenHashScheme} IN ('sha256', 'hmac-sha256')`,
+    ),
+    check(
+      "invitations_token_key_check",
+      sql`${table.tokenHashScheme} <> 'hmac-sha256' OR ${table.tokenKeyId} IS NOT NULL`,
+    ),
+    check(
+      "invitations_accepted_shape_check",
+      sql`${table.status} <> 'accepted' OR ${table.acceptedAt} IS NOT NULL`,
+    ),
+    check(
+      "invitations_revoked_shape_check",
+      sql`${table.status} <> 'revoked' OR ${table.revokedAt} IS NOT NULL`,
+    ),
+    check("invitations_source_check", sql`${table.source} IN ('native', 'legacy_snapshot')`),
+    check(
+      "invitations_legacy_revoked_check",
+      sql`${table.source} <> 'legacy_snapshot' OR ${table.status} = 'revoked'`,
+    ),
+  ],
+);
+
+export const credentialHmacKeyRegistry = pgTable(
+  "credential_hmac_key_registry",
+  {
+    keyId: text("key_id").primaryKey(),
+    keyFingerprint: text("key_fingerprint").notNull(),
+    status: text("status").notNull().default("active"),
+    registeredAt: createdAt(),
+    retiredAt: timestamp("retired_at", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    check(
+      "credential_hmac_key_registry_fingerprint_check",
+      sql`${table.keyFingerprint} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "credential_hmac_key_registry_status_check",
+      sql`${table.status} IN ('active', 'retired')`,
+    ),
+    check(
+      "credential_hmac_key_registry_retirement_shape_check",
+      sql`(
+        (${table.status} = 'active' AND ${table.retiredAt} IS NULL)
+        OR (${table.status} = 'retired' AND ${table.retiredAt} IS NOT NULL)
+      )`,
+    ),
+  ],
+);
+
+export const archiveEncryptionKeyRegistry = pgTable(
+  "archive_encryption_key_registry",
+  {
+    keyId: text("key_id").primaryKey(),
+    keyFingerprint: text("key_fingerprint").notNull(),
+    registeredAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("archive_encryption_key_registry_fingerprint_unique").on(table.keyFingerprint),
+    uniqueIndex("archive_encryption_key_registry_identity_unique").on(
+      table.keyId,
+      table.keyFingerprint,
+    ),
+    check(
+      "archive_encryption_key_registry_fingerprint_check",
+      sql`${table.keyFingerprint} ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
+
+export const projectPlanningPreferences = pgTable(
+  "project_planning_preferences",
+  {
+    projectId: text("project_id")
+      .primaryKey()
+      .references(() => projects.id, { onDelete: "restrict" }),
+    pmProvider: text("pm_provider").notNull(),
+    pmModel: text("pm_model"),
+    reviewerProvider: text("reviewer_provider").notNull(),
+    source: text("source").notNull().default("native"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    check(
+      "project_planning_preferences_pm_provider_check",
+      sql`${table.pmProvider} IN ('anthropic', 'openai')`,
+    ),
+    check(
+      "project_planning_preferences_reviewer_provider_check",
+      sql`${table.reviewerProvider} IN ('anthropic', 'openai')
+        AND ${table.reviewerProvider} <> ${table.pmProvider}`,
+    ),
+    check(
+      "project_planning_preferences_source_check",
+      sql`${table.source} IN ('native', 'legacy_snapshot')`,
+    ),
+  ],
+);
+
+export const repositoryBindingCandidates = pgTable(
+  "repository_binding_candidates",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "restrict" }),
+    sourceType: text("source_type").notNull(),
+    sourceFingerprint: text("source_fingerprint").notNull(),
+    displayName: text("display_name").notNull(),
+    githubOwner: text("github_owner"),
+    githubName: text("github_name"),
+    status: text("status").notNull().default("unverified"),
+    archiveId: text("archive_id").references((): AnyPgColumn => legacySnapshotArchives.id, {
+      onDelete: "restrict",
+    }),
+    sourceRecordId: text("source_record_id"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("repository_binding_candidates_project_source_unique").on(
+      table.projectId,
+      table.sourceType,
+      table.sourceFingerprint,
+    ),
+    index("repository_binding_candidates_project_status_idx").on(table.projectId, table.status),
+    check(
+      "repository_binding_candidates_source_type_check",
+      sql`${table.sourceType} IN ('local', 'github')`,
+    ),
+    check(
+      "repository_binding_candidates_status_check",
+      sql`${table.status} IN ('unverified', 'promoted', 'dismissed')`,
+    ),
+    check(
+      "repository_binding_candidates_hash_check",
+      sql`${table.sourceFingerprint} ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
+
+export const phase2MigrationRuns = pgTable(
+  "migration_runs",
+  {
+    id: text("id").primaryKey(),
+    migrationName: text("migration_name").notNull(),
+    sourceSnapshotHashes: jsonb("source_snapshot_hashes").notNull().default({}),
+    sourceCounts: jsonb("source_counts").notNull().default({}),
+    sourceFrozenAt: timestamp("source_frozen_at", { withTimezone: true, mode: "string" }),
+    sourceManifestHash: text("source_manifest_hash"),
+    sourceApplicationVersion: text("source_application_version"),
+    sourceApplicationCommit: text("source_application_commit"),
+    recoveryMarker: jsonb("recovery_marker").notNull().default({}),
+    lastSourceRecords: jsonb("last_source_records").notNull().default({}),
+    status: text("status").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+    rollbackWindowUntil: timestamp("rollback_window_until", {
+      withTimezone: true,
+      mode: "string",
+    }),
+    v2WritesStartedAt: timestamp("v2_writes_started_at", {
+      withTimezone: true,
+      mode: "string",
+    }),
+    errorCode: text("error_code"),
+    errorSummary: text("error_summary"),
+    details: jsonb("details").notNull().default({}),
+  },
+  (table) => [
+    uniqueIndex("migration_runs_name_started_unique").on(table.migrationName, table.startedAt),
+    uniqueIndex("migration_runs_name_manifest_unique")
+      .on(table.migrationName, table.sourceManifestHash)
+      .where(sql`${table.sourceManifestHash} IS NOT NULL`),
+    check(
+      "migration_runs_status_check",
+      sql`${table.status} IN (
+        'capturing', 'archived', 'importing', 'reconciling', 'shadowing',
+        'ready', 'cutover', 'rolled_back', 'failed'
+      )`,
+    ),
+    check(
+      "migration_runs_manifest_hash_check",
+      sql`${table.sourceManifestHash} IS NULL
+        OR ${table.sourceManifestHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
+
+export const recoveryCheckpoints = pgTable(
+  "recovery_checkpoints",
+  {
+    id: text("id").primaryKey(),
+    migrationRunId: text("migration_run_id")
+      .notNull()
+      .references(() => migrationRuns.id, { onDelete: "restrict" }),
+    provider: text("provider").notNull(),
+    backupReference: text("backup_reference").notNull(),
+    databaseTime: timestamp("database_time", { withTimezone: true, mode: "string" }).notNull(),
+    walLsn: text("wal_lsn").notNull(),
+    transactionId: text("transaction_id").notNull(),
+    applicationVersion: text("application_version").notNull(),
+    applicationCommit: text("application_commit").notNull(),
+    sourceManifestHash: text("source_manifest_hash").notNull(),
+    sourceFrozenAt: timestamp("source_frozen_at", { withTimezone: true, mode: "string" }).notNull(),
+    verifiedAt: timestamp("verified_at", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("recovery_checkpoints_migration_run_unique").on(table.migrationRunId),
+    check(
+      "recovery_checkpoints_manifest_hash_check",
+      sql`${table.sourceManifestHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
+
+export const legacySnapshotArchives = pgTable(
+  "legacy_snapshot_archives",
+  {
+    id: text("id").primaryKey(),
+    migrationRunId: text("migration_run_id")
+      .notNull()
+      .references(() => migrationRuns.id, { onDelete: "restrict" }),
+    sourceKey: text("source_key").notNull(),
+    sourceUpdatedAt: timestamp("source_updated_at", {
+      withTimezone: true,
+      mode: "string",
+    }).notNull(),
+    storageRef: text("storage_ref").notNull(),
+    keyId: text("key_id").notNull(),
+    keyFingerprint: text("key_fingerprint").notNull(),
+    cipher: text("cipher").notNull(),
+    exactHash: text("exact_hash").notNull(),
+    canonicalHash: text("canonical_hash").notNull(),
+    ciphertextHash: text("ciphertext_hash").notNull(),
+    aadHash: text("aad_hash").notNull(),
+    manifestHash: text("manifest_hash").notNull(),
+    exactByteSize: bigint("exact_byte_size", { mode: "number" }).notNull(),
+    canonicalByteSize: bigint("canonical_byte_size", { mode: "number" }).notNull(),
+    objectCounts: jsonb("object_counts").notNull().default({}),
+    lastRecord: jsonb("last_record"),
+    nonce: bytea("nonce").notNull(),
+    authTag: bytea("auth_tag").notNull(),
+    ciphertext: bytea("ciphertext").notNull(),
+    status: text("status").notNull(),
+    capturedAt: timestamp("captured_at", { withTimezone: true, mode: "string" }).notNull(),
+    retentionUntil: timestamp("retention_until", {
+      withTimezone: true,
+      mode: "string",
+    }).notNull(),
+    verifiedAt: timestamp("verified_at", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    uniqueIndex("legacy_snapshot_archives_storage_unique").on(table.storageRef),
+    uniqueIndex("legacy_snapshot_archives_run_source_unique").on(
+      table.migrationRunId,
+      table.sourceKey,
+    ),
+    uniqueIndex("legacy_snapshot_archives_key_nonce_unique").on(table.keyFingerprint, table.nonce),
+    foreignKey({
+      name: "legacy_snapshot_archives_key_registry_fk",
+      columns: [table.keyId, table.keyFingerprint],
+      foreignColumns: [
+        archiveEncryptionKeyRegistry.keyId,
+        archiveEncryptionKeyRegistry.keyFingerprint,
+      ],
+    }).onDelete("restrict"),
+    check(
+      "legacy_snapshot_archives_hashes_check",
+      sql`${table.exactHash} ~ '^[a-f0-9]{64}$'
+        AND ${table.canonicalHash} ~ '^[a-f0-9]{64}$'
+        AND ${table.ciphertextHash} ~ '^[a-f0-9]{64}$'
+        AND ${table.aadHash} ~ '^[a-f0-9]{64}$'
+        AND ${table.manifestHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check("legacy_snapshot_archives_cipher_check", sql`${table.cipher} = 'aes-256-gcm'`),
+    check(
+      "legacy_snapshot_archives_status_check",
+      sql`${table.status} IN ('sealed', 'verified', 'expired')`,
+    ),
+    check(
+      "legacy_snapshot_archives_verification_shape_check",
+      sql`(${table.status} = 'sealed' AND ${table.verifiedAt} IS NULL)
+        OR ${table.status} = 'expired'
+        OR (${table.status} = 'verified' AND ${table.verifiedAt} IS NOT NULL)`,
+    ),
+    check(
+      "legacy_snapshot_archives_size_check",
+      sql`${table.exactByteSize} >= 0 AND ${table.canonicalByteSize} >= 0`,
+    ),
+    check(
+      "legacy_snapshot_archives_retention_check",
+      sql`${table.retentionUntil} > ${table.capturedAt}`,
+    ),
+  ],
+);
+
+export const legacyArchiveAccessEvents = pgTable(
+  "legacy_archive_access_events",
+  {
+    id: text("id").primaryKey(),
+    archiveId: text("archive_id")
+      .notNull()
+      .references(() => legacySnapshotArchives.id, { onDelete: "restrict" }),
+    actorType: text("actor_type").notNull(),
+    actorId: text("actor_id"),
+    operation: text("operation").notNull(),
+    outcome: text("outcome").notNull(),
+    correlationId: text("correlation_id").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "string" }).notNull(),
+    details: jsonb("details").notNull().default({}),
+    redactionApplied: boolean("redaction_applied").notNull().default(true),
+  },
+  (table) => [
+    index("legacy_archive_access_archive_time_idx").on(table.archiveId, table.occurredAt),
+    check(
+      "legacy_archive_access_operation_check",
+      sql`${table.operation} IN ('write', 'head', 'read', 'verify')`,
+    ),
+    check(
+      "legacy_archive_access_outcome_check",
+      sql`${table.outcome} IN ('allowed', 'denied', 'failed')`,
+    ),
+    check(
+      "legacy_archive_access_human_actor_check",
+      sql`${table.actorType} <> 'human' OR ${table.actorId} IS NOT NULL`,
+    ),
+  ],
+);
+
+export const migrationSteps = pgTable(
+  "migration_steps",
+  {
+    migrationRunId: text("migration_run_id")
+      .notNull()
+      .references(() => migrationRuns.id, { onDelete: "restrict" }),
+    stepKey: text("step_key").notNull(),
+    inputHash: text("input_hash").notNull(),
+    status: text("status").notNull(),
+    attempt: integer("attempt").notNull().default(1),
+    outputHash: text("output_hash"),
+    outputCounts: jsonb("output_counts").notNull().default({}),
+    errorCode: text("error_code"),
+    errorSummary: text("error_summary"),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
+    completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    primaryKey({
+      name: "migration_steps_pk",
+      columns: [table.migrationRunId, table.stepKey],
+    }),
+    check("migration_steps_hash_check", sql`${table.inputHash} ~ '^[a-f0-9]{64}$'`),
+    check(
+      "migration_steps_output_hash_check",
+      sql`${table.outputHash} IS NULL OR ${table.outputHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "migration_steps_status_check",
+      sql`${table.status} IN ('pending', 'running', 'succeeded', 'failed')`,
+    ),
+    check("migration_steps_attempt_check", sql`${table.attempt} > 0`),
+  ],
+);
+
+export const legacyProjectImports = pgTable(
+  "legacy_project_imports",
+  {
+    migrationRunId: text("migration_run_id")
+      .notNull()
+      .references(() => migrationRuns.id, { onDelete: "restrict" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "restrict" }),
+    sourceHash: text("source_hash").notNull(),
+    planHash: text("plan_hash"),
+    graphHash: text("graph_hash"),
+    approvalHash: text("approval_hash"),
+    graphVersion: integer("graph_version"),
+    sourceCounts: jsonb("source_counts").notNull().default({}),
+    importHash: text("import_hash").notNull(),
+    archiveId: text("archive_id").references(() => legacySnapshotArchives.id, {
+      onDelete: "restrict",
+    }),
+    importedAt: timestamp("imported_at", { withTimezone: true, mode: "string" }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      name: "legacy_project_imports_pk",
+      columns: [table.migrationRunId, table.projectId],
+    }),
+    check(
+      "legacy_project_imports_hash_check",
+      sql`${table.sourceHash} ~ '^[a-f0-9]{64}$'
+        AND (${table.planHash} IS NULL OR ${table.planHash} ~ '^[a-f0-9]{64}$')
+        AND (${table.graphHash} IS NULL OR ${table.graphHash} ~ '^[a-f0-9]{64}$')
+        AND (${table.approvalHash} IS NULL OR ${table.approvalHash} ~ '^[a-f0-9]{64}$')
+        AND ${table.importHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "legacy_project_imports_graph_version_check",
+      sql`${table.graphVersion} IS NULL OR ${table.graphVersion} > 0`,
+    ),
+  ],
+);
+
+export const phase2LegacyIdMappings = pgTable(
+  "legacy_id_mappings",
+  {
+    migrationRunId: text("migration_run_id")
+      .notNull()
+      .references(() => migrationRuns.id, { onDelete: "cascade" }),
+    legacyEntityType: text("legacy_entity_type").notNull(),
+    legacyId: text("legacy_id").notNull(),
+    v2EntityType: text("v2_entity_type").notNull(),
+    v2Id: text("v2_id").notNull(),
+    sourceHash: text("source_hash").notNull(),
+    sourceMetadata: jsonb("source_metadata").notNull().default({}),
+    importEventId: text("import_event_id"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    primaryKey({
+      name: "legacy_id_mappings_pk",
+      columns: [table.migrationRunId, table.legacyEntityType, table.legacyId],
+    }),
+    uniqueIndex("legacy_id_mappings_v2_unique").on(
+      table.migrationRunId,
+      table.v2EntityType,
+      table.v2Id,
+    ),
+    check("legacy_id_mappings_source_hash_check", sql`${table.sourceHash} ~ '^[a-f0-9]{64}$'`),
+  ],
+);
+
+export const migrationReconciliationFindings = pgTable(
+  "migration_reconciliation_findings",
+  {
+    id: text("id").primaryKey(),
+    migrationRunId: text("migration_run_id")
+      .notNull()
+      .references(() => migrationRuns.id, { onDelete: "restrict" }),
+    projectId: text("project_id").references(() => projects.id, { onDelete: "restrict" }),
+    code: text("code").notNull(),
+    severity: text("severity").notNull(),
+    status: text("status").notNull().default("open"),
+    sourceEntityType: text("source_entity_type").notNull(),
+    sourceEntityId: text("source_entity_id"),
+    sourceFingerprint: text("source_fingerprint").notNull(),
+    details: jsonb("details").notNull().default({}),
+    detectedAt: timestamp("detected_at", { withTimezone: true, mode: "string" }).notNull(),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true, mode: "string" }),
+    resolvedByActorId: text("resolved_by_actor_id").references(() => users.id, {
+      onDelete: "restrict",
+    }),
+    dispositionNote: text("disposition_note"),
+  },
+  (table) => [
+    uniqueIndex("migration_reconciliation_findings_identity_unique").on(
+      table.migrationRunId,
+      table.projectId,
+      table.code,
+      table.sourceEntityType,
+      table.sourceEntityId,
+      table.sourceFingerprint,
+    ),
+    index("migration_reconciliation_findings_open_idx").on(
+      table.migrationRunId,
+      table.projectId,
+      table.status,
+      table.severity,
+    ),
+    check(
+      "migration_reconciliation_findings_code_check",
+      sql`${table.code} IN (
+        'invalid_plan_payload',
+        'invalid_graph_payload',
+        'plan_without_graph',
+        'graph_without_plan',
+        'graph_node_without_plan_module',
+        'plan_module_without_graph_node',
+        'shared_task_field_mismatch',
+        'acceptance_criteria_unavailable',
+        'acceptance_criteria_projection_mismatch',
+        'dependency_edge_added_in_graph',
+        'dependency_edge_removed_from_graph',
+        'orphan_dependency_reference',
+        'assignment_missing',
+        'assignment_projection_mismatch',
+        'assignment_worker_count_requires_reconciliation',
+        'assignment_changed_since_approval',
+        'approval_graph_version_mismatch',
+        'approval_content_hash_mismatch',
+        'invalid_approval_payload',
+        'approval_actor_unattributable',
+        'source_changed_after_freeze',
+        'imported_count_mismatch',
+        'imported_checksum_mismatch',
+        'unknown_snapshot_key',
+        'nonterminal_legacy_command'
+      )`,
+    ),
+    check(
+      "migration_reconciliation_findings_severity_check",
+      sql`${table.severity} IN ('blocking', 'warning', 'informational')`,
+    ),
+    check(
+      "migration_reconciliation_findings_status_check",
+      sql`${table.status} IN ('open', 'resolved', 'accepted')`,
+    ),
+    check(
+      "migration_reconciliation_findings_hash_check",
+      sql`${table.sourceFingerprint} ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
+
+export const shadowReadComparisons = pgTable(
+  "shadow_read_comparisons",
+  {
+    id: text("id").primaryKey(),
+    migrationRunId: text("migration_run_id")
+      .notNull()
+      .references(() => migrationRuns.id, { onDelete: "restrict" }),
+    scopeType: text("scope_type").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    operation: text("operation").notNull(),
+    legacyHash: text("legacy_hash").notNull(),
+    relationalHash: text("relational_hash").notNull(),
+    matched: boolean("matched").notNull(),
+    differences: jsonb("differences").notNull().default([]),
+    sourceKey: text("source_key").notNull(),
+    sourceManifestHash: text("source_manifest_hash").notNull(),
+    sourceExactHash: text("source_exact_hash").notNull(),
+    sourceUpdatedAt: timestamp("source_updated_at", {
+      withTimezone: true,
+      mode: "string",
+    }).notNull(),
+    observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(),
+  },
+  (table) => [
+    index("shadow_read_comparisons_scope_time_idx").on(
+      table.scopeType,
+      table.scopeKey,
+      table.observedAt,
+    ),
+    index("shadow_read_comparisons_mismatch_idx").on(table.migrationRunId, table.matched),
+    index("shadow_read_comparisons_provenance_idx").on(
+      table.migrationRunId,
+      table.scopeType,
+      table.scopeKey,
+      table.sourceManifestHash,
+      table.sourceKey,
+      table.sourceExactHash,
+      table.sourceUpdatedAt,
+      table.observedAt,
+    ),
+    check(
+      "shadow_read_comparisons_scope_check",
+      sql`${table.scopeType} IN ('identity', 'project', 'new_projects', 'relay')`,
+    ),
+    check(
+      "shadow_read_comparisons_hash_check",
+      sql`${table.legacyHash} ~ '^[a-f0-9]{64}$'
+        AND ${table.relationalHash} ~ '^[a-f0-9]{64}$'
+        AND ${table.sourceManifestHash} ~ '^[a-f0-9]{64}$'
+        AND ${table.sourceExactHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "shadow_read_comparisons_difference_check",
+      sql`(${table.matched} AND jsonb_array_length(${table.differences}) = 0)
+        OR (NOT ${table.matched} AND jsonb_array_length(${table.differences}) > 0)`,
+    ),
+  ],
+);
+
+export const persistenceRoutes = pgTable(
+  "persistence_routes",
+  {
+    scopeType: text("scope_type").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    readMode: text("read_mode").notNull(),
+    writeMode: text("write_mode").notNull(),
+    migrationRunId: text("migration_run_id").references(() => migrationRuns.id, {
+      onDelete: "restrict",
+    }),
+    aggregateVersion: aggregateVersion(),
+    changedByActorType: text("changed_by_actor_type").notNull(),
+    changedByActorId: text("changed_by_actor_id").references(() => users.id, {
+      onDelete: "restrict",
+    }),
+    changedAt: timestamp("changed_at", { withTimezone: true, mode: "string" }).notNull(),
+    v2WritesStartedAt: timestamp("v2_writes_started_at", {
+      withTimezone: true,
+      mode: "string",
+    }),
+    rollbackWindowUntil: timestamp("rollback_window_until", {
+      withTimezone: true,
+      mode: "string",
+    }),
+  },
+  (table) => [
+    primaryKey({
+      name: "persistence_routes_pk",
+      columns: [table.scopeType, table.scopeKey],
+    }),
+    check(
+      "persistence_routes_scope_check",
+      sql`${table.scopeType} IN ('identity', 'project', 'new_projects', 'relay')`,
+    ),
+    check(
+      "persistence_routes_scope_key_check",
+      sql`(${table.scopeType} = 'project' AND ${table.scopeKey} <> '*')
+        OR (${table.scopeType} <> 'project' AND ${table.scopeKey} = '*')`,
+    ),
+    check(
+      "persistence_routes_read_mode_check",
+      sql`${table.readMode} IN ('legacy', 'shadow', 'relational')`,
+    ),
+    check(
+      "persistence_routes_write_mode_check",
+      sql`${table.writeMode} IN ('legacy', 'frozen', 'relational')`,
+    ),
+    check(
+      "persistence_routes_v2_write_time_check",
+      sql`${table.writeMode} <> 'relational' OR ${table.v2WritesStartedAt} IS NOT NULL`,
+    ),
+    check(
+      "persistence_routes_human_actor_check",
+      sql`${table.changedByActorType} <> 'human' OR ${table.changedByActorId} IS NOT NULL`,
+    ),
+  ],
+);
+
+export const migrationRollbackEvidence = pgTable(
+  "migration_rollback_evidence",
+  {
+    id: text("id").primaryKey(),
+    migrationRunId: text("migration_run_id")
+      .notNull()
+      .references(() => migrationRuns.id, { onDelete: "restrict" }),
+    stateFingerprint: text("state_fingerprint").notNull(),
+    reportFingerprint: text("report_fingerprint").notNull(),
+    observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(),
+    validUntil: timestamp("valid_until", { withTimezone: true, mode: "string" }).notNull(),
+    report: jsonb("report").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("migration_rollback_evidence_identity_unique").on(table.id, table.migrationRunId),
+    uniqueIndex("migration_rollback_evidence_report_unique").on(table.reportFingerprint),
+    index("migration_rollback_evidence_run_time_idx").on(table.migrationRunId, table.observedAt),
+    check(
+      "migration_rollback_evidence_hash_check",
+      sql`${table.stateFingerprint} ~ '^[a-f0-9]{64}$'
+        AND ${table.reportFingerprint} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "migration_rollback_evidence_freshness_check",
+      sql`${table.validUntil} > ${table.observedAt}`,
+    ),
+    check(
+      "migration_rollback_evidence_report_shape_check",
+      sql`jsonb_typeof(${table.report}) = 'object'`,
+    ),
+  ],
+);
+
+export const migrationRollbackApprovals = pgTable(
+  "migration_rollback_approvals",
+  {
+    id: text("id").primaryKey(),
+    evidenceId: text("evidence_id").notNull(),
+    migrationRunId: text("migration_run_id").notNull(),
+    humanActorId: text("human_actor_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    confirmedReportFingerprint: text("confirmed_report_fingerprint").notNull(),
+    approvedAt: timestamp("approved_at", { withTimezone: true, mode: "string" }).notNull(),
+    routesReversed: jsonb("routes_reversed").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("migration_rollback_approvals_evidence_unique").on(table.evidenceId),
+    index("migration_rollback_approvals_run_time_idx").on(table.migrationRunId, table.approvedAt),
+    foreignKey({
+      name: "migration_rollback_approvals_evidence_run_fk",
+      columns: [table.evidenceId, table.migrationRunId],
+      foreignColumns: [migrationRollbackEvidence.id, migrationRollbackEvidence.migrationRunId],
+    }).onDelete("restrict"),
+    check(
+      "migration_rollback_approvals_hash_check",
+      sql`${table.confirmedReportFingerprint} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "migration_rollback_approvals_routes_check",
+      sql`jsonb_typeof(${table.routesReversed}) = 'array'
+        AND jsonb_array_length(${table.routesReversed}) > 0`,
+    ),
+  ],
+);
+
+export const legacyApprovalEvidence = pgTable(
+  "legacy_approval_evidence",
+  {
+    id: text("id").primaryKey(),
+    migrationRunId: text("migration_run_id")
+      .notNull()
+      .references(() => migrationRuns.id, { onDelete: "restrict" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "restrict" }),
+    phaseId: text("phase_id").references(() => phases.id, { onDelete: "restrict" }),
+    subjectEntityType: text("subject_entity_type").notNull(),
+    subjectEntityId: text("subject_entity_id").notNull(),
+    contentHash: text("content_hash").notNull(),
+    graphVersion: integer("graph_version").notNull(),
+    allocationFingerprint: text("allocation_fingerprint").notNull(),
+    actorType: text("actor_type").notNull(),
+    actorId: text("actor_id").references(() => users.id, { onDelete: "restrict" }),
+    sourceActorText: text("source_actor_text"),
+    approvedAt: timestamp("approved_at", { withTimezone: true, mode: "string" }).notNull(),
+    currentAtImport: boolean("current_at_import").notNull(),
+    sourceHash: text("source_hash").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("legacy_approval_evidence_source_unique").on(
+      table.migrationRunId,
+      table.projectId,
+      table.sourceHash,
+    ),
+    check(
+      "legacy_approval_evidence_hash_check",
+      sql`${table.contentHash} ~ '^[a-f0-9]{64}$'
+        AND ${table.allocationFingerprint} ~ '^[a-f0-9]{64}$'
+        AND ${table.sourceHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check("legacy_approval_evidence_graph_version_check", sql`${table.graphVersion} > 0`),
+    check(
+      "legacy_approval_evidence_actor_check",
+      sql`(
+        ${table.actorType} = 'legacy'
+        AND ${table.actorId} IS NULL
+        AND ${table.sourceActorText} IS NOT NULL
+      ) OR (
+        ${table.actorType} = 'human'
+        AND ${table.actorId} IS NOT NULL
+      )`,
+    ),
+  ],
+);
+
+export const phase2PreservationSchema = {
+  archiveEncryptionKeyRegistry,
+  credentialHmacKeyRegistry,
+  ...phase1V2Schema,
+  users: phase2Users,
+  sessions: phase2Sessions,
+  migrationRuns: phase2MigrationRuns,
+  legacyIdMappings: phase2LegacyIdMappings,
+  invitations,
+  projectPlanningPreferences,
+  repositoryBindingCandidates,
+  recoveryCheckpoints,
+  legacySnapshotArchives,
+  legacyArchiveAccessEvents,
+  migrationSteps,
+  legacyProjectImports,
+  migrationReconciliationFindings,
+  shadowReadComparisons,
+  persistenceRoutes,
+  migrationRollbackEvidence,
+  migrationRollbackApprovals,
+  legacyApprovalEvidence,
 };

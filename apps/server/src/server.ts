@@ -51,17 +51,43 @@ import {
   reviewerFor,
 } from "./projects/store.js";
 import type { RelayStores } from "./stores.js";
-import { LastActiveAdminError, type UserRecord, type UserStore } from "./users/store.js";
+import type {
+  IdentityService,
+  IdentityUser,
+  IdentityUserSummary,
+} from "./users/identityService.js";
+import { IdentityAlreadyBootstrappedError } from "./users/identityService.js";
+import { LegacyIdentityService } from "./users/legacyIdentityService.js";
+import { LoginAttemptThrottle } from "./users/loginThrottle.js";
+import { LastActiveAdminError, type UserStore } from "./users/store.js";
 
 const PAIRING_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_COMMAND_TTL_MS = 5 * 60 * 1000;
 
 interface WsLike {
   send(data: string): void;
-  close(): void;
+  close(code?: number, reason?: string): void;
   on(event: "message", cb: (data: unknown) => void): void;
   on(event: "close", cb: () => void): void;
 }
+
+interface SessionSocketBinding {
+  socket: WsLike;
+  token: string;
+  userId: string;
+  active: boolean;
+  /** Keeps validation and delivery ordered for a single browser connection. */
+  delivery: Promise<void>;
+}
+
+const SessionAuthFrame = z
+  .object({
+    type: z.literal("auth"),
+    token: z.string().min(1),
+  })
+  .strict();
+
+const SESSION_AUTH_TIMEOUT_MS = 5_000;
 
 function asSocket(conn: unknown): WsLike {
   const candidate = conn as { socket?: WsLike } & WsLike;
@@ -70,8 +96,17 @@ function asSocket(conn: unknown): WsLike {
 
 export interface ServerOptions {
   stores: RelayStores;
-  /** Real user accounts — session auth resolves against this, not a shared secret. */
+  /**
+   * Legacy account store retained for existing callers and snapshot bootstrap.
+   * It remains the identity source whenever `identity` is omitted.
+   */
   users: UserStore;
+  /**
+   * Optional async identity implementation. When omitted, `users` is adapted
+   * through LegacyIdentityService so all existing callers retain their
+   * snapshot-backed behavior while route handlers use one async seam.
+   */
+  identity?: IdentityService;
   /**
    * Deploy-level secret (Railway env var). Its ONLY job is gating the
    * one-time POST /api/auth/bootstrap that creates the first admin account
@@ -114,39 +149,79 @@ export interface NornsServer {
 
 export async function buildServer(options: ServerOptions): Promise<NornsServer> {
   const { stores, users, deployToken } = options;
+  const usesLegacyIdentity = options.identity === undefined;
+  const identityService = options.identity ?? new LegacyIdentityService(users);
   const now = options.clock ?? (() => new Date());
   const app = Fastify({ logger: false });
   await app.register(websocket);
 
   const runnerSockets = new Map<string, WsLike>();
-  const sessionSockets = new Set<WsLike>();
+  const sessionSockets = new Map<WsLike, SessionSocketBinding>();
+  const loginThrottle = new LoginAttemptThrottle();
 
   const sendFrame = (socket: WsLike, frame: ServerFrameT): void => {
     socket.send(JSON.stringify(frame));
   };
 
+  const closeSessionSocket = (binding: SessionSocketBinding, reason: string): void => {
+    if (!binding.active) return;
+    binding.active = false;
+    sessionSockets.delete(binding.socket);
+    try {
+      binding.socket.close(1008, reason);
+    } catch {
+      // The connection is already gone. Removing it from the map is enough.
+    }
+  };
+
+  const closeMatchingSessionSockets = (
+    predicate: (binding: SessionSocketBinding) => boolean,
+    reason: string,
+  ): void => {
+    for (const binding of sessionSockets.values()) {
+      if (predicate(binding)) closeSessionSocket(binding, reason);
+    }
+  };
+
   const broadcast = (message: Record<string, unknown>): void => {
     const raw = JSON.stringify(message);
-    for (const socket of sessionSockets) {
-      try {
-        socket.send(raw);
-      } catch {
-        // session sockets are pure views; drop failures
-      }
+    for (const binding of sessionSockets.values()) {
+      binding.delivery = binding.delivery
+        .then(async () => {
+          if (!binding.active) return;
+          const currentUser = await identityService.userForToken(binding.token);
+          if (
+            !currentUser ||
+            currentUser.id !== binding.userId ||
+            currentUser.status !== "active"
+          ) {
+            closeSessionSocket(binding, "session no longer valid");
+            return;
+          }
+          if (!binding.active) return;
+          try {
+            binding.socket.send(raw);
+          } catch {
+            closeSessionSocket(binding, "connection unavailable");
+          }
+        })
+        .catch(() => {
+          closeSessionSocket(binding, "session validation failed");
+        });
     }
   };
 
   /** Resolve the caller's bearer token to a real user, or undefined. Real
    *  per-user sessions are the only session credential — the deploy token is
    *  never accepted here, only by the bootstrap route below. */
-  const resolveUser = (req: FastifyRequest): UserRecord | undefined => {
+  const resolveUser = async (req: FastifyRequest): Promise<IdentityUser | undefined> => {
     const token = bearerToken(req.headers.authorization);
     if (!token) return undefined;
-    return users.userForToken(token);
+    return identityService.userForToken(token);
   };
 
-  const requireSession = (req: FastifyRequest, reply: FastifyReply): boolean => {
-    if (!resolveUser(req)) {
+  const requireSession = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> => {
+    if (!(await resolveUser(req))) {
       stores.audit("anonymous", "auth.rejected", `${req.method} ${req.url}`, now());
       reply.code(401).send({ error: "unauthorized" });
       return false;
@@ -157,8 +232,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   /** Like requireSession, but also enforces the admin role. Returns the
    *  resolved admin user (so the caller can attribute audit entries), or
    *  null if it already sent a 401/403. */
-  const requireAdmin = (req: FastifyRequest, reply: FastifyReply): UserRecord | null => {
-    const user = resolveUser(req);
+  const requireAdmin = async (
+    req: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<IdentityUser | null> => {
+    const user = await resolveUser(req);
     if (!user) {
       stores.audit("anonymous", "auth.rejected", `${req.method} ${req.url}`, now());
       reply.code(401).send({ error: "unauthorized" });
@@ -187,8 +265,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // The deploy token's only remaining job is gating the one-time bootstrap
   // below; every other route resolves a real per-user session.
 
-  app.get("/api/auth/status", (_req, reply) => {
-    reply.send({ needs_bootstrap: !users.hasActiveAdmin });
+  app.get("/api/auth/status", async (_req, reply) => {
+    reply.send({ needs_bootstrap: !(await identityService.hasActiveAdmin()) });
   });
 
   const BootstrapBody = z.object({
@@ -198,11 +276,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     name: z.string().min(1).optional(),
   });
   app.post("/api/auth/bootstrap", async (req, reply) => {
-    // An active-admin check is the real gate — it means this route can never
-    // be used to mint a SECOND active admin later, even by someone who knows
-    // the deploy token. Members and unaccepted admin invites do not strand a
-    // workspace that still has nobody able to administer it.
-    if (users.hasActiveAdmin) {
+    // Keep the established response semantics while the service-level
+    // bootstrap operation performs the authoritative, atomic re-check.
+    if (await identityService.hasActiveAdmin()) {
       return reply.code(403).send({ error: "already_bootstrapped" });
     }
     if (!deployToken) return reply.code(501).send({ error: "bootstrap_disabled" });
@@ -212,18 +288,27 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       stores.audit("anonymous", "auth.bootstrap_rejected", "bad deploy token", now());
       return reply.code(403).send({ error: "invalid_deploy_token" });
     }
-    const beforeBootstrap = users.snapshot();
-    const summary = users.createActive({
-      email: body.data.email,
-      name: body.data.name,
-      password: body.data.password,
-      role: "admin",
-    });
-    const { token } = users.login(body.data.email, body.data.password);
+    // Snapshot rollback remains exclusive to the legacy adapter. Relational
+    // identity operations are already committed by their transaction runner.
+    const beforeBootstrap = usesLegacyIdentity ? users.snapshot() : undefined;
+    let summary: IdentityUserSummary;
     try {
-      await options.persistUsers?.();
+      summary = await identityService.bootstrapAdmin({
+        email: body.data.email,
+        name: body.data.name,
+        password: body.data.password,
+      });
+    } catch (error) {
+      if (error instanceof IdentityAlreadyBootstrappedError) {
+        return reply.code(403).send({ error: "already_bootstrapped" });
+      }
+      throw error;
+    }
+    const { token } = await identityService.login(body.data.email, body.data.password);
+    try {
+      if (usesLegacyIdentity) await options.persistUsers?.();
     } catch {
-      users.restoreFrom(beforeBootstrap);
+      if (beforeBootstrap) users.restoreFrom(beforeBootstrap);
       stores.audit("anonymous", "auth.bootstrap_persistence_failed", summary.id, now());
       return reply.code(503).send({ error: "auth_persistence_unavailable" });
     }
@@ -232,27 +317,40 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   });
 
   const LoginBody = z.object({ email: z.string().email(), password: z.string().min(1) });
-  app.post("/api/auth/login", (req, reply) => {
+  app.post("/api/auth/login", async (req, reply) => {
     const body = LoginBody.safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: "bad_request" });
+    const attemptedAt = now();
+    const throttleKey = loginThrottle.key(body.data.email, req.ip);
+    const allowance = loginThrottle.check(throttleKey, attemptedAt);
+    if (!allowance.allowed) {
+      stores.audit("anonymous", "auth.login_throttled", "credential_pair", attemptedAt);
+      reply.header("Retry-After", String(allowance.retry_after_seconds));
+      return reply.code(429).send({ error: "login_throttled" });
+    }
     try {
-      const { token, user } = users.login(body.data.email, body.data.password);
+      const { token, user } = await identityService.login(body.data.email, body.data.password);
+      loginThrottle.recordSuccess(throttleKey);
       stores.audit(user.email, "auth.login", user.id, now());
       reply.send({ token, user });
     } catch {
+      loginThrottle.recordFailure(throttleKey, attemptedAt);
       stores.audit("anonymous", "auth.login_failed", body.data.email, now());
       reply.code(401).send({ error: "invalid_credentials" });
     }
   });
 
-  app.post("/api/auth/logout", (req, reply) => {
+  app.post("/api/auth/logout", async (req, reply) => {
     const token = bearerToken(req.headers.authorization);
-    if (token) users.logout(token);
+    if (token) {
+      await identityService.logout(token);
+      closeMatchingSessionSockets((binding) => binding.token === token, "session logged out");
+    }
     reply.send({ ok: true });
   });
 
-  app.get("/api/auth/me", (req, reply) => {
-    const user = resolveUser(req);
+  app.get("/api/auth/me", async (req, reply) => {
+    const user = await resolveUser(req);
     if (!user) return reply.code(401).send({ error: "unauthorized" });
     reply.send({
       id: user.id,
@@ -267,27 +365,30 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     invite_token: z.string().min(1),
     password: z.string().min(8),
   });
-  app.post("/api/auth/accept-invite", (req, reply) => {
+  app.post("/api/auth/accept-invite", async (req, reply) => {
     const body = AcceptInviteBody.safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: "bad_request" });
     try {
-      const summary = users.acceptInvite(body.data.invite_token, body.data.password);
-      const { token } = users.login(summary.email, body.data.password);
+      const summary = await identityService.acceptInvite(
+        body.data.invite_token,
+        body.data.password,
+      );
+      const { token } = await identityService.login(summary.email, body.data.password);
       stores.audit(summary.email, "auth.invite_accepted", summary.id, now());
       reply.send({ token, user: summary });
-    } catch (error) {
+    } catch {
       reply.code(400).send({
         error: "invalid_invite",
-        message: error instanceof Error ? error.message : String(error),
+        message: "Invitation is invalid, expired, or already used.",
       });
     }
   });
 
   // ---- admin: user management (admin role required) ---------------------------
 
-  app.get("/api/admin/users", (req, reply) => {
-    if (!requireAdmin(req, reply)) return;
-    reply.send(users.list());
+  app.get("/api/admin/users", async (req, reply) => {
+    if (!(await requireAdmin(req, reply))) return;
+    reply.send(await identityService.list());
   });
 
   const CreateUserBody = z.object({
@@ -296,13 +397,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     password: z.string().min(8),
     role: z.enum(["admin", "member"]).default("member"),
   });
-  app.post("/api/admin/users", (req, reply) => {
-    const admin = requireAdmin(req, reply);
+  app.post("/api/admin/users", async (req, reply) => {
+    const admin = await requireAdmin(req, reply);
     if (!admin) return;
     const body = CreateUserBody.safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: "bad_request" });
     try {
-      const summary = users.createActive(body.data);
+      const summary = await identityService.createActive(body.data);
       stores.audit(admin.email, "admin.user_created", summary.id, now());
       reply.code(201).send(summary);
     } catch (error) {
@@ -319,13 +420,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     role: z.enum(["admin", "member"]).default("member"),
   });
   app.post("/api/admin/users/invite", async (req, reply) => {
-    const admin = requireAdmin(req, reply);
+    const admin = await requireAdmin(req, reply);
     if (!admin) return;
     const body = InviteUserBody.safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: "bad_request" });
-    let created: { summary: ReturnType<UserStore["list"]>[number]; inviteToken: string };
+    let created: { summary: IdentityUserSummary; inviteToken: string };
     try {
-      created = users.createInvite(body.data);
+      created = await identityService.createInvite(body.data);
     } catch (error) {
       return reply.code(409).send({
         error: "user_exists",
@@ -358,12 +459,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     reply.code(201).send({ user: created.summary });
   });
 
-  app.delete("/api/admin/users/:id", (req, reply) => {
-    const admin = requireAdmin(req, reply);
+  app.delete("/api/admin/users/:id", async (req, reply) => {
+    const admin = await requireAdmin(req, reply);
     if (!admin) return;
     const { id } = req.params as { id: string };
     try {
-      users.remove(id);
+      await identityService.remove(id);
+      closeMatchingSessionSockets((binding) => binding.userId === id, "account disabled");
       stores.audit(admin.email, "admin.user_removed", id, now());
       reply.send({ ok: true });
     } catch (error) {
@@ -379,8 +481,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
   // ---- pairing ---------------------------------------------------------------
 
-  app.post("/api/pairing/start", (req, reply) => {
-    if (!requireSession(req, reply)) return;
+  app.post("/api/pairing/start", async (req, reply) => {
+    if (!(await requireSession(req, reply))) return;
     const code = pairingCode();
     const expiresAt = new Date(now().getTime() + PAIRING_TTL_MS);
     stores.createPairing(code, expiresAt);
@@ -422,8 +524,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     expires_in_ms: z.number().int().optional(),
   });
 
-  app.post("/api/commands", (req, reply) => {
-    if (!requireSession(req, reply)) return;
+  app.post("/api/commands", async (req, reply) => {
+    if (!(await requireSession(req, reply))) return;
     const parsed = IssueCommand.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: "bad_request" });
     const body = parsed.data;
@@ -457,8 +559,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     return reply.send({ command_id: commandId });
   });
 
-  app.get("/api/commands/:id", (req, reply) => {
-    if (!requireSession(req, reply)) return;
+  app.get("/api/commands/:id", async (req, reply) => {
+    if (!(await requireSession(req, reply))) return;
     const { id } = req.params as { id: string };
     const record = stores.command(id);
     if (!record) return reply.code(404).send({ error: "not_found" });
@@ -472,8 +574,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
   // ---- observation -------------------------------------------------------------
 
-  app.get("/api/runners", (req, reply) => {
-    if (!requireSession(req, reply)) return;
+  app.get("/api/runners", async (req, reply) => {
+    if (!(await requireSession(req, reply))) return;
     reply.send(
       stores.runners().map((r) => ({
         runner_id: r.runner_id,
@@ -484,19 +586,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     );
   });
 
-  app.get("/api/audit", (req, reply) => {
-    if (!requireSession(req, reply)) return;
+  app.get("/api/audit", async (req, reply) => {
+    if (!(await requireSession(req, reply))) return;
     reply.send(stores.auditEntries());
   });
 
-  app.get("/api/events/:runnerId", (req, reply) => {
-    if (!requireSession(req, reply)) return;
+  app.get("/api/events/:runnerId", async (req, reply) => {
+    if (!(await requireSession(req, reply))) return;
     const { runnerId } = req.params as { runnerId: string };
     reply.send(stores.eventsFor(runnerId));
   });
 
-  app.post("/api/kill-switch", (req, reply) => {
-    if (!requireSession(req, reply)) return;
+  app.post("/api/kill-switch", async (req, reply) => {
+    if (!(await requireSession(req, reply))) return;
     const body = z.object({ engaged: z.boolean() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: "bad_request" });
     stores.setKillSwitch(body.data.engaged);
@@ -547,8 +649,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // future pass — wire that as its own route reading ProjectStore, never here.
   if (options.dashboard) {
     const demoDashboard = options.dashboard;
-    app.get("/api/demo/dashboard", (req, reply) => {
-      if (!requireSession(req, reply)) return;
+    app.get("/api/demo/dashboard", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
       reply.send(demoDashboard());
     });
   }
@@ -593,7 +695,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     };
 
     app.get("/api/projects", async (req, reply) => {
-      if (!requireSession(req, reply)) return;
+      if (!(await requireSession(req, reply))) return;
       reply.send(await projects.list());
     });
 
@@ -639,7 +741,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
       });
     app.post("/api/projects", async (req, reply) => {
-      if (!requireSession(req, reply)) return;
+      if (!(await requireSession(req, reply))) return;
       const body = CreateProjectBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
       const project = await projects.create({
@@ -660,7 +762,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
 
     app.get("/api/projects/:id", async (req, reply) => {
-      if (!requireSession(req, reply)) return;
+      if (!(await requireSession(req, reply))) return;
       const { id } = req.params as { id: string };
       try {
         reply.send(await projects.summary(id));
@@ -670,7 +772,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
 
     app.get("/api/projects/:id/graph", async (req, reply) => {
-      if (!requireSession(req, reply)) return;
+      if (!(await requireSession(req, reply))) return;
       const { id } = req.params as { id: string };
       try {
         sendGraph(reply, await projects.graph(id));
@@ -681,7 +783,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
     const EdgeBody = z.object({ from: z.string().min(1), to: z.string().min(1) });
     app.post("/api/projects/:id/graph/edges", async (req, reply) => {
-      if (!requireSession(req, reply)) return;
+      if (!(await requireSession(req, reply))) return;
       const { id } = req.params as { id: string };
       const body = EdgeBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
@@ -700,7 +802,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
 
     app.delete("/api/projects/:id/graph/edges", async (req, reply) => {
-      if (!requireSession(req, reply)) return;
+      if (!(await requireSession(req, reply))) return;
       const { id } = req.params as { id: string };
       const body = EdgeBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
@@ -726,7 +828,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       dependencies: z.array(z.string().min(1)).optional(),
     });
     app.post("/api/projects/:id/graph/nodes", async (req, reply) => {
-      if (!requireSession(req, reply)) return;
+      if (!(await requireSession(req, reply))) return;
       const { id } = req.params as { id: string };
       const body = NodeBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
@@ -740,7 +842,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
 
     app.delete("/api/projects/:id/graph/nodes/:nodeId", async (req, reply) => {
-      if (!requireSession(req, reply)) return;
+      if (!(await requireSession(req, reply))) return;
       const { id, nodeId } = req.params as { id: string; nodeId: string };
       const { mode } = req.query as { mode?: "reparent" | "cascade" };
       try {
@@ -753,7 +855,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
 
     app.post("/api/projects/:id/graph/allocate", async (req, reply) => {
-      if (!requireSession(req, reply)) return;
+      if (!(await requireSession(req, reply))) return;
       const { id } = req.params as { id: string };
       const body = z.object({ strategy: AllocationStrategy }).safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
@@ -775,7 +877,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       rationale: z.string().min(1).optional(),
     });
     app.post("/api/projects/:id/graph/nodes/:nodeId/assignment", async (req, reply) => {
-      if (!requireSession(req, reply)) return;
+      if (!(await requireSession(req, reply))) return;
       const { id, nodeId } = req.params as { id: string; nodeId: string };
       const body = OverrideBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
@@ -789,7 +891,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
 
     app.post("/api/projects/:id/graph/approve-allocation", async (req, reply) => {
-      if (!requireSession(req, reply)) return;
+      if (!(await requireSession(req, reply))) return;
       const { id } = req.params as { id: string };
       try {
         const approval = await projects.approveAllocation(id, "operator");
@@ -824,7 +926,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     };
 
     app.post("/api/projects/:id/plan", async (req, reply) => {
-      if (!requireSession(req, reply)) return;
+      if (!(await requireSession(req, reply))) return;
       const { id } = req.params as { id: string };
       let pmSelection: { provider: ProviderName; model: string | null };
       try {
@@ -931,7 +1033,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     // /api/projects/:id/plan — into that project's graph.
     const LoadPlanBody = z.object({ plan: PlanContract });
     app.post("/api/projects/:id/plan/load", async (req, reply) => {
-      if (!requireSession(req, reply)) return;
+      if (!(await requireSession(req, reply))) return;
       const { id } = req.params as { id: string };
       const body = LoadPlanBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
@@ -1103,28 +1205,91 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
   // ---- session websocket -----------------------------------------------------------
 
-  app.get("/ws/session", { websocket: true }, (conn, req) => {
+  app.get("/ws/session", { websocket: true }, (conn) => {
     const socket = asSocket(conn);
-    const token = (req.query as { token?: string }).token;
-    if (!token || !users.userForToken(token)) {
-      socket.close();
-      return;
-    }
-    sessionSockets.add(socket);
-    socket.send(
-      JSON.stringify({
-        type: "snapshot",
-        runners: stores.runners().map((r) => ({
-          runner_id: r.runner_id,
-          connected: runnerSockets.has(r.runner_id),
-        })),
-      }),
-    );
+    let authState: "awaiting" | "authenticating" | "authenticated" | "closed" = "awaiting";
+    const authTimeout = setTimeout(() => {
+      if (authState !== "awaiting") return;
+      authState = "closed";
+      socket.close(1008, "authentication required");
+    }, SESSION_AUTH_TIMEOUT_MS);
+    authTimeout.unref();
+
     socket.on("close", () => {
+      authState = "closed";
+      clearTimeout(authTimeout);
       sessionSockets.delete(socket);
     });
-    socket.on("message", () => {
-      // session sockets are read-only views; commands go through POST /api/commands
+
+    socket.on("message", (data) => {
+      // After authentication, session sockets remain read-only views; commands
+      // continue to go through the authenticated HTTP command routes.
+      if (authState === "authenticated" || authState === "closed") return;
+      if (authState === "authenticating") {
+        authState = "closed";
+        clearTimeout(authTimeout);
+        socket.close(1008, "authentication already in progress");
+        return;
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(String(data));
+      } catch {
+        authState = "closed";
+        clearTimeout(authTimeout);
+        socket.close(1008, "invalid authentication frame");
+        return;
+      }
+      const frame = SessionAuthFrame.safeParse(parsed);
+      if (!frame.success) {
+        authState = "closed";
+        clearTimeout(authTimeout);
+        socket.close(1008, "invalid authentication frame");
+        return;
+      }
+
+      authState = "authenticating";
+      void identityService
+        .userForToken(frame.data.token)
+        .then((user) => {
+          if (authState === "closed") return;
+          if (!user || user.status !== "active") {
+            authState = "closed";
+            clearTimeout(authTimeout);
+            socket.close(1008, "unauthorized");
+            return;
+          }
+          authState = "authenticated";
+          clearTimeout(authTimeout);
+          const binding: SessionSocketBinding = {
+            socket,
+            token: frame.data.token,
+            userId: user.id,
+            active: true,
+            delivery: Promise.resolve(),
+          };
+          sessionSockets.set(socket, binding);
+          try {
+            socket.send(
+              JSON.stringify({
+                type: "snapshot",
+                runners: stores.runners().map((runner) => ({
+                  runner_id: runner.runner_id,
+                  connected: runnerSockets.has(runner.runner_id),
+                })),
+              }),
+            );
+          } catch {
+            closeSessionSocket(binding, "connection unavailable");
+          }
+        })
+        .catch(() => {
+          if (authState === "closed") return;
+          authState = "closed";
+          clearTimeout(authTimeout);
+          socket.close(1011, "authentication unavailable");
+        });
     });
   });
 

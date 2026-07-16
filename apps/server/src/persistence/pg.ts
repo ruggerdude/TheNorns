@@ -15,6 +15,10 @@ export class PgPersistence {
 
   /** Idempotent schema setup — safe to run on every boot. */
   async init(): Promise<void> {
+    const existing = await this.client.query("SELECT to_regclass('norns_state')::text AS relation");
+    if (existing.rows[0]?.relation !== null && existing.rows[0]?.relation !== undefined) {
+      return;
+    }
     await this.client.query(
       `CREATE TABLE IF NOT EXISTS norns_state (
          key         TEXT PRIMARY KEY,
@@ -57,6 +61,7 @@ export class PgPersistence {
 export class SnapshotFlusher {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastWritten: string | null = null;
+  private flushTail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly persistence: PgPersistence,
@@ -66,21 +71,48 @@ export class SnapshotFlusher {
   ) {}
 
   start(): void {
+    if (this.timer) return;
     this.timer = setInterval(() => {
       void this.flush();
     }, this.intervalMs);
   }
 
-  async flush(): Promise<void> {
+  private async performFlush(): Promise<void> {
     const current = this.snapshot();
     if (current === this.lastWritten) return;
     await this.persistence.save(this.key, current);
     this.lastWritten = current;
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Serialize writes for this snapshot key.
+   *
+   * A slow database call must not let two timer ticks race each other: Phase 2
+   * checkpoint capture pauses and drains these queues before it locks the
+   * legacy rows, so the frozen source has one unambiguous last writer.
+   */
+  flush(): Promise<void> {
+    const next = this.flushTail.then(() => this.performFlush());
+    this.flushTail = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
+   * Stop periodic writes and wait for every already-started flush. When
+   * `flushLatest` is true, one final change-detected snapshot is queued after
+   * the in-flight work. The flusher can later be resumed with start().
+   */
+  async pause(flushLatest = true): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    await this.flush(); // final durable write on shutdown
+    if (flushLatest) {
+      await this.flush();
+      return;
+    }
+    await this.flushTail;
+  }
+
+  async stop(): Promise<void> {
+    await this.pause(true); // final durable write on shutdown
   }
 }

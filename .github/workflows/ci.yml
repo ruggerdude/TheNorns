@@ -24,6 +24,7 @@ jobs:
           --health-retries 12
     env:
       V2_POSTGRES_TEST_URL: postgresql://norns:norns@127.0.0.1:5432/norns_test
+      PHASE2_DOCKER_BACKUP_TEST: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

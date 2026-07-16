@@ -299,6 +299,28 @@ describe("POST /api/auth/login + /api/auth/logout", () => {
     expect(wrongPw.json()).toEqual(noSuchUser.json());
   });
 
+  it("throttles repeated failures before another credential check", async () => {
+    const users = new UserStore();
+    users.createActive({ email: "throttle@x.com", password: "password1", role: "member" });
+    const s = await start({ users });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect(
+        (
+          await inject(s, "POST", "/api/auth/login", {
+            email: "throttle@x.com",
+            password: "wrong",
+          })
+        ).statusCode,
+      ).toBe(401);
+    }
+    const blocked = await inject(s, "POST", "/api/auth/login", {
+      email: "throttle@x.com",
+      password: "password1",
+    });
+    expect(blocked.statusCode).toBe(429);
+    expect(blocked.json()).toEqual({ error: "login_throttled" });
+  });
+
   it("logout invalidates the session", async () => {
     const users = new UserStore();
     users.createActive({ email: "a@x.com", password: "password1", role: "member" });

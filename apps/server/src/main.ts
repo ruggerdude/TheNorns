@@ -10,10 +10,32 @@ import { buildDashboard } from "./dashboard.js";
 import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
 import { GraphSession } from "./graph/session.js";
+import {
+  Phase2ApplicationPersistenceLease,
+  Phase2PersistenceLeaseUnavailableError,
+} from "./persistence/migration/migrationLock.js";
 import { PgPersistence, SnapshotFlusher } from "./persistence/pg.js";
+import {
+  PostgresConnectionConfigurationError,
+  assertRestrictedRuntimeDatabase,
+  postgresPoolConfig,
+} from "./persistence/postgresConnection.js";
+import { NodePgTransactionRunner } from "./persistence/v2/database.js";
 import { ProjectStore } from "./projects/store.js";
 import { buildServer } from "./server.js";
 import { evaluateAuthStartup } from "./startup/authPolicy.js";
+import {
+  IdentityRuntimeConfigurationError,
+  assertCredentialHmacKeyCoverage,
+  createIdentityRuntime,
+  loadDurableIdentityRoute,
+  parseCredentialHmacKeyring,
+} from "./startup/identityRuntime.js";
+import {
+  ProjectRuntimeConfigurationError,
+  createProjectRuntime,
+  loadDurableProjectRoutes,
+} from "./startup/projectRuntime.js";
 import { RelayStores } from "./stores.js";
 import { UserStore } from "./users/store.js";
 
@@ -31,6 +53,15 @@ const projects = new ProjectStore();
 // login mechanism. Empty until the first admin is bootstrapped (or, in dev,
 // auto-seeded below).
 const users = new UserStore();
+let identityRuntime = createIdentityRuntime({
+  users,
+  route: null,
+  environment: process.env,
+});
+let projectRuntime = createProjectRuntime({
+  projects,
+  routes: { new_projects: null, projects: new Map() },
+});
 
 const isProd = process.env.NODE_ENV === "production";
 
@@ -44,21 +75,42 @@ let stores = new RelayStores();
 const flushers: SnapshotFlusher[] = [];
 let usersFlusher: SnapshotFlusher | undefined;
 let persistenceReady = false;
+let persistenceLease: Phase2ApplicationPersistenceLease | undefined;
+let databasePool: import("pg").Pool | undefined;
 
 if (databaseUrl) {
   try {
     const { Pool } = await import("pg");
-    // Railway's private URL (…railway.internal) needs no SSL; any public
-    // endpoint does. node-postgres won't attempt SSL unless told.
-    const isInternal = /railway\.internal|localhost|127\.0\.0\.1/.test(databaseUrl);
-    const pool = new Pool({
-      connectionString: databaseUrl,
-      ...(isInternal ? {} : { ssl: { rejectUnauthorized: false } }),
-    });
+    const pool = new Pool(postgresPoolConfig(databaseUrl));
+    databasePool = pool;
+    await assertRestrictedRuntimeDatabase(pool, process.env);
+    persistenceLease = await Phase2ApplicationPersistenceLease.acquire(pool);
     const persistence = new PgPersistence({
       query: (sql, params) => pool.query(sql, params as unknown[]),
     });
     await persistence.init();
+    const identityRoute = await loadDurableIdentityRoute({
+      query: async <TRow = Record<string, unknown>>(sql: string, params?: unknown[]) => {
+        const result = await pool.query(sql, params);
+        return { rows: result.rows as TRow[] };
+      },
+    });
+    const runtimeTransactions = new NodePgTransactionRunner(pool, {
+      mode: "runtime",
+      role: "norns_app",
+    });
+    if (identityRoute?.read_mode === "relational" && identityRoute.write_mode === "relational") {
+      await assertCredentialHmacKeyCoverage(
+        runtimeTransactions,
+        parseCredentialHmacKeyring(process.env),
+      );
+    }
+    identityRuntime = createIdentityRuntime({
+      users,
+      route: identityRoute,
+      environment: process.env,
+      transactions: runtimeTransactions,
+    });
 
     // relay state (runners, outbox, events, audit)
     const relaySnap = await persistence.load("relay");
@@ -67,30 +119,81 @@ if (databaseUrl) {
     // your real projects: metadata, plans, graph edits, allocations
     const projectsSnap = await persistence.load("projects");
     if (projectsSnap) projects.restoreFrom(JSON.parse(projectsSnap));
+    const projectRoutes = await loadDurableProjectRoutes({
+      query: async <TRow = Record<string, unknown>>(sql: string, params?: unknown[]) => {
+        const result = await pool.query(sql, params);
+        return { rows: result.rows as TRow[] };
+      },
+    });
+    projectRuntime = createProjectRuntime({
+      projects,
+      routes: projectRoutes,
+      transactions: runtimeTransactions,
+    });
 
-    // user accounts + live sessions
-    const usersSnap = await persistence.load("users");
-    if (usersSnap) users.restoreFrom(JSON.parse(usersSnap));
-
-    usersFlusher = new SnapshotFlusher(persistence, "users", () =>
-      JSON.stringify(users.snapshot()),
-    );
+    // Legacy accounts remain snapshot-backed until the durable route records
+    // relational/relational cutover. After cutover, raw legacy users/sessions
+    // are neither loaded nor flushed by the application.
+    let usersPersistenceState = "relational";
+    if (identityRuntime.usesLegacyUserSnapshot) {
+      const usersSnap = await persistence.load("users");
+      if (usersSnap) users.restoreFrom(JSON.parse(usersSnap));
+      usersFlusher = new SnapshotFlusher(persistence, "users", () =>
+        JSON.stringify(users.snapshot()),
+      );
+      usersPersistenceState = usersSnap ? "restored" : "fresh";
+    }
     flushers.push(
       new SnapshotFlusher(persistence, "relay", () => stores.snapshot()),
       new SnapshotFlusher(persistence, "projects", () => JSON.stringify(projects.snapshot())),
-      usersFlusher,
     );
+    if (usersFlusher) flushers.push(usersFlusher);
     for (const f of flushers) f.start();
     persistenceReady = true;
     console.log(
-      `postgres: relay ${relaySnap ? "restored" : "fresh"}, projects ${projectsSnap ? "restored" : "fresh"}, users ${usersSnap ? "restored" : "fresh"}`,
+      `postgres: relay ${relaySnap ? "restored" : "fresh"}, projects ${projectsSnap ? "restored" : "fresh"}, identity ${identityRuntime.mode} ${usersPersistenceState}`,
     );
+    let shutdownRequested = false;
     for (const signal of ["SIGTERM", "SIGINT"] as const) {
       process.on(signal, () => {
-        void Promise.all(flushers.map((f) => f.stop())).then(() => process.exit(0));
+        if (shutdownRequested) return;
+        shutdownRequested = true;
+        void Promise.all(flushers.map((f) => f.stop()))
+          .then(() => persistenceLease?.release())
+          .then(() => databasePool?.end())
+          .then(() => process.exit(0));
       });
     }
   } catch (error) {
+    const identityMustFailClosed =
+      error instanceof IdentityRuntimeConfigurationError || identityRuntime.mode === "relational";
+    const databaseBoundaryMustFailClosed =
+      error instanceof Phase2PersistenceLeaseUnavailableError ||
+      error instanceof PostgresConnectionConfigurationError;
+    await persistenceLease?.release();
+    persistenceLease = undefined;
+    await databasePool?.end();
+    databasePool = undefined;
+    if (
+      identityMustFailClosed ||
+      databaseBoundaryMustFailClosed ||
+      error instanceof ProjectRuntimeConfigurationError
+    ) {
+      const code =
+        error instanceof IdentityRuntimeConfigurationError
+          ? error.code
+          : error instanceof ProjectRuntimeConfigurationError
+            ? error.code
+            : error instanceof PostgresConnectionConfigurationError
+              ? error.code
+              : error instanceof Phase2PersistenceLeaseUnavailableError
+                ? "phase2_persistence_lease_unavailable"
+                : "relational_identity_unavailable";
+      console.error(
+        `startup refused [${code}]: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      process.exit(1);
+    }
     console.error(
       `postgres persistence unavailable${isProd ? " — production startup will be refused" : " — continuing in-memory"}. reason: ${
         error instanceof Error ? error.message : String(error)
@@ -100,6 +203,15 @@ if (databaseUrl) {
     flushers.length = 0;
     usersFlusher = undefined;
     persistenceReady = false;
+    identityRuntime = createIdentityRuntime({
+      users,
+      route: null,
+      environment: process.env,
+    });
+    projectRuntime = createProjectRuntime({
+      projects,
+      routes: { new_projects: null, projects: new Map() },
+    });
   }
 }
 
@@ -169,15 +281,29 @@ const complexityOf = (nodeId: string): "S" | "M" | "L" | "XL" =>
 // credential anymore. Real accounts replace that entirely.
 const deployToken = process.env.NORNS_TOKEN;
 
-if (!isProd && !users.hasActiveAdmin) {
+let hasActiveAdmin: boolean;
+try {
+  hasActiveAdmin = await identityRuntime.identity.hasActiveAdmin();
+} catch (error) {
+  await Promise.all(flushers.map((flusher) => flusher.stop())).catch(() => undefined);
+  await persistenceLease?.release();
+  await databasePool?.end();
+  console.error(
+    `identity startup refused [identity_probe_failed]: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  process.exit(1);
+}
+
+if (!isProd && identityRuntime.allowsDevelopmentSeed && !hasActiveAdmin) {
   // Local dev convenience: skip the bootstrap ceremony so `pnpm dev` keeps
   // working out of the box, same spirit as the old default dev token.
-  users.createActive({
+  await identityRuntime.identity.createActive({
     email: "dev@local.test",
     name: "Dev Admin",
     password: "dev-password",
     role: "admin",
   });
+  hasActiveAdmin = true;
   console.log("dev mode: seeded dev@local.test / dev-password as the first admin");
 }
 
@@ -185,7 +311,7 @@ const authStartup = evaluateAuthStartup({
   isProduction: isProd,
   persistenceConfigured: Boolean(databaseUrl),
   persistenceReady,
-  hasActiveAdmin: users.hasActiveAdmin,
+  hasActiveAdmin,
   hasDeployToken: Boolean(deployToken),
 });
 
@@ -204,7 +330,8 @@ const webDist = process.env.NORNS_WEB_DIST;
 const server = await buildServer({
   stores,
   users,
-  projects,
+  ...(identityRuntime.mode === "relational" ? { identity: identityRuntime.identity } : {}),
+  projects: projectRuntime.repository,
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),
   ...(usersFlusher !== undefined ? { persistUsers: () => usersFlusher.flush() } : {}),

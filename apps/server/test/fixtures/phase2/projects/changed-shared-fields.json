@@ -1,0 +1,48 @@
+{
+  "id": "proj-changed-shared-fields",
+  "name": "Changed shared fields",
+  "description": "The graph changed fields shared with the plan",
+  "pmProvider": "anthropic",
+  "createdAt": "2026-07-15T12:00:00.000Z",
+  "plan": {
+    "objective": "Detect shared field drift",
+    "assumptions": [],
+    "modules": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "description": "Implement task A",
+        "deliverables": ["Task A output"],
+        "acceptance": [
+          {
+            "id": "AC-A",
+            "statement": "Task A passes",
+            "verification_type": "command",
+            "verification": "pnpm test"
+          }
+        ],
+        "dependencies": [],
+        "estimated_complexity": "M",
+        "risk": "low",
+        "parallelization": { "safe": false }
+      }
+    ],
+    "risks": [],
+    "out_of_scope": []
+  },
+  "graph": {
+    "version": 2,
+    "nodes": [
+      {
+        "id": "a",
+        "title": "Task A after graph edit",
+        "complexity": "L",
+        "risk": "high",
+        "parallel_safe": true,
+        "dependencies": [],
+        "assignment": null
+      }
+    ]
+  },
+  "approval": null
+}

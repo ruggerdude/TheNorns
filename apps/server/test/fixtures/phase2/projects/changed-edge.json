@@ -1,0 +1,76 @@
+{
+  "id": "proj-edge",
+  "name": "Changed edge",
+  "description": "A plan edge was removed in the graph",
+  "pmProvider": "anthropic",
+  "createdAt": "2026-07-15T12:00:00.000Z",
+  "plan": {
+    "objective": "Change dependency ordering",
+    "modules": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "description": "Implement task A",
+        "deliverables": ["Task A output"],
+        "acceptance": [
+          {
+            "id": "AC-A",
+            "statement": "Task A passes",
+            "verification_type": "command",
+            "verification": "pnpm test"
+          }
+        ],
+        "dependencies": [],
+        "estimated_complexity": "M",
+        "risk": "low",
+        "parallelization": {
+          "safe": false
+        }
+      },
+      {
+        "id": "b",
+        "title": "Task B",
+        "description": "Implement task B",
+        "deliverables": ["Task B output"],
+        "acceptance": [
+          {
+            "id": "AC-B",
+            "statement": "Task B passes",
+            "verification_type": "command",
+            "verification": "pnpm test"
+          }
+        ],
+        "dependencies": ["a"],
+        "estimated_complexity": "M",
+        "risk": "low",
+        "parallelization": {
+          "safe": false
+        }
+      }
+    ]
+  },
+  "graph": {
+    "version": 2,
+    "nodes": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "complexity": "M",
+        "risk": "low",
+        "parallel_safe": false,
+        "dependencies": [],
+        "assignment": null
+      },
+      {
+        "id": "b",
+        "title": "Task B",
+        "complexity": "M",
+        "risk": "low",
+        "parallel_safe": false,
+        "dependencies": [],
+        "assignment": null
+      }
+    ]
+  },
+  "approval": null
+}

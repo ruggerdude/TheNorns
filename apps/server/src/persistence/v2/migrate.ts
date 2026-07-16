@@ -6,6 +6,11 @@ export const PHASE1_V2_MIGRATION_URL = new URL(
   "../../../drizzle/0001_refoundation_v2.sql",
   import.meta.url,
 );
+export const PHASE2_PRESERVATION_MIGRATION_NAME = "0002_preservation_migration";
+export const PHASE2_PRESERVATION_MIGRATION_URL = new URL(
+  "../../../drizzle/0002_preservation_migration.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -30,6 +35,11 @@ export interface V2MigrationResult {
   applied: boolean;
 }
 
+export interface V2MigrationSource {
+  name: string;
+  sql: string;
+}
+
 interface AppliedMigrationRow {
   checksum: string;
 }
@@ -38,9 +48,15 @@ export async function loadPhase1V2MigrationSql(): Promise<string> {
   return readFile(PHASE1_V2_MIGRATION_URL, "utf8");
 }
 
-export function phase1V2MigrationChecksum(sql: string): string {
+export async function loadPhase2PreservationMigrationSql(): Promise<string> {
+  return readFile(PHASE2_PRESERVATION_MIGRATION_URL, "utf8");
+}
+
+export function v2MigrationChecksum(sql: string): string {
   return createHash("sha256").update(sql).digest("hex");
 }
+
+export const phase1V2MigrationChecksum = v2MigrationChecksum;
 
 async function executeMigrationBatch(tx: V2MigrationExecutor, sql: string): Promise<void> {
   if (tx.exec) {
@@ -51,19 +67,15 @@ async function executeMigrationBatch(tx: V2MigrationExecutor, sql: string): Prom
 }
 
 /**
- * Applies the additive Phase 1 schema exactly once.
+ * Applies an ordered forward-only migration list.
  *
- * The checksum guard refuses to treat edited SQL as the already-applied
- * migration. The V2 DDL and its tracking row commit atomically. Existing
- * `norns_state` data is outside this migration and remains untouched.
+ * Every migration and its tracking row commit atomically. An already-applied
+ * migration is replay-safe only when its source checksum is unchanged.
  */
-export async function runPhase1V2Migration(
+export async function runV2Migrations(
   database: V2MigrationDatabase,
-  migrationSql?: string,
-): Promise<V2MigrationResult> {
-  const sql = migrationSql ?? (await loadPhase1V2MigrationSql());
-  const checksum = phase1V2MigrationChecksum(sql);
-
+  migrations: readonly V2MigrationSource[],
+): Promise<V2MigrationResult[]> {
   await database.query(
     `CREATE TABLE IF NOT EXISTS norns_schema_migrations (
        name TEXT PRIMARY KEY,
@@ -72,37 +84,89 @@ export async function runPhase1V2Migration(
      )`,
   );
 
-  return database.transaction(async (tx) => {
-    const existing = await tx.query<AppliedMigrationRow>(
-      "SELECT checksum FROM norns_schema_migrations WHERE name = $1 FOR UPDATE",
-      [PHASE1_V2_MIGRATION_NAME],
-    );
-    const applied = existing.rows[0];
-    if (applied) {
-      if (applied.checksum !== checksum) {
-        throw new Error(
-          `migration ${PHASE1_V2_MIGRATION_NAME} checksum mismatch: ` +
-            `database=${applied.checksum} source=${checksum}`,
-        );
+  const results: V2MigrationResult[] = [];
+  for (const migration of migrations) {
+    const checksum = v2MigrationChecksum(migration.sql);
+    const result = await database.transaction(async (tx) => {
+      const existing = await tx.query<AppliedMigrationRow>(
+        "SELECT checksum FROM norns_schema_migrations WHERE name = $1 FOR UPDATE",
+        [migration.name],
+      );
+      const applied = existing.rows[0];
+      if (applied) {
+        if (applied.checksum !== checksum) {
+          throw new Error(
+            `migration ${migration.name} checksum mismatch: ` +
+              `database=${applied.checksum} source=${checksum}`,
+          );
+        }
+        return {
+          name: migration.name,
+          checksum,
+          applied: false,
+        };
       }
+
+      await executeMigrationBatch(tx, migration.sql);
+      await tx.query(
+        `INSERT INTO norns_schema_migrations (name, checksum)
+         VALUES ($1, $2)`,
+        [migration.name, checksum],
+      );
+
       return {
-        name: PHASE1_V2_MIGRATION_NAME,
+        name: migration.name,
         checksum,
-        applied: false,
+        applied: true,
       };
-    }
+    });
+    results.push(result);
+  }
+  return results;
+}
 
-    await executeMigrationBatch(tx, sql);
-    await tx.query(
-      `INSERT INTO norns_schema_migrations (name, checksum)
-       VALUES ($1, $2)`,
-      [PHASE1_V2_MIGRATION_NAME, checksum],
-    );
-
-    return {
+/**
+ * Backward-compatible Phase 1 wrapper used by the frozen Phase 1 evidence.
+ */
+export async function runPhase1V2Migration(
+  database: V2MigrationDatabase,
+  migrationSql?: string,
+): Promise<V2MigrationResult> {
+  const [result] = await runV2Migrations(database, [
+    {
       name: PHASE1_V2_MIGRATION_NAME,
-      checksum,
-      applied: true,
-    };
-  });
+      sql: migrationSql ?? (await loadPhase1V2MigrationSql()),
+    },
+  ]);
+  if (!result) throw new Error("Phase 1 migration runner produced no result");
+  return result;
+}
+
+export async function runPhase2PreservationMigration(
+  database: V2MigrationDatabase,
+  migrationSql?: string,
+): Promise<V2MigrationResult> {
+  const [result] = await runV2Migrations(database, [
+    {
+      name: PHASE2_PRESERVATION_MIGRATION_NAME,
+      sql: migrationSql ?? (await loadPhase2PreservationMigrationSql()),
+    },
+  ]);
+  if (!result) throw new Error("Phase 2 migration runner produced no result");
+  return result;
+}
+
+export async function runCurrentV2Migrations(
+  database: V2MigrationDatabase,
+): Promise<V2MigrationResult[]> {
+  return runV2Migrations(database, [
+    {
+      name: PHASE1_V2_MIGRATION_NAME,
+      sql: await loadPhase1V2MigrationSql(),
+    },
+    {
+      name: PHASE2_PRESERVATION_MIGRATION_NAME,
+      sql: await loadPhase2PreservationMigrationSql(),
+    },
+  ]);
 }

@@ -8,6 +8,9 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "migrate:phase2": "pnpm run build && node dist/phase2.js",
+    "cutover:phase2-identity": "pnpm run build && node dist/phase2CutoverIdentity.js",
+    "verify:phase2-restore": "pnpm run build && node dist/phase2VerifyRestore.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

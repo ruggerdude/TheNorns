@@ -114,6 +114,62 @@ describe("Tier-2 postgres persistence", () => {
     expect(writes).toBe(2);
   });
 
+  it("serializes concurrent flushes and can pause, drain, and resume", async () => {
+    const persistence = new PgPersistence(client);
+    await persistence.init();
+
+    let value = 0;
+    let activeWrites = 0;
+    let maxActiveWrites = 0;
+    const writes: string[] = [];
+    let markWriteStarted: (() => void) | undefined;
+    const writeStarted = new Promise<void>((resolve) => {
+      markWriteStarted = resolve;
+    });
+    const serialized = new SnapshotFlusher(
+      new PgPersistence({
+        query: async (sql, params) => {
+          if (sql.startsWith("INSERT")) {
+            activeWrites += 1;
+            maxActiveWrites = Math.max(maxActiveWrites, activeWrites);
+            markWriteStarted?.();
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            writes.push(String(params?.[1]));
+            activeWrites -= 1;
+          }
+          return client.query(sql, params);
+        },
+      }),
+      "checkpoint-source",
+      () => JSON.stringify({ value }),
+      5,
+    );
+
+    value = 1;
+    const first = serialized.flush();
+    await writeStarted;
+    value = 2;
+    const second = serialized.flush();
+    await Promise.all([first, second]);
+
+    expect(maxActiveWrites).toBe(1);
+    expect(writes).toEqual(['{"value":1}', '{"value":2}']);
+
+    serialized.start();
+    value = 3;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await serialized.pause(true);
+    const writesAfterPause = writes.length;
+    value = 4;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(writes).toHaveLength(writesAfterPause);
+
+    serialized.start();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await serialized.stop();
+    expect(writes.at(-1)).toBe('{"value":4}');
+  });
+
   it("reconstructs the workflow graph (edits + allocations) across a restart", async () => {
     const persistence = new PgPersistence(client);
     await persistence.init();

@@ -1,0 +1,48 @@
+{
+  "id": "proj-invalid-plan",
+  "name": "Invalid plan",
+  "description": "The plan references a dependency module that does not exist",
+  "pmProvider": "anthropic",
+  "createdAt": "2026-07-15T12:00:00.000Z",
+  "plan": {
+    "objective": "Reject invalid plan semantics",
+    "assumptions": [],
+    "modules": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "description": "Implement task A",
+        "deliverables": ["Task A output"],
+        "acceptance": [
+          {
+            "id": "AC-A",
+            "statement": "Task A passes",
+            "verification_type": "command",
+            "verification": "pnpm test"
+          }
+        ],
+        "dependencies": ["ghost"],
+        "estimated_complexity": "M",
+        "risk": "low",
+        "parallelization": { "safe": false }
+      }
+    ],
+    "risks": [],
+    "out_of_scope": []
+  },
+  "graph": {
+    "version": 1,
+    "nodes": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "complexity": "M",
+        "risk": "low",
+        "parallel_safe": false,
+        "dependencies": [],
+        "assignment": null
+      }
+    ]
+  },
+  "approval": null
+}

@@ -1,0 +1,62 @@
+{
+  "id": "proj-assignment",
+  "name": "Changed assignment",
+  "description": "The allocation changed after approval",
+  "pmProvider": "anthropic",
+  "createdAt": "2026-07-15T12:00:00.000Z",
+  "plan": {
+    "objective": "Detect changed assignment",
+    "modules": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "description": "Implement task A",
+        "deliverables": ["Task A output"],
+        "acceptance": [
+          {
+            "id": "AC-A",
+            "statement": "Task A passes",
+            "verification_type": "command",
+            "verification": "pnpm test"
+          }
+        ],
+        "dependencies": [],
+        "estimated_complexity": "M",
+        "risk": "low",
+        "parallelization": {
+          "safe": false
+        }
+      }
+    ]
+  },
+  "graph": {
+    "version": 1,
+    "nodes": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "complexity": "M",
+        "risk": "low",
+        "parallel_safe": false,
+        "dependencies": [],
+        "assignment": {
+          "provider": "anthropic",
+          "model": "claude-sonnet-5",
+          "role": "implementation",
+          "worker_count": 1,
+          "reviewer_model": "openai-reasoning-default",
+          "budget_usd": 50,
+          "rationale": "legacy allocation",
+          "source": "auto"
+        }
+      }
+    ]
+  },
+  "approval": {
+    "content_hash": "d1a6458bfe82a6123bbf441638a841c21789387fd8665e9006dc330fac2570ad",
+    "graph_version": 1,
+    "allocation_fingerprint": "ed9af4fd8f247bbb1f7240c4316ed84593ea9da24f89726892e7f473bd4b269d",
+    "actor": "operator",
+    "approved_at": "2026-07-15T13:00:00.000Z"
+  }
+}

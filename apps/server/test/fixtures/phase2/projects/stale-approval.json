@@ -1,0 +1,62 @@
+{
+  "id": "proj-stale",
+  "name": "Stale approval",
+  "description": "The graph version changed after approval",
+  "pmProvider": "anthropic",
+  "createdAt": "2026-07-15T12:00:00.000Z",
+  "plan": {
+    "objective": "Detect a stale approval",
+    "modules": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "description": "Implement task A",
+        "deliverables": ["Task A output"],
+        "acceptance": [
+          {
+            "id": "AC-A",
+            "statement": "Task A passes",
+            "verification_type": "command",
+            "verification": "pnpm test"
+          }
+        ],
+        "dependencies": [],
+        "estimated_complexity": "M",
+        "risk": "low",
+        "parallelization": {
+          "safe": false
+        }
+      }
+    ]
+  },
+  "graph": {
+    "version": 2,
+    "nodes": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "complexity": "M",
+        "risk": "low",
+        "parallel_safe": false,
+        "dependencies": [],
+        "assignment": {
+          "provider": "anthropic",
+          "model": "claude-sonnet-5",
+          "role": "implementation",
+          "worker_count": 1,
+          "reviewer_model": "openai-reasoning-default",
+          "budget_usd": 50,
+          "rationale": "legacy allocation",
+          "source": "auto"
+        }
+      }
+    ]
+  },
+  "approval": {
+    "content_hash": "1f856de9e9b484a6b230fef58363cc8da1c6384a020183cb840da446915bcaa1",
+    "graph_version": 1,
+    "allocation_fingerprint": "c203c311d4b0e01a05b93877cd9480f47de727f808b51b7b7a2ae2091d7beb15",
+    "actor": "operator",
+    "approved_at": "2026-07-15T13:00:00.000Z"
+  }
+}

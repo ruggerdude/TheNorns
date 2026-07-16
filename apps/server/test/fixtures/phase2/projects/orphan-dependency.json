@@ -1,0 +1,48 @@
+{
+  "id": "proj-orphan-dependency",
+  "name": "Orphan graph dependency",
+  "description": "The graph references a dependency node that does not exist",
+  "pmProvider": "anthropic",
+  "createdAt": "2026-07-15T12:00:00.000Z",
+  "plan": {
+    "objective": "Detect an orphan dependency",
+    "assumptions": [],
+    "modules": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "description": "Implement task A",
+        "deliverables": ["Task A output"],
+        "acceptance": [
+          {
+            "id": "AC-A",
+            "statement": "Task A passes",
+            "verification_type": "command",
+            "verification": "pnpm test"
+          }
+        ],
+        "dependencies": [],
+        "estimated_complexity": "M",
+        "risk": "low",
+        "parallelization": { "safe": false }
+      }
+    ],
+    "risks": [],
+    "out_of_scope": []
+  },
+  "graph": {
+    "version": 2,
+    "nodes": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "complexity": "M",
+        "risk": "low",
+        "parallel_safe": false,
+        "dependencies": ["ghost"],
+        "assignment": null
+      }
+    ]
+  },
+  "approval": null
+}
