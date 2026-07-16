@@ -13,12 +13,53 @@ const asMigrationDatabase = (database: PGlite): V2MigrationDatabase =>
   database as unknown as V2MigrationDatabase;
 const postgresIdentifier = (name: string): string => name.slice(0, 63);
 
+describe.sequential("Phase 1 V2 runtime-role migration preflight", () => {
+  it("refuses to apply when norns_app has not been provisioned", async () => {
+    const candidate = new PGlite();
+    try {
+      await expect(runPhase1V2Migration(asMigrationDatabase(candidate))).rejects.toThrow(
+        /required runtime role norns_app does not exist/,
+      );
+      const tables = await candidate.query<{ projects: string | null }>(
+        "SELECT to_regclass('projects')::text AS projects",
+      );
+      expect(tables.rows[0]?.projects).toBeNull();
+    } finally {
+      await candidate.close();
+    }
+  });
+
+  it("refuses to apply when the migration login cannot assume norns_app", async () => {
+    const candidate = new PGlite();
+    await candidate.exec(`
+      CREATE ROLE norns_app NOLOGIN;
+      CREATE ROLE migration_actor NOLOGIN;
+      GRANT USAGE, CREATE ON SCHEMA public TO migration_actor;
+      SET ROLE migration_actor;
+    `);
+    try {
+      await expect(runPhase1V2Migration(asMigrationDatabase(candidate))).rejects.toThrow(
+        /cannot SET ROLE norns_app/,
+      );
+      const tables = await candidate.query<{ projects: string | null }>(
+        "SELECT to_regclass('projects')::text AS projects",
+      );
+      expect(tables.rows[0]?.projects).toBeNull();
+    } finally {
+      await candidate.exec("RESET ROLE");
+      await candidate.close();
+    }
+  });
+});
+
 describe.sequential("Phase 1 V2 normalized schema", () => {
   let pg: PGlite;
 
   beforeAll(async () => {
     pg = new PGlite();
     await pg.exec(`
+      CREATE ROLE norns_app NOLOGIN;
+
       CREATE TABLE norns_state (
         key TEXT PRIMARY KEY,
         snapshot JSONB NOT NULL,
@@ -75,19 +116,19 @@ describe.sequential("Phase 1 V2 normalized schema", () => {
         id, project_id, phase_id, objective_id, strategy_version_id,
         title, description, deliverables, acceptance_criteria,
         complexity, risk, required_roles, expected_outputs,
-        environment_policy_ref, verification_policy_ref, state
+        environment_policy_ref, verification_policy_ref, state, lifecycle_version
       ) VALUES
         (
           'task-a', 'project-main', 'phase-a', 'objective-a', 'strategy-a',
           'Task A', 'First task', '["artifact"]'::jsonb, '["green"]'::jsonb,
           'M', 'medium', '["implementation"]'::jsonb, '["commit"]'::jsonb,
-          'environment/default', 'verification/default', 'ready'
+          'environment/default', 'verification/default', 'ready', 1
         ),
         (
           'task-b', 'project-main', 'phase-b', 'objective-b', 'strategy-b',
           'Task B', 'Second task', '["artifact"]'::jsonb, '["green"]'::jsonb,
           'M', 'medium', '["implementation"]'::jsonb, '["commit"]'::jsonb,
-          'environment/default', 'verification/default', 'ready'
+          'environment/default', 'verification/default', 'ready', 1
         );
 
       INSERT INTO agent_profiles (
@@ -154,12 +195,12 @@ describe.sequential("Phase 1 V2 normalized schema", () => {
         id, project_id, phase_id, objective_id, strategy_version_id,
         title, description, deliverables, acceptance_criteria,
         complexity, risk, required_roles, expected_outputs,
-        environment_policy_ref, verification_policy_ref, state
+        environment_policy_ref, verification_policy_ref, state, lifecycle_version
       ) VALUES (
         'task-other', 'project-other', 'phase-other', 'objective-other', 'strategy-other',
         'Other task', 'Other project task', '["artifact"]'::jsonb, '["green"]'::jsonb,
         'M', 'medium', '["implementation"]'::jsonb, '["commit"]'::jsonb,
-        'environment/default', 'verification/default', 'ready'
+        'environment/default', 'verification/default', 'ready', 1
       );
 
       INSERT INTO agent_assignments (
@@ -412,6 +453,41 @@ describe.sequential("Phase 1 V2 normalized schema", () => {
     expect(result.rows[0]?.state).toBe("completed");
   });
 
+  it("pins lifecycle version zero to the published origin states", async () => {
+    await expect(
+      pg.query(
+        `UPDATE tasks
+         SET lifecycle_version = 0
+         WHERE id = 'task-a'`,
+      ),
+    ).rejects.toThrow();
+
+    await expect(
+      pg.query(
+        `UPDATE agent_runs
+         SET state = 'running'
+         WHERE id = 'run-1'`,
+      ),
+    ).rejects.toThrow();
+
+    await expect(
+      pg.query(
+        `UPDATE agent_runs
+         SET lifecycle_version = -1
+         WHERE id = 'run-1'`,
+      ),
+    ).rejects.toThrow();
+
+    const task = await pg.query<{ lifecycle_version: number; state: string }>(
+      "SELECT lifecycle_version, state FROM tasks WHERE id = 'task-a'",
+    );
+    const run = await pg.query<{ lifecycle_version: number; state: string }>(
+      "SELECT lifecycle_version, state FROM agent_runs WHERE id = 'run-1'",
+    );
+    expect(task.rows[0]).toEqual({ lifecycle_version: 1, state: "ready" });
+    expect(run.rows[0]).toEqual({ lifecycle_version: 0, state: "created" });
+  });
+
   it("allows only one open DecisionPoint for a stable condition key", async () => {
     const insert = (id: string, status: string) =>
       pg.query(
@@ -438,6 +514,93 @@ describe.sequential("Phase 1 V2 normalized schema", () => {
        WHERE condition_key = 'task:task-a:repository_conflict' AND status = 'open'`,
     );
     expect(result.rows[0]?.count).toBe(1);
+  });
+
+  it("preserves resolved and dismissed DecisionPoint dispositions across supersession", async () => {
+    const insert = (
+      id: string,
+      conditionKey: string,
+      status: "open" | "resolved" | "dismissed",
+      revision: number,
+      supersedes: string | null = null,
+    ) =>
+      pg.query(
+        `INSERT INTO decision_points (
+           id, project_id, phase_id, task_id, scope_entity_type, scope_entity_id,
+           reason_class, source_instance_id, condition_key, condition_fingerprint,
+           condition_revision, question, context, options, recommendation_option_id,
+           urgency, status, supersedes_decision_point_id, resolved_at
+         ) VALUES (
+           $1, 'project-main', 'phase-a', 'task-a', 'task', 'task-a',
+           'architecture_choice', $2, $3, $4, $5,
+           'Choose a resolution', 'The material condition changed',
+           '[{"id":"resolve","label":"Resolve"}]'::jsonb, 'resolve', 'high', $6, $7,
+           CASE WHEN $6 = 'open' THEN NULL ELSE now() END
+         )`,
+        [
+          id,
+          `${conditionKey}:${revision}`,
+          conditionKey,
+          "f".repeat(64),
+          revision,
+          status,
+          supersedes,
+        ],
+      );
+
+    await insert("decision-resolved", "task:task-a:architecture_choice", "resolved", 1);
+    await insert(
+      "decision-resolved-revision",
+      "task:task-a:architecture_choice",
+      "open",
+      2,
+      "decision-resolved",
+    );
+    await pg.query(
+      `UPDATE decision_points
+       SET superseded_by_decision_point_id = 'decision-resolved-revision'
+       WHERE id = 'decision-resolved'`,
+    );
+
+    await expect(
+      pg.query(
+        `UPDATE decision_points
+         SET status = 'superseded'
+         WHERE id = 'decision-resolved'`,
+      ),
+    ).rejects.toThrow(/terminal status resolved/);
+
+    await insert("decision-dismissed", "task:task-a:architecture_dismissed", "dismissed", 1);
+    await expect(
+      pg.query(
+        `UPDATE decision_points
+         SET status = 'superseded'
+         WHERE id = 'decision-dismissed'`,
+      ),
+    ).rejects.toThrow(/terminal status dismissed/);
+
+    const result = await pg.query<{
+      id: string;
+      status: string;
+      superseded_by_decision_point_id: string | null;
+    }>(
+      `SELECT id, status, superseded_by_decision_point_id
+       FROM decision_points
+       WHERE id IN ('decision-resolved', 'decision-dismissed')
+       ORDER BY id`,
+    );
+    expect(result.rows).toEqual([
+      {
+        id: "decision-dismissed",
+        status: "dismissed",
+        superseded_by_decision_point_id: null,
+      },
+      {
+        id: "decision-resolved",
+        status: "resolved",
+        superseded_by_decision_point_id: "decision-resolved-revision",
+      },
+    ]);
   });
 
   it("pins one stable command identity to one dispatch job", async () => {
@@ -525,6 +688,189 @@ describe.sequential("Phase 1 V2 normalized schema", () => {
     await expect(pg.query("DELETE FROM audit_events WHERE audit_id = 'audit-1'")).rejects.toThrow(
       /append-only/,
     );
+
+    await pg.query(
+      `INSERT INTO projects (
+         id, name, status, assignment_policy_ref, verification_policy_ref, budget_policy_ref
+       ) VALUES (
+         'project-history-only', 'History only', 'active',
+         'assignment/default', 'verification/default', 'budget/default'
+       )`,
+    );
+    await pg.query(
+      `INSERT INTO domain_events (
+         event_id, stream_type, stream_id, stream_version, event_type,
+         project_id, actor_type, actor_id, correlation_id, occurred_at, payload
+       ) VALUES (
+         'event-history-only', 'project', 'project-history-only', 1, 'ProjectCreated',
+         'project-history-only', 'system', 'coordinator', 'correlation-history',
+         now(), '{}'::jsonb
+       )`,
+    );
+    await expect(
+      pg.query("DELETE FROM projects WHERE id = 'project-history-only'"),
+    ).rejects.toThrow(/domain_events_project_id_projects_id_fk/);
+
+    await expect(pg.query("TRUNCATE domain_events")).rejects.toThrow(/append-only/);
+    await expect(pg.query("TRUNCATE projects CASCADE")).rejects.toThrow(/append-only/);
+
+    const retained = await pg.query<{ domain_count: number; audit_count: number }>(
+      `SELECT
+         (SELECT count(*)::int FROM domain_events WHERE event_id = 'event-1') AS domain_count,
+         (SELECT count(*)::int FROM audit_events WHERE audit_id = 'audit-1') AS audit_count`,
+    );
+    expect(retained.rows[0]).toEqual({ domain_count: 1, audit_count: 1 });
+  });
+
+  it("uses restrictive history foreign keys and an INSERT/SELECT-only runtime role", async () => {
+    const deleteActions = await pg.query<{ conname: string; confdeltype: string }>(
+      `SELECT conname, confdeltype
+       FROM pg_constraint
+       WHERE conrelid IN ('domain_events'::regclass, 'audit_events'::regclass)
+         AND contype = 'f'`,
+    );
+    expect(deleteActions.rows.length).toBeGreaterThan(0);
+    expect(deleteActions.rows.every((row) => row.confdeltype === "r")).toBe(true);
+
+    const historyTables = new Set(["domain_events", "audit_events"]);
+    const schemaTables = Object.values(phase1V2Schema) as PgTable[];
+    for (const table of schemaTables) {
+      const tableName = getTableName(table);
+      const grants = await pg.query<{
+        can_delete: boolean;
+        can_insert: boolean;
+        can_select: boolean;
+        can_truncate: boolean;
+        can_update: boolean;
+      }>(
+        `SELECT
+           has_table_privilege('norns_app', $1, 'SELECT') AS can_select,
+           has_table_privilege('norns_app', $1, 'INSERT') AS can_insert,
+           has_table_privilege('norns_app', $1, 'UPDATE') AS can_update,
+           has_table_privilege('norns_app', $1, 'DELETE') AS can_delete,
+           has_table_privilege('norns_app', $1, 'TRUNCATE') AS can_truncate`,
+        [tableName],
+      );
+      expect(grants.rows[0], `${tableName} runtime grants`).toEqual({
+        can_select: true,
+        can_insert: true,
+        can_update: !historyTables.has(tableName),
+        can_delete: !historyTables.has(tableName),
+        can_truncate: false,
+      });
+    }
+
+    const privileges = await pg.query<{
+      audit_can_delete: boolean;
+      audit_can_insert: boolean;
+      audit_can_select: boolean;
+      audit_can_truncate: boolean;
+      audit_can_update: boolean;
+      can_delete: boolean;
+      can_insert: boolean;
+      can_select: boolean;
+      can_truncate: boolean;
+      can_update: boolean;
+      projects_can_delete: boolean;
+      projects_can_insert: boolean;
+      projects_can_select: boolean;
+      projects_can_truncate: boolean;
+      projects_can_update: boolean;
+    }>(
+      `SELECT
+         has_table_privilege('norns_app', 'domain_events', 'SELECT') AS can_select,
+         has_table_privilege('norns_app', 'domain_events', 'INSERT') AS can_insert,
+         has_table_privilege('norns_app', 'domain_events', 'UPDATE') AS can_update,
+         has_table_privilege('norns_app', 'domain_events', 'DELETE') AS can_delete,
+         has_table_privilege('norns_app', 'domain_events', 'TRUNCATE') AS can_truncate,
+         has_table_privilege('norns_app', 'audit_events', 'SELECT') AS audit_can_select,
+         has_table_privilege('norns_app', 'audit_events', 'INSERT') AS audit_can_insert,
+         has_table_privilege('norns_app', 'audit_events', 'UPDATE') AS audit_can_update,
+         has_table_privilege('norns_app', 'audit_events', 'DELETE') AS audit_can_delete,
+         has_table_privilege('norns_app', 'audit_events', 'TRUNCATE') AS audit_can_truncate,
+         has_table_privilege('norns_app', 'projects', 'SELECT') AS projects_can_select,
+         has_table_privilege('norns_app', 'projects', 'INSERT') AS projects_can_insert,
+         has_table_privilege('norns_app', 'projects', 'UPDATE') AS projects_can_update,
+         has_table_privilege('norns_app', 'projects', 'DELETE') AS projects_can_delete,
+         has_table_privilege('norns_app', 'projects', 'TRUNCATE') AS projects_can_truncate`,
+    );
+    expect(privileges.rows[0]).toEqual({
+      can_select: true,
+      can_insert: true,
+      can_update: false,
+      can_delete: false,
+      can_truncate: false,
+      audit_can_select: true,
+      audit_can_insert: true,
+      audit_can_update: false,
+      audit_can_delete: false,
+      audit_can_truncate: false,
+      projects_can_select: true,
+      projects_can_insert: true,
+      projects_can_update: true,
+      projects_can_delete: true,
+      projects_can_truncate: false,
+    });
+
+    await pg.exec("SET ROLE norns_app");
+    try {
+      const project = await pg.query<{ name: string }>(
+        "SELECT name FROM projects WHERE id = 'project-main'",
+      );
+      expect(project.rows[0]?.name).toBe("Main project");
+      await pg.query(
+        `INSERT INTO projection_checkpoints (
+           projection_name, partition_key, version
+         ) VALUES ('runtime-role', 'project-main', 1)`,
+      );
+      await pg.query(
+        `UPDATE projection_checkpoints
+         SET version = version + 1
+         WHERE projection_name = 'runtime-role' AND partition_key = 'project-main'`,
+      );
+      await pg.query(
+        `INSERT INTO domain_events (
+           event_id, stream_type, stream_id, stream_version, event_type,
+           project_id, phase_id, task_id, actor_type, actor_id,
+           correlation_id, occurred_at, payload
+         ) VALUES (
+           'event-runtime-role', 'task', 'task-a', 2, 'TaskAssigned',
+           'project-main', 'phase-a', 'task-a', 'system', 'coordinator',
+           'correlation-role', now(), '{}'::jsonb
+         )`,
+      );
+      await pg.query(
+        `INSERT INTO audit_events (
+           audit_id, audit_type, project_id, phase_id, task_id, actor_type,
+           actor_id, outcome, severity, correlation_id, occurred_at, summary
+         ) VALUES (
+           'audit-runtime-role', 'task.assigned', 'project-main', 'phase-a', 'task-a',
+           'system', 'coordinator', 'succeeded', 'info', 'correlation-role',
+           now(), 'Task became assigned'
+         )`,
+      );
+      const selected = await pg.query<{ count: number }>(
+        `SELECT
+           (SELECT count(*)::int
+            FROM domain_events
+            WHERE event_id = 'event-runtime-role')
+           + (SELECT count(*)::int
+              FROM audit_events
+              WHERE audit_id = 'audit-runtime-role') AS count`,
+      );
+      expect(selected.rows[0]?.count).toBe(2);
+      await expect(
+        pg.query(
+          "UPDATE domain_events SET event_type = 'Changed' WHERE event_id = 'event-runtime-role'",
+        ),
+      ).rejects.toThrow(/permission denied/);
+      await expect(
+        pg.query("DELETE FROM domain_events WHERE event_id = 'event-runtime-role'"),
+      ).rejects.toThrow(/permission denied/);
+      await expect(pg.query("TRUNCATE domain_events")).rejects.toThrow(/permission denied/);
+    } finally {
+      await pg.exec("RESET ROLE");
+    }
   });
 
   it("backs up and restores legacy and normalized rows together", async () => {

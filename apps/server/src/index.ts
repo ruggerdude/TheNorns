@@ -73,6 +73,5 @@ export * from "./persistence/v2/database.js";
 export * from "./persistence/v2/lifecycleMutation.js";
 export * from "./persistence/v2/migrate.js";
 export * from "./persistence/v2/reconciliation.js";
-export * from "./persistence/v2/schema.js";
 export * from "./persistence/v2/sqlRepositories.js";
 export * from "./projects/repository.js";

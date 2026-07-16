@@ -23,6 +23,7 @@ describe.sequential("V2 production lifecycle mutation chokepoint", () => {
   beforeEach(async () => {
     pg = new PGlite();
     runner = new PGliteTransactionRunner(pg as unknown as PGliteDatabaseLike);
+    await pg.exec("CREATE ROLE norns_app NOLOGIN");
     await runPhase1V2Migration(pg as unknown as V2MigrationDatabase);
     await pg.exec(`
       INSERT INTO projects (

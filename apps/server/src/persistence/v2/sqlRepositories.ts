@@ -8,6 +8,7 @@ import {
 import { newId } from "../../ids.js";
 import type {
   V2ApplicationTransaction,
+  V2CommandFailureAuditInput,
   V2DecisionPointTransaction,
   V2DecisionPointWriteInput,
   V2IdempotencyAuditInput,
@@ -151,6 +152,17 @@ export class SqlV2ApplicationTransaction
     if (!result.rows[0]) throw new Error("idempotency claim disappeared before commit");
   }
 
+  async releaseIdempotency(scope: V2IdempotencyAttemptT): Promise<void> {
+    const result = await this.sql.query<{ command_id: string }>(
+      `DELETE FROM idempotency_records
+       WHERE actor_id = $1 AND command_family = $2 AND idempotency_key = $3
+         AND status = 'in_progress'
+       RETURNING command_id`,
+      [scope.actor_id, scope.command_family, scope.idempotency_key],
+    );
+    if (!result.rows[0]) throw new Error("idempotency claim disappeared before release");
+  }
+
   async appendIdempotencyAudit(input: V2IdempotencyAuditInput): Promise<void> {
     await this.sql.query(
       `INSERT INTO audit_events (
@@ -178,6 +190,54 @@ export class SqlV2ApplicationTransaction
           idempotency_key: input.idempotency_key,
           request_fingerprint: input.request_fingerprint,
           existing_command_id: input.existing_command_id,
+        }),
+      ],
+    );
+  }
+
+  async appendCommandFailureAudit(input: V2CommandFailureAuditInput): Promise<void> {
+    await this.sql.query(
+      `INSERT INTO audit_events (
+         audit_id, audit_type, project_id, phase_id, task_id, actor_type,
+         actor_id, outcome, severity, correlation_id, causation_id, occurred_at,
+         targets, summary, details, redaction_applied
+       ) VALUES (
+         $1, 'command.failed',
+         (SELECT id FROM projects WHERE id = $2),
+         (SELECT id FROM phases WHERE id = $3 AND project_id = $2),
+         (SELECT id FROM tasks WHERE id = $4 AND project_id = $2 AND phase_id = $3),
+         $5, $6, 'denied', 'warning',
+         $7, $8, $9, $10::jsonb, $11, $12::jsonb, true
+       )`,
+      [
+        newId("audit"),
+        input.project_id,
+        input.phase_id,
+        input.task_id,
+        input.actor_type,
+        input.actor_id,
+        input.correlation_id,
+        input.causation_id,
+        input.occurred_at,
+        JSON.stringify([
+          { entity_type: "command", entity_id: input.command_id },
+          { entity_type: "project", entity_id: input.project_id },
+          ...(input.phase_id === null ? [] : [{ entity_type: "phase", entity_id: input.phase_id }]),
+          ...(input.task_id === null ? [] : [{ entity_type: "task", entity_id: input.task_id }]),
+        ]),
+        `Command failed: ${input.error_code ?? input.failure_disposition}`,
+        JSON.stringify({
+          command_family: input.command_family,
+          idempotency_key: input.idempotency_key,
+          request_fingerprint: input.request_fingerprint,
+          failure_disposition: input.failure_disposition,
+          http_status: input.http_status,
+          error_code: input.error_code,
+          requested_scope: {
+            project_id: input.project_id,
+            phase_id: input.phase_id,
+            task_id: input.task_id,
+          },
         }),
       ],
     );
@@ -532,21 +592,28 @@ export class SqlV2DecisionPointTransaction implements V2DecisionPointTransaction
     existing: V2KnownDecisionPoint,
     input: V2DecisionPointWriteInput,
   ): Promise<V2OpenDecisionPoint> {
-    const result = await this.sql.query<{ id: string }>(
-      `UPDATE decision_points
-       SET status = 'superseded', updated_at = $2
-       WHERE id = $1
-       RETURNING id`,
-      [existing.id, input.occurred_at],
-    );
-    if (!result.rows[0]) throw new Error("decision point disappeared before supersession");
+    let linkedStatus = existing.status;
+    if (existing.status === "open") {
+      const result = await this.sql.query<{ id: string }>(
+        `UPDATE decision_points
+         SET status = 'superseded', updated_at = $2
+         WHERE id = $1 AND status = 'open'
+         RETURNING id`,
+        [existing.id, input.occurred_at],
+      );
+      if (!result.rows[0]) throw new Error("open decision point disappeared before supersession");
+      linkedStatus = "superseded";
+    }
+
     const replacement = await this.insertDecisionPoint(input);
-    await this.sql.query(
+    const linked = await this.sql.query<{ id: string }>(
       `UPDATE decision_points
-       SET superseded_by_decision_point_id = $2
-       WHERE id = $1`,
-      [existing.id, replacement.id],
+       SET superseded_by_decision_point_id = $2, updated_at = $3
+       WHERE id = $1 AND status = $4
+       RETURNING id`,
+      [existing.id, replacement.id, input.occurred_at, linkedStatus],
     );
+    if (!linked.rows[0]) throw new Error("decision point disappeared before revision linking");
     return replacement;
   }
 }

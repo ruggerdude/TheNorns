@@ -196,6 +196,13 @@ export const V2Task = z
   })
   .strict()
   .superRefine((task, ctx) => {
+    if (task.lifecycle_version === 0 && task.state !== "pending") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["state"],
+        message: "a version-zero task must be at the pending lifecycle origin",
+      });
+    }
     if (task.state === "assigned" && task.designated_assignment_id === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -694,6 +701,13 @@ export const V2AgentRun = z
   })
   .strict()
   .superRefine((run, ctx) => {
+    if (run.lifecycle_version === 0 && run.state !== "created") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["state"],
+        message: "a version-zero agent run must be at the created lifecycle origin",
+      });
+    }
     const hasSupersededAt = run.superseded_at !== null;
     const hasSupersededBy = run.superseded_by_run_id !== null;
     if (hasSupersededAt !== hasSupersededBy) {
@@ -933,16 +947,24 @@ export interface V2StrategyMaterialization {
 
 function v2MaterializedId(
   kind: "objective" | "task" | "task-dependency" | "assignment",
-  strategyId: string,
-  localId: string,
+  phaseId: string,
+  ...localIdentityParts: string[]
 ): string {
-  return [kind, strategyId, localId].map(encodeURIComponent).join(":");
+  return [kind, phaseId, ...localIdentityParts].map(encodeURIComponent).join(":");
 }
 
 /**
  * Exact, deterministic projection used by the approval transaction. Every
  * proposal field is copied into its canonical entity; only database-owned
  * lifecycle, version, evidence, and timestamp defaults are introduced.
+ *
+ * Materialized identity is scoped to the Phase and proposal-local identity,
+ * rather than the StrategyVersion. An amendment therefore addresses the same
+ * canonical rows for unchanged local identities while `strategy_version_id`
+ * records the newly approved provenance. This function creates proposal-shaped
+ * defaults only; callers applying an amendment to canonical state MUST use
+ * mergeV2StrategyAmendment so lifecycle, evidence, and historical fields are
+ * not reset.
  */
 export function materializeV2StrategyVersion(
   strategyInput: V2StrategyVersionT,
@@ -966,13 +988,13 @@ export function materializeV2StrategyVersion(
   const objectiveIdByLocalId = new Map(
     strategy.proposed_objectives.map((objective) => [
       objective.local_id,
-      v2MaterializedId("objective", strategy.id, objective.local_id),
+      v2MaterializedId("objective", strategy.phase_id, objective.local_id),
     ]),
   );
   const taskIdByLocalId = new Map(
     strategy.proposed_tasks.map((task) => [
       task.local_id,
-      v2MaterializedId("task", strategy.id, task.local_id),
+      v2MaterializedId("task", strategy.phase_id, task.local_id),
     ]),
   );
   const assignmentByTaskLocalId = new Map(
@@ -1021,7 +1043,7 @@ export function materializeV2StrategyVersion(
       designated_assignment_id:
         assignment === undefined
           ? null
-          : v2MaterializedId("assignment", strategy.id, assignment.local_id),
+          : v2MaterializedId("assignment", strategy.phase_id, assignment.local_id),
       designated_run_id: null,
       review_evidence: [],
       completion_evidence: [],
@@ -1039,8 +1061,9 @@ export function materializeV2StrategyVersion(
         schema_version: 2,
         id: v2MaterializedId(
           "task-dependency",
-          strategy.id,
-          `${predecessorLocalId}->${successor.local_id}`,
+          strategy.phase_id,
+          predecessorLocalId,
+          successor.local_id,
         ),
         project_id: strategy.project_id,
         phase_id: strategy.phase_id,
@@ -1056,7 +1079,7 @@ export function materializeV2StrategyVersion(
   const agentAssignments = strategy.proposed_assignments.map((proposal) =>
     V2AgentAssignment.parse({
       schema_version: 2,
-      id: v2MaterializedId("assignment", strategy.id, proposal.local_id),
+      id: v2MaterializedId("assignment", strategy.phase_id, proposal.local_id),
       project_id: strategy.project_id,
       phase_id: strategy.phase_id,
       task_id: taskIdByLocalId.get(proposal.task_local_id),
@@ -1072,6 +1095,354 @@ export function materializeV2StrategyVersion(
       updated_at: timestamp,
     }),
   );
+
+  return {
+    objectives,
+    tasks,
+    task_dependencies: taskDependencies,
+    agent_assignments: agentAssignments,
+  };
+}
+
+export const V2StrategyAmendmentConflictCode = z.enum([
+  "invalid_supersession",
+  "scope_mismatch",
+  "entity_removal_or_rename_forbidden",
+  "locked_entity_change",
+  "identity_relationship_change_forbidden",
+]);
+export type V2StrategyAmendmentConflictCodeT = z.infer<typeof V2StrategyAmendmentConflictCode>;
+
+export class V2StrategyAmendmentConflict extends Error {
+  readonly code: V2StrategyAmendmentConflictCodeT;
+  readonly entity_kind: string | null;
+  readonly entity_id: string | null;
+
+  constructor(
+    code: V2StrategyAmendmentConflictCodeT,
+    message: string,
+    entityKind: string | null = null,
+    entityId: string | null = null,
+  ) {
+    super(message);
+    this.name = "V2StrategyAmendmentConflict";
+    this.code = code;
+    this.entity_kind = entityKind;
+    this.entity_id = entityId;
+  }
+}
+
+type V2MaterializedEntity = {
+  id: string;
+  project_id: string;
+  phase_id: string;
+};
+
+function v2MaterializedEntityMap<T extends { id: string }>(
+  entityKind: string,
+  entities: readonly T[],
+): Map<string, T> {
+  const result = new Map<string, T>();
+  for (const entity of entities) {
+    if (result.has(entity.id)) {
+      throw new V2StrategyAmendmentConflict(
+        "identity_relationship_change_forbidden",
+        `existing materialization contains duplicate ${entityKind} ID ${entity.id}`,
+        entityKind,
+        entity.id,
+      );
+    }
+    result.set(entity.id, entity);
+  }
+  return result;
+}
+
+function v2AssertAmendmentScope(
+  strategy: V2StrategyVersionT,
+  entityKind: string,
+  entities: readonly V2MaterializedEntity[],
+): void {
+  for (const entity of entities) {
+    if (entity.project_id !== strategy.project_id || entity.phase_id !== strategy.phase_id) {
+      throw new V2StrategyAmendmentConflict(
+        "scope_mismatch",
+        `${entityKind} ${entity.id} is outside amendment project/phase scope`,
+        entityKind,
+        entity.id,
+      );
+    }
+  }
+}
+
+function v2AssertNoRemovedMaterializedIds<T extends { id: string }>(
+  entityKind: string,
+  existing: ReadonlyMap<string, T>,
+  proposed: ReadonlyMap<string, T>,
+): void {
+  for (const id of existing.keys()) {
+    if (!proposed.has(id)) {
+      throw new V2StrategyAmendmentConflict(
+        "entity_removal_or_rename_forbidden",
+        `MVP amendments cannot remove or rename existing ${entityKind} ${id}`,
+        entityKind,
+        id,
+      );
+    }
+  }
+}
+
+function v2SameAmendmentMaterial(left: unknown, right: unknown): boolean {
+  return (
+    JSON.stringify(canonicalizeStrategyContent(left)) ===
+    JSON.stringify(canonicalizeStrategyContent(right))
+  );
+}
+
+function v2ObjectiveProposalMaterial(objective: V2ObjectiveT): unknown {
+  return {
+    outcome: objective.outcome,
+    success_measures: objective.success_measures,
+    order: objective.order,
+  };
+}
+
+function v2TaskProposalMaterial(task: V2TaskT): unknown {
+  return {
+    objective_id: task.objective_id,
+    title: task.title,
+    description: task.description,
+    deliverables: task.deliverables,
+    acceptance_criteria: task.acceptance_criteria,
+    complexity: task.complexity,
+    risk: task.risk,
+    required_roles: task.required_roles,
+    required_capabilities: task.required_capabilities,
+    required_inputs: task.required_inputs,
+    expected_outputs: task.expected_outputs,
+    environment_policy_ref: task.environment_policy_ref,
+    verification_policy_ref: task.verification_policy_ref,
+  };
+}
+
+function v2AssignmentProposalMaterial(assignment: V2AgentAssignmentT): unknown {
+  return {
+    agent_profile_id: assignment.agent_profile_id,
+    rationale: assignment.rationale,
+    rationale_factors: assignment.rationale_factors,
+    budget_limit_usd: assignment.budget_limit_usd,
+    reviewer_agent_profile_id: assignment.reviewer_agent_profile_id,
+    allocation_policy_ref: assignment.allocation_policy_ref,
+  };
+}
+
+function v2DependencyIdentity(dependency: V2TaskDependencyT): unknown {
+  return {
+    project_id: dependency.project_id,
+    phase_id: dependency.phase_id,
+    predecessor_task_id: dependency.predecessor_task_id,
+    predecessor_phase_id: dependency.predecessor_phase_id,
+    successor_task_id: dependency.successor_task_id,
+    successor_phase_id: dependency.successor_phase_id,
+  };
+}
+
+function v2LockedAmendmentChange(
+  entityKind: string,
+  entityId: string,
+  currentStatus: string,
+): never {
+  throw new V2StrategyAmendmentConflict(
+    "locked_entity_change",
+    `${entityKind} ${entityId} is ${currentStatus}; its approved proposal fields are execution/history-locked`,
+    entityKind,
+    entityId,
+  );
+}
+
+/**
+ * Applies an approved StrategyVersion amendment to already materialized
+ * canonical rows.
+ *
+ * MVP amendment rules are deliberately conservative:
+ * - existing phase-scoped IDs may not disappear or be renamed;
+ * - Objective proposal fields may change only while proposed/active;
+ * - Task proposal fields (including new incoming dependencies) may change only
+ *   while pending/ready;
+ * - Assignment proposal fields may change only while proposed;
+ * - relationship identity and existing dependency edges are immutable.
+ *
+ * Existing lifecycle state, evidence, designations, and historical timestamps
+ * are preserved. A changed canonical row advances aggregate_version and
+ * updated_at; created/completed timestamps are never reset. Every existing
+ * Task records the new StrategyVersion provenance even when its proposal fields
+ * are unchanged.
+ */
+export function mergeV2StrategyAmendment(
+  existingInput: V2StrategyMaterialization,
+  amendmentInput: V2StrategyVersionT,
+  amendedAt: string,
+  serverSha256: (canonicalContent: string) => string,
+): V2StrategyMaterialization {
+  const amendment = V2StrategyVersion.parse(amendmentInput);
+  if (amendment.supersedes_strategy_version_id === null) {
+    throw new V2StrategyAmendmentConflict(
+      "invalid_supersession",
+      "a StrategyVersion amendment must name the StrategyVersion it supersedes",
+    );
+  }
+
+  const existing: V2StrategyMaterialization = {
+    objectives: existingInput.objectives.map((objective) => V2Objective.parse(objective)),
+    tasks: existingInput.tasks.map((task) => V2Task.parse(task)),
+    task_dependencies: existingInput.task_dependencies.map((dependency) =>
+      V2TaskDependency.parse(dependency),
+    ),
+    agent_assignments: existingInput.agent_assignments.map((assignment) =>
+      V2AgentAssignment.parse(assignment),
+    ),
+  };
+  const proposed = materializeV2StrategyVersion(amendment, amendedAt, serverSha256);
+  const timestamp = V2IsoDateTime.parse(amendedAt);
+
+  v2AssertAmendmentScope(amendment, "Objective", existing.objectives);
+  v2AssertAmendmentScope(amendment, "Task", existing.tasks);
+  v2AssertAmendmentScope(amendment, "TaskDependency", existing.task_dependencies);
+  v2AssertAmendmentScope(amendment, "AgentAssignment", existing.agent_assignments);
+
+  for (const task of existing.tasks) {
+    if (
+      task.strategy_version_id !== amendment.supersedes_strategy_version_id &&
+      task.strategy_version_id !== amendment.id
+    ) {
+      throw new V2StrategyAmendmentConflict(
+        "invalid_supersession",
+        `Task ${task.id} provenance ${task.strategy_version_id} is not the superseded or current StrategyVersion`,
+        "Task",
+        task.id,
+      );
+    }
+  }
+
+  const existingObjectives = v2MaterializedEntityMap("Objective", existing.objectives);
+  const proposedObjectives = v2MaterializedEntityMap("Objective", proposed.objectives);
+  const existingTasks = v2MaterializedEntityMap("Task", existing.tasks);
+  const proposedTasks = v2MaterializedEntityMap("Task", proposed.tasks);
+  const existingDependencies = v2MaterializedEntityMap(
+    "TaskDependency",
+    existing.task_dependencies,
+  );
+  const proposedDependencies = v2MaterializedEntityMap(
+    "TaskDependency",
+    proposed.task_dependencies,
+  );
+  const existingAssignments = v2MaterializedEntityMap(
+    "AgentAssignment",
+    existing.agent_assignments,
+  );
+  const proposedAssignments = v2MaterializedEntityMap(
+    "AgentAssignment",
+    proposed.agent_assignments,
+  );
+
+  v2AssertNoRemovedMaterializedIds("Objective", existingObjectives, proposedObjectives);
+  v2AssertNoRemovedMaterializedIds("Task", existingTasks, proposedTasks);
+  v2AssertNoRemovedMaterializedIds("AgentAssignment", existingAssignments, proposedAssignments);
+  v2AssertNoRemovedMaterializedIds("TaskDependency", existingDependencies, proposedDependencies);
+
+  const objectives = proposed.objectives.map((proposal) => {
+    const current = existingObjectives.get(proposal.id);
+    if (current === undefined) return proposal;
+    const changed = !v2SameAmendmentMaterial(
+      v2ObjectiveProposalMaterial(current),
+      v2ObjectiveProposalMaterial(proposal),
+    );
+    if (changed && current.status !== "proposed" && current.status !== "active") {
+      return v2LockedAmendmentChange("Objective", current.id, current.status);
+    }
+    return V2Objective.parse({
+      ...proposal,
+      status: current.status,
+      completion_evidence: current.completion_evidence,
+      aggregate_version: current.aggregate_version + (changed ? 1 : 0),
+      created_at: current.created_at,
+      updated_at: changed ? timestamp : current.updated_at,
+    });
+  });
+
+  const tasks = proposed.tasks.map((proposal) => {
+    const current = existingTasks.get(proposal.id);
+    if (current === undefined) return proposal;
+    const changed = !v2SameAmendmentMaterial(
+      v2TaskProposalMaterial(current),
+      v2TaskProposalMaterial(proposal),
+    );
+    if (changed && current.state !== "pending" && current.state !== "ready") {
+      return v2LockedAmendmentChange("Task", current.id, current.state);
+    }
+    const provenanceChanged = current.strategy_version_id !== amendment.id;
+    return V2Task.parse({
+      ...proposal,
+      strategy_version_id: amendment.id,
+      state: current.state,
+      designated_assignment_id: current.designated_assignment_id,
+      designated_run_id: current.designated_run_id,
+      review_evidence: current.review_evidence,
+      completion_evidence: current.completion_evidence,
+      lifecycle_version: current.lifecycle_version,
+      aggregate_version: current.aggregate_version + (changed || provenanceChanged ? 1 : 0),
+      created_at: current.created_at,
+      updated_at: changed || provenanceChanged ? timestamp : current.updated_at,
+      completed_at: current.completed_at,
+    });
+  });
+
+  const taskDependencies = proposed.task_dependencies.map((proposal) => {
+    const current = existingDependencies.get(proposal.id);
+    if (current !== undefined) {
+      if (!v2SameAmendmentMaterial(v2DependencyIdentity(current), v2DependencyIdentity(proposal))) {
+        throw new V2StrategyAmendmentConflict(
+          "identity_relationship_change_forbidden",
+          `TaskDependency ${current.id} cannot change endpoints or scope`,
+          "TaskDependency",
+          current.id,
+        );
+      }
+      return current;
+    }
+
+    const successor = existingTasks.get(proposal.successor_task_id);
+    if (successor !== undefined && successor.state !== "pending" && successor.state !== "ready") {
+      return v2LockedAmendmentChange("Task", successor.id, successor.state);
+    }
+    return proposal;
+  });
+
+  const agentAssignments = proposed.agent_assignments.map((proposal) => {
+    const current = existingAssignments.get(proposal.id);
+    if (current === undefined) return proposal;
+    if (current.task_id !== proposal.task_id) {
+      throw new V2StrategyAmendmentConflict(
+        "identity_relationship_change_forbidden",
+        `AgentAssignment ${current.id} cannot move to a different Task`,
+        "AgentAssignment",
+        current.id,
+      );
+    }
+    const changed = !v2SameAmendmentMaterial(
+      v2AssignmentProposalMaterial(current),
+      v2AssignmentProposalMaterial(proposal),
+    );
+    if (changed && current.status !== "proposed") {
+      return v2LockedAmendmentChange("AgentAssignment", current.id, current.status);
+    }
+    return V2AgentAssignment.parse({
+      ...proposal,
+      status: current.status,
+      aggregate_version: current.aggregate_version + (changed ? 1 : 0),
+      created_at: current.created_at,
+      updated_at: changed ? timestamp : current.updated_at,
+    });
+  });
 
   return {
     objectives,

@@ -172,9 +172,16 @@ A unique constraint prevents two transactions from owning the same
   available, or a retriable `command_in_progress` conflict while the first
   transaction is unresolved.
 - Reusing a key with a different request fingerprint is rejected and audited.
-- A committed failure is retained and replayed as the result for that key;
-  an intentional retry uses a new key and records causation to the failed
-  command.
+- A terminal business failure, such as validation or authorization denial,
+  rolls back every mutation write, commits only its non-retriable response,
+  appends an attributable, redacted failure audit after rollback, and replays
+  that response for the same key.
+- A retriable conflict, including optimistic-concurrency conflict, rolls back
+  every mutation write, appends its attributable failure audit after rollback,
+  and releases the key. A matching retry may reuse that key after refreshing
+  current state; its response envelope is explicitly marked `retriable`.
+- Unexpected exceptions roll back the entire transaction, including the
+  in-progress idempotency claim.
 - Keys and response envelopes are retained for at least the longest client
   retry, approval-staleness, audit, and rollback window. The MVP minimum is 30
   days and never shorter than the lifetime of related asynchronous work,

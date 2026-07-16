@@ -390,7 +390,9 @@ Active implementation brief:
 - Define event schemas and versioning policy.
 - Define immutable command identity per dispatch job.
 - Define actor-scoped idempotency key, request fingerprint, concurrent
-  duplicate, committed-failure replay, and retention behavior.
+  duplicate, terminal-failure replay, retriable-conflict key release, and
+  retention behavior. A returned failure must roll back mutation writes
+  before either retaining or releasing the idempotency key.
 - Define budget-reservation settlement/release for every terminal and
   ambiguous execution outcome.
 

@@ -1,6 +1,6 @@
 # Phase 1 Brief — Domain and Persistence Foundation
 
-**Status:** Candidate frozen — independent review pending
+**Status:** Independent review complete — required remediation in progress
 **Authorized:** 2026-07-16
 **Branch:** `refoundation/phase1-domain-persistence`
 **Candidate implementation:** `7244dd8430128b99acb8e5facc4d7575ff3e05a8`
@@ -118,6 +118,18 @@ Owner: Codex plus Sol.
 5. Findings are dispositioned under the standing independence rules.
 6. Required remediation lands.
 7. Sol records the final contract freeze.
+
+### Pre-freeze migration policy
+
+The reviewed candidate migration at `7244dd8` was never authorized for
+production or shared-environment use. Any database that applied that candidate
+DDL is a disposable verification database and must be dropped and recreated
+before final-freeze validation. Required review remediation may therefore
+amend `0001_refoundation_v2.sql` until the final Phase 1 freeze.
+
+The final freeze pins the migration checksum. After that point, every schema
+change is forward-only in a new numbered migration; editing the frozen
+migration is prohibited.
 
 ## Exit gate
 

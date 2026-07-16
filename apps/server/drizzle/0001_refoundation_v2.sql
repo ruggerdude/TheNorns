@@ -4,6 +4,26 @@
 -- table is neither altered nor dropped so Phase 2 can migrate and reconcile
 -- from a fixed source before any cutover.
 
+-- The migration login remains privileged for schema management, while every
+-- application transaction explicitly assumes this restricted runtime role.
+-- Fail before creating V2 tables if deployment provisioning has not made that
+-- role usable by the current login.
+DO $runtime_role_preflight$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'norns_app') THEN
+    RAISE EXCEPTION
+      'required runtime role norns_app does not exist; provision it before migration'
+      USING ERRCODE = '42501';
+  END IF;
+  IF NOT pg_has_role(current_user, 'norns_app', 'SET') THEN
+    RAISE EXCEPTION
+      'migration login % cannot SET ROLE norns_app; grant it SET membership before migration',
+      current_user
+      USING ERRCODE = '42501';
+  END IF;
+END
+$runtime_role_preflight$;
+
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   username TEXT NOT NULL,
@@ -285,6 +305,7 @@ CREATE TABLE IF NOT EXISTS tasks (
       'in_review', 'completed', 'blocked', 'failed', 'cancelled'
     )),
   CONSTRAINT tasks_lifecycle_version_check CHECK (lifecycle_version >= 0),
+  CONSTRAINT tasks_lifecycle_origin_check CHECK (lifecycle_version > 0 OR state = 'pending'),
   CONSTRAINT tasks_completed_at_check CHECK (state <> 'completed' OR completed_at IS NOT NULL),
   CONSTRAINT tasks_completed_evidence_check CHECK (
     state <> 'completed'
@@ -416,6 +437,9 @@ CREATE TABLE IF NOT EXISTS agent_runs (
       'created', 'dispatched', 'running', 'verifying',
       'succeeded', 'failed', 'cancelled', 'expired'
     )),
+  CONSTRAINT agent_runs_lifecycle_version_check CHECK (lifecycle_version >= 0),
+  CONSTRAINT agent_runs_lifecycle_origin_check
+    CHECK (lifecycle_version > 0 OR state = 'created'),
   CONSTRAINT agent_runs_verification_status_check
     CHECK (verification_status IN ('pending', 'passed', 'failed')),
   CONSTRAINT agent_runs_supersession_shape_check
@@ -892,11 +916,11 @@ CREATE TABLE IF NOT EXISTS domain_events (
   event_type TEXT NOT NULL,
   schema_version INTEGER NOT NULL DEFAULT 2,
   project_id TEXT NOT NULL CONSTRAINT domain_events_project_id_projects_id_fk
-    REFERENCES projects (id) ON DELETE CASCADE,
+    REFERENCES projects (id) ON DELETE RESTRICT,
   phase_id TEXT CONSTRAINT domain_events_phase_id_phases_id_fk
-    REFERENCES phases (id) ON DELETE CASCADE,
+    REFERENCES phases (id) ON DELETE RESTRICT,
   task_id TEXT CONSTRAINT domain_events_task_id_tasks_id_fk
-    REFERENCES tasks (id) ON DELETE CASCADE,
+    REFERENCES tasks (id) ON DELETE RESTRICT,
   actor_type TEXT NOT NULL,
   actor_id TEXT,
   correlation_id TEXT NOT NULL,
@@ -918,11 +942,11 @@ CREATE TABLE IF NOT EXISTS audit_events (
   schema_version INTEGER NOT NULL DEFAULT 2,
   audit_type TEXT NOT NULL,
   project_id TEXT CONSTRAINT audit_events_project_id_projects_id_fk
-    REFERENCES projects (id) ON DELETE CASCADE,
+    REFERENCES projects (id) ON DELETE RESTRICT,
   phase_id TEXT CONSTRAINT audit_events_phase_id_phases_id_fk
-    REFERENCES phases (id) ON DELETE CASCADE,
+    REFERENCES phases (id) ON DELETE RESTRICT,
   task_id TEXT CONSTRAINT audit_events_task_id_tasks_id_fk
-    REFERENCES tasks (id) ON DELETE CASCADE,
+    REFERENCES tasks (id) ON DELETE RESTRICT,
   actor_type TEXT NOT NULL,
   actor_id TEXT,
   outcome TEXT NOT NULL,
@@ -1244,7 +1268,7 @@ BEGIN
     ALTER TABLE domain_events
       ADD CONSTRAINT domain_events_phase_scope_fk
       FOREIGN KEY (project_id, phase_id)
-      REFERENCES phases (project_id, id) ON DELETE CASCADE;
+      REFERENCES phases (project_id, id) ON DELETE RESTRICT;
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'domain_events_task_scope_fk'
@@ -1252,7 +1276,7 @@ BEGIN
     ALTER TABLE domain_events
       ADD CONSTRAINT domain_events_task_scope_fk
       FOREIGN KEY (project_id, phase_id, task_id)
-      REFERENCES tasks (project_id, phase_id, id) ON DELETE CASCADE;
+      REFERENCES tasks (project_id, phase_id, id) ON DELETE RESTRICT;
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'audit_events_phase_scope_fk'
@@ -1260,7 +1284,7 @@ BEGIN
     ALTER TABLE audit_events
       ADD CONSTRAINT audit_events_phase_scope_fk
       FOREIGN KEY (project_id, phase_id)
-      REFERENCES phases (project_id, id) ON DELETE CASCADE;
+      REFERENCES phases (project_id, id) ON DELETE RESTRICT;
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'audit_events_task_scope_fk'
@@ -1268,7 +1292,7 @@ BEGIN
     ALTER TABLE audit_events
       ADD CONSTRAINT audit_events_task_scope_fk
       FOREIGN KEY (project_id, phase_id, task_id)
-      REFERENCES tasks (project_id, phase_id, id) ON DELETE CASCADE;
+      REFERENCES tasks (project_id, phase_id, id) ON DELETE RESTRICT;
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'projects_primary_repository_scope_fk'
@@ -1438,9 +1462,26 @@ BEGIN
 END
 $migration$;
 
+-- A human disposition is terminal. A later material change may link a new
+-- DecisionPoint revision, but it must not rewrite what the human decided.
+CREATE OR REPLACE FUNCTION norns_guard_decision_point_terminal_status()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $decision_point_guard$
+BEGIN
+  IF OLD.status IN ('resolved', 'dismissed')
+    AND NEW.status IS DISTINCT FROM OLD.status
+  THEN
+    RAISE EXCEPTION 'decision point % has terminal status %; transition to % is forbidden',
+      OLD.id, OLD.status, NEW.status
+      USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END
+$decision_point_guard$;
+
 -- Domain and audit history are append-only even when the application connects
--- with table-owner privileges (as PGlite does in verification). Production
--- roles should additionally grant INSERT/SELECT only on these two tables.
+-- with table-owner privileges (as PGlite does in verification).
 CREATE OR REPLACE FUNCTION norns_reject_append_only_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1453,6 +1494,15 @@ $append_only$;
 
 DO $migration$
 BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgname = 'decision_points_terminal_status_guard'
+      AND tgrelid = 'decision_points'::regclass
+  ) THEN
+    CREATE TRIGGER decision_points_terminal_status_guard
+      BEFORE UPDATE OF status ON decision_points
+      FOR EACH ROW EXECUTE FUNCTION norns_guard_decision_point_terminal_status();
+  END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_trigger
     WHERE tgname = 'domain_events_append_only'
@@ -1471,5 +1521,107 @@ BEGIN
       BEFORE UPDATE OR DELETE ON audit_events
       FOR EACH ROW EXECUTE FUNCTION norns_reject_append_only_mutation();
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgname = 'domain_events_append_only_truncate'
+      AND tgrelid = 'domain_events'::regclass
+  ) THEN
+    CREATE TRIGGER domain_events_append_only_truncate
+      BEFORE TRUNCATE ON domain_events
+      FOR EACH STATEMENT EXECUTE FUNCTION norns_reject_append_only_mutation();
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgname = 'audit_events_append_only_truncate'
+      AND tgrelid = 'audit_events'::regclass
+  ) THEN
+    CREATE TRIGGER audit_events_append_only_truncate
+      BEFORE TRUNCATE ON audit_events
+      FOR EACH STATEMENT EXECUTE FUNCTION norns_reject_append_only_mutation();
+  END IF;
 END
 $migration$;
+
+-- Provision the runtime role against the schema selected by this connection.
+-- This supports isolated-schema verification and avoids silently granting the
+-- wrong `public` relations when search_path is deployment-specific.
+DO $production_grants$
+DECLARE
+  runtime_schema TEXT := current_schema();
+  runtime_table TEXT;
+  operational_tables TEXT[] := ARRAY[
+    'users',
+    'sessions',
+    'projects',
+    'repository_bindings',
+    'phases',
+    'phase_dependencies',
+    'strategy_versions',
+    'strategy_reviews',
+    'objectives',
+    'tasks',
+    'task_dependencies',
+    'agent_profiles',
+    'agent_assignments',
+    'agent_runs',
+    'decision_points',
+    'approvals',
+    'decision_records',
+    'project_memory_entries',
+    'architecture_revisions',
+    'artifacts',
+    'verification_results',
+    'budget_allocations',
+    'budget_reservations',
+    'usage_events',
+    'commands',
+    'dispatch_jobs',
+    'runner_events',
+    'idempotency_records',
+    'lifecycle_integrity_findings',
+    'projection_checkpoints',
+    'migration_runs',
+    'legacy_id_mappings'
+  ];
+BEGIN
+  IF runtime_schema IS NULL THEN
+    RAISE EXCEPTION 'migration search_path has no current schema'
+      USING ERRCODE = '3F000';
+  END IF;
+
+  EXECUTE format('GRANT USAGE ON SCHEMA %I TO norns_app', runtime_schema);
+
+  FOREACH runtime_table IN ARRAY operational_tables LOOP
+    EXECUTE format(
+      'REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM norns_app',
+      runtime_schema,
+      runtime_table
+    );
+    EXECUTE format(
+      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO norns_app',
+      runtime_schema,
+      runtime_table
+    );
+  END LOOP;
+
+  EXECUTE format(
+    'REVOKE ALL PRIVILEGES ON TABLE %I.domain_events, %I.audit_events FROM PUBLIC',
+    runtime_schema,
+    runtime_schema
+  );
+  EXECUTE format(
+    'REVOKE ALL PRIVILEGES ON TABLE %I.domain_events, %I.audit_events FROM norns_app',
+    runtime_schema,
+    runtime_schema
+  );
+  EXECUTE format(
+    'GRANT SELECT, INSERT ON TABLE %I.domain_events, %I.audit_events TO norns_app',
+    runtime_schema,
+    runtime_schema
+  );
+END
+$production_grants$;
+
+-- Validate the exact operation the runtime transaction adapter performs.
+SET LOCAL ROLE norns_app;
+RESET ROLE;

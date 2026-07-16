@@ -42,6 +42,15 @@ export interface NodePgPoolLike {
   connect(): Promise<NodePgClientLike>;
 }
 
+export type NodePgTransactionAccess = { mode: "privileged" } | { mode: "runtime"; role: string };
+
+function quotePostgresIdentifier(identifier: string): string {
+  if (identifier.trim().length === 0) {
+    throw new Error("PostgreSQL role identifier must not be empty");
+  }
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
 /**
  * Transaction adapter used by the Phase 1 PGlite verification suite.
  *
@@ -64,7 +73,10 @@ export class PGliteTransactionRunner implements V2TransactionRunner {
  * substituted because successive calls may use different connections.
  */
 export class NodePgTransactionRunner implements V2TransactionRunner {
-  constructor(private readonly pool: NodePgPoolLike) {}
+  constructor(
+    private readonly pool: NodePgPoolLike,
+    private readonly access: NodePgTransactionAccess,
+  ) {}
 
   async transaction<T>(work: (tx: V2SqlExecutor) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
@@ -79,6 +91,9 @@ export class NodePgTransactionRunner implements V2TransactionRunner {
 
     try {
       await client.query("BEGIN");
+      if (this.access.mode === "runtime") {
+        await client.query(`SET LOCAL ROLE ${quotePostgresIdentifier(this.access.role)}`);
+      }
       const result = await work(executor);
       await client.query("COMMIT");
       return result;

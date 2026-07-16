@@ -5,5 +5,4 @@ export * from "./v2/database.js";
 export * from "./v2/lifecycleMutation.js";
 export * from "./v2/migrate.js";
 export * from "./v2/reconciliation.js";
-export * from "./v2/schema.js";
 export * from "./v2/sqlRepositories.js";

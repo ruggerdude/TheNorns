@@ -29,6 +29,7 @@ describe.sequential("V2 concrete SQL repositories", () => {
   beforeAll(async () => {
     pg = new PGlite();
     runner = new PGliteTransactionRunner(pg as unknown as PGliteDatabaseLike);
+    await pg.exec("CREATE ROLE norns_app NOLOGIN");
     await runPhase1V2Migration(pg as unknown as V2MigrationDatabase);
     await pg.exec(`
       INSERT INTO projects (
@@ -176,6 +177,50 @@ describe.sequential("V2 concrete SQL repositories", () => {
         )
       ).rows[0]?.count,
     ).toBe(1);
+
+    const terminalFailure = await executeV2ApplicationCommand({
+      command: V2StartPhaseCommand.parse({
+        ...command,
+        command_id: "command-start-phase-rejected",
+        idempotency_key: "start-phase-rejected",
+      }),
+      transactionRunner: runner,
+      transactionFactory: {
+        bind: (sql) => new SqlV2ApplicationTransaction(sql),
+      },
+      now: () => new Date(NOW),
+      mutate: async () => ({
+        outcome: "failed",
+        failure_disposition: "terminal",
+        http_status: 422,
+        body: { error: "phase_not_ready" },
+      }),
+    });
+    expect(terminalFailure.kind).toBe("executed");
+    const failureAudit = await pg.query<{
+      audit_type: string;
+      details: {
+        error_code: string;
+        failure_disposition: string;
+        http_status: number;
+      };
+      summary: string;
+    }>(
+      `SELECT audit_type, details, summary
+       FROM audit_events
+       WHERE audit_type = 'command.failed'`,
+    );
+    expect(failureAudit.rows).toEqual([
+      {
+        audit_type: "command.failed",
+        details: expect.objectContaining({
+          error_code: "phase_not_ready",
+          failure_disposition: "terminal",
+          http_status: 422,
+        }),
+        summary: "Command failed: phase_not_ready",
+      },
+    ]);
   });
 
   it("creates, reuses, and supersedes DecisionPoints with durable history", async () => {
@@ -257,6 +302,53 @@ describe.sequential("V2 concrete SQL repositories", () => {
       kind: "closed_unchanged",
       decision_point: { id: "decision-2", status: "resolved" },
     });
+    const changedAfterResolution = await upsertV2DecisionPoint({
+      transactionRunner: runner,
+      transactionFactory: factory,
+      input: input("decision-3", "c".repeat(64)),
+    });
+    expect(changedAfterResolution).toMatchObject({
+      kind: "superseded",
+      superseded_decision_point_id: "decision-2",
+      decision_point: {
+        id: "decision-3",
+        status: "open",
+        condition_revision: 3,
+        supersedes_decision_point_id: "decision-2",
+      },
+    });
+    const revisionHistory = await pg.query<{
+      id: string;
+      status: string;
+      supersedes_decision_point_id: string | null;
+      superseded_by_decision_point_id: string | null;
+    }>(
+      `SELECT id, status, supersedes_decision_point_id, superseded_by_decision_point_id
+       FROM decision_points
+       WHERE condition_key = $1
+       ORDER BY condition_revision`,
+      [v2DecisionPointConditionKey(identity)],
+    );
+    expect(revisionHistory.rows).toEqual([
+      {
+        id: "decision-1",
+        status: "superseded",
+        supersedes_decision_point_id: null,
+        superseded_by_decision_point_id: "decision-2",
+      },
+      {
+        id: "decision-2",
+        status: "resolved",
+        supersedes_decision_point_id: "decision-1",
+        superseded_by_decision_point_id: "decision-3",
+      },
+      {
+        id: "decision-3",
+        status: "open",
+        supersedes_decision_point_id: "decision-2",
+        superseded_by_decision_point_id: null,
+      },
+    ]);
     const counts = await pg.query<{ points: number; events: number; audits: number }>(
       `SELECT
          (SELECT count(*)::int FROM decision_points) AS points,
@@ -265,7 +357,7 @@ describe.sequential("V2 concrete SQL repositories", () => {
          (SELECT count(*)::int FROM audit_events
            WHERE audit_type = 'decision_point.opened') AS audits`,
     );
-    expect(counts.rows[0]).toEqual({ points: 2, events: 2, audits: 2 });
+    expect(counts.rows[0]).toEqual({ points: 3, events: 3, audits: 3 });
   });
 
   it("settles a reservation through the production budget adapter", async () => {

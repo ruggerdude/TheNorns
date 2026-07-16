@@ -135,6 +135,29 @@ TaskDependency, and initial AgentAssignment records in one transaction.
 Changing an active phase requires an explicit amendment version; it does not
 silently mutate the approved strategy.
 
+Materialized entity identity is deterministic within the Phase:
+`(phase_id, proposal_local_id)` for Objective, Task, and AgentAssignment, and
+`(phase_id, predecessor_local_id, successor_local_id)` for TaskDependency.
+Applying an approved amendment is an explicit merge against the canonical
+rows, never a second fresh materialization followed by caller-authored
+overlays. The merge:
+
+- preserves lifecycle state, evidence, designations, and historical timestamps;
+- updates every retained Task's `strategy_version_id` provenance;
+- permits proposal-field changes only for Objectives in `proposed`/`active`,
+  Tasks in `pending`/`ready`, and AgentAssignments in `proposed`;
+- rejects proposal-field changes once execution or history has locked the
+  entity;
+- adds genuinely new entities with deterministic IDs; and
+- for the MVP, rejects removal or rename of any previously materialized
+  Objective, Task, AgentAssignment, or TaskDependency ID. Existing dependency
+  endpoints and Assignment-to-Task identity are immutable. A new dependency
+  may target an existing Task only while that Task is `pending` or `ready`.
+
+Later support for deleting, splitting, or renaming canonical work requires a
+separate, auditable domain command and ADR amendment; it must not be smuggled
+through StrategyVersion materialization.
+
 `ApproveStrategyVersion` is a server-enforced invariant, not a client
 affordance. It rejects a StrategyVersion whose planning review did not
 converge or that retains any unresolved must-fix finding. There is no

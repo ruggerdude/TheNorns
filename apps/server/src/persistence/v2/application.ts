@@ -35,6 +35,24 @@ export interface V2IdempotencyAuditInput {
   occurred_at: string;
 }
 
+export interface V2CommandFailureAuditInput {
+  actor_type: V2ActorTypeT;
+  actor_id: string;
+  project_id: string;
+  phase_id: string | null;
+  task_id: string | null;
+  command_id: string;
+  command_family: string;
+  idempotency_key: string;
+  request_fingerprint: string;
+  failure_disposition: "terminal" | "retriable";
+  http_status: number;
+  error_code: string | null;
+  correlation_id: string;
+  causation_id: string | null;
+  occurred_at: string;
+}
+
 export interface V2ApplicationTransaction {
   tryAcquireIdempotencyLock(scope: V2IdempotencyAttemptT): Promise<boolean>;
   findIdempotency(scope: V2IdempotencyAttemptT): Promise<V2IdempotencyRecordT | null>;
@@ -45,18 +63,27 @@ export interface V2ApplicationTransaction {
     response: V2CommandResponseEnvelopeT,
     updatedAt: string,
   ): Promise<void>;
+  releaseIdempotency(scope: V2IdempotencyAttemptT): Promise<void>;
   appendIdempotencyAudit(input: V2IdempotencyAuditInput): Promise<void>;
+  appendCommandFailureAudit(input: V2CommandFailureAuditInput): Promise<void>;
 }
 
 export interface V2ApplicationTransactionFactory<TTx extends V2ApplicationTransaction> {
   bind(tx: V2SqlExecutor): TTx;
 }
 
-export interface V2CommandMutationResult {
-  outcome: "succeeded" | "failed";
-  http_status: number;
-  body: unknown;
-}
+export type V2CommandMutationResult =
+  | {
+      outcome: "succeeded";
+      http_status: number;
+      body: unknown;
+    }
+  | {
+      outcome: "failed";
+      failure_disposition: "terminal" | "retriable";
+      http_status: number;
+      body: unknown;
+    };
 
 export function v2ExpectedVersionConflict(input: {
   entity_type: string;
@@ -66,6 +93,7 @@ export function v2ExpectedVersionConflict(input: {
 }): V2CommandMutationResult {
   return {
     outcome: "failed",
+    failure_disposition: "retriable",
     http_status: 409,
     body: {
       error: "optimistic_concurrency_conflict",
@@ -114,12 +142,20 @@ function latestDate(...dates: (Date | null | undefined)[]): Date {
   return new Date(Math.max(...present.map((date) => date.getTime())));
 }
 
+function commandFailureCode(body: unknown): string | null {
+  if (typeof body !== "object" || body === null || !("error" in body)) return null;
+  const error = body.error;
+  return typeof error === "string" && error.trim().length > 0 ? error : null;
+}
+
 /**
  * One actor-scoped application-command boundary.
  *
- * Business failures are returned by mutate() and committed with their audit
- * and idempotency response. Unexpected exceptions escape the callback and
- * therefore roll back the idempotency claim and every domain write.
+ * mutate() runs behind a savepoint. Any returned failure rolls back all domain
+ * writes made by mutate(). Terminal failures retain and replay their response;
+ * retriable failures release the idempotency key so a matching retry can
+ * execute against current state. Unexpected exceptions roll back the whole
+ * transaction, including the idempotency claim.
  */
 export async function executeV2ApplicationCommand<TTx extends V2ApplicationTransaction>(
   options: V2ExecuteCommandOptions<TTx>,
@@ -214,14 +250,46 @@ export async function executeV2ApplicationCommand<TTx extends V2ApplicationTrans
     });
     await tx.insertIdempotency(inProgress);
 
+    await executor.query("SAVEPOINT v2_command_mutation");
     const mutation = await options.mutate(tx, command);
     const committedAt = now().toISOString();
+    if (mutation.outcome === "failed") {
+      await executor.query("ROLLBACK TO SAVEPOINT v2_command_mutation");
+    }
+    await executor.query("RELEASE SAVEPOINT v2_command_mutation");
+
     const response = V2CommandResponseEnvelope.parse({
       outcome: mutation.outcome,
+      retriable: mutation.outcome === "failed" && mutation.failure_disposition === "retriable",
       http_status: mutation.http_status,
       body: mutation.body,
       committed_at: committedAt,
     });
+
+    if (mutation.outcome === "failed") {
+      await tx.appendCommandFailureAudit({
+        actor_type: command.actor.actor_type,
+        actor_id: scope.actor_id,
+        project_id: command.project_id,
+        phase_id: "phase_id" in command ? command.phase_id : null,
+        task_id: "task_id" in command ? command.task_id : null,
+        command_id: command.command_id,
+        command_family: command.command_family,
+        idempotency_key: command.idempotency_key,
+        request_fingerprint: requestFingerprint,
+        failure_disposition: mutation.failure_disposition,
+        http_status: mutation.http_status,
+        error_code: commandFailureCode(mutation.body),
+        correlation_id: command.correlation_id,
+        causation_id: command.causation_id,
+        occurred_at: committedAt,
+      });
+      if (mutation.failure_disposition === "retriable") {
+        await tx.releaseIdempotency(scope);
+        return { kind: "executed", command_id: command.command_id, response };
+      }
+    }
+
     await tx.commitIdempotency(
       scope,
       mutation.outcome === "succeeded" ? "committed_succeeded" : "committed_failed",
@@ -282,6 +350,11 @@ export interface V2DecisionPointWriteInput extends V2DecisionPointInput {
 export interface V2DecisionPointTransaction {
   lockLatestDecisionPoint(conditionKey: string): Promise<V2KnownDecisionPoint | null>;
   insertDecisionPoint(input: V2DecisionPointWriteInput): Promise<V2OpenDecisionPoint>;
+  /**
+   * Opens the next condition revision and links it to the prior revision.
+   * Only an open prior point may transition to superseded; resolved and
+   * dismissed dispositions are immutable and retain their status.
+   */
   supersedeAndInsertDecisionPoint(
     existing: V2KnownDecisionPoint,
     input: V2DecisionPointWriteInput,
@@ -308,7 +381,9 @@ export type V2DecisionPointUpsertResult =
 /**
  * Idempotent coordinator interruption boundary. One open point exists per
  * condition key; the same fingerprint reuses it, while changed material state
- * atomically supersedes the old revision.
+ * atomically opens and links the next revision. An open prior revision becomes
+ * superseded; a resolved or dismissed prior revision keeps its human
+ * disposition.
  */
 export async function upsertV2DecisionPoint<TTx extends V2DecisionPointTransaction>(options: {
   transactionRunner: V2TransactionRunner;

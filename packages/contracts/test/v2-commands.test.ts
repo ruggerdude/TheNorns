@@ -331,6 +331,7 @@ describe("V2 immutable dispatch identity", () => {
 describe("V2 actor-scoped idempotency", () => {
   const response = {
     outcome: "succeeded",
+    retriable: false,
     http_status: 200,
     body: { phase_id: "phase-1" },
     committed_at: NOW,
@@ -366,12 +367,25 @@ describe("V2 actor-scoped idempotency", () => {
     const failed = V2IdempotencyRecord.parse({
       ...baseRecord,
       status: "committed_failed",
-      response: { ...response, outcome: "failed", http_status: 409 },
+      response: { ...response, outcome: "failed", http_status: 422 },
     });
     expect(evaluateV2Idempotency(failed, attempt)).toMatchObject({
       kind: "replay",
-      response: { outcome: "failed", http_status: 409 },
+      response: { outcome: "failed", retriable: false, http_status: 422 },
     });
+
+    expect(() =>
+      V2IdempotencyRecord.parse({
+        ...baseRecord,
+        status: "committed_failed",
+        response: {
+          ...response,
+          outcome: "failed",
+          retriable: true,
+          http_status: 409,
+        },
+      }),
+    ).toThrow(/retriable failures must release/);
   });
 
   it("returns an in-progress conflict and rejects mismatched fingerprints", () => {

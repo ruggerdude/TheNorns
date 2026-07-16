@@ -11,6 +11,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type V2ApplicationTransaction,
+  type V2CommandFailureAuditInput,
   type V2DecisionPointInput,
   type V2DecisionPointTransaction,
   type V2DecisionPointWriteInput,
@@ -114,11 +115,32 @@ class SqlApplicationTransaction implements V2ApplicationTransaction {
     );
   }
 
+  async releaseIdempotency(scope: V2IdempotencyAttemptT): Promise<void> {
+    await this.sql.query(
+      `DELETE FROM idempotency_records
+       WHERE actor_id = $1 AND command_family = $2 AND idempotency_key = $3
+         AND status = 'in_progress'`,
+      [scope.actor_id, scope.command_family, scope.idempotency_key],
+    );
+  }
+
   async appendIdempotencyAudit(input: V2IdempotencyAuditInput): Promise<void> {
     await this.sql.query(
       `INSERT INTO audit_events (audit_type, actor_id, outcome, summary, occurred_at)
        VALUES ('idempotency.rejected', $1, 'denied', $2, $3)`,
       [input.actor_id, input.reason, input.occurred_at],
+    );
+  }
+
+  async appendCommandFailureAudit(input: V2CommandFailureAuditInput): Promise<void> {
+    await this.sql.query(
+      `INSERT INTO audit_events (audit_type, actor_id, outcome, summary, occurred_at)
+       VALUES ('command.failed', $1, 'denied', $2, $3)`,
+      [
+        input.actor_id,
+        `${input.failure_disposition}:${input.error_code ?? "unknown"}`,
+        input.occurred_at,
+      ],
     );
   }
 }
@@ -182,10 +204,22 @@ class SqlDecisionPointTransaction implements V2DecisionPointTransaction {
     existing: Awaited<ReturnType<SqlDecisionPointTransaction["lockLatestDecisionPoint"]>> & {},
     input: V2DecisionPointWriteInput,
   ) {
-    await this.sql.query("UPDATE decision_points SET status = 'superseded' WHERE id = $1", [
-      existing.id,
-    ]);
-    return this.insertDecisionPoint(input);
+    let linkedStatus = existing.status;
+    if (existing.status === "open") {
+      await this.sql.query(
+        "UPDATE decision_points SET status = 'superseded' WHERE id = $1 AND status = 'open'",
+        [existing.id],
+      );
+      linkedStatus = "superseded";
+    }
+    const replacement = await this.insertDecisionPoint(input);
+    await this.sql.query(
+      `UPDATE decision_points
+       SET superseded_by_decision_point_id = $2
+       WHERE id = $1 AND status = $3`,
+      [existing.id, replacement.id, linkedStatus],
+    );
+    return replacement;
   }
 }
 
@@ -352,7 +386,8 @@ beforeEach(async () => {
       condition_fingerprint TEXT NOT NULL,
       condition_revision INTEGER NOT NULL,
       status TEXT NOT NULL,
-      supersedes_decision_point_id TEXT
+      supersedes_decision_point_id TEXT,
+      superseded_by_decision_point_id TEXT
     );
     CREATE UNIQUE INDEX one_open_decision_per_condition
       ON decision_points(condition_key) WHERE status = 'open';
@@ -416,7 +451,14 @@ async function scheduleMutation(
     command.task_id,
   ]);
   const task = taskResult.rows[0];
-  if (!task) return { outcome: "failed" as const, http_status: 404, body: { error: "not_found" } };
+  if (!task) {
+    return {
+      outcome: "failed" as const,
+      failure_disposition: "terminal" as const,
+      http_status: 404,
+      body: { error: "not_found" },
+    };
+  }
   if (task.aggregate_version !== command.expected_task_version) {
     await tx.sql.query(
       `INSERT INTO audit_events (audit_type, actor_id, outcome, summary, occurred_at)
@@ -624,7 +666,7 @@ describe("V2 transactional application boundary", () => {
     expect((await pg.query("SELECT * FROM idempotency_records")).rows).toHaveLength(0);
   });
 
-  it("commits and replays expected-version failures, and audits changed-payload key reuse", async () => {
+  it("releases retriable version conflicts so the same key can execute against fresh state", async () => {
     await seedScheduledTask();
     const stale = scheduleCommand({
       command_id: "stale-command",
@@ -639,37 +681,94 @@ describe("V2 transactional application boundary", () => {
     });
     expect(first.kind).toBe("executed");
     expect(first.kind === "executed" ? first.response.http_status : null).toBe(409);
+    expect(first.kind === "executed" ? first.response.retriable : null).toBe(true);
+    expect((await pg.query("SELECT * FROM idempotency_records")).rows).toHaveLength(0);
+    const conflictAudit = await pg.query<{ audit_type: string; summary: string }>(
+      "SELECT audit_type, summary FROM audit_events",
+    );
+    expect(conflictAudit.rows).toEqual([
+      {
+        audit_type: "command.failed",
+        summary: "retriable:optimistic_concurrency_conflict",
+      },
+    ]);
+
+    await pg.query("UPDATE tasks SET aggregate_version = 99 WHERE id = 'task-1'");
+    const retried = await executeV2ApplicationCommand({
+      command: stale,
+      transactionRunner: runner,
+      transactionFactory: { bind: (sql) => new SqlApplicationTransaction(sql) },
+      mutate: scheduleMutation,
+    });
+    expect(retried.kind).toBe("executed");
+    expect(retried.kind === "executed" ? retried.response.outcome : null).toBe("succeeded");
+    expect(retried.kind === "executed" ? retried.response.retriable : null).toBe(false);
+
     const replay = await executeV2ApplicationCommand({
       command: stale,
       transactionRunner: runner,
       transactionFactory: { bind: (sql) => new SqlApplicationTransaction(sql) },
       mutate: async () => {
-        throw new Error("must not rerun");
+        throw new Error("a committed success must replay");
       },
     });
     expect(replay.kind).toBe("replayed");
+  });
 
-    const mismatch = await executeV2ApplicationCommand({
-      command: scheduleCommand({
-        command_id: "changed-command",
-        idempotency_key: "stale-key",
-        expected_task_version: 98,
-      }),
+  it("rolls back writes from terminal failures while retaining their response for replay", async () => {
+    const command = scheduleCommand({
+      command_id: "terminal-failure-command",
+      idempotency_key: "terminal-failure-key",
+      task_id: "missing-task",
+      run_id: "missing-run",
+    });
+    const first = await executeV2ApplicationCommand({
+      command,
       transactionRunner: runner,
       transactionFactory: { bind: (sql) => new SqlApplicationTransaction(sql) },
-      mutate: scheduleMutation,
+      mutate: async (tx) => {
+        await tx.sql.query(
+          `INSERT INTO audit_events (audit_type, actor_id, outcome, summary, occurred_at)
+           VALUES ('should.rollback', 'coordinator-1', 'denied', 'partial write', $1)`,
+          [command.issued_at],
+        );
+        return {
+          outcome: "failed",
+          failure_disposition: "terminal",
+          http_status: 422,
+          body: { error: "validation_failed" },
+        };
+      },
     });
-    expect(mismatch).toMatchObject({
-      kind: "idempotency_conflict",
-      reason: "fingerprint_mismatch",
+    expect(first.kind).toBe("executed");
+    expect(first.kind === "executed" ? first.response : null).toMatchObject({
+      outcome: "failed",
+      retriable: false,
+      http_status: 422,
     });
-    expect(
-      (
-        await pg.query<{ n: number }>(
-          "SELECT COUNT(*)::int AS n FROM audit_events WHERE audit_type='idempotency.rejected'",
-        )
-      ).rows[0]?.n,
-    ).toBe(1);
+    const failureAudit = await pg.query<{ audit_type: string; summary: string }>(
+      "SELECT audit_type, summary FROM audit_events",
+    );
+    expect(failureAudit.rows).toEqual([
+      {
+        audit_type: "command.failed",
+        summary: "terminal:validation_failed",
+      },
+    ]);
+    expect((await pg.query("SELECT * FROM idempotency_records")).rows).toHaveLength(1);
+
+    const replay = await executeV2ApplicationCommand({
+      command,
+      transactionRunner: runner,
+      transactionFactory: { bind: (sql) => new SqlApplicationTransaction(sql) },
+      mutate: async () => {
+        throw new Error("a terminal failure must replay");
+      },
+    });
+    expect(replay.kind).toBe("replayed");
+    expect(replay.kind === "replayed" ? replay.response : null).toEqual(
+      first.kind === "executed" ? first.response : null,
+    );
   });
 });
 
@@ -733,16 +832,98 @@ describe("V2 DecisionPoint dedupe", () => {
       kind: "superseded",
       superseded_decision_point_id: "decision-1",
     });
-    const rows = await pg.query<{ id: string; status: string }>(
-      "SELECT id, status FROM decision_points ORDER BY id",
+    const rows = await pg.query<{
+      id: string;
+      status: string;
+      supersedes_decision_point_id: string | null;
+      superseded_by_decision_point_id: string | null;
+    }>(
+      `SELECT id, status, supersedes_decision_point_id, superseded_by_decision_point_id
+       FROM decision_points
+       ORDER BY id`,
     );
     expect(rows.rows).toEqual([
-      { id: "decision-1", status: "superseded" },
-      { id: "decision-2", status: "open" },
+      {
+        id: "decision-1",
+        status: "superseded",
+        supersedes_decision_point_id: null,
+        superseded_by_decision_point_id: "decision-2",
+      },
+      {
+        id: "decision-2",
+        status: "open",
+        supersedes_decision_point_id: "decision-1",
+        superseded_by_decision_point_id: null,
+      },
     ]);
   });
 
-  it("does not resurrect a resolved condition until its material fingerprint changes", async () => {
+  it.each(["resolved", "dismissed"] as const)(
+    "preserves a %s disposition when changed material state opens a new revision",
+    async (disposition) => {
+      const factory = { bind: (sql: V2SqlExecutor) => new SqlDecisionPointTransaction(sql) };
+      await upsertV2DecisionPoint({
+        transactionRunner: runner,
+        transactionFactory: factory,
+        input: input("decision-closed", "a".repeat(64)),
+      });
+      await pg.query("UPDATE decision_points SET status = $2 WHERE id = $1", [
+        "decision-closed",
+        disposition,
+      ]);
+
+      const unchanged = await upsertV2DecisionPoint({
+        transactionRunner: runner,
+        transactionFactory: factory,
+        input: input("decision-unused", "a".repeat(64)),
+      });
+      expect(unchanged).toMatchObject({
+        kind: "closed_unchanged",
+        decision_point: { id: "decision-closed", status: disposition },
+      });
+      expect((await pg.query("SELECT * FROM decision_points")).rows).toHaveLength(1);
+
+      const changed = await upsertV2DecisionPoint({
+        transactionRunner: runner,
+        transactionFactory: factory,
+        input: input("decision-reopened", "b".repeat(64)),
+      });
+      expect(changed).toMatchObject({
+        kind: "superseded",
+        decision_point: {
+          id: "decision-reopened",
+          condition_revision: 2,
+          supersedes_decision_point_id: "decision-closed",
+        },
+      });
+      const rows = await pg.query<{
+        id: string;
+        status: string;
+        supersedes_decision_point_id: string | null;
+        superseded_by_decision_point_id: string | null;
+      }>(
+        `SELECT id, status, supersedes_decision_point_id, superseded_by_decision_point_id
+         FROM decision_points
+         ORDER BY condition_revision`,
+      );
+      expect(rows.rows).toEqual([
+        {
+          id: "decision-closed",
+          status: disposition,
+          supersedes_decision_point_id: null,
+          superseded_by_decision_point_id: "decision-reopened",
+        },
+        {
+          id: "decision-reopened",
+          status: "open",
+          supersedes_decision_point_id: "decision-closed",
+          superseded_by_decision_point_id: null,
+        },
+      ]);
+    },
+  );
+
+  it("rolls back an interrupted closed-point revision without losing the disposition", async () => {
     const factory = { bind: (sql: V2SqlExecutor) => new SqlDecisionPointTransaction(sql) };
     await upsertV2DecisionPoint({
       transactionRunner: runner,
@@ -751,25 +932,56 @@ describe("V2 DecisionPoint dedupe", () => {
     });
     await pg.query("UPDATE decision_points SET status = 'resolved' WHERE id = 'decision-resolved'");
 
-    const unchanged = await upsertV2DecisionPoint({
-      transactionRunner: runner,
-      transactionFactory: factory,
-      input: input("decision-unused", "a".repeat(64)),
-    });
-    expect(unchanged).toMatchObject({
-      kind: "closed_unchanged",
-      decision_point: { id: "decision-resolved", status: "resolved" },
-    });
-    expect((await pg.query("SELECT * FROM decision_points")).rows).toHaveLength(1);
+    const crashingFactory = {
+      bind: (sql: V2SqlExecutor): V2DecisionPointTransaction => {
+        const delegate = new SqlDecisionPointTransaction(sql);
+        return {
+          lockLatestDecisionPoint: (conditionKey) => delegate.lockLatestDecisionPoint(conditionKey),
+          insertDecisionPoint: (writeInput) => delegate.insertDecisionPoint(writeInput),
+          supersedeAndInsertDecisionPoint: async (existing, writeInput) => {
+            await delegate.supersedeAndInsertDecisionPoint(existing, writeInput);
+            throw new Error("crash after DecisionPoint revision linking");
+          },
+        };
+      },
+    };
+    await expect(
+      upsertV2DecisionPoint({
+        transactionRunner: runner,
+        transactionFactory: crashingFactory,
+        input: input("decision-interrupted", "b".repeat(64)),
+      }),
+    ).rejects.toThrow("crash after DecisionPoint revision linking");
 
-    const changed = await upsertV2DecisionPoint({
+    const afterCrash = await pg.query<{
+      id: string;
+      status: string;
+      superseded_by_decision_point_id: string | null;
+    }>(
+      `SELECT id, status, superseded_by_decision_point_id
+       FROM decision_points
+       ORDER BY condition_revision`,
+    );
+    expect(afterCrash.rows).toEqual([
+      {
+        id: "decision-resolved",
+        status: "resolved",
+        superseded_by_decision_point_id: null,
+      },
+    ]);
+
+    const recovered = await upsertV2DecisionPoint({
       transactionRunner: runner,
       transactionFactory: factory,
-      input: input("decision-reopened", "b".repeat(64)),
+      input: input("decision-recovered", "b".repeat(64)),
     });
-    expect(changed).toMatchObject({
+    expect(recovered).toMatchObject({
       kind: "superseded",
-      decision_point: { id: "decision-reopened", condition_revision: 2 },
+      decision_point: {
+        id: "decision-recovered",
+        status: "open",
+        condition_revision: 2,
+      },
     });
   });
 

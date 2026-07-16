@@ -460,6 +460,10 @@ export const tasks = pgTable(
     ),
     check("tasks_lifecycle_version_check", sql`${table.lifecycleVersion} >= 0`),
     check(
+      "tasks_lifecycle_origin_check",
+      sql`${table.lifecycleVersion} > 0 OR ${table.state} = 'pending'`,
+    ),
+    check(
       "tasks_completed_at_check",
       sql`${table.state} <> 'completed' OR ${table.completedAt} IS NOT NULL`,
     ),
@@ -654,6 +658,11 @@ export const agentRuns = pgTable(
     check(
       "agent_runs_state_check",
       sql`${table.state} IN ('created', 'dispatched', 'running', 'verifying', 'succeeded', 'failed', 'cancelled', 'expired')`,
+    ),
+    check("agent_runs_lifecycle_version_check", sql`${table.lifecycleVersion} >= 0`),
+    check(
+      "agent_runs_lifecycle_origin_check",
+      sql`${table.lifecycleVersion} > 0 OR ${table.state} = 'created'`,
     ),
     check(
       "agent_runs_verification_status_check",
@@ -1439,9 +1448,9 @@ export const domainEvents = pgTable(
     schemaVersion: schemaVersion(),
     projectId: text("project_id")
       .notNull()
-      .references(() => projects.id, { onDelete: "cascade" }),
-    phaseId: text("phase_id").references(() => phases.id, { onDelete: "cascade" }),
-    taskId: text("task_id").references(() => tasks.id, { onDelete: "cascade" }),
+      .references(() => projects.id, { onDelete: "restrict" }),
+    phaseId: text("phase_id").references(() => phases.id, { onDelete: "restrict" }),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "restrict" }),
     actorType: text("actor_type").notNull(),
     actorId: text("actor_id"),
     correlationId: text("correlation_id").notNull(),
@@ -1461,12 +1470,12 @@ export const domainEvents = pgTable(
       name: "domain_events_phase_scope_fk",
       columns: [table.projectId, table.phaseId],
       foreignColumns: [phases.projectId, phases.id],
-    }).onDelete("cascade"),
+    }).onDelete("restrict"),
     foreignKey({
       name: "domain_events_task_scope_fk",
       columns: [table.projectId, table.phaseId, table.taskId],
       foreignColumns: [tasks.projectId, tasks.phaseId, tasks.id],
-    }).onDelete("cascade"),
+    }).onDelete("restrict"),
     check(
       "domain_events_scope_shape_check",
       sql`${table.phaseId} IS NOT NULL OR ${table.taskId} IS NULL`,
@@ -1481,9 +1490,9 @@ export const auditEvents = pgTable(
     auditId: text("audit_id").primaryKey(),
     schemaVersion: schemaVersion(),
     auditType: text("audit_type").notNull(),
-    projectId: text("project_id").references(() => projects.id, { onDelete: "cascade" }),
-    phaseId: text("phase_id").references(() => phases.id, { onDelete: "cascade" }),
-    taskId: text("task_id").references(() => tasks.id, { onDelete: "cascade" }),
+    projectId: text("project_id").references(() => projects.id, { onDelete: "restrict" }),
+    phaseId: text("phase_id").references(() => phases.id, { onDelete: "restrict" }),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "restrict" }),
     actorType: text("actor_type").notNull(),
     actorId: text("actor_id"),
     outcome: text("outcome").notNull(),
@@ -1503,12 +1512,12 @@ export const auditEvents = pgTable(
       name: "audit_events_phase_scope_fk",
       columns: [table.projectId, table.phaseId],
       foreignColumns: [phases.projectId, phases.id],
-    }).onDelete("cascade"),
+    }).onDelete("restrict"),
     foreignKey({
       name: "audit_events_task_scope_fk",
       columns: [table.projectId, table.phaseId, table.taskId],
       foreignColumns: [tasks.projectId, tasks.phaseId, tasks.id],
-    }).onDelete("cascade"),
+    }).onDelete("restrict"),
     check(
       "audit_events_scope_shape_check",
       sql`(${table.projectId} IS NOT NULL OR (${table.phaseId} IS NULL AND ${table.taskId} IS NULL))

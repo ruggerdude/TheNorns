@@ -297,11 +297,21 @@ const V2_IDEMPOTENCY_MIN_RETENTION_MS = V2_IDEMPOTENCY_MIN_RETENTION_DAYS * 24 *
 export const V2CommandResponseEnvelope = z
   .object({
     outcome: z.enum(["succeeded", "failed"]),
+    retriable: z.boolean(),
     http_status: z.number().int().min(100).max(599),
     body: z.unknown(),
     committed_at: V2IsoDateTime,
   })
-  .strict();
+  .strict()
+  .superRefine((response, ctx) => {
+    if (response.outcome === "succeeded" && response.retriable) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["retriable"],
+        message: "a succeeded command response cannot be retriable",
+      });
+    }
+  });
 export type V2CommandResponseEnvelopeT = z.infer<typeof V2CommandResponseEnvelope>;
 
 export const V2IdempotencyRecord = z
@@ -378,6 +388,17 @@ export const V2IdempotencyRecord = z
         code: z.ZodIssueCode.custom,
         path: ["response", "outcome"],
         message: "committed_failed requires a failed response",
+      });
+    }
+    if (
+      record.status === "committed_failed" &&
+      record.response !== null &&
+      record.response.retriable
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["response", "retriable"],
+        message: "retriable failures must release the idempotency key instead of being committed",
       });
     }
   });
