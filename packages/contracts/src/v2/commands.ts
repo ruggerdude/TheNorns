@@ -52,6 +52,17 @@ export const V2ApproveStrategyVersionCommand = V2ApplicationCommandBase.extend({
 }).strict();
 export type V2ApproveStrategyVersionCommandT = z.infer<typeof V2ApproveStrategyVersionCommand>;
 
+export const V2CreatePhaseCommand = V2ApplicationCommandBase.extend({
+  kind: z.literal("create_phase"),
+  command_family: z.literal("phase"),
+  project_id: V2EntityId,
+  objective_summary: V2NonEmptyString,
+  priority: z.number().int().nonnegative(),
+  predecessor_phase_ids: z.array(V2EntityId),
+  expected_project_version: V2PositiveVersion,
+}).strict();
+export type V2CreatePhaseCommandT = z.infer<typeof V2CreatePhaseCommand>;
+
 export const V2StartPhaseCommand = V2ApplicationCommandBase.extend({
   kind: z.literal("start_phase"),
   command_family: z.literal("phase"),
@@ -127,6 +138,7 @@ export const V2ResolveDecisionPointCommand = V2ApplicationCommandBase.extend({
 export type V2ResolveDecisionPointCommandT = z.infer<typeof V2ResolveDecisionPointCommand>;
 
 export const V2ApplicationCommand = z.discriminatedUnion("kind", [
+  V2CreatePhaseCommand,
   V2ApproveStrategyVersionCommand,
   V2StartPhaseCommand,
   V2RetryTaskCommand,
