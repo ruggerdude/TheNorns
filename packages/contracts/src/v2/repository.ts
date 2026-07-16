@@ -151,3 +151,74 @@ export const V2RepositoryIngestionSeed = z
     }
   });
 export type V2RepositoryIngestionSeedT = z.infer<typeof V2RepositoryIngestionSeed>;
+
+export const V2ProjectResume = z
+  .object({
+    schema_version: z.literal(2),
+    project: z
+      .object({
+        id: V2EntityId,
+        name: V2NonEmptyString,
+        description: z.string(),
+        status: V2NonEmptyString,
+        aggregate_version: V2PositiveVersion,
+      })
+      .strict(),
+    architecture: z
+      .object({
+        id: V2EntityId,
+        revision: V2PositiveVersion,
+        title: V2NonEmptyString,
+        summary: V2NonEmptyString,
+        repository_revision: V2NonEmptyString,
+      })
+      .strict()
+      .nullable(),
+    repositories: z.array(
+      z
+        .object({
+          id: V2EntityId,
+          binding_type: z.enum(["local_runner", "github"]),
+          display_name: V2NonEmptyString,
+          status: V2RepositoryBindingStatus,
+          health: V2RepositoryHealth,
+          observed_head: V2NonEmptyString.nullable(),
+        })
+        .strict(),
+    ),
+    phases: z.array(
+      z
+        .object({
+          id: V2EntityId,
+          objective_summary: V2NonEmptyString,
+          priority: z.number().int().nonnegative(),
+          status: V2NonEmptyString,
+          approved_strategy_version_id: V2EntityId.nullable(),
+          objectives: z.number().int().nonnegative(),
+          tasks: z.number().int().nonnegative(),
+          completed_tasks: z.number().int().nonnegative(),
+          blocked_tasks: z.number().int().nonnegative(),
+        })
+        .strict(),
+    ),
+    attention: z
+      .object({
+        open_decisions: z.number().int().nonnegative(),
+        active_runs: z.number().int().nonnegative(),
+        blocked_tasks: z.number().int().nonnegative(),
+      })
+      .strict(),
+    active_memory_entries: z.number().int().nonnegative(),
+    recent_completions: z.array(
+      z
+        .object({
+          task_id: V2EntityId,
+          title: V2NonEmptyString,
+          completed_at: V2IsoDateTime,
+        })
+        .strict(),
+    ),
+    next_recommended_action: V2NonEmptyString,
+  })
+  .strict();
+export type V2ProjectResumeT = z.infer<typeof V2ProjectResume>;
