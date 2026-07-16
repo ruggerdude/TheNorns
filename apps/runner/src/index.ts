@@ -12,3 +12,16 @@ export { ProcessRuntime } from "./runtimes/process.js";
 export { REDACTED, Redactor } from "./redact.js";
 export { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
 export { CodexRuntime } from "./runtimes/codex.js";
+export {
+  ApprovedRepositoryRegistry,
+  GitWorktreeManager,
+  HashVerifiedContextLoader,
+  V2RunnerExecutor,
+  type PreparedWorktree,
+  type RunnerContentFetcher,
+  type RunnerRepositoryBinding,
+  type RunnerVerificationResult,
+  type RunnerVerifier,
+  type RunnerWorktreeManager,
+  type V2RunnerExecutionResult,
+} from "./v2Execution.js";
