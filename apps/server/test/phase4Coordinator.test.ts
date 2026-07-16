@@ -1,8 +1,8 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
 import { Phase4CompletionService } from "../src/coordinator/phase4Completion.js";
-import { Phase4Dispatcher, Phase4DispatchRepository } from "../src/coordinator/phase4Dispatcher.js";
+import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
+import { Phase4DispatchRepository, Phase4Dispatcher } from "../src/coordinator/phase4Dispatcher.js";
 import { Phase4EventProcessor } from "../src/coordinator/phase4EventProcessor.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";

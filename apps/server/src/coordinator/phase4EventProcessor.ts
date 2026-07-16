@@ -1,4 +1,4 @@
-import { type EventEnvelopeT, EventEnvelope, resolveV2BudgetReservation } from "@norns/contracts";
+import { EventEnvelope, type EventEnvelopeT, resolveV2BudgetReservation } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   transitionV2AgentRunLifecycle,

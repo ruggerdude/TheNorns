@@ -30,20 +30,20 @@ import {
   ReconcileRequest,
   type ServerFrameT,
   type UsageEventT,
-  V2RepositoryIngestionSeed,
   V2ContentAddressedReference,
   type V2DispatchCommandT,
   V2EvidenceRef,
+  V2RepositoryIngestionSeed,
   V2StrategyVersion,
   parseRunnerFrame,
 } from "@norns/contracts";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
+import { bearerToken, verifyRunnerSignature } from "./auth.js";
 import type { Phase4CompletionService } from "./coordinator/phase4Completion.js";
 import type { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
-import { Phase4Dispatcher, type Phase4DispatchRepository } from "./coordinator/phase4Dispatcher.js";
+import { type Phase4DispatchRepository, Phase4Dispatcher } from "./coordinator/phase4Dispatcher.js";
 import type { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
-import { bearerToken, verifyRunnerSignature } from "./auth.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
 import { GraphEditError } from "./graph/graph.js";

@@ -1,8 +1,8 @@
 import {
-  V2EvidenceRef,
-  resolveV2BudgetReservation,
   type V2ActorT,
+  V2EvidenceRef,
   type V2EvidenceRefT,
+  resolveV2BudgetReservation,
 } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import { transitionV2TaskLifecycle } from "../persistence/v2/lifecycleMutation.js";

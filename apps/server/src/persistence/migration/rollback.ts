@@ -487,9 +487,7 @@ async function deriveEvidenceBody(
   const importedIds = await importedProjectIds(sql, migrationRunId);
   const scopes: Phase2RollbackScopeEvidence[] = [];
   for (const route of candidates) {
-    scopes.push(
-      await scopeEvidence(sql, route, sourceFrozenAt, observedAt, importedIds),
-    );
+    scopes.push(await scopeEvidence(sql, route, sourceFrozenAt, observedAt, importedIds));
   }
   const details = object(run.details);
   const sourceUpdatedAt = object(details.source_updated_at);
