@@ -1,6 +1,7 @@
 # The Norns Controlled Re-foundation Program
 
-**Status:** Phase 1 candidate frozen; independent review pending
+**Status:** Phase 1 technical remediation complete; human retention decision
+and final freeze pending
 **Date:** 2026-07-16
 **Program Manager / Chief Architect / Integration Owner:** ChatGPT Sol
 **Governing charter:** [PROGRAM-CHARTER.md](PROGRAM-CHARTER.md)
@@ -17,8 +18,14 @@
 [reviews/REFOUNDATION-HUMAN-DECISIONS.md](reviews/REFOUNDATION-HUMAN-DECISIONS.md)
 **Phase 1 candidate review:**
 [reviews/PHASE-1-CANDIDATE-REVIEW-PACKET.md](reviews/PHASE-1-CANDIDATE-REVIEW-PACKET.md)
+**Phase 1 independent findings:**
+[reviews/PHASE-1-CANDIDATE-REVIEW-FINDINGS.md](reviews/PHASE-1-CANDIDATE-REVIEW-FINDINGS.md)
+**Phase 1 findings disposition:**
+[reviews/PHASE-1-CANDIDATE-REVIEW-DISPOSITION.md](reviews/PHASE-1-CANDIDATE-REVIEW-DISPOSITION.md)
 **Phase 1 evidence:**
 [reviews/PHASE-1-CANDIDATE-EVIDENCE.md](reviews/PHASE-1-CANDIDATE-EVIDENCE.md)
+**Phase 1 remediation evidence:**
+[reviews/PHASE-1-REMEDIATION-EVIDENCE.md](reviews/PHASE-1-REMEDIATION-EVIDENCE.md)
 
 ## Objective
 
