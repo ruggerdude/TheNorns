@@ -19,6 +19,7 @@ import {
 } from "@norns/adapters";
 import {
   AnthropicPmModel,
+  type CommandEnvelopeT,
   CommandPayload,
   type CommandStateT,
   DEFAULT_PM_MODEL,
@@ -30,11 +31,18 @@ import {
   type ServerFrameT,
   type UsageEventT,
   V2RepositoryIngestionSeed,
+  V2ContentAddressedReference,
+  type V2DispatchCommandT,
+  V2EvidenceRef,
   V2StrategyVersion,
   parseRunnerFrame,
 } from "@norns/contracts";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
+import type { Phase4CompletionService } from "./coordinator/phase4Completion.js";
+import type { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
+import { Phase4Dispatcher, type Phase4DispatchRepository } from "./coordinator/phase4Dispatcher.js";
+import type { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
 import { bearerToken, verifyRunnerSignature } from "./auth.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
@@ -139,6 +147,12 @@ export interface ServerOptions {
     strategies: StrategyWorkflowService;
     resume: ProjectResumeService;
   };
+  phase4?: {
+    coordinator: Phase4Coordinator;
+    completion: Phase4CompletionService;
+    dispatch: Phase4DispatchRepository;
+    events: Phase4EventProcessor;
+  };
   /**
    * DEMO-ONLY dashboard provider (engine + ledger composition). When set, it is
    * exposed at GET /api/demo/dashboard and returns the same illustrative demo
@@ -176,6 +190,55 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const sendFrame = (socket: WsLike, frame: ServerFrameT): void => {
     socket.send(JSON.stringify(frame));
   };
+
+  const v2WireCommand = (command: V2DispatchCommandT): CommandEnvelopeT => ({
+    protocol: 1,
+    command_id: command.command_id,
+    idempotency_key: command.idempotency_key,
+    correlation_id: command.correlation_id,
+    causation_id: command.causation_id,
+    project_id: command.project_id,
+    runner_id: command.runner_id,
+    generation: command.runner_generation,
+    issued_by_session: command.authorized_by_session_id,
+    issued_at: command.issued_at,
+    expires_at: command.expires_at,
+    payload: {
+      kind: "launch_run",
+      node_id: command.task_id,
+      run_id: command.run_id,
+      prompt_ref: command.context_refs[0]?.storage_ref ?? "content-addressed-context",
+      dispatch: command,
+    },
+  });
+
+  let phase4DispatchTimer: ReturnType<typeof setInterval> | undefined;
+  if (options.phase4) {
+    const dispatcher = new Phase4Dispatcher(
+      options.phase4.dispatch,
+      `server:${process.pid}`,
+      async (command) => {
+        const socket = runnerSockets.get(command.runner_id);
+        if (!socket) throw new Error(`runner ${command.runner_id} is not connected`);
+        sendFrame(socket, {
+          type: "command",
+          command: v2WireCommand(command),
+        });
+      },
+    );
+    let ticking = false;
+    phase4DispatchTimer = setInterval(() => {
+      if (ticking) return;
+      ticking = true;
+      void dispatcher.tick().finally(() => {
+        ticking = false;
+      });
+    }, 500);
+    phase4DispatchTimer.unref();
+  }
+  app.addHook("onClose", async () => {
+    if (phase4DispatchTimer) clearInterval(phase4DispatchTimer);
+  });
 
   const closeSessionSocket = (binding: SessionSocketBinding, reason: string): void => {
     if (!binding.active) return;
@@ -975,6 +1038,95 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       });
     }
 
+    if (options.phase4) {
+      const ScheduleTaskBody = z.object({
+        assignment_id: z.string().min(1),
+        runner_id: z.string().min(1),
+        context_refs: z.array(V2ContentAddressedReference).min(1),
+        target_branch: z.string().min(1),
+        worktree_policy_ref: z.string().min(1),
+        sandbox_policy_ref: z.string().min(1),
+        max_input_tokens: z.number().int().positive(),
+        max_output_tokens: z.number().int().positive(),
+        max_duration_seconds: z.number().int().positive(),
+      });
+      const CompleteTaskBody = z.object({
+        run_id: z.string().min(1),
+        review_evidence: z.array(V2EvidenceRef).min(1),
+        integration_evidence: z.array(V2EvidenceRef).min(1),
+        review_summary: z.string().min(1),
+      });
+
+      app.post(
+        "/api/v2/projects/:id/phases/:phaseId/tasks/:taskId/schedule",
+        async (req, reply) => {
+          if (!(await requireSession(req, reply))) return;
+          const user = await resolveUser(req);
+          if (!user) return;
+          const body = ScheduleTaskBody.safeParse(req.body);
+          if (!body.success) return reply.code(400).send({ error: "bad_request" });
+          const { id, phaseId, taskId } = req.params as {
+            id: string;
+            phaseId: string;
+            taskId: string;
+          };
+          const runner = stores.runner(body.data.runner_id);
+          if (!runner) return reply.code(409).send({ error: "runner_unavailable" });
+          const issuedAt = now();
+          try {
+            reply.code(202).send(
+              await options.phase4?.coordinator.schedule({
+                project_id: id,
+                phase_id: phaseId,
+                task_id: taskId,
+                ...body.data,
+                runner_generation: runner.generation,
+                authorized_by: { actor_type: "human", actor_id: user.id },
+                authorized_by_session_id: `authenticated-request:${req.id}`,
+                correlation_id: newId("correlation"),
+                causation_id: null,
+                issued_at: issuedAt.toISOString(),
+                expires_at: new Date(issuedAt.getTime() + DEFAULT_COMMAND_TTL_MS).toISOString(),
+              }),
+            );
+          } catch (error) {
+            reply.code(409).send({ error: "schedule_conflict", detail: String(error) });
+          }
+        },
+      );
+
+      app.post(
+        "/api/v2/projects/:id/phases/:phaseId/tasks/:taskId/complete",
+        async (req, reply) => {
+          if (!(await requireSession(req, reply))) return;
+          const user = await resolveUser(req);
+          if (!user) return;
+          const body = CompleteTaskBody.safeParse(req.body);
+          if (!body.success) return reply.code(400).send({ error: "bad_request" });
+          const { id, phaseId, taskId } = req.params as {
+            id: string;
+            phaseId: string;
+            taskId: string;
+          };
+          try {
+            reply.send(
+              await options.phase4?.completion.complete({
+                project_id: id,
+                phase_id: phaseId,
+                task_id: taskId,
+                ...body.data,
+                actor: { actor_type: "human", actor_id: user.id },
+                correlation_id: newId("correlation"),
+                completed_at: now().toISOString(),
+              }),
+            );
+          } catch (error) {
+            reply.code(409).send({ error: "completion_conflict", detail: String(error) });
+          }
+        },
+      );
+    }
+
     app.get("/api/projects/:id/graph", async (req, reply) => {
       if (!(await requireSession(req, reply))) return;
       const { id } = req.params as { id: string };
@@ -1264,10 +1416,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     const socket = asSocket(conn);
     const challenge = nonce();
     let authedRunnerId: string | null = null;
+    let runnerEventDelivery = Promise.resolve();
 
     sendFrame(socket, { type: "challenge", nonce: challenge });
 
-    socket.on("message", (data) => {
+    socket.on("message", async (data) => {
       const frame = parseRunnerFrame(String(data));
       if (!frame) return;
 
@@ -1327,6 +1480,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             ),
           },
         });
+        if (options.phase4) {
+          for (const command of await options.phase4.dispatch.pendingForRunner(authedRunnerId)) {
+            sendFrame(socket, { type: "command", command: v2WireCommand(command) });
+          }
+        }
         // mark the resends delivered
         for (const cmd of stores.pendingCommandsFor(
           authedRunnerId,
@@ -1346,19 +1504,35 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
       if (frame.type === "event") {
         const event: EventEnvelopeT = frame.event;
-        if (event.generation !== runner.generation) {
-          sendFrame(socket, { type: "fenced", current_generation: runner.generation });
-          socket.close();
-          return;
-        }
-        const outcome = stores.ingestEvent(event);
-        if (outcome === "accepted") {
-          applyEventSideEffects(event);
-        }
-        sendFrame(socket, {
-          type: "event_ack",
-          ack_event_seq: stores.eventWatermark(authedRunnerId),
-        });
+        runnerEventDelivery = runnerEventDelivery
+          .then(async () => {
+            const currentRunner = stores.runner(event.runner_id);
+            if (!currentRunner || event.generation !== currentRunner.generation) {
+              sendFrame(socket, {
+                type: "fenced",
+                current_generation: currentRunner?.generation ?? event.generation + 1,
+              });
+              socket.close();
+              return;
+            }
+            await options.phase4?.events.apply(event);
+            const outcome = stores.ingestEvent(event);
+            if (outcome === "accepted") applyEventSideEffects(event);
+            sendFrame(socket, {
+              type: "event_ack",
+              ack_event_seq: stores.eventWatermark(event.runner_id),
+            });
+          })
+          .catch((error) => {
+            stores.audit(
+              `runner:${event.runner_id}`,
+              "runner.event_rejected",
+              error instanceof Error ? error.message : String(error),
+              now(),
+            );
+            socket.close(1008, "runner event rejected");
+          });
+        return;
       }
     });
 

@@ -6,6 +6,10 @@
 // separate from the real, user-created projects in `ProjectStore` — no real
 // project's data ever flows into it, and none of its state ever flows back.
 import { UsageEvent } from "@norns/contracts";
+import { Phase4CompletionService } from "./coordinator/phase4Completion.js";
+import { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
+import { Phase4DispatchRepository } from "./coordinator/phase4Dispatcher.js";
+import { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
 import { buildDashboard } from "./dashboard.js";
 import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
@@ -91,6 +95,14 @@ let phase3Services:
       resume: ProjectResumeService;
     }
   | undefined;
+let phase4Services:
+  | {
+      coordinator: Phase4Coordinator;
+      completion: Phase4CompletionService;
+      dispatch: Phase4DispatchRepository;
+      events: Phase4EventProcessor;
+    }
+  | undefined;
 
 if (databaseUrl) {
   try {
@@ -119,6 +131,12 @@ if (databaseUrl) {
       phases: new PhaseWorkflowService(runtimeTransactions),
       strategies: new StrategyWorkflowService(runtimeTransactions),
       resume: new ProjectResumeService(runtimeTransactions),
+    };
+    phase4Services = {
+      coordinator: new Phase4Coordinator(runtimeTransactions),
+      completion: new Phase4CompletionService(runtimeTransactions),
+      dispatch: new Phase4DispatchRepository(runtimeTransactions),
+      events: new Phase4EventProcessor(runtimeTransactions),
     };
     if (identityRoute?.read_mode === "relational" && identityRoute.write_mode === "relational") {
       await assertCredentialHmacKeyCoverage(
@@ -354,6 +372,7 @@ const server = await buildServer({
   ...(identityRuntime.mode === "relational" ? { identity: identityRuntime.identity } : {}),
   projects: projectRuntime.repository,
   ...(phase3Services !== undefined ? { phase3: phase3Services } : {}),
+  ...(phase4Services !== undefined ? { phase4: phase4Services } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),
   ...(usersFlusher !== undefined ? { persistUsers: () => usersFlusher.flush() } : {}),

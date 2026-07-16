@@ -1,7 +1,9 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
-import { Phase4DispatchRepository } from "../src/coordinator/phase4Dispatcher.js";
+import { Phase4CompletionService } from "../src/coordinator/phase4Completion.js";
+import { Phase4Dispatcher, Phase4DispatchRepository } from "../src/coordinator/phase4Dispatcher.js";
+import { Phase4EventProcessor } from "../src/coordinator/phase4EventProcessor.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 
@@ -173,5 +175,173 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       [scheduled.dispatch_job_id],
     );
     expect(state.rows[0]).toEqual({ job: "delivered", command: "dispatched", run: "dispatched" });
+    await expect(repository.pendingForRunner("runner-1")).resolves.toEqual([scheduled.command]);
+  });
+
+  it("durably applies runner events once and closes reviewed integrated work", async () => {
+    const scheduled = await schedule();
+    const transactions = new PGliteTransactionRunner(pg);
+    const dispatch = new Phase4DispatchRepository(transactions);
+    const claimed = await dispatch.claim("dispatcher-a", 30_000);
+    expect(claimed?.command.command_id).toBe(scheduled.command_id);
+    await dispatch.markDelivered(
+      scheduled.dispatch_job_id,
+      "dispatcher-a",
+      "2026-07-16T20:01:00.000Z",
+    );
+
+    const events = new Phase4EventProcessor(transactions);
+    const envelope = (event_seq: number, payload: Record<string, unknown>) => ({
+      protocol: 1 as const,
+      event_seq,
+      runner_id: "runner-1",
+      generation: 3,
+      correlation_id: "correlation-1",
+      causation_id: scheduled.command_id,
+      occurred_at: `2026-07-16T20:0${event_seq}:00.000Z`,
+      payload,
+    });
+    await events.apply(
+      envelope(1, { kind: "run_status", run_id: scheduled.run_id, status: "started" }) as never,
+    );
+    const usage = envelope(2, {
+      kind: "usage_report",
+      run_id: scheduled.run_id,
+      input_tokens: 100,
+      output_tokens: 25,
+    });
+    await events.apply(usage as never);
+    await expect(events.apply(usage as never)).resolves.toEqual({ duplicate: true });
+    await events.apply(
+      envelope(3, {
+        kind: "verification_result",
+        node_id: "task-1",
+        commit_sha: "c".repeat(40),
+        passed: true,
+        output_digest: "verification-output",
+      }) as never,
+    );
+    await events.apply(
+      envelope(4, { kind: "run_status", run_id: scheduled.run_id, status: "completed" }) as never,
+    );
+    await events.apply(
+      envelope(5, {
+        kind: "command_ack",
+        command_id: scheduled.command_id,
+        state: "succeeded",
+        detail: "",
+      }) as never,
+    );
+
+    const beforeReview = await pg.query<{
+      task: string;
+      run: string;
+      verification: string;
+      runner_events: number;
+    }>(
+      `SELECT task.state AS task, run.state AS run,
+              run.verification_status AS verification,
+              (SELECT count(*)::int FROM runner_events WHERE applied_at IS NOT NULL) AS runner_events
+       FROM tasks task JOIN agent_runs run ON run.id=task.designated_run_id
+       WHERE task.id='task-1'`,
+    );
+    expect(beforeReview.rows[0]).toEqual({
+      task: "in_review",
+      run: "succeeded",
+      verification: "passed",
+      runner_events: 5,
+    });
+
+    const evidence = {
+      artifact_id: "artifact-1",
+      content_hash: "d".repeat(64),
+      media_type: "application/json",
+      label: "review and integration evidence",
+    };
+    const completion = new Phase4CompletionService(transactions);
+    await expect(
+      completion.complete({
+        project_id: "project-1",
+        phase_id: "phase-1",
+        task_id: "task-1",
+        run_id: scheduled.run_id,
+        actor: { actor_type: "human", actor_id: "admin-1" },
+        correlation_id: "correlation-1",
+        review_evidence: [evidence],
+        integration_evidence: [evidence],
+        review_summary: "Reviewed and integrated",
+        completed_at: "2026-07-16T20:06:00.000Z",
+      }),
+    ).resolves.toEqual({ task_completed: true, phase_closed: true });
+
+    const closed = await pg.query<{
+      task: string;
+      phase: string;
+      objective: string;
+      assignment: string;
+      reservation: string;
+      memory: number;
+    }>(
+      `SELECT task.state AS task, phase.status AS phase, objective.status AS objective,
+              assignment.status AS assignment, reservation.status AS reservation,
+              (SELECT count(*)::int FROM project_memory_entries
+               WHERE phase_id='phase-1' AND category='phase_completion') AS memory
+       FROM tasks task
+       JOIN phases phase ON phase.id=task.phase_id
+       JOIN objectives objective ON objective.id=task.objective_id
+       JOIN agent_assignments assignment ON assignment.id=task.designated_assignment_id
+       JOIN budget_reservations reservation ON reservation.run_id=task.designated_run_id
+       WHERE task.id='task-1'`,
+    );
+    expect(closed.rows[0]).toEqual({
+      task: "completed",
+      phase: "completed",
+      objective: "completed",
+      assignment: "completed",
+      reservation: "settled",
+      memory: 1,
+    });
+  });
+
+  it("dead-letters exhausted delivery, blocks work, and releases its reservation", async () => {
+    const scheduled = await schedule();
+    await pg.query("UPDATE dispatch_jobs SET attempts=4 WHERE id=$1", [scheduled.dispatch_job_id]);
+    const repository = new Phase4DispatchRepository(new PGliteTransactionRunner(pg));
+    const dispatcher = new Phase4Dispatcher(
+      repository,
+      "dispatcher-a",
+      async () => {
+        throw new Error("runner unavailable");
+      },
+      { max_attempts: 5, now: () => new Date("2026-07-16T20:10:00.000Z") },
+    );
+    await expect(dispatcher.tick()).resolves.toBe(false);
+    const state = await pg.query<{
+      job: string;
+      command: string;
+      run: string;
+      task: string;
+      reservation: string;
+      outcome: string;
+    }>(
+      `SELECT job.status AS job, command.status AS command, run.state AS run,
+              task.state AS task, reservation.status AS reservation,
+              reservation.resolution_outcome AS outcome
+       FROM dispatch_jobs job
+       JOIN commands command ON command.command_id=job.command_id
+       JOIN agent_runs run ON run.id=job.run_id
+       JOIN tasks task ON task.id=job.task_id
+       JOIN budget_reservations reservation ON reservation.run_id=job.run_id
+       WHERE job.id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    expect(state.rows[0]).toEqual({
+      job: "dead_letter",
+      command: "failed",
+      run: "expired",
+      task: "blocked",
+      reservation: "released",
+      outcome: "dead_letter",
+    });
   });
 });
