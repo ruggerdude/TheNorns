@@ -67,3 +67,12 @@ export {
   mergeIntegrationToMain,
 } from "./engine/release.js";
 export { PgPersistence, SnapshotFlusher, type PgClient } from "./persistence/pg.js";
+export * from "./persistence/v2/application.js";
+export * from "./persistence/v2/budget.js";
+export * from "./persistence/v2/database.js";
+export * from "./persistence/v2/lifecycleMutation.js";
+export * from "./persistence/v2/migrate.js";
+export * from "./persistence/v2/reconciliation.js";
+export * from "./persistence/v2/schema.js";
+export * from "./persistence/v2/sqlRepositories.js";
+export * from "./projects/repository.js";

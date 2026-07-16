@@ -2,3 +2,8 @@
 // the major version and requires architecture-lead approval (STAFFING.md).
 export const CONTRACTS_VERSION = "1.3.0"; // 1.3: PM model catalog + review-model provenance
 export const PROTOCOL_VERSION = 1;
+
+// V2 is introduced alongside the frozen legacy surface. Consumers opt into
+// V2-prefixed schemas; legacy protocol and schema exports remain unchanged.
+export const V2_CONTRACTS_VERSION = "2.0.0";
+export const V2_PROTOCOL_VERSION = 2;

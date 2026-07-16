@@ -35,17 +35,15 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { z } from "zod";
 import { bearerToken, verifyRunnerSignature } from "./auth.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
-import {
-  AllocationError,
-  AllocationStrategy,
-  approveAllocation,
-  autoAllocate,
-  costPreview,
-  overrideAssignment,
-} from "./graph/allocation.js";
+import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
 import { GraphEditError } from "./graph/graph.js";
 import { newId, nonce, pairingCode } from "./ids.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
+import {
+  type ProjectGraphView,
+  type ProjectRepository,
+  projectRepository,
+} from "./projects/repository.js";
 import {
   ProjectNotFoundError,
   ProjectNotPlannedError,
@@ -91,7 +89,7 @@ export interface ServerOptions {
   persistUsers?: () => Promise<void>;
   clock?: () => Date;
   /** Multi-project management: create/list projects, plan + edit + allocate each one's graph. */
-  projects?: ProjectStore;
+  projects?: ProjectRepository | ProjectStore;
   /**
    * DEMO-ONLY dashboard provider (engine + ledger composition). When set, it is
    * exposed at GET /api/demo/dashboard and returns the same illustrative demo
@@ -558,8 +556,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // ---- multi-project management: create/list projects; plan, edit, and ------
   // ---- allocate each one's own graph ------------------------------------------
 
-  const projects = options.projects;
-  if (projects) {
+  const projects = options.projects ? projectRepository(options.projects) : undefined;
+  if (projects !== undefined) {
     const projectError = (reply: FastifyReply, error: unknown): void => {
       if (error instanceof ProjectNotFoundError) {
         reply.code(404).send({ error: "not_found", message: error.message });
@@ -584,21 +582,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       throw error;
     };
 
-    const sendGraph = (reply: FastifyReply, id: string): void => {
-      const session = projects.session(id);
-      const graph = session.graph;
+    const sendGraph = (reply: FastifyReply, view: ProjectGraphView): void => {
       // ADR-1: every graph response carries the server-authoritative approval
       // status, with `current` computed against the live version/fingerprint.
       reply.send({
-        ...graph.snapshot(),
-        cost: costPreview(graph),
-        approval: session.approvalStatus(),
+        ...view.graph,
+        cost: view.cost,
+        approval: view.approval,
       });
     };
 
-    app.get("/api/projects", (req, reply) => {
+    app.get("/api/projects", async (req, reply) => {
       if (!requireSession(req, reply)) return;
-      reply.send(projects.list());
+      reply.send(await projects.list());
     });
 
     const CreateProjectFields = {
@@ -642,11 +638,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           });
         }
       });
-    app.post("/api/projects", (req, reply) => {
+    app.post("/api/projects", async (req, reply) => {
       if (!requireSession(req, reply)) return;
       const body = CreateProjectBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
-      const project = projects.create({
+      const project = await projects.create({
         name: body.data.name,
         description: body.data.description,
         pmProvider: body.data.pm_provider,
@@ -663,60 +659,60 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       reply.code(201).send(project);
     });
 
-    app.get("/api/projects/:id", (req, reply) => {
+    app.get("/api/projects/:id", async (req, reply) => {
       if (!requireSession(req, reply)) return;
       const { id } = req.params as { id: string };
       try {
-        reply.send(projects.summary(id));
+        reply.send(await projects.summary(id));
       } catch (error) {
         projectError(reply, error);
       }
     });
 
-    app.get("/api/projects/:id/graph", (req, reply) => {
+    app.get("/api/projects/:id/graph", async (req, reply) => {
       if (!requireSession(req, reply)) return;
       const { id } = req.params as { id: string };
       try {
-        sendGraph(reply, id);
+        sendGraph(reply, await projects.graph(id));
       } catch (error) {
         projectError(reply, error);
       }
     });
 
     const EdgeBody = z.object({ from: z.string().min(1), to: z.string().min(1) });
-    app.post("/api/projects/:id/graph/edges", (req, reply) => {
+    app.post("/api/projects/:id/graph/edges", async (req, reply) => {
       if (!requireSession(req, reply)) return;
       const { id } = req.params as { id: string };
       const body = EdgeBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
       try {
-        projects.session(id).graph.addEdge(body.data.from, body.data.to);
+        const view = await projects.addEdge(id, body.data.from, body.data.to);
         stores.audit(
           "operator",
           "graph.edge_added",
           `${id}:${body.data.from}->${body.data.to}`,
           now(),
         );
-        sendGraph(reply, id);
+        sendGraph(reply, view);
       } catch (error) {
         projectError(reply, error);
       }
     });
 
-    app.delete("/api/projects/:id/graph/edges", (req, reply) => {
+    app.delete("/api/projects/:id/graph/edges", async (req, reply) => {
       if (!requireSession(req, reply)) return;
       const { id } = req.params as { id: string };
       const body = EdgeBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
       try {
-        projects.session(id).graph.removeEdge(body.data.from, body.data.to);
+        const view = await projects.removeEdge(id, body.data.from, body.data.to);
         stores.audit(
           "operator",
           "graph.edge_removed",
           `${id}:${body.data.from}->${body.data.to}`,
           now(),
         );
-        sendGraph(reply, id);
+        sendGraph(reply, view);
       } catch (error) {
         projectError(reply, error);
       }
@@ -729,42 +725,42 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       risk: z.enum(["low", "medium", "high", "critical"]).optional(),
       dependencies: z.array(z.string().min(1)).optional(),
     });
-    app.post("/api/projects/:id/graph/nodes", (req, reply) => {
+    app.post("/api/projects/:id/graph/nodes", async (req, reply) => {
       if (!requireSession(req, reply)) return;
       const { id } = req.params as { id: string };
       const body = NodeBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
       try {
-        projects.session(id).graph.addNode(body.data);
+        const view = await projects.addNode(id, body.data);
         stores.audit("operator", "graph.node_added", `${id}:${body.data.id}`, now());
-        sendGraph(reply, id);
+        sendGraph(reply, view);
       } catch (error) {
         projectError(reply, error);
       }
     });
 
-    app.delete("/api/projects/:id/graph/nodes/:nodeId", (req, reply) => {
+    app.delete("/api/projects/:id/graph/nodes/:nodeId", async (req, reply) => {
       if (!requireSession(req, reply)) return;
       const { id, nodeId } = req.params as { id: string; nodeId: string };
       const { mode } = req.query as { mode?: "reparent" | "cascade" };
       try {
-        const removed = projects.session(id).graph.removeNode(nodeId, mode);
+        const { removed, view } = await projects.removeNode(id, nodeId, mode);
         stores.audit("operator", "graph.node_removed", `${id}:${removed.join(",")}`, now());
-        sendGraph(reply, id);
+        sendGraph(reply, view);
       } catch (error) {
         projectError(reply, error);
       }
     });
 
-    app.post("/api/projects/:id/graph/allocate", (req, reply) => {
+    app.post("/api/projects/:id/graph/allocate", async (req, reply) => {
       if (!requireSession(req, reply)) return;
       const { id } = req.params as { id: string };
       const body = z.object({ strategy: AllocationStrategy }).safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
       try {
-        autoAllocate(projects.session(id).graph, body.data.strategy);
+        const view = await projects.allocate(id, body.data.strategy);
         stores.audit("operator", "graph.auto_allocated", `${id}:${body.data.strategy}`, now());
-        sendGraph(reply, id);
+        sendGraph(reply, view);
       } catch (error) {
         projectError(reply, error);
       }
@@ -778,29 +774,25 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       budget_usd: z.number().positive().optional(),
       rationale: z.string().min(1).optional(),
     });
-    app.post("/api/projects/:id/graph/nodes/:nodeId/assignment", (req, reply) => {
+    app.post("/api/projects/:id/graph/nodes/:nodeId/assignment", async (req, reply) => {
       if (!requireSession(req, reply)) return;
       const { id, nodeId } = req.params as { id: string; nodeId: string };
       const body = OverrideBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
       try {
-        overrideAssignment(projects.session(id).graph, nodeId, body.data);
+        const view = await projects.overrideAssignment(id, nodeId, body.data);
         stores.audit("operator", "graph.assignment_overridden", `${id}:${nodeId}`, now());
-        sendGraph(reply, id);
+        sendGraph(reply, view);
       } catch (error) {
         projectError(reply, error);
       }
     });
 
-    app.post("/api/projects/:id/graph/approve-allocation", (req, reply) => {
+    app.post("/api/projects/:id/graph/approve-allocation", async (req, reply) => {
       if (!requireSession(req, reply)) return;
       const { id } = req.params as { id: string };
       try {
-        const session = projects.session(id);
-        const approval = approveAllocation(session.graph, "operator");
-        // Persist the approval server-side (ADR-1) so staleness is judged by
-        // the server, not reconstructed from client memory.
-        session.recordApproval(approval);
+        const approval = await projects.approveAllocation(id, "operator");
         stores.audit("operator", "allocation.approved", `${id}:${approval.content_hash}`, now());
         reply.send(approval);
       } catch (error) {
@@ -836,7 +828,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       const { id } = req.params as { id: string };
       let pmSelection: { provider: ProviderName; model: string | null };
       try {
-        pmSelection = projects.pmSelectionOf(id);
+        pmSelection = await projects.pmSelectionOf(id);
       } catch (error) {
         projectError(reply, error);
         return;
@@ -938,15 +930,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     // Commit a (human-reviewed) plan — typically the output of POST
     // /api/projects/:id/plan — into that project's graph.
     const LoadPlanBody = z.object({ plan: PlanContract });
-    app.post("/api/projects/:id/plan/load", (req, reply) => {
+    app.post("/api/projects/:id/plan/load", async (req, reply) => {
       if (!requireSession(req, reply)) return;
       const { id } = req.params as { id: string };
       const body = LoadPlanBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
       try {
-        projects.loadPlan(id, body.data.plan);
+        const view = await projects.loadPlan(id, body.data.plan);
         stores.audit("operator", "graph.plan_loaded", `${id}:${body.data.plan.objective}`, now());
-        sendGraph(reply, id);
+        sendGraph(reply, view);
       } catch (error) {
         if (error instanceof ProjectNotFoundError) {
           projectError(reply, error);

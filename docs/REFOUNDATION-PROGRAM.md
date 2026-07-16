@@ -371,6 +371,9 @@ Specify:
 
 ## Phase 1 — Domain and persistence foundation
 
+Active implementation brief:
+[PHASE-1-BRIEF.md](phases/PHASE-1-BRIEF.md).
+
 ### 1.1 Versioned domain contracts
 
 - Introduce V2 entities and commands alongside legacy contracts.
@@ -436,8 +439,10 @@ can be switched between legacy and relational implementations.
 - Lifecycle fold-and-compare reconciliation passes and catches both
   fault-injected one-sided mutations.
 - Every redelivery of one dispatch job presents the same command ID.
-- Concurrent duplicate commands produce one mutation and replay one result;
-  key reuse with a different request is rejected.
+- Concurrent duplicate commands produce one mutation. A concurrent loser
+  receives the committed replay when available or an explicit retriable
+  `command_in_progress`; its later retry replays the committed result. Key
+  reuse with a different request is rejected.
 - Idempotency records remain replayable for the reviewed minimum and are not
   cleaned up while related asynchronous or rollback state exists.
 - Budget-reservation contract tests cover success, partial usage, cancel,
