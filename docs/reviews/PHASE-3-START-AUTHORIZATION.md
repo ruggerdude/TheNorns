@@ -27,5 +27,7 @@ Phase 3 is authorized on branch `refoundation/phase3-existing-projects`.
 - New contracts and migration decisions require independent review before the
   next phase gate.
 
-Phase 3 implementation must stop at its exit gate until the independent review
-and human disposition are complete.
+The human program owner has explicitly selected manual gating for the remainder
+of this program. Phase 3 may proceed through its implementation scope without
+an automatic independent-review hold; the owner will decide when to pause,
+review, or advance each gate.
