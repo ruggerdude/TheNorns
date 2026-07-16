@@ -1,6 +1,6 @@
 # The Norns Controlled Re-foundation Program
 
-**Status:** Phase 1 — Domain and Persistence Foundation active
+**Status:** Phase 1 candidate frozen; independent review pending
 **Date:** 2026-07-16
 **Program Manager / Chief Architect / Integration Owner:** ChatGPT Sol
 **Governing charter:** [PROGRAM-CHARTER.md](PROGRAM-CHARTER.md)
@@ -15,6 +15,10 @@
 [reviews/REFOUNDATION-REVIEW-DISPOSITION.md](reviews/REFOUNDATION-REVIEW-DISPOSITION.md)
 **Human decisions:**
 [reviews/REFOUNDATION-HUMAN-DECISIONS.md](reviews/REFOUNDATION-HUMAN-DECISIONS.md)
+**Phase 1 candidate review:**
+[reviews/PHASE-1-CANDIDATE-REVIEW-PACKET.md](reviews/PHASE-1-CANDIDATE-REVIEW-PACKET.md)
+**Phase 1 evidence:**
+[reviews/PHASE-1-CANDIDATE-EVIDENCE.md](reviews/PHASE-1-CANDIDATE-EVIDENCE.md)
 
 ## Objective
 

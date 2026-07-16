@@ -24,7 +24,7 @@
   API spend posture.
 - [x] Human authorization — `Start Phase 1 — Domain and Persistence
   Foundation`.
-- [ ] Phase 1 candidate contracts, normalized schema, transactional boundary,
+- [x] Phase 1 candidate contracts, normalized schema, transactional boundary,
   compatibility repositories, and required verification evidence.
 - [ ] Claude Fable independent review of the Phase 1 candidate contract
   package, disposition, and final contract freeze.

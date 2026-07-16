@@ -1,8 +1,9 @@
 # Phase 1 Brief — Domain and Persistence Foundation
 
-**Status:** Candidate verification
+**Status:** Candidate frozen — independent review pending
 **Authorized:** 2026-07-16
 **Branch:** `refoundation/phase1-domain-persistence`
+**Candidate implementation:** `7244dd8430128b99acb8e5facc4d7575ff3e05a8`
 **Program baseline:** 14 FSE
 **Program manager / integration owner:** ChatGPT Sol
 **Primary implementation:** Backend Sonnet
