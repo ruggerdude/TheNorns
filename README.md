@@ -1,23 +1,30 @@
 # TheNorns
 
-Visual AI Program Management platform: a PM agent orchestrates planning,
-cross-provider review (Anthropic ⇄ OpenAI), and sandboxed execution via
-Claude Code and Codex, with a deterministic workflow engine, human approval
-gates, and a complete audit trail.
+The Norns is being developed as an AI operating system for complex knowledge
+work: persistent projects, evolving phases, durable memory, deterministic
+coordination, multi-provider AI execution, and human strategic control.
 
-**Spec:** [TheNorns_MVP_PRD.md](TheNorns_MVP_PRD.md) (R4, externally reviewed
-twice — dispositions in [docs/reviews/](docs/reviews/)) ·
-**Decisions:** [docs/adr/](docs/adr/) · **Staffing:** [docs/STAFFING.md](docs/STAFFING.md) ·
-**Tracking:** [todo.md](todo.md), [progress.log](progress.log)
+## Canonical program documents
+
+- **Charter:** [docs/PROGRAM-CHARTER.md](docs/PROGRAM-CHARTER.md)
+- **Phase 0 review:** [docs/PHASE-0-ARCHITECTURE-REVIEW.md](docs/PHASE-0-ARCHITECTURE-REVIEW.md)
+- **Re-foundation program:** [docs/REFOUNDATION-PROGRAM.md](docs/REFOUNDATION-PROGRAM.md)
+- **Architecture decisions:** [docs/adr/](docs/adr/)
+
+The earlier [R4 MVP PRD](TheNorns_MVP_PRD.md), [staffing plan](docs/STAFFING.md),
+[todo](todo.md), and [progress log](progress.log) remain implementation-history
+references. Where they conflict with the Program Charter or ADR-004 through
+ADR-007, the newer documents govern.
 
 ## Layout
 
 | Path | Package | What it is |
 |---|---|---|
-| `packages/contracts` | `@norns/contracts` | **Contracts v1 (frozen at Phase 0B):** Plan Contract, node lifecycle + pure reducer, runner protocol (command state machine, envelopes, dedup semantics), usage/reservations, approvals, artifacts, Project Memory, verification. Single source of truth — changes require architecture-lead approval. |
-| `apps/server` | `@norns/server` | Backend: API, relay (browser + runner WebSockets), workflow engine, dispatch outbox (Phase 1A+) |
-| `apps/runner` | `@norns/runner` | Local Runner daemon: pairing, buffered replay, sandbox launcher, runtime adapters (Phase 1A+) |
-| `apps/web` | `@norns/web` | Frontend: PM workspace, plan review, workflow graph, dashboard (Phase 1A+) |
+| `packages/contracts` | `@norns/contracts` | Existing Plan, lifecycle, runner-protocol, usage, approval, artifact, memory, and verification contracts. V2 persistent-domain contracts will be introduced through the approved re-foundation. |
+| `packages/adapters` | `@norns/adapters` | Anthropic and OpenAI planning/provider adapters and usage normalization. |
+| `apps/server` | `@norns/server` | Cloud API, relay, authentication, current project store, planning, and coordination primitives. |
+| `apps/runner` | `@norns/runner` | Local Runner daemon, protocol replay/dedup, and coding runtime adapters. |
+| `apps/web` | `@norns/web` | Current project/planning/graph UI; scheduled to become the Attention and Execution Mode experience. |
 
 ## Development
 
@@ -28,5 +35,5 @@ pnpm install
 pnpm run ci      # lint + typecheck + test
 ```
 
-Every implementation change runs through the phase plan in the PRD
-(§Development Order); the current phase and open items are in `todo.md`.
+New implementation follows the gates in
+[docs/REFOUNDATION-PROGRAM.md](docs/REFOUNDATION-PROGRAM.md).

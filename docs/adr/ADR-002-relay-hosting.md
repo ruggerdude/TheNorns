@@ -1,7 +1,9 @@
 # ADR-002: Relay Topology, Hosting & Data Services (Phase 1A)
 
-**Status:** Accepted 2026-07-14; **hosting amended to Railway 2026-07-14** (human chose Railway) · **Date:** 2026-07-13
-**Resolves:** NORN-003 · **Amended by:** `docs/reviews/REVIEW-001-disposition.md`
+**Status:** Accepted 2026-07-14; **Railway text consolidated 2026-07-16** ·
+**Date:** 2026-07-13
+**Resolves:** NORN-003 · **Amended by:**
+`docs/reviews/REVIEW-001-disposition.md`, ADR-005, ADR-006
 
 > **Amendment (2026-07-14) — Railway supersedes Fly.io + Neon.** The operator
 > created a GitHub repo (`TheNorns`) and a Railway project, so hosting moves
@@ -32,20 +34,18 @@ command outbox, and the audit feed; repository contents stay on the runner.
 and ack watermarks are durable, so a server restart recovers from the
 database (REVIEW-001 P0-2/P1-5).
 
-**2. App hosting: Fly.io**, single region, single small machine
-(`shared-cpu-1x`, 512 MB), TLS automatic, deploys via `flyctl`.
+**2. App hosting: Railway**, initially one Node/Docker service serving the
+built web application, HTTP API, and WebSocket relay. The service is
+production-configured through Railway variables and deploys from the GitHub
+repository.
 
-**3. Database: managed Postgres on Neon** (same region as the Fly app).
-Fly's legacy "Fly Postgres" is explicitly unmanaged; Fly's newer Managed
-Postgres (MPG) is genuinely managed but starts at ~$38/mo — out of
-proportion for a single-operator MVP. Neon provides automated backups,
-point-in-time recovery, and zero database operations at ~$0–19/mo for this
-scale. Fly MPG is the designated same-platform alternative if Neon latency
-or connection behavior disappoints.
+**3. Database: Railway managed PostgreSQL**, linked to the application with
+Railway reference variables. ADR-005 governs normalized schema, migrations,
+backup/restore, events, and the transactional outbox.
 
-**4. Artifact/blob storage: S3-compatible object storage** (Tigris via Fly,
-or any S3-compatible bucket; local disk in dev) for large logs, transcripts,
-patches, artifacts. Postgres keeps metadata + content hashes only.
+**4. Artifact/blob storage: S3-compatible object storage** selected during the
+evidence/artifact implementation phase. Local development may use a compatible
+filesystem implementation. PostgreSQL stores metadata and content hashes.
 
 **5. Operational requirements (mandatory before pilot):** automated backups
 verified; point-in-time recovery expectations documented; migration
@@ -53,9 +53,8 @@ rollback procedure; **a tested restore** (Phase 8 exit).
 
 ## Rationale
 
-- Long-lived runner sockets + a resident dispatch loop rule out
-  request-scoped platforms; Fly is the cheapest managed host in the
-  classic-server class. Cost envelope all-in: **~US$10–35/month**.
+- Long-lived runner sockets and a resident dispatch loop require a
+  classic long-running service; Railway supports the current Docker topology.
 - A separate relay would be a third protocol hop with no MVP benefit.
 - Managed Postgres shifts backups/upgrades/recovery off the project; for an
   MVP intended to become commercial, self-operating the database is the
@@ -66,32 +65,30 @@ rollback procedure; **a tested restore** (Phase 8 exit).
 
 ## Alternatives rejected
 
-Railway (fine fallback, app + DB together). Fly MPG (managed but ~$38/mo
-minimum; designated alternative). Self-operated Fly Postgres (unmanaged;
-operational burden). Hetzner VPS (cheapest, most ops). Cloudflare
-Workers/DO (engine wants a long-running Node process). Tailscale
-direct-to-runner (audit trail must survive runner loss; couples browser
-access to runner uptime).
+Fly.io/Neon (previous primary; no longer the operator’s selected deployment).
+Self-operated PostgreSQL (unnecessary operational burden). Hetzner VPS
+(cheapest but most operations). Request-scoped platforms (coordinator and
+runner sockets need a resident process). Tailscale direct-to-runner (audit and
+coordination state must survive runner loss).
 
 ## Security posture
 
-- Only the server is internet-exposed; runner outbound-only WSS with
-  Ed25519 keypair + rotation + revocation + generation fencing; browser via
-  passkeys with the hardening set from the PRD Security section.
-- Neon reached over TLS with credentials held as Fly secrets; provider keys
-  encrypted at rest in the credential store, encryption key as a Fly secret
-  — never in the image.
+- Only the Railway service is internet-exposed; the runner connects outbound
+  with Ed25519 authentication, revocation, and generation fencing.
+- Railway injects database/provider configuration as service variables.
+  Provider and repository credentials must not be included in the image or
+  worker prompts.
 - Kill switch is a server-side flag checked by the dispatch loop.
 
 ## Consequences
 
-- Phase 1A infra: Fly app, Neon database, Tigris/S3 bucket, `flyctl`
-  pipeline, `/ws/runner` with outbox-backed command delivery and
-  watermark-based replay; 1A acceptance run from a device on a different
-  network, including the server-restart recovery test.
+- Deployment remains one Railway app service plus Railway PostgreSQL until
+  scale requires separation. Artifact storage is added independently.
+- `/ws/runner` retains outbox-backed delivery and watermark replay; acceptance
+  includes cross-network operation and server-restart recovery.
 - Single machine = brief downtime on deploys; tolerated because runner
   buffer-and-replay doubles as deploy tolerance.
-- NOTIFY-over-Neon may drop across connection interruptions — irrelevant by
-  design, since polling the durable jobs table guarantees recovery
-  (ADR-001).
-- Human-only prerequisites: Fly.io and Neon accounts + payment methods.
+- Database notifications are hints only; polling durable jobs guarantees
+  recovery.
+- Human-controlled prerequisites are the Railway project, PostgreSQL service,
+  GitHub App configuration, and eventual object-storage account.

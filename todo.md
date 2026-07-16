@@ -1,5 +1,13 @@
 # TheNorns — todo
 
+> **Historical tracker notice (2026-07-16):** this file records delivery
+> against the previous plan-centric PRD and therefore contains completion
+> claims that do not equal acceptance of the persistent-project Charter MVP.
+> New work is governed by
+> [docs/REFOUNDATION-PROGRAM.md](docs/REFOUNDATION-PROGRAM.md). Treat the
+> remaining entries below as legacy backlog/input until they are migrated into
+> the new phase structure.
+
 ## Done
 - [x] NORN-001 — Review original MVP PRD; produce corrected R2 (`TheNorns_MVP_PRD.md`)
 - [x] NORN-002 — Choose tech stack → [ADR-001](docs/adr/ADR-001-tech-stack.md)

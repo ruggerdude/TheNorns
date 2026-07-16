@@ -1,5 +1,11 @@
 # TheNorns web app — UI feedback for a design/frontend pass
 
+> **Historical review notice (2026-07-16):** this document reviewed the
+> plan/graph UI before the Program Charter and controlled re-foundation.
+> Individual accessibility and visual observations remain useful, but the
+> target information architecture is now governed by ADR-007 and
+> `docs/REFOUNDATION-PROGRAM.md`.
+
 **Audience:** an agent (or engineer) doing a substantial UI/UX pass on `apps/web`.
 **Author context:** written by the agent that built the current UI incrementally,
 feature-by-feature, with zero design investment — this doc is an honest
