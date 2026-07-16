@@ -11,6 +11,11 @@ export const PHASE2_PRESERVATION_MIGRATION_URL = new URL(
   "../../../drizzle/0002_preservation_migration.sql",
   import.meta.url,
 );
+export const PHASE3_SOURCE_BINDINGS_MIGRATION_NAME = "0003_phase3_source_bindings";
+export const PHASE3_SOURCE_BINDINGS_MIGRATION_URL = new URL(
+  "../../../drizzle/0003_phase3_source_bindings.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -50,6 +55,10 @@ export async function loadPhase1V2MigrationSql(): Promise<string> {
 
 export async function loadPhase2PreservationMigrationSql(): Promise<string> {
   return readFile(PHASE2_PRESERVATION_MIGRATION_URL, "utf8");
+}
+
+export async function loadPhase3SourceBindingsMigrationSql(): Promise<string> {
+  return readFile(PHASE3_SOURCE_BINDINGS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -167,6 +176,10 @@ export async function runCurrentV2Migrations(
     {
       name: PHASE2_PRESERVATION_MIGRATION_NAME,
       sql: await loadPhase2PreservationMigrationSql(),
+    },
+    {
+      name: PHASE3_SOURCE_BINDINGS_MIGRATION_NAME,
+      sql: await loadPhase3SourceBindingsMigrationSql(),
     },
   ]);
 }

@@ -70,3 +70,35 @@ export const V2RepositoryBinding = z.discriminatedUnion("binding_type", [
   V2GitHubRepositoryBinding,
 ]);
 export type V2RepositoryBindingT = z.infer<typeof V2RepositoryBinding>;
+
+export const V2CreateLocalRepositoryBinding = z
+  .object({
+    project_id: V2EntityId,
+    runner_id: V2EntityId,
+    workspace_id: V2EntityId,
+    repository_id: V2EntityId,
+    repository_display_name: V2NonEmptyString,
+    default_branch: V2NonEmptyString,
+    observed_head: V2NonEmptyString,
+    verification_policy_ref: V2EntityId,
+    created_by: V2Actor,
+  })
+  .strict();
+export type V2CreateLocalRepositoryBindingT = z.infer<typeof V2CreateLocalRepositoryBinding>;
+
+export const V2CreateGitHubRepositoryBinding = z
+  .object({
+    project_id: V2EntityId,
+    runner_id: V2EntityId,
+    github_installation_id: V2EntityId,
+    github_repository_id: V2EntityId,
+    owner: V2NonEmptyString,
+    name: V2NonEmptyString,
+    default_branch: V2NonEmptyString,
+    observed_head: V2NonEmptyString,
+    verification_policy_ref: V2EntityId,
+    granted_permissions: V2GitHubRepositoryBinding.shape.granted_permissions,
+    created_by: V2Actor,
+  })
+  .strict();
+export type V2CreateGitHubRepositoryBindingT = z.infer<typeof V2CreateGitHubRepositoryBinding>;
