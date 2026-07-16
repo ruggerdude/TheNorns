@@ -102,3 +102,52 @@ export const V2CreateGitHubRepositoryBinding = z
   })
   .strict();
 export type V2CreateGitHubRepositoryBindingT = z.infer<typeof V2CreateGitHubRepositoryBinding>;
+
+export const V2RepositoryIngestionSeed = z
+  .object({
+    project_id: V2EntityId,
+    repository_binding_id: V2EntityId,
+    repository_revision: V2NonEmptyString,
+    architecture: z
+      .object({
+        title: V2NonEmptyString,
+        summary: V2NonEmptyString,
+        artifact: z
+          .object({
+            storage_ref: V2NonEmptyString,
+            content_hash: z.string().regex(/^[a-f0-9]{64}$/),
+            byte_size: z.number().int().nonnegative(),
+            media_type: V2NonEmptyString,
+          })
+          .strict(),
+      })
+      .strict(),
+    repository_facts: z
+      .array(
+        z
+          .object({
+            key: V2NonEmptyString,
+            value: V2NonEmptyString,
+            confidence: z.number().min(0).max(1),
+          })
+          .strict(),
+      )
+      .max(500),
+    constraints: z.array(V2NonEmptyString).max(100),
+    directives: z.array(V2NonEmptyString).max(100),
+    assignment_policy_ref: V2EntityId,
+    verification_policy_ref: V2EntityId,
+    budget_policy_ref: V2EntityId,
+    created_by: V2Actor,
+  })
+  .strict()
+  .superRefine((seed, ctx) => {
+    if (seed.created_by.actor_type !== "human" || seed.created_by.actor_id === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["created_by"],
+        message: "initial project directives require an attributable human actor",
+      });
+    }
+  });
+export type V2RepositoryIngestionSeedT = z.infer<typeof V2RepositoryIngestionSeed>;
