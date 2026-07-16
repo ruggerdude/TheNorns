@@ -1,6 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
+import { Phase4DispatchRepository } from "../src/coordinator/phase4Dispatcher.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 
@@ -75,8 +76,8 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     await pg.close();
   });
 
-  it("atomically assigns, reserves budget, and creates stable durable outbox records", async () => {
-    const result = await coordinator.schedule({
+  function schedule() {
+    return coordinator.schedule({
       project_id: "project-1",
       phase_id: "phase-1",
       task_id: "task-1",
@@ -104,6 +105,10 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       issued_at: "2026-07-16T20:00:00.000Z",
       expires_at: "2026-07-16T20:15:00.000Z",
     });
+  }
+
+  it("atomically assigns, reserves budget, and creates stable durable outbox records", async () => {
+    const result = await schedule();
 
     expect(result.command.command_id).toBe(`dispatch:${result.dispatch_job_id}`);
     const state = await pg.query<{
@@ -138,5 +143,35 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       command_status: "queued",
       task_events: 2,
     });
+  });
+
+  it("reclaims a crashed dispatcher lease and redelivers the identical command", async () => {
+    const scheduled = await schedule();
+    const repository = new Phase4DispatchRepository(new PGliteTransactionRunner(pg));
+    const first = await repository.claim("dispatcher-a", 30_000);
+    expect(first?.command.command_id).toBe(scheduled.command_id);
+
+    await pg.query(
+      "UPDATE dispatch_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+      [scheduled.dispatch_job_id],
+    );
+    const recovered = await repository.claim("dispatcher-b", 30_000);
+    expect(recovered?.command.command_id).toBe(first?.command.command_id);
+    expect(recovered?.attempts).toBe(2);
+    await repository.markDelivered(
+      scheduled.dispatch_job_id,
+      "dispatcher-b",
+      "2026-07-16T20:01:00.000Z",
+    );
+
+    const state = await pg.query<{ job: string; command: string; run: string }>(
+      `SELECT job.status AS job, command.status AS command, run.state AS run
+       FROM dispatch_jobs job
+       JOIN commands command ON command.command_id = job.command_id
+       JOIN agent_runs run ON run.id = job.run_id
+       WHERE job.id = $1`,
+      [scheduled.dispatch_job_id],
+    );
+    expect(state.rows[0]).toEqual({ job: "delivered", command: "dispatched", run: "dispatched" });
   });
 });
