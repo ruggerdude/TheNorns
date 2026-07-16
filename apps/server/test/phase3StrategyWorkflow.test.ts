@@ -9,6 +9,7 @@ import {
   StrategyWorkflowConflictError,
   StrategyWorkflowService,
 } from "../src/projects/strategyWorkflowService.js";
+import { hashCurrentPassword } from "../src/users/passwords.js";
 
 const NOW = "2026-07-16T19:30:00.000Z";
 
@@ -116,6 +117,22 @@ describe.sequential("Phase 3 retained strategy workflow", () => {
        ) VALUES ('project-1','Project One','','active','assignment',
                  'verification','budget')`,
     );
+    await pg.query(
+      `INSERT INTO users (
+         id, username, display_name, email, name, password_hash,
+         password_hash_scheme, role, status
+       ) VALUES ('admin-1','admin@example.com','Admin','admin@example.com','Admin',
+                 $1,'scrypt-v1','admin','active')`,
+      [await hashCurrentPassword("test-password")],
+    );
+    await pg.query(
+      `INSERT INTO agent_profiles (
+         id, provider, runtime, model, roles, capabilities, context_limit_tokens,
+         security_restrictions, status, active_workload, cost_metadata
+       ) VALUES ('agent-frontend','anthropic','server','claude-sonnet',
+                 '["frontend"]'::jsonb,'["react"]'::jsonb,200000,'[]'::jsonb,
+                 'available',0,'{"billing_mode":"api"}'::jsonb)`,
+    );
     const transactions = new PGliteTransactionRunner(pg);
     phaseId = (
       await new PhaseWorkflowService(transactions).create({
@@ -169,5 +186,50 @@ describe.sequential("Phase 3 retained strategy workflow", () => {
     await expect(workflow.saveAwaitingApproval(candidate)).rejects.toBeInstanceOf(
       StrategyWorkflowConflictError,
     );
+  });
+
+  it("atomically approves and materializes objectives, tasks, and assignments", async () => {
+    const candidate = strategy(phaseId);
+    await workflow.saveAwaitingApproval(candidate);
+    const command = {
+      schema_version: 2 as const,
+      command_id: "approve-animation-v1",
+      kind: "approve_strategy_version" as const,
+      command_family: "strategy_approval" as const,
+      actor: { actor_type: "human" as const, actor_id: "admin-1" },
+      idempotency_key: "approve-animation-v1",
+      correlation_id: "correlation-approval",
+      causation_id: null,
+      issued_at: "2026-07-16T19:31:00.000Z",
+      project_id: "project-1",
+      phase_id: phaseId,
+      strategy_version_id: candidate.id,
+      expected_phase_version: 2,
+      expected_strategy_version: 1,
+      expected_strategy_aggregate_version: 1,
+      expected_content_hash: candidate.content_hash,
+    };
+    const result = await workflow.approve(command);
+    await expect(workflow.approve(command)).resolves.toEqual(result);
+    expect(result).toMatchObject({ objectives: 1, tasks: 1 });
+    const state = await pg.query<{
+      phase_status: string;
+      strategy_status: string;
+      approvals: number;
+      assignments: number;
+    }>(
+      `SELECT p.status AS phase_status, s.status AS strategy_status,
+              (SELECT count(*)::int FROM approvals) AS approvals,
+              (SELECT count(*)::int FROM agent_assignments) AS assignments
+       FROM phases p JOIN strategy_versions s ON s.id = p.approved_strategy_version_id
+       WHERE p.id = $1`,
+      [phaseId],
+    );
+    expect(state.rows[0]).toEqual({
+      phase_status: "approved",
+      strategy_status: "approved",
+      approvals: 1,
+      assignments: 1,
+    });
   });
 });
