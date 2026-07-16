@@ -4,8 +4,14 @@ import { readFileSync } from "node:fs";
 import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 import { canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
-import { Phase2MigrationProcessLease } from "../src/persistence/migration/migrationLock.js";
+import { SqlPhase2ControlRepository } from "../src/persistence/migration/controlRepository.js";
+import { Phase2IdentityCutoverEvidenceRecorder } from "../src/persistence/migration/cutoverEvidence.js";
+import {
+  Phase2ApplicationPersistenceLease,
+  Phase2MigrationProcessLease,
+} from "../src/persistence/migration/migrationLock.js";
 import { Phase2MigrationService } from "../src/persistence/migration/phase2MigrationService.js";
+import { SqlPhase2PrivilegedControlRepository } from "../src/persistence/migration/privilegedControlRepository.js";
 import {
   SqlPhase2RecoveryVerificationRepository,
   readPostgresDatabaseIdentity,
@@ -19,12 +25,15 @@ import { NodePgTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import {
   assertCredentialHmacKeyCoverage,
+  createIdentityRuntime,
+  loadDurableIdentityRoute,
   parseCredentialHmacKeyring,
 } from "../src/startup/identityRuntime.js";
 import type { CredentialHmacKey } from "../src/users/credentialTokens.js";
 import { IdentityAlreadyBootstrappedError } from "../src/users/identityService.js";
 import { hashCurrentPassword } from "../src/users/passwords.js";
 import { RelationalIdentityService } from "../src/users/relationalIdentityService.js";
+import { UserStore } from "../src/users/store.js";
 
 const databaseUrl = process.env.V2_POSTGRES_TEST_URL;
 const enabled = databaseUrl !== undefined && process.env.PHASE2_DOCKER_BACKUP_TEST === "1";
@@ -213,6 +222,7 @@ postgresDescribe("Phase 2 production-shaped PostgreSQL exit checkpoint", () => {
     let migrationPool: Pool | undefined;
     let runtimePoolOne: Pool | undefined;
     let runtimeRestartPool: Pool | undefined;
+    let postCutoverPool: Pool | undefined;
     let bootstrapMigrationPool: Pool | undefined;
     let bootstrapRuntimePoolOne: Pool | undefined;
     let bootstrapRuntimePoolTwo: Pool | undefined;
@@ -526,18 +536,17 @@ postgresDescribe("Phase 2 production-shaped PostgreSQL exit checkpoint", () => {
         /credential identity and verifier are immutable/,
       );
 
-      const invited = await identity.createInvite({
-        email: "phase2.native.invite@example.com",
-        role: "member",
-      });
-      await identity.acceptInvite(invited.inviteToken, "accepted-password");
+      const legacyInvitation = await migrationPool.query<{ id: string }>(
+        `SELECT id FROM invitations
+         WHERE user_id = 'phase2-invited-member' AND status = 'revoked'`,
+      );
       await expectPostgresError(
         runtimeRunnerOne.transaction((sql) =>
           sql.query(
             `UPDATE invitations
-               SET status = 'pending', accepted_at = NULL
-               WHERE user_id = $1`,
-            [invited.summary.id],
+               SET status = 'pending', revoked_at = NULL
+               WHERE id = $1`,
+            [legacyInvitation.rows[0]?.id],
           ),
         ),
         /terminal state cannot be resurrected/,
@@ -686,15 +695,176 @@ postgresDescribe("Phase 2 production-shaped PostgreSQL exit checkpoint", () => {
         archive_verification_events: 3,
       });
 
-      // FOLLOW-UP(PHASE2-FENCED-CUTOVER): once the independent cutover
-      // implementation is frozen, continue this same database through the
-      // exclusive-fence prerequisite checks and relational route write.
-      // Until then this test deliberately stops at the recovery checkpoint.
+      const sanitizedIdentity = await runtimePoolOne.query<{
+        snapshot: {
+          users: Array<{
+            id: string;
+            email: string;
+            name: string | null;
+            role: string;
+            status: string;
+            createdAt: string;
+          }>;
+        };
+      }>("SELECT snapshot FROM norns_state WHERE key = 'users'");
+      const legacyPublicProjection = (sanitizedIdentity.rows[0]?.snapshot.users ?? [])
+        .map((user) => ({
+          id: user.id,
+          email: user.email.trim().toLowerCase(),
+          name: user.name,
+          role: user.role,
+          status: user.status,
+          created_at: new Date(user.createdAt).toISOString(),
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id));
+      const relationalPublicProjection = (await identity.list()).sort((left, right) =>
+        left.id.localeCompare(right.id),
+      );
+      expect(relationalPublicProjection).toEqual(legacyPublicProjection);
+
+      const legacySessionRejected =
+        (await restartedIdentity.userForToken(LEGACY_SESSION_TOKEN)) === undefined;
+      let legacyInvitationRejected = false;
+      try {
+        await restartedIdentity.acceptInvite(LEGACY_INVITE_TOKEN, "must-not-work");
+      } catch {
+        legacyInvitationRejected = true;
+      }
+      const normalizedSessionRestart =
+        (await restartedIdentity.userForToken(legacyLogin.token))?.id === "phase2-legacy-member";
+      const revokedSessionRejected =
+        (await restartedIdentity.userForToken(currentLogin.token)) === undefined;
+
+      const runtimeControl = new SqlPhase2ControlRepository(runtimeRunnerOne);
+      const cutoverEvidence = new Phase2IdentityCutoverEvidenceRecorder(
+        migrationResult.migration_run_id,
+        runtimeControl,
+      );
+      const callerTime = "2099-12-31T23:59:59.000Z";
+      await cutoverEvidence.recordPublicUserProjection({
+        legacy: legacyPublicProjection,
+        relational: relationalPublicProjection,
+        observed_at: callerTime,
+      });
+      await cutoverEvidence.recordRetainedLegacyCredentialRejection({
+        satisfied: legacySessionRejected && legacyInvitationRejected,
+        observed_at: callerTime,
+      });
+      await cutoverEvidence.recordNormalizedSessionRestart({
+        satisfied: normalizedSessionRestart,
+        observed_at: callerTime,
+      });
+      await cutoverEvidence.recordExpiredRevokedRejection({
+        satisfied: revokedSessionRejected,
+        observed_at: callerTime,
+      });
+
+      const boundEvidence = await migrationPool.query<{
+        operations: number;
+        all_green: boolean;
+        caller_time_ignored: boolean;
+      }>(
+        `SELECT count(DISTINCT operation)::int AS operations,
+                bool_and(matched) AS all_green,
+                bool_and(observed_at < '2099-01-01T00:00:00Z') AS caller_time_ignored
+         FROM shadow_read_comparisons
+         WHERE migration_run_id = $1
+           AND scope_type = 'identity' AND scope_key = '*'`,
+        [migrationResult.migration_run_id],
+      );
+      expect(boundEvidence.rows[0]).toEqual({
+        operations: 4,
+        all_green: true,
+        caller_time_ignored: true,
+      });
+
+      const cutoverLease = await Phase2MigrationProcessLease.acquire(migrationPool);
+      let identityRoute: Awaited<
+        ReturnType<SqlPhase2PrivilegedControlRepository["cutoverIdentity"]>
+      >;
+      try {
+        const cutover = new SqlPhase2PrivilegedControlRepository(cutoverLease);
+        identityRoute = await cutover.cutoverIdentity({
+          migration_run_id: migrationResult.migration_run_id,
+          human_actor_id: "phase2-current-admin",
+        });
+        await expect(
+          cutover.cutoverIdentity({
+            migration_run_id: migrationResult.migration_run_id,
+            human_actor_id: "phase2-current-admin",
+          }),
+        ).resolves.toEqual(identityRoute);
+      } finally {
+        await cutoverLease.release();
+      }
+      expect(identityRoute).toMatchObject({
+        scope_type: "identity",
+        scope_key: "*",
+        read_mode: "relational",
+        write_mode: "relational",
+        migration_run_id: migrationResult.migration_run_id,
+        changed_by: { actor_type: "human", actor_id: "phase2-current-admin" },
+      });
+
+      const cutoverState = await migrationPool.query<{
+        status: string;
+        audit_count: number;
+        operator_restart_required: boolean;
+      }>(
+        `SELECT run.status,
+                (SELECT count(*)::int FROM audit_events
+                 WHERE audit_type = 'persistence.identity_cutover') AS audit_count,
+                (SELECT (details->>'operator_restart_required')::boolean
+                 FROM audit_events
+                 WHERE audit_type = 'persistence.identity_cutover') AS operator_restart_required
+         FROM migration_runs run WHERE run.id = $1`,
+        [migrationResult.migration_run_id],
+      );
+      expect(cutoverState.rows[0]).toEqual({
+        status: "cutover",
+        audit_count: 1,
+        operator_restart_required: true,
+      });
+      await expectPostgresError(
+        runtimePoolOne.query(
+          `UPDATE persistence_routes
+           SET read_mode = 'legacy', write_mode = 'legacy'
+           WHERE scope_type = 'identity' AND scope_key = '*'`,
+        ),
+        /permission denied/,
+      );
+
+      postCutoverPool = new Pool({ ...postgresPoolConfig(runtimeUrl), max: 2 });
+      await expect(
+        assertRestrictedRuntimeDatabase(postCutoverPool, keyringEnvironment),
+      ).resolves.toBeUndefined();
+      const restartedRoute = await loadDurableIdentityRoute(postCutoverPool);
+      expect(restartedRoute).toEqual(identityRoute);
+      const postCutoverTransactions = new NodePgTransactionRunner(postCutoverPool, {
+        mode: "runtime",
+        role: "norns_app",
+      });
+      await expect(
+        assertCredentialHmacKeyCoverage(postCutoverTransactions, keyring),
+      ).resolves.toBeUndefined();
+      const postCutoverRuntime = createIdentityRuntime({
+        users: new UserStore(),
+        route: restartedRoute,
+        environment: keyringEnvironment,
+        transactions: postCutoverTransactions,
+      });
+      expect(postCutoverRuntime.mode).toBe("relational");
+      await expect(
+        postCutoverRuntime.identity.userForToken(legacyLogin.token),
+      ).resolves.toMatchObject({ id: "phase2-legacy-member" });
+      const applicationLease = await Phase2ApplicationPersistenceLease.acquire(postCutoverPool);
+      await applicationLease.release();
     } finally {
       await restoredPool?.end();
       await bootstrapRuntimePoolTwo?.end();
       await bootstrapRuntimePoolOne?.end();
       await bootstrapMigrationPool?.end();
+      await postCutoverPool?.end();
       await runtimeRestartPool?.end();
       await runtimePoolOne?.end();
       await migrationPool?.end();
