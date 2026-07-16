@@ -1,9 +1,10 @@
 # Phase 1 Brief — Domain and Persistence Foundation
 
-**Status:** Independent review complete — required remediation in progress
+**Status:** Complete and frozen
 **Authorized:** 2026-07-16
 **Branch:** `refoundation/phase1-domain-persistence`
 **Candidate implementation:** `7244dd8430128b99acb8e5facc4d7575ff3e05a8`
+**Final technical freeze:** `50c9e7b0576f31d32ec01994c069b72c07e7e031`
 **Program baseline:** 14 FSE
 **Program manager / integration owner:** ChatGPT Sol
 **Primary implementation:** Backend Sonnet
@@ -135,6 +136,6 @@ migration is prohibited.
 
 The Phase 1 exit criteria are exactly those in
 [`REFOUNDATION-PROGRAM.md`](../REFOUNDATION-PROGRAM.md). Passing component
-tests alone is insufficient. Phase 2 cannot begin until the independent
-contract review and final freeze are complete and the human authorizes the
-next phase.
+tests alone is insufficient. The independent review, remediation, human
+retention decision, final freeze, and effort checkpoint are complete. Phase 2
+was separately authorized on 2026-07-16.

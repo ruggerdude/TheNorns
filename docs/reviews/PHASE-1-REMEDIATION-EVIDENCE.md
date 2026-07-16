@@ -4,8 +4,8 @@
 **Remediation candidate:** `0b15579757bf6d0320ee537ab728fe3dfdf9d9ac`
 **Branch:** `refoundation/phase1-domain-persistence`
 **Evidence date:** 2026-07-16
-**Status:** Technical remediation complete; human retention decision and final
-Phase 1 freeze pending
+**Status:** Technical remediation complete and included in the final Phase 1
+freeze
 
 ## Fixed-snapshot evidence
 
@@ -97,8 +97,10 @@ real lock-wait proof, and pre-freeze migration policy. Result:
 All closed.
 ```
 
-## Remaining gate
+## Final gate
 
-This evidence does not claim Phase 1 completion. `PH1-OPEN-1` still requires
-the human retention-policy decision. The final effort/variance checkpoint and
-contract freeze follow that decision; Phase 2 remains unauthorized.
+The human approved archive-only for `PH1-OPEN-1`. The final technical tree,
+including CI portability corrections, is frozen at
+`50c9e7b0576f31d32ec01994c069b72c07e7e031`. The complete effort and gate
+record is
+[PHASE-1-FINAL-FREEZE.md](PHASE-1-FINAL-FREEZE.md).

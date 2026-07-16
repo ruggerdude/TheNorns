@@ -1,7 +1,6 @@
 # The Norns Controlled Re-foundation Program
 
-**Status:** Phase 1 technical remediation complete; human retention decision
-and final freeze pending
+**Status:** Phase 1 complete and frozen; Phase 2 authorized and in progress
 **Date:** 2026-07-16
 **Program Manager / Chief Architect / Integration Owner:** ChatGPT Sol
 **Governing charter:** [PROGRAM-CHARTER.md](PROGRAM-CHARTER.md)
@@ -26,6 +25,12 @@ and final freeze pending
 [reviews/PHASE-1-CANDIDATE-EVIDENCE.md](reviews/PHASE-1-CANDIDATE-EVIDENCE.md)
 **Phase 1 remediation evidence:**
 [reviews/PHASE-1-REMEDIATION-EVIDENCE.md](reviews/PHASE-1-REMEDIATION-EVIDENCE.md)
+**Phase 1 final freeze:**
+[reviews/PHASE-1-FINAL-FREEZE.md](reviews/PHASE-1-FINAL-FREEZE.md)
+**Phase 2 brief:**
+[phases/PHASE-2-BRIEF.md](phases/PHASE-2-BRIEF.md)
+**Phase 2 authorization:**
+[reviews/PHASE-2-START-AUTHORIZATION.md](reviews/PHASE-2-START-AUTHORIZATION.md)
 
 ## Objective
 
@@ -71,6 +76,9 @@ and source metadata remain available throughout migration.
     or shared delivery requires a separate design and recovery gate.
 15. No real-repository execution capability is enabled until minimum identity
     hardening and dispatch-route authorization pass the Phase 4 gate.
+16. Archive-only is the normal MVP project-retention path. A privileged hard
+    purge requires a later human-approved ADR and is not an ordinary
+    application capability.
 
 ## Effort, cost, and variance baseline
 
@@ -472,11 +480,15 @@ can be switched between legacy and relational implementations.
 
 ## Phase 2 — User and project preservation migration
 
+Active implementation brief:
+[PHASE-2-BRIEF.md](phases/PHASE-2-BRIEF.md).
+
 ### 2.1 Recovery checkpoint
 
 - Create a database backup/PITR marker.
 - Archive raw users/projects/relay snapshots as encrypted, access-controlled
-  secret material with access logging and a defined retention window.
+  secret material with access logging. Archive-only is the MVP retention
+  policy; no ordinary migration or application path deletes these sources.
 - Record source hashes, object counts, and application version.
 - Stamp the legacy snapshot freeze time and the last included legacy record.
 
@@ -519,8 +531,9 @@ For each planned legacy project:
 3. Materialize tasks and acceptance data.
 4. Use the graph for current dependency/assignment state.
 5. Create reconciliation findings for plan/graph disagreement.
-6. Preserve valid approval evidence.
-7. Require reapproval when hashes or structures disagree.
+6. Preserve legacy allocation approval as historical evidence with
+   `actor_type = legacy`; it never becomes V2 Strategy approval.
+7. Require a fresh V2 Strategy approval for every imported planned project.
 
 The reconciliation report emits distinct codes for:
 
@@ -538,8 +551,15 @@ retained as source metadata rather than fabricated identity.
 ### 2.5 Shadow/canary cutover
 
 - Compare legacy and relational reads.
-- Cut over internal/admin projects first.
-- Retain tested read/write switches through the rollback window.
+- Canary internal/admin project reads first.
+- A shadow mismatch blocks project read cutover.
+- Identity may complete read/write cutover after credential-revocation and
+  rollback evidence passes.
+- Project mutation remains legacy through Phase 2. Phase 3 owns relational
+  project commands, amendment workflow, and new-project defaults.
+- Relay/dispatch remains legacy through Phase 2. Phase 4 owns its normalized
+  cutover and execution activation.
+- Retain tested routing switches through the rollback window.
 
 ### Ownership
 
@@ -564,6 +584,9 @@ retained as source metadata rather than fabricated identity.
 - Rollback dry-run shows the snapshot freeze timestamp, V2 records created or
   changed since that point, and the resulting visibility/data-loss window.
 - No legacy snapshot is deleted.
+- No imported project is executable without resolved reconciliation and a
+  fresh human V2 Strategy approval.
+- Project writes and relay/dispatch remain on their legacy paths.
 
 ## Phase 3 — Existing-project import and persistent phase workflow
 
@@ -948,19 +971,13 @@ Rules:
 
 ## Next authorization gate
 
-Phase 0 architecture disposition is complete:
+Phase 1 is complete and frozen at technical commit `50c9e7b`. The human
+approved archive-only for the MVP and explicitly authorized:
 
-- the independent findings and disposition are committed;
-- `REF-REC-9`, `REF-REC-11`, and `REF-REC-14` evidence are complete;
-- the 150% program-control tabletop pause test is recorded and passed;
-- `REF-REC-1`, `-2`, `-6`, `-7`, `-8`, `-10`, `-13`, and the contract portion
-  of `REF-REC-16` are bound to the Phase 1 exit gate;
-- the human approved `REF-OPEN-1` through `REF-OPEN-4`;
-- the 145-FSE and $500 incremental API envelopes are approved.
+> Start Phase 2 — Legacy Migration and Recovery Checkpoint.
 
-Production implementation begins with Phase 1 only after the human authorizes:
-
-> Start Phase 1 — Domain and Persistence Foundation.
-
-Authorization was recorded on 2026-07-16 in
-[PHASE-1-START-AUTHORIZATION.md](reviews/PHASE-1-START-AUTHORIZATION.md).
+Authorization is recorded in
+[PHASE-2-START-AUTHORIZATION.md](reviews/PHASE-2-START-AUTHORIZATION.md).
+Phase 3 remains unauthorized until the Phase 2 exit evidence, independent
+review, dispositions, effort checkpoint, and a separate human start command
+are complete.

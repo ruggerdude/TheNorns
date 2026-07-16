@@ -5,10 +5,11 @@
 **Architecture author / disposition preparer:** ChatGPT Sol
 **Reviewed candidate:** `7244dd8430128b99acb8e5facc4d7575ff3e05a8`
 **Remediation candidate:** `0b15579757bf6d0320ee537ab728fe3dfdf9d9ac`
+**Final technical freeze:** `50c9e7b0576f31d32ec01994c069b72c07e7e031`
 **Disposition date:** 2026-07-16
-**Status:** All findings accepted and implemented; `PH1-OPEN-1` awaits the
-human retention-policy decision; final Phase 1 freeze and Phase 2 remain
-unauthorized.
+**Status:** Closed. All findings accepted and implemented; archive-only
+approved for `PH1-OPEN-1`; Phase 1 finally frozen; Phase 2 separately
+authorized.
 
 ## Disposition principles
 
@@ -19,8 +20,8 @@ unauthorized.
   changes live only in this disposition and the governing ADRs.
 - The remediation received a second read-only adversarial audit after the
   required changes; that audit reported all previously identified gaps closed.
-- Implementation evidence does not decide `PH1-OPEN-1`. That data-retention
-  posture remains a human decision under the charter.
+- The human approved archive-only for `PH1-OPEN-1`; no implementation evidence
+  was substituted for that policy decision.
 
 ## Findings
 
@@ -59,14 +60,13 @@ real-PostgreSQL evidence boundary are recorded in
 
 | ID | Sol recommendation | Status |
 |---|---|---|
-| PH1-OPEN-1 — project hard deletion | Use archive-only for the MVP and as the normal permanent product path. If a legal erasure or environment-purge requirement later appears, design a separate human-authorized, audited, privileged purge ADR; do not expose hard delete through ordinary application commands. | **Pending human decision.** |
+| PH1-OPEN-1 — project hard deletion | Use archive-only for the MVP and as the normal permanent product path. If a legal erasure or environment-purge requirement later appears, design a separate human-authorized, audited, privileged purge ADR; do not expose hard delete through ordinary application commands. | **Approved by the human on 2026-07-16.** See [PHASE-1-HUMAN-RETENTION-DECISION.md](PHASE-1-HUMAN-RETENTION-DECISION.md). |
 
 ## Authorization state
 
-The implementation blocker and every recommended finding have been remediated
-at `0b155797`. Phase 1 is not finally frozen while `PH1-OPEN-1` is pending.
-Phase 2 remains prohibited until:
-
-1. the human records the retention-policy decision;
-2. the final Phase 1 freeze and effort checkpoint are committed; and
-3. the human separately authorizes Phase 2 against that completed gate.
+The implementation blocker and every recommended finding were remediated at
+`0b155797`. The CI-portable final technical tree is frozen at `50c9e7b`.
+The retention decision and final effort checkpoint are committed in
+[PHASE-1-FINAL-FREEZE.md](PHASE-1-FINAL-FREEZE.md). The human separately
+authorized Phase 2 in
+[PHASE-2-START-AUTHORIZATION.md](PHASE-2-START-AUTHORIZATION.md).
