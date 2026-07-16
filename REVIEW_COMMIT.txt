@@ -1,0 +1,5 @@
+Phase 2 candidate review snapshot
+Candidate commit: 0dc337f
+Parent commit: 19f96c97713eb19f058ee1cd9cf121160de08b2c
+Working tree at candidate creation: clean
+Application source and review artifacts are pinned by the candidate commit.
