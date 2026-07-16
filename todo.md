@@ -16,11 +16,11 @@
 - [x] Add REF-REC-9 effort/variance baseline and REF-REC-14 commit evidence.
 - [x] Demonstrate the REF-REC-9 150% automatic-pause control in a recorded
   tabletop.
-- [ ] Human decision REF-OPEN-1 — keep GitHub App repository picker in MVP.
-- [ ] Human decision REF-OPEN-2 — rotate/revoke sessions and invitations at
+- [x] Human decision REF-OPEN-1 — keep GitHub App repository picker in MVP.
+- [x] Human decision REF-OPEN-2 — rotate/revoke sessions and invitations at
   migration cutover, with encrypted/restricted archives.
-- [ ] Human decision REF-OPEN-3 — default to one executing phase per project.
-- [ ] Human decision REF-OPEN-4 — authorize 145 FSE maximum and the selected
+- [x] Human decision REF-OPEN-3 — default to one executing phase per project.
+- [x] Human decision REF-OPEN-4 — authorize 145 FSE maximum and the selected
   API spend posture.
 - [ ] Human authorization — `Start Phase 1 — Domain and Persistence
   Foundation`.

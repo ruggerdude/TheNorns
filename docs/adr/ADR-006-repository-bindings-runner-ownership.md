@@ -77,10 +77,8 @@ control, but it is not the normal product path.
 
 ### 3. GitHub uses a GitHub App and repository picker
 
-Whether GitHub App binding is required for the first MVP pilot is the human
-scope decision `REF-OPEN-1`. The trust boundary below governs the feature
-whenever it is enabled and must be accepted before Phase 3 GitHub
-implementation begins.
+`REF-OPEN-1` includes GitHub App binding in the MVP. The trust boundary below
+must pass before Phase 3 GitHub implementation begins.
 
 The cloud service uses a GitHub App/OAuth installation flow:
 

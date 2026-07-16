@@ -70,9 +70,10 @@ Multiple phases may be active when their explicit dependencies, repository
 conflict policy, budget, and coordinator capacity allow it. Concurrency is a
 policy decision, not an implicit consequence of phase creation.
 
-The schema supports multiple active phases. The MVP runtime default is a
-separate human-approved policy decision recorded as `REF-OPEN-3`; changing
-that default later does not require a data migration.
+The schema supports multiple phases. `REF-OPEN-3` sets the MVP runtime default
+to one executing phase per Project. Multiple non-executing or historical
+phases may coexist. Raising the execution limit later is a human-approved
+policy change and does not require a data migration.
 
 ### 3. Objective is measurable
 

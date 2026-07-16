@@ -211,8 +211,8 @@ retained for:
 They are not the production source of truth after cutover.
 
 Legacy archives that contain reusable credentials are treated as secret
-material. Pending human approval in `REF-OPEN-2`, the proposed required
-cutover revokes all legacy session and invitation credentials so no token
+material. The approved `REF-OPEN-2` cutover revokes all legacy session and
+invitation credentials so no token
 string in an archive can authenticate against the live system. Encryption,
 least-privilege access, access logging, key ownership, and retention are
 Phase 2 exit criteria because the archives contain other sensitive identity
@@ -235,7 +235,7 @@ and project data.
 10. Retire legacy writes only after human acceptance.
 
 User and project records must not be discarded. Account access continuity is
-preserved, but reusable bearer continuity is not required. Under the proposed
+preserved, but reusable bearer continuity is not required. Under the approved
 `REF-OPEN-2` cutover, the operator receives explicit notice and one deliberate
 reauthentication rather than a silent logout loop.
 

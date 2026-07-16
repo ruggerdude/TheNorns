@@ -1,7 +1,7 @@
 # The Norns Controlled Re-foundation Program
 
-**Status:** Independent review accepted with required changes; four human
-decisions and explicit Phase 1 authorization remain pending
+**Status:** Phase 0 disposition complete; explicit Phase 1 start authorization
+remains pending
 **Date:** 2026-07-16
 **Program Manager / Chief Architect / Integration Owner:** ChatGPT Sol
 **Governing charter:** [PROGRAM-CHARTER.md](PROGRAM-CHARTER.md)
@@ -14,6 +14,8 @@ decisions and explicit Phase 1 authorization remain pending
 [reviews/REFOUNDATION-REVIEW-FINDINGS.md](reviews/REFOUNDATION-REVIEW-FINDINGS.md)
 **Findings disposition:**
 [reviews/REFOUNDATION-REVIEW-DISPOSITION.md](reviews/REFOUNDATION-REVIEW-DISPOSITION.md)
+**Human decisions:**
+[reviews/REFOUNDATION-HUMAN-DECISIONS.md](reviews/REFOUNDATION-HUMAN-DECISIONS.md)
 
 ## Objective
 
@@ -62,8 +64,8 @@ and source metadata remain available throughout migration.
 
 ## Effort, cost, and variance baseline
 
-This baseline resolves `REF-REC-9` and is pending the human spend-posture
-decision `REF-OPEN-4`.
+This baseline resolves `REF-REC-9` and was approved by the human under
+`REF-OPEN-4` on 2026-07-16.
 
 A **Focused Session Equivalent (FSE)** is 60 minutes of active agent work,
 recorded in 0.5-FSE increments. Parallel agents are counted separately.
@@ -87,7 +89,7 @@ sessions rotate at cutover, and one phase executes per project by default:
 | 7 — Hardening and pilot | 19 | 2–3 weeks | Attack/recovery tests, real-project pilot, cutover evidence |
 | **Planned** | **116** | **9–16 weeks** | Excludes human/infrastructure pauses |
 | **Central contingency (25%)** | **29** | Not preallocated | Named risks and review remediation only |
-| **Proposed maximum envelope** | **145** | Human-gated | Requires approval under `REF-OPEN-4` |
+| **Approved maximum envelope** | **145** | Human-gated | Approved under `REF-OPEN-4` |
 
 Role allocation:
 
@@ -108,9 +110,10 @@ Decision sensitivity:
 - permitting more than one concurrently executing phase by default adds an
   estimated 6–10 FSE across Phases 4–6.
 
-After `REF-OPEN-1` through `REF-OPEN-3` are decided, Sol recalculates each
-affected phase, the 25% contingency, the proposed program envelope, and the
-program control thresholds before `REF-OPEN-4` can be approved.
+The approved `REF-OPEN-1` through `REF-OPEN-3` decisions match the assumptions
+used above. Sol's recalculation leaves every phase allocation, the 25%
+contingency, the 145-FSE program envelope, and the 80%/100% program thresholds
+unchanged.
 
 Contingency may cover migration reconciliation, database/lease races,
 runner/provider churn, independent-review remediation, and pilot defects. New
@@ -147,7 +150,7 @@ Control thresholds:
   containment, rollback, and evidence preservation continue until the human
   increases the envelope, reduces scope, approves redesign/reassignment, or
   terminates the phase.
-- When program `EAC` reaches 80% of the proposed 145-FSE envelope, issue a
+- When program `EAC` reaches 80% of the approved 145-FSE envelope, issue a
   whole-program reforecast. When aggregate `actual + committed` reaches 100%
   of the approved envelope, no new work begins without human reauthorization.
 
@@ -159,13 +162,13 @@ and require a recorded human disposition to resume.
 The passed pre-implementation evidence is
 [REFOUNDATION-PROGRAM-CONTROL-TABLETOP.md](reviews/REFOUNDATION-PROGRAM-CONTROL-TABLETOP.md).
 
-The proposed spend posture is **seat-first hybrid**: existing subscriptions
+The approved spend posture is **seat-first hybrid**: existing subscriptions
 handle interactive architecture, implementation, and review; metered APIs are
 reserved for live adapter, planning, multi-provider, recovery, and pilot
-acceptance. Expected incremental API spend is $150–300. The proposed hard
+acceptance. Expected incremental API spend is $150–300. The approved hard
 incremental metered-API cap is $400 base plus $100 central reserve:
 
-| Phase | Proposed API cap |
+| Phase | Approved API cap |
 |---|---:|
 | 1 | $10 |
 | 2 | $10 |
@@ -186,7 +189,7 @@ Subscription seats and infrastructure are separate disclosed ledgers and are
 not included in the $500 figure. Any new seat, hosting tier, database, object
 storage, or email-service spend requires separate human approval. A balanced
 hybrid ($1,000 incremental API cap) and API-first posture ($2,500 incremental
-API cap) remain alternatives for `REF-OPEN-4`.
+API cap) are not authorized by `REF-OPEN-4`.
 
 ## Workstreams
 
@@ -467,12 +470,12 @@ Preserve:
 - user IDs, email addresses, names, roles, and admin status;
 - password hashes and creation metadata;
 - session inventory and attribution metadata; reusable session credentials are
-  revoked under the proposed cutover policy;
+  revoked under the approved cutover policy;
 - invitation state with improved token hashing.
 
 No shared deployment token is reintroduced as a login requirement.
 
-`REF-OPEN-2` is the human approval of the proposed mandatory cutover policy:
+`REF-OPEN-2` approved the mandatory cutover policy:
 revoke every legacy session and unused invitation token and require one
 explicit re-login. No token string present in a retained archive may
 authenticate against the live system.
@@ -561,11 +564,11 @@ GitHub:
 - select repository from an authorized picker;
 - create a durable binding and runner checkout.
 
-GitHub App inclusion in the first MVP pilot is the human decision
-`REF-OPEN-1`. If included, Phase 3 uses ADR-006's server-only private key and
-just-in-time, single-repository credential broker. Tokens never enter command
-envelopes, events, logs, artifacts, prompts, or sandbox environments, and the
-permission set is accepted before implementation.
+`REF-OPEN-1` approved GitHub App inclusion in the MVP. Phase 3 uses ADR-006's
+server-only private key and just-in-time, single-repository credential broker.
+Tokens never enter command envelopes, events, logs, artifacts, prompts, or
+sandbox environments, and the permission set is accepted before
+implementation.
 
 ### 3.2 Repository ingestion
 
@@ -928,16 +931,15 @@ Rules:
 
 ## Next authorization gate
 
-Phase 0 architecture is approved with required changes. Phase 1 remains
-unauthorized until:
+Phase 0 architecture disposition is complete:
 
 - the independent findings and disposition are committed;
 - `REF-REC-9`, `REF-REC-11`, and `REF-REC-14` evidence are complete;
 - the 150% program-control tabletop pause test is recorded and passed;
 - `REF-REC-1`, `-2`, `-6`, `-7`, `-8`, `-10`, `-13`, and the contract portion
   of `REF-REC-16` are bound to the Phase 1 exit gate;
-- the human records `REF-OPEN-1` through `REF-OPEN-4`;
-- the human explicitly approves the resulting effort and API envelope.
+- the human approved `REF-OPEN-1` through `REF-OPEN-4`;
+- the 145-FSE and $500 incremental API envelopes are approved.
 
 Production implementation begins with Phase 1 only after the human authorizes:
 

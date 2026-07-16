@@ -88,8 +88,8 @@ Decision:
 
 Migration must preserve users, password hashes, roles, and session
 inventory/audit metadata. Reusable credential values are not a continuity
-requirement. `REF-OPEN-2` is the human approval of the proposed mandatory
-cutover policy: revoke all legacy session and invitation credentials and
+requirement. `REF-OPEN-2` approved the mandatory cutover policy: revoke all
+legacy session and invitation credentials and
 require one explicit reauthentication. That event must be announced and cannot
 reopen deployment-token login. Retained legacy archives remain encrypted,
 access-controlled, logged, and time-bounded because they also contain other

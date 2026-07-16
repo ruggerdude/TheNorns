@@ -1,6 +1,6 @@
 # Phase 0 Architecture Review
 
-**Status:** Independently reviewed; approved with required changes ·
+**Status:** Complete; independently approved with required changes incorporated ·
 **Date:** 2026-07-16
 **Scope:** Existing repository architecture against the Program Charter
 **Implementation performed:** None
@@ -153,3 +153,4 @@ unless it is represented by a committed ADR or explicitly ratified above.
 - [Independent Review Baseline](reviews/REFOUNDATION-REVIEW-BASELINE.md)
 - [Independent Findings of Record](reviews/REFOUNDATION-REVIEW-FINDINGS.md)
 - [Findings Disposition](reviews/REFOUNDATION-REVIEW-DISPOSITION.md)
+- [Human Decisions](reviews/REFOUNDATION-HUMAN-DECISIONS.md)
