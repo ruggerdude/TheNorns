@@ -108,6 +108,29 @@ export interface PlanReviewResult {
   outstanding: { statement: string }[];
 }
 
+interface ProjectResumeDto {
+  project: { id: string; name: string; status: string; aggregate_version: number };
+  architecture: { title: string; summary: string; repository_revision: string } | null;
+  repositories: Array<{ id: string; display_name: string; status: string; health: string }>;
+  phases: Array<{
+    id: string;
+    objective_summary: string;
+    status: string;
+    tasks: number;
+    completed_tasks: number;
+    blocked_tasks: number;
+  }>;
+  attention: { open_decisions: number; active_runs: number; blocked_tasks: number };
+  next_recommended_action: string;
+}
+
+async function getJson<T>(path: string): Promise<T> {
+  const res = await fetch(path, { headers: authHeaders(false) });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new ApiError(`request failed: ${res.status}`, res.status);
+  return (await res.json()) as T;
+}
+
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(path, {
     method: "POST",
@@ -193,6 +216,10 @@ function ProjectGraph({
   const [planError, setPlanError] = useState<string | null>(null);
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
+  const [resume, setResume] = useState<ProjectResumeDto | null>(null);
+  const [phaseObjective, setPhaseObjective] = useState("");
+  const [phaseCreating, setPhaseCreating] = useState(false);
+  const [phaseError, setPhaseError] = useState<string | null>(null);
 
   // Last-known-*good* approval state (never "pending"): what we revert to when
   // an in-flight mutation fails, so the banner is never left stuck at pending.
@@ -276,6 +303,43 @@ function ProjectGraph({
       cancelled = true;
     };
   }, [base, onLogout, reconcileApproval]);
+
+  const loadResume = useCallback(async () => {
+    try {
+      setResume(await getJson<ProjectResumeDto>(`/api/v2/projects/${project.id}/resume`));
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else if (!(err instanceof ApiError && err.status === 404)) {
+        setPhaseError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  }, [project.id, onLogout]);
+
+  useEffect(() => {
+    void loadResume();
+  }, [loadResume]);
+
+  const createPersistentPhase = useCallback(async () => {
+    if (!resume || !phaseObjective.trim()) return;
+    setPhaseCreating(true);
+    setPhaseError(null);
+    try {
+      await postJson(`/api/v2/projects/${project.id}/phases`, {
+        objective_summary: phaseObjective.trim(),
+        priority: resume.phases.length,
+        predecessor_phase_ids: [],
+        expected_project_version: resume.project.aggregate_version,
+        idempotency_key: `phase-${Date.now()}`,
+      });
+      setPhaseObjective("");
+      await loadResume();
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else setPhaseError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPhaseCreating(false);
+    }
+  }, [resume, phaseObjective, project.id, loadResume, onLogout]);
 
   const runPlanning = useCallback(async () => {
     setPlanLoading(true);
@@ -605,6 +669,61 @@ function ProjectGraph({
           <Spinner label="Loading graph…" />
         )}
         {error ? <Alert testId="error">{error}</Alert> : null}
+
+        {resume ? (
+          <details className="card side-section" open data-testid="project-resume">
+            <summary>Project Resume</summary>
+            <div className="side-body form-stack">
+              <div className="stat-strip">
+                <div className="stat">
+                  <strong>{resume.phases.length}</strong>
+                  <span>PHASES</span>
+                </div>
+                <div className="stat">
+                  <strong>
+                    {resume.attention.open_decisions + resume.attention.blocked_tasks}
+                  </strong>
+                  <span>NEEDS ATTENTION</span>
+                </div>
+              </div>
+              {resume.architecture ? (
+                <div>
+                  <strong>{resume.architecture.title}</strong>
+                  <p className="muted" style={{ fontSize: 12 }}>
+                    {resume.architecture.summary}
+                  </p>
+                </div>
+              ) : null}
+              <Alert>{resume.next_recommended_action}</Alert>
+              {resume.phases.map((phase) => (
+                <div className="project-row" key={phase.id}>
+                  <div>
+                    <strong>{phase.objective_summary}</strong>
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      {phase.status} · {phase.completed_tasks}/{phase.tasks} tasks complete
+                    </div>
+                  </div>
+                </div>
+              ))}
+              <Field label="Create the next phase">
+                <Input
+                  data-testid="phase-objective"
+                  placeholder="e.g. Add animations"
+                  value={phaseObjective}
+                  onChange={(event) => setPhaseObjective(event.target.value)}
+                />
+              </Field>
+              <Button
+                variant="primary"
+                disabled={phaseCreating || !phaseObjective.trim()}
+                onClick={() => void createPersistentPhase()}
+              >
+                {phaseCreating ? "Creating phase…" : "Create phase"}
+              </Button>
+              {phaseError ? <Alert testId="phase-error">{phaseError}</Alert> : null}
+            </div>
+          </details>
+        ) : null}
 
         <details className="card side-section" open>
           <summary>01 · Live planning</summary>
