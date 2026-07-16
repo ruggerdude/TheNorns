@@ -22,8 +22,12 @@
 - [x] Human decision REF-OPEN-3 — default to one executing phase per project.
 - [x] Human decision REF-OPEN-4 — authorize 145 FSE maximum and the selected
   API spend posture.
-- [ ] Human authorization — `Start Phase 1 — Domain and Persistence
+- [x] Human authorization — `Start Phase 1 — Domain and Persistence
   Foundation`.
+- [ ] Phase 1 candidate contracts, normalized schema, transactional boundary,
+  compatibility repositories, and required verification evidence.
+- [ ] Claude Fable independent review of the Phase 1 candidate contract
+  package, disposition, and final contract freeze.
 
 ## Done
 - [x] NORN-001 — Review original MVP PRD; produce corrected R2 (`TheNorns_MVP_PRD.md`)

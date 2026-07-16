@@ -1,7 +1,6 @@
 # The Norns Controlled Re-foundation Program
 
-**Status:** Phase 0 disposition complete; explicit Phase 1 start authorization
-remains pending
+**Status:** Phase 1 — Domain and Persistence Foundation active
 **Date:** 2026-07-16
 **Program Manager / Chief Architect / Integration Owner:** ChatGPT Sol
 **Governing charter:** [PROGRAM-CHARTER.md](PROGRAM-CHARTER.md)
@@ -944,3 +943,6 @@ Phase 0 architecture disposition is complete:
 Production implementation begins with Phase 1 only after the human authorizes:
 
 > Start Phase 1 — Domain and Persistence Foundation.
+
+Authorization was recorded on 2026-07-16 in
+[PHASE-1-START-AUTHORIZATION.md](reviews/PHASE-1-START-AUTHORIZATION.md).
