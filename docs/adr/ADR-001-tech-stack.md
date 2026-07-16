@@ -70,18 +70,31 @@ Decision:
 - Session and invitation tokens must be stored as hashes, carry expiry, support
   revocation/rotation, and never be persisted or logged as reusable plaintext
   in the target schema.
+- Before the `live_runner_execution` capability can be enabled against a real
+  repository, the target schema must store no plaintext session or invitation
+  tokens; session expiry and server-side revocation must be enforced; login
+  attempts must be rate-limited; expired or revoked credentials must be
+  refused on every dispatch-capable HTTP route and browser observation/control
+  channel; runner channels authenticate separately with runner identity,
+  generation, and revocation credentials; and credential material must be
+  redacted from URLs, logs, events, and artifacts.
 - The browser target is a Secure, HttpOnly, SameSite session cookie with CSRF
   protection and recent authentication for high-risk operations. The current
   `sessionStorage` bearer token is a migration compatibility mechanism, not
   the final security architecture.
 - Password recovery, session inventory/revocation, rate limiting, enrollment
-  notification, and audit attribution are required before the security/pilot
-  gate.
+  notification, Secure-cookie migration, CSRF protection, recent-auth checks,
+  and complete audit attribution are required before the security/pilot gate.
 
-Migration must preserve users, password hashes, roles, and active sessions
-where safely possible. If token hashing or cookie migration requires one
-reauthentication event, it must be explicit and cannot reopen deployment-token
-login.
+Migration must preserve users, password hashes, roles, and session
+inventory/audit metadata. Reusable credential values are not a continuity
+requirement. `REF-OPEN-2` is the human approval of the proposed mandatory
+cutover policy: revoke all legacy session and invitation credentials and
+require one explicit reauthentication. That event must be announced and cannot
+reopen deployment-token login. Retained legacy archives remain encrypted,
+access-controlled, logged, and time-bounded because they also contain other
+sensitive identity data. No credential string present in an archive may
+authenticate against the live system after cutover.
 
 ## Rationale
 

@@ -122,6 +122,9 @@ pnpm run typecheck
 pnpm run test
 ```
 
-The architecture snapshot intentionally changes documentation only. Any
-application/package source difference in the review commit should be treated as
-a packaging error and reported before substantive review begins.
+The architecture snapshot intentionally changes documentation and
+program-tracking artifacts only. No path under `apps/` or `packages/` may
+differ from code baseline `4ee3b8a`; any such difference is a packaging error.
+The exact tree-object and diff evidence for reviewed commit `b4afd44` is
+recorded in
+[REFOUNDATION-REVIEW-DIFF-EVIDENCE.md](REFOUNDATION-REVIEW-DIFF-EVIDENCE.md).

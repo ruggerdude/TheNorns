@@ -8,6 +8,23 @@
 > remaining entries below as legacy backlog/input until they are migrated into
 > the new phase structure.
 
+## Re-foundation gate
+
+- [x] Record Claude Fable 5 independent Phase 0 baseline and findings.
+- [x] Accept and bind REF-REC-1 through REF-REC-18 to their governing ADRs and
+  phase gates; no rejection, downgrade, or later-gate deferral.
+- [x] Add REF-REC-9 effort/variance baseline and REF-REC-14 commit evidence.
+- [x] Demonstrate the REF-REC-9 150% automatic-pause control in a recorded
+  tabletop.
+- [ ] Human decision REF-OPEN-1 — keep GitHub App repository picker in MVP.
+- [ ] Human decision REF-OPEN-2 — rotate/revoke sessions and invitations at
+  migration cutover, with encrypted/restricted archives.
+- [ ] Human decision REF-OPEN-3 — default to one executing phase per project.
+- [ ] Human decision REF-OPEN-4 — authorize 145 FSE maximum and the selected
+  API spend posture.
+- [ ] Human authorization — `Start Phase 1 — Domain and Persistence
+  Foundation`.
+
 ## Done
 - [x] NORN-001 — Review original MVP PRD; produce corrected R2 (`TheNorns_MVP_PRD.md`)
 - [x] NORN-002 — Choose tech stack → [ADR-001](docs/adr/ADR-001-tech-stack.md)

@@ -80,6 +80,10 @@ LLM agents may:
 LLM output is schema-validated and never directly mutates state without an
 application command that enforces policy.
 
+Schema-invalid LLM output is never partially applied. The bounded workflow
+either retries validation/generation under policy or creates one attributable
+DecisionPoint when safe progress requires human judgment.
+
 ### 4. Assignment is capability and workload aware
 
 Assignment considers:
@@ -116,6 +120,28 @@ the human.
 
 Each DecisionPoint contains a recommended action and one clear primary action
 in the UI.
+
+DecisionPoint creation is idempotent across coordinator restarts. A stable
+`condition_key` is composed from:
+
+```text
+project ID
+scope entity type
+scope entity ID
+reason class
+stable condition/source instance ID
+```
+
+A separate `condition_fingerprint` hashes the material condition fields. A
+partial unique constraint permits one open DecisionPoint per `condition_key`.
+Coordinator re-evaluation returns or updates the same equivalent open
+condition rather than creating a duplicate. When the fingerprint changes, the
+prior revision is atomically superseded before one new revision is opened or
+re-opened. Resolving the single surviving point unblocks only its declared
+scope. The resolved key/fingerprint is retained so an unchanged condition is
+not recreated after restart.
+Where a DecisionPoint is the result of a blocking state transition, its
+creation and the evaluation checkpoint commit in the same transaction.
 
 ### 6. Create a ProjectResumeView
 
@@ -163,6 +189,18 @@ Every attention item includes:
 User acknowledgement, snooze, or dismissal is persisted separately from the
 rebuildable projection. Rebuilding Attention state must not resurrect an
 acknowledged informational item unless its authoritative source changes.
+
+The acknowledgement key is:
+
+```text
+(project ID, source entity type, source entity ID, condition class)
+```
+
+The projected item also carries a fingerprint of the condition's material
+fields. Projection rebuilds preserve acknowledgement while the fingerprint is
+unchanged and re-raise the item exactly once when the authoritative condition
+changes. Per-user acknowledgement is stored against
+`(user_id, item_key, fingerprint)`.
 
 Project inventory and search remain available but are not the dashboard.
 
@@ -284,3 +322,8 @@ is proven.
 8. Live task/run updates appear without requiring manual page refresh.
 9. Phase closure updates project state, memory, architecture history, and
    attention projections.
+10. Crash-injection around DecisionPoint creation produces exactly one open
+    point for a condition, and resolving it unblocks the declared scope.
+11. Projection rebuild preserves an acknowledged Attention item while its
+    fingerprint is stable and re-raises it once after a material source
+    change.

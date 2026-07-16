@@ -1,6 +1,7 @@
 # Phase 0 Architecture Review
 
-**Status:** Complete and approved · **Date:** 2026-07-16
+**Status:** Independently reviewed; approved with required changes ·
+**Date:** 2026-07-16
 **Scope:** Existing repository architecture against the Program Charter
 **Implementation performed:** None
 
@@ -132,9 +133,9 @@ The re-foundation does not leave shipped scope changes undocumented:
 | Multi-project `ProjectStore` | Ratified and replaced by the persistent Project/Phase domain in ADR-004 |
 | Multi-user password/session/invite system | Ratified as a single-tenant named-account baseline by ADR-001’s 2026-07-16 identity amendment; target security requirements are explicit |
 | Whole-state JSONB snapshot persistence | Recognized as an interim compatibility mechanism and superseded by ADR-005 |
-| Allocation fingerprint and stale approval protection | Preserved as an approval invariant under ADR-004/ADR-005 |
-| Non-converged plan load prohibition | Preserved as a strategy-approval safety policy; recovery workflow moves to phase DecisionPoints |
-| Demo dashboard containment | Preserved until ADR-007’s project Resume and Portfolio Attention projections exist |
+| NORN-041 decision 1 — separate allocation fingerprint and stale-approval protection | Preserved as an approval invariant under ADR-004/ADR-005 |
+| NORN-041 decision 2 — no unaudited plan override | At `4ee3b8a` this is a client-side structural control only; `/plan/load` accepts any schema-valid client-posted plan. ADR-004 §5 makes approval/materialization server-enforced: a non-converged strategy or unresolved must-fix finding cannot create executable Tasks, and remediation creates a new StrategyVersion rather than an override |
+| NORN-041 decision 3 — immediate demo-dashboard containment | Preserved until ADR-007’s project Resume and Portfolio Attention projections exist |
 | Railway hosting | Consolidated in ADR-002 |
 
 No historical “decided” item is treated as a durable architecture decision
@@ -149,3 +150,6 @@ unless it is represented by a committed ADR or explicitly ratified above.
 - [Re-foundation Program](REFOUNDATION-PROGRAM.md)
 - [Claude Fable Review Packet](reviews/REFOUNDATION-REVIEW-PACKET.md)
 - [Review Repository Map](reviews/REFOUNDATION-REPO-MAP.md)
+- [Independent Review Baseline](reviews/REFOUNDATION-REVIEW-BASELINE.md)
+- [Independent Findings of Record](reviews/REFOUNDATION-REVIEW-FINDINGS.md)
+- [Findings Disposition](reviews/REFOUNDATION-REVIEW-DISPOSITION.md)

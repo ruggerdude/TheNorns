@@ -70,6 +70,10 @@ Multiple phases may be active when their explicit dependencies, repository
 conflict policy, budget, and coordinator capacity allow it. Concurrency is a
 policy decision, not an implicit consequence of phase creation.
 
+The schema supports multiple active phases. The MVP runtime default is a
+separate human-approved policy decision recorded as `REF-OPEN-3`; changing
+that default later does not require a data migration.
+
 ### 3. Objective is measurable
 
 An `Objective` belongs to a Phase and contains:
@@ -100,6 +104,11 @@ A `Task` contains:
 the UI and consumed by the scheduler is a projection of Tasks and
 TaskDependencies. No separate mutable graph may diverge from task records.
 
+For the MVP, TaskDependencies are phase-local. Work that must precede work in
+another phase is represented by a Phase dependency. A TaskDependency whose
+predecessor and successor have different `phase_id` values is rejected by the
+contract and database boundary.
+
 The existing Plan Module lifecycle reducer may be adapted into the Task
 lifecycle, but task identifiers must be globally stable rather than phase-local
 slugs.
@@ -125,6 +134,13 @@ TaskDependency, and initial AgentAssignment records in one transaction.
 Changing an active phase requires an explicit amendment version; it does not
 silently mutate the approved strategy.
 
+`ApproveStrategyVersion` is a server-enforced invariant, not a client
+affordance. It rejects a StrategyVersion whose planning review did not
+converge or that retains any unresolved must-fix finding. There is no
+override command. The human may choose to revise scope, authorize another
+review round, or stop the phase through a DecisionPoint, but executable Tasks
+are created only from a newly converged StrategyVersion.
+
 ### 6. Agent identity, assignment, and execution are distinct
 
 - `AgentProfile` describes provider, runtime, model, roles, capabilities,
@@ -136,6 +152,41 @@ silently mutate the approved strategy.
 
 This prevents “agent,” “model,” “assignment,” and “run” from being treated as
 the same concept.
+
+Every AgentAssignment must include a non-empty rationale that records the
+capability, workload, dependency, risk, budget, and review factors material to
+the selection.
+
+Task and AgentRun have separate state machines:
+
+```text
+Task:
+pending → ready → assigned → in_progress → verifying → in_review → completed
+             ↘ blocked | failed | cancelled
+
+AgentRun:
+created → dispatched → running → verifying → succeeded
+                       ↘ failed | cancelled | expired
+```
+
+The Phase 1 V2 contracts freeze the complete transition tables and the
+Task-from-AgentRun projection. The governing rules are:
+
+- exactly one run is the designated active attempt for a Task at a time;
+- `superseded` is a projection designation, not a replacement lifecycle
+  outcome: the run retains its original state/result plus `superseded_at` and
+  `superseded_by_run_id`;
+- a superseded run remains immutable history and cannot move Task state;
+- the designated run in `created`, `dispatched`, or `running` projects the
+  Task to `in_progress`;
+- `verifying` projects the Task to `verifying`;
+- `succeeded` moves the Task to `in_review` only when required
+  infrastructure-produced verification evidence is green;
+- retry creates a new AgentRun and returns the Task to `in_progress`;
+- a failed attempt with no authorized retry moves the Task to `blocked` or
+  `failed` according to recorded policy;
+- `completed` requires recorded review and integration/completion evidence;
+  no run self-report can directly create a terminal Task state.
 
 ### 7. Decision points are first-class
 
@@ -182,14 +233,16 @@ repository facts may be recorded automatically with provenance and confidence.
 1. A Phase cannot execute without an approved StrategyVersion.
 2. Strategy approval and task materialization are atomic.
 3. Every Task belongs to exactly one Project, Phase, and primary Objective.
-4. Task dependencies cannot cross projects and must remain acyclic within the
-   scheduler’s active dependency scope.
+4. Task dependencies cannot cross projects or phases and must remain acyclic
+   within their Phase. Cross-phase sequencing uses Phase dependencies only.
 5. The graph is never independently persisted as editable canonical state.
 6. Completed phases and their approved strategy/evidence are immutable.
 7. A blocking DecisionPoint blocks only its declared scope.
 8. Assignments reference registered AgentProfiles.
 9. Runs never mutate strategy history.
 10. Project summaries use active DecisionRecords and Memory entries only.
+11. A non-converged StrategyVersion or one with unresolved must-fix findings
+    cannot be approved or materialized through any server command.
 
 ## Migration
 
@@ -208,6 +261,18 @@ Each legacy `ProjectStore` record becomes:
 
 If the plan and graph disagree, migration records a reconciliation finding and
 requires review before execution. It must not silently guess.
+
+The migration reconciliation predicate is machine-checkable and compares:
+
+- plan module IDs against graph node IDs, including graph-only nodes and
+  deleted modules;
+- dependency edges;
+- assignments and allocation metadata;
+- acceptance-criteria cardinality and content;
+- approval fingerprints against the exact imported structure.
+
+Each mismatch creates a distinct finding. Imported audit records use
+`actor_type = legacy` unless an authenticated historical actor is provable.
 
 ## Alternatives rejected
 
@@ -246,8 +311,16 @@ A staged migration has lower risk and preserves verified behavior.
 2. Completed phase strategy, tasks, assignments, evidence, and decisions remain
    queryable.
 3. Task graph edits and scheduler reads use the same TaskDependency records.
-4. An unapproved StrategyVersion cannot create executable tasks.
+4. An unapproved, non-converged, or unresolved-must-fix StrategyVersion cannot
+   create executable tasks, and no override path exists.
 5. Opening a migrated project preserves its plan, graph edits, assignments,
    source metadata, and approval evidence.
 6. Decision points and memory entries survive process restart.
 7. No public production path creates or replaces a project-wide GraphSession.
+8. A cross-phase TaskDependency is rejected at the contract and persistence
+   boundaries.
+9. Reducer tests enumerate every AgentRun transition and its projected Task
+   state; no run event sequence can create an unreachable Task state.
+10. Migration fixtures containing graph-only nodes, deleted modules, changed
+    edges, changed assignments, and stale approvals produce distinct,
+    reviewable reconciliation findings.

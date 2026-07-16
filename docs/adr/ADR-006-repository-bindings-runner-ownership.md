@@ -77,6 +77,11 @@ control, but it is not the normal product path.
 
 ### 3. GitHub uses a GitHub App and repository picker
 
+Whether GitHub App binding is required for the first MVP pilot is the human
+scope decision `REF-OPEN-1`. The trust boundary below governs the feature
+whenever it is enabled and must be accepted before Phase 3 GitHub
+implementation begins.
+
 The cloud service uses a GitHub App/OAuth installation flow:
 
 1. Authorize or select a GitHub App installation.
@@ -90,8 +95,57 @@ Repository permissions are least-privilege and explicit. The server may read
 GitHub metadata and create branches/pull-request intents according to policy,
 but coding execution and worktree operations remain runner-owned.
 
+The MVP permission set is:
+
+- Metadata: read, as required by GitHub Apps.
+- Contents: read/write only for the selected repositories so the runner can
+  fetch and push approved branches.
+- Pull requests: read/write only when Norns creates or updates pull requests.
+- Checks and Actions: no permission by default; read-only permission may be
+  added by a separately reviewed verification requirement.
+- Administration, members, secrets, workflows, and organization permissions:
+  none.
+
 Long-lived personal access tokens and “credentials configured on the server”
 are not the default design.
+
+#### GitHub credential broker
+
+- The GitHub App private key exists only in the server-side secret store. It is
+  never installed on a runner or placed in a command, event, log, artifact, or
+  sandbox environment.
+- At push time, the authenticated runner requests authorization for a specific
+  RepositoryBinding, expected revision, branch operation, and run.
+- The server revalidates the installation, repository, permissions, run,
+  approval, and runner generation, then mints a just-in-time installation
+  token restricted to that repository and the minimum permission subset.
+- [GitHub installation tokens expire after one
+  hour](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation).
+  Norns mints them immediately before the operation, permits one bounded push
+  workflow, and requires the runner to discard them immediately afterward; it
+  does not misstate that provider credential as having a shorter cryptographic
+  expiry.
+- The token travels only over the authenticated runner channel in a
+  Norns-operation-bound, single-consumption broker response protected by the
+  runner channel's authenticated encryption. The underlying GitHub token
+  remains a bearer credential until GitHub expiry or revocation. It is never
+  embedded in `launch_run`, stored in the command/event outbox, or passed into
+  the coding sandbox.
+- The runner holds the token only in memory and supplies it through an
+  ephemeral askpass/credential helper or standard input. It never places the
+  token in a remote URL, process argument, shell history, or persistent Git
+  configuration.
+- Immediately after the bounded operation, the runner uses GitHub's
+  [`DELETE /installation/token`
+  endpoint](https://docs.github.com/en/rest/apps/installations#revoke-an-installation-access-token)
+  to revoke the bearer token, then clears its in-memory credential state.
+  Credential closure is recorded only after GitHub returns success or the
+  server records natural expiry. Revocation failure is audited and prevents
+  the workflow from being reported as securely closed.
+- Token shapes and known derived credential forms are registered with runner,
+  relay, log, and artifact redaction before the first live use.
+- Credential issue, use, denial, expiry, and disposal are audited without
+  recording the credential.
 
 ### 4. The Local Runner owns repository execution
 
@@ -154,6 +208,13 @@ runner implementation code.
 
 Large prompts, memory bundles, and artifacts are content-addressed references,
 not oversized command envelopes.
+
+The runner resolves those references through its authenticated relay channel
+or a per-command signed object URL. It verifies the declared content hash and
+size before use, stages the content into the assigned worktree or scratch
+mount, and records provenance. A mismatch is rejected and audited. Fetch
+credentials remain in runner infrastructure and are never exposed to the
+sandbox process or persisted in run artifacts.
 
 Runner results report structured state transitions, commits, usage, evidence,
 artifacts, failures, and capability limitations.
@@ -232,3 +293,9 @@ repository-selection UX compared with a GitHub App.
    revision is rejected and audited.
 7. Repository ingestion populates architecture and repository facts that are
    available after restart.
+8. A GitHub push uses a just-in-time, single-repository installation token;
+   stored commands, events, logs, sandbox environments, and artifacts contain
+   no token material. After the bounded operation, revocation succeeds and an
+   attempted replay is rejected.
+9. A content-addressed context reference with the wrong hash is rejected and
+   audited, and the sandbox contains no artifact-fetch credential.
