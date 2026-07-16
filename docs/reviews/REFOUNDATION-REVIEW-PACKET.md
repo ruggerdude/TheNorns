@@ -16,12 +16,14 @@ Charter MVP without a rewrite or hidden reintroduction of plan-centric state.
 
 1. `docs/PROGRAM-CHARTER.md`
 2. `docs/PHASE-0-ARCHITECTURE-REVIEW.md`
-3. `docs/adr/ADR-004-persistent-project-domain.md`
-4. `docs/adr/ADR-005-persistence-events-outbox.md`
-5. `docs/adr/ADR-006-repository-bindings-runner-ownership.md`
-6. `docs/adr/ADR-007-coordinator-attention-read-models.md`
-7. `docs/REFOUNDATION-PROGRAM.md`
-8. `docs/reviews/REFOUNDATION-REPO-MAP.md`
+3. `docs/adr/ADR-001-tech-stack.md` — including the 2026-07-16 identity
+   amendment
+4. `docs/adr/ADR-004-persistent-project-domain.md`
+5. `docs/adr/ADR-005-persistence-events-outbox.md`
+6. `docs/adr/ADR-006-repository-bindings-runner-ownership.md`
+7. `docs/adr/ADR-007-coordinator-attention-read-models.md`
+8. `docs/REFOUNDATION-PROGRAM.md`
+9. `docs/reviews/REFOUNDATION-REPO-MAP.md`
 
 Use these current implementation files as evidence:
 
@@ -75,42 +77,53 @@ that direction, not propose a different product.
 4. Are there missing invariants that would permit historical-state loss or
    cross-project leakage?
 
+### Identity, scope, and governance
+
+5. Does ADR-001’s identity amendment adequately ratify the shipped
+   account/password/invite/admin scope without silently expanding into
+   collaborative multi-tenant RBAC?
+6. Are target session-token hashing, expiry, cookie, recent-auth, recovery, and
+   audit-attribution requirements sufficient?
+7. Does the post-GATE ratification map account for every architecture-relevant
+   change that landed without an ADR?
+8. Does the disposition-authority rule preserve reviewer independence?
+
 ### Persistence and migration
 
-5. Is the hybrid normalized-state/domain-event model coherent?
-6. Is the state/event/audit/outbox transaction boundary complete?
-7. Are idempotency, optimistic concurrency, runner event ingestion, leases,
+9. Is the hybrid normalized-state/domain-event model coherent?
+10. Is the state/event/audit/outbox transaction boundary complete?
+11. Are idempotency, optimistic concurrency, runner event ingestion, leases,
    terminal-state races, and budget reservation semantics sufficient?
-8. Can legacy users, sessions, projects, plans, graph edits, assignments, and
+12. Can legacy users, sessions, projects, plans, graph edits, assignments, and
    approvals be migrated and rolled back safely?
-9. Does the plan/graph reconciliation policy avoid silent guessing?
+13. Does the plan/graph reconciliation policy avoid silent guessing?
 
 ### Runner and source trust boundary
 
-10. Is local folder selection feasible and secure through the Local Runner?
-11. Are GitHub App credentials and repository permissions correctly bounded?
-12. Are all repository, worktree, sandbox, verification, and push
+14. Is local folder selection feasible and secure through the Local Runner?
+15. Are GitHub App credentials and repository permissions correctly bounded?
+16. Are all repository, worktree, sandbox, verification, and push
     responsibilities on the correct side of the boundary?
-13. Is the proposed execution command sufficiently bound and idempotent?
+17. Is the proposed execution command sufficiently bound and idempotent?
 
 ### Coordinator and product behavior
 
-14. Can the coordinator restart safely and continue without duplicate work?
-15. Are deterministic policy and LLM recommendation responsibilities
+18. Can the coordinator restart safely and continue without duplicate work?
+19. Are deterministic policy and LLM recommendation responsibilities
     separated?
-16. Does assignment account for capability, workload, dependency, budget,
+20. Does assignment account for capability, workload, dependency, budget,
     context, and review cost?
-17. Are DecisionPoints likely to interrupt the human only for strategic issues?
-18. Can Project Resume and Portfolio Attention be built from the proposed
+21. Are DecisionPoints likely to interrupt the human only for strategic issues?
+22. Can Project Resume and Portfolio Attention be built from the proposed
     state and projections?
 
 ### Program execution
 
-19. Are phase dependencies and exit gates ordered correctly?
-20. Is the proposed agent concurrency safe?
-21. Are any workstreams likely to implement against unstable contracts?
-22. Does the rollback strategy remain viable after V2 writes begin?
-23. Are there missing security, operational, or acceptance gates before a real
+23. Are phase dependencies and exit gates ordered correctly?
+24. Is the proposed agent concurrency safe?
+25. Are any workstreams likely to implement against unstable contracts?
+26. Does the rollback strategy remain viable after V2 writes begin?
+27. Are there missing security, operational, or acceptance gates before a real
     project pilot?
 
 ## Finding format

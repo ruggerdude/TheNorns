@@ -68,6 +68,8 @@ Primary evidence:
 | The source connection stores strings but does not connect/analyze a repository | project creation routes in `apps/server/src/server.ts`, `apps/server/src/projects/store.ts`, `apps/web/src/Projects.tsx` |
 | Project Memory is accepted by planning helpers but omitted by the live route/store | `packages/contracts/src/memory.ts`, `apps/server/src/planning/session.ts`, planning route in `apps/server/src/server.ts` |
 | Plan approval exists as a helper but is not persisted by the production load route | `apps/server/src/planning/session.ts`, plan routes in `apps/server/src/server.ts` |
+| Multi-user auth stores reusable session and invitation tokens inside the users snapshot | `apps/server/src/users/store.ts`, `apps/server/src/main.ts`, `apps/web/src/auth.ts` |
+| Audit actions often use a hardcoded operator rather than the authenticated user | project/graph/planning routes in `apps/server/src/server.ts` |
 | Real-project dashboard/read model is absent | `apps/server/src/main.ts`, `apps/server/src/server.ts`, `apps/web/src/App.tsx`, `apps/web/src/Dashboard.tsx` |
 | The project UI ends at plan, allocation, and approval | `apps/web/src/App.tsx` |
 | The pilot test manually composes disconnected components | `apps/server/test/pilot.test.ts` |
@@ -77,6 +79,7 @@ Primary evidence:
 | Capability | Current status |
 |---|---|
 | User login and project list | Production-integrated |
+| Named admin/member accounts and invitations | Production-integrated but target token/session hardening is not implemented |
 | Project-scoped planning and graph editing | Production-integrated |
 | Allocation and server-authoritative allocation approval | Production-integrated |
 | PostgreSQL snapshot restoration | Production-integrated when configured |

@@ -47,6 +47,42 @@ pays off more than any per-component optimization.
 | Testing | Vitest (engine/reducer determinism, idempotency, budget races), Playwright (MVP acceptance), adapter conformance suites (LLM + runtime capability matrix) |
 | Lint/format | Biome |
 
+### Identity and access amendment — 2026-07-16
+
+NORN-042 introduced account/password login, invitations, `admin | member`
+roles, and persisted sessions without a governing ADR. This amendment
+ratifies the product scope while recording the security debt explicitly.
+
+Decision:
+
+- The Norns is a single-tenant workspace that may contain multiple named user
+  accounts.
+- `admin` may manage workspace membership, integrations, runners, and global
+  settings.
+- `member` may operate projects according to application authorization.
+- Strategic approvals and DecisionRecords must identify the actual
+  authenticated user. The hardcoded `"operator"` actor is legacy debt.
+- This is not yet collaborative multi-operator project management. Concurrent
+  editing, fine-grained project RBAC, organization tenancy, and approval
+  quorum are outside the current MVP unless separately approved.
+- `NORNS_TOKEN` is limited to one-time first-admin bootstrap and is never a
+  normal session credential after an active admin exists.
+- Session and invitation tokens must be stored as hashes, carry expiry, support
+  revocation/rotation, and never be persisted or logged as reusable plaintext
+  in the target schema.
+- The browser target is a Secure, HttpOnly, SameSite session cookie with CSRF
+  protection and recent authentication for high-risk operations. The current
+  `sessionStorage` bearer token is a migration compatibility mechanism, not
+  the final security architecture.
+- Password recovery, session inventory/revocation, rate limiting, enrollment
+  notification, and audit attribution are required before the security/pilot
+  gate.
+
+Migration must preserve users, password hashes, roles, and active sessions
+where safely possible. If token hashing or cookie migration requires one
+reauthentication event, it must be explicit and cannot reopen deployment-token
+login.
+
 ## Rationale
 
 - **One language, shared zod schemas** eliminates the class of bug this
@@ -81,4 +117,5 @@ REVIEW-001 P0-3).
 - Runner host prerequisites: Node (Active LTS) + git + a sandbox substrate
   (ADR-003).
 - Auth is deliberately minimal and gets replaced wholesale if multi-user
-  ever lands (accepted).
+  ever lands (historical consequence superseded by the 2026-07-16 identity
+  amendment above).

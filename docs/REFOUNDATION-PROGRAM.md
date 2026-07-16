@@ -48,6 +48,9 @@ and source metadata remain available throughout migration.
     time.
 12. New functionality ships behind reversible capability flags until its phase
     exit gate passes.
+13. Architecture-relevant scope changes do not merge on the strength of a
+    progress-log statement. They require a committed ADR or an explicit
+    amendment to an existing ADR before integration.
 
 ## Workstreams
 
@@ -179,6 +182,7 @@ and are revalidated at every phase gate.
 
 ### 0.2 ADR package
 
+- Identity/account scope amendment and post-GATE ratification map.
 - Persistent project domain.
 - Normalized persistence/events/outbox.
 - Repository bindings and runner ownership.

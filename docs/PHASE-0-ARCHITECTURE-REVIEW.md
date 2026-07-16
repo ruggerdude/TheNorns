@@ -123,6 +123,23 @@ is demo-only, and opening a project does not provide a resumable state summary.
 7. Project Resume and Portfolio Attention read models.
 8. Existing users and projects migrate without destructive replacement.
 
+## Ratification of post-GATE architectural changes
+
+The re-foundation does not leave shipped scope changes undocumented:
+
+| Shipped change | Governing disposition |
+|---|---|
+| Multi-project `ProjectStore` | Ratified and replaced by the persistent Project/Phase domain in ADR-004 |
+| Multi-user password/session/invite system | Ratified as a single-tenant named-account baseline by ADR-001’s 2026-07-16 identity amendment; target security requirements are explicit |
+| Whole-state JSONB snapshot persistence | Recognized as an interim compatibility mechanism and superseded by ADR-005 |
+| Allocation fingerprint and stale approval protection | Preserved as an approval invariant under ADR-004/ADR-005 |
+| Non-converged plan load prohibition | Preserved as a strategy-approval safety policy; recovery workflow moves to phase DecisionPoints |
+| Demo dashboard containment | Preserved until ADR-007’s project Resume and Portfolio Attention projections exist |
+| Railway hosting | Consolidated in ADR-002 |
+
+No historical “decided” item is treated as a durable architecture decision
+unless it is represented by a committed ADR or explicitly ratified above.
+
 ## Governing decisions
 
 - [ADR-004](adr/ADR-004-persistent-project-domain.md)
