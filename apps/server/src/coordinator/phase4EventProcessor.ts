@@ -84,6 +84,86 @@ export class Phase4EventProcessor {
             [event.payload.command_id],
           );
         }
+        if (["failed", "rejected", "expired", "cancelled"].includes(event.payload.state)) {
+          const failedScope = await sql.query<RunScope>(
+            `SELECT run.id, run.project_id, run.phase_id, run.task_id, run.state,
+                    run.aggregate_version, run.runner_id, run.repository_binding_id,
+                    task.verification_policy_ref, task.state AS task_state,
+                    task.aggregate_version AS task_aggregate_version
+             FROM agent_runs run JOIN tasks task ON task.id=run.task_id
+             WHERE run.id=$1 FOR UPDATE OF run, task`,
+            [row.run_id],
+          );
+          const scope = failedScope.rows[0];
+          if (scope) {
+            const lifecycle = new SqlV2ApplicationTransaction(sql);
+            const actor = {
+              actor_type: "runner" as const,
+              actor_id: event.runner_id,
+              correlation_id: event.correlation_id,
+              causation_id: event.causation_id,
+              occurred_at: event.occurred_at,
+            };
+            const run = await lifecycle.lockAgentRunLifecycle(scope.id);
+            if (run && !["succeeded", "failed", "cancelled", "expired"].includes(run.state)) {
+              const runTarget =
+                event.payload.state === "cancelled"
+                  ? "cancelled"
+                  : event.payload.state === "expired" || run.state === "created"
+                    ? "expired"
+                    : "failed";
+              await transitionV2AgentRunLifecycle(lifecycle, {
+                ...actor,
+                project_id: scope.project_id,
+                phase_id: scope.phase_id,
+                task_id: scope.task_id,
+                run_id: scope.id,
+                expected_aggregate_version: run.aggregate_version,
+                to: runTarget,
+                reason: `command ${event.payload.state} before successful completion`,
+              });
+            }
+            const task = await lifecycle.lockTaskLifecycle(scope.task_id);
+            if (task && !["completed", "failed", "cancelled"].includes(task.state)) {
+              await transitionV2TaskLifecycle(lifecycle, {
+                ...actor,
+                project_id: scope.project_id,
+                phase_id: scope.phase_id,
+                task_id: scope.task_id,
+                expected_aggregate_version: task.aggregate_version,
+                to: event.payload.state === "cancelled" ? "cancelled" : "blocked",
+                reason: `command ${event.payload.state} requires operator attention`,
+              });
+            }
+            const budget = new SqlV2BudgetTransaction(sql);
+            const reservation = await budget.lockReservation(`budget-reservation:${scope.id}`);
+            if (reservation?.status === "active") {
+              const outcome: "cancelled" | "expired" | "rejected" =
+                event.payload.state === "cancelled"
+                  ? "cancelled"
+                  : event.payload.state === "expired"
+                    ? "expired"
+                    : "rejected";
+              const request = {
+                reservation_id: reservation.id,
+                expected_version: reservation.version,
+                outcome,
+                attributable_usage_usd: 0,
+                reason: `command ${event.payload.state}`,
+                actor_type: "runner" as const,
+                actor_id: event.runner_id,
+                correlation_id: event.correlation_id,
+                causation_id: event.causation_id,
+                occurred_at: event.occurred_at,
+              };
+              await budget.applyResolution(
+                reservation,
+                request,
+                resolveV2BudgetReservation(reservation.amount_usd, request),
+              );
+            }
+          }
+        }
         await sql.query("UPDATE runner_events SET run_id = $2, applied_at = now() WHERE id = $1", [
           eventId,
           row.run_id,

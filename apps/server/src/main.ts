@@ -10,6 +10,7 @@ import { Phase4CompletionService } from "./coordinator/phase4Completion.js";
 import { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
 import { Phase4DispatchRepository } from "./coordinator/phase4Dispatcher.js";
 import { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
+import { Phase4RecoveryMonitor } from "./coordinator/phase4RecoveryMonitor.js";
 import { buildDashboard } from "./dashboard.js";
 import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
@@ -101,6 +102,7 @@ let phase4Services:
       completion: Phase4CompletionService;
       dispatch: Phase4DispatchRepository;
       events: Phase4EventProcessor;
+      recovery: Phase4RecoveryMonitor;
     }
   | undefined;
 
@@ -137,6 +139,7 @@ if (databaseUrl) {
       completion: new Phase4CompletionService(runtimeTransactions),
       dispatch: new Phase4DispatchRepository(runtimeTransactions),
       events: new Phase4EventProcessor(runtimeTransactions),
+      recovery: new Phase4RecoveryMonitor(runtimeTransactions),
     };
     if (identityRoute?.read_mode === "relational" && identityRoute.write_mode === "relational") {
       await assertCredentialHmacKeyCoverage(

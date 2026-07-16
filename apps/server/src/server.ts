@@ -44,6 +44,7 @@ import type { Phase4CompletionService } from "./coordinator/phase4Completion.js"
 import type { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
 import { type Phase4DispatchRepository, Phase4Dispatcher } from "./coordinator/phase4Dispatcher.js";
 import type { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
+import type { Phase4RecoveryMonitor } from "./coordinator/phase4RecoveryMonitor.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
 import { GraphEditError } from "./graph/graph.js";
@@ -152,6 +153,7 @@ export interface ServerOptions {
     completion: Phase4CompletionService;
     dispatch: Phase4DispatchRepository;
     events: Phase4EventProcessor;
+    recovery: Phase4RecoveryMonitor;
   };
   /**
    * DEMO-ONLY dashboard provider (engine + ledger composition). When set, it is
@@ -213,6 +215,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   });
 
   let phase4DispatchTimer: ReturnType<typeof setInterval> | undefined;
+  let phase4RecoveryTimer: ReturnType<typeof setInterval> | undefined;
   if (options.phase4) {
     const dispatcher = new Phase4Dispatcher(
       options.phase4.dispatch,
@@ -235,9 +238,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       });
     }, 500);
     phase4DispatchTimer.unref();
+    let scanning = false;
+    phase4RecoveryTimer = setInterval(() => {
+      if (scanning) return;
+      scanning = true;
+      void options.phase4?.recovery.scan().finally(() => {
+        scanning = false;
+      });
+    }, 60_000);
+    phase4RecoveryTimer.unref();
   }
   app.addHook("onClose", async () => {
     if (phase4DispatchTimer) clearInterval(phase4DispatchTimer);
+    if (phase4RecoveryTimer) clearInterval(phase4RecoveryTimer);
   });
 
   const closeSessionSocket = (binding: SessionSocketBinding, reason: string): void => {

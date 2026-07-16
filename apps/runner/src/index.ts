@@ -14,12 +14,15 @@ export { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
 export { CodexRuntime } from "./runtimes/codex.js";
 export {
   ApprovedRepositoryRegistry,
+  CommandPolicyVerifier,
   GitWorktreeManager,
   HashVerifiedContextLoader,
+  SignedUrlContentFetcher,
   V2RunnerExecutor,
   type PreparedWorktree,
   type RunnerContentFetcher,
   type RunnerRepositoryBinding,
+  type RunnerRuntimeProvider,
   type RunnerVerificationResult,
   type RunnerVerifier,
   type RunnerWorktreeManager,

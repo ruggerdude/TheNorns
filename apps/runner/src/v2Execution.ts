@@ -52,6 +52,19 @@ export interface RunnerContentFetcher {
   fetch(reference: V2ContentAddressedReferenceT): Promise<Uint8Array>;
 }
 
+export class SignedUrlContentFetcher implements RunnerContentFetcher {
+  async fetch(reference: V2ContentAddressedReferenceT): Promise<Uint8Array> {
+    const url = new URL(reference.storage_ref);
+    const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+    if (url.protocol !== "https:" && !(local && url.protocol === "http:")) {
+      throw new Error("context storage_ref must be a signed HTTPS URL");
+    }
+    const response = await fetch(url, { redirect: "error" });
+    if (!response.ok) throw new Error(`context fetch failed with ${response.status}`);
+    return new Uint8Array(await response.arrayBuffer());
+  }
+}
+
 export class HashVerifiedContextLoader {
   constructor(private readonly fetcher: RunnerContentFetcher) {}
 
@@ -153,6 +166,33 @@ export interface RunnerVerifier {
   }): Promise<RunnerVerificationResult>;
 }
 
+export class CommandPolicyVerifier implements RunnerVerifier {
+  constructor(private readonly policies: ReadonlyMap<string, readonly [string, ...string[]]>) {}
+
+  async verify(input: {
+    worktree_path: string;
+    policy_ref: string;
+    expected_commit: string;
+  }): Promise<RunnerVerificationResult> {
+    const command = this.policies.get(input.policy_ref);
+    if (!command) throw new Error(`verification policy ${input.policy_ref} is not approved`);
+    const [file, ...args] = command;
+    const result = await execFileAsync(file, args, {
+      cwd: input.worktree_path,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    const actual = (
+      await execFileAsync("git", ["-C", input.worktree_path, "rev-parse", "HEAD"])
+    ).stdout.trim();
+    return {
+      passed: actual === input.expected_commit,
+      output: `${result.stdout}\n${result.stderr}`.slice(0, 100_000),
+    };
+  }
+}
+
+export type RunnerRuntimeProvider = CodingRuntime | ((model: string) => CodingRuntime);
+
 export interface V2RunnerExecutionResult {
   outcome: "succeeded" | "failed" | "cancelled";
   commit_sha: string | null;
@@ -166,7 +206,7 @@ export class V2RunnerExecutor {
     private readonly repositories: ApprovedRepositoryRegistry,
     private readonly context: HashVerifiedContextLoader,
     private readonly worktrees: RunnerWorktreeManager,
-    private readonly runtimes: ReadonlyMap<string, CodingRuntime>,
+    private readonly runtimes: ReadonlyMap<string, RunnerRuntimeProvider>,
     private readonly verifier: RunnerVerifier,
   ) {}
 
@@ -183,8 +223,10 @@ export class V2RunnerExecutor {
     }
     if (Date.parse(command.expires_at) <= Date.now()) throw new Error("dispatch command expired");
     const repositoryPath = this.repositories.resolve(command.repository_binding_id);
-    const runtime = this.runtimes.get(command.runtime);
-    if (!runtime) throw new Error(`runtime ${command.runtime} is unavailable`);
+    const runtimeProvider = this.runtimes.get(command.runtime);
+    if (!runtimeProvider) throw new Error(`runtime ${command.runtime} is unavailable`);
+    const runtime =
+      typeof runtimeProvider === "function" ? runtimeProvider(command.model) : runtimeProvider;
     const prompt = await this.context.load(command.context_refs);
     const scratch = await mkdtemp(resolve(this.runner.scratch_root ?? tmpdir(), "norns-context-"));
     await writeFile(resolve(scratch, "prompt.txt"), prompt, { mode: 0o600 });
@@ -245,6 +287,23 @@ export class V2RunnerExecutor {
         commit_sha: commit,
         verification_passed: verification.passed,
         usage: runtimeResult.usage,
+      };
+    } catch (error) {
+      emit({ kind: "run_status", run_id: command.run_id, status: "failed" });
+      emit({
+        kind: "run_log",
+        run_id: command.run_id,
+        chunk: error instanceof Error ? error.message : String(error),
+      });
+      return {
+        outcome: "failed",
+        commit_sha: null,
+        verification_passed: false,
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          usage_source: "unavailable",
+        },
       };
     } finally {
       await worktree.cleanup().catch(() => undefined);

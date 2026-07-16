@@ -62,6 +62,10 @@ export class RunnerDaemon {
     return this.socket?.readyState === WebSocket.OPEN;
   }
 
+  get generation(): number {
+    return this.requireState().state.generation;
+  }
+
   /** One-time enrollment: generate the keypair and redeem the pairing code. */
   async pair(code: string): Promise<void> {
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");

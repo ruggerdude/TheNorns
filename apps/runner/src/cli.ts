@@ -12,6 +12,17 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { RunnerDaemon } from "./daemon.js";
+import { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
+import { CodexRuntime } from "./runtimes/codex.js";
+import {
+  ApprovedRepositoryRegistry,
+  CommandPolicyVerifier,
+  GitWorktreeManager,
+  HashVerifiedContextLoader,
+  type RunnerRuntimeProvider,
+  SignedUrlContentFetcher,
+  V2RunnerExecutor,
+} from "./v2Execution.js";
 
 interface Args {
   command: string | undefined;
@@ -46,6 +57,54 @@ function resolveOptions(flags: Record<string, string>) {
   const server = flags.server ?? process.env.NORNS_SERVER;
   const dataDir = flags.data ?? join(homedir(), ".norns", runnerId);
   return { runnerId, server, dataDir };
+}
+
+function jsonObject(name: string): Record<string, unknown> {
+  const raw = process.env[name];
+  if (!raw) throw new Error(`${name} is required for Phase 4 execution`);
+  const parsed = JSON.parse(raw) as unknown;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${name} must be a JSON object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function createV2Executor(runnerId: string, generation: number, dataDir: string): V2RunnerExecutor {
+  const bindingConfig = jsonObject("NORNS_REPOSITORY_BINDINGS_JSON");
+  const approvedRoots = JSON.parse(process.env.NORNS_APPROVED_ROOTS_JSON ?? "[]") as unknown;
+  if (!Array.isArray(approvedRoots) || !approvedRoots.every((root) => typeof root === "string")) {
+    throw new Error("NORNS_APPROVED_ROOTS_JSON must be a JSON string array");
+  }
+  const repositories = new ApprovedRepositoryRegistry(approvedRoots);
+  for (const [repository_binding_id, repository_path] of Object.entries(bindingConfig)) {
+    if (typeof repository_path !== "string") {
+      throw new Error("every repository binding value must be a local path");
+    }
+    repositories.register({ repository_binding_id, repository_path });
+  }
+  const policyConfig = jsonObject("NORNS_VERIFICATION_POLICIES_JSON");
+  const policies = new Map<string, [string, ...string[]]>();
+  for (const [policy, command] of Object.entries(policyConfig)) {
+    if (
+      !Array.isArray(command) ||
+      command.length === 0 ||
+      !command.every((part) => typeof part === "string")
+    ) {
+      throw new Error(`verification policy ${policy} must be a non-empty string array`);
+    }
+    policies.set(policy, command as [string, ...string[]]);
+  }
+  return new V2RunnerExecutor(
+    { id: runnerId, generation, scratch_root: join(dataDir, "scratch") },
+    repositories,
+    new HashVerifiedContextLoader(new SignedUrlContentFetcher()),
+    new GitWorktreeManager(join(dataDir, "worktrees")),
+    new Map<string, RunnerRuntimeProvider>([
+      ["codex", (model: string) => new CodexRuntime({ model })],
+      ["claude-code", (model: string) => new ClaudeCodeRuntime({ model })],
+    ]),
+    new CommandPolicyVerifier(policies),
+  );
 }
 
 const USAGE = `norns-runner — TheNorns Local Runner
@@ -88,12 +147,24 @@ async function main(): Promise<void> {
   }
 
   if (args.command === "start") {
-    const daemon = new RunnerDaemon({ serverUrl: server, runnerId, dataDir });
+    let executor: V2RunnerExecutor | undefined;
+    const daemon = new RunnerDaemon({
+      serverUrl: server,
+      runnerId,
+      dataDir,
+      executeV2: async (command, emit) => {
+        if (!executor) throw new Error("Phase 4 executor is not initialized");
+        return (await executor.execute(command, emit)).outcome;
+      },
+    });
     try {
       daemon.loadState();
     } catch {
       process.stderr.write(`error: runner "${runnerId}" is not paired — run \`pair\` first\n`);
       process.exit(2);
+    }
+    if (process.env.NORNS_REPOSITORY_BINDINGS_JSON) {
+      executor = createV2Executor(runnerId, daemon.generation, dataDir);
     }
     daemon.connect();
     process.stdout.write(`runner "${runnerId}" connecting to ${server} — Ctrl-C to stop\n`);

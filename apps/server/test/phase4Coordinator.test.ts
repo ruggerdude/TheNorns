@@ -4,6 +4,7 @@ import { Phase4CompletionService } from "../src/coordinator/phase4Completion.js"
 import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
 import { Phase4DispatchRepository, Phase4Dispatcher } from "../src/coordinator/phase4Dispatcher.js";
 import { Phase4EventProcessor } from "../src/coordinator/phase4EventProcessor.js";
+import { Phase4RecoveryMonitor } from "../src/coordinator/phase4RecoveryMonitor.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 
@@ -343,5 +344,85 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       reservation: "released",
       outcome: "dead_letter",
     });
+  });
+
+  it("turns a rejected production command into durable blocked work without budget drift", async () => {
+    const scheduled = await schedule();
+    const transactions = new PGliteTransactionRunner(pg);
+    const dispatch = new Phase4DispatchRepository(transactions);
+    await dispatch.claim("dispatcher-a", 30_000);
+    await dispatch.markDelivered(
+      scheduled.dispatch_job_id,
+      "dispatcher-a",
+      "2026-07-16T20:01:00.000Z",
+    );
+    const events = new Phase4EventProcessor(transactions);
+    await events.apply({
+      protocol: 1,
+      event_seq: 1,
+      runner_id: "runner-1",
+      generation: 3,
+      correlation_id: "correlation-1",
+      causation_id: scheduled.command_id,
+      occurred_at: "2026-07-16T20:02:00.000Z",
+      payload: {
+        kind: "command_ack",
+        command_id: scheduled.command_id,
+        state: "rejected",
+        detail: "runner execution is not configured",
+      },
+    });
+    const state = await pg.query<{
+      job: string;
+      run: string;
+      task: string;
+      reservation: string;
+      outcome: string;
+    }>(
+      `SELECT job.status AS job, run.state AS run, task.state AS task,
+              reservation.status AS reservation, reservation.resolution_outcome AS outcome
+       FROM dispatch_jobs job JOIN agent_runs run ON run.id=job.run_id
+       JOIN tasks task ON task.id=job.task_id
+       JOIN budget_reservations reservation ON reservation.run_id=job.run_id
+       WHERE job.id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    expect(state.rows[0]).toEqual({
+      job: "completed",
+      run: "failed",
+      task: "blocked",
+      reservation: "released",
+      outcome: "rejected",
+    });
+  });
+
+  it("raises one stable DecisionPoint for stuck work", async () => {
+    const scheduled = await schedule();
+    const transactions = new PGliteTransactionRunner(pg);
+    const dispatch = new Phase4DispatchRepository(transactions);
+    await dispatch.claim("dispatcher-a", 30_000);
+    await dispatch.markDelivered(
+      scheduled.dispatch_job_id,
+      "dispatcher-a",
+      "2026-07-16T20:01:00.000Z",
+    );
+    await pg.query("UPDATE agent_runs SET updated_at='2026-07-16T19:00:00.000Z' WHERE id=$1", [
+      scheduled.run_id,
+    ]);
+    const monitor = new Phase4RecoveryMonitor(transactions);
+    await expect(monitor.scan(new Date("2026-07-16T20:10:00.000Z"), 60_000)).resolves.toEqual({
+      decision_points: 1,
+      repaired_reservations: [],
+    });
+    await expect(monitor.scan(new Date("2026-07-16T20:11:00.000Z"), 60_000)).resolves.toEqual({
+      decision_points: 0,
+      repaired_reservations: [],
+    });
+    const points = await pg.query<{ count: number; status: string }>(
+      `SELECT count(*)::int AS count, min(status) AS status
+       FROM decision_points WHERE scope_entity_id=$1`,
+      [scheduled.run_id],
+    );
+    expect(points.rows[0]).toEqual({ count: 1, status: "open" });
   });
 });
