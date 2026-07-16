@@ -154,7 +154,14 @@ export class StrategyWorkflowService {
       }>("SELECT * FROM strategy_versions WHERE id = $1 FOR UPDATE", [command.strategy_version_id]);
       const row = strategyResult.rows[0];
       if (!row) throw new StrategyWorkflowConflictError("strategy version does not exist");
-      const approvalId = `approval:${command.command_id}`;
+      const approvalId = `approval:${sha256(
+        JSON.stringify([
+          command.project_id,
+          command.phase_id,
+          command.actor.actor_id,
+          command.idempotency_key,
+        ]),
+      ).slice(0, 32)}`;
       if (row.status === "approved" && row.approval_id === approvalId) {
         const counts = await tx.query<{ objectives: number; tasks: number }>(
           `SELECT (SELECT count(*)::int FROM objectives WHERE phase_id = $1) AS objectives,

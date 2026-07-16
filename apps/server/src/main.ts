@@ -21,7 +21,12 @@ import {
   postgresPoolConfig,
 } from "./persistence/postgresConnection.js";
 import { NodePgTransactionRunner } from "./persistence/v2/database.js";
+import { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
+import { ProjectResumeService } from "./projects/projectResumeService.js";
+import { RepositoryIngestionService } from "./projects/repositoryIngestionService.js";
+import { SourceBindingService } from "./projects/sourceBindingService.js";
 import { ProjectStore } from "./projects/store.js";
+import { StrategyWorkflowService } from "./projects/strategyWorkflowService.js";
 import { buildServer } from "./server.js";
 import { evaluateAuthStartup } from "./startup/authPolicy.js";
 import {
@@ -77,6 +82,15 @@ let usersFlusher: SnapshotFlusher | undefined;
 let persistenceReady = false;
 let persistenceLease: Phase2ApplicationPersistenceLease | undefined;
 let databasePool: import("pg").Pool | undefined;
+let phase3Services:
+  | {
+      sourceBindings: SourceBindingService;
+      ingestion: RepositoryIngestionService;
+      phases: PhaseWorkflowService;
+      strategies: StrategyWorkflowService;
+      resume: ProjectResumeService;
+    }
+  | undefined;
 
 if (databaseUrl) {
   try {
@@ -99,6 +113,13 @@ if (databaseUrl) {
       mode: "runtime",
       role: "norns_app",
     });
+    phase3Services = {
+      sourceBindings: new SourceBindingService(runtimeTransactions),
+      ingestion: new RepositoryIngestionService(runtimeTransactions),
+      phases: new PhaseWorkflowService(runtimeTransactions),
+      strategies: new StrategyWorkflowService(runtimeTransactions),
+      resume: new ProjectResumeService(runtimeTransactions),
+    };
     if (identityRoute?.read_mode === "relational" && identityRoute.write_mode === "relational") {
       await assertCredentialHmacKeyCoverage(
         runtimeTransactions,
@@ -332,6 +353,7 @@ const server = await buildServer({
   users,
   ...(identityRuntime.mode === "relational" ? { identity: identityRuntime.identity } : {}),
   projects: projectRuntime.repository,
+  ...(phase3Services !== undefined ? { phase3: phase3Services } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),
   ...(usersFlusher !== undefined ? { persistUsers: () => usersFlusher.flush() } : {}),

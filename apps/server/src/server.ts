@@ -29,6 +29,8 @@ import {
   ReconcileRequest,
   type ServerFrameT,
   type UsageEventT,
+  V2RepositoryIngestionSeed,
+  V2StrategyVersion,
   parseRunnerFrame,
 } from "@norns/contracts";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -39,17 +41,22 @@ import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
 import { GraphEditError } from "./graph/graph.js";
 import { newId, nonce, pairingCode } from "./ids.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
+import type { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
+import type { ProjectResumeService } from "./projects/projectResumeService.js";
 import {
   type ProjectGraphView,
   type ProjectRepository,
   projectRepository,
 } from "./projects/repository.js";
+import type { RepositoryIngestionService } from "./projects/repositoryIngestionService.js";
+import type { SourceBindingService } from "./projects/sourceBindingService.js";
 import {
   ProjectNotFoundError,
   ProjectNotPlannedError,
   type ProjectStore,
   reviewerFor,
 } from "./projects/store.js";
+import type { StrategyWorkflowService } from "./projects/strategyWorkflowService.js";
 import type { RelayStores } from "./stores.js";
 import type {
   IdentityService,
@@ -125,6 +132,13 @@ export interface ServerOptions {
   clock?: () => Date;
   /** Multi-project management: create/list projects, plan + edit + allocate each one's graph. */
   projects?: ProjectRepository | ProjectStore;
+  phase3?: {
+    sourceBindings: SourceBindingService;
+    ingestion: RepositoryIngestionService;
+    phases: PhaseWorkflowService;
+    strategies: StrategyWorkflowService;
+    resume: ProjectResumeService;
+  };
   /**
    * DEMO-ONLY dashboard provider (engine + ledger composition). When set, it is
    * exposed at GET /api/demo/dashboard and returns the same illustrative demo
@@ -770,6 +784,196 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         projectError(reply, error);
       }
     });
+
+    if (options.phase3) {
+      const LocalBindingBody = z.object({
+        runner_id: z.string().min(1),
+        workspace_id: z.string().min(1),
+        repository_id: z.string().min(1),
+        repository_display_name: z.string().min(1),
+        default_branch: z.string().min(1),
+        observed_head: z.string().min(1),
+        verification_policy_ref: z.string().min(1),
+      });
+      const GitHubBindingBody = z.object({
+        runner_id: z.string().min(1),
+        github_installation_id: z.string().min(1),
+        github_repository_id: z.string().min(1),
+        owner: z.string().min(1),
+        name: z.string().min(1),
+        default_branch: z.string().min(1),
+        observed_head: z.string().min(1),
+        verification_policy_ref: z.string().min(1),
+        granted_permissions: z.object({
+          metadata: z.literal("read"),
+          contents: z.enum(["read", "write"]),
+          pull_requests: z.enum(["none", "read", "write"]),
+          checks: z.enum(["none", "read"]),
+          actions: z.enum(["none", "read"]),
+        }),
+      });
+      const CreatePhaseBody = z.object({
+        objective_summary: z.string().min(1),
+        priority: z.number().int().nonnegative(),
+        predecessor_phase_ids: z.array(z.string().min(1)).default([]),
+        expected_project_version: z.number().int().positive(),
+        idempotency_key: z.string().min(1),
+      });
+      const ApproveStrategyBody = z.object({
+        phase_id: z.string().min(1),
+        expected_phase_version: z.number().int().positive(),
+        expected_strategy_version: z.number().int().positive(),
+        expected_strategy_aggregate_version: z.number().int().positive(),
+        expected_content_hash: z.string().regex(/^[a-f0-9]{64}$/),
+        idempotency_key: z.string().min(1),
+      });
+
+      app.get("/api/v2/projects/:id/resume", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        try {
+          reply.send(await options.phase3?.resume.open(id));
+        } catch (error) {
+          reply.code(404).send({ error: "project_not_found", detail: String(error) });
+        }
+      });
+
+      app.post("/api/v2/projects/:id/source-bindings/local", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const body = LocalBindingBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const { id } = req.params as { id: string };
+        try {
+          reply.code(201).send(
+            await options.phase3?.sourceBindings.createLocal({
+              project_id: id,
+              ...body.data,
+              created_by: { actor_type: "human", actor_id: user.id },
+            }),
+          );
+        } catch (error) {
+          reply.code(409).send({ error: "source_binding_conflict", detail: String(error) });
+        }
+      });
+
+      app.post("/api/v2/projects/:id/source-bindings/github", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const body = GitHubBindingBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const { id } = req.params as { id: string };
+        try {
+          reply.code(201).send(
+            await options.phase3?.sourceBindings.createGitHub({
+              project_id: id,
+              ...body.data,
+              created_by: { actor_type: "human", actor_id: user.id },
+            }),
+          );
+        } catch (error) {
+          reply.code(409).send({ error: "source_binding_conflict", detail: String(error) });
+        }
+      });
+
+      app.post("/api/v2/projects/:id/ingest", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const { id } = req.params as { id: string };
+        const body = V2RepositoryIngestionSeed.safeParse({
+          ...(typeof req.body === "object" && req.body !== null ? req.body : {}),
+          project_id: id,
+          created_by: { actor_type: "human", actor_id: user.id },
+        });
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        try {
+          reply.send(await options.phase3?.ingestion.ingest(body.data));
+        } catch (error) {
+          reply.code(409).send({ error: "ingestion_conflict", detail: String(error) });
+        }
+      });
+
+      app.post("/api/v2/projects/:id/phases", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const body = CreatePhaseBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const { id } = req.params as { id: string };
+        try {
+          reply.code(201).send(
+            await options.phase3?.phases.create({
+              schema_version: 2,
+              command_id: newId("command"),
+              kind: "create_phase",
+              command_family: "phase",
+              actor: { actor_type: "human", actor_id: user.id },
+              idempotency_key: body.data.idempotency_key,
+              correlation_id: newId("correlation"),
+              causation_id: null,
+              issued_at: now().toISOString(),
+              project_id: id,
+              objective_summary: body.data.objective_summary,
+              priority: body.data.priority,
+              predecessor_phase_ids: body.data.predecessor_phase_ids,
+              expected_project_version: body.data.expected_project_version,
+            }),
+          );
+        } catch (error) {
+          reply.code(409).send({ error: "phase_conflict", detail: String(error) });
+        }
+      });
+
+      app.post("/api/v2/projects/:id/strategies", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        const body = V2StrategyVersion.safeParse(req.body);
+        if (!body.success || body.data.project_id !== id) {
+          return reply.code(400).send({ error: "bad_request" });
+        }
+        try {
+          reply.code(201).send(await options.phase3?.strategies.saveAwaitingApproval(body.data));
+        } catch (error) {
+          reply.code(409).send({ error: "strategy_conflict", detail: String(error) });
+        }
+      });
+
+      app.post("/api/v2/projects/:id/strategies/:strategyId/approve", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const body = ApproveStrategyBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const { id, strategyId } = req.params as { id: string; strategyId: string };
+        try {
+          reply.send(
+            await options.phase3?.strategies.approve({
+              schema_version: 2,
+              command_id: newId("command"),
+              kind: "approve_strategy_version",
+              command_family: "strategy_approval",
+              actor: { actor_type: "human", actor_id: user.id },
+              idempotency_key: body.data.idempotency_key,
+              correlation_id: newId("correlation"),
+              causation_id: null,
+              issued_at: now().toISOString(),
+              project_id: id,
+              phase_id: body.data.phase_id,
+              strategy_version_id: strategyId,
+              expected_phase_version: body.data.expected_phase_version,
+              expected_strategy_version: body.data.expected_strategy_version,
+              expected_strategy_aggregate_version: body.data.expected_strategy_aggregate_version,
+              expected_content_hash: body.data.expected_content_hash,
+            }),
+          );
+        } catch (error) {
+          reply.code(409).send({ error: "strategy_approval_conflict", detail: String(error) });
+        }
+      });
+    }
 
     app.get("/api/projects/:id/graph", async (req, reply) => {
       if (!(await requireSession(req, reply))) return;
