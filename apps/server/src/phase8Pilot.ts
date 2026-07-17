@@ -21,18 +21,24 @@ function requiredEnvironment(name: string): string {
   return value;
 }
 
-const databaseUrl = requiredEnvironment("NORNS_PILOT_DATABASE_URL");
+const runtimeDatabaseUrl = requiredEnvironment("NORNS_PILOT_DATABASE_URL");
+const controlDatabaseUrl = requiredEnvironment("NORNS_PILOT_CONTROL_DATABASE_URL");
 const migrationRunId = requiredEnvironment("NORNS_PHASE2_RUN_ID");
 const adminId = requiredEnvironment("NORNS_PHASE2_HUMAN_ADMIN_ID");
 const restoreTarget = requiredEnvironment("NORNS_PHASE8_RESTORE_TARGET");
 const drillId = `phase8-restore:${migrationRunId}`;
 const cohortId = `phase8-new-projects:${migrationRunId}`;
 const pilotName = "The Norns Production Pilot";
-const pool = new Pool(postgresPoolConfig(databaseUrl));
-const transactions = new NodePgTransactionRunner(pool, { mode: "runtime", role: "norns_app" });
+const runtimePool = new Pool(postgresPoolConfig(runtimeDatabaseUrl));
+const controlPool = new Pool(postgresPoolConfig(controlDatabaseUrl));
+const transactions = new NodePgTransactionRunner(runtimePool, {
+  mode: "runtime",
+  role: "norns_app",
+});
+const controlTransactions = new NodePgTransactionRunner(controlPool, { mode: "privileged" });
 
 try {
-  const gate = await transactions.transaction(async (sql) => {
+  const gate = await controlTransactions.transaction(async (sql) => {
     const result = await sql.query<{
       source_manifest_hash: string;
       checkpoint_created_at: Date | string;
@@ -65,8 +71,8 @@ try {
     return row;
   });
 
-  const operations = new Phase7OperationsService(transactions);
-  const drillExists = await transactions.transaction(async (sql) => {
+  const operations = new Phase7OperationsService(controlTransactions);
+  const drillExists = await controlTransactions.transaction(async (sql) => {
     const result = await sql.query<{ exists: boolean }>(
       "SELECT EXISTS(SELECT 1 FROM resilience_drills WHERE id=$1) AS exists",
       [drillId],
@@ -102,7 +108,7 @@ try {
   }
 
   const status = async (): Promise<string | null> =>
-    transactions.transaction(async (sql) => {
+    controlTransactions.transaction(async (sql) => {
       const result = await sql.query<{ status: string }>(
         "SELECT status FROM v2_cutover_cohorts WHERE id=$1",
         [cohortId],
@@ -213,5 +219,5 @@ try {
   );
   process.exitCode = 1;
 } finally {
-  await pool.end();
+  await Promise.all([runtimePool.end(), controlPool.end()]);
 }
