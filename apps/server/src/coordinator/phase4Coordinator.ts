@@ -7,10 +7,7 @@ import {
   v2CommandIdForDispatchJob,
 } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
-import {
-  type V2LockedTaskLifecycle,
-  transitionV2TaskLifecycle,
-} from "../persistence/v2/lifecycleMutation.js";
+import { transitionV2TaskLifecycle } from "../persistence/v2/lifecycleMutation.js";
 import { SqlV2ApplicationTransaction } from "../persistence/v2/sqlRepositories.js";
 
 export class Phase4CoordinatorConflictError extends Error {
@@ -40,6 +37,8 @@ export interface Phase4ScheduleInput {
   max_duration_seconds: number;
   issued_at: string;
   expires_at: string;
+  /** Required when reviewer rework supersedes the currently designated run. */
+  supersedes_run_id?: string | null;
 }
 
 export interface Phase4ScheduledRun {
@@ -65,6 +64,9 @@ interface SchedulingRow {
   model: string;
   repository_binding_id: string;
   expected_revision: string | null;
+  max_concurrent_tasks: number;
+  max_concurrent_runs: number;
+  active_workload: number;
 }
 
 function runIdentity(taskId: string, attempt: number): string {
@@ -89,6 +91,8 @@ export class Phase4Coordinator {
                 a.status AS assignment_status, a.budget_limit_usd, a.agent_profile_id,
                 profile.provider, profile.runtime, profile.model,
                 project.primary_repository_binding_id AS repository_binding_id,
+                project.max_concurrent_tasks, profile.max_concurrent_runs,
+                profile.active_workload,
                 binding.observed_head AS expected_revision
          FROM tasks t
          JOIN phases p ON p.id = t.phase_id AND p.project_id = t.project_id
@@ -113,8 +117,57 @@ export class Phase4Coordinator {
       if (!["approved", "active"].includes(row.phase_status)) {
         throw new Phase4CoordinatorConflictError("phase is not approved for execution");
       }
-      if (!["pending", "ready"].includes(row.task_state)) {
+      const isRework = input.supersedes_run_id !== undefined && input.supersedes_run_id !== null;
+      if (
+        !["pending", "ready"].includes(row.task_state) &&
+        !(isRework && row.task_state === "in_review")
+      ) {
         throw new Phase4CoordinatorConflictError(`task is not schedulable from ${row.task_state}`);
+      }
+      const activeCapacity = await sql.query<{ project_count: number; profile_count: number }>(
+        `SELECT
+           (SELECT count(*)::int FROM agent_runs
+            WHERE project_id=$1 AND state IN ('created','dispatched','running','verifying')) AS project_count,
+           (SELECT count(*)::int FROM agent_runs run
+            JOIN agent_assignments assigned ON assigned.id=run.assignment_id
+            WHERE assigned.agent_profile_id=$2
+              AND run.state IN ('created','dispatched','running','verifying')) AS profile_count`,
+        [input.project_id, row.agent_profile_id],
+      );
+      const capacity = activeCapacity.rows[0] ?? { project_count: 0, profile_count: 0 };
+      if (capacity.project_count >= row.max_concurrent_tasks) {
+        throw new Phase4CoordinatorConflictError("project concurrency capacity is exhausted");
+      }
+      if (capacity.profile_count >= row.max_concurrent_runs) {
+        throw new Phase4CoordinatorConflictError("agent profile concurrency capacity is exhausted");
+      }
+      const conflictRows = await sql.query<{ task_id: string; conflict_keys: unknown }>(
+        `SELECT constraint_row.task_id, constraint_row.conflict_keys
+         FROM task_coordination_constraints constraint_row
+         JOIN tasks conflict_task ON conflict_task.id=constraint_row.task_id
+         WHERE constraint_row.phase_id=$1
+           AND (constraint_row.task_id=$2
+                OR conflict_task.state IN ('assigned','in_progress','verifying','in_review'))`,
+        [input.phase_id, input.task_id],
+      );
+      const ownConflictKeys = conflictRows.rows.find(
+        (entry) => entry.task_id === input.task_id,
+      )?.conflict_keys;
+      const ownKeys = new Set(
+        Array.isArray(ownConflictKeys)
+          ? ownConflictKeys.filter((key): key is string => typeof key === "string")
+          : [],
+      );
+      if (
+        ownKeys.size > 0 &&
+        conflictRows.rows.some(
+          (entry) =>
+            entry.task_id !== input.task_id &&
+            Array.isArray(entry.conflict_keys) &&
+            entry.conflict_keys.some((key) => typeof key === "string" && ownKeys.has(key)),
+        )
+      ) {
+        throw new Phase4CoordinatorConflictError("task conflicts with active repository scope");
       }
       const incompleteDependencies = await sql.query<{ count: number }>(
         `SELECT count(*)::int AS count
@@ -147,12 +200,25 @@ export class Phase4Coordinator {
       ) {
         throw new Phase4CoordinatorConflictError("approved phase budget is insufficient");
       }
+      if (isRework) {
+        const prior = await sql.query<{ id: string }>(
+          `SELECT id FROM agent_runs
+           WHERE id=$1 AND task_id=$2 AND is_designated=true AND state='succeeded'
+           FOR UPDATE`,
+          [input.supersedes_run_id, input.task_id],
+        );
+        if (!prior.rows[0]) {
+          throw new Phase4CoordinatorConflictError(
+            "rework must supersede the designated green run",
+          );
+        }
+      }
       await sql.query(
         `INSERT INTO agent_runs (
            id, project_id, phase_id, task_id, assignment_id, attempt, state,
            is_designated, runner_id, repository_binding_id, expected_revision,
            verification_status, lifecycle_version, aggregate_version
-         ) VALUES ($1,$2,$3,$4,$5,$6,'created',true,$7,$8,$9,'pending',0,1)`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,'created',$10,$7,$8,$9,'pending',0,1)`,
         [
           runId,
           input.project_id,
@@ -163,8 +229,18 @@ export class Phase4Coordinator {
           input.runner_id,
           row.repository_binding_id,
           row.expected_revision,
+          !isRework,
         ],
       );
+      if (isRework) {
+        await sql.query(
+          `UPDATE agent_runs
+           SET is_designated=false, superseded_at=$3, superseded_by_run_id=$2, updated_at=now()
+           WHERE id=$1`,
+          [input.supersedes_run_id, runId, input.issued_at],
+        );
+        await sql.query("UPDATE agent_runs SET is_designated=true WHERE id=$1", [runId]);
+      }
       await sql.query(
         `UPDATE tasks SET designated_assignment_id = $2, designated_run_id = $3
          WHERE id = $1`,
@@ -178,14 +254,8 @@ export class Phase4Coordinator {
         causation_id: input.causation_id,
         occurred_at: input.issued_at,
       } as const;
-      let task: V2LockedTaskLifecycle = {
-        id: input.task_id,
-        project_id: input.project_id,
-        phase_id: input.phase_id,
-        state: row.task_state as V2LockedTaskLifecycle["state"],
-        lifecycle_version: 0,
-        aggregate_version: row.task_aggregate_version,
-      };
+      let task = await lifecycle.lockTaskLifecycle(input.task_id);
+      if (!task) throw new Phase4CoordinatorConflictError("task disappeared during scheduling");
       if (task.state === "pending") {
         task = await transitionV2TaskLifecycle(lifecycle, {
           ...actor,
@@ -197,15 +267,27 @@ export class Phase4Coordinator {
           reason: "dependencies satisfied",
         });
       }
-      await transitionV2TaskLifecycle(lifecycle, {
-        ...actor,
-        project_id: input.project_id,
-        phase_id: input.phase_id,
-        task_id: input.task_id,
-        expected_aggregate_version: task.aggregate_version,
-        to: "assigned",
-        reason: `designated run ${runId}`,
-      });
+      if (task.state === "ready") {
+        await transitionV2TaskLifecycle(lifecycle, {
+          ...actor,
+          project_id: input.project_id,
+          phase_id: input.phase_id,
+          task_id: input.task_id,
+          expected_aggregate_version: task.aggregate_version,
+          to: "assigned",
+          reason: `designated run ${runId}`,
+        });
+      } else if (task.state === "in_review" && isRework) {
+        await transitionV2TaskLifecycle(lifecycle, {
+          ...actor,
+          project_id: input.project_id,
+          phase_id: input.phase_id,
+          task_id: input.task_id,
+          expected_aggregate_version: task.aggregate_version,
+          to: "in_progress",
+          reason: `reviewer requested rework in ${runId}`,
+        });
+      }
       await sql.query(
         "UPDATE agent_assignments SET status = 'active', aggregate_version = aggregate_version + 1, updated_at = now() WHERE id = $1",
         [input.assignment_id],

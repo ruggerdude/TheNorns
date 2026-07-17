@@ -11,6 +11,7 @@ import { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
 import { Phase4DispatchRepository } from "./coordinator/phase4Dispatcher.js";
 import { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
 import { Phase4RecoveryMonitor } from "./coordinator/phase4RecoveryMonitor.js";
+import { Phase6CoordinationService } from "./coordinator/phase6Coordination.js";
 import { buildDashboard } from "./dashboard.js";
 import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
@@ -107,6 +108,7 @@ let phase4Services:
     }
   | undefined;
 let phase5Services: { attention: AttentionService } | undefined;
+let phase6Services: { coordination: Phase6CoordinationService } | undefined;
 
 if (databaseUrl) {
   try {
@@ -144,6 +146,7 @@ if (databaseUrl) {
       recovery: new Phase4RecoveryMonitor(runtimeTransactions),
     };
     phase5Services = { attention: new AttentionService(runtimeTransactions) };
+    phase6Services = { coordination: new Phase6CoordinationService(runtimeTransactions) };
     if (identityRoute?.read_mode === "relational" && identityRoute.write_mode === "relational") {
       await assertCredentialHmacKeyCoverage(
         runtimeTransactions,
@@ -380,6 +383,7 @@ const server = await buildServer({
   ...(phase3Services !== undefined ? { phase3: phase3Services } : {}),
   ...(phase4Services !== undefined ? { phase4: phase4Services } : {}),
   ...(phase5Services !== undefined ? { phase5: phase5Services } : {}),
+  ...(phase6Services !== undefined ? { phase6: phase6Services } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),
   ...(usersFlusher !== undefined ? { persistUsers: () => usersFlusher.flush() } : {}),

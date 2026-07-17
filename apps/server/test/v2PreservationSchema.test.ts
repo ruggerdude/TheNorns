@@ -7,6 +7,7 @@ import {
   PHASE2_PRESERVATION_MIGRATION_NAME,
   PHASE3_SOURCE_BINDINGS_MIGRATION_NAME,
   PHASE5_ATTENTION_MIGRATION_NAME,
+  PHASE6_COORDINATION_MIGRATION_NAME,
   type V2MigrationDatabase,
   runCurrentV2Migrations,
   runPhase1V2Migration,
@@ -176,6 +177,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       { name: PHASE2_PRESERVATION_MIGRATION_NAME, applied: false },
       { name: PHASE3_SOURCE_BINDINGS_MIGRATION_NAME, applied: false },
       { name: PHASE5_ATTENTION_MIGRATION_NAME, applied: false },
+      { name: PHASE6_COORDINATION_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -185,6 +187,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       PHASE2_PRESERVATION_MIGRATION_NAME,
       PHASE3_SOURCE_BINDINGS_MIGRATION_NAME,
       PHASE5_ATTENTION_MIGRATION_NAME,
+      PHASE6_COORDINATION_MIGRATION_NAME,
     ]);
   });
 

@@ -45,6 +45,7 @@ import type { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
 import { type Phase4DispatchRepository, Phase4Dispatcher } from "./coordinator/phase4Dispatcher.js";
 import type { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
 import type { Phase4RecoveryMonitor } from "./coordinator/phase4RecoveryMonitor.js";
+import type { Phase6CoordinationService } from "./coordinator/phase6Coordination.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
 import { GraphEditError } from "./graph/graph.js";
@@ -157,6 +158,7 @@ export interface ServerOptions {
     recovery: Phase4RecoveryMonitor;
   };
   phase5?: { attention: AttentionService };
+  phase6?: { coordination: Phase6CoordinationService };
   /**
    * DEMO-ONLY dashboard provider (engine + ledger composition). When set, it is
    * exposed at GET /api/demo/dashboard and returns the same illustrative demo
@@ -1140,6 +1142,71 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           }
         },
       );
+    }
+
+    if (options.phase6) {
+      const AgentReviewBody = z.object({
+        run_id: z.string().min(1),
+        reviewer_agent_profile_id: z.string().min(1),
+        decision: z.enum(["approved", "rework", "escalated"]),
+        summary: z.string().min(1),
+        evidence: z.array(V2EvidenceRef).min(1),
+      });
+      app.post(
+        "/api/v2/projects/:id/phases/:phaseId/tasks/:taskId/allocate",
+        async (req, reply) => {
+          if (!(await requireSession(req, reply))) return;
+          const { id, phaseId, taskId } = req.params as {
+            id: string;
+            phaseId: string;
+            taskId: string;
+          };
+          try {
+            const allocation = await options.phase6?.coordination.allocate(
+              taskId,
+              now().toISOString(),
+            );
+            if (allocation?.project_id !== id || allocation.phase_id !== phaseId) {
+              return reply.code(404).send({ error: "task_not_found" });
+            }
+            reply.send(allocation);
+          } catch (error) {
+            reply.code(409).send({ error: "allocation_conflict", detail: String(error) });
+          }
+        },
+      );
+      app.get("/api/v2/projects/:id/phases/:phaseId/coordination", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id, phaseId } = req.params as { id: string; phaseId: string };
+        try {
+          reply.send(await options.phase6?.coordination.snapshot(id, phaseId, now().toISOString()));
+        } catch (error) {
+          reply.code(404).send({ error: "phase_not_found", detail: String(error) });
+        }
+      });
+      app.post("/api/v2/projects/:id/phases/:phaseId/tasks/:taskId/review", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const body = AgentReviewBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const { id, phaseId, taskId } = req.params as {
+          id: string;
+          phaseId: string;
+          taskId: string;
+        };
+        try {
+          reply.send(
+            await options.phase6?.coordination.recordReview({
+              project_id: id,
+              phase_id: phaseId,
+              task_id: taskId,
+              ...body.data,
+              created_at: now().toISOString(),
+            }),
+          );
+        } catch (error) {
+          reply.code(409).send({ error: "review_conflict", detail: String(error) });
+        }
+      });
     }
 
     if (options.phase5) {
