@@ -28,7 +28,10 @@ describe.sequential("Phase 7 resilience and cutover controls", () => {
                 'hash','scrypt-v1','admin','active','native');
       INSERT INTO projects (
         id,name,description,status,assignment_policy_ref,verification_policy_ref,budget_policy_ref
-      ) VALUES ('project-7','Existing Project','','active','assignment','verification','budget');
+      ) VALUES
+        ('project-7','Existing Project','','active','assignment','verification','budget'),
+        ('project-internal-7','Internal Project','','active','assignment','verification','budget'),
+        ('project-remaining-7','Remaining Project','','active','assignment','verification','budget');
     `);
     operations = new Phase7OperationsService(new PGliteTransactionRunner(pg));
   });
@@ -100,7 +103,7 @@ describe.sequential("Phase 7 resilience and cutover controls", () => {
 
     const promote = async (
       id: string,
-      cohort_type: "selected" | "new_projects",
+      cohort_type: "internal" | "selected" | "new_projects" | "remaining",
       project_id: string | null,
       status: "shadow" | "canary" | "authoritative",
     ) =>
@@ -115,10 +118,12 @@ describe.sequential("Phase 7 resilience and cutover controls", () => {
         authorized_at: "2026-07-16T20:20:00.000Z",
       });
     for (const status of ["shadow", "canary", "authoritative"] as const) {
+      await promote("cohort-internal-7", "internal", "project-internal-7", status);
       await promote("cohort-project-7", "selected", "project-7", status);
       await promote("cohort-new-7", "new_projects", null, status);
+      await promote("cohort-remaining-7", "remaining", null, status);
     }
-    await expect(operations.assertRelationalAuthoritative()).resolves.toEqual({ projects: 1 });
+    await expect(operations.assertRelationalAuthoritative()).resolves.toEqual({ projects: 3 });
 
     await expect(
       operations.authorizeLegacyRetirement({
@@ -150,6 +155,6 @@ describe.sequential("Phase 7 resilience and cutover controls", () => {
       (SELECT count(*)::int FROM resilience_drills WHERE passed) AS drills,
       (SELECT count(*)::int FROM v2_cutover_cohorts WHERE status='authoritative') AS authoritative,
       (SELECT count(*)::int FROM legacy_retirement_authorizations) AS retirements`);
-    expect(evidence.rows[0]).toEqual({ drills: 6, authoritative: 2, retirements: 1 });
+    expect(evidence.rows[0]).toEqual({ drills: 6, authoritative: 4, retirements: 1 });
   });
 });

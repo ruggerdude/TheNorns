@@ -329,6 +329,7 @@ postgresDescribe("Phase 2 production-shaped PostgreSQL exit checkpoint", () => {
         expect.objectContaining({ name: "0004_phase5_attention", applied: true }),
         expect.objectContaining({ name: "0005_phase6_coordination", applied: true }),
         expect.objectContaining({ name: "0006_phase7_hardening", applied: true }),
+        expect.objectContaining({ name: "0007_phase8_cutover_completion", applied: true }),
       ]);
 
       await adminPool.query(

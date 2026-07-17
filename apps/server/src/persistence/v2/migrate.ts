@@ -31,6 +31,11 @@ export const PHASE7_HARDENING_MIGRATION_URL = new URL(
   "../../../drizzle/0006_phase7_hardening.sql",
   import.meta.url,
 );
+export const PHASE8_CUTOVER_COMPLETION_MIGRATION_NAME = "0007_phase8_cutover_completion";
+export const PHASE8_CUTOVER_COMPLETION_MIGRATION_URL = new URL(
+  "../../../drizzle/0007_phase8_cutover_completion.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -86,6 +91,10 @@ export async function loadPhase6CoordinationMigrationSql(): Promise<string> {
 
 export async function loadPhase7HardeningMigrationSql(): Promise<string> {
   return readFile(PHASE7_HARDENING_MIGRATION_URL, "utf8");
+}
+
+export async function loadPhase8CutoverCompletionMigrationSql(): Promise<string> {
+  return readFile(PHASE8_CUTOVER_COMPLETION_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -219,6 +228,10 @@ export async function runCurrentV2Migrations(
     {
       name: PHASE7_HARDENING_MIGRATION_NAME,
       sql: await loadPhase7HardeningMigrationSql(),
+    },
+    {
+      name: PHASE8_CUTOVER_COMPLETION_MIGRATION_NAME,
+      sql: await loadPhase8CutoverCompletionMigrationSql(),
     },
   ]);
 }

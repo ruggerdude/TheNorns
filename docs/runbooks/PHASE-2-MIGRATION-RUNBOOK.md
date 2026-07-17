@@ -91,7 +91,7 @@ pnpm --filter @norns/server migrate:phase2
 The command:
 
 1. takes the exclusive migration lease;
-2. applies checksum-pinned forward migrations `0001` and `0002`;
+2. applies every checksum-pinned forward migration through the current release;
 3. captures every `norns_state` row in one pinned transaction;
 4. encrypts and records exact source archives;
 5. imports identity with all legacy sessions and invitations revoked;

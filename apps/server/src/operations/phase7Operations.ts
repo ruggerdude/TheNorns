@@ -98,6 +98,10 @@ export class Phase7OperationsService {
     authorized_by: string;
     authorized_at: string;
   }): Promise<void> {
+    const projectScoped = input.cohort_type === "internal" || input.cohort_type === "selected";
+    if (projectScoped !== (input.project_id !== null)) {
+      throw new Phase7GateError(`${input.cohort_type} cohort has an invalid project scope`);
+    }
     return this.transactions.transaction(async (sql) => {
       const drill = await sql.query<{ passed: boolean; drill_type: string }>(
         "SELECT passed, drill_type FROM resilience_drills WHERE id=$1",
@@ -154,9 +158,30 @@ export class Phase7OperationsService {
         ],
       );
       if (input.status === "authoritative") {
-        const scopeType = input.cohort_type === "new_projects" ? "new_projects" : "project";
-        const scopeKey = input.cohort_type === "new_projects" ? "*" : input.project_id;
-        if (scopeKey) {
+        if (input.cohort_type === "remaining") {
+          await sql.query(
+            `INSERT INTO persistence_routes (
+               scope_type, scope_key, read_mode, write_mode, migration_run_id,
+               changed_by_actor_type, changed_by_actor_id, changed_at,
+               v2_writes_started_at
+             )
+             SELECT 'project', project.id, 'relational', 'relational', NULL,
+                    'human', $1, $2, $2
+             FROM projects project
+             WHERE project.status <> 'archived'
+             ON CONFLICT (scope_type, scope_key) DO UPDATE
+             SET read_mode='relational', write_mode='relational',
+                 aggregate_version=persistence_routes.aggregate_version+1,
+                 changed_by_actor_type='human', changed_by_actor_id=$1,
+                 changed_at=$2, v2_writes_started_at=COALESCE(
+                   persistence_routes.v2_writes_started_at,$2
+                 )`,
+            [input.authorized_by, input.authorized_at],
+          );
+        } else {
+          const scopeType = input.cohort_type === "new_projects" ? "new_projects" : "project";
+          const scopeKey = input.cohort_type === "new_projects" ? "*" : input.project_id;
+          if (!scopeKey) throw new Phase7GateError("authoritative cohort has no route scope");
           await sql.query(
             `INSERT INTO persistence_routes (
                scope_type, scope_key, read_mode, write_mode, migration_run_id,
