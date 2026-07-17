@@ -41,6 +41,11 @@ export const WORKSPACE_CONNECTIONS_MIGRATION_URL = new URL(
   "../../../drizzle/0008_workspace_connections.sql",
   import.meta.url,
 );
+export const QC_COMMUNICATION_MIGRATION_NAME = "0009_qc_communication_decisions";
+export const QC_COMMUNICATION_MIGRATION_URL = new URL(
+  "../../../drizzle/0009_qc_communication_decisions.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -104,6 +109,10 @@ export async function loadPhase8CutoverCompletionMigrationSql(): Promise<string>
 
 export async function loadWorkspaceConnectionsMigrationSql(): Promise<string> {
   return readFile(WORKSPACE_CONNECTIONS_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcCommunicationMigrationSql(): Promise<string> {
+  return readFile(QC_COMMUNICATION_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -245,6 +254,10 @@ export async function runCurrentV2Migrations(
     {
       name: WORKSPACE_CONNECTIONS_MIGRATION_NAME,
       sql: await loadWorkspaceConnectionsMigrationSql(),
+    },
+    {
+      name: QC_COMMUNICATION_MIGRATION_NAME,
+      sql: await loadQcCommunicationMigrationSql(),
     },
   ]);
 }

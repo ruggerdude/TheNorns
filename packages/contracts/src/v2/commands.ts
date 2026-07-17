@@ -17,6 +17,7 @@ export const V2CommandFamily = z.enum([
   "strategy_approval",
   "task_execution",
   "decision_resolution",
+  "human_direction",
   "budget",
   "integration",
 ]);
@@ -134,8 +135,27 @@ export const V2ResolveDecisionPointCommand = V2ApplicationCommandBase.extend({
   expected_condition_fingerprint: V2Sha256Hex,
   selected_option_id: V2EntityId,
   rationale: V2NonEmptyString,
+  direction_target: z.enum(["project_manager", "implementation_agent", "reviewer", "all_agents"]),
+  direction_text: z.string().trim().max(10_000),
 }).strict();
 export type V2ResolveDecisionPointCommandT = z.infer<typeof V2ResolveDecisionPointCommand>;
+
+export const V2RecordHumanDirectionCommand = V2ApplicationCommandBase.extend({
+  kind: z.literal("record_human_direction"),
+  command_family: z.literal("human_direction"),
+  actor: z
+    .object({
+      actor_type: z.literal("human"),
+      actor_id: V2EntityId,
+    })
+    .strict(),
+  project_id: V2EntityId,
+  phase_id: V2EntityId.nullable(),
+  task_id: V2EntityId.nullable(),
+  direction_target: z.enum(["project_manager", "implementation_agent", "reviewer", "all_agents"]),
+  direction_text: V2NonEmptyString.max(10_000),
+}).strict();
+export type V2RecordHumanDirectionCommandT = z.infer<typeof V2RecordHumanDirectionCommand>;
 
 export const V2ApplicationCommand = z.discriminatedUnion("kind", [
   V2CreatePhaseCommand,
@@ -145,6 +165,7 @@ export const V2ApplicationCommand = z.discriminatedUnion("kind", [
   V2ScheduleAgentRunCommand,
   V2CancelTaskCommand,
   V2ResolveDecisionPointCommand,
+  V2RecordHumanDirectionCommand,
 ]);
 export type V2ApplicationCommandT = z.infer<typeof V2ApplicationCommand>;
 

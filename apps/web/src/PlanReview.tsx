@@ -32,7 +32,33 @@ export interface PlanReviewResult {
   plan: PlanLike;
   content_hash: string;
   total_cost_usd: number;
-  outstanding: { statement: string }[];
+  outstanding: Array<{
+    finding?: string;
+    statement?: string;
+    recommendation?: string;
+    module_id?: string | null;
+    severity?: "must_fix" | "should_fix" | "suggestion";
+  }>;
+  policy?: {
+    pm_provider: string;
+    pm_model?: string;
+    reviewer_provider: string;
+    reviewer_model?: string;
+  };
+  versions?: Array<{
+    version: number;
+    findings: Array<{
+      severity: "must_fix" | "should_fix" | "suggestion";
+      module_id: string | null;
+      finding: string;
+      recommendation: string;
+    }> | null;
+    responses: Array<{
+      finding_index: number;
+      disposition: "accept" | "rebut";
+      rationale: string;
+    }> | null;
+  }>;
 }
 
 /** A module blocks commit if it has zero criteria, or any criterion has a
@@ -115,6 +141,81 @@ export function PlanReview({
         plan hash: {content_hash}
       </div>
 
+      {result.policy ? (
+        <div className="agent-identity-grid planning-agent-identities">
+          <section className="agent-identity-card" aria-label="Planning Project Manager">
+            <span className="eyebrow">Planning Project Manager</span>
+            <strong>{result.policy.pm_model ?? `${result.policy.pm_provider} default`}</strong>
+            <span>{result.policy.pm_provider} · plan author and reviser</span>
+          </section>
+          <section className="agent-identity-card" aria-label="Independent Planning Reviewer">
+            <span className="eyebrow">Independent Planning Reviewer</span>
+            <strong>
+              {result.policy.reviewer_model ?? `${result.policy.reviewer_provider} default`}
+            </strong>
+            <span>{result.policy.reviewer_provider} · independent QC</span>
+          </section>
+        </div>
+      ) : null}
+
+      {result.versions?.some((version) => version.findings?.length) ? (
+        <details className="planning-qc-history" data-testid="planning-qc-history">
+          <summary>Planning QC round history</summary>
+          <div className="qc-timeline">
+            {result.versions.map((version) =>
+              version.findings?.length ? (
+                <section className="qc-review" key={version.version}>
+                  <div className="qc-review-head">
+                    <strong>Round {version.version}</strong>
+                    <Badge
+                      tone={
+                        version.findings.some((f) => f.severity === "must_fix") ? "danger" : "warn"
+                      }
+                    >
+                      {version.findings.length} finding{version.findings.length === 1 ? "" : "s"}
+                    </Badge>
+                  </div>
+                  {version.findings.map((finding, findingIndex) => {
+                    const response = version.responses?.find(
+                      (candidate) => candidate.finding_index === findingIndex,
+                    );
+                    return (
+                      <article
+                        className="planning-finding"
+                        key={`${version.version}-${findingIndex}`}
+                      >
+                        <div className="outstanding-item-meta">
+                          <Badge tone={finding.severity === "must_fix" ? "danger" : "warn"}>
+                            {finding.severity.replaceAll("_", " ")}
+                          </Badge>
+                          <span>
+                            {finding.module_id ? `Module: ${finding.module_id}` : "Plan-level"}
+                          </span>
+                        </div>
+                        <strong>{finding.finding}</strong>
+                        <p>
+                          <strong>Reviewer recommendation:</strong> {finding.recommendation}
+                        </p>
+                        {response ? (
+                          <div className="pm-disposition">
+                            <Badge tone={response.disposition === "accept" ? "success" : "info"}>
+                              PM {response.disposition === "accept" ? "accepted" : "rebutted"}
+                            </Badge>
+                            <span>{response.rationale}</span>
+                          </div>
+                        ) : (
+                          <span className="meta">No PM response recorded for this finding.</span>
+                        )}
+                      </article>
+                    );
+                  })}
+                </section>
+              ) : null,
+            )}
+          </div>
+        </details>
+      ) : null}
+
       {outstanding.length > 0 ? (
         <div className="card outstanding-panel" data-testid="outstanding-findings">
           <strong>
@@ -122,11 +223,28 @@ export function PlanReview({
               ? "Outstanding findings — why this plan didn't converge"
               : "Outstanding findings"}
           </strong>
-          {outstanding.map((f) => (
-            <div className="outstanding-item" key={f.statement}>
-              {f.statement}
-            </div>
-          ))}
+          {outstanding.map((finding, index) => {
+            // `finding` is the canonical server field. `statement` remains a
+            // read-only fallback for planning sessions created before the
+            // structured finding contract landed.
+            const text = finding.finding ?? finding.statement ?? "Reviewer finding unavailable";
+            return (
+              <article className="outstanding-item" key={`${finding.module_id ?? "plan"}-${index}`}>
+                <div className="outstanding-item-meta">
+                  <Badge tone={finding.severity === "must_fix" ? "danger" : "warn"}>
+                    {(finding.severity ?? "must_fix").replaceAll("_", " ")}
+                  </Badge>
+                  <span>{finding.module_id ? `Module: ${finding.module_id}` : "Plan-level"}</span>
+                </div>
+                <strong>{text}</strong>
+                {finding.recommendation ? (
+                  <p>
+                    <strong>Recommendation:</strong> {finding.recommendation}
+                  </p>
+                ) : null}
+              </article>
+            );
+          })}
         </div>
       ) : null}
 

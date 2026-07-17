@@ -31,8 +31,10 @@ import {
   type ServerFrameT,
   type UsageEventT,
   V2ContentAddressedReference,
+  V2DecisionResolutionRequest,
   type V2DispatchCommandT,
   V2EvidenceRef,
+  V2HumanDirectionRequest,
   V2RepositoryIngestionSeed,
   V2StrategyVersion,
   parseRunnerFrame,
@@ -57,7 +59,7 @@ import {
 } from "./integrations/github.js";
 import type { Phase7OperationsService } from "./operations/phase7Operations.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
-import type { AttentionService } from "./projects/attentionService.js";
+import { type AttentionService, DecisionResolutionError } from "./projects/attentionService.js";
 import type { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
 import type { ProjectResumeService } from "./projects/projectResumeService.js";
 import { Phase3RequiredError } from "./projects/relationalReadRepository.js";
@@ -1772,6 +1774,65 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
       });
 
+      app.post(
+        "/api/v2/projects/:id/decision-points/:decisionPointId/resolve",
+        async (req, reply) => {
+          const user = await resolveUser(req);
+          if (!user) return reply.code(401).send({ error: "unauthorized" });
+          const { id, decisionPointId } = req.params as { id: string; decisionPointId: string };
+          const body = V2DecisionResolutionRequest.safeParse(req.body);
+          if (!body.success) return reply.code(400).send({ error: "bad_request" });
+          try {
+            reply.send(
+              await options.phase5?.attention.resolveDecision({
+                user_id: user.id,
+                project_id: id,
+                decision_point_id: decisionPointId,
+                ...body.data,
+              }),
+            );
+          } catch (error) {
+            if (error instanceof DecisionResolutionError) {
+              const status =
+                error.code === "decision_not_found"
+                  ? 404
+                  : error.code === "invalid_option"
+                    ? 400
+                    : 409;
+              return reply.code(status).send({ error: error.code, detail: error.message });
+            }
+            throw error;
+          }
+        },
+      );
+
+      app.post("/api/v2/projects/:id/directions", async (req, reply) => {
+        const user = await resolveUser(req);
+        if (!user) return reply.code(401).send({ error: "unauthorized" });
+        const { id } = req.params as { id: string };
+        const body = V2HumanDirectionRequest.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        try {
+          reply.send(
+            await options.phase5?.attention.recordDirection({
+              user_id: user.id,
+              project_id: id,
+              direction_target: body.data.direction_target,
+              direction_text: body.data.direction_text,
+              idempotency_key: body.data.idempotency_key,
+              ...(body.data.phase_id !== undefined ? { phase_id: body.data.phase_id } : {}),
+              ...(body.data.task_id !== undefined ? { task_id: body.data.task_id } : {}),
+            }),
+          );
+        } catch (error) {
+          if (error instanceof DecisionResolutionError) {
+            const status = error.code === "scope_not_found" ? 404 : 409;
+            return reply.code(status).send({ error: error.code, detail: error.message });
+          }
+          throw error;
+        }
+      });
+
       app.get("/api/v2/projects/:id/phases/:phaseId/execution", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
         const { id, phaseId } = req.params as { id: string; phaseId: string };
@@ -2021,6 +2082,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           content_hash: planContentHash(result.finalPlan),
           outstanding: result.outstanding,
           policy: result.policy,
+          versions: result.versions.map((version) => ({
+            version: version.version,
+            findings: version.findings,
+            responses: version.responses,
+          })),
           usage: result.usage,
           total_cost_usd: totalCost,
         });

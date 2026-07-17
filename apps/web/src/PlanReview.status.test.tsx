@@ -41,7 +41,10 @@ describe("UI-3: convergence status drives structurally distinct views", () => {
 
     const findings = screen.getByTestId("outstanding-findings");
     for (const f of capReachedPlanResult.outstanding) {
-      expect(findings).toHaveTextContent(f.statement);
+      expect(findings).toHaveTextContent(f.finding);
+      expect(findings).toHaveTextContent(f.recommendation);
+      expect(findings).toHaveTextContent(`Module: ${f.module_id}`);
+      expect(findings).toHaveTextContent("must fix");
     }
 
     // The only way forward from here is Cancel.
@@ -65,5 +68,30 @@ describe("estimated_complexity field-name fix", () => {
 
     expect(screen.getByText("XL")).toBeInTheDocument();
     expect(screen.queryByText(/complexity n\/a/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("planning QC identities and round history", () => {
+  test("identifies both agents and preserves the reviewer's finding plus PM response", () => {
+    render(
+      <PlanReview
+        result={capReachedPlanResult}
+        committing={false}
+        onCancel={() => {}}
+        onCommit={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("region", { name: "Planning Project Manager" })).toHaveTextContent(
+      /claude-sonnet-5.*anthropic/i,
+    );
+    expect(screen.getByRole("region", { name: "Independent Planning Reviewer" })).toHaveTextContent(
+      /gpt-5-codex.*openai/i,
+    );
+    const history = screen.getByTestId("planning-qc-history");
+    expect(history).toHaveTextContent("Rollback evidence is missing");
+    expect(history).toHaveTextContent("Add a production-safe rollback drill");
+    expect(history).toHaveTextContent("PM rebutted");
+    expect(history).toHaveTextContent("existing deployment smoke test");
   });
 });

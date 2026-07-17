@@ -1,4 +1,5 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { renderAppAndOpenProject, seedAuth } from "./test/appHarness";
 import { fullyAllocatedGraph, projectAlpha } from "./test/fixtures";
@@ -57,6 +58,18 @@ describe("Phase 5 project execution monitoring", () => {
             risk: "high",
             dependencies: ["task-1"],
             assignment: { provider: "openai", model: "gpt-5-codex", status: "active" },
+            implementation_agent: {
+              profile_id: "agent-codex-sol",
+              provider: "openai",
+              model: "gpt-5-codex",
+              roles: ["implementation"],
+            },
+            reviewer_agent: {
+              profile_id: "agent-claude-fable",
+              provider: "anthropic",
+              model: "claude-fable-5",
+              roles: ["independent_review", "quality_control"],
+            },
             run: {
               id: "run-2",
               state: "verifying",
@@ -66,17 +79,71 @@ describe("Phase 5 project execution monitoring", () => {
               failure_detail: null,
             },
             evidence_count: 2,
+            reviews: [
+              {
+                id: "review-1",
+                run_id: "run-2",
+                review_round: 1,
+                decision: "rework",
+                summary: "The rollback verification is incomplete. Add a production-safe drill.",
+                evidence: [
+                  {
+                    artifact_id: "artifact-1",
+                    content_hash: "b".repeat(64),
+                    media_type: "text/plain",
+                    label: "Verification log",
+                  },
+                ],
+                reviewer: {
+                  profile_id: "agent-claude-fable",
+                  provider: "anthropic",
+                  model: "claude-fable-5",
+                  roles: ["independent_review"],
+                },
+                created_at: "2026-07-17T12:00:00.000Z",
+              },
+            ],
           },
         ],
       },
     });
+    mock.post(`/api/v2/projects/${projectAlpha.id}/directions`, { body: {} });
     mock.install();
 
     await renderAppAndOpenProject(projectAlpha.name);
     expect(await screen.findByRole("heading", { name: "Release safely" })).toBeVisible();
     expect(screen.getByText("Verify production release")).toBeVisible();
-    expect(screen.getByText(/gpt-5-codex · active/i)).toBeVisible();
+    expect(screen.getByRole("region", { name: "Implementation Agent" })).toHaveTextContent(
+      /gpt-5-codex.*agent-codex-sol.*active/i,
+    );
+    expect(screen.getByRole("region", { name: "Independent QC Reviewer" })).toHaveTextContent(
+      /claude-fable-5.*agent-claude-fable/i,
+    );
     expect(screen.getByText(/Verification: pending/i)).toBeVisible();
     expect(screen.getByText("2 evidence")).toBeVisible();
+    expect(screen.getByText(/rollback verification is incomplete/i)).toBeVisible();
+    expect(screen.getByText(/Verification log · text\/plain · b{12}/i)).toBeVisible();
+
+    await userEvent.selectOptions(screen.getByLabelText("Send to"), "reviewer");
+    await userEvent.type(
+      screen.getByLabelText("Direction"),
+      "Verify the recovery drill before the next review round.",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Record direction" }));
+    await waitFor(() =>
+      expect(
+        mock.calls.find((call) => call.url === `/api/v2/projects/${projectAlpha.id}/directions`),
+      ).toMatchObject({
+        body: {
+          phase_id: "phase-1",
+          task_id: "task-2",
+          direction_target: "reviewer",
+          direction_text: "Verify the recovery drill before the next review round.",
+        },
+      }),
+    );
+    expect(
+      screen.getByText(/^Direction recorded in project memory\. Agent delivery is pending\.$/i),
+    ).toBeVisible();
   });
 });

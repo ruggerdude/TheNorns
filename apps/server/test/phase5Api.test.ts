@@ -67,4 +67,57 @@ describe.sequential("Phase 5 authenticated attention API", () => {
       items: [],
     });
   });
+
+  it("requires authentication and resolves decisions or records proactive direction", async () => {
+    await pg.exec(`
+      INSERT INTO decision_points (
+        id,project_id,scope_entity_type,scope_entity_id,reason_class,source_instance_id,
+        condition_key,condition_fingerprint,question,context,options,recommendation_option_id,
+        urgency,status
+      ) VALUES ('decision-api','project-1','project','project-1','api_question','source-api',
+        'decision:api',repeat('e',64),'Proceed?','Human input required',
+        '[{"id":"yes","label":"Yes","impact":"Continue","risk":"Known risk"}]'::jsonb,
+        'yes','normal','open');
+    `);
+    const resolveUrl = "/api/v2/projects/project-1/decision-points/decision-api/resolve";
+    const resolveBody = {
+      idempotency_key: "api-resolution-1",
+      expected_condition_fingerprint: "e".repeat(64),
+      selected_option_id: "yes",
+      rationale: "Approved after review.",
+      direction_target: "project_manager",
+      direction_text: "Proceed with the approved option.",
+    };
+    expect(
+      (await server.app.inject({ method: "POST", url: resolveUrl, payload: resolveBody }))
+        .statusCode,
+    ).toBe(401);
+    const resolved = await server.app.inject({
+      method: "POST",
+      url: resolveUrl,
+      headers: { authorization: `Bearer ${token}` },
+      payload: resolveBody,
+    });
+    expect(resolved.statusCode).toBe(200);
+    expect(resolved.json()).toMatchObject({ decision_point_id: "decision-api" });
+
+    const directionUrl = "/api/v2/projects/project-1/directions";
+    const directionBody = {
+      direction_target: "all_agents",
+      direction_text: "Use the approved compatibility constraint in subsequent work.",
+      idempotency_key: "api-direction-1",
+    };
+    expect(
+      (await server.app.inject({ method: "POST", url: directionUrl, payload: directionBody }))
+        .statusCode,
+    ).toBe(401);
+    const recorded = await server.app.inject({
+      method: "POST",
+      url: directionUrl,
+      headers: { authorization: `Bearer ${token}` },
+      payload: directionBody,
+    });
+    expect(recorded.statusCode).toBe(200);
+    expect(recorded.json()).toMatchObject({ replayed: false });
+  });
 });

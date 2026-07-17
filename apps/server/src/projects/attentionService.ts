@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import {
   V2AttentionItem,
   type V2AttentionItemT,
+  V2DecisionResolutionResult,
+  type V2DecisionResolutionResultT,
+  type V2DirectionTargetT,
+  V2HumanDirectionResult,
+  type V2HumanDirectionResultT,
   V2PhaseExecution,
   type V2PhaseExecutionT,
   V2PortfolioAttention,
@@ -24,6 +29,7 @@ interface SourceRow {
   explanation: string;
   recommendation: string;
   tradeoffs: unknown;
+  decision: unknown;
   impact: string;
   resumes: string;
   occurred_at: string | Date;
@@ -58,6 +64,48 @@ export class AttentionConflictError extends Error {
   }
 }
 
+export class DecisionResolutionError extends Error {
+  constructor(
+    readonly code:
+      | "decision_not_found"
+      | "decision_closed"
+      | "stale_decision"
+      | "invalid_option"
+      | "scope_not_found"
+      | "idempotency_conflict",
+    message: string,
+  ) {
+    super(message);
+    this.name = "DecisionResolutionError";
+  }
+}
+
+const iso = (value: string | Date): string => new Date(value).toISOString();
+
+function stableFingerprint(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function decisionMetadata(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const options = Array.isArray(source.options)
+    ? source.options.map((entry) => {
+        const option =
+          entry && typeof entry === "object" && !Array.isArray(entry)
+            ? (entry as Record<string, unknown>)
+            : {};
+        return {
+          id: String(option.id ?? "option"),
+          label: String(option.label ?? "Option"),
+          impact: String(option.impact ?? "Review the operational impact before selecting."),
+          risk: String(option.risk ?? "No explicit risk was recorded for this legacy option."),
+        };
+      })
+    : [];
+  return { ...source, options };
+}
+
 export class AttentionService {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
@@ -79,8 +127,14 @@ export class AttentionService {
                        WHERE option->>'id'=d.recommendation_option_id LIMIT 1),
                       'Review the available options') AS recommendation,
              d.options AS tradeoffs,
-             'The declared blocking scope remains paused.' AS impact,
-             'Resolving this decision resumes its blocked scope.' AS resumes,
+             jsonb_build_object(
+               'decision_point_id', d.id,
+               'condition_fingerprint', d.condition_fingerprint,
+               'options', d.options,
+               'recommendation_option_id', d.recommendation_option_id
+             ) AS decision,
+             'The declared blocking scope remains paused until orchestration applies the recorded direction.' AS impact,
+             'Resolution records an approved directive for subsequent coordinator evaluation.' AS resumes,
              d.updated_at AS occurred_at,
              jsonb_build_object('status',d.status,'revision',d.condition_revision,
                                 'fingerprint',d.condition_fingerprint) AS material
@@ -93,6 +147,7 @@ export class AttentionService {
              'Review scope, assignments, budget, and approve when correct',
              jsonb_build_array('Approval materializes canonical execution tasks',
                                'Changes require a new immutable strategy version'),
+             NULL::jsonb,
              'The phase cannot begin execution until approved.',
              'Approval materializes tasks and enables scheduling.', s.updated_at,
              jsonb_build_object('status',s.status,'hash',s.content_hash,'version',s.version)
@@ -106,6 +161,7 @@ export class AttentionService {
              'Execution cannot make progress automatically from the current task state.',
              'Inspect the latest run and choose retry, rework, or cancellation',
              jsonb_build_array('Retry may repeat work', 'Rework may change phase scope'),
+             NULL::jsonb,
              'Dependent tasks and phase completion are blocked.',
              'A disposition returns the task to an executable state.', t.updated_at,
              jsonb_build_object('state',t.state,'version',t.aggregate_version)
@@ -129,6 +185,7 @@ export class AttentionService {
              'Review evidence and retry with a fresh fenced run when safe',
              jsonb_build_array('Retry can consume additional budget',
                                'Cancellation leaves the task incomplete'),
+             NULL::jsonb,
              'The assigned task cannot advance to review.',
              'A new designated run resumes task execution.', r.updated_at,
              jsonb_build_object('state',r.state,'attempt',r.attempt,
@@ -143,6 +200,7 @@ export class AttentionService {
              'Automatic release could undercount real provider usage.',
              'Reconcile provider usage before releasing or settling funds',
              jsonb_build_array('Release risks overspend', 'Retain reduces available phase budget'),
+             NULL::jsonb,
              'New work may be prevented by the remaining budget hold.',
              'Reconciliation restores an accurate available budget.', b.updated_at,
              jsonb_build_object('status',b.status,'amount',b.amount_usd,
@@ -156,6 +214,7 @@ export class AttentionService {
              'The phase closed with reviewed and integrated evidence.',
              'Review the completion summary or create the next phase',
              jsonb_build_array('No action is required'),
+             NULL::jsonb,
              'Project memory and progress have been updated.',
              'A new phase can begin without reconstructing prior context.', phase.closed_at,
              jsonb_build_object('status',phase.status,'version',phase.aggregate_version,
@@ -194,6 +253,7 @@ export class AttentionService {
           condition_fingerprint: currentFingerprint,
           occurred_at: new Date(row.occurred_at).toISOString(),
           tradeoffs,
+          decision: decisionMetadata(row.decision),
           acknowledged,
           snoozed_until: snoozedUntil ? new Date(snoozedUntil).toISOString() : null,
         });
@@ -308,6 +368,438 @@ export class AttentionService {
     });
   }
 
+  resolveDecision(input: {
+    user_id: string;
+    project_id: string;
+    decision_point_id: string;
+    idempotency_key: string;
+    expected_condition_fingerprint: string;
+    selected_option_id: string;
+    rationale: string;
+    direction_target: V2DirectionTargetT;
+    direction_text: string;
+    now?: Date;
+  }): Promise<V2DecisionResolutionResultT> {
+    const resolvedAt = (input.now ?? new Date()).toISOString();
+    return this.transactions.transaction(async (sql) => {
+      const requestFingerprint = stableFingerprint({
+        project_id: input.project_id,
+        decision_point_id: input.decision_point_id,
+        expected_condition_fingerprint: input.expected_condition_fingerprint,
+        selected_option_id: input.selected_option_id,
+        rationale: input.rationale.trim(),
+        direction_target: input.direction_target,
+        direction_text: input.direction_text.trim(),
+      });
+      const existingIdempotency = await sql.query<{
+        request_fingerprint: string;
+        status: string;
+        response: unknown;
+      }>(
+        `SELECT request_fingerprint, status, response FROM idempotency_records
+         WHERE actor_id=$1 AND command_family='decision_resolution' AND idempotency_key=$2`,
+        [input.user_id, input.idempotency_key],
+      );
+      const prior = existingIdempotency.rows[0];
+      if (prior) {
+        if (prior.request_fingerprint !== requestFingerprint) {
+          throw new DecisionResolutionError(
+            "idempotency_conflict",
+            "idempotency key was already used for a different decision resolution",
+          );
+        }
+        if (prior.status !== "committed_succeeded" || !prior.response) {
+          throw new DecisionResolutionError(
+            "idempotency_conflict",
+            "matching decision resolution is still in progress",
+          );
+        }
+        return V2DecisionResolutionResult.parse(prior.response);
+      }
+      const found = await sql.query<{
+        id: string;
+        project_id: string;
+        phase_id: string | null;
+        task_id: string | null;
+        status: string;
+        condition_fingerprint: string;
+        condition_revision: number;
+        question: string;
+        options: unknown;
+        scope_entity_type: string;
+        scope_entity_id: string;
+      }>(
+        `SELECT id, project_id, phase_id, task_id, status, condition_fingerprint,
+                condition_revision, question, options, scope_entity_type, scope_entity_id
+         FROM decision_points WHERE id=$1 AND project_id=$2 FOR UPDATE`,
+        [input.decision_point_id, input.project_id],
+      );
+      const point = found.rows[0];
+      if (!point) {
+        throw new DecisionResolutionError(
+          "decision_not_found",
+          "decision point does not exist in this project",
+        );
+      }
+      if (point.status !== "open") {
+        throw new DecisionResolutionError("decision_closed", "decision point is already closed");
+      }
+      if (point.condition_fingerprint !== input.expected_condition_fingerprint) {
+        throw new DecisionResolutionError(
+          "stale_decision",
+          "decision condition changed; refresh before resolving",
+        );
+      }
+      const options = Array.isArray(point.options)
+        ? point.options.filter((option): option is Record<string, unknown> =>
+            Boolean(option && typeof option === "object" && !Array.isArray(option)),
+          )
+        : [];
+      const optionIds = options.map((option) => String(option.id ?? ""));
+      if (new Set(optionIds).size !== optionIds.length) {
+        throw new DecisionResolutionError(
+          "invalid_option",
+          "decision point contains duplicate option ids",
+        );
+      }
+      const selected = options.find(
+        (option) => String(option.id ?? "") === input.selected_option_id,
+      );
+      if (!selected) {
+        throw new DecisionResolutionError(
+          "invalid_option",
+          "selected option is not available on this decision point",
+        );
+      }
+      const normalizedDirection =
+        input.direction_text.trim() ||
+        `${String(selected.label ?? input.selected_option_id)} — ${input.rationale.trim()}`;
+      const decisionMaterial = {
+        decision_point_id: point.id,
+        condition_fingerprint: point.condition_fingerprint,
+        selected_option_id: input.selected_option_id,
+        rationale: input.rationale.trim(),
+        direction_target: input.direction_target,
+        direction_text: normalizedDirection,
+      };
+      const contentHash = stableFingerprint(decisionMaterial);
+      const commandId = `decision-resolution:${stableFingerprint({ actor: input.user_id, key: input.idempotency_key }).slice(0, 32)}`;
+      await sql.query(
+        `INSERT INTO idempotency_records (
+           actor_id, command_family, idempotency_key, request_fingerprint, command_id,
+           status, retain_until
+         ) VALUES ($1,'decision_resolution',$2,$3,$4,'in_progress',$5::timestamptz + interval '30 days')`,
+        [input.user_id, input.idempotency_key, requestFingerprint, commandId, resolvedAt],
+      );
+      const suffix = stableFingerprint(commandId).slice(0, 20);
+      const approvalId = `approval:decision:${point.id}:${suffix}`;
+      const recordId = `decision-record:${point.id}:${suffix}`;
+      const memoryId = `memory:decision-direction:${point.id}:${suffix}`;
+
+      await sql.query(
+        `INSERT INTO approvals (
+           id, project_id, phase_id, kind, subject_entity_type, subject_entity_id,
+           actor_id, content_hash, status, approved_at
+         ) VALUES ($1,$2,$3,'decision','decision_point',$4,$5,$6,'active',$7)`,
+        [
+          approvalId,
+          point.project_id,
+          point.phase_id,
+          point.id,
+          input.user_id,
+          contentHash,
+          resolvedAt,
+        ],
+      );
+      await sql.query(
+        `INSERT INTO decision_records (
+           id, project_id, phase_id, decision_point_id, title, rationale,
+           selected_option_id, direction_target, direction_text, status, decided_by,
+           approval_id, affected_entities, created_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'active',$10,$11,$12::jsonb,$13)`,
+        [
+          recordId,
+          point.project_id,
+          point.phase_id,
+          point.id,
+          point.question,
+          input.rationale.trim(),
+          input.selected_option_id,
+          input.direction_target,
+          normalizedDirection,
+          input.user_id,
+          approvalId,
+          JSON.stringify([
+            { entity_type: point.scope_entity_type, entity_id: point.scope_entity_id },
+          ]),
+          resolvedAt,
+        ],
+      );
+      await sql.query(
+        `INSERT INTO project_memory_entries (
+           id, project_id, phase_id, task_id, category, content, provenance, source_ref,
+           confidence, version, status, approved_by_human, approved_by, approved_at, created_at
+         ) VALUES ($1,$2,$3,$4,'directive',$5,'human_decision_resolution',$6::jsonb,
+                   1,1,'active',true,$7,$8,$8)`,
+        [
+          memoryId,
+          point.project_id,
+          point.phase_id,
+          point.task_id,
+          normalizedDirection,
+          JSON.stringify({
+            entity_type: "decision_record",
+            entity_id: recordId,
+          }),
+          input.user_id,
+          resolvedAt,
+        ],
+      );
+      await sql.query(
+        `UPDATE decision_points
+         SET status='resolved', resolved_at=$3, updated_at=$3
+         WHERE id=$1 AND project_id=$2 AND status='open'`,
+        [point.id, point.project_id, resolvedAt],
+      );
+      const stream = await sql.query<{ next: number }>(
+        `SELECT COALESCE(max(stream_version),0)::int + 1 AS next
+         FROM domain_events WHERE stream_type='decision_point' AND stream_id=$1`,
+        [point.id],
+      );
+      const streamVersion = stream.rows[0]?.next ?? 1;
+      await sql.query(
+        `INSERT INTO domain_events (
+           event_id, stream_type, stream_id, stream_version, event_type, project_id,
+           phase_id, task_id, actor_type, actor_id, correlation_id, causation_id,
+           occurred_at, payload
+         ) VALUES ($1,'decision_point',$2,$3,'decision_point_resolved',$4,$5,$6,
+                   'human',$7,$8,$2,$9,$10::jsonb)`,
+        [
+          `event:decision-resolved:${point.id}:${streamVersion}`,
+          point.id,
+          streamVersion,
+          point.project_id,
+          point.phase_id,
+          point.task_id,
+          input.user_id,
+          recordId,
+          resolvedAt,
+          JSON.stringify({
+            kind: "decision_point_resolved",
+            decision_point_id: point.id,
+            decision_record_id: recordId,
+            selected_option_id: input.selected_option_id,
+          }),
+        ],
+      );
+      await sql.query(
+        `INSERT INTO audit_events (
+           audit_id, audit_type, project_id, phase_id, task_id, actor_type, actor_id,
+           outcome, severity, correlation_id, causation_id, occurred_at, targets, summary, details
+         ) VALUES ($1,'decision_point_resolved',$2,$3,$4,'human',$5,'succeeded','info',
+                   $6,$7,$8,$9::jsonb,$10,$11::jsonb)`,
+        [
+          `audit:decision-resolved:${point.id}:${suffix}`,
+          point.project_id,
+          point.phase_id,
+          point.task_id,
+          input.user_id,
+          recordId,
+          point.id,
+          resolvedAt,
+          JSON.stringify([
+            { entity_type: "decision_point", entity_id: point.id },
+            { entity_type: "decision_record", entity_id: recordId },
+            { entity_type: "memory_entry", entity_id: memoryId },
+          ]),
+          `Resolved decision: ${point.question}`,
+          JSON.stringify({
+            selected_option_id: input.selected_option_id,
+            direction_target: input.direction_target,
+          }),
+        ],
+      );
+      const result = V2DecisionResolutionResult.parse({
+        decision_point_id: point.id,
+        approval_id: approvalId,
+        decision_record_id: recordId,
+        memory_entry_id: memoryId,
+        resolved_at: resolvedAt,
+      });
+      await sql.query(
+        `UPDATE idempotency_records SET status='committed_succeeded', response=$4::jsonb, updated_at=$3
+         WHERE actor_id=$1 AND command_family='decision_resolution' AND idempotency_key=$2`,
+        [input.user_id, input.idempotency_key, resolvedAt, JSON.stringify(result)],
+      );
+      return result;
+    });
+  }
+
+  recordDirection(input: {
+    user_id: string;
+    project_id: string;
+    phase_id?: string | null;
+    task_id?: string | null;
+    direction_target: V2DirectionTargetT;
+    direction_text: string;
+    idempotency_key: string;
+    now?: Date;
+  }): Promise<V2HumanDirectionResultT> {
+    const recordedAt = (input.now ?? new Date()).toISOString();
+    const phaseId = input.phase_id ?? null;
+    const taskId = input.task_id ?? null;
+    const requestFingerprint = stableFingerprint({
+      project_id: input.project_id,
+      phase_id: phaseId,
+      task_id: taskId,
+      direction_target: input.direction_target,
+      direction_text: input.direction_text.trim(),
+    });
+    return this.transactions.transaction(async (sql) => {
+      const project = await sql.query<{ id: string }>(
+        "SELECT id FROM projects WHERE id=$1 FOR UPDATE",
+        [input.project_id],
+      );
+      if (!project.rows[0]) {
+        throw new DecisionResolutionError("scope_not_found", "project does not exist");
+      }
+      if (phaseId) {
+        const phase = await sql.query<{ id: string }>(
+          "SELECT id FROM phases WHERE id=$1 AND project_id=$2",
+          [phaseId, input.project_id],
+        );
+        if (!phase.rows[0]) {
+          throw new DecisionResolutionError("scope_not_found", "phase does not exist in project");
+        }
+      }
+      if (taskId) {
+        const task = await sql.query<{ id: string }>(
+          "SELECT id FROM tasks WHERE id=$1 AND project_id=$2 AND phase_id=$3",
+          [taskId, input.project_id, phaseId],
+        );
+        if (!task.rows[0]) {
+          throw new DecisionResolutionError("scope_not_found", "task does not exist in phase");
+        }
+      }
+      const existing = await sql.query<{
+        request_fingerprint: string;
+        status: string;
+        response: unknown;
+      }>(
+        `SELECT request_fingerprint, status, response FROM idempotency_records
+         WHERE actor_id=$1 AND command_family='human_direction' AND idempotency_key=$2`,
+        [input.user_id, input.idempotency_key],
+      );
+      const prior = existing.rows[0];
+      if (prior) {
+        if (prior.request_fingerprint !== requestFingerprint) {
+          throw new DecisionResolutionError(
+            "idempotency_conflict",
+            "idempotency key was already used for different direction content or scope",
+          );
+        }
+        if (prior.status !== "committed_succeeded" || !prior.response) {
+          throw new DecisionResolutionError(
+            "idempotency_conflict",
+            "matching direction request is still in progress",
+          );
+        }
+        return V2HumanDirectionResult.parse({
+          ...(prior.response as Record<string, unknown>),
+          replayed: true,
+        });
+      }
+      const commandId = `human-direction:${stableFingerprint({ actor: input.user_id, key: input.idempotency_key }).slice(0, 32)}`;
+      await sql.query(
+        `INSERT INTO idempotency_records (
+           actor_id, command_family, idempotency_key, request_fingerprint, command_id,
+           status, retain_until
+         ) VALUES ($1,'human_direction',$2,$3,$4,'in_progress',$5::timestamptz + interval '30 days')`,
+        [input.user_id, input.idempotency_key, requestFingerprint, commandId, recordedAt],
+      );
+      const identitySuffix = stableFingerprint(commandId).slice(0, 32);
+      const directionId = `human-direction:${identitySuffix}`;
+      const memoryId = `memory:human-direction:${identitySuffix}`;
+      const scopeType = taskId ? "task" : phaseId ? "phase" : "project";
+      const scopeId = taskId ?? phaseId ?? input.project_id;
+      await sql.query(
+        `INSERT INTO human_directions (
+           id, project_id, phase_id, task_id, actor_id, idempotency_key,
+           direction_target, direction_text, content_hash, created_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [
+          directionId,
+          input.project_id,
+          phaseId,
+          taskId,
+          input.user_id,
+          input.idempotency_key,
+          input.direction_target,
+          input.direction_text.trim(),
+          requestFingerprint,
+          recordedAt,
+        ],
+      );
+      await sql.query(
+        `INSERT INTO project_memory_entries (
+           id, project_id, phase_id, task_id, category, content, provenance, source_ref,
+           confidence, version, status, approved_by_human, approved_by, approved_at, created_at
+         ) VALUES ($1,$2,$3,$4,'directive',$5,'human_proactive_direction',$6::jsonb,
+                   1,1,'active',true,$7,$8,$8)`,
+        [
+          memoryId,
+          input.project_id,
+          phaseId,
+          taskId,
+          input.direction_text.trim(),
+          JSON.stringify({
+            entity_type: "human_direction",
+            entity_id: directionId,
+          }),
+          input.user_id,
+          recordedAt,
+        ],
+      );
+      await sql.query(
+        `INSERT INTO audit_events (
+           audit_id, audit_type, project_id, phase_id, task_id, actor_type, actor_id,
+           outcome, severity, correlation_id, occurred_at, targets, summary, details
+         ) VALUES ($1,'human_direction_recorded',$2,$3,$4,'human',$5,'succeeded','info',
+                   $6,$7,$8::jsonb,'Human direction recorded; agent delivery pending context assembly',$9::jsonb)`,
+        [
+          `audit:human-direction:${identitySuffix}`,
+          input.project_id,
+          phaseId,
+          taskId,
+          input.user_id,
+          commandId,
+          recordedAt,
+          JSON.stringify([
+            { entity_type: "human_direction", entity_id: directionId },
+            { entity_type: scopeType, entity_id: scopeId },
+          ]),
+          JSON.stringify({
+            human_direction_id: directionId,
+            memory_entry_id: memoryId,
+            direction_target: input.direction_target,
+            delivery_status: "pending_context_assembly",
+          }),
+        ],
+      );
+      const response = V2HumanDirectionResult.parse({
+        memory_entry_id: memoryId,
+        recorded_at: recordedAt,
+        replayed: false,
+      });
+      await sql.query(
+        `UPDATE idempotency_records SET status='committed_succeeded', response=$4::jsonb, updated_at=$3
+         WHERE actor_id=$1 AND command_family='human_direction' AND idempotency_key=$2`,
+        [input.user_id, input.idempotency_key, recordedAt, JSON.stringify(response)],
+      );
+      return response;
+    });
+  }
+
   phase(projectId: string, phaseId: string): Promise<V2PhaseExecutionT> {
     return this.transactions.transaction(async (sql) => {
       const phase = await sql.query<{
@@ -332,8 +824,14 @@ export class AttentionService {
         complexity: string;
         risk: string;
         dependencies: string[];
+        implementation_profile_id: string | null;
         provider: string | null;
         model: string | null;
+        implementation_roles: unknown;
+        reviewer_profile_id: string | null;
+        reviewer_provider: string | null;
+        reviewer_model: string | null;
+        reviewer_roles: unknown;
         assignment_status: string | null;
         run_id: string | null;
         run_state: string | null;
@@ -346,7 +844,10 @@ export class AttentionService {
         `SELECT t.id, t.title, t.state, t.complexity, t.risk,
           COALESCE((SELECT jsonb_agg(d.predecessor_task_id ORDER BY d.predecessor_task_id)
                     FROM task_dependencies d WHERE d.successor_task_id=t.id),'[]'::jsonb) AS dependencies,
-          profile.provider, profile.model, assignment.status AS assignment_status,
+          profile.id AS implementation_profile_id, profile.provider, profile.model,
+          profile.roles AS implementation_roles, assignment.status AS assignment_status,
+          reviewer.id AS reviewer_profile_id, reviewer.provider AS reviewer_provider,
+          reviewer.model AS reviewer_model, reviewer.roles AS reviewer_roles,
           run.id AS run_id, run.state AS run_state, run.attempt, run.verification_status,
           run.commit_sha, run.failure_detail,
           (SELECT count(*)::int FROM verification_results verification
@@ -354,10 +855,40 @@ export class AttentionService {
          FROM tasks t
          LEFT JOIN agent_assignments assignment ON assignment.id=t.designated_assignment_id
          LEFT JOIN agent_profiles profile ON profile.id=assignment.agent_profile_id
+         LEFT JOIN agent_profiles reviewer ON reviewer.id=assignment.reviewer_agent_profile_id
          LEFT JOIN agent_runs run ON run.id=t.designated_run_id
          WHERE t.project_id=$1 AND t.phase_id=$2 ORDER BY t.created_at, t.id`,
         [projectId, phaseId],
       );
+      const reviewRows = await sql.query<{
+        id: string;
+        task_id: string;
+        run_id: string;
+        review_round: number;
+        decision: "approved" | "rework" | "escalated";
+        summary: string;
+        evidence: unknown;
+        created_at: string | Date;
+        reviewer_profile_id: string;
+        reviewer_provider: string;
+        reviewer_model: string;
+        reviewer_roles: unknown;
+      }>(
+        `SELECT review.id, review.task_id, review.run_id, review.review_round,
+          review.decision, review.summary, review.evidence, review.created_at,
+          review.reviewer_agent_profile_id AS reviewer_profile_id,
+          review.reviewer_provider, review.reviewer_model, review.reviewer_roles
+         FROM agent_reviews review
+         WHERE review.project_id=$1 AND review.phase_id=$2
+         ORDER BY review.task_id, review.review_round, review.created_at, review.id`,
+        [projectId, phaseId],
+      );
+      const reviewsByTask = new Map<string, typeof reviewRows.rows>();
+      for (const review of reviewRows.rows) {
+        const current = reviewsByTask.get(review.task_id) ?? [];
+        current.push(review);
+        reviewsByTask.set(review.task_id, current);
+      }
       return V2PhaseExecution.parse({
         schema_version: 2,
         project_id: projectId,
@@ -373,6 +904,24 @@ export class AttentionService {
             task.provider && task.model && task.assignment_status
               ? { provider: task.provider, model: task.model, status: task.assignment_status }
               : null,
+          implementation_agent:
+            task.implementation_profile_id && task.provider && task.model
+              ? {
+                  profile_id: task.implementation_profile_id,
+                  provider: task.provider,
+                  model: task.model,
+                  roles: Array.isArray(task.implementation_roles) ? task.implementation_roles : [],
+                }
+              : null,
+          reviewer_agent:
+            task.reviewer_profile_id && task.reviewer_provider && task.reviewer_model
+              ? {
+                  profile_id: task.reviewer_profile_id,
+                  provider: task.reviewer_provider,
+                  model: task.reviewer_model,
+                  roles: Array.isArray(task.reviewer_roles) ? task.reviewer_roles : [],
+                }
+              : null,
           run:
             task.run_id && task.run_state && task.attempt && task.verification_status
               ? {
@@ -385,6 +934,21 @@ export class AttentionService {
                 }
               : null,
           evidence_count: task.evidence_count,
+          reviews: (reviewsByTask.get(task.id) ?? []).map((review) => ({
+            id: review.id,
+            run_id: review.run_id,
+            review_round: review.review_round,
+            decision: review.decision,
+            summary: review.summary,
+            evidence: review.evidence,
+            reviewer: {
+              profile_id: review.reviewer_profile_id,
+              provider: review.reviewer_provider,
+              model: review.reviewer_model,
+              roles: Array.isArray(review.reviewer_roles) ? review.reviewer_roles : [],
+            },
+            created_at: iso(review.created_at),
+          })),
         })),
       });
     });
