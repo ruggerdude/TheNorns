@@ -97,4 +97,26 @@ describe.sequential("Phase 5 attention projections", () => {
       }),
     ]);
   });
+
+  it("snoozes unchanged material but immediately re-raises a changed condition", async () => {
+    const now = new Date("2026-07-16T21:00:00.000Z");
+    const item = (await attention.portfolio("user-1", { now })).items[0];
+    if (!item) throw new Error("missing attention item");
+    await attention.disposition({
+      user_id: "user-1",
+      item_key: item.key,
+      condition_fingerprint: item.condition_fingerprint,
+      disposition: "snoozed",
+      snoozed_until: "2026-07-16T22:00:00.000Z",
+      now,
+    });
+    expect((await attention.portfolio("user-1", { now })).items).toHaveLength(0);
+
+    await pg.query("UPDATE tasks SET aggregate_version=2 WHERE id='task-1'");
+    const changed = await attention.portfolio("user-1", {
+      now: new Date("2026-07-16T21:01:00.000Z"),
+    });
+    expect(changed.items).toHaveLength(1);
+    expect(changed.items[0]).toMatchObject({ key: item.key, snoozed_until: null });
+  });
 });
