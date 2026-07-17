@@ -197,7 +197,10 @@ describe("phase 1A — remote control", () => {
     stack.server.stores.revokeRunnerSessions("runner-1");
     stack.daemon.disconnectNow(); // force a reconnect under the old generation
 
-    await waitFor(() => stack?.daemon.isFenced === true, "daemon fenced");
+    await waitFor(
+      () => stack?.daemon.isFenced === true && stack.server.connectedRunners().length === 0,
+      "daemon fenced and stale socket removed",
+    );
     expect(stack.server.connectedRunners()).toHaveLength(0);
     const audit = (await (await stack.api("/api/audit")).json()) as { action: string }[];
     expect(audit.map((a) => a.action)).toContain("runner.fenced");
