@@ -10,6 +10,7 @@ import {
 } from "../src/coordinator/phase6Coordination.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
+import { ProjectResumeService } from "../src/projects/projectResumeService.js";
 
 const evidence = (id: string) => ({
   artifact_id: id,
@@ -373,6 +374,16 @@ describe.sequential("Phase 6 autonomous multi-agent coordination", () => {
       decisions: 1,
       active_reservations: 0,
       memory: 4,
+    });
+    const laterResume = await new ProjectResumeService(new PGliteTransactionRunner(pg)).open(
+      "project-6",
+    );
+    expect(laterResume).toMatchObject({
+      project: { id: "project-6", status: "active" },
+      phases: [expect.objectContaining({ id: "phase-6", status: "completed", tasks: 3 })],
+      active_memory_entries: 4,
+      next_recommended_action: "Review open decision points",
+      attention: expect.objectContaining({ open_decisions: 1 }),
     });
   }, 30_000);
 });

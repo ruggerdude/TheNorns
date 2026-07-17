@@ -29,6 +29,7 @@ import {
   authHeaders,
   clearToken,
   consumeInviteToken,
+  consumeRecoveryToken,
   fetchAuthStatus,
   fetchMe,
   getToken,
@@ -1161,17 +1162,18 @@ export function App(): React.ReactElement {
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [needsBootstrap, setNeedsBootstrap] = useState(false);
   const [inviteToken] = useState<string | null>(() => consumeInviteToken());
+  const [recoveryToken, setRecoveryToken] = useState<string | null>(() => consumeRecoveryToken());
   const [showAccount, setShowAccount] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
 
   useEffect(() => {
     // An invite link always wins, regardless of bootstrap state — no need to
     // ask the server at all in that case.
-    if (token || inviteToken) return;
+    if (token || inviteToken || recoveryToken) return;
     fetchAuthStatus()
       .then((status) => setNeedsBootstrap(status.needs_bootstrap))
       .catch(() => setNeedsBootstrap(false));
-  }, [token, inviteToken]);
+  }, [token, inviteToken, recoveryToken]);
 
   useEffect(() => {
     if (!token) {
@@ -1195,7 +1197,7 @@ export function App(): React.ReactElement {
     setToken(session.token);
     setUser(session.user);
     setAuthError(null);
-    setTok(session.token);
+    setTok("present");
   }, []);
 
   const logout = useCallback((message: string) => {
@@ -1225,11 +1227,19 @@ export function App(): React.ReactElement {
   }, []);
 
   if (!token) {
-    const mode: LoginMode = inviteToken ? "invite" : needsBootstrap ? "bootstrap" : "login";
+    const mode: LoginMode = recoveryToken
+      ? "recovery"
+      : inviteToken
+        ? "invite"
+        : needsBootstrap
+          ? "bootstrap"
+          : "login";
     return (
       <Login
         mode={mode}
         inviteToken={inviteToken}
+        recoveryToken={recoveryToken}
+        onRecoveryComplete={() => setRecoveryToken(null)}
         onAuthenticated={authenticated}
         error={authError}
       />

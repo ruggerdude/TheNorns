@@ -16,6 +16,7 @@ import { buildDashboard } from "./dashboard.js";
 import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
 import { GraphSession } from "./graph/session.js";
+import { Phase7OperationsService } from "./operations/phase7Operations.js";
 import {
   Phase2ApplicationPersistenceLease,
   Phase2PersistenceLeaseUnavailableError,
@@ -109,6 +110,7 @@ let phase4Services:
   | undefined;
 let phase5Services: { attention: AttentionService } | undefined;
 let phase6Services: { coordination: Phase6CoordinationService } | undefined;
+let phase7Services: { operations: Phase7OperationsService } | undefined;
 
 if (databaseUrl) {
   try {
@@ -147,6 +149,7 @@ if (databaseUrl) {
     };
     phase5Services = { attention: new AttentionService(runtimeTransactions) };
     phase6Services = { coordination: new Phase6CoordinationService(runtimeTransactions) };
+    phase7Services = { operations: new Phase7OperationsService(runtimeTransactions) };
     if (identityRoute?.read_mode === "relational" && identityRoute.write_mode === "relational") {
       await assertCredentialHmacKeyCoverage(
         runtimeTransactions,
@@ -384,6 +387,7 @@ const server = await buildServer({
   ...(phase4Services !== undefined ? { phase4: phase4Services } : {}),
   ...(phase5Services !== undefined ? { phase5: phase5Services } : {}),
   ...(phase6Services !== undefined ? { phase6: phase6Services } : {}),
+  ...(phase7Services !== undefined ? { phase7: phase7Services } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),
   ...(usersFlusher !== undefined ? { persistUsers: () => usersFlusher.flush() } : {}),

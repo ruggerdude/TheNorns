@@ -26,8 +26,15 @@
   Foundation`.
 - [x] Phase 1 candidate contracts, normalized schema, transactional boundary,
   compatibility repositories, and required verification evidence.
-- [ ] Claude Fable independent review of the Phase 1 candidate contract
+- [x] Claude Fable independent review of the Phase 1 candidate contract
   package, disposition, and final contract freeze.
+- [x] Re-foundation Phase 2 — preservation migration and recovery checkpoint.
+- [x] Re-foundation Phase 3 — persistent project, source binding, and phase workflow.
+- [x] Re-foundation Phase 4 — coordinator and runner execution loop.
+- [x] Re-foundation Phase 5 — attention-first dashboard and execution monitoring.
+- [x] Re-foundation Phase 6 — multi-agent autonomous coordination.
+- [x] Re-foundation Phase 7 — security hardening, existing-project pilot,
+  progressive cutover controls, and separately gated legacy-retirement authorization.
 
 ## Done
 - [x] NORN-001 — Review original MVP PRD; produce corrected R2 (`TheNorns_MVP_PRD.md`)

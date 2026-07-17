@@ -1,19 +1,30 @@
 import { useEffect, useRef, useState } from "react";
 import type { AuthSession } from "./auth";
-import { acceptInvite, bootstrap, describeAuthError, login } from "./auth";
+import {
+  acceptInvite,
+  bootstrap,
+  completePasswordRecovery,
+  describeAuthError,
+  login,
+  requestPasswordRecovery,
+} from "./auth";
 import { Alert, Brand, Button, Field, Input } from "./ui";
 
-export type LoginMode = "login" | "bootstrap" | "invite";
+export type LoginMode = "login" | "bootstrap" | "invite" | "recovery";
 
 export function Login({
   mode,
   inviteToken,
+  recoveryToken,
   onAuthenticated,
+  onRecoveryComplete,
   error: externalError,
 }: {
   mode: LoginMode;
   inviteToken?: string | null;
+  recoveryToken?: string | null;
   onAuthenticated: (session: AuthSession) => void;
+  onRecoveryComplete?: () => void;
   error: string | null;
 }): React.ReactElement {
   const [email, setEmail] = useState("");
@@ -22,6 +33,8 @@ export function Login({
   const [deployToken, setDeployToken] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [requestMode, setRequestMode] = useState(false);
+  const [recoverySent, setRecoverySent] = useState(false);
   const firstRef = useRef<HTMLInputElement>(null);
   useEffect(() => firstRef.current?.focus(), []);
 
@@ -32,6 +45,18 @@ export function Login({
     setSubmitting(true);
     setFormError(null);
     try {
+      if (requestMode) {
+        await requestPasswordRecovery(email.trim());
+        setRecoverySent(true);
+        setSubmitting(false);
+        return;
+      }
+      if (mode === "recovery") {
+        await completePasswordRecovery(recoveryToken ?? "", password);
+        setSubmitting(false);
+        onRecoveryComplete?.();
+        return;
+      }
       const session =
         mode === "bootstrap"
           ? await bootstrap(deployToken.trim(), email.trim(), password, name.trim() || undefined)
@@ -50,28 +75,50 @@ export function Login({
       ? "Set up the first admin account"
       : mode === "invite"
         ? "Accept your invite"
-        : "Enter your workspace";
+        : mode === "recovery"
+          ? "Reset your password"
+          : requestMode
+            ? "Recover your account"
+            : "Enter your workspace";
   const subhead =
     mode === "bootstrap"
       ? "This runs once. Use the deploy setup key to create the first admin."
       : mode === "invite"
         ? "Choose a password to activate your account."
-        : "Sign in with your email and password.";
+        : mode === "recovery"
+          ? "Choose a new password. Every existing session will be revoked."
+          : requestMode
+            ? "We'll email a one-hour reset link if this account exists."
+            : "Sign in with your email and password.";
   const eyebrow =
-    mode === "bootstrap" ? "First-time setup" : mode === "invite" ? "Welcome" : "Welcome back";
+    mode === "bootstrap"
+      ? "First-time setup"
+      : mode === "invite"
+        ? "Welcome"
+        : mode === "recovery" || requestMode
+          ? "Account recovery"
+          : "Welcome back";
   const submitLabel =
     mode === "bootstrap"
       ? "Create admin account"
       : mode === "invite"
         ? "Activate account"
-        : "Sign in";
+        : mode === "recovery"
+          ? "Reset password"
+          : requestMode
+            ? "Send recovery link"
+            : "Sign in";
 
   const canSubmit =
     mode === "bootstrap"
       ? deployToken.trim().length > 0 && email.trim().length > 0 && password.length >= 8
       : mode === "invite"
         ? password.length >= 8
-        : email.trim().length > 0 && password.length > 0;
+        : mode === "recovery"
+          ? password.length >= 8
+          : requestMode
+            ? email.trim().length > 0
+            : email.trim().length > 0 && password.length > 0;
 
   return (
     <main className="login">
@@ -110,7 +157,7 @@ export function Login({
             </Field>
           ) : null}
 
-          {mode !== "invite" ? (
+          {mode !== "invite" && mode !== "recovery" ? (
             <Field label="Email">
               <Input
                 ref={mode === "login" ? firstRef : undefined}
@@ -133,18 +180,23 @@ export function Login({
             </Field>
           ) : null}
 
-          <Field label={mode === "login" ? "Password" : "Choose a password"}>
-            <Input
-              ref={mode === "invite" ? firstRef : undefined}
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={mode === "login" ? "Enter password" : "At least 8 characters"}
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-            />
-          </Field>
+          {!requestMode ? (
+            <Field label={mode === "login" ? "Password" : "Choose a password"}>
+              <Input
+                ref={mode === "invite" || mode === "recovery" ? firstRef : undefined}
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={mode === "login" ? "Enter password" : "At least 8 characters"}
+                autoComplete={mode === "login" ? "current-password" : "new-password"}
+              />
+            </Field>
+          ) : null}
 
           {error ? <Alert testId="login-error">{error}</Alert> : null}
+          {recoverySent ? (
+            <Alert>If the account exists, a recovery link has been sent.</Alert>
+          ) : null}
           <Button
             variant="primary"
             className="btn-block"
@@ -153,6 +205,19 @@ export function Login({
           >
             {submitting ? "Working…" : submitLabel}
           </Button>
+          {mode === "login" ? (
+            <Button
+              variant="ghost"
+              type="button"
+              onClick={() => {
+                setRequestMode((current) => !current);
+                setRecoverySent(false);
+                setFormError(null);
+              }}
+            >
+              {requestMode ? "Back to sign in" : "Forgot password?"}
+            </Button>
+          ) : null}
         </form>
       </section>
     </main>

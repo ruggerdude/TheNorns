@@ -14,6 +14,7 @@ import type {
   CreateActiveIdentityInput,
   CreateIdentityInviteInput,
   IdentityService,
+  IdentitySessionSummary,
   IdentityUser,
   IdentityUserStatus,
   IdentityUserSummary,
@@ -41,6 +42,7 @@ type IdFactory = (kind: "user") => string;
 
 const DEFAULT_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const DEFAULT_INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const DEFAULT_RECOVERY_TTL_MS = 60 * 60 * 1_000;
 
 interface UserRow {
   id: string;
@@ -132,7 +134,7 @@ function storedCredential(
     token_hash_scheme: string;
     token_key_id: string | null;
   },
-  kind: "session" | "invite",
+  kind: "session" | "invite" | "recovery",
 ): StoredSplitCredential | null {
   if (row.token_hash_scheme !== CREDENTIAL_HASH_SCHEME || row.token_key_id === null) {
     return null;
@@ -347,11 +349,11 @@ export class RelationalIdentityService implements IdentityService {
         `INSERT INTO sessions (
            id, user_id, token_hash, token_hash_scheme, token_key_id,
            status, created_at, expires_at, revoked_at, last_seen_at,
-           revocation_reason, source, source_record_id
+           revocation_reason, source, source_record_id, authenticated_at
          ) VALUES (
            $1, $2, $3, $4, $5,
            'active', $6, $7, NULL, $6,
-           NULL, 'native', NULL
+           NULL, 'native', NULL, $6
          )`,
         [
           issued.stored.id,
@@ -361,6 +363,16 @@ export class RelationalIdentityService implements IdentityService {
           issued.stored.key_id,
           now.toISOString(),
           later(now, this.sessionTtlMs),
+        ],
+      );
+      await sql.query(
+        `INSERT INTO security_notifications (id, user_id, kind, detail, created_at)
+         VALUES ($1,$2,'session_created',$3::jsonb,$4)`,
+        [
+          `security:session:${issued.stored.id}`,
+          row.id,
+          JSON.stringify({ session_id: issued.stored.id }),
+          now.toISOString(),
         ],
       );
       return { token: issued.token, user: summary(row) };
@@ -409,6 +421,166 @@ export class RelationalIdentityService implements IdentityService {
          ORDER BY created_at, id`,
       );
       return result.rows.map(summary);
+    });
+  }
+
+  async isRecentSession(token: string, maximumAgeMs: number): Promise<boolean> {
+    assertDuration("maximumAgeMs", maximumAgeMs);
+    const parsed = parseSplitCredential(token, "session");
+    if (!parsed || !(await this.userForToken(token))) return false;
+    return this.transactions.transaction(async (sql) => {
+      const result = await sql.query<{ authenticated_at: Date | string }>(
+        "SELECT authenticated_at FROM sessions WHERE id=$1 AND status='active'",
+        [parsed.id],
+      );
+      const authenticatedAt = result.rows[0]?.authenticated_at;
+      return (
+        authenticatedAt !== undefined &&
+        this.clock().getTime() - new Date(authenticatedAt).getTime() <= maximumAgeMs
+      );
+    });
+  }
+
+  async listSessions(userId: string, currentToken: string): Promise<IdentitySessionSummary[]> {
+    const current = parseSplitCredential(currentToken, "session")?.id ?? null;
+    return this.transactions.transaction(async (sql) => {
+      const result = await sql.query<{
+        id: string;
+        status: "active" | "revoked" | "expired";
+        created_at: Date | string;
+        authenticated_at: Date | string;
+        expires_at: Date | string;
+        last_seen_at: Date | string | null;
+      }>(
+        `SELECT id, status, created_at, authenticated_at, expires_at, last_seen_at
+         FROM sessions WHERE user_id=$1 ORDER BY created_at DESC, id`,
+        [userId],
+      );
+      return result.rows.map((row) => ({
+        id: row.id,
+        status: row.status,
+        created_at: iso(row.created_at),
+        authenticated_at: iso(row.authenticated_at),
+        expires_at: iso(row.expires_at),
+        last_seen_at: row.last_seen_at === null ? null : iso(row.last_seen_at),
+        current: row.id === current,
+      }));
+    });
+  }
+
+  async revokeSession(userId: string, sessionId: string): Promise<void> {
+    const revokedAt = this.clock().toISOString();
+    await this.transactions.transaction(async (sql) => {
+      await sql.query(
+        `UPDATE sessions SET status='revoked', revoked_at=$3,
+                             revocation_reason='session_inventory_revocation'
+         WHERE id=$1 AND user_id=$2 AND status='active'`,
+        [sessionId, userId, revokedAt],
+      );
+    });
+  }
+
+  async requestPasswordRecovery(email: string): Promise<string | undefined> {
+    const now = this.clock();
+    return this.transactions.transaction(async (sql) => {
+      const user = await findUserByEmail(sql, normalizedEmail(email), true);
+      if (!user || user.status !== "active") return undefined;
+      await sql.query(
+        `UPDATE password_recovery_tokens SET status='revoked'
+         WHERE user_id=$1 AND status='pending'`,
+        [user.id],
+      );
+      const issued = issueSplitCredential(
+        "recovery",
+        this.credentialKeys.current,
+        this.randomBytes,
+      );
+      await sql.query(
+        `INSERT INTO password_recovery_tokens (
+           id, user_id, token_hash, token_hash_scheme, token_key_id,
+           status, created_at, expires_at
+         ) VALUES ($1,$2,$3,$4,$5,'pending',$6,$7)`,
+        [
+          issued.stored.id,
+          user.id,
+          issued.stored.secret_hash,
+          issued.stored.hash_scheme,
+          issued.stored.key_id,
+          now.toISOString(),
+          later(now, DEFAULT_RECOVERY_TTL_MS),
+        ],
+      );
+      await sql.query(
+        `INSERT INTO security_notifications (id,user_id,kind,detail,created_at)
+         VALUES ($1,$2,'password_recovery_requested','{}'::jsonb,$3)`,
+        [`security:recovery:${issued.stored.id}`, user.id, now.toISOString()],
+      );
+      return issued.token;
+    });
+  }
+
+  async resetPassword(recoveryToken: string, password: string): Promise<void> {
+    const parsed = parseSplitCredential(recoveryToken, "recovery");
+    if (!parsed) throw new InvalidCredentialsError();
+    const now = this.clock();
+    await this.transactions.transaction(async (sql) => {
+      const result = await sql.query<{
+        id: string;
+        user_id: string;
+        token_hash: string;
+        token_hash_scheme: string;
+        token_key_id: string;
+        status: string;
+        expires_at: Date | string;
+      }>("SELECT * FROM password_recovery_tokens WHERE id=$1 FOR UPDATE", [parsed.id]);
+      const row = result.rows[0];
+      const verifier = row
+        ? storedCredential(
+            {
+              id: row.id,
+              token_hash: row.token_hash,
+              token_hash_scheme: row.token_hash_scheme,
+              token_key_id: row.token_key_id,
+            },
+            "recovery",
+          )
+        : null;
+      const key = verifier ? this.credentialKeys.byId.get(verifier.key_id) : undefined;
+      if (
+        !row ||
+        row.status !== "pending" ||
+        new Date(row.expires_at).getTime() <= now.getTime() ||
+        !verifier ||
+        !key ||
+        !verifySplitCredential(recoveryToken, verifier, key)
+      ) {
+        throw new InvalidCredentialsError();
+      }
+      await sql.query(
+        `UPDATE users SET password_hash=$2, password_hash_scheme=$3,
+                          password_rehashed_at=$4, updated_at=$4 WHERE id=$1`,
+        [
+          row.user_id,
+          hashCurrentPassword(password, this.randomBytes),
+          CURRENT_PASSWORD_HASH_SCHEME,
+          now.toISOString(),
+        ],
+      );
+      await sql.query(
+        "UPDATE password_recovery_tokens SET status='consumed', consumed_at=$2 WHERE id=$1",
+        [row.id, now.toISOString()],
+      );
+      await sql.query(
+        `UPDATE sessions SET status='revoked', revoked_at=$2,
+                             revocation_reason='password_changed'
+         WHERE user_id=$1 AND status='active'`,
+        [row.user_id, now.toISOString()],
+      );
+      await sql.query(
+        `INSERT INTO security_notifications (id,user_id,kind,detail,created_at)
+         VALUES ($1,$2,'password_changed','{}'::jsonb,$3)`,
+        [`security:password-changed:${row.id}`, row.user_id, now.toISOString()],
+      );
     });
   }
 

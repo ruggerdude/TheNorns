@@ -38,6 +38,16 @@ export interface CreateIdentityInviteInput {
   role: UserRole;
 }
 
+export interface IdentitySessionSummary {
+  id: string;
+  status: "active" | "revoked" | "expired";
+  created_at: string;
+  authenticated_at: string;
+  expires_at: string;
+  last_seen_at: string | null;
+  current: boolean;
+}
+
 export class IdentityAlreadyBootstrappedError extends Error {
   constructor() {
     super("an active administrator already exists");
@@ -65,6 +75,12 @@ export interface IdentityService {
   acceptInvite(inviteToken: string, password: string): Promise<IdentityUserSummary>;
   disable(id: string): Promise<void>;
   remove(id: string): Promise<void>;
+  /** Phase 7 capabilities are optional only for the legacy compatibility adapter. */
+  isRecentSession?(token: string, maximumAgeMs: number): Promise<boolean>;
+  listSessions?(userId: string, currentToken: string): Promise<IdentitySessionSummary[]>;
+  revokeSession?(userId: string, sessionId: string): Promise<void>;
+  requestPasswordRecovery?(email: string): Promise<string | undefined>;
+  resetPassword?(recoveryToken: string, password: string): Promise<void>;
 }
 
 export {

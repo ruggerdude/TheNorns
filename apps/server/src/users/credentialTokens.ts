@@ -10,7 +10,7 @@ const CREDENTIAL_KEY_BYTES = 32;
 const CREDENTIAL_ID_BYTES = 16;
 const CREDENTIAL_SECRET_BYTES = 32;
 
-export type CredentialKind = "session" | "invite";
+export type CredentialKind = "session" | "invite" | "recovery";
 
 export interface CredentialHmacKey {
   keyId: string;

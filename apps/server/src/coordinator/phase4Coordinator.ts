@@ -108,6 +108,16 @@ export class Phase4Coordinator {
       );
       const row = rows.rows[0];
       if (!row) throw new Phase4CoordinatorConflictError("task scheduling scope is unavailable");
+      const revocation = await sql.query<{ revoked_through_generation: number }>(
+        "SELECT revoked_through_generation FROM runner_revocations WHERE runner_id=$1",
+        [input.runner_id],
+      );
+      if (
+        revocation.rows[0] &&
+        input.runner_generation <= revocation.rows[0].revoked_through_generation
+      ) {
+        throw new Phase4CoordinatorConflictError("runner generation has been revoked");
+      }
       if (!input.authorized_by.actor_id) {
         throw new Phase4CoordinatorConflictError("dispatch authorization must be attributable");
       }

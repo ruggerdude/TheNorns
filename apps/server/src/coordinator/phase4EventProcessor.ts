@@ -36,6 +36,13 @@ export class Phase4EventProcessor {
   apply(input: EventEnvelopeT): Promise<{ duplicate: boolean; ignored?: boolean }> {
     const event = EventEnvelope.parse(input);
     return this.transactions.transaction(async (sql) => {
+      const revocation = await sql.query<{ revoked_through_generation: number }>(
+        "SELECT revoked_through_generation FROM runner_revocations WHERE runner_id=$1",
+        [event.runner_id],
+      );
+      if (revocation.rows[0] && event.generation <= revocation.rows[0].revoked_through_generation) {
+        throw new Phase4RunnerEventRejectedError("runner generation is revoked");
+      }
       const eventId = `runner-event:${event.runner_id}:${event.generation}:${event.event_seq}`;
       const inserted = await sql.query<{ id: string }>(
         `INSERT INTO runner_events (

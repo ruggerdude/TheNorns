@@ -50,6 +50,7 @@ import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
 import { GraphEditError } from "./graph/graph.js";
 import { newId, nonce, pairingCode } from "./ids.js";
+import type { Phase7OperationsService } from "./operations/phase7Operations.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
 import type { AttentionService } from "./projects/attentionService.js";
 import type { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
@@ -159,6 +160,7 @@ export interface ServerOptions {
   };
   phase5?: { attention: AttentionService };
   phase6?: { coordination: Phase6CoordinationService };
+  phase7?: { operations: Phase7OperationsService };
   /**
    * DEMO-ONLY dashboard provider (engine + ledger composition). When set, it is
    * exposed at GET /api/demo/dashboard and returns the same illustrative demo
@@ -172,6 +174,10 @@ export interface ServerOptions {
   recordUsage?: (events: UsageEventT[]) => void;
   /** Test/deployment seam for constructing an adapter for an exact provider model. */
   createPlanningAdapter?: (provider: ProviderName, model: string, apiKey: string) => LlmAdapter;
+  /** Force Secure browser cookies in production and production-shaped tests. */
+  secureCookies?: boolean;
+  /** Canonical browser origin used in emailed links. */
+  publicOrigin?: string;
 }
 
 export interface NornsServer {
@@ -184,7 +190,7 @@ export interface NornsServer {
 export async function buildServer(options: ServerOptions): Promise<NornsServer> {
   const { stores, users, deployToken } = options;
   const usesLegacyIdentity = options.identity === undefined;
-  const identityService = options.identity ?? new LegacyIdentityService(users);
+  const identityService: IdentityService = options.identity ?? new LegacyIdentityService(users);
   const now = options.clock ?? (() => new Date());
   const app = Fastify({ logger: false });
   await app.register(websocket);
@@ -192,6 +198,71 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const runnerSockets = new Map<string, WsLike>();
   const sessionSockets = new Map<WsLike, SessionSocketBinding>();
   const loginThrottle = new LoginAttemptThrottle();
+  const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
+  const configuredOrigin =
+    options.publicOrigin ??
+    process.env.NORNS_PUBLIC_ORIGIN ??
+    (process.env.RAILWAY_PUBLIC_DOMAIN
+      ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+      : undefined);
+  const SESSION_COOKIE = "norns_session";
+  const CSRF_COOKIE = "norns_csrf";
+  const RECENT_AUTH_MS = 15 * 60_000;
+
+  const cookies = (req: FastifyRequest): Map<string, string> => {
+    const result = new Map<string, string>();
+    for (const segment of (req.headers.cookie ?? "").split(";")) {
+      const separator = segment.indexOf("=");
+      if (separator <= 0) continue;
+      const key = segment.slice(0, separator).trim();
+      const value = segment.slice(separator + 1).trim();
+      try {
+        result.set(key, decodeURIComponent(value));
+      } catch {
+        // Invalid cookie encoding is treated as absent.
+      }
+    }
+    return result;
+  };
+  const credentialFor = (req: FastifyRequest): string | undefined =>
+    bearerToken(req.headers.authorization) ?? cookies(req).get(SESSION_COOKIE);
+  const cookieAttributes = `Path=/; SameSite=Strict${secureCookies ? "; Secure" : ""}`;
+  const setBrowserSession = (reply: FastifyReply, token: string, csrf: string): void => {
+    reply.header("Set-Cookie", [
+      `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; ${cookieAttributes}`,
+      `${CSRF_COOKIE}=${encodeURIComponent(csrf)}; ${cookieAttributes}`,
+    ]);
+    reply.header("Cache-Control", "no-store");
+  };
+  const clearBrowserSession = (reply: FastifyReply): void => {
+    reply.header("Set-Cookie", [
+      `${SESSION_COOKIE}=; Max-Age=0; HttpOnly; ${cookieAttributes}`,
+      `${CSRF_COOKIE}=; Max-Age=0; ${cookieAttributes}`,
+    ]);
+    reply.header("Cache-Control", "no-store");
+  };
+  const externalOrigin = (req: FastifyRequest): string => {
+    if (configuredOrigin) {
+      const parsed = new URL(configuredOrigin);
+      if (!["http:", "https:"].includes(parsed.protocol)) {
+        throw new Error("NORNS_PUBLIC_ORIGIN must use http or https");
+      }
+      return parsed.origin;
+    }
+    return `${req.protocol}://${req.headers.host}`;
+  };
+
+  app.addHook("preHandler", async (req, reply) => {
+    if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return;
+    if (bearerToken(req.headers.authorization)) return;
+    const requestCookies = cookies(req);
+    if (!requestCookies.has(SESSION_COOKIE)) return;
+    const cookieCsrf = requestCookies.get(CSRF_COOKIE);
+    const headerCsrf = req.headers["x-csrf-token"];
+    if (!cookieCsrf || typeof headerCsrf !== "string" || headerCsrf !== cookieCsrf) {
+      reply.code(403).send({ error: "csrf_rejected" });
+    }
+  });
 
   const sendFrame = (socket: WsLike, frame: ServerFrameT): void => {
     socket.send(JSON.stringify(frame));
@@ -309,7 +380,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
    *  per-user sessions are the only session credential — the deploy token is
    *  never accepted here, only by the bootstrap route below. */
   const resolveUser = async (req: FastifyRequest): Promise<IdentityUser | undefined> => {
-    const token = bearerToken(req.headers.authorization);
+    const token = credentialFor(req);
     if (!token) return undefined;
     return identityService.userForToken(token);
   };
@@ -339,6 +410,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (user.role !== "admin") {
       stores.audit(user.email, "auth.forbidden", `${req.method} ${req.url}`, now());
       reply.code(403).send({ error: "forbidden", message: "admin role required" });
+      return null;
+    }
+    if (
+      !["GET", "HEAD", "OPTIONS"].includes(req.method) &&
+      identityService.isRecentSession &&
+      !(await identityService.isRecentSession(credentialFor(req) ?? "", RECENT_AUTH_MS))
+    ) {
+      stores.audit(user.email, "auth.recent_required", `${req.method} ${req.url}`, now());
+      reply.code(403).send({ error: "recent_auth_required" });
       return null;
     }
     return user;
@@ -407,7 +487,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       return reply.code(503).send({ error: "auth_persistence_unavailable" });
     }
     stores.audit(summary.email, "auth.bootstrapped", summary.id, now());
-    reply.code(201).send({ token, user: summary });
+    const csrf = nonce();
+    setBrowserSession(reply, token, csrf);
+    const bearerRequested = req.headers["x-norns-api-client"] === "bearer";
+    reply.code(201).send({
+      user: summary,
+      csrf_token: csrf,
+      ...(bearerRequested || usesLegacyIdentity ? { token } : {}),
+    });
   });
 
   const LoginBody = z.object({ email: z.string().email(), password: z.string().min(1) });
@@ -426,7 +513,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       const { token, user } = await identityService.login(body.data.email, body.data.password);
       loginThrottle.recordSuccess(throttleKey);
       stores.audit(user.email, "auth.login", user.id, now());
-      reply.send({ token, user });
+      const csrf = nonce();
+      setBrowserSession(reply, token, csrf);
+      const bearerRequested = req.headers["x-norns-api-client"] === "bearer";
+      reply.send({
+        user,
+        csrf_token: csrf,
+        ...(bearerRequested || usesLegacyIdentity ? { token } : {}),
+      });
     } catch {
       loginThrottle.recordFailure(throttleKey, attemptedAt);
       stores.audit("anonymous", "auth.login_failed", body.data.email, now());
@@ -435,11 +529,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   });
 
   app.post("/api/auth/logout", async (req, reply) => {
-    const token = bearerToken(req.headers.authorization);
+    const token = credentialFor(req);
     if (token) {
       await identityService.logout(token);
       closeMatchingSessionSockets((binding) => binding.token === token, "session logged out");
     }
+    clearBrowserSession(reply);
     reply.send({ ok: true });
   });
 
@@ -453,6 +548,71 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       role: user.role,
       status: user.status,
     });
+  });
+
+  app.get("/api/auth/sessions", async (req, reply) => {
+    const user = await resolveUser(req);
+    const token = credentialFor(req);
+    if (!user || !token) return reply.code(401).send({ error: "unauthorized" });
+    if (!identityService.listSessions) {
+      return reply.code(409).send({ error: "relational_identity_required" });
+    }
+    reply.send({ sessions: await identityService.listSessions(user.id, token) });
+  });
+
+  app.delete("/api/auth/sessions/:sessionId", async (req, reply) => {
+    const user = await resolveUser(req);
+    if (!user) return reply.code(401).send({ error: "unauthorized" });
+    if (!identityService.revokeSession) {
+      return reply.code(409).send({ error: "relational_identity_required" });
+    }
+    const { sessionId } = req.params as { sessionId: string };
+    await identityService.revokeSession(user.id, sessionId);
+    closeMatchingSessionSockets(
+      (binding) => binding.userId === user.id,
+      "session inventory changed",
+    );
+    stores.audit(user.email, "auth.session_revoked", sessionId, now());
+    reply.send({ ok: true });
+  });
+
+  const RecoveryRequestBody = z.object({ email: z.string().email() });
+  app.post("/api/auth/recovery/request", async (req, reply) => {
+    const body = RecoveryRequestBody.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: "bad_request" });
+    const token = await identityService.requestPasswordRecovery?.(body.data.email);
+    if (token) {
+      const origin = externalOrigin(req);
+      const resetUrl = `${origin}/?recovery=${encodeURIComponent(token)}`;
+      try {
+        await sendEmail({
+          to: body.data.email,
+          subject: "Reset your TheNorns password",
+          html: `<p><a href="${resetUrl}">Reset your password</a>. This link expires in one hour.</p>`,
+        });
+      } catch {
+        stores.audit("system", "auth.recovery_email_failed", "redacted-recipient", now());
+      }
+    }
+    reply.code(202).send({ accepted: true });
+  });
+
+  const RecoveryCompleteBody = z.object({
+    recovery_token: z.string().min(1),
+    password: z.string().min(8),
+  });
+  app.post("/api/auth/recovery/complete", async (req, reply) => {
+    const body = RecoveryCompleteBody.safeParse(req.body);
+    if (!body.success || !identityService.resetPassword) {
+      return reply.code(400).send({ error: "invalid_recovery" });
+    }
+    try {
+      await identityService.resetPassword(body.data.recovery_token, body.data.password);
+      clearBrowserSession(reply);
+      reply.send({ ok: true });
+    } catch {
+      reply.code(400).send({ error: "invalid_recovery" });
+    }
   });
 
   const AcceptInviteBody = z.object({
@@ -469,7 +629,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       );
       const { token } = await identityService.login(summary.email, body.data.password);
       stores.audit(summary.email, "auth.invite_accepted", summary.id, now());
-      reply.send({ token, user: summary });
+      const csrf = nonce();
+      setBrowserSession(reply, token, csrf);
+      const bearerRequested = req.headers["x-norns-api-client"] === "bearer";
+      reply.send({
+        user: summary,
+        csrf_token: csrf,
+        ...(bearerRequested || usesLegacyIdentity ? { token } : {}),
+      });
     } catch {
       reply.code(400).send({
         error: "invalid_invite",
@@ -527,7 +694,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         message: error instanceof Error ? error.message : String(error),
       });
     }
-    const origin = `${req.protocol}://${req.headers.host}`;
+    const origin = externalOrigin(req);
     const acceptUrl = `${origin}/?invite=${created.inviteToken}`;
     try {
       await sendEmail({
@@ -572,6 +739,96 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       reply.code(404).send({ error: "not_found" });
     }
   });
+
+  if (options.phase7) {
+    const RevokeRunnerBody = z.object({
+      revoked_through_generation: z.number().int().nonnegative(),
+      reason: z.string().min(1),
+    });
+    app.post("/api/admin/runners/:runnerId/revoke", async (req, reply) => {
+      const admin = await requireAdmin(req, reply);
+      if (!admin) return;
+      const body = RevokeRunnerBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      const { runnerId } = req.params as { runnerId: string };
+      await options.phase7?.operations.revokeRunner({
+        runner_id: runnerId,
+        ...body.data,
+        revoked_by: admin.id,
+        revoked_at: now().toISOString(),
+      });
+      stores.revokeRunnerSessions(runnerId);
+      const socket = runnerSockets.get(runnerId);
+      socket?.close(1008, "runner revoked");
+      reply.send({ ok: true });
+    });
+
+    const DrillBody = z.object({
+      id: z.string().min(1),
+      drill_type: z.enum(["restore", "chaos", "load", "soak", "runner_fencing", "audit"]),
+      source_revision: z.string().min(1),
+      target_reference: z.string().min(1),
+      started_at: z.string().datetime(),
+      completed_at: z.string().datetime(),
+      recovery_time_seconds: z.number().int().nonnegative(),
+      recovery_point_seconds: z.number().int().nonnegative(),
+      passed: z.boolean(),
+      evidence: z.array(z.unknown()).min(1),
+    });
+    app.post("/api/admin/resilience/drills", async (req, reply) => {
+      const admin = await requireAdmin(req, reply);
+      if (!admin) return;
+      const body = DrillBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      try {
+        await options.phase7?.operations.recordDrill({ ...body.data, recorded_by: admin.id });
+        reply.code(201).send({ ok: true });
+      } catch (error) {
+        reply.code(409).send({ error: "drill_rejected", detail: String(error) });
+      }
+    });
+
+    const CutoverBody = z.object({
+      id: z.string().min(1),
+      cohort_type: z.enum(["internal", "selected", "new_projects", "remaining"]),
+      project_id: z.string().min(1).nullable(),
+      status: z.enum(["shadow", "canary", "authoritative", "paused"]),
+      reconciliation_material: z.union([
+        z.record(z.unknown()),
+        z.array(z.unknown()),
+        z.string(),
+        z.number(),
+        z.boolean(),
+        z.null(),
+      ]),
+      restore_drill_id: z.string().min(1),
+    });
+    app.post("/api/admin/cutover/cohorts", async (req, reply) => {
+      const admin = await requireAdmin(req, reply);
+      if (!admin) return;
+      const body = CutoverBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      try {
+        await options.phase7?.operations.promoteCutover({
+          ...body.data,
+          authorized_by: admin.id,
+          authorized_at: now().toISOString(),
+        });
+        reply.send({ ok: true });
+      } catch (error) {
+        reply.code(409).send({ error: "cutover_rejected", detail: String(error) });
+      }
+    });
+
+    app.get("/api/admin/cutover/authoritative", async (req, reply) => {
+      if (!(await requireAdmin(req, reply))) return;
+      try {
+        reply.send(await options.phase7?.operations.assertRelationalAuthoritative());
+      } catch (error) {
+        reply.code(409).send({ error: "relational_not_authoritative", detail: String(error) });
+      }
+    });
+  }
 
   // ---- pairing ---------------------------------------------------------------
 

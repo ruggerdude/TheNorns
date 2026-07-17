@@ -30,7 +30,10 @@ async function inject(
   const response = await server.app.inject({
     method,
     url,
-    ...(token ? { headers: { authorization: `Bearer ${token}` } } : {}),
+    headers: {
+      "x-norns-api-client": "bearer",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
     ...(body !== undefined ? { payload: body as Record<string, unknown> } : {}),
   });
   return response as unknown as InjectedResponse;

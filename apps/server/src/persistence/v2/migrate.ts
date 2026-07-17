@@ -26,6 +26,11 @@ export const PHASE6_COORDINATION_MIGRATION_URL = new URL(
   "../../../drizzle/0005_phase6_coordination.sql",
   import.meta.url,
 );
+export const PHASE7_HARDENING_MIGRATION_NAME = "0006_phase7_hardening";
+export const PHASE7_HARDENING_MIGRATION_URL = new URL(
+  "../../../drizzle/0006_phase7_hardening.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -77,6 +82,10 @@ export async function loadPhase5AttentionMigrationSql(): Promise<string> {
 
 export async function loadPhase6CoordinationMigrationSql(): Promise<string> {
   return readFile(PHASE6_COORDINATION_MIGRATION_URL, "utf8");
+}
+
+export async function loadPhase7HardeningMigrationSql(): Promise<string> {
+  return readFile(PHASE7_HARDENING_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -206,6 +215,10 @@ export async function runCurrentV2Migrations(
     {
       name: PHASE6_COORDINATION_MIGRATION_NAME,
       sql: await loadPhase6CoordinationMigrationSql(),
+    },
+    {
+      name: PHASE7_HARDENING_MIGRATION_NAME,
+      sql: await loadPhase7HardeningMigrationSql(),
     },
   ]);
 }
