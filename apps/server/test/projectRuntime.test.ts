@@ -133,18 +133,25 @@ describe.sequential("Phase 2 project runtime routing", () => {
     scopeType: "project" | "new_projects",
     scopeKey: string,
     readMode: "legacy" | "shadow" | "relational",
+    writeMode: "legacy" | "relational" = "legacy",
   ): Promise<void> {
     await pg.query(
       `INSERT INTO persistence_routes (
          scope_type, scope_key, read_mode, write_mode, migration_run_id,
          aggregate_version, changed_by_actor_type, changed_by_actor_id,
          changed_at, v2_writes_started_at, rollback_window_until
-       ) VALUES ($1,$2,$3,'legacy',$4,1,'system',NULL,$5,NULL,NULL)
+       ) VALUES ($1,$2,$3,$4,$5,1,'system',NULL,$6,
+                 CASE WHEN $4='relational' THEN $6::timestamptz ELSE NULL END,NULL)
        ON CONFLICT (scope_type, scope_key) DO UPDATE
        SET read_mode = EXCLUDED.read_mode,
+           write_mode = EXCLUDED.write_mode,
            aggregate_version = persistence_routes.aggregate_version + 1,
-           changed_at = EXCLUDED.changed_at`,
-      [scopeType, scopeKey, readMode, RUN_ID, "2026-07-16T18:00:00.000Z"],
+           changed_at = EXCLUDED.changed_at,
+           v2_writes_started_at = COALESCE(
+             persistence_routes.v2_writes_started_at,
+             EXCLUDED.v2_writes_started_at
+           )`,
+      [scopeType, scopeKey, readMode, writeMode, RUN_ID, "2026-07-16T18:00:00.000Z"],
     );
   }
 
@@ -289,5 +296,42 @@ describe.sequential("Phase 2 project runtime routing", () => {
     expect(created.statusCode).toBe(201);
     const createdId = (created.json() as { id: string }).id;
     expect(store.summary(createdId).name).toBe("Still legacy-owned");
+  });
+
+  it("creates new projects relationally and refuses legacy graph writes after write cutover", async () => {
+    const source = fixture("clean-planned");
+    await importSource(source);
+    const store = legacyStore([source]);
+    await bindProjectsSnapshotEvidence(store);
+    await setRoute("new_projects", "*", "relational", "relational");
+    await setRoute("project", source.id, "relational", "relational");
+    const running = await start(store);
+
+    const created = await request(running, "POST", "/api/projects", {
+      name: "Relational pilot",
+      description: "Created after the authoritative new-project route",
+      pm_provider: "openai",
+    });
+    expect(created.statusCode).toBe(201);
+    const project = created.json() as { id: string; name: string; pm_provider: string };
+    expect(project).toMatchObject({ name: "Relational pilot", pm_provider: "openai" });
+    expect(() => store.summary(project.id)).toThrow(/unknown project/);
+    expect((await request(running, "GET", "/api/projects")).json()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: project.id })]),
+    );
+    const history = await pg.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM domain_events
+       WHERE project_id=$1 AND event_type='project.created'`,
+      [project.id],
+    );
+    expect(history.rows[0]?.count).toBe(1);
+
+    const mutation = await request(running, "POST", `/api/projects/${source.id}/graph/nodes`, {
+      id: "must-not-write-legacy",
+      title: "Must not write the legacy snapshot",
+    });
+    expect(mutation.statusCode).toBe(409);
+    expect(mutation.json()).toMatchObject({ error: "phase3_required", operation: "addNode" });
+    expect(store.session(source.id).graph.node("must-not-write-legacy")).toBeUndefined();
   });
 });

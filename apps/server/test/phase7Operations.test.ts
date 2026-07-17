@@ -32,6 +32,11 @@ describe.sequential("Phase 7 resilience and cutover controls", () => {
         ('project-7','Existing Project','','active','assignment','verification','budget'),
         ('project-internal-7','Internal Project','','active','assignment','verification','budget'),
         ('project-remaining-7','Remaining Project','','active','assignment','verification','budget');
+      INSERT INTO migration_runs (
+        id, migration_name, status, started_at
+      ) VALUES (
+        'migration-7','phase2_legacy_preservation','shadowing','2026-07-16T19:00:00Z'
+      );
     `);
     operations = new Phase7OperationsService(new PGliteTransactionRunner(pg));
   });
@@ -151,10 +156,18 @@ describe.sequential("Phase 7 resilience and cutover controls", () => {
       drills: number;
       authoritative: number;
       retirements: number;
+      bound_routes: number;
     }>(`SELECT
       (SELECT count(*)::int FROM resilience_drills WHERE passed) AS drills,
       (SELECT count(*)::int FROM v2_cutover_cohorts WHERE status='authoritative') AS authoritative,
-      (SELECT count(*)::int FROM legacy_retirement_authorizations) AS retirements`);
-    expect(evidence.rows[0]).toEqual({ drills: 6, authoritative: 4, retirements: 1 });
+      (SELECT count(*)::int FROM legacy_retirement_authorizations) AS retirements,
+      (SELECT count(*)::int FROM persistence_routes
+       WHERE migration_run_id='migration-7') AS bound_routes`);
+    expect(evidence.rows[0]).toEqual({
+      drills: 6,
+      authoritative: 4,
+      retirements: 1,
+      bound_routes: 4,
+    });
   });
 });

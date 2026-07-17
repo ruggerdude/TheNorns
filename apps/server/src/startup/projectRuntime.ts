@@ -72,16 +72,13 @@ function parseRoute(row: ProjectRouteRow): V2PersistenceRouteT {
       `durable project route ${row.scope_type}:${row.scope_key} failed contract validation`,
     );
   }
-  if (parsed.data.read_mode !== "legacy" && parsed.data.migration_run_id === null) {
+  if (
+    (parsed.data.read_mode !== "legacy" || parsed.data.write_mode === "relational") &&
+    parsed.data.migration_run_id === null
+  ) {
     throw new ProjectRuntimeConfigurationError(
       "project_route_incoherent",
       `durable project route ${row.scope_type}:${row.scope_key} requires a migration run`,
-    );
-  }
-  if (parsed.data.write_mode === "relational") {
-    throw new ProjectRuntimeConfigurationError(
-      "project_route_incoherent",
-      `durable project route ${row.scope_type}:${row.scope_key} cannot activate Phase 3 writes`,
     );
   }
   return parsed.data;
