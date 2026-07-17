@@ -1,0 +1,37 @@
+# Short-lived Railway operations image used for offline migrations, restore
+# verification, and cutover commands on the private service network. It is
+# intentionally inert until an operator invokes a reviewed command over SSH.
+FROM node:24-slim AS build
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@11.13.0 --activate
+
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
+COPY packages/contracts/package.json packages/contracts/
+COPY packages/adapters/package.json packages/adapters/
+COPY apps/server/package.json apps/server/
+COPY apps/runner/package.json apps/runner/
+COPY apps/web/package.json apps/web/
+RUN pnpm install --frozen-lockfile
+
+COPY . .
+RUN pnpm -r run build
+
+FROM node:24-slim AS runtime
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@11.13.0 --activate
+ENV NODE_ENV=production
+
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+COPY packages/contracts/package.json packages/contracts/
+COPY packages/adapters/package.json packages/adapters/
+COPY apps/server/package.json apps/server/
+COPY apps/runner/package.json apps/runner/
+COPY apps/web/package.json apps/web/
+RUN pnpm install --frozen-lockfile --prod --filter @norns/server...
+
+COPY --from=build /app/packages/contracts/dist packages/contracts/dist
+COPY --from=build /app/packages/adapters/dist packages/adapters/dist
+COPY --from=build /app/apps/server/dist apps/server/dist
+COPY --from=build /app/apps/server/drizzle apps/server/drizzle
+
+CMD ["sleep", "infinity"]
