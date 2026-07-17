@@ -6,6 +6,7 @@ import {
   providerForPmModel,
 } from "@norns/contracts";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { GitHubConnection, GitHubIntegrationStatus } from "./Account";
 import { ApiError, type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 
@@ -70,6 +71,23 @@ interface PortfolioAttentionDto {
     attention_count: number;
     next_action: string;
   }>;
+}
+
+interface GitHubRepository {
+  id: string;
+  connection_id: string;
+  owner: string;
+  name: string;
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+  html_url: string;
+  clone_url: string;
+  description: string | null;
+  language: string | null;
+  archived: boolean;
+  updated_at: string;
+  binding_ready?: boolean;
 }
 
 async function request<T>(path: string, body?: unknown): Promise<T> {
@@ -144,14 +162,23 @@ export function Projects({
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [dialog, setDialog] = useState<"new" | "existing" | null>(null);
+  const [dialog, setDialog] = useState(false);
+  const [startingPoint, setStartingPoint] = useState<"new" | "existing">("new");
+  const [newRepository, setNewRepository] = useState<"none" | "github">("none");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [pmModel, setPmModel] = useState<PmModelT>(DEFAULT_PM_MODEL.anthropic);
   const pmProvider = providerForPmModel(pmModel);
   const selectedModel = pmModelOption(pmModel);
-  const [sourceType, setSourceType] = useState<"local" | "github">("local");
-  const [sourceLocation, setSourceLocation] = useState("");
+  const [githubStatus, setGitHubStatus] = useState<GitHubIntegrationStatus | null>(null);
+  const [selectedConnectionId, setSelectedConnectionId] = useState("");
+  const [repositories, setRepositories] = useState<GitHubRepository[]>([]);
+  const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
+  const [repositoryQuery, setRepositoryQuery] = useState("");
+  const [repositoryLoading, setRepositoryLoading] = useState(false);
+  const [repositoryName, setRepositoryName] = useState("");
+  const [repositoryPrivate, setRepositoryPrivate] = useState(true);
+  const [sourceError, setSourceError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
   const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
@@ -168,6 +195,52 @@ export function Projects({
   }, [onUnauthorized]);
 
   useEffect(() => void refresh(), [refresh]);
+
+  const refreshGitHub = useCallback(async () => {
+    try {
+      setSourceError(null);
+      const status = await request<GitHubIntegrationStatus>("/api/integrations/github/status");
+      setGitHubStatus(status);
+      const firstConnected = status.connections.find(
+        (connection) => connection.status === "connected",
+      );
+      setSelectedConnectionId((current) => current || firstConnected?.id || "");
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setSourceError(error instanceof Error ? error.message : String(error));
+    }
+  }, [onUnauthorized]);
+
+  useEffect(() => void refreshGitHub(), [refreshGitHub]);
+
+  const loadRepositories = useCallback(async () => {
+    if (!selectedConnectionId) {
+      setRepositories([]);
+      return;
+    }
+    setRepositoryLoading(true);
+    setSourceError(null);
+    try {
+      const repositories = await request<GitHubRepository[]>(
+        `/api/integrations/github/connections/${encodeURIComponent(selectedConnectionId)}/repositories`,
+      );
+      setRepositories(repositories);
+      setSelectedRepositoryId((current) =>
+        repositories.some((repository) => repository.id === current) ? current : "",
+      );
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setSourceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRepositoryLoading(false);
+    }
+  }, [onUnauthorized, selectedConnectionId]);
+
+  useEffect(() => {
+    if (dialog && startingPoint === "existing" && selectedConnectionId) {
+      void loadRepositories();
+    }
+  }, [dialog, loadRepositories, selectedConnectionId, startingPoint]);
 
   const refreshAttention = useCallback(async () => {
     try {
@@ -219,21 +292,57 @@ export function Projects({
   const create = useCallback(async () => {
     setCreating(true);
     setError(null);
+    setSourceError(null);
     try {
+      let repository = repositories.find((candidate) => candidate.id === selectedRepositoryId);
+      if (startingPoint === "new" && newRepository === "github") {
+        repository = await request<GitHubRepository>("/api/integrations/github/repositories", {
+          connection_id: selectedConnectionId,
+          name: repositoryName.trim(),
+          description: description.trim(),
+          private: repositoryPrivate,
+          auto_init: true,
+        });
+        if (repository.binding_ready === false) {
+          setSourceError(
+            `${repository.full_name} was created, but this GitHub installation only has selected-repository access. Add the repository to The Norns in GitHub, refresh connections, and then import it as existing code.`,
+          );
+          return;
+        }
+      }
+      if (startingPoint === "existing" && !repository) {
+        setSourceError("Select a GitHub repository to continue.");
+        return;
+      }
+      const projectName = name.trim() || repository?.name || "Untitled project";
+      const projectDescription =
+        description.trim() ||
+        repository?.description ||
+        (repository
+          ? `Analyze and continue development of ${repository.full_name}`
+          : "New project");
       const project = await request<ProjectSummary>("/api/projects", {
-        name: name.trim(),
-        description: description.trim(),
+        name: projectName,
+        description: projectDescription,
         pm_provider: pmProvider,
         pm_model: pmModel,
-        ...(sourceLocation.trim()
-          ? { source_type: sourceType, source_location: sourceLocation.trim() }
+        ...(repository
+          ? {
+              source_type: "github",
+              github_connection_id: repository.connection_id,
+              github_repository_id: repository.id,
+            }
           : {}),
       });
       setProjects((current) => (current ? [project, ...current] : [project]));
-      setDialog(null);
+      setDialog(false);
       setName("");
       setDescription("");
-      setSourceLocation("");
+      setStartingPoint("new");
+      setNewRepository("none");
+      setSelectedRepositoryId("");
+      setRepositoryName("");
+      setRepositoryQuery("");
       onOpenProject(project);
     } catch (e) {
       e instanceof UnauthorizedError
@@ -247,13 +356,17 @@ export function Projects({
     description,
     pmProvider,
     pmModel,
-    sourceType,
-    sourceLocation,
+    repositories,
+    selectedRepositoryId,
+    startingPoint,
+    newRepository,
+    selectedConnectionId,
+    repositoryName,
+    repositoryPrivate,
     onOpenProject,
     onUnauthorized,
   ]);
 
-  const openIds = useMemo(() => new Set(openProjects.map((p) => p.id)), [openProjects]);
   const visible = useMemo(
     () =>
       projects?.filter((p) =>
@@ -264,7 +377,27 @@ export function Projects({
     [projects, query],
   );
   const planned = projects?.filter((p) => p.status === "planned").length ?? 0;
-  const existingChoices = projects?.filter((p) => !openIds.has(p.id)) ?? [];
+  const connectedGitHub =
+    githubStatus?.connections.filter((connection) => connection.status === "connected") ?? [];
+  const selectedConnection = connectedGitHub.find(
+    (connection) => connection.id === selectedConnectionId,
+  );
+  const visibleRepositories = repositories.filter((repository) =>
+    repository.full_name.toLowerCase().includes(repositoryQuery.trim().toLowerCase()),
+  );
+  const selectedRepository = repositories.find(
+    (repository) => repository.id === selectedRepositoryId,
+  );
+  const sourceRequired = startingPoint === "existing" || newRepository === "github";
+  const canCreate =
+    !creating &&
+    (name.trim().length > 0 || startingPoint === "existing") &&
+    (description.trim().length > 0 || startingPoint === "existing") &&
+    (!sourceRequired ||
+      (Boolean(selectedConnectionId) &&
+        (startingPoint === "existing"
+          ? Boolean(selectedRepositoryId)
+          : Boolean(repositoryName.trim()))));
 
   return (
     <div className="app-shell">
@@ -272,7 +405,7 @@ export function Projects({
         <Brand />
         <div className="header-actions">
           <Button variant="ghost" className="btn-small" onClick={onOpenAccount}>
-            Account
+            Settings
           </Button>
           {user?.role === "admin" ? (
             <Button variant="ghost" className="btn-small" onClick={onOpenAdmin}>
@@ -295,8 +428,7 @@ export function Projects({
             </p>
           </div>
           <div className="dashboard-actions">
-            <Button onClick={() => setDialog("existing")}>Add existing</Button>
-            <Button variant="primary" onClick={() => setDialog("new")}>
+            <Button variant="primary" onClick={() => setDialog(true)}>
               + New project
             </Button>
           </div>
@@ -549,162 +681,311 @@ export function Projects({
       </main>
 
       {dialog ? (
-        <dialog
-          open
-          className="modal-overlay"
-          aria-modal="true"
-          aria-label={dialog === "new" ? "New project" : "Add existing project"}
-        >
+        <dialog open className="modal-overlay" aria-modal="true" aria-label="New project">
           <button
             className="modal-backdrop"
             type="button"
             aria-label="Close"
-            onClick={() => setDialog(null)}
+            onClick={() => setDialog(false)}
           />
-          <section className="modal card">
+          <section className="modal modal-wide project-create-modal card">
             <div className="section-head">
               <div>
-                <div className="eyebrow">{dialog === "new" ? "Create" : "Workspace"}</div>
-                <h2>{dialog === "new" ? "New project" : "Add existing project"}</h2>
+                <div className="eyebrow">Create</div>
+                <h2>New project</h2>
+                <p className="muted">Start fresh or bring an existing codebase into The Norns.</p>
               </div>
-              <Button variant="ghost" className="btn-small" onClick={() => setDialog(null)}>
+              <Button variant="ghost" className="btn-small" onClick={() => setDialog(false)}>
                 ×
               </Button>
             </div>
-            {dialog === "new" ? (
-              <div className="form-stack">
-                <Field label="Project name">
+            <div className="form-stack">
+              <fieldset className="source-picker">
+                <legend>What are you starting with?</legend>
+                <div className="source-options">
+                  <button
+                    type="button"
+                    className={startingPoint === "new" ? "is-selected" : ""}
+                    onClick={() => {
+                      setStartingPoint("new");
+                      setSelectedRepositoryId("");
+                    }}
+                  >
+                    <strong>New project</strong>
+                    <span>Define a new objective and optionally create its GitHub repository.</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={startingPoint === "existing" ? "is-selected" : ""}
+                    onClick={() => {
+                      setStartingPoint("existing");
+                      setNewRepository("none");
+                    }}
+                  >
+                    <strong>Existing codebase</strong>
+                    <span>
+                      Select a connected repository and let The Norns establish its current state.
+                    </span>
+                  </button>
+                </div>
+              </fieldset>
+
+              {startingPoint === "new" ? (
+                <fieldset className="source-picker">
+                  <legend>Repository</legend>
+                  <div className="source-options">
+                    <button
+                      type="button"
+                      className={newRepository === "none" ? "is-selected" : ""}
+                      onClick={() => setNewRepository("none")}
+                    >
+                      <strong>Not yet</strong>
+                      <span>Create the Norns project now and connect source code later.</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={newRepository === "github" ? "is-selected" : ""}
+                      onClick={() => setNewRepository("github")}
+                    >
+                      <strong>Create on GitHub</strong>
+                      <span>
+                        Create and bind a private or public repository through a workspace
+                        connection.
+                      </span>
+                    </button>
+                  </div>
+                </fieldset>
+              ) : null}
+
+              {sourceRequired ? (
+                <div className="repository-picker">
+                  {sourceError ? <Alert>{sourceError}</Alert> : null}
+                  {!githubStatus?.configured ? (
+                    <div className="connection-required">
+                      <div>
+                        <strong>GitHub is not configured</strong>
+                        <p>
+                          Configure the Norns GitHub App in workspace Settings before selecting
+                          repositories.
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="primary"
+                        className="btn-small"
+                        onClick={onOpenAccount}
+                      >
+                        Open Settings
+                      </Button>
+                    </div>
+                  ) : connectedGitHub.length === 0 ? (
+                    <div className="connection-required">
+                      <div>
+                        <strong>No GitHub installations available</strong>
+                        <p>
+                          {githubStatus.user_authorization.connected
+                            ? "Add a personal account or organization in Settings."
+                            : "Authorize GitHub in Settings, then add a personal account or organization."}
+                        </p>
+                      </div>
+                      <Button type="button" className="btn-small" onClick={onOpenAccount}>
+                        Manage connections
+                      </Button>
+                    </div>
+                  ) : (
+                    <>
+                      <Field label="GitHub account or organization">
+                        <Select
+                          data-testid="github-connection"
+                          value={selectedConnectionId}
+                          onChange={(event) => {
+                            setSelectedConnectionId(event.target.value);
+                            setSelectedRepositoryId("");
+                          }}
+                        >
+                          {connectedGitHub.map((connection: GitHubConnection) => (
+                            <option key={connection.id} value={connection.id}>
+                              {connection.owner_login} · {connection.owner_type}
+                            </option>
+                          ))}
+                        </Select>
+                      </Field>
+                      {startingPoint === "new" ? (
+                        <div className="repository-create-fields">
+                          <Field label="Repository name">
+                            <Input
+                              data-testid="github-new-repository-name"
+                              value={repositoryName}
+                              onChange={(event) => setRepositoryName(event.target.value)}
+                              placeholder="notifications-service"
+                            />
+                          </Field>
+                          <Field label="Visibility">
+                            <Select
+                              value={repositoryPrivate ? "private" : "public"}
+                              onChange={(event) =>
+                                setRepositoryPrivate(event.target.value === "private")
+                              }
+                            >
+                              <option value="private">Private</option>
+                              <option value="public">Public</option>
+                            </Select>
+                          </Field>
+                          <p className="field-help">
+                            The selected GitHub installation must allow repository administration to
+                            create a repository.
+                          </p>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="repository-search">
+                            <Input
+                              aria-label="Search connected repositories"
+                              value={repositoryQuery}
+                              onChange={(event) => setRepositoryQuery(event.target.value)}
+                              placeholder={`Search ${selectedConnection?.owner_login ?? "repositories"}…`}
+                            />
+                            <Button
+                              type="button"
+                              className="btn-small"
+                              disabled={repositoryLoading}
+                              onClick={() => void loadRepositories()}
+                            >
+                              Refresh
+                            </Button>
+                          </div>
+                          {repositoryLoading ? (
+                            <Spinner label="Loading repositories…" />
+                          ) : visibleRepositories.length ? (
+                            <div className="repository-list" aria-label="GitHub repositories">
+                              {visibleRepositories.map((repository) => (
+                                <button
+                                  type="button"
+                                  aria-pressed={selectedRepositoryId === repository.id}
+                                  disabled={repository.archived}
+                                  className={
+                                    selectedRepositoryId === repository.id ? "is-selected" : ""
+                                  }
+                                  key={repository.id}
+                                  onClick={() => {
+                                    setSelectedRepositoryId(repository.id);
+                                    setName((current) => current || repository.name);
+                                    setDescription(
+                                      (current) =>
+                                        current ||
+                                        repository.description ||
+                                        `Analyze and continue development of ${repository.full_name}`,
+                                    );
+                                  }}
+                                >
+                                  <span>
+                                    <strong>{repository.full_name}</strong>
+                                    <small>
+                                      {repository.description || "No repository description"}
+                                    </small>
+                                  </span>
+                                  <span className="repository-meta">
+                                    {repository.private ? "Private" : "Public"}
+                                    {repository.language ? ` · ${repository.language}` : ""}
+                                    {repository.archived ? " · Archived" : ""}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="muted">
+                              No repositories match this connection and search.
+                            </p>
+                          )}
+                          {selectedRepository ? (
+                            <p className="policy">
+                              <strong>{selectedRepository.full_name}</strong> will be validated
+                              against the connected installation. Repository metadata is reviewed
+                              immediately; code ingestion begins through an approved runner.
+                            </p>
+                          ) : null}
+                        </>
+                      )}
+                    </>
+                  )}
+                </div>
+              ) : null}
+
+              <div className="project-create-grid">
+                <Field
+                  label={startingPoint === "existing" ? "Project name (optional)" : "Project name"}
+                >
                   <Input
                     data-testid="project-name"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="e.g. Notifications service"
+                    placeholder={
+                      startingPoint === "existing"
+                        ? "Defaults to repository name"
+                        : "e.g. Notifications service"
+                    }
                     autoFocus
                   />
                 </Field>
-                <Field label="Objective">
+                <Field
+                  label={
+                    startingPoint === "existing" ? "Initial direction (optional)" : "Objective"
+                  }
+                >
                   <TextArea
                     data-testid="project-description"
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
-                    placeholder="What should this project deliver?"
+                    placeholder={
+                      startingPoint === "existing"
+                        ? "What should The Norns focus on after understanding the repository?"
+                        : "What should this project deliver?"
+                    }
                   />
                 </Field>
-                <fieldset className="source-picker">
-                  <legend>Connect project source</legend>
-                  <div className="source-options">
-                    <button
-                      type="button"
-                      className={sourceType === "local" ? "is-selected" : ""}
-                      onClick={() => {
-                        setSourceType("local");
-                        setSourceLocation("");
-                      }}
-                    >
-                      <strong>Local folder</strong>
-                      <span>A folder available to TheNorns server</span>
-                    </button>
-                    <button
-                      type="button"
-                      className={sourceType === "github" ? "is-selected" : ""}
-                      onClick={() => {
-                        setSourceType("github");
-                        setSourceLocation("");
-                      }}
-                    >
-                      <strong>GitHub</strong>
-                      <span>Connect an existing repository</span>
-                    </button>
-                  </div>
-                  <Field label={sourceType === "local" ? "Folder path" : "Repository URL"}>
-                    <Input
-                      data-testid="project-source-location"
-                      type={sourceType === "github" ? "url" : "text"}
-                      value={sourceLocation}
-                      onChange={(event) => setSourceLocation(event.target.value)}
-                      placeholder={
-                        sourceType === "local"
-                          ? "/Users/you/projects/my-app"
-                          : "https://github.com/owner/repository"
-                      }
-                    />
-                  </Field>
-                  <span className="field-help">
-                    {sourceType === "local"
-                      ? "Use an absolute path on the machine running TheNorns."
-                      : "Private repositories use the Git credentials configured on the server."}
-                  </span>
-                </fieldset>
-                <Field label="Project manager model">
-                  <Select
-                    data-testid="pm-model"
-                    value={pmModel}
-                    aria-describedby="pm-model-description"
-                    onChange={(e) => setPmModel(e.target.value as PmModelT)}
-                  >
-                    <optgroup label="Anthropic">
-                      {PM_MODEL_OPTIONS.anthropic.map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.label}
-                        </option>
-                      ))}
-                    </optgroup>
-                    <optgroup label="OpenAI">
-                      {PM_MODEL_OPTIONS.openai.map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.label}
-                        </option>
-                      ))}
-                    </optgroup>
-                  </Select>
-                  <span className="field-help" id="pm-model-description">
-                    {selectedModel?.description}
-                  </span>
-                </Field>
-                <div className="policy">
-                  <strong>Cross-provider review is on.</strong>
-                  <br />
-                  {selectedModel?.label} will lead planning.{" "}
-                  {pmProvider === "anthropic" ? "OpenAI" : "Anthropic"} will independently review
-                  the plan.
-                </div>
-                <Button
-                  variant="primary"
-                  disabled={creating || !name.trim() || !description.trim()}
-                  onClick={() => void create()}
+              </div>
+
+              <Field label="Project manager model">
+                <Select
+                  data-testid="pm-model"
+                  value={pmModel}
+                  aria-describedby="pm-model-description"
+                  onChange={(e) => setPmModel(e.target.value as PmModelT)}
                 >
-                  {creating ? "Creating…" : "Create and open project"}
-                </Button>
+                  <optgroup label="Anthropic">
+                    {PM_MODEL_OPTIONS.anthropic.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="OpenAI">
+                    {PM_MODEL_OPTIONS.openai.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                </Select>
+                <span className="field-help" id="pm-model-description">
+                  {selectedModel?.description}
+                </span>
+              </Field>
+              <div className="policy">
+                <strong>Cross-provider review is on.</strong>
+                <br />
+                {selectedModel?.label} will lead planning.{" "}
+                {pmProvider === "anthropic" ? "OpenAI" : "Anthropic"} will independently review the
+                plan.
               </div>
-            ) : existingChoices.length ? (
-              <div className="existing-list">
-                {existingChoices.map((project) => (
-                  <button
-                    type="button"
-                    key={project.id}
-                    onClick={() => {
-                      onOpenProject(project);
-                      setDialog(null);
-                    }}
-                  >
-                    <span>
-                      <strong>{project.name}</strong>
-                      <small>{project.description}</small>
-                    </span>
-                    <Badge tone={project.status === "planned" ? "success" : "warn"}>
-                      {project.status}
-                    </Badge>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <div className="empty compact-empty">
-                <div>
-                  <strong>Everything is already open</strong>
-                  <p>Close a project tab or create a new project.</p>
-                </div>
-              </div>
-            )}
+              <Button variant="primary" disabled={!canCreate} onClick={() => void create()}>
+                {creating
+                  ? newRepository === "github"
+                    ? "Creating repository and project…"
+                    : "Creating…"
+                  : "Create and open project"}
+              </Button>
+            </div>
           </section>
         </dialog>
       ) : null}

@@ -61,20 +61,20 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     mock.get("/api/projects", { body: [] });
   });
 
-  test("shows Account but not Admin for a member", async () => {
+  test("shows Settings but not Admin for a member", async () => {
     mock.get("/api/auth/me", {
       body: { id: "u1", email: "member@x.com", name: null, role: "member", status: "active" },
     });
     mock.install();
     render(<App />);
 
-    expect(await screen.findByRole("button", { name: /account/i })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /settings/i })).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: /^admin$/i })).not.toBeInTheDocument(),
     );
   });
 
-  test("shows both Account and Admin for an admin, and Admin opens the panel", async () => {
+  test("shows both Settings and Admin for an admin, and Admin opens the panel", async () => {
     mock.get("/api/auth/me", {
       body: { id: "u1", email: "admin@x.com", name: null, role: "admin", status: "active" },
     });

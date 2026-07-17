@@ -104,6 +104,35 @@ The MVP permission set is:
 - Administration, members, secrets, workflows, and organization permissions:
   none.
 
+#### 2026-07-16 amendment — workspace connections and explicit provisioning
+
+GitHub authorization is configured once at workspace scope. A Norns project
+stores only the selected `service_connection_id`, installation identity, and
+repository identity. User access and refresh tokens are encrypted at rest in
+`github_user_authorizations`; they never enter a project, repository binding,
+runner command, event, log, or browser response.
+
+The normal existing-repository flow retains the permissions above. The human
+has additionally requested an explicit **Create on GitHub** action. GitHub's
+repository-creation API requires repository Administration write permission.
+That permission is therefore an opt-in deployment capability with these
+constraints:
+
+- it is exercised only after a user explicitly selects Create on GitHub and
+  confirms owner, repository name, and visibility;
+- Norns uses it only to create the repository; rename, delete, transfer,
+  settings mutation, collaborator administration, and secret administration
+  remain outside the product surface;
+- creation is attributed and audited;
+- installations without Administration write remain fully usable for
+  repository selection and normal source binding, but repository creation
+  fails closed with an actionable permission error;
+- selected-repository installations may require the human to add the newly
+  created repository to the installation before it can be bound.
+
+This amendment does not broaden runner credentials. Installation tokens are
+still minted just in time and remain outside the coding sandbox.
+
 Long-lived personal access tokens and “credentials configured on the server”
 are not the default design.
 

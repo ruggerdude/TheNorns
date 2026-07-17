@@ -672,7 +672,7 @@ function ProjectGraph({
           </Button>
           <div className="header-actions">
             <Button className="btn-small" variant="ghost" onClick={onOpenAccount}>
-              Account
+              Settings
             </Button>
             {user?.role === "admin" ? (
               <Button className="btn-small" variant="ghost" onClick={onOpenAdmin}>
@@ -1163,7 +1163,11 @@ export function App(): React.ReactElement {
   const [needsBootstrap, setNeedsBootstrap] = useState(false);
   const [inviteToken] = useState<string | null>(() => consumeInviteToken());
   const [recoveryToken, setRecoveryToken] = useState<string | null>(() => consumeRecoveryToken());
-  const [showAccount, setShowAccount] = useState(false);
+  const requestedSettingsTab =
+    typeof window === "undefined"
+      ? null
+      : new URLSearchParams(window.location.search).get("settings");
+  const [showAccount, setShowAccount] = useState(requestedSettingsTab !== null);
   const [showAdmin, setShowAdmin] = useState(false);
 
   useEffect(() => {
@@ -1277,6 +1281,8 @@ export function App(): React.ReactElement {
           user={user}
           onClose={() => setShowAccount(false)}
           onSignOut={() => logout("Signed out.")}
+          onUnauthorized={() => logout("Session expired. Sign in again.")}
+          initialTab={requestedSettingsTab === "connections" ? "connections" : "profile"}
         />
       ) : null}
       {showAdmin && user?.role === "admin" ? (

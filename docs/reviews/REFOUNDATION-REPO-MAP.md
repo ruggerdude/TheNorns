@@ -91,7 +91,7 @@ Primary evidence:
 | Verification and multi-worker execution | Direct local/test composition |
 | Project Memory persistence/injection in live projects | Not integrated |
 | Project Resume / Attention dashboard | Not implemented |
-| Local folder picker / GitHub App repository picker | Not implemented |
+| Local folder picker / GitHub App repository picker | GitHub App authorization, workspace installations, repository discovery/creation, and project selection implemented by `0008_workspace_connections`, `integrations/github.ts`, `Account.tsx`, and `Projects.tsx`; local folders remain runner-owned and require the runner picker surface |
 
 ## Important tests
 
