@@ -11,6 +11,7 @@
     "migrate:phase2": "pnpm run build && node dist/phase2.js",
     "cutover:phase2-identity": "pnpm run build && node dist/phase2CutoverIdentity.js",
     "verify:phase2-restore": "pnpm run build && node dist/phase2VerifyRestore.js",
+    "pilot:phase8": "pnpm run build && node dist/phase8Pilot.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

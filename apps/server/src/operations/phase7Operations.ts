@@ -119,6 +119,16 @@ export class Phase7OperationsService {
       if ((open.rows[0]?.count ?? 0) > 0) {
         throw new Phase7GateError("cutover is blocked by reconciliation discrepancies");
       }
+      const migration = await sql.query<{ id: string }>(
+        `SELECT id FROM migration_runs
+         WHERE migration_name='phase2_legacy_preservation'
+           AND status IN ('shadowing','ready','cutover')
+         ORDER BY started_at DESC LIMIT 1`,
+      );
+      const migrationRunId = migration.rows[0]?.id;
+      if (!migrationRunId) {
+        throw new Phase7GateError("cutover requires an active Phase 2 preservation run");
+      }
       const current = await sql.query<{ status: string }>(
         "SELECT status FROM v2_cutover_cohorts WHERE id=$1 FOR UPDATE",
         [input.id],
@@ -165,18 +175,19 @@ export class Phase7OperationsService {
                changed_by_actor_type, changed_by_actor_id, changed_at,
                v2_writes_started_at
              )
-             SELECT 'project', project.id, 'relational', 'relational', NULL,
+             SELECT 'project', project.id, 'relational', 'relational', $3,
                     'human', $1, $2, $2
              FROM projects project
              WHERE project.status <> 'archived'
              ON CONFLICT (scope_type, scope_key) DO UPDATE
              SET read_mode='relational', write_mode='relational',
+                 migration_run_id=EXCLUDED.migration_run_id,
                  aggregate_version=persistence_routes.aggregate_version+1,
                  changed_by_actor_type='human', changed_by_actor_id=$1,
                  changed_at=$2, v2_writes_started_at=COALESCE(
                    persistence_routes.v2_writes_started_at,$2
                  )`,
-            [input.authorized_by, input.authorized_at],
+            [input.authorized_by, input.authorized_at, migrationRunId],
           );
         } else {
           const scopeType = input.cohort_type === "new_projects" ? "new_projects" : "project";
@@ -187,15 +198,16 @@ export class Phase7OperationsService {
                scope_type, scope_key, read_mode, write_mode, migration_run_id,
                changed_by_actor_type, changed_by_actor_id, changed_at,
                v2_writes_started_at
-             ) VALUES ($1,$2,'relational','relational',NULL,'human',$3,$4,$4)
+             ) VALUES ($1,$2,'relational','relational',$5,'human',$3,$4,$4)
              ON CONFLICT (scope_type, scope_key) DO UPDATE
              SET read_mode='relational', write_mode='relational',
+                 migration_run_id=EXCLUDED.migration_run_id,
                  aggregate_version=persistence_routes.aggregate_version+1,
                  changed_by_actor_type='human', changed_by_actor_id=$3,
                  changed_at=$4, v2_writes_started_at=COALESCE(
                    persistence_routes.v2_writes_started_at,$4
                  )`,
-            [scopeType, scopeKey, input.authorized_by, input.authorized_at],
+            [scopeType, scopeKey, input.authorized_by, input.authorized_at, migrationRunId],
           );
         }
       }

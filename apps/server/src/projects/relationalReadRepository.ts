@@ -3,6 +3,7 @@ import type { ProviderName } from "@norns/adapters";
 import { type PmModelT, isPmModelForProvider } from "@norns/contracts";
 import { NodeAssignment, type NodeAssignmentT } from "../graph/allocation.js";
 import type { GraphNode } from "../graph/graph.js";
+import { newId } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import type { ProjectGraphView, ProjectRepository } from "./repository.js";
 import {
@@ -10,6 +11,7 @@ import {
   ProjectNotPlannedError,
   type ProjectSourceType,
   type ProjectSummary,
+  reviewerFor,
 } from "./store.js";
 
 interface ProjectReadRow {
@@ -197,7 +199,7 @@ async function projectRows(
             phase.objective_summary AS plan_objective,
             candidate.source_type, candidate.github_owner, candidate.github_name
      FROM projects project
-     JOIN legacy_project_imports imported
+     LEFT JOIN legacy_project_imports imported
        ON imported.project_id = project.id
       AND imported.migration_run_id = $1
      JOIN project_planning_preferences preference
@@ -220,13 +222,13 @@ async function projectRows(
        LIMIT 1
      ) candidate ON true
      WHERE true ${projectPredicate}
-     ORDER BY project.created_at DESC, imported.imported_at DESC, project.id DESC`,
+     ORDER BY project.created_at DESC, imported.imported_at DESC NULLS LAST, project.id DESC`,
     params,
   );
   return result.rows;
 }
 
-/** Phase 2 installs relational reads only. Any project mutation is a Phase 3 command. */
+/** Legacy graph mutations require normalized Phase 3 commands after write cutover. */
 export class Phase3RequiredError extends Error {
   readonly code = "phase3_required" as const;
 
@@ -236,11 +238,7 @@ export class Phase3RequiredError extends Error {
   }
 }
 
-/**
- * Read-only compatibility projection over Phase 2 V2 rows plus import
- * provenance. It returns the legacy API DTO so shadow reads compare like for
- * like without making the legacy snapshot a second operational truth.
- */
+/** Compatibility projection over V2 rows, including relational project creation. */
 export class RelationalProjectReadRepository implements ProjectRepository {
   readonly repositoryKind = "project_repository" as const;
 
@@ -437,8 +435,86 @@ export class RelationalProjectReadRepository implements ProjectRepository {
     });
   }
 
-  create(_input: Parameters<ProjectRepository["create"]>[0]): Promise<never> {
-    return Promise.reject(new Phase3RequiredError("create"));
+  create(input: Parameters<ProjectRepository["create"]>[0]): Promise<ProjectSummary> {
+    const projectId = newId("proj");
+    const createdAt = new Date().toISOString();
+    const reviewerProvider = reviewerFor(input.pmProvider);
+    return this.transactions.transaction(async (sql) => {
+      await sql.query(
+        `INSERT INTO projects (
+           id, name, description, status, assignment_policy_ref,
+           verification_policy_ref, budget_policy_ref, created_at, updated_at
+         ) VALUES ($1,$2,$3,'initializing',$4,$5,$6,$7,$7)`,
+        [
+          projectId,
+          input.name,
+          input.description,
+          "assignment-policy:default-v1",
+          "verification-policy:default-v1",
+          "budget-policy:default-v1",
+          createdAt,
+        ],
+      );
+      await sql.query(
+        `INSERT INTO project_planning_preferences (
+           project_id, pm_provider, pm_model, reviewer_provider, source,
+           created_at, updated_at
+         ) VALUES ($1,$2,$3,$4,'native',$5,$5)`,
+        [projectId, input.pmProvider, input.pmModel ?? null, reviewerProvider, createdAt],
+      );
+
+      if (input.sourceType && input.sourceLocation) {
+        const sourceFingerprint = createHash("sha256").update(input.sourceLocation).digest("hex");
+        const githubMatch =
+          input.sourceType === "github"
+            ? /github\.com[/:]([^/]+)\/([^/]+)$/.exec(input.sourceLocation)
+            : null;
+        const github =
+          githubMatch === null
+            ? null
+            : [githubMatch[0], githubMatch[1], githubMatch[2]?.replace(/\.git$/, "")];
+        const displayName =
+          github?.[2] ?? input.sourceLocation.split(/[\\/]/).filter(Boolean).at(-1) ?? "repository";
+        await sql.query(
+          `INSERT INTO repository_binding_candidates (
+             id, project_id, source_type, source_fingerprint, display_name,
+             github_owner, github_name, status, created_at, updated_at
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,'unverified',$8,$8)`,
+          [
+            newId("binding_candidate"),
+            projectId,
+            input.sourceType,
+            sourceFingerprint,
+            displayName,
+            github?.[1] ?? null,
+            github?.[2] ?? null,
+            createdAt,
+          ],
+        );
+      }
+
+      await sql.query(
+        `INSERT INTO domain_events (
+           event_id, stream_type, stream_id, stream_version, event_type,
+           project_id, actor_type, actor_id, correlation_id, occurred_at, payload
+         ) VALUES ($1,'project',$2,1,'project.created',$2,'system',NULL,$3,$4,$5::jsonb)`,
+        [
+          newId("event"),
+          projectId,
+          newId("correlation"),
+          createdAt,
+          JSON.stringify({
+            name: input.name,
+            pm_provider: input.pmProvider,
+            pm_model: input.pmModel ?? null,
+            reviewer_provider: reviewerProvider,
+          }),
+        ],
+      );
+      const row = (await projectRows(sql, this.migrationRunId, projectId))[0];
+      if (!row) throw new Error(`project ${projectId} disappeared after creation`);
+      return summaryFromRow(row);
+    });
   }
 
   addEdge(_id: string, _from: string, _to: string): Promise<never> {

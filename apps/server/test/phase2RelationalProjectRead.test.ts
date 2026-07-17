@@ -365,7 +365,7 @@ describe.sequential("Phase 2 relational project read projection", () => {
     expect(JSON.stringify(sink.comparisons)).not.toContain("customer-repository");
   });
 
-  it("keeps the relational projection read-only while shadow mutations remain legacy-owned", async () => {
+  it("creates relational projects while legacy graph mutations remain isolated", async () => {
     const source = fixture("clean-planned");
     await importSource(source);
     const relationalRepository = relational();
@@ -379,19 +379,25 @@ describe.sequential("Phase 2 relational project read projection", () => {
     const plan = parseLegacyProjectPayloads(source).plan;
     if (plan === null) throw new Error("fixture lacks plan");
 
-    const attempts = [
+    await expect(
       relationalRepository.create({ name: "x", description: "x", pmProvider: "anthropic" }),
-      relationalRepository.addEdge(source.id, "a", "b"),
-      relationalRepository.removeEdge(source.id, "a", "b"),
-      relationalRepository.addNode(source.id, { id: "b", title: "B" }),
-      relationalRepository.removeNode(source.id, "a"),
-      relationalRepository.allocate(source.id, "balanced"),
-      relationalRepository.overrideAssignment(source.id, "a", { model: "claude-sonnet-5" }),
-      relationalRepository.approveAllocation(source.id, "operator"),
-      relationalRepository.loadPlan(source.id, plan),
+    ).resolves.toMatchObject({ name: "x", pm_provider: "anthropic" });
+
+    const attempts = [
+      () => relationalRepository.addEdge(source.id, "a", "b"),
+      () => relationalRepository.removeEdge(source.id, "a", "b"),
+      () => relationalRepository.addNode(source.id, { id: "b", title: "B" }),
+      () => relationalRepository.removeNode(source.id, "a"),
+      () => relationalRepository.allocate(source.id, "balanced"),
+      () =>
+        relationalRepository.overrideAssignment(source.id, "a", {
+          model: "claude-sonnet-5",
+        }),
+      () => relationalRepository.approveAllocation(source.id, "operator"),
+      () => relationalRepository.loadPlan(source.id, plan),
     ];
     for (const attempt of attempts) {
-      await expect(attempt).rejects.toBeInstanceOf(Phase3RequiredError);
+      await expect(attempt()).rejects.toBeInstanceOf(Phase3RequiredError);
     }
 
     expect(

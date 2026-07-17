@@ -29,8 +29,9 @@ export interface RoutedProjectRepositoryOptions {
  * canary promotion observable and reversible without changing a live
  * process underneath in-flight requests.
  *
- * Reads may be legacy, shadow, or relational. Every mutation remains owned
- * by the legacy ProjectStore until Phase 3 supplies relational commands.
+ * Reads may be legacy, shadow, or relational. Write routing is independent:
+ * relational project creation is supported, while legacy graph mutations
+ * fail closed after a project's write route becomes relational.
  */
 export class RoutedProjectRepository implements ProjectRepository {
   readonly repositoryKind = "project_repository" as const;
@@ -46,6 +47,13 @@ export class RoutedProjectRepository implements ProjectRepository {
 
   private repositoryFor(route: V2PersistenceRouteT | null): ProjectRepository {
     if (route === null || route.read_mode === "legacy") return this.options.legacy;
+    return this.relationalRepositoryFor(route, route.read_mode === "shadow");
+  }
+
+  private relationalRepositoryFor(
+    route: V2PersistenceRouteT,
+    useShadow: boolean,
+  ): ProjectRepository {
     const migrationRunId = route.migration_run_id;
     if (migrationRunId === null) {
       throw new Error(
@@ -57,25 +65,32 @@ export class RoutedProjectRepository implements ProjectRepository {
       relational = new RelationalProjectReadRepository(this.options.transactions, migrationRunId);
       this.relationalByRun.set(migrationRunId, relational);
     }
-    if (route.read_mode === "relational") return relational;
+    if (!useShadow) return relational;
 
     const routeKey = `${route.scope_type}:${route.scope_key}:${migrationRunId}`;
-    let shadow = this.shadowByRoute.get(routeKey);
-    if (!shadow) {
-      shadow = new ShadowProjectRepository({
+    let shadowRepository = this.shadowByRoute.get(routeKey);
+    if (!shadowRepository) {
+      shadowRepository = new ShadowProjectRepository({
         migration_run_id: migrationRunId,
         legacy: this.options.legacy,
         relational,
         comparison_sink: this.options.comparison_sink,
         now: this.options.now,
       });
-      this.shadowByRoute.set(routeKey, shadow);
+      this.shadowByRoute.set(routeKey, shadowRepository);
     }
-    return shadow;
+    return shadowRepository;
   }
 
   private projectRead(id: string): ProjectRepository {
     return this.repositoryFor(this.projectRoutes.get(id) ?? null);
+  }
+
+  private projectWrite(id: string): ProjectRepository {
+    const route = this.projectRoutes.get(id);
+    return route?.write_mode === "relational"
+      ? this.relationalRepositoryFor(route, false)
+      : this.options.legacy;
   }
 
   list(): Promise<ProjectSummary[]> | ProjectSummary[] {
@@ -97,22 +112,24 @@ export class RoutedProjectRepository implements ProjectRepository {
   create(
     input: Parameters<ProjectRepository["create"]>[0],
   ): ReturnType<ProjectRepository["create"]> {
-    return this.options.legacy.create(input);
+    return this.newProjectsRoute?.write_mode === "relational"
+      ? this.relationalRepositoryFor(this.newProjectsRoute, false).create(input)
+      : this.options.legacy.create(input);
   }
 
   addEdge(id: string, from: string, to: string): ReturnType<ProjectRepository["addEdge"]> {
-    return this.options.legacy.addEdge(id, from, to);
+    return this.projectWrite(id).addEdge(id, from, to);
   }
 
   removeEdge(id: string, from: string, to: string): ReturnType<ProjectRepository["removeEdge"]> {
-    return this.options.legacy.removeEdge(id, from, to);
+    return this.projectWrite(id).removeEdge(id, from, to);
   }
 
   addNode(
     id: string,
     input: Parameters<ProjectRepository["addNode"]>[1],
   ): ReturnType<ProjectRepository["addNode"]> {
-    return this.options.legacy.addNode(id, input);
+    return this.projectWrite(id).addNode(id, input);
   }
 
   removeNode(
@@ -120,14 +137,14 @@ export class RoutedProjectRepository implements ProjectRepository {
     nodeId: string,
     mode?: Parameters<ProjectRepository["removeNode"]>[2],
   ): ReturnType<ProjectRepository["removeNode"]> {
-    return this.options.legacy.removeNode(id, nodeId, mode);
+    return this.projectWrite(id).removeNode(id, nodeId, mode);
   }
 
   allocate(
     id: string,
     strategy: Parameters<ProjectRepository["allocate"]>[1],
   ): ReturnType<ProjectRepository["allocate"]> {
-    return this.options.legacy.allocate(id, strategy);
+    return this.projectWrite(id).allocate(id, strategy);
   }
 
   overrideAssignment(
@@ -135,17 +152,17 @@ export class RoutedProjectRepository implements ProjectRepository {
     nodeId: string,
     patch: Parameters<ProjectRepository["overrideAssignment"]>[2],
   ): ReturnType<ProjectRepository["overrideAssignment"]> {
-    return this.options.legacy.overrideAssignment(id, nodeId, patch);
+    return this.projectWrite(id).overrideAssignment(id, nodeId, patch);
   }
 
   approveAllocation(id: string, actor: string): ReturnType<ProjectRepository["approveAllocation"]> {
-    return this.options.legacy.approveAllocation(id, actor);
+    return this.projectWrite(id).approveAllocation(id, actor);
   }
 
   loadPlan(
     id: string,
     plan: Parameters<ProjectRepository["loadPlan"]>[1],
   ): ReturnType<ProjectRepository["loadPlan"]> {
-    return this.options.legacy.loadPlan(id, plan);
+    return this.projectWrite(id).loadPlan(id, plan);
   }
 }

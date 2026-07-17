@@ -55,6 +55,7 @@ import { PlanningError, planContentHash, runPlanning } from "./planning/session.
 import type { AttentionService } from "./projects/attentionService.js";
 import type { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
 import type { ProjectResumeService } from "./projects/projectResumeService.js";
+import { Phase3RequiredError } from "./projects/relationalReadRepository.js";
 import {
   type ProjectGraphView,
   type ProjectRepository,
@@ -1030,6 +1031,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       }
       if (error instanceof AllocationError) {
         reply.code(409).send({ error: "allocation", message: error.message });
+        return;
+      }
+      if (error instanceof Phase3RequiredError) {
+        reply
+          .code(409)
+          .send({ error: error.code, operation: error.operation, message: error.message });
         return;
       }
       throw error;
