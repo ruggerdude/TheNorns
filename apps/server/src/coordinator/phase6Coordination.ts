@@ -324,14 +324,20 @@ export class Phase6CoordinationService {
     return this.transactions.transaction(async (sql) => {
       const scope = await sql.query<{
         reviewer_agent_profile_id: string | null;
+        reviewer_provider: string | null;
+        reviewer_model: string | null;
+        reviewer_roles: unknown;
         task_state: string;
         run_state: string;
         usage_cost_usd: string | number;
       }>(
-        `SELECT assignment.reviewer_agent_profile_id, task.state AS task_state,
+        `SELECT assignment.reviewer_agent_profile_id, reviewer.provider AS reviewer_provider,
+                reviewer.model AS reviewer_model, reviewer.roles AS reviewer_roles,
+                task.state AS task_state,
                 run.state AS run_state, run.usage_cost_usd
          FROM tasks task JOIN agent_runs run ON run.id=$4 AND run.task_id=task.id
          JOIN agent_assignments assignment ON assignment.id=run.assignment_id
+         LEFT JOIN agent_profiles reviewer ON reviewer.id=assignment.reviewer_agent_profile_id
          WHERE task.project_id=$1 AND task.phase_id=$2 AND task.id=$3
          FOR UPDATE OF task, run, assignment`,
         [input.project_id, input.phase_id, input.task_id, input.run_id],
@@ -358,8 +364,9 @@ export class Phase6CoordinationService {
       await sql.query(
         `INSERT INTO agent_reviews (
            id, project_id, phase_id, task_id, run_id, reviewer_agent_profile_id,
-           review_round, decision, summary, evidence, created_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11)`,
+           review_round, decision, summary, evidence, created_at,
+           reviewer_provider, reviewer_model, reviewer_roles
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14::jsonb)`,
         [
           review.id,
           review.project_id,
@@ -372,6 +379,9 @@ export class Phase6CoordinationService {
           review.summary,
           JSON.stringify(review.evidence),
           review.created_at,
+          row.reviewer_provider,
+          row.reviewer_model,
+          JSON.stringify(row.reviewer_roles ?? []),
         ],
       );
       if (review.decision === "rework") {
@@ -410,7 +420,7 @@ export class Phase6CoordinationService {
              blocking_scope, status
            ) VALUES ($1,$2,$3,$4,'task',$4,'agent_review_escalation',$5,$6,$7,
                      'How should reviewer escalation be resolved?',$8,
-                     '[{"id":"accept","label":"Accept recommendation"},{"id":"revise","label":"Request revision"}]'::jsonb,
+                     '[{"id":"accept","label":"Accept recommendation","impact":"Accept the reviewer recommendation and continue with that disposition.","risk":"The selected approach may require follow-on validation."},{"id":"revise","label":"Request revision","impact":"Return the work for another implementation and review round.","risk":"Additional time and budget may be consumed."}]'::jsonb,
                      'accept','high',$9::jsonb,'open')
            ON CONFLICT (condition_key) WHERE status='open' DO NOTHING`,
           [

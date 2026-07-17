@@ -37,7 +37,7 @@ describe("UI-3: plan metadata (status/rounds/cost/outstanding) must reach the QC
 
   test("shows the plan did not converge (cap_reached) after 5 rounds", () => {
     expect(qc().getByText(/cap_reached/i)).toBeInTheDocument();
-    expect(qc().getByText(/5/)).toBeInTheDocument();
+    expect(qc().getByText(/^5$/)).toBeInTheDocument();
   });
 
   test("shows the total planning cost", () => {
@@ -49,7 +49,7 @@ describe("UI-3: plan metadata (status/rounds/cost/outstanding) must reach the QC
   test("shows the reviewer's outstanding finding", () => {
     const [finding] = capReachedPlanResult.outstanding;
     expect(finding).toBeDefined();
-    const snippet = finding?.statement.slice(0, 30) ?? "";
+    const snippet = finding?.finding.slice(0, 30) ?? "";
     expect(qc().getByText(new RegExp(snippet))).toBeInTheDocument();
   });
 });

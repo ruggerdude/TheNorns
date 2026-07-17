@@ -10,6 +10,7 @@ import {
 } from "../src/coordinator/phase6Coordination.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
+import { AttentionService } from "../src/projects/attentionService.js";
 import { ProjectResumeService } from "../src/projects/projectResumeService.js";
 
 const evidence = (id: string) => ({
@@ -385,5 +386,33 @@ describe.sequential("Phase 6 autonomous multi-agent coordination", () => {
       next_recommended_action: "Review open decision points",
       attention: expect.objectContaining({ open_decisions: 1 }),
     });
+    await pg.query(
+      "UPDATE agent_profiles SET provider='mutated-provider', model='mutated-model' WHERE id='anthropic-reviewer'",
+    );
+    const execution = await new AttentionService(new PGliteTransactionRunner(pg)).phase(
+      "project-6",
+      "phase-6",
+    );
+    const apiTask = execution.tasks.find((task) => task.id === "task-api");
+    expect(apiTask?.implementation_agent).toMatchObject({
+      profile_id: "openai-builder",
+      provider: "openai",
+      model: "gpt-5-codex",
+      roles: expect.arrayContaining(["implementation", "backend"]),
+    });
+    expect(apiTask?.reviewer_agent?.profile_id).toBe("anthropic-reviewer");
+    expect(apiTask?.reviews).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          review_round: 1,
+          decision: "rework",
+          reviewer: expect.objectContaining({
+            profile_id: "anthropic-reviewer",
+            provider: "anthropic",
+            model: "claude-fable-5",
+          }),
+        }),
+      ]),
+    );
   }, 30_000);
 });

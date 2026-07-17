@@ -1,5 +1,45 @@
 import { z } from "zod";
-import { V2EntityId, V2IsoDateTime, V2NonEmptyString, V2Sha256Hex } from "./common.js";
+import {
+  V2EntityId,
+  V2EvidenceRef,
+  V2IsoDateTime,
+  V2NonEmptyString,
+  V2Sha256Hex,
+} from "./common.js";
+
+export const V2DirectionTarget = z.enum([
+  "project_manager",
+  "implementation_agent",
+  "reviewer",
+  "all_agents",
+]);
+export type V2DirectionTargetT = z.infer<typeof V2DirectionTarget>;
+
+export const V2DecisionOption = z
+  .object({
+    id: V2EntityId,
+    label: V2NonEmptyString,
+    impact: V2NonEmptyString,
+    risk: V2NonEmptyString,
+  })
+  .strict();
+
+export const V2DecisionOptions = z
+  .array(V2DecisionOption)
+  .min(1)
+  .superRefine((options, ctx) => {
+    const ids = new Set<string>();
+    for (const [index, option] of options.entries()) {
+      if (ids.has(option.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [index, "id"],
+          message: "decision option ids must be unique",
+        });
+      }
+      ids.add(option.id);
+    }
+  });
 
 export const V2AttentionSourceType = z.enum([
   "decision_point",
@@ -38,6 +78,15 @@ export const V2AttentionItem = z
     explanation: V2NonEmptyString,
     recommendation: V2NonEmptyString,
     tradeoffs: z.array(V2NonEmptyString),
+    decision: z
+      .object({
+        decision_point_id: V2EntityId,
+        condition_fingerprint: V2Sha256Hex,
+        options: V2DecisionOptions,
+        recommendation_option_id: V2EntityId,
+      })
+      .strict()
+      .nullable(),
     impact: V2NonEmptyString,
     resumes: V2NonEmptyString,
     occurred_at: V2IsoDateTime,
@@ -83,6 +132,28 @@ export const V2PortfolioAttention = z
   .strict();
 export type V2PortfolioAttentionT = z.infer<typeof V2PortfolioAttention>;
 
+export const V2AgentIdentity = z
+  .object({
+    profile_id: V2EntityId,
+    provider: V2NonEmptyString,
+    model: V2NonEmptyString,
+    roles: z.array(V2NonEmptyString),
+  })
+  .strict();
+
+export const V2PhaseReviewRound = z
+  .object({
+    id: V2EntityId,
+    run_id: V2EntityId,
+    review_round: z.number().int().positive(),
+    decision: z.enum(["approved", "rework", "escalated"]),
+    summary: V2NonEmptyString,
+    evidence: z.array(V2EvidenceRef).min(1),
+    reviewer: V2AgentIdentity,
+    created_at: V2IsoDateTime,
+  })
+  .strict();
+
 export const V2PhaseExecution = z
   .object({
     schema_version: z.literal(2),
@@ -113,6 +184,8 @@ export const V2PhaseExecution = z
             })
             .strict()
             .nullable(),
+          implementation_agent: V2AgentIdentity.nullable(),
+          reviewer_agent: V2AgentIdentity.nullable(),
           run: z
             .object({
               id: V2EntityId,
@@ -125,9 +198,61 @@ export const V2PhaseExecution = z
             .strict()
             .nullable(),
           evidence_count: z.number().int().nonnegative(),
+          reviews: z.array(V2PhaseReviewRound),
         })
         .strict(),
     ),
   })
   .strict();
 export type V2PhaseExecutionT = z.infer<typeof V2PhaseExecution>;
+
+export const V2DecisionResolutionRequest = z
+  .object({
+    idempotency_key: V2NonEmptyString.max(256),
+    expected_condition_fingerprint: V2Sha256Hex,
+    selected_option_id: V2EntityId,
+    rationale: V2NonEmptyString.max(10_000),
+    direction_target: V2DirectionTarget,
+    direction_text: z.string().trim().max(10_000),
+  })
+  .strict();
+
+export const V2DecisionResolutionResult = z
+  .object({
+    decision_point_id: V2EntityId,
+    approval_id: V2EntityId,
+    decision_record_id: V2EntityId,
+    memory_entry_id: V2EntityId,
+    resolved_at: V2IsoDateTime,
+  })
+  .strict();
+export type V2DecisionResolutionResultT = z.infer<typeof V2DecisionResolutionResult>;
+
+export const V2HumanDirectionRequest = z
+  .object({
+    phase_id: V2EntityId.nullable().optional(),
+    task_id: V2EntityId.nullable().optional(),
+    direction_target: V2DirectionTarget,
+    direction_text: V2NonEmptyString.max(10_000),
+    idempotency_key: V2NonEmptyString.max(256),
+  })
+  .strict()
+  .superRefine((direction, ctx) => {
+    if (direction.task_id && !direction.phase_id) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["phase_id"],
+        message: "task-scoped direction requires phase_id",
+      });
+    }
+  });
+export type V2HumanDirectionRequestT = z.infer<typeof V2HumanDirectionRequest>;
+
+export const V2HumanDirectionResult = z
+  .object({
+    memory_entry_id: V2EntityId,
+    recorded_at: V2IsoDateTime,
+    replayed: z.boolean(),
+  })
+  .strict();
+export type V2HumanDirectionResultT = z.infer<typeof V2HumanDirectionResult>;

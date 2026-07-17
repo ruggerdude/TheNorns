@@ -137,9 +137,10 @@ partial unique constraint permits one open DecisionPoint per `condition_key`.
 Coordinator re-evaluation returns or updates the same equivalent open
 condition rather than creating a duplicate. When the fingerprint changes, the
 prior revision is atomically superseded before one new revision is opened or
-re-opened. Resolving the single surviving point unblocks only its declared
-scope. The resolved key/fingerprint is retained so an unchanged condition is
-not recreated after restart.
+re-opened. Resolving the single surviving point records the judgment and
+closes the point; a subsequent versioned application command transitions or
+unblocks only its declared scope. The resolved key/fingerprint is retained so
+an unchanged condition is not recreated after restart.
 Where a DecisionPoint is the result of a blocking state transition, its
 creation and the evaluation checkpoint commit in the same transaction.
 
@@ -241,6 +242,44 @@ The primary review hierarchy is:
 Humans are not required to line-edit every tactical acceptance criterion to
 operate the system.
 
+### 10. Make QC provenance and human direction explicit
+
+Agent review is an append-only project record, not a transient status badge.
+Every task review surface identifies the implementation agent and independent
+reviewer by role, agent-profile ID, provider, and model. Review rounds retain
+their decision, complete summary, evidence references, run identity, and
+timestamp. The UI may summarize this material, but it must always provide a
+drill-down to the attributable record and must not present a single undifferentiated
+"Agent" label for both roles.
+
+Attention acknowledgement is notification state only. It never resolves a
+DecisionPoint, changes task state, or resumes work. Resolution is a separate
+human-attributed application command that atomically:
+
+- verifies the open DecisionPoint and its current condition fingerprint;
+- validates the selected option against the recorded option set;
+- records the human rationale and intended recipient role;
+- writes approval, decision, domain-event, and audit evidence;
+- records the direction as active project memory; and
+- closes only the declared DecisionPoint record.
+
+Resolution does not infer a task or phase transition from human-readable
+option labels. A subsequent coordinator evaluation applies the recorded
+decision through the appropriate versioned application command; until that
+audited transition commits, the affected work remains in its current state.
+
+Humans may also record proactive project-, phase-, or task-scoped direction
+without an open DecisionPoint. Such direction is idempotent, attributable, and
+stored as active project memory. Storage alone is not delivery: a later
+server-owned context-assembly step must select applicable directives by scope
+and intended role, bind them into the next content-addressed run or review
+manifest, and record delivery evidence. Until that step exists and consumes a
+direction, the product labels it **delivery pending**. Direction is never
+injected into an already-running model invocation. If it must change active
+work, the coordinator creates or selects an explicit rework, cancel, or
+superseding-run transition so the resulting run has a complete context and
+audit boundary.
+
 ## Application commands and APIs
 
 Representative commands:
@@ -323,7 +362,8 @@ is proven.
 9. Phase closure updates project state, memory, architecture history, and
    attention projections.
 10. Crash-injection around DecisionPoint creation produces exactly one open
-    point for a condition, and resolving it unblocks the declared scope.
+    point for a condition; resolution closes that point, and a subsequent
+    versioned command unblocks the declared scope.
 11. Projection rebuild preserves an acknowledged Attention item while its
     fingerprint is stable and re-raises it once after a material source
     change.

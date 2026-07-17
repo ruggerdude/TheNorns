@@ -1040,6 +1040,58 @@ export const projectMemoryEntries = pgTable(
   ],
 );
 
+export const humanDirections = pgTable(
+  "human_directions",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    phaseId: text("phase_id"),
+    taskId: text("task_id"),
+    actorId: text("actor_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    directionTarget: text("direction_target").notNull(),
+    directionText: text("direction_text").notNull(),
+    contentHash: text("content_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("human_directions_actor_key_unique").on(table.actorId, table.idempotencyKey),
+    index("human_directions_project_scope_idx").on(
+      table.projectId,
+      table.phaseId,
+      table.taskId,
+      table.createdAt,
+    ),
+    foreignKey({
+      name: "human_directions_project_fk",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "human_directions_phase_scope_fk",
+      columns: [table.projectId, table.phaseId],
+      foreignColumns: [phases.projectId, phases.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "human_directions_task_scope_fk",
+      columns: [table.projectId, table.phaseId, table.taskId],
+      foreignColumns: [tasks.projectId, tasks.phaseId, tasks.id],
+    }).onDelete("restrict"),
+    check(
+      "human_directions_scope_shape_check",
+      sql`${table.phaseId} IS NOT NULL OR ${table.taskId} IS NULL`,
+    ),
+    check(
+      "human_directions_target_check",
+      sql`${table.directionTarget} IN ('project_manager','implementation_agent','reviewer','all_agents')`,
+    ),
+    check("human_directions_text_check", sql`length(trim(${table.directionText})) > 0`),
+    check("human_directions_hash_check", sql`${table.contentHash} ~ '^[a-f0-9]{64}$'`),
+  ],
+);
+
 export const architectureRevisions = pgTable(
   "architecture_revisions",
   {
@@ -2655,6 +2707,7 @@ export const phase2PreservationSchema = {
   repositoryBindingCandidates,
   serviceConnections,
   githubUserAuthorizations,
+  humanDirections,
   recoveryCheckpoints,
   legacySnapshotArchives,
   legacyArchiveAccessEvents,

@@ -39,12 +39,16 @@ async function start(opts?: {
   deployToken?: string;
   users?: UserStore;
   persistUsers?: () => Promise<void>;
+  integrationEnvironment?: NodeJS.ProcessEnv;
 }): Promise<NornsServer> {
   server = await buildServer({
     stores: new RelayStores(),
     users: opts?.users ?? new UserStore(),
     ...(opts?.deployToken !== undefined ? { deployToken: opts.deployToken } : {}),
     ...(opts?.persistUsers !== undefined ? { persistUsers: opts.persistUsers } : {}),
+    ...(opts?.integrationEnvironment !== undefined
+      ? { integrationEnvironment: opts.integrationEnvironment }
+      : {}),
   });
   return server;
 }
@@ -63,6 +67,50 @@ describe("GET /api/auth/status", () => {
 
     users.createActive({ email: "admin@x.com", password: "password1", role: "admin" });
     expect((await inject(s, "GET", "/api/auth/status")).json()).toEqual({ needs_bootstrap: false });
+  });
+});
+
+describe("GET /api/integrations/ai/status", () => {
+  it("reports provider readiness without returning secret values", async () => {
+    const s = await start({
+      deployToken: "deploy-secret",
+      integrationEnvironment: {
+        ANTHROPIC_API_KEY: "anthropic-secret",
+        NORNS_PM_MODEL: "claude-sonnet-5",
+        NORNS_OPENAI_MODEL: "gpt-5.6-sol",
+      },
+    });
+    const bootstrap = await inject(s, "POST", "/api/auth/bootstrap", {
+      deploy_token: "deploy-secret",
+      email: "root@x.com",
+      password: "password123",
+      name: "Root",
+    });
+    const token = (bootstrap.json() as { token: string }).token;
+
+    expect((await inject(s, "GET", "/api/integrations/ai/status")).statusCode).toBe(401);
+    const status = await inject(s, "GET", "/api/integrations/ai/status", undefined, token);
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toEqual({
+      cross_provider_ready: false,
+      providers: [
+        {
+          id: "anthropic",
+          name: "Anthropic",
+          configured: true,
+          model: "claude-sonnet-5",
+          required_environment: ["ANTHROPIC_API_KEY"],
+        },
+        {
+          id: "openai",
+          name: "OpenAI",
+          configured: false,
+          model: "gpt-5.6-sol",
+          required_environment: ["OPENAI_API_KEY", "NORNS_OPENAI_MODEL"],
+        },
+      ],
+    });
+    expect(JSON.stringify(status.json())).not.toContain("anthropic-secret");
   });
 });
 

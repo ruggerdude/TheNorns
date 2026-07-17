@@ -28,6 +28,31 @@ export interface GitHubIntegrationStatus {
   connections: GitHubConnection[];
 }
 
+interface RunnerSummary {
+  runner_id: string;
+  generation: number;
+  connected: boolean;
+  last_seen_at: string | null;
+}
+
+interface PairingSession {
+  code: string;
+  expires_at: string;
+}
+
+interface AiIntegrationStatus {
+  cross_provider_ready: boolean;
+  providers: Array<{
+    id: "anthropic" | "openai";
+    name: string;
+    configured: boolean;
+    model: string;
+    required_environment: string[];
+  }>;
+}
+
+type ConnectionPanel = "github" | "runners" | "ai";
+
 type SettingsTab = "profile" | "connections" | "security";
 
 async function integrationRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -66,6 +91,11 @@ export function Account({
   const [github, setGitHub] = useState<GitHubIntegrationStatus | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [connectionBusy, setConnectionBusy] = useState<string | null>(null);
+  const [openConnection, setOpenConnection] = useState<ConnectionPanel | null>(null);
+  const [runners, setRunners] = useState<RunnerSummary[] | null>(null);
+  const [pairing, setPairing] = useState<PairingSession | null>(null);
+  const [pairingCopied, setPairingCopied] = useState(false);
+  const [aiStatus, setAiStatus] = useState<AiIntegrationStatus | null>(null);
 
   const loadSessions = useCallback((): void => {
     fetch("/api/auth/sessions", { headers: authHeaders(), credentials: "include" })
@@ -162,6 +192,91 @@ export function Account({
     }
   };
 
+  const toggleConnection = async (panel: ConnectionPanel): Promise<void> => {
+    if (openConnection === panel) {
+      setOpenConnection(null);
+      return;
+    }
+    setOpenConnection(panel);
+    setConnectionError(null);
+    try {
+      if (panel === "runners" && runners === null) {
+        setConnectionBusy("runners");
+        setRunners(await integrationRequest<RunnerSummary[]>("/api/runners"));
+      }
+      if (panel === "ai" && aiStatus === null) {
+        setConnectionBusy("ai");
+        setAiStatus(await integrationRequest<AiIntegrationStatus>("/api/integrations/ai/status"));
+      }
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setConnectionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setConnectionBusy(null);
+    }
+  };
+
+  const refreshRunners = async (): Promise<void> => {
+    setConnectionBusy("runners");
+    setConnectionError(null);
+    try {
+      setRunners(await integrationRequest<RunnerSummary[]>("/api/runners"));
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setConnectionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setConnectionBusy(null);
+    }
+  };
+
+  const startPairing = async (): Promise<void> => {
+    setConnectionBusy("pairing");
+    setConnectionError(null);
+    setPairingCopied(false);
+    try {
+      setPairing(
+        await integrationRequest<PairingSession>("/api/pairing/start", {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+      );
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setConnectionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setConnectionBusy(null);
+    }
+  };
+
+  const refreshAiStatus = async (): Promise<void> => {
+    setConnectionBusy("ai");
+    setConnectionError(null);
+    try {
+      setAiStatus(await integrationRequest<AiIntegrationStatus>("/api/integrations/ai/status"));
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setConnectionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setConnectionBusy(null);
+    }
+  };
+
+  const pairingCommand = pairing
+    ? `norns-runner pair ${pairing.code} --server ${window.location.origin}`
+    : null;
+
+  const copyPairingCommand = async (): Promise<void> => {
+    if (!pairingCommand) return;
+    try {
+      await navigator.clipboard.writeText(pairingCommand);
+      setPairingCopied(true);
+    } catch {
+      setConnectionError(
+        "Could not copy the command. Select the command text and copy it manually.",
+      );
+    }
+  };
+
   return (
     <div className="modal-overlay">
       <button type="button" className="modal-backdrop" aria-label="Dismiss" onClick={onClose} />
@@ -238,7 +353,9 @@ export function Account({
                 {github === null ? (
                   <Spinner label="Loading GitHub connection…" />
                 ) : (
-                  <article className="connection-card">
+                  <article
+                    className={`connection-card ${openConnection === "github" ? "is-open" : ""}`}
+                  >
                     <div className="connection-card-head">
                       <div className="connection-brand">
                         <span className="connection-icon">GH</span>
@@ -247,106 +364,178 @@ export function Account({
                           <p>Repository discovery, creation, branches, and pull requests</p>
                         </div>
                       </div>
-                      <Badge
-                        tone={
-                          !github.configured
-                            ? "default"
+                      <div className="connection-card-controls">
+                        <Badge
+                          tone={
+                            !github.configured
+                              ? "default"
+                              : github.user_authorization.connected
+                                ? "success"
+                                : "warn"
+                          }
+                        >
+                          {!github.configured
+                            ? "Not configured"
                             : github.user_authorization.connected
-                              ? "success"
-                              : "warn"
-                        }
-                      >
-                        {!github.configured
-                          ? "Not configured"
-                          : github.user_authorization.connected
-                            ? `Authorized as ${github.user_authorization.login}`
-                            : "Authorization required"}
-                      </Badge>
+                              ? `Authorized as ${github.user_authorization.login}`
+                              : "Authorization required"}
+                        </Badge>
+                        <Button
+                          variant={github.configured ? "ghost" : "primary"}
+                          className="btn-small"
+                          aria-expanded={openConnection === "github"}
+                          aria-controls="github-connection-details"
+                          onClick={() => void toggleConnection("github")}
+                        >
+                          {openConnection === "github"
+                            ? "Hide"
+                            : github.configured
+                              ? "Manage GitHub"
+                              : "Set up GitHub"}
+                        </Button>
+                      </div>
                     </div>
-                    {!github.configured ? (
-                      <p className="muted">
-                        An administrator must configure the Norns GitHub App deployment secrets.
-                      </p>
-                    ) : (
-                      <>
-                        <div className="connection-actions">
-                          <Button
-                            variant={github.user_authorization.connected ? "ghost" : "primary"}
-                            className="btn-small"
-                            disabled={connectionBusy !== null}
-                            onClick={() => void openGitHubFlow("authorize")}
-                          >
-                            {github.user_authorization.connected
-                              ? "Reconnect identity"
-                              : "Connect GitHub"}
-                          </Button>
-                          {github.user_authorization.connected ? (
-                            <Button
-                              className="btn-small"
-                              disabled={connectionBusy !== null}
-                              onClick={() => void openGitHubFlow("install")}
-                            >
-                              Add GitHub account or organization
-                            </Button>
-                          ) : null}
-                          <Button
-                            variant="ghost"
-                            className="btn-small"
-                            disabled={connectionBusy !== null}
-                            onClick={() => void loadGitHub()}
-                          >
-                            Refresh
-                          </Button>
-                        </div>
-                        {github.connections.length ? (
-                          <div className="connection-list">
-                            {github.connections.map((connection) => (
-                              <div className="connection-row" key={connection.id}>
-                                <div>
-                                  <strong>{connection.owner_login}</strong>
-                                  <span>
-                                    {connection.owner_type} · {connection.repository_selection}{" "}
-                                    repositories
-                                  </span>
-                                </div>
-                                <Badge
-                                  tone={connection.status === "connected" ? "success" : "warn"}
-                                >
-                                  {connection.status.replaceAll("_", " ")}
-                                </Badge>
-                                {user.role === "admin" && connection.status === "connected" ? (
-                                  <Button
-                                    variant="ghost"
-                                    className="btn-small"
-                                    disabled={connectionBusy !== null}
-                                    onClick={() => void disconnect(connection)}
-                                  >
-                                    Disconnect
-                                  </Button>
-                                ) : user.role === "admin" ? (
-                                  <Button
-                                    className="btn-small"
-                                    disabled={connectionBusy !== null}
-                                    onClick={() => void reconnect(connection)}
-                                  >
-                                    Reconnect
-                                  </Button>
-                                ) : null}
-                              </div>
-                            ))}
+                    {openConnection === "github" ? (
+                      <div className="connection-details" id="github-connection-details">
+                        {!github.configured ? (
+                          <div className="connection-setup">
+                            <div>
+                              <strong>GitHub App setup is required once per deployment</strong>
+                              <p className="muted">
+                                Create the app, add its credentials to the server secret store, then
+                                return here to authorize your GitHub identity.
+                              </p>
+                            </div>
+                            <ol>
+                              <li>Create a GitHub App owned by you or your organization.</li>
+                              <li>
+                                Set the callback URL to{" "}
+                                <code>
+                                  {window.location.origin}/api/integrations/github/callback
+                                </code>
+                                and the setup URL to{" "}
+                                <code>{window.location.origin}/api/integrations/github/setup</code>.
+                              </li>
+                              <li>
+                                Configure the seven <code>NORNS_GITHUB_*</code> deployment
+                                variables, then redeploy The Norns.
+                              </li>
+                            </ol>
+                            <div className="connection-actions">
+                              <a
+                                className="btn btn-primary btn-small"
+                                href="https://github.com/settings/apps/new"
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                Create GitHub App ↗
+                              </a>
+                              <a
+                                className="btn btn-ghost btn-small"
+                                href="https://github.com/settings/apps"
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                Open GitHub App settings ↗
+                              </a>
+                            </div>
+                            <details>
+                              <summary>Required deployment variables</summary>
+                              <code className="connection-variable-list">
+                                NORNS_GITHUB_APP_ID{"\n"}
+                                NORNS_GITHUB_CLIENT_ID{"\n"}
+                                NORNS_GITHUB_CLIENT_SECRET{"\n"}
+                                NORNS_GITHUB_APP_SLUG{"\n"}
+                                NORNS_GITHUB_PRIVATE_KEY{"\n"}
+                                NORNS_GITHUB_STATE_SECRET{"\n"}
+                                NORNS_GITHUB_TOKEN_ENCRYPTION_KEY
+                              </code>
+                            </details>
                           </div>
                         ) : (
-                          <p className="muted">
-                            Authorize GitHub, then install The Norns for the account or organization
-                            you want to use.
-                          </p>
+                          <>
+                            <div className="connection-actions">
+                              <Button
+                                variant={github.user_authorization.connected ? "ghost" : "primary"}
+                                className="btn-small"
+                                disabled={connectionBusy !== null}
+                                onClick={() => void openGitHubFlow("authorize")}
+                              >
+                                {github.user_authorization.connected
+                                  ? "Reconnect identity"
+                                  : "Connect GitHub"}
+                              </Button>
+                              {github.user_authorization.connected ? (
+                                <Button
+                                  className="btn-small"
+                                  disabled={connectionBusy !== null}
+                                  onClick={() => void openGitHubFlow("install")}
+                                >
+                                  Add GitHub account or organization
+                                </Button>
+                              ) : null}
+                              <Button
+                                variant="ghost"
+                                className="btn-small"
+                                disabled={connectionBusy !== null}
+                                onClick={() => void loadGitHub()}
+                              >
+                                Refresh
+                              </Button>
+                            </div>
+                            {github.connections.length ? (
+                              <div className="connection-list">
+                                {github.connections.map((connection) => (
+                                  <div className="connection-row" key={connection.id}>
+                                    <div>
+                                      <strong>{connection.owner_login}</strong>
+                                      <span>
+                                        {connection.owner_type} · {connection.repository_selection}{" "}
+                                        repositories
+                                      </span>
+                                    </div>
+                                    <Badge
+                                      tone={connection.status === "connected" ? "success" : "warn"}
+                                    >
+                                      {connection.status.replaceAll("_", " ")}
+                                    </Badge>
+                                    {user.role === "admin" && connection.status === "connected" ? (
+                                      <Button
+                                        variant="ghost"
+                                        className="btn-small"
+                                        disabled={connectionBusy !== null}
+                                        onClick={() => void disconnect(connection)}
+                                      >
+                                        Disconnect
+                                      </Button>
+                                    ) : user.role === "admin" ? (
+                                      <Button
+                                        className="btn-small"
+                                        disabled={connectionBusy !== null}
+                                        onClick={() => void reconnect(connection)}
+                                      >
+                                        Reconnect
+                                      </Button>
+                                    ) : null}
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="muted">
+                                Authorize GitHub, then install The Norns for the account or
+                                organization you want to use.
+                              </p>
+                            )}
+                          </>
                         )}
-                      </>
-                    )}
+                      </div>
+                    ) : null}
                   </article>
                 )}
 
-                <article className="connection-card is-secondary">
+                <article
+                  className={`connection-card is-secondary ${openConnection === "runners" ? "is-open" : ""}`}
+                >
                   <div className="connection-card-head">
                     <div className="connection-brand">
                       <span className="connection-icon">LR</span>
@@ -355,15 +544,98 @@ export function Account({
                         <p>Approved folders and local execution environments</p>
                       </div>
                     </div>
-                    <Badge>Runner managed</Badge>
+                    <div className="connection-card-controls">
+                      <Badge
+                        tone={runners?.some((runner) => runner.connected) ? "success" : "default"}
+                      >
+                        {runners === null
+                          ? "Runner managed"
+                          : `${runners.filter((runner) => runner.connected).length} connected`}
+                      </Badge>
+                      <Button
+                        variant="ghost"
+                        className="btn-small"
+                        aria-expanded={openConnection === "runners"}
+                        aria-controls="runner-connection-details"
+                        onClick={() => void toggleConnection("runners")}
+                      >
+                        {openConnection === "runners" ? "Hide" : "Manage runners"}
+                      </Button>
+                    </div>
                   </div>
-                  <p className="muted">
-                    Folder access is granted by a paired runner. Raw server paths are never stored
-                    as workspace credentials.
-                  </p>
+                  {openConnection === "runners" ? (
+                    <div className="connection-details" id="runner-connection-details">
+                      <p className="muted">
+                        Pair a runner on the computer that owns your local folders. The runner keeps
+                        raw paths and execution credentials off the web service.
+                      </p>
+                      <div className="connection-actions">
+                        <Button
+                          variant="primary"
+                          className="btn-small"
+                          disabled={connectionBusy !== null}
+                          onClick={() => void startPairing()}
+                        >
+                          Pair new runner
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          className="btn-small"
+                          disabled={connectionBusy !== null}
+                          onClick={() => void refreshRunners()}
+                        >
+                          Refresh
+                        </Button>
+                      </div>
+                      {pairing && pairingCommand ? (
+                        <output className="pairing-panel">
+                          <div>
+                            <span className="field-label">Pairing code</span>
+                            <strong className="pairing-code mono">{pairing.code}</strong>
+                            <span className="muted">
+                              Expires{" "}
+                              {new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(
+                                new Date(pairing.expires_at),
+                              )}
+                            </span>
+                          </div>
+                          <code>{pairingCommand}</code>
+                          <Button className="btn-small" onClick={() => void copyPairingCommand()}>
+                            {pairingCopied ? "Copied" : "Copy pairing command"}
+                          </Button>
+                        </output>
+                      ) : null}
+                      {runners === null || connectionBusy === "runners" ? (
+                        <Spinner label="Loading runners…" />
+                      ) : runners.length ? (
+                        <div className="connection-list">
+                          {runners.map((runner) => (
+                            <div className="connection-row" key={runner.runner_id}>
+                              <div>
+                                <strong>{runner.runner_id}</strong>
+                                <span>
+                                  Generation {runner.generation} ·{" "}
+                                  {runner.last_seen_at
+                                    ? `last seen ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(runner.last_seen_at))}`
+                                    : "not seen yet"}
+                                </span>
+                              </div>
+                              <Badge tone={runner.connected ? "success" : "default"}>
+                                {runner.connected ? "Connected" : "Offline"}
+                              </Badge>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="muted">No runners are paired with this workspace yet.</p>
+                      )}
+                    </div>
+                  ) : null}
                 </article>
 
-                <article className="connection-card is-secondary">
+                <article
+                  className={`connection-card is-secondary ${openConnection === "ai" ? "is-open" : ""}`}
+                >
                   <div className="connection-card-head">
                     <div className="connection-brand">
                       <span className="connection-icon">AI</span>
@@ -372,12 +644,59 @@ export function Account({
                         <p>OpenAI and Anthropic execution credentials</p>
                       </div>
                     </div>
-                    <Badge>Deployment managed</Badge>
+                    <div className="connection-card-controls">
+                      <Badge tone={aiStatus?.cross_provider_ready ? "success" : "default"}>
+                        {aiStatus?.cross_provider_ready ? "Ready" : "Deployment managed"}
+                      </Badge>
+                      <Button
+                        variant="ghost"
+                        className="btn-small"
+                        aria-expanded={openConnection === "ai"}
+                        aria-controls="ai-connection-details"
+                        onClick={() => void toggleConnection("ai")}
+                      >
+                        {openConnection === "ai" ? "Hide" : "Manage providers"}
+                      </Button>
+                    </div>
                   </div>
-                  <p className="muted">
-                    Provider keys remain in the server secret store and are never exposed to
-                    projects or browsers.
-                  </p>
+                  {openConnection === "ai" ? (
+                    <div className="connection-details" id="ai-connection-details">
+                      <p className="muted">
+                        Keys remain in the server secret store. This page shows configuration status
+                        and model routing without exposing secret values.
+                      </p>
+                      <div className="connection-actions">
+                        <Button
+                          variant="ghost"
+                          className="btn-small"
+                          disabled={connectionBusy !== null}
+                          onClick={() => void refreshAiStatus()}
+                        >
+                          Refresh status
+                        </Button>
+                      </div>
+                      {aiStatus === null || connectionBusy === "ai" ? (
+                        <Spinner label="Checking provider configuration…" />
+                      ) : (
+                        <div className="connection-list">
+                          {aiStatus.providers.map((provider) => (
+                            <div className="connection-row provider-row" key={provider.id}>
+                              <div>
+                                <strong>{provider.name}</strong>
+                                <span className="mono">{provider.model}</span>
+                                {!provider.configured ? (
+                                  <span>Required: {provider.required_environment.join(", ")}</span>
+                                ) : null}
+                              </div>
+                              <Badge tone={provider.configured ? "success" : "warn"}>
+                                {provider.configured ? "Configured" : "Action required"}
+                              </Badge>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
                 </article>
               </div>
             ) : null}

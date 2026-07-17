@@ -139,17 +139,50 @@ export interface PlanResultFixture {
   plan: PlanContractT;
   content_hash: string;
   total_cost_usd: number;
-  outstanding: { statement: string }[];
+  outstanding: Array<{
+    severity: "must_fix" | "should_fix" | "suggestion";
+    module_id: string | null;
+    finding: string;
+    recommendation: string;
+  }>;
+  policy: {
+    pm_provider: string;
+    pm_model: string;
+    reviewer_provider: string;
+    reviewer_model: string;
+  };
+  versions: Array<{
+    version: number;
+    findings: Array<{
+      severity: "must_fix" | "should_fix" | "suggestion";
+      module_id: string | null;
+      finding: string;
+      recommendation: string;
+    }> | null;
+    responses: Array<{
+      finding_index: number;
+      disposition: "accept" | "rebut";
+      rationale: string;
+    }> | null;
+  }>;
 }
 
 export function makePlanResult(overrides: Partial<PlanResultFixture> = {}): PlanResultFixture {
+  const plan = makePlan();
   return {
     status: "converged",
     rounds: 2,
-    plan: makePlan(),
+    plan,
     content_hash: "a".repeat(64),
     total_cost_usd: 42.5,
     outstanding: [],
+    policy: {
+      pm_provider: "anthropic",
+      pm_model: "claude-sonnet-5",
+      reviewer_provider: "openai",
+      reviewer_model: "gpt-5-codex",
+    },
+    versions: [{ version: 1, findings: [], responses: [] }],
     ...overrides,
   };
 }
@@ -166,8 +199,31 @@ export const capReachedPlanResult: PlanResultFixture = makePlanResult({
   total_cost_usd: 118.2,
   outstanding: [
     {
-      statement:
+      severity: "must_fix",
+      module_id: "web-ui",
+      finding:
         "Reviewer flagged: web-ui module has no rollback plan for a failed notification-preferences migration.",
+      recommendation: "Add a rollback drill and name the evidence required before release.",
+    },
+  ],
+  versions: [
+    {
+      version: 1,
+      findings: [
+        {
+          severity: "must_fix",
+          module_id: "web-ui",
+          finding: "Rollback evidence is missing from the release strategy.",
+          recommendation: "Add a production-safe rollback drill.",
+        },
+      ],
+      responses: [
+        {
+          finding_index: 0,
+          disposition: "rebut",
+          rationale: "The existing deployment smoke test covers rollback behavior.",
+        },
+      ],
     },
   ],
 });

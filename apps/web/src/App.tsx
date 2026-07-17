@@ -106,7 +106,33 @@ export interface PlanReviewResult {
   plan: PlanLike;
   content_hash: string;
   total_cost_usd: number;
-  outstanding: { statement: string }[];
+  outstanding: Array<{
+    finding?: string;
+    statement?: string;
+    recommendation?: string;
+    module_id?: string | null;
+    severity?: "must_fix" | "should_fix" | "suggestion";
+  }>;
+  policy?: {
+    pm_provider: string;
+    pm_model?: string;
+    reviewer_provider: string;
+    reviewer_model?: string;
+  };
+  versions?: Array<{
+    version: number;
+    findings: Array<{
+      severity: "must_fix" | "should_fix" | "suggestion";
+      module_id: string | null;
+      finding: string;
+      recommendation: string;
+    }> | null;
+    responses: Array<{
+      finding_index: number;
+      disposition: "accept" | "rebut";
+      rationale: string;
+    }> | null;
+  }>;
 }
 
 interface ProjectResumeDto {
@@ -140,7 +166,23 @@ interface PhaseExecutionDto {
     complexity: string;
     risk: string;
     dependencies: string[];
-    assignment: { provider: string; model: string; status: string } | null;
+    assignment: {
+      provider: string;
+      model: string;
+      status: string;
+    } | null;
+    implementation_agent: {
+      profile_id: string;
+      provider: string;
+      model: string;
+      roles: string[];
+    } | null;
+    reviewer_agent: {
+      profile_id: string;
+      provider: string;
+      model: string;
+      roles: string[];
+    } | null;
     run: {
       id: string;
       state: string;
@@ -150,7 +192,255 @@ interface PhaseExecutionDto {
       failure_detail: string | null;
     } | null;
     evidence_count: number;
+    reviews: Array<{
+      id: string;
+      run_id: string;
+      review_round: number;
+      decision: "approved" | "rework" | "escalated" | string;
+      summary: string;
+      evidence: Array<{
+        artifact_id: string;
+        content_hash: string;
+        media_type: string;
+        label: string;
+      }>;
+      created_at: string;
+      reviewer: {
+        profile_id: string;
+        provider: string;
+        model: string;
+        roles: string[];
+      };
+    }>;
   }>;
+}
+
+type PhaseExecutionTask = PhaseExecutionDto["tasks"][number];
+
+function agentRoleLabel(roles: string[] | undefined): string {
+  return roles?.length ? roles.map((role) => role.replaceAll("_", " ")).join(", ") : "Agent";
+}
+
+function evidenceLabel(evidence: {
+  artifact_id: string;
+  content_hash: string;
+  media_type: string;
+  label: string;
+}): string {
+  return `${evidence.label} · ${evidence.media_type} · ${evidence.content_hash.slice(0, 12)}`;
+}
+
+function TaskQcPanel({
+  task,
+  projectId,
+  phaseId,
+  focused,
+  onUnauthorized,
+}: {
+  task: PhaseExecutionTask;
+  projectId: string;
+  phaseId: string;
+  focused: boolean;
+  onUnauthorized: () => void;
+}): React.ReactElement {
+  const [directionTarget, setDirectionTarget] = useState("project_manager");
+  const [directionText, setDirectionText] = useState("");
+  const [directionBusy, setDirectionBusy] = useState(false);
+  const [directionStatus, setDirectionStatus] = useState<string | null>(null);
+  const reviewer = task.reviewer_agent ?? task.reviews?.at(-1)?.reviewer ?? null;
+  const implementationAgent = task.implementation_agent;
+
+  const sendDirection = async () => {
+    if (!directionText.trim()) return;
+    setDirectionBusy(true);
+    setDirectionStatus(null);
+    try {
+      await postJson(`/api/v2/projects/${projectId}/directions`, {
+        phase_id: phaseId,
+        task_id: task.id,
+        direction_target: directionTarget,
+        direction_text: directionText.trim(),
+        idempotency_key: `direction-${task.id}-${Date.now()}`,
+      });
+      setDirectionText("");
+      setDirectionStatus("Direction recorded in project memory. Agent delivery is pending.");
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setDirectionStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDirectionBusy(false);
+    }
+  };
+
+  return (
+    <article
+      className={`phase-task task-${task.state} ${focused ? "is-focused" : ""}`}
+      id={`task-qc-${task.id}`}
+      data-testid={`task-qc-${task.id}`}
+    >
+      <div className="phase-task-head">
+        <strong>{task.title}</strong>
+        <Badge
+          tone={
+            task.state === "completed"
+              ? "success"
+              : ["blocked", "failed"].includes(task.state)
+                ? "danger"
+                : ["in_progress", "verifying", "in_review"].includes(task.state)
+                  ? "info"
+                  : "default"
+          }
+        >
+          {task.state.replaceAll("_", " ")}
+        </Badge>
+      </div>
+      <div className="phase-task-meta">
+        <span>
+          {task.complexity} · {task.risk} risk
+        </span>
+        {task.dependencies.length ? (
+          <span>Depends on {task.dependencies.length}</span>
+        ) : (
+          <span>Ready path</span>
+        )}
+        <span>{task.evidence_count} evidence</span>
+      </div>
+
+      <div className="agent-identity-grid">
+        <section className="agent-identity-card" aria-label="Implementation Agent">
+          <span className="eyebrow">Implementation Agent</span>
+          {implementationAgent ? (
+            <>
+              <strong>{implementationAgent.model}</strong>
+              <span>
+                {implementationAgent.provider} · {agentRoleLabel(implementationAgent.roles)}
+              </span>
+              <span className="mono">
+                {implementationAgent.profile_id} · {task.assignment?.status ?? "assigned"}
+              </span>
+            </>
+          ) : (
+            <span className="muted">No implementation agent assigned</span>
+          )}
+        </section>
+        <section className="agent-identity-card" aria-label="Independent QC Reviewer">
+          <span className="eyebrow">Independent QC Reviewer</span>
+          {reviewer ? (
+            <>
+              <strong>{reviewer.model}</strong>
+              <span>
+                {reviewer.provider} · {agentRoleLabel(reviewer.roles)}
+              </span>
+              <span className="mono">{reviewer.profile_id}</span>
+            </>
+          ) : (
+            <span className="muted">Awaiting independent reviewer assignment</span>
+          )}
+        </section>
+      </div>
+
+      {task.run ? (
+        <div className="run-line">
+          <span>
+            Run {task.run.attempt}: {task.run.state}
+          </span>
+          <span>Verification: {task.run.verification_status}</span>
+          {task.run.commit_sha ? <code>{task.run.commit_sha.slice(0, 8)}</code> : null}
+        </div>
+      ) : null}
+      {task.run?.failure_detail ? <Alert>{task.run.failure_detail}</Alert> : null}
+
+      <details className="task-qc-details" open={focused || Boolean(task.reviews?.length)}>
+        <summary>
+          QC timeline · {task.reviews?.length ?? 0} review
+          {(task.reviews?.length ?? 0) === 1 ? "" : "s"}
+        </summary>
+        <div className="qc-timeline">
+          {task.reviews?.length ? (
+            task.reviews.map((review) => (
+              <article className="qc-review" key={review.id}>
+                <div className="qc-review-head">
+                  <strong>Round {review.review_round}</strong>
+                  <Badge
+                    tone={
+                      review.decision === "approved"
+                        ? "success"
+                        : review.decision === "escalated"
+                          ? "danger"
+                          : "warn"
+                    }
+                  >
+                    {review.decision}
+                  </Badge>
+                  <time dateTime={review.created_at}>
+                    {new Intl.DateTimeFormat(undefined, {
+                      dateStyle: "medium",
+                      timeStyle: "short",
+                    }).format(new Date(review.created_at))}
+                  </time>
+                </div>
+                <p className="qc-reviewer">
+                  <strong>{review.reviewer.model}</strong> · {review.reviewer.provider} ·{" "}
+                  {review.reviewer.profile_id}
+                </p>
+                <p className="qc-summary">{review.summary}</p>
+                {review.evidence.length ? (
+                  <div className="qc-evidence">
+                    <strong>Evidence reviewed</strong>
+                    <ul>
+                      {review.evidence.map((evidence, index) => (
+                        <li key={`${review.id}-evidence-${index}`}>{evidenceLabel(evidence)}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </article>
+            ))
+          ) : (
+            <p className="muted">No independent QC review has been recorded yet.</p>
+          )}
+
+          <section className="task-direction" aria-label={`Direction for ${task.title}`}>
+            <div>
+              <strong>Provide direction</strong>
+              <p className="muted">
+                Direction is recorded in project memory. Delivery to the selected agent remains
+                pending until a coordinator context-assembly step consumes it; active runs are not
+                interrupted.
+              </p>
+            </div>
+            <Field label="Send to">
+              <Select
+                value={directionTarget}
+                onChange={(event) => setDirectionTarget(event.target.value)}
+              >
+                <option value="project_manager">Project Manager</option>
+                <option value="implementation_agent">Implementation Agent</option>
+                <option value="reviewer">QC Reviewer</option>
+                <option value="all_agents">All agents</option>
+              </Select>
+            </Field>
+            <Field label="Direction">
+              <TextArea
+                value={directionText}
+                placeholder="Clarify constraints, request rework, or give the next-step direction…"
+                onChange={(event) => setDirectionText(event.target.value)}
+              />
+            </Field>
+            <Button
+              className="btn-small"
+              variant="primary"
+              disabled={directionBusy || !directionText.trim()}
+              onClick={() => void sendDirection()}
+            >
+              {directionBusy ? "Recording…" : "Record direction"}
+            </Button>
+            {directionStatus ? <Alert>{directionStatus}</Alert> : null}
+          </section>
+        </div>
+      </details>
+    </article>
+  );
 }
 
 async function getJson<T>(path: string): Promise<T> {
@@ -252,6 +542,7 @@ function ProjectGraph({
   const [monitoredPhaseId, setMonitoredPhaseId] = useState<string | null>(null);
   const [phaseExecution, setPhaseExecution] = useState<PhaseExecutionDto | null>(null);
   const [executionError, setExecutionError] = useState<string | null>(null);
+  const focusedTaskId = project.focus_task_id ?? null;
 
   // Last-known-*good* approval state (never "pending"): what we revert to when
   // an in-flight mutation fails, so the banner is never left stuck at pending.
@@ -352,13 +643,25 @@ function ProjectGraph({
   }, [loadResume]);
 
   useEffect(() => {
+    if (project.focus_phase_id) {
+      setMonitoredPhaseId(project.focus_phase_id);
+      return;
+    }
     if (!resume?.phases.length) return;
     if (!monitoredPhaseId || !resume.phases.some((phase) => phase.id === monitoredPhaseId)) {
       const preferred =
         resume.phases.find((phase) => phase.status === "active") ?? resume.phases[0];
       setMonitoredPhaseId(preferred?.id ?? null);
     }
-  }, [resume, monitoredPhaseId]);
+  }, [resume, monitoredPhaseId, project.focus_phase_id]);
+
+  useEffect(() => {
+    if (!focusedTaskId || !phaseExecution?.tasks.some((task) => task.id === focusedTaskId)) return;
+    document.getElementById(`task-qc-${focusedTaskId}`)?.scrollIntoView?.({
+      behavior: "smooth",
+      block: "center",
+    });
+  }, [focusedTaskId, phaseExecution]);
 
   const loadPhaseExecution = useCallback(async () => {
     if (!monitoredPhaseId) return;
@@ -799,55 +1102,14 @@ function ProjectGraph({
                   </p>
                   <div className="phase-task-list" data-testid="phase-task-list">
                     {phaseExecution.tasks.map((task) => (
-                      <article className={`phase-task task-${task.state}`} key={task.id}>
-                        <div className="phase-task-head">
-                          <strong>{task.title}</strong>
-                          <Badge
-                            tone={
-                              task.state === "completed"
-                                ? "success"
-                                : ["blocked", "failed"].includes(task.state)
-                                  ? "danger"
-                                  : ["in_progress", "verifying", "in_review"].includes(task.state)
-                                    ? "info"
-                                    : "default"
-                            }
-                          >
-                            {task.state.replaceAll("_", " ")}
-                          </Badge>
-                        </div>
-                        <div className="phase-task-meta">
-                          <span>
-                            {task.complexity} · {task.risk} risk
-                          </span>
-                          {task.dependencies.length ? (
-                            <span>Depends on {task.dependencies.length}</span>
-                          ) : (
-                            <span>Ready path</span>
-                          )}
-                          <span>{task.evidence_count} evidence</span>
-                        </div>
-                        {task.assignment ? (
-                          <p>
-                            <strong>Agent:</strong> {task.assignment.model} ·{" "}
-                            {task.assignment.status}
-                          </p>
-                        ) : (
-                          <p className="muted">No agent assigned</p>
-                        )}
-                        {task.run ? (
-                          <div className="run-line">
-                            <span>
-                              Run {task.run.attempt}: {task.run.state}
-                            </span>
-                            <span>Verification: {task.run.verification_status}</span>
-                            {task.run.commit_sha ? (
-                              <code>{task.run.commit_sha.slice(0, 8)}</code>
-                            ) : null}
-                          </div>
-                        ) : null}
-                        {task.run?.failure_detail ? <Alert>{task.run.failure_detail}</Alert> : null}
-                      </article>
+                      <TaskQcPanel
+                        key={task.id}
+                        task={task}
+                        projectId={project.id}
+                        phaseId={phaseExecution.phase.id}
+                        focused={focusedTaskId === task.id}
+                        onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+                      />
                     ))}
                   </div>
                 </section>

@@ -344,6 +344,8 @@ describe("V2 canonical domain schemas", () => {
         title: "Keep A",
         rationale: "A preserves the architecture boundary.",
         selected_option_id: "option-1",
+        direction_target: null,
+        direction_text: null,
         status: "active",
         decided_by: "user-1",
         approval_evidence: approval,

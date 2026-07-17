@@ -56,6 +56,7 @@ export const V2EntityRefType = z.enum([
   "budget_reservation",
   "dispatch_job",
   "command",
+  "human_direction",
 ]);
 export type V2EntityRefTypeT = z.infer<typeof V2EntityRefType>;
 

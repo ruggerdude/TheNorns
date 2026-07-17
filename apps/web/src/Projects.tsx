@@ -22,6 +22,9 @@ export interface ProjectSummary {
   plan_objective: string | null;
   source_type?: "local" | "github" | null;
   source_location?: string | null;
+  /** Transient navigation hints attached by the attention center. */
+  focus_phase_id?: string | null;
+  focus_task_id?: string | null;
 }
 
 interface AttentionItemDto {
@@ -46,6 +49,16 @@ interface AttentionItemDto {
   impact: string;
   resumes: string;
   occurred_at: string;
+  phase_id?: string | null;
+  task_id?: string | null;
+  source_type?: string;
+  source_id?: string;
+  decision?: {
+    decision_point_id: string;
+    condition_fingerprint: string;
+    options: Array<{ id: string; label: string; impact: string; risk: string }>;
+    recommendation_option_id: string;
+  } | null;
 }
 
 interface PortfolioAttentionDto {
@@ -100,6 +113,104 @@ async function request<T>(path: string, body?: unknown): Promise<T> {
   const json = (await res.json()) as T & { message?: string };
   if (!res.ok) throw new ApiError(json.message ?? `request failed: ${res.status}`, res.status);
   return json;
+}
+
+function AttentionDecisionForm({
+  item,
+  busy,
+  onResolve,
+}: {
+  item: AttentionItemDto & { decision: NonNullable<AttentionItemDto["decision"]> };
+  busy: boolean;
+  onResolve: (input: {
+    selectedOptionId: string;
+    rationale: string;
+    directionTarget: string;
+    directionText: string;
+    idempotencyKey: string;
+  }) => Promise<void>;
+}): React.ReactElement {
+  const [selectedOptionId, setSelectedOptionId] = useState(item.decision.recommendation_option_id);
+  const [rationale, setRationale] = useState("");
+  const [directionTarget, setDirectionTarget] = useState("project_manager");
+  const [directionText, setDirectionText] = useState("");
+  const [idempotencyKey] = useState(
+    () => `decision-${item.decision.decision_point_id}-${globalThis.crypto.randomUUID()}`,
+  );
+
+  return (
+    <section className="decision-response" aria-label={`Respond to ${item.title}`}>
+      <div className="decision-options" role="radiogroup" aria-label="Decision options">
+        {item.decision.options.map((option) => {
+          const recommended = option.id === item.decision.recommendation_option_id;
+          return (
+            <label className={selectedOptionId === option.id ? "is-selected" : ""} key={option.id}>
+              <input
+                type="radio"
+                name={`decision-${item.decision.decision_point_id}`}
+                value={option.id}
+                checked={selectedOptionId === option.id}
+                onChange={() => setSelectedOptionId(option.id)}
+              />
+              <span>
+                <strong>{option.label}</strong>
+                {recommended ? <Badge tone="info">Recommended</Badge> : null}
+                <small>
+                  Impact: {option.impact} · Risk: {option.risk}
+                </small>
+              </span>
+            </label>
+          );
+        })}
+      </div>
+      <Field label="Decision rationale">
+        <TextArea
+          value={rationale}
+          placeholder="Explain the strategic judgment so it becomes part of project memory…"
+          onChange={(event) => setRationale(event.target.value)}
+        />
+      </Field>
+      <div className="decision-direction-grid">
+        <Field label="Direct subsequent work to">
+          <Select
+            value={directionTarget}
+            onChange={(event) => setDirectionTarget(event.target.value)}
+          >
+            <option value="project_manager">Project Manager</option>
+            <option value="implementation_agent">Implementation Agent</option>
+            <option value="reviewer">QC Reviewer</option>
+            <option value="all_agents">All agents</option>
+          </Select>
+        </Field>
+        <Field label="Optional direction for subsequent work">
+          <TextArea
+            value={directionText}
+            placeholder="Constraints or instructions for the next orchestration/rework step…"
+            onChange={(event) => setDirectionText(event.target.value)}
+          />
+        </Field>
+      </div>
+      <p className="meta">
+        Direction is recorded in project memory. Delivery to the selected agent remains pending
+        until a coordinator context-assembly step consumes it; active runs are not interrupted.
+      </p>
+      <Button
+        variant="primary"
+        disabled={busy || !selectedOptionId || !rationale.trim()}
+        onClick={() =>
+          void onResolve({
+            selectedOptionId,
+            rationale: rationale.trim(),
+            directionTarget,
+            directionText: directionText.trim(),
+            idempotencyKey,
+          })
+        }
+      >
+        {busy ? "Recording decision…" : "Resolve decision"}
+      </Button>
+    </section>
+  );
 }
 
 export function ProjectTabs({
@@ -277,6 +388,56 @@ export function Projects({
         if (response.status === 401) throw new UnauthorizedError();
         if (!response.ok)
           throw new ApiError("Attention item changed; refresh and try again", response.status);
+        await refreshAttention();
+      } catch (error) {
+        error instanceof UnauthorizedError
+          ? onUnauthorized()
+          : setError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setAttentionBusy(null);
+      }
+    },
+    [onUnauthorized, refreshAttention],
+  );
+
+  const resolveDecision = useCallback(
+    async (
+      item: AttentionItemDto,
+      input: {
+        selectedOptionId: string;
+        rationale: string;
+        directionTarget: string;
+        directionText: string;
+        idempotencyKey: string;
+      },
+    ) => {
+      const decision = item.decision;
+      if (!decision) return;
+      setAttentionBusy(item.key);
+      try {
+        const response = await fetch(
+          `/api/v2/projects/${item.project_id}/decision-points/${decision.decision_point_id}/resolve`,
+          {
+            method: "POST",
+            headers: authHeaders(true),
+            body: JSON.stringify({
+              expected_condition_fingerprint: decision.condition_fingerprint,
+              selected_option_id: input.selectedOptionId,
+              rationale: input.rationale,
+              direction_target: input.directionTarget,
+              direction_text: input.directionText,
+              idempotency_key: input.idempotencyKey,
+            }),
+          },
+        );
+        if (response.status === 401) throw new UnauthorizedError();
+        if (!response.ok) {
+          const body = (await response.json().catch(() => ({}))) as { message?: string };
+          throw new ApiError(
+            body.message ?? "Decision changed; review the latest options and try again",
+            response.status,
+          );
+        }
         await refreshAttention();
       } catch (error) {
         error instanceof UnauthorizedError
@@ -503,7 +664,11 @@ export function Projects({
                           <strong>Impact:</strong> {item.impact}
                         </p>
                         <p>
-                          <strong>After resolution:</strong> {item.resumes}
+                          <strong>Intended outcome:</strong> {item.resumes}
+                        </p>
+                        <p className="meta">
+                          The decision is recorded immediately. Any task-state change or resumed
+                          work occurs through a subsequent coordinator handoff.
                         </p>
                         {item.tradeoffs.length ? (
                           <ul>
@@ -513,6 +678,18 @@ export function Projects({
                           </ul>
                         ) : null}
                       </details>
+                      {item.decision ? (
+                        <AttentionDecisionForm
+                          item={{ ...item, decision: item.decision }}
+                          busy={attentionBusy === item.key}
+                          onResolve={(input) => resolveDecision(item, input)}
+                        />
+                      ) : item.kind === "decision" ? (
+                        <Alert>
+                          Open the project to inspect the affected task. This decision cannot be
+                          cleared by acknowledging the notification.
+                        </Alert>
+                      ) : null}
                     </div>
                     <div className="attention-actions">
                       <Button
@@ -522,26 +699,36 @@ export function Projects({
                           const project = projects?.find(
                             (candidate) => candidate.id === item.project_id,
                           );
-                          if (project) onOpenProject(project);
+                          if (project) {
+                            onOpenProject({
+                              ...project,
+                              ...(item.phase_id ? { focus_phase_id: item.phase_id } : {}),
+                              ...(item.task_id ? { focus_task_id: item.task_id } : {}),
+                            });
+                          }
                         }}
                       >
                         Open project
                       </Button>
-                      <Button
-                        className="btn-small"
-                        disabled={attentionBusy === item.key}
-                        onClick={() => void dispositionAttention(item, "acknowledged")}
-                      >
-                        Acknowledge
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        className="btn-small"
-                        disabled={attentionBusy === item.key}
-                        onClick={() => void dispositionAttention(item, "snoozed")}
-                      >
-                        Snooze 1h
-                      </Button>
+                      {item.kind !== "decision" ? (
+                        <>
+                          <Button
+                            className="btn-small"
+                            disabled={attentionBusy === item.key}
+                            onClick={() => void dispositionAttention(item, "acknowledged")}
+                          >
+                            Acknowledge
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            className="btn-small"
+                            disabled={attentionBusy === item.key}
+                            onClick={() => void dispositionAttention(item, "snoozed")}
+                          >
+                            Snooze 1h
+                          </Button>
+                        </>
+                      ) : null}
                     </div>
                   </article>
                 ))}

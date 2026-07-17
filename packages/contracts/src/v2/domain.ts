@@ -846,6 +846,13 @@ export const V2DecisionPoint = z
         message: "recommendation_option_id must reference one of the options",
       });
     }
+    if (new Set(point.options.map((option) => option.id)).size !== point.options.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["options"],
+        message: "decision option ids must be unique",
+      });
+    }
   });
 export type V2DecisionPointT = z.infer<typeof V2DecisionPoint>;
 
@@ -861,6 +868,10 @@ export const V2DecisionRecord = z
     title: V2NonEmptyString,
     rationale: V2NonEmptyString,
     selected_option_id: V2EntityId.nullable(),
+    direction_target: z
+      .enum(["project_manager", "implementation_agent", "reviewer", "all_agents"])
+      .nullable(),
+    direction_text: V2NonEmptyString.max(10_000).nullable(),
     status: V2DecisionRecordStatus,
     decided_by: V2EntityId,
     approval_evidence: V2ApprovalEvidence,
@@ -869,7 +880,16 @@ export const V2DecisionRecord = z
     superseded_by_decision_record_id: V2EntityId.nullable(),
     created_at: V2IsoDateTime,
   })
-  .strict();
+  .strict()
+  .superRefine((record, ctx) => {
+    if ((record.direction_target === null) !== (record.direction_text === null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["direction_text"],
+        message: "direction_target and direction_text must be present together",
+      });
+    }
+  });
 export type V2DecisionRecordT = z.infer<typeof V2DecisionRecord>;
 
 export const V2MemoryCategory = z.enum([

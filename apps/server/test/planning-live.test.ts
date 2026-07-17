@@ -149,6 +149,9 @@ describe("live planning — persisted PM model routing", () => {
         reviewer_provider: "openai",
         reviewer_model: "gpt-5.6-luna",
       });
+      expect((fable.json() as { versions: unknown[] }).versions).toEqual([
+        expect.objectContaining({ version: 1, findings: [], responses: null }),
+      ]);
 
       const solId = await createProject(s, "openai", "gpt-5.6-sol");
       const sol = await inject(s, "POST", `/api/projects/${solId}/plan`, {
