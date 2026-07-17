@@ -6,6 +6,7 @@ Status: implementation and verification complete under the human owner's
 manual-gating policy.
 Candidate branch: `refoundation/phase6-7-completion`.
 Phase 6 implementation baseline: `0201aca`.
+Phase 7 implementation commit: `8d3bca05e5fb7a8c92d668312be24d0a9a6dc677`.
 
 ## Security and resilience delivered
 
@@ -93,4 +94,3 @@ a follow-on performance improvement.
 
 Phase 7 implementation is complete. The only intentionally open operation is
 the later, destructive legacy-retirement change after its distinct approval.
-
