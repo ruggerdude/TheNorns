@@ -171,6 +171,12 @@ export interface ServerOptions {
   phase7?: { operations: Phase7OperationsService };
   integrations?: { github: GitHubIntegrationService | null };
   /**
+   * Deployment configuration inspected by safe integration-status routes.
+   * Only presence and public model identifiers are returned; secret values
+   * never cross the server boundary. Tests may inject an isolated environment.
+   */
+  integrationEnvironment?: NodeJS.ProcessEnv;
+  /**
    * DEMO-ONLY dashboard provider (engine + ledger composition). When set, it is
    * exposed at GET /api/demo/dashboard and returns the same illustrative demo
    * data for every caller. It is intentionally unscoped: no project_id reaches
@@ -208,6 +214,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const sessionSockets = new Map<WsLike, SessionSocketBinding>();
   const loginThrottle = new LoginAttemptThrottle();
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
+  const integrationEnvironment = options.integrationEnvironment ?? process.env;
   const configuredOrigin =
     options.publicOrigin ??
     process.env.NORNS_PUBLIC_ORIGIN ??
@@ -1018,6 +1025,32 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // ---- workspace service connections -----------------------------------------
   // GitHub credentials live here, at the workspace/user authorization boundary.
   // Project records receive only stable installation/repository identities.
+  app.get("/api/integrations/ai/status", async (req, reply) => {
+    const user = await resolveUser(req);
+    if (!user) return reply.code(401).send({ error: "unauthorized" });
+    const anthropicConfigured = Boolean(integrationEnvironment.ANTHROPIC_API_KEY?.trim());
+    const openaiConfigured = Boolean(integrationEnvironment.OPENAI_API_KEY?.trim());
+    reply.header("Cache-Control", "no-store").send({
+      cross_provider_ready: anthropicConfigured && openaiConfigured,
+      providers: [
+        {
+          id: "anthropic",
+          name: "Anthropic",
+          configured: anthropicConfigured,
+          model: integrationEnvironment.NORNS_PM_MODEL ?? DEFAULT_PM_MODEL.anthropic,
+          required_environment: ["ANTHROPIC_API_KEY"],
+        },
+        {
+          id: "openai",
+          name: "OpenAI",
+          configured: openaiConfigured,
+          model: integrationEnvironment.NORNS_OPENAI_MODEL ?? DEFAULT_PM_MODEL.openai,
+          required_environment: ["OPENAI_API_KEY", "NORNS_OPENAI_MODEL"],
+        },
+      ],
+    });
+  });
+
   const github = options.integrations?.github ?? null;
   const githubError = (reply: FastifyReply, error: unknown): void => {
     if (error instanceof GitHubIntegrationError) {

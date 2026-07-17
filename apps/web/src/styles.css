@@ -511,6 +511,10 @@ button:disabled {
   border-radius: 12px;
   background: #101216;
 }
+.connection-card.is-open {
+  border-color: #59636e;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+}
 .connection-card.is-secondary {
   background: #0d0f12;
 }
@@ -519,6 +523,7 @@ button:disabled {
 }
 .connection-card-head,
 .connection-brand,
+.connection-card-controls,
 .connection-actions,
 .connection-row {
   display: flex;
@@ -532,6 +537,12 @@ button:disabled {
 .connection-brand {
   min-width: 0;
   gap: 0.75rem;
+}
+.connection-card-controls {
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.45rem;
 }
 .connection-brand p,
 .connection-row span {
@@ -553,6 +564,73 @@ button:disabled {
 .connection-actions {
   flex-wrap: wrap;
   gap: 0.5rem;
+}
+.connection-actions a.btn {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+.connection-details,
+.connection-setup,
+.pairing-panel {
+  display: grid;
+  gap: 0.8rem;
+}
+.connection-details {
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--line);
+}
+.connection-setup ol {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding-left: 1.25rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+.connection-setup code,
+.pairing-panel code {
+  overflow-wrap: anywhere;
+}
+.connection-setup details summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 650;
+}
+.connection-variable-list {
+  display: block;
+  margin-top: 0.65rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--muted);
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+.pairing-panel {
+  padding: 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+}
+.pairing-panel > div {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+.pairing-code {
+  color: var(--accent);
+  font-size: 1.15rem;
+  letter-spacing: 0.12em;
+}
+.provider-row > div,
+.connection-row > div {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
 }
 .connection-list {
   display: grid;
