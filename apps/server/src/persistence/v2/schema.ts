@@ -178,6 +178,68 @@ export const repositoryBindings = pgTable(
   ],
 );
 
+export const serviceConnections = pgTable(
+  "service_connections",
+  {
+    id: text("id").primaryKey(),
+    provider: text("provider").notNull(),
+    displayName: text("display_name").notNull(),
+    baseUrl: text("base_url").notNull().default("https://github.com"),
+    status: text("status").notNull().default("connected"),
+    ownerType: text("owner_type").notNull(),
+    ownerLogin: text("owner_login").notNull(),
+    externalAccountId: text("external_account_id").notNull(),
+    installationId: text("installation_id"),
+    repositorySelection: text("repository_selection"),
+    connectedByUserId: text("connected_by_user_id").notNull(),
+    lastValidatedAt: timestamp("last_validated_at", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("service_connections_provider_installation_unique").on(
+      table.provider,
+      table.installationId,
+    ),
+    index("service_connections_provider_status_idx").on(
+      table.provider,
+      table.status,
+      table.ownerLogin,
+    ),
+    check("service_connections_provider_check", sql`${table.provider} IN ('github')`),
+    check(
+      "service_connections_status_check",
+      sql`${table.status} IN ('connected', 'action_required', 'disconnected')`,
+    ),
+    check(
+      "service_connections_owner_type_check",
+      sql`${table.ownerType} IN ('user', 'organization')`,
+    ),
+  ],
+);
+
+export const githubUserAuthorizations = pgTable(
+  "github_user_authorizations",
+  {
+    userId: text("user_id").primaryKey(),
+    githubUserId: text("github_user_id").notNull(),
+    githubLogin: text("github_login").notNull(),
+    accessTokenCiphertext: text("access_token_ciphertext").notNull(),
+    refreshTokenCiphertext: text("refresh_token_ciphertext"),
+    accessTokenExpiresAt: timestamp("access_token_expires_at", {
+      withTimezone: true,
+      mode: "string",
+    }),
+    refreshTokenExpiresAt: timestamp("refresh_token_expires_at", {
+      withTimezone: true,
+      mode: "string",
+    }),
+    connectedAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  () => [],
+);
+
 export const phases = pgTable(
   "phases",
   {
@@ -1891,6 +1953,11 @@ export const repositoryBindingCandidates = pgTable(
     displayName: text("display_name").notNull(),
     githubOwner: text("github_owner"),
     githubName: text("github_name"),
+    serviceConnectionId: text("service_connection_id").references(() => serviceConnections.id, {
+      onDelete: "restrict",
+    }),
+    externalRepositoryId: text("external_repository_id"),
+    defaultBranch: text("default_branch"),
     status: text("status").notNull().default("unverified"),
     archiveId: text("archive_id").references((): AnyPgColumn => legacySnapshotArchives.id, {
       onDelete: "restrict",
@@ -2586,6 +2653,8 @@ export const phase2PreservationSchema = {
   invitations,
   projectPlanningPreferences,
   repositoryBindingCandidates,
+  serviceConnections,
+  githubUserAuthorizations,
   recoveryCheckpoints,
   legacySnapshotArchives,
   legacyArchiveAccessEvents,

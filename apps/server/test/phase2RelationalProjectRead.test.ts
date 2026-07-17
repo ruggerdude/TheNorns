@@ -427,4 +427,44 @@ describe.sequential("Phase 2 relational project read projection", () => {
     expect((await shadowRepository.removeNode(source.id, "b")).removed).toEqual(["b"]);
     expect((await shadowRepository.loadPlan(source.id, plan)).graph.nodes).toHaveLength(1);
   });
+
+  it("retains the selected workspace connection and repository identity on native creation", async () => {
+    await pg.query(
+      `INSERT INTO service_connections (
+         id, provider, display_name, status, owner_type, owner_login,
+         external_account_id, installation_id, repository_selection,
+         connected_by_user_id
+       ) VALUES (
+         'github:42','github','octocat on GitHub','connected','user','octocat',
+         '101','42','all','norns-user-1'
+       )`,
+    );
+    const created = await relational().create({
+      name: "Connected project",
+      description: "Uses a selected repository",
+      pmProvider: "openai",
+      sourceType: "github",
+      sourceLocation: "https://github.com/octocat/existing-app.git",
+      sourceConnectionId: "github:42",
+      sourceRepositoryId: "9001",
+      sourceDefaultBranch: "main",
+    });
+
+    const candidate = await pg.query<{
+      service_connection_id: string;
+      external_repository_id: string;
+      default_branch: string;
+    }>(
+      `SELECT service_connection_id, external_repository_id, default_branch
+       FROM repository_binding_candidates WHERE project_id = $1`,
+      [created.id],
+    );
+    expect(candidate.rows).toEqual([
+      {
+        service_connection_id: "github:42",
+        external_repository_id: "9001",
+        default_branch: "main",
+      },
+    ]);
+  });
 });

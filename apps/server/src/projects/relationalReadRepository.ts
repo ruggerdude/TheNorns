@@ -478,8 +478,9 @@ export class RelationalProjectReadRepository implements ProjectRepository {
         await sql.query(
           `INSERT INTO repository_binding_candidates (
              id, project_id, source_type, source_fingerprint, display_name,
-             github_owner, github_name, status, created_at, updated_at
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,'unverified',$8,$8)`,
+             github_owner, github_name, service_connection_id,
+             external_repository_id, default_branch, status, created_at, updated_at
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'unverified',$11,$11)`,
           [
             newId("binding_candidate"),
             projectId,
@@ -488,6 +489,9 @@ export class RelationalProjectReadRepository implements ProjectRepository {
             displayName,
             github?.[1] ?? null,
             github?.[2] ?? null,
+            input.sourceConnectionId ?? null,
+            input.sourceRepositoryId ?? null,
+            input.sourceDefaultBranch ?? null,
             createdAt,
           ],
         );

@@ -50,6 +50,11 @@ import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
 import { GraphEditError } from "./graph/graph.js";
 import { newId, nonce, pairingCode } from "./ids.js";
+import {
+  GitHubIntegrationError,
+  type GitHubIntegrationService,
+  disabledGitHubStatus,
+} from "./integrations/github.js";
 import type { Phase7OperationsService } from "./operations/phase7Operations.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
 import type { AttentionService } from "./projects/attentionService.js";
@@ -162,6 +167,7 @@ export interface ServerOptions {
   phase5?: { attention: AttentionService };
   phase6?: { coordination: Phase6CoordinationService };
   phase7?: { operations: Phase7OperationsService };
+  integrations?: { github: GitHubIntegrationService | null };
   /**
    * DEMO-ONLY dashboard provider (engine + ledger composition). When set, it is
    * exposed at GET /api/demo/dashboard and returns the same illustrative demo
@@ -1007,6 +1013,220 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
   }
 
+  // ---- workspace service connections -----------------------------------------
+  // GitHub credentials live here, at the workspace/user authorization boundary.
+  // Project records receive only stable installation/repository identities.
+  const github = options.integrations?.github ?? null;
+  const githubError = (reply: FastifyReply, error: unknown): void => {
+    if (error instanceof GitHubIntegrationError) {
+      reply.code(error.status).send({ error: error.code, message: error.message });
+      return;
+    }
+    throw error;
+  };
+
+  app.get("/api/integrations/github/status", async (req, reply) => {
+    const user = await resolveUser(req);
+    if (!user) return reply.code(401).send({ error: "unauthorized" });
+    if (!github) return reply.send(disabledGitHubStatus());
+    try {
+      reply.header("Cache-Control", "no-store").send(await github.status(user.id));
+    } catch (error) {
+      githubError(reply, error);
+    }
+  });
+
+  app.get("/api/integrations/github/authorize", async (req, reply) => {
+    const user = await resolveUser(req);
+    if (!user) return reply.code(401).send({ error: "unauthorized" });
+    if (!github) {
+      return reply
+        .code(503)
+        .send({ error: "github_not_configured", message: "GitHub App is not configured" });
+    }
+    reply
+      .header("Cache-Control", "no-store")
+      .send({ authorization_url: github.authorizationUrl(user.id) });
+  });
+
+  app.get("/api/integrations/github/install", async (req, reply) => {
+    const user = await resolveUser(req);
+    if (!user) return reply.code(401).send({ error: "unauthorized" });
+    if (!github) {
+      return reply
+        .code(503)
+        .send({ error: "github_not_configured", message: "GitHub App is not configured" });
+    }
+    reply
+      .header("Cache-Control", "no-store")
+      .send({ installation_url: github.installationUrl(user.id) });
+  });
+
+  const GitHubAuthorizationCallback = z.object({
+    code: z.string().min(1).optional(),
+    state: z.string().min(1).optional(),
+    error: z.string().optional(),
+  });
+  app.get("/api/integrations/github/callback", async (req, reply) => {
+    if (!github)
+      return reply.redirect(`${externalOrigin(req)}/?settings=connections&github=disabled`);
+    const query = GitHubAuthorizationCallback.safeParse(req.query);
+    if (!query.success || query.data.error || !query.data.code || !query.data.state) {
+      return reply.redirect(`${externalOrigin(req)}/?settings=connections&github=denied`);
+    }
+    try {
+      const stateUserId = github.authorizationUserId(query.data.state);
+      const currentUser = await resolveUser(req);
+      if (currentUser && currentUser.id !== stateUserId) {
+        return reply.redirect(
+          `${externalOrigin(req)}/?settings=connections&github=invalid_oauth_state`,
+        );
+      }
+      await github.completeAuthorization(stateUserId, query.data.code, query.data.state);
+      stores.audit(
+        currentUser?.email ?? stateUserId,
+        "integration.github.authorized",
+        stateUserId,
+        now(),
+      );
+      return reply.redirect(`${externalOrigin(req)}/?settings=connections&github=connected`);
+    } catch (error) {
+      const code = error instanceof GitHubIntegrationError ? error.code : "failed";
+      return reply.redirect(
+        `${externalOrigin(req)}/?settings=connections&github=${encodeURIComponent(code)}`,
+      );
+    }
+  });
+
+  const GitHubSetupCallback = z.object({
+    state: z.string().min(1).optional(),
+    installation_id: z.string().min(1).optional(),
+    setup_action: z.string().optional(),
+  });
+  app.get("/api/integrations/github/setup", async (req, reply) => {
+    if (!github)
+      return reply.redirect(`${externalOrigin(req)}/?settings=connections&github=disabled`);
+    const query = GitHubSetupCallback.safeParse(req.query);
+    if (!query.success) {
+      return reply.redirect(`${externalOrigin(req)}/?settings=connections&github=failed`);
+    }
+    try {
+      if (!query.data.state) {
+        return reply.redirect(
+          `${externalOrigin(req)}/?settings=connections&github=invalid_oauth_state`,
+        );
+      }
+      const stateUserId = github.installationUserId(query.data.state);
+      const currentUser = await resolveUser(req);
+      if (currentUser && currentUser.id !== stateUserId) {
+        return reply.redirect(
+          `${externalOrigin(req)}/?settings=connections&github=invalid_oauth_state`,
+        );
+      }
+      await github.completeInstallation(stateUserId, query.data.state);
+      stores.audit(
+        currentUser?.email ?? stateUserId,
+        "integration.github.installed",
+        query.data.installation_id ?? "installation synchronized",
+        now(),
+      );
+      return reply.redirect(`${externalOrigin(req)}/?settings=connections&github=installed`);
+    } catch (error) {
+      const code = error instanceof GitHubIntegrationError ? error.code : "failed";
+      return reply.redirect(
+        `${externalOrigin(req)}/?settings=connections&github=${encodeURIComponent(code)}`,
+      );
+    }
+  });
+
+  app.get("/api/integrations/github/connections/:id/repositories", async (req, reply) => {
+    const user = await resolveUser(req);
+    if (!user) return reply.code(401).send({ error: "unauthorized" });
+    if (!github) {
+      return reply
+        .code(503)
+        .send({ error: "github_not_configured", message: "GitHub App is not configured" });
+    }
+    const { id } = req.params as { id: string };
+    const query = z.object({ q: z.string().max(200).optional() }).safeParse(req.query);
+    if (!query.success) return reply.code(400).send({ error: "bad_request" });
+    try {
+      reply.send(await github.listRepositories(user.id, id, query.data.q));
+    } catch (error) {
+      githubError(reply, error);
+    }
+  });
+
+  const CreateGitHubRepositoryBody = z.object({
+    connection_id: z.string().min(1),
+    name: z
+      .string()
+      .regex(/^[A-Za-z0-9._-]+$/)
+      .max(100),
+    description: z.string().max(350).default(""),
+    private: z.boolean().default(true),
+    auto_init: z.boolean().default(true),
+  });
+  app.post("/api/integrations/github/repositories", async (req, reply) => {
+    const user = await resolveUser(req);
+    if (!user) return reply.code(401).send({ error: "unauthorized" });
+    if (!github) {
+      return reply
+        .code(503)
+        .send({ error: "github_not_configured", message: "GitHub App is not configured" });
+    }
+    const body = CreateGitHubRepositoryBody.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: "bad_request" });
+    try {
+      const repository = await github.createRepository(user.id, body.data);
+      stores.audit(
+        user.email,
+        "integration.github.repository_created",
+        repository.full_name,
+        now(),
+      );
+      reply.code(201).send(repository);
+    } catch (error) {
+      githubError(reply, error);
+    }
+  });
+
+  app.delete("/api/integrations/github/connections/:id", async (req, reply) => {
+    const user = await requireAdmin(req, reply);
+    if (!user) return;
+    if (!github) {
+      return reply
+        .code(503)
+        .send({ error: "github_not_configured", message: "GitHub App is not configured" });
+    }
+    const { id } = req.params as { id: string };
+    try {
+      await github.disconnect(id);
+      stores.audit(user.email, "integration.github.disconnected", id, now());
+      reply.code(204).send();
+    } catch (error) {
+      githubError(reply, error);
+    }
+  });
+
+  app.post("/api/integrations/github/connections/:id/reconnect", async (req, reply) => {
+    const user = await requireAdmin(req, reply);
+    if (!user) return;
+    if (!github) {
+      return reply
+        .code(503)
+        .send({ error: "github_not_configured", message: "GitHub App is not configured" });
+    }
+    const { id } = req.params as { id: string };
+    try {
+      await github.reconnect(id);
+      stores.audit(user.email, "integration.github.reconnected", id, now());
+      reply.send({ status: "connected" });
+    } catch (error) {
+      githubError(reply, error);
+    }
+  });
+
   // ---- multi-project management: create/list projects; plan, edit, and ------
   // ---- allocate each one's own graph ------------------------------------------
 
@@ -1062,6 +1282,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       description: z.string().min(1),
       source_type: z.enum(["local", "github"]).optional(),
       source_location: z.string().trim().min(1).optional(),
+      github_connection_id: z.string().min(1).optional(),
+      github_repository_id: z.string().min(1).optional(),
     };
     const CreateProjectBody = z
       .discriminatedUnion("pm_provider", [
@@ -1077,41 +1299,89 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }),
       ])
       .superRefine((value, context) => {
-        if (value.source_type && !value.source_location) {
+        if (value.source_type === "local" && !value.source_location) {
           context.addIssue({
             code: z.ZodIssueCode.custom,
             path: ["source_location"],
             message: "source location is required",
           });
         }
-        if (
-          value.source_type === "github" &&
-          value.source_location &&
-          !/^(https:\/\/github\.com\/[^/]+\/[^/]+(?:\.git)?|git@github\.com:[^/]+\/[^/]+(?:\.git)?)$/.test(
-            value.source_location,
-          )
-        ) {
+        if (value.source_type === "github" && !value.github_connection_id) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["github_connection_id"],
+            message: "select a GitHub connection",
+          });
+        }
+        if (value.source_type === "github" && !value.github_repository_id) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["github_repository_id"],
+            message: "select a GitHub repository",
+          });
+        }
+        if (value.source_type === "github" && value.source_location) {
           context.addIssue({
             code: z.ZodIssueCode.custom,
             path: ["source_location"],
-            message: "enter a GitHub repository URL",
+            message: "raw GitHub URLs are not accepted; select a connected repository",
+          });
+        }
+        if (
+          value.source_type !== "github" &&
+          (value.github_connection_id || value.github_repository_id)
+        ) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["source_type"],
+            message: "GitHub repository selection requires source_type=github",
           });
         }
       });
     app.post("/api/projects", async (req, reply) => {
-      if (!(await requireSession(req, reply))) return;
+      const user = await resolveUser(req);
+      if (!user) return reply.code(401).send({ error: "unauthorized" });
       const body = CreateProjectBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      let resolvedGitHubRepository:
+        | Awaited<ReturnType<GitHubIntegrationService["resolveRepository"]>>
+        | undefined;
+      if (body.data.source_type === "github") {
+        if (!github) {
+          return reply.code(503).send({
+            error: "github_not_configured",
+            message: "GitHub App is not configured",
+          });
+        }
+        try {
+          resolvedGitHubRepository = await github.resolveRepository(
+            user.id,
+            body.data.github_connection_id ?? "",
+            body.data.github_repository_id ?? "",
+          );
+        } catch (error) {
+          return githubError(reply, error);
+        }
+      }
       const project = await projects.create({
         name: body.data.name,
         description: body.data.description,
         pmProvider: body.data.pm_provider,
         pmModel: body.data.pm_model,
         ...(body.data.source_type ? { sourceType: body.data.source_type } : {}),
-        ...(body.data.source_location ? { sourceLocation: body.data.source_location } : {}),
+        ...(resolvedGitHubRepository
+          ? {
+              sourceLocation: resolvedGitHubRepository.clone_url,
+              sourceConnectionId: resolvedGitHubRepository.connection_id,
+              sourceRepositoryId: resolvedGitHubRepository.id,
+              sourceDefaultBranch: resolvedGitHubRepository.default_branch,
+            }
+          : body.data.source_location
+            ? { sourceLocation: body.data.source_location }
+            : {}),
       });
       stores.audit(
-        "operator",
+        user.email,
         "project.created",
         `${project.id} ${project.name} pm=${project.pm_provider}:${project.pm_model}`,
         now(),

@@ -56,6 +56,9 @@ interface ProjectRecord {
   pmModel: PmModelT | null;
   sourceType: ProjectSourceType | null;
   sourceLocation: string | null;
+  sourceConnectionId: string | null;
+  sourceRepositoryId: string | null;
+  sourceDefaultBranch: string | null;
   createdAt: string;
   session: GraphSession | null;
 }
@@ -71,6 +74,9 @@ export interface ProjectStoreSnapshot {
     /** Optional for snapshots created before repository connections were supported. */
     sourceType?: ProjectSourceType | null;
     sourceLocation?: string | null;
+    sourceConnectionId?: string | null;
+    sourceRepositoryId?: string | null;
+    sourceDefaultBranch?: string | null;
     createdAt: string;
     plan: PlanContractT | null;
     graph: GraphSnapshot | null;
@@ -101,6 +107,9 @@ export class ProjectStore {
     pmModel?: PmModelT;
     sourceType?: ProjectSourceType;
     sourceLocation?: string;
+    sourceConnectionId?: string;
+    sourceRepositoryId?: string;
+    sourceDefaultBranch?: string;
   }): ProjectSummary {
     const record: ProjectRecord = {
       id: newId("proj"),
@@ -110,6 +119,9 @@ export class ProjectStore {
       pmModel: resolvePmModel(input.pmProvider, input.pmModel),
       sourceType: input.sourceType ?? null,
       sourceLocation: input.sourceLocation?.trim() || null,
+      sourceConnectionId: input.sourceConnectionId ?? null,
+      sourceRepositoryId: input.sourceRepositoryId ?? null,
+      sourceDefaultBranch: input.sourceDefaultBranch ?? null,
       createdAt: new Date().toISOString(),
       session: null,
     };
@@ -173,6 +185,9 @@ export class ProjectStore {
         pmModel: r.pmModel,
         sourceType: r.sourceType,
         sourceLocation: r.sourceLocation,
+        sourceConnectionId: r.sourceConnectionId,
+        sourceRepositoryId: r.sourceRepositoryId,
+        sourceDefaultBranch: r.sourceDefaultBranch,
         createdAt: r.createdAt,
         plan: r.session?.plan ?? null,
         graph: r.session?.graph.snapshot() ?? null,
@@ -203,6 +218,9 @@ export class ProjectStore {
             : resolvePmModel(p.pmProvider, p.pmModel),
         sourceType: p.sourceType ?? null,
         sourceLocation: p.sourceLocation ?? null,
+        sourceConnectionId: p.sourceConnectionId ?? null,
+        sourceRepositoryId: p.sourceRepositoryId ?? null,
+        sourceDefaultBranch: p.sourceDefaultBranch ?? null,
         createdAt: p.createdAt,
         session,
       });

@@ -16,6 +16,10 @@ import { buildDashboard } from "./dashboard.js";
 import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
 import { GraphSession } from "./graph/session.js";
+import {
+  GitHubIntegrationService,
+  githubIntegrationConfigFromEnvironment,
+} from "./integrations/github.js";
 import { Phase7OperationsService } from "./operations/phase7Operations.js";
 import {
   Phase2ApplicationPersistenceLease,
@@ -111,6 +115,13 @@ let phase4Services:
 let phase5Services: { attention: AttentionService } | undefined;
 let phase6Services: { coordination: Phase6CoordinationService } | undefined;
 let phase7Services: { operations: Phase7OperationsService } | undefined;
+let integrationServices: { github: GitHubIntegrationService | null } | undefined;
+
+const publicOrigin =
+  process.env.NORNS_PUBLIC_ORIGIN ??
+  (process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : "http://127.0.0.1:5173");
 
 if (databaseUrl) {
   try {
@@ -133,6 +144,10 @@ if (databaseUrl) {
       mode: "runtime",
       role: "norns_app",
     });
+    const githubConfig = githubIntegrationConfigFromEnvironment(process.env, publicOrigin);
+    integrationServices = {
+      github: githubConfig ? new GitHubIntegrationService(runtimeTransactions, githubConfig) : null,
+    };
     phase3Services = {
       sourceBindings: new SourceBindingService(runtimeTransactions),
       ingestion: new RepositoryIngestionService(runtimeTransactions),
@@ -388,10 +403,12 @@ const server = await buildServer({
   ...(phase5Services !== undefined ? { phase5: phase5Services } : {}),
   ...(phase6Services !== undefined ? { phase6: phase6Services } : {}),
   ...(phase7Services !== undefined ? { phase7: phase7Services } : {}),
+  ...(integrationServices !== undefined ? { integrations: integrationServices } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),
   ...(usersFlusher !== undefined ? { persistUsers: () => usersFlusher.flush() } : {}),
   ...(webDist !== undefined ? { webDist } : {}),
+  publicOrigin,
   dashboard: () =>
     buildDashboard({
       engine,
