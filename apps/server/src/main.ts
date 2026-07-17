@@ -144,9 +144,38 @@ if (databaseUrl) {
       mode: "runtime",
       role: "norns_app",
     });
+    const credentialKeyring =
+      identityRoute?.read_mode === "relational" && identityRoute.write_mode === "relational"
+        ? parseCredentialHmacKeyring(process.env)
+        : null;
     const githubConfig = githubIntegrationConfigFromEnvironment(process.env, publicOrigin);
+    const githubManifestBootstrap = credentialKeyring
+      ? {
+          publicOrigin,
+          currentKey: {
+            keyId: credentialKeyring.current.keyId,
+            key: credentialKeyring.current.key,
+          },
+          keys: new Map(
+            [...credentialKeyring.byId].map(([keyId, key]) => [
+              keyId,
+              { keyId: key.keyId, key: key.key },
+            ]),
+          ),
+        }
+      : null;
+    const github =
+      githubConfig || githubManifestBootstrap
+        ? new GitHubIntegrationService(
+            runtimeTransactions,
+            githubConfig,
+            fetch,
+            githubManifestBootstrap,
+          )
+        : null;
+    await github?.loadStoredConfiguration();
     integrationServices = {
-      github: githubConfig ? new GitHubIntegrationService(runtimeTransactions, githubConfig) : null,
+      github,
     };
     phase3Services = {
       sourceBindings: new SourceBindingService(runtimeTransactions),
@@ -165,11 +194,8 @@ if (databaseUrl) {
     phase5Services = { attention: new AttentionService(runtimeTransactions) };
     phase6Services = { coordination: new Phase6CoordinationService(runtimeTransactions) };
     phase7Services = { operations: new Phase7OperationsService(runtimeTransactions) };
-    if (identityRoute?.read_mode === "relational" && identityRoute.write_mode === "relational") {
-      await assertCredentialHmacKeyCoverage(
-        runtimeTransactions,
-        parseCredentialHmacKeyring(process.env),
-      );
+    if (credentialKeyring) {
+      await assertCredentialHmacKeyCoverage(runtimeTransactions, credentialKeyring);
     }
     identityRuntime = createIdentityRuntime({
       users,

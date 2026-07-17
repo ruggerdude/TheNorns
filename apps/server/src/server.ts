@@ -267,6 +267,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     }
     return `${req.protocol}://${req.headers.host}`;
   };
+  const escapeHtml = (value: string): string =>
+    value
+      .replaceAll("&", "&amp;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
 
   app.addHook("preHandler", async (req, reply) => {
     if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return;
@@ -1071,10 +1078,95 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     }
   });
 
+  const GitHubManifestStartQuery = z.object({
+    owner_type: z.enum(["personal", "organization"]).default("personal"),
+    organization: z.string().trim().max(39).optional(),
+  });
+  app.get("/api/integrations/github/manifest/start", async (req, reply) => {
+    const user = await requireAdmin(req, reply);
+    if (!user) return;
+    if (!github) {
+      return reply.code(503).send({
+        error: "github_manifest_unavailable",
+        message: "Guided GitHub setup requires relational persistence",
+      });
+    }
+    const query = GitHubManifestStartQuery.safeParse(req.query);
+    if (!query.success) return reply.code(400).send({ error: "bad_request" });
+    if (query.data.owner_type === "organization" && !query.data.organization) {
+      return reply.code(400).send({
+        error: "organization_required",
+        message: "Enter the GitHub organization that should own the App",
+      });
+    }
+    try {
+      const registration = github.manifestRegistration(
+        user.id,
+        query.data.owner_type === "organization" ? query.data.organization : undefined,
+      );
+      const cspNonce = nonce();
+      reply
+        .header("Cache-Control", "no-store")
+        .header(
+          "Content-Security-Policy",
+          `default-src 'none'; form-action https://github.com; script-src 'nonce-${cspNonce}'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'`,
+        )
+        .type("text/html")
+        .send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Connecting GitHub…</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{background:#0d0f12;color:#f5f3ee;font:16px system-ui;margin:3rem;line-height:1.5}button{padding:.75rem 1rem}</style>
+</head><body><p>Opening GitHub to create your preconfigured App…</p>
+<form method="post" action="${escapeHtml(registration.action)}">
+<input type="hidden" name="manifest" value="${escapeHtml(registration.manifest)}">
+<input type="hidden" name="state" value="${escapeHtml(registration.state)}">
+<noscript><button type="submit">Continue to GitHub</button></noscript>
+</form><script nonce="${cspNonce}">document.forms[0].submit()</script></body></html>`);
+    } catch (error) {
+      githubError(reply, error);
+    }
+  });
+
+  const GitHubManifestCallback = z.object({
+    code: z.string().min(1).optional(),
+    state: z.string().min(1).optional(),
+    error: z.string().optional(),
+  });
+  app.get("/api/integrations/github/manifest/callback", async (req, reply) => {
+    if (!github)
+      return reply.redirect(`${externalOrigin(req)}/?settings=connections&github=disabled`);
+    const query = GitHubManifestCallback.safeParse(req.query);
+    if (!query.success || query.data.error || !query.data.code || !query.data.state) {
+      return reply.redirect(`${externalOrigin(req)}/?settings=connections&github=denied`);
+    }
+    try {
+      const stateUserId = github.manifestUserId(query.data.state);
+      const currentUser = await resolveUser(req);
+      if (currentUser && currentUser.id !== stateUserId) {
+        return reply.redirect(
+          `${externalOrigin(req)}/?settings=connections&github=invalid_oauth_state`,
+        );
+      }
+      await github.completeManifest(stateUserId, query.data.code, query.data.state);
+      stores.audit(
+        currentUser?.email ?? stateUserId,
+        "integration.github.app_created",
+        stateUserId,
+        now(),
+      );
+      return reply.redirect(github.authorizationUrl(stateUserId, "install"));
+    } catch (error) {
+      const code = error instanceof GitHubIntegrationError ? error.code : "failed";
+      return reply.redirect(
+        `${externalOrigin(req)}/?settings=connections&github=${encodeURIComponent(code)}`,
+      );
+    }
+  });
+
   app.get("/api/integrations/github/authorize", async (req, reply) => {
     const user = await resolveUser(req);
     if (!user) return reply.code(401).send({ error: "unauthorized" });
-    if (!github) {
+    if (!github || !github.isConfigured()) {
       return reply
         .code(503)
         .send({ error: "github_not_configured", message: "GitHub App is not configured" });
@@ -1087,7 +1179,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   app.get("/api/integrations/github/install", async (req, reply) => {
     const user = await resolveUser(req);
     if (!user) return reply.code(401).send({ error: "unauthorized" });
-    if (!github) {
+    if (!github || !github.isConfigured()) {
       return reply
         .code(503)
         .send({ error: "github_not_configured", message: "GitHub App is not configured" });
@@ -1117,14 +1209,22 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           `${externalOrigin(req)}/?settings=connections&github=invalid_oauth_state`,
         );
       }
-      await github.completeAuthorization(stateUserId, query.data.code, query.data.state);
+      const result = await github.completeAuthorization(
+        stateUserId,
+        query.data.code,
+        query.data.state,
+      );
       stores.audit(
         currentUser?.email ?? stateUserId,
         "integration.github.authorized",
         stateUserId,
         now(),
       );
-      return reply.redirect(`${externalOrigin(req)}/?settings=connections&github=connected`);
+      return reply.redirect(
+        result.next === "install"
+          ? github.installationUrl(stateUserId)
+          : `${externalOrigin(req)}/?settings=connections&github=connected`,
+      );
     } catch (error) {
       const code = error instanceof GitHubIntegrationError ? error.code : "failed";
       return reply.redirect(

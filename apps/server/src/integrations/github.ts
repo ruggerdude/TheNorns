@@ -3,6 +3,7 @@ import {
   createDecipheriv,
   createHmac,
   createSign,
+  hkdfSync,
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
@@ -27,6 +28,23 @@ export interface GitHubIntegrationConfig {
   stateSecret: string;
   tokenEncryptionKey: Uint8Array;
   publicOrigin: string;
+}
+
+export interface GitHubManifestBootstrapKey {
+  keyId: string;
+  key: Uint8Array;
+}
+
+export interface GitHubManifestBootstrap {
+  publicOrigin: string;
+  currentKey: GitHubManifestBootstrapKey;
+  keys: ReadonlyMap<string, GitHubManifestBootstrapKey>;
+}
+
+export interface GitHubManifestRegistration {
+  action: string;
+  manifest: string;
+  state: string;
 }
 
 export interface GitHubConnectionSummary {
@@ -59,6 +77,8 @@ export interface GitHubRepositorySummary {
 
 export interface GitHubIntegrationStatus {
   configured: boolean;
+  setup_available: boolean;
+  configuration_source: "environment" | "manifest" | null;
   user_authorization: {
     connected: boolean;
     login: string | null;
@@ -128,8 +148,44 @@ interface InstallationTokenResponse {
   expires_at: string;
 }
 
+interface StoredAppConfigurationRow {
+  key_id: string;
+  app_id: string;
+  client_id: string;
+  app_slug: string;
+  credentials_ciphertext: string;
+}
+
+interface StoredAppSecrets {
+  client_secret: string;
+  private_key: string;
+  webhook_secret: string;
+}
+
+interface GitHubManifestConversion {
+  id?: number;
+  slug?: string;
+  client_id?: string;
+  client_secret?: string;
+  pem?: string;
+  webhook_secret?: string;
+  message?: string;
+}
+
 const GITHUB_API_VERSION = "2022-11-28";
 const API_BASE = "https://api.github.com";
+
+function derivedKey(key: Uint8Array, purpose: "configuration" | "state" | "tokens"): Buffer {
+  return Buffer.from(
+    hkdfSync(
+      "sha256",
+      Buffer.from(key),
+      Buffer.from("TheNorns GitHub integration", "utf8"),
+      Buffer.from(`github:${purpose}:v1`, "utf8"),
+      32,
+    ),
+  );
+}
 
 function required(name: string, value: string | undefined): string {
   if (!value?.trim()) throw new Error(`${name} is required when GitHub integration is configured`);
@@ -193,11 +249,23 @@ function base64Url(value: string | Uint8Array): string {
   return Buffer.from(value).toString("base64url");
 }
 
-function statePayload(userId: string, purpose: "authorize" | "install"): string {
+type GitHubStatePurpose = "authorize" | "install" | "manifest";
+
+interface GitHubStateContext {
+  userId: string;
+  next: "install" | null;
+}
+
+function statePayload(
+  userId: string,
+  purpose: GitHubStatePurpose,
+  next: "install" | null = null,
+): string {
   return base64Url(
     JSON.stringify({
       user_id: userId,
       purpose,
+      next,
       nonce: randomBytes(16).toString("hex"),
       expires_at: Date.now() + 10 * 60_000,
     }),
@@ -208,12 +276,21 @@ function signState(payload: string, secret: string): string {
   return createHmac("sha256", secret).update(payload).digest("base64url");
 }
 
-function createState(userId: string, purpose: "authorize" | "install", secret: string): string {
-  const payload = statePayload(userId, purpose);
+function createState(
+  userId: string,
+  purpose: GitHubStatePurpose,
+  secret: string,
+  next: "install" | null = null,
+): string {
+  const payload = statePayload(userId, purpose, next);
   return `${payload}.${signState(payload, secret)}`;
 }
 
-function stateUserId(state: string, purpose: "authorize" | "install", secret: string): string {
+function stateContext(
+  state: string,
+  purpose: GitHubStatePurpose,
+  secret: string,
+): GitHubStateContext {
   const [payload, suppliedSignature, extra] = state.split(".");
   if (!payload || !suppliedSignature || extra) {
     throw new GitHubIntegrationError(
@@ -231,7 +308,7 @@ function stateUserId(state: string, purpose: "authorize" | "install", secret: st
       400,
     );
   }
-  let parsed: { user_id?: string; purpose?: string; expires_at?: number };
+  let parsed: { user_id?: string; purpose?: string; expires_at?: number; next?: unknown };
   try {
     parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as typeof parsed;
   } catch {
@@ -253,22 +330,31 @@ function stateUserId(state: string, purpose: "authorize" | "install", secret: st
       400,
     );
   }
-  return parsed.user_id;
-}
-
-function verifyState(
-  state: string,
-  userId: string,
-  purpose: "authorize" | "install",
-  secret: string,
-): void {
-  if (stateUserId(state, purpose, secret) !== userId) {
+  if (parsed.next !== undefined && parsed.next !== null && parsed.next !== "install") {
     throw new GitHubIntegrationError(
       "invalid_oauth_state",
       "GitHub authorization state is invalid",
       400,
     );
   }
+  return { userId: parsed.user_id, next: parsed.next === "install" ? "install" : null };
+}
+
+function verifyState(
+  state: string,
+  userId: string,
+  purpose: GitHubStatePurpose,
+  secret: string,
+): GitHubStateContext {
+  const context = stateContext(state, purpose, secret);
+  if (context.userId !== userId) {
+    throw new GitHubIntegrationError(
+      "invalid_oauth_state",
+      "GitHub authorization state is invalid",
+      400,
+    );
+  }
+  return context;
 }
 
 class TokenCipher {
@@ -349,48 +435,240 @@ function repositorySummary(
 export type GitHubFetch = typeof fetch;
 
 export class GitHubIntegrationService {
-  private readonly cipher: TokenCipher;
+  private config: GitHubIntegrationConfig | null;
+  private cipher: TokenCipher | null;
+  private configurationSource: "environment" | "manifest" | null;
 
   constructor(
     private readonly transactions: V2TransactionRunner,
-    private readonly config: GitHubIntegrationConfig,
+    config: GitHubIntegrationConfig | null,
     private readonly http: GitHubFetch = fetch,
+    private readonly manifestBootstrap: GitHubManifestBootstrap | null = null,
   ) {
-    this.cipher = new TokenCipher(config.tokenEncryptionKey);
+    this.config = config;
+    this.cipher = config ? new TokenCipher(config.tokenEncryptionKey) : null;
+    this.configurationSource = config ? "environment" : null;
   }
 
-  authorizationUrl(userId: string): string {
-    const url = new URL("https://github.com/login/oauth/authorize");
-    url.searchParams.set("client_id", this.config.clientId);
-    url.searchParams.set(
-      "redirect_uri",
-      `${this.config.publicOrigin}/api/integrations/github/callback`,
+  async loadStoredConfiguration(): Promise<void> {
+    if (this.config || !this.manifestBootstrap) return;
+    const row = await this.transactions.transaction(async (tx) => {
+      return (
+        await tx.query<StoredAppConfigurationRow>(
+          `SELECT key_id, app_id, client_id, app_slug, credentials_ciphertext
+           FROM github_app_configurations
+           WHERE id = 'primary'`,
+        )
+      ).rows[0];
+    });
+    if (!row) return;
+    const key = this.manifestBootstrap.keys.get(row.key_id);
+    if (!key) {
+      throw new GitHubIntegrationError(
+        "github_configuration_key_unavailable",
+        `Stored GitHub configuration requires unavailable credential key ${row.key_id}`,
+        500,
+      );
+    }
+    const secrets = this.parseStoredSecrets(
+      new TokenCipher(derivedKey(key.key, "configuration")).decrypt(row.credentials_ciphertext),
     );
-    url.searchParams.set("state", createState(userId, "authorize", this.config.stateSecret));
+    this.activateManifestConfiguration(row, secrets, key.key);
+  }
+
+  isConfigured(): boolean {
+    return this.config !== null;
+  }
+
+  setupAvailable(): boolean {
+    return this.config === null && this.manifestBootstrap !== null;
+  }
+
+  manifestRegistration(userId: string, organization?: string): GitHubManifestRegistration {
+    if (!this.manifestBootstrap) {
+      throw new GitHubIntegrationError(
+        "github_manifest_unavailable",
+        "Guided GitHub setup requires durable relational identity credentials",
+        503,
+      );
+    }
+    if (this.config) {
+      throw new GitHubIntegrationError(
+        "github_already_configured",
+        "GitHub App is already configured",
+      );
+    }
+    const normalizedOrganization = organization?.trim();
+    if (
+      normalizedOrganization &&
+      !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(normalizedOrganization)
+    ) {
+      throw new GitHubIntegrationError(
+        "invalid_github_organization",
+        "GitHub organization names may contain letters, numbers, and single hyphens",
+        400,
+      );
+    }
+    const origin = this.manifestBootstrap.publicOrigin.replace(/\/$/, "");
+    const hostLabel =
+      new URL(origin).hostname.split(".")[0]?.replace(/[^A-Za-z0-9-]/g, "-") || "workspace";
+    const name = `The Norns ${hostLabel} ${randomBytes(3).toString("hex")}`.slice(0, 34);
+    const manifest = {
+      name,
+      url: origin,
+      description: "AI project coordination and repository execution for The Norns",
+      redirect_url: `${origin}/api/integrations/github/manifest/callback`,
+      callback_urls: [`${origin}/api/integrations/github/callback`],
+      setup_url: `${origin}/api/integrations/github/setup`,
+      public: false,
+      request_oauth_on_install: false,
+      setup_on_update: true,
+      default_permissions: {
+        metadata: "read",
+        contents: "write",
+        pull_requests: "write",
+        administration: "write",
+      },
+      default_events: [],
+    };
+    const action = normalizedOrganization
+      ? `https://github.com/organizations/${encodeURIComponent(normalizedOrganization)}/settings/apps/new`
+      : "https://github.com/settings/apps/new";
+    const stateSecret = derivedKey(this.manifestBootstrap.currentKey.key, "state").toString(
+      "base64url",
+    );
+    return {
+      action,
+      manifest: JSON.stringify(manifest),
+      state: createState(userId, "manifest", stateSecret),
+    };
+  }
+
+  manifestUserId(state: string): string {
+    const bootstrap = this.requireManifestBootstrap();
+    return stateContext(
+      state,
+      "manifest",
+      derivedKey(bootstrap.currentKey.key, "state").toString("base64url"),
+    ).userId;
+  }
+
+  async completeManifest(userId: string, code: string, state: string): Promise<void> {
+    const bootstrap = this.requireManifestBootstrap();
+    verifyState(
+      state,
+      userId,
+      "manifest",
+      derivedKey(bootstrap.currentKey.key, "state").toString("base64url"),
+    );
+    if (this.config) {
+      throw new GitHubIntegrationError(
+        "github_already_configured",
+        "GitHub App is already configured",
+      );
+    }
+    const response = await this.http(
+      `${API_BASE}/app-manifests/${encodeURIComponent(code)}/conversions`,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": GITHUB_API_VERSION,
+          "User-Agent": "TheNorns",
+        },
+      },
+    );
+    const conversion = (await response.json().catch(() => ({}))) as GitHubManifestConversion;
+    if (!response.ok) {
+      throw new GitHubIntegrationError(
+        "github_manifest_conversion_failed",
+        conversion.message ?? `GitHub App creation failed (${response.status})`,
+        502,
+      );
+    }
+    const appId = conversion.id === undefined ? "" : String(conversion.id);
+    const clientId = conversion.client_id?.trim() ?? "";
+    const appSlug = conversion.slug?.trim() ?? "";
+    const secrets: StoredAppSecrets = {
+      client_secret: conversion.client_secret?.trim() ?? "",
+      private_key: conversion.pem?.trim() ?? "",
+      webhook_secret: conversion.webhook_secret?.trim() ?? "",
+    };
+    if (
+      !appId ||
+      !clientId ||
+      !appSlug ||
+      !secrets.client_secret ||
+      !secrets.private_key ||
+      !secrets.webhook_secret
+    ) {
+      throw new GitHubIntegrationError(
+        "github_manifest_conversion_invalid",
+        "GitHub returned an incomplete App configuration",
+        502,
+      );
+    }
+    const ciphertext = new TokenCipher(
+      derivedKey(bootstrap.currentKey.key, "configuration"),
+    ).encrypt(JSON.stringify(secrets));
+    await this.transactions.transaction(async (tx) => {
+      await tx.query(
+        `INSERT INTO github_app_configurations (
+           id, key_id, app_id, client_id, app_slug, credentials_ciphertext,
+           created_by_user_id, created_at, updated_at
+         ) VALUES ('primary',$1,$2,$3,$4,$5,$6,now(),now())`,
+        [bootstrap.currentKey.keyId, appId, clientId, appSlug, ciphertext, userId],
+      );
+    });
+    this.activateManifestConfiguration(
+      {
+        key_id: bootstrap.currentKey.keyId,
+        app_id: appId,
+        client_id: clientId,
+        app_slug: appSlug,
+        credentials_ciphertext: ciphertext,
+      },
+      secrets,
+      bootstrap.currentKey.key,
+    );
+  }
+
+  authorizationUrl(userId: string, next: "install" | null = null): string {
+    const config = this.requireConfig();
+    const url = new URL("https://github.com/login/oauth/authorize");
+    url.searchParams.set("client_id", config.clientId);
+    url.searchParams.set("redirect_uri", `${config.publicOrigin}/api/integrations/github/callback`);
+    url.searchParams.set("state", createState(userId, "authorize", config.stateSecret, next));
     return url.toString();
   }
 
   installationUrl(userId: string): string {
-    const url = new URL(`https://github.com/apps/${this.config.appSlug}/installations/new`);
-    url.searchParams.set("state", createState(userId, "install", this.config.stateSecret));
+    const config = this.requireConfig();
+    const url = new URL(`https://github.com/apps/${config.appSlug}/installations/new`);
+    url.searchParams.set("state", createState(userId, "install", config.stateSecret));
     return url.toString();
   }
 
   authorizationUserId(state: string): string {
-    return stateUserId(state, "authorize", this.config.stateSecret);
+    return stateContext(state, "authorize", this.requireConfig().stateSecret).userId;
   }
 
   installationUserId(state: string): string {
-    return stateUserId(state, "install", this.config.stateSecret);
+    return stateContext(state, "install", this.requireConfig().stateSecret).userId;
   }
 
-  async completeAuthorization(userId: string, code: string, state: string): Promise<void> {
-    verifyState(state, userId, "authorize", this.config.stateSecret);
+  async completeAuthorization(
+    userId: string,
+    code: string,
+    state: string,
+  ): Promise<{ next: "install" | null }> {
+    const config = this.requireConfig();
+    const context = verifyState(state, userId, "authorize", config.stateSecret);
     const token = await this.oauthToken({
-      client_id: this.config.clientId,
-      client_secret: this.config.clientSecret,
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
       code,
-      redirect_uri: `${this.config.publicOrigin}/api/integrations/github/callback`,
+      redirect_uri: `${config.publicOrigin}/api/integrations/github/callback`,
     });
     if (!token.access_token) {
       throw new GitHubIntegrationError(
@@ -427,22 +705,24 @@ export class GitHubIntegrationService {
           userId,
           String(user.id),
           user.login,
-          this.cipher.encrypt(accessToken),
-          token.refresh_token ? this.cipher.encrypt(token.refresh_token) : null,
+          this.requireCipher().encrypt(accessToken),
+          token.refresh_token ? this.requireCipher().encrypt(token.refresh_token) : null,
           accessExpiresAt,
           refreshExpiresAt,
         ],
       );
     });
     await this.syncConnections(userId);
+    return { next: context.next };
   }
 
   async completeInstallation(userId: string, state: string | undefined): Promise<void> {
-    if (state) verifyState(state, userId, "install", this.config.stateSecret);
+    if (state) verifyState(state, userId, "install", this.requireConfig().stateSecret);
     await this.syncConnections(userId);
   }
 
   async status(userId: string, refresh = true): Promise<GitHubIntegrationStatus> {
+    if (!this.config) return disabledGitHubStatus(this.setupAvailable());
     if (refresh) {
       try {
         await this.syncConnections(userId);
@@ -460,6 +740,8 @@ export class GitHubIntegrationService {
       const connections = await this.selectConnections(tx);
       return {
         configured: true,
+        setup_available: false,
+        configuration_source: this.configurationSource,
         user_authorization: {
           connected: authorization.rows.length > 0,
           login: authorization.rows[0]?.github_login ?? null,
@@ -647,6 +929,98 @@ export class GitHubIntegrationService {
     });
   }
 
+  private requireConfig(): GitHubIntegrationConfig {
+    if (!this.config) {
+      throw new GitHubIntegrationError(
+        "github_not_configured",
+        "GitHub App is not configured",
+        503,
+      );
+    }
+    return this.config;
+  }
+
+  private requireCipher(): TokenCipher {
+    this.requireConfig();
+    if (!this.cipher) {
+      throw new GitHubIntegrationError(
+        "credential_unavailable",
+        "GitHub credential encryption is unavailable",
+        500,
+      );
+    }
+    return this.cipher;
+  }
+
+  private requireManifestBootstrap(): GitHubManifestBootstrap {
+    if (!this.manifestBootstrap) {
+      throw new GitHubIntegrationError(
+        "github_manifest_unavailable",
+        "Guided GitHub setup is unavailable",
+        503,
+      );
+    }
+    return this.manifestBootstrap;
+  }
+
+  private parseStoredSecrets(value: string): StoredAppSecrets {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      throw new GitHubIntegrationError(
+        "github_configuration_invalid",
+        "Stored GitHub App configuration is invalid",
+        500,
+      );
+    }
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      !("client_secret" in parsed) ||
+      typeof parsed.client_secret !== "string" ||
+      !("private_key" in parsed) ||
+      typeof parsed.private_key !== "string" ||
+      !("webhook_secret" in parsed) ||
+      typeof parsed.webhook_secret !== "string" ||
+      !parsed.client_secret ||
+      !parsed.private_key ||
+      !parsed.webhook_secret
+    ) {
+      throw new GitHubIntegrationError(
+        "github_configuration_invalid",
+        "Stored GitHub App configuration is incomplete",
+        500,
+      );
+    }
+    return {
+      client_secret: parsed.client_secret,
+      private_key: parsed.private_key,
+      webhook_secret: parsed.webhook_secret,
+    };
+  }
+
+  private activateManifestConfiguration(
+    row: StoredAppConfigurationRow,
+    secrets: StoredAppSecrets,
+    rootKey: Uint8Array,
+  ): void {
+    const bootstrap = this.requireManifestBootstrap();
+    const tokenEncryptionKey = derivedKey(rootKey, "tokens");
+    this.config = {
+      appId: row.app_id,
+      clientId: row.client_id,
+      clientSecret: secrets.client_secret,
+      appSlug: row.app_slug,
+      privateKey: secrets.private_key,
+      stateSecret: derivedKey(rootKey, "state").toString("base64url"),
+      tokenEncryptionKey,
+      publicOrigin: bootstrap.publicOrigin.replace(/\/$/, ""),
+    };
+    this.cipher = new TokenCipher(tokenEncryptionKey);
+    this.configurationSource = "manifest";
+  }
+
   private async selectConnections(tx: V2SqlExecutor): Promise<ConnectionRow[]> {
     return (
       await tx.query<ConnectionRow>(
@@ -705,7 +1079,7 @@ export class GitHubIntegrationService {
     if (expiresAt !== null && expiresAt <= Date.now() + 60_000) {
       return this.refreshAuthorization(row);
     }
-    return { ...row, accessToken: this.cipher.decrypt(row.access_token_ciphertext) };
+    return { ...row, accessToken: this.requireCipher().decrypt(row.access_token_ciphertext) };
   }
 
   private async userAccessToken(userId: string): Promise<string> {
@@ -732,11 +1106,13 @@ export class GitHubIntegrationService {
         409,
       );
     }
+    const config = this.requireConfig();
+    const cipher = this.requireCipher();
     const token = await this.oauthToken({
-      client_id: this.config.clientId,
-      client_secret: this.config.clientSecret,
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
       grant_type: "refresh_token",
-      refresh_token: this.cipher.decrypt(row.refresh_token_ciphertext),
+      refresh_token: cipher.decrypt(row.refresh_token_ciphertext),
     });
     if (!token.access_token) {
       throw new GitHubIntegrationError(
@@ -748,9 +1124,9 @@ export class GitHubIntegrationService {
     const now = Date.now();
     const next: AuthorizationRow = {
       ...row,
-      access_token_ciphertext: this.cipher.encrypt(token.access_token),
+      access_token_ciphertext: cipher.encrypt(token.access_token),
       refresh_token_ciphertext: token.refresh_token
-        ? this.cipher.encrypt(token.refresh_token)
+        ? cipher.encrypt(token.refresh_token)
         : row.refresh_token_ciphertext,
       access_token_expires_at: token.expires_in
         ? new Date(now + token.expires_in * 1000).toISOString()
@@ -781,16 +1157,17 @@ export class GitHubIntegrationService {
   }
 
   private appJwt(): string {
+    const config = this.requireConfig();
     const now = Math.floor(Date.now() / 1000);
     const header = base64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
     const payload = base64Url(
-      JSON.stringify({ iat: now - 30, exp: now + 9 * 60, iss: this.config.appId }),
+      JSON.stringify({ iat: now - 30, exp: now + 9 * 60, iss: config.appId }),
     );
     const unsigned = `${header}.${payload}`;
     const signer = createSign("RSA-SHA256");
     signer.update(unsigned);
     signer.end();
-    return `${unsigned}.${signer.sign(this.config.privateKey, "base64url")}`;
+    return `${unsigned}.${signer.sign(config.privateKey, "base64url")}`;
   }
 
   private async installationToken(installationId: string): Promise<string> {
@@ -852,9 +1229,11 @@ export class GitHubIntegrationService {
   }
 }
 
-export function disabledGitHubStatus(): GitHubIntegrationStatus {
+export function disabledGitHubStatus(setupAvailable = false): GitHubIntegrationStatus {
   return {
     configured: false,
+    setup_available: setupAvailable,
+    configuration_source: null,
     user_authorization: { connected: false, login: null },
     connections: [],
   };
