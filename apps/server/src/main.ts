@@ -26,6 +26,7 @@ import {
   postgresPoolConfig,
 } from "./persistence/postgresConnection.js";
 import { NodePgTransactionRunner } from "./persistence/v2/database.js";
+import { AttentionService } from "./projects/attentionService.js";
 import { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
 import { ProjectResumeService } from "./projects/projectResumeService.js";
 import { RepositoryIngestionService } from "./projects/repositoryIngestionService.js";
@@ -105,6 +106,7 @@ let phase4Services:
       recovery: Phase4RecoveryMonitor;
     }
   | undefined;
+let phase5Services: { attention: AttentionService } | undefined;
 
 if (databaseUrl) {
   try {
@@ -141,6 +143,7 @@ if (databaseUrl) {
       events: new Phase4EventProcessor(runtimeTransactions),
       recovery: new Phase4RecoveryMonitor(runtimeTransactions),
     };
+    phase5Services = { attention: new AttentionService(runtimeTransactions) };
     if (identityRoute?.read_mode === "relational" && identityRoute.write_mode === "relational") {
       await assertCredentialHmacKeyCoverage(
         runtimeTransactions,
@@ -376,6 +379,7 @@ const server = await buildServer({
   projects: projectRuntime.repository,
   ...(phase3Services !== undefined ? { phase3: phase3Services } : {}),
   ...(phase4Services !== undefined ? { phase4: phase4Services } : {}),
+  ...(phase5Services !== undefined ? { phase5: phase5Services } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),
   ...(usersFlusher !== undefined ? { persistUsers: () => usersFlusher.flush() } : {}),

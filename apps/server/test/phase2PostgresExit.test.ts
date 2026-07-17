@@ -326,6 +326,7 @@ postgresDescribe("Phase 2 production-shaped PostgreSQL exit checkpoint", () => {
         expect.objectContaining({ name: "0001_refoundation_v2", applied: true }),
         expect.objectContaining({ name: "0002_preservation_migration", applied: true }),
         expect.objectContaining({ name: "0003_phase3_source_bindings", applied: true }),
+        expect.objectContaining({ name: "0004_phase5_attention", applied: true }),
       ]);
 
       await adminPool.query(

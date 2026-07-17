@@ -124,6 +124,34 @@ interface ProjectResumeDto {
   next_recommended_action: string;
 }
 
+interface PhaseExecutionDto {
+  phase: {
+    id: string;
+    objective_summary: string;
+    status: string;
+    completed_tasks: number;
+    total_tasks: number;
+  };
+  tasks: Array<{
+    id: string;
+    title: string;
+    state: string;
+    complexity: string;
+    risk: string;
+    dependencies: string[];
+    assignment: { provider: string; model: string; status: string } | null;
+    run: {
+      id: string;
+      state: string;
+      attempt: number;
+      verification_status: string;
+      commit_sha: string | null;
+      failure_detail: string | null;
+    } | null;
+    evidence_count: number;
+  }>;
+}
+
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(path, { headers: authHeaders(false) });
   if (res.status === 401) throw new UnauthorizedError();
@@ -220,6 +248,9 @@ function ProjectGraph({
   const [phaseObjective, setPhaseObjective] = useState("");
   const [phaseCreating, setPhaseCreating] = useState(false);
   const [phaseError, setPhaseError] = useState<string | null>(null);
+  const [monitoredPhaseId, setMonitoredPhaseId] = useState<string | null>(null);
+  const [phaseExecution, setPhaseExecution] = useState<PhaseExecutionDto | null>(null);
+  const [executionError, setExecutionError] = useState<string | null>(null);
 
   // Last-known-*good* approval state (never "pending"): what we revert to when
   // an in-flight mutation fails, so the banner is never left stuck at pending.
@@ -318,6 +349,37 @@ function ProjectGraph({
   useEffect(() => {
     void loadResume();
   }, [loadResume]);
+
+  useEffect(() => {
+    if (!resume?.phases.length) return;
+    if (!monitoredPhaseId || !resume.phases.some((phase) => phase.id === monitoredPhaseId)) {
+      const preferred =
+        resume.phases.find((phase) => phase.status === "active") ?? resume.phases[0];
+      setMonitoredPhaseId(preferred?.id ?? null);
+    }
+  }, [resume, monitoredPhaseId]);
+
+  const loadPhaseExecution = useCallback(async () => {
+    if (!monitoredPhaseId) return;
+    try {
+      setExecutionError(null);
+      setPhaseExecution(
+        await getJson<PhaseExecutionDto>(
+          `/api/v2/projects/${project.id}/phases/${monitoredPhaseId}/execution`,
+        ),
+      );
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else setExecutionError(err instanceof Error ? err.message : String(err));
+    }
+  }, [monitoredPhaseId, project.id, onLogout]);
+
+  useEffect(() => {
+    if (!monitoredPhaseId) return;
+    void loadPhaseExecution();
+    const timer = window.setInterval(() => void loadPhaseExecution(), 5_000);
+    return () => window.clearInterval(timer);
+  }, [monitoredPhaseId, loadPhaseExecution]);
 
   const createPersistentPhase = useCallback(async () => {
     if (!resume || !phaseObjective.trim()) return;
@@ -703,8 +765,95 @@ function ProjectGraph({
                       {phase.status} · {phase.completed_tasks}/{phase.tasks} tasks complete
                     </div>
                   </div>
+                  <Button
+                    className="btn-small"
+                    variant={monitoredPhaseId === phase.id ? "primary" : "default"}
+                    onClick={() => setMonitoredPhaseId(phase.id)}
+                  >
+                    {monitoredPhaseId === phase.id ? "Monitoring" : "Monitor"}
+                  </Button>
                 </div>
               ))}
+              {phaseExecution ? (
+                <section className="phase-execution" aria-labelledby="phase-execution-heading">
+                  <div className="section-head">
+                    <div>
+                      <div className="eyebrow">Live phase</div>
+                      <h3 id="phase-execution-heading">{phaseExecution.phase.objective_summary}</h3>
+                    </div>
+                    <Badge tone={phaseExecution.phase.status === "completed" ? "success" : "info"}>
+                      {phaseExecution.phase.status}
+                    </Badge>
+                  </div>
+                  <div className="phase-progress" aria-label="Phase task progress">
+                    <span
+                      style={{
+                        width: `${phaseExecution.phase.total_tasks ? (phaseExecution.phase.completed_tasks / phaseExecution.phase.total_tasks) * 100 : 0}%`,
+                      }}
+                    />
+                  </div>
+                  <p className="muted">
+                    {phaseExecution.phase.completed_tasks}/{phaseExecution.phase.total_tasks} tasks
+                    complete · updates every 5 seconds
+                  </p>
+                  <div className="phase-task-list" data-testid="phase-task-list">
+                    {phaseExecution.tasks.map((task) => (
+                      <article className={`phase-task task-${task.state}`} key={task.id}>
+                        <div className="phase-task-head">
+                          <strong>{task.title}</strong>
+                          <Badge
+                            tone={
+                              task.state === "completed"
+                                ? "success"
+                                : ["blocked", "failed"].includes(task.state)
+                                  ? "danger"
+                                  : ["in_progress", "verifying", "in_review"].includes(task.state)
+                                    ? "info"
+                                    : "default"
+                            }
+                          >
+                            {task.state.replaceAll("_", " ")}
+                          </Badge>
+                        </div>
+                        <div className="phase-task-meta">
+                          <span>
+                            {task.complexity} · {task.risk} risk
+                          </span>
+                          {task.dependencies.length ? (
+                            <span>Depends on {task.dependencies.length}</span>
+                          ) : (
+                            <span>Ready path</span>
+                          )}
+                          <span>{task.evidence_count} evidence</span>
+                        </div>
+                        {task.assignment ? (
+                          <p>
+                            <strong>Agent:</strong> {task.assignment.model} ·{" "}
+                            {task.assignment.status}
+                          </p>
+                        ) : (
+                          <p className="muted">No agent assigned</p>
+                        )}
+                        {task.run ? (
+                          <div className="run-line">
+                            <span>
+                              Run {task.run.attempt}: {task.run.state}
+                            </span>
+                            <span>Verification: {task.run.verification_status}</span>
+                            {task.run.commit_sha ? (
+                              <code>{task.run.commit_sha.slice(0, 8)}</code>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {task.run?.failure_detail ? <Alert>{task.run.failure_detail}</Alert> : null}
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              ) : monitoredPhaseId && !executionError ? (
+                <Spinner label="Loading phase execution…" />
+              ) : null}
+              {executionError ? <Alert testId="execution-error">{executionError}</Alert> : null}
               <Field label="Create the next phase">
                 <Input
                   data-testid="phase-objective"

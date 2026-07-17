@@ -50,6 +50,7 @@ import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
 import { GraphEditError } from "./graph/graph.js";
 import { newId, nonce, pairingCode } from "./ids.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
+import type { AttentionService } from "./projects/attentionService.js";
 import type { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
 import type { ProjectResumeService } from "./projects/projectResumeService.js";
 import {
@@ -155,6 +156,7 @@ export interface ServerOptions {
     events: Phase4EventProcessor;
     recovery: Phase4RecoveryMonitor;
   };
+  phase5?: { attention: AttentionService };
   /**
    * DEMO-ONLY dashboard provider (engine + ledger composition). When set, it is
    * exposed at GET /api/demo/dashboard and returns the same illustrative demo
@@ -1138,6 +1140,46 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           }
         },
       );
+    }
+
+    if (options.phase5) {
+      const AttentionDispositionBody = z
+        .object({
+          item_key: z.string().min(1),
+          condition_fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+          disposition: z.enum(["acknowledged", "snoozed"]),
+          snoozed_until: z.string().datetime().nullable(),
+        })
+        .strict();
+
+      app.get("/api/v2/attention", async (req, reply) => {
+        const user = await resolveUser(req);
+        if (!user) return reply.code(401).send({ error: "unauthorized" });
+        reply.send(await options.phase5?.attention.portfolio(user.id));
+      });
+
+      app.post("/api/v2/attention/disposition", async (req, reply) => {
+        const user = await resolveUser(req);
+        if (!user) return reply.code(401).send({ error: "unauthorized" });
+        const body = AttentionDispositionBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        try {
+          await options.phase5?.attention.disposition({ user_id: user.id, ...body.data });
+          reply.code(204).send();
+        } catch (error) {
+          reply.code(409).send({ error: "stale_attention_item", detail: String(error) });
+        }
+      });
+
+      app.get("/api/v2/projects/:id/phases/:phaseId/execution", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id, phaseId } = req.params as { id: string; phaseId: string };
+        try {
+          reply.send(await options.phase5?.attention.phase(id, phaseId));
+        } catch (error) {
+          reply.code(404).send({ error: "phase_not_found", detail: String(error) });
+        }
+      });
     }
 
     app.get("/api/projects/:id/graph", async (req, reply) => {

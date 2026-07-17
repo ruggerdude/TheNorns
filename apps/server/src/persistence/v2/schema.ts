@@ -2535,6 +2535,46 @@ export const legacyApprovalEvidence = pgTable(
   ],
 );
 
+export const attentionItemStates = pgTable(
+  "attention_item_states",
+  {
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    itemKey: text("item_key").notNull(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    sourceType: text("source_type").notNull(),
+    sourceId: text("source_id").notNull(),
+    conditionClass: text("condition_class").notNull(),
+    conditionFingerprint: text("condition_fingerprint").notNull(),
+    disposition: text("disposition").notNull(),
+    snoozedUntil: timestamp("snoozed_until", { withTimezone: true, mode: "string" }),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.itemKey] }),
+    index("attention_item_states_project_user_idx").on(
+      table.projectId,
+      table.userId,
+      table.updatedAt,
+    ),
+    check(
+      "attention_item_states_fingerprint_check",
+      sql`${table.conditionFingerprint} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "attention_item_states_disposition_check",
+      sql`${table.disposition} IN ('acknowledged','snoozed')`,
+    ),
+    check(
+      "attention_item_states_snooze_check",
+      sql`(${table.disposition} = 'snoozed') = (${table.snoozedUntil} IS NOT NULL)`,
+    ),
+  ],
+);
+
 export const phase2PreservationSchema = {
   archiveEncryptionKeyRegistry,
   credentialHmacKeyRegistry,
@@ -2557,4 +2597,5 @@ export const phase2PreservationSchema = {
   migrationRollbackEvidence,
   migrationRollbackApprovals,
   legacyApprovalEvidence,
+  attentionItemStates,
 };
