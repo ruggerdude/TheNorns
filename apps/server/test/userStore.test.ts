@@ -1,5 +1,6 @@
 // Real user accounts: password hashing round-trip, session lifecycle,
 // manual-add vs. email-invite, and durable round-trip through a snapshot.
+import { scryptSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   InvalidCredentialsError,
@@ -40,6 +41,34 @@ describe("UserStore — accounts and sessions", () => {
     store.createActive({ email: "a@x.com", password: "super-secret-value", role: "member" });
     const snapshot = JSON.stringify(store.snapshot());
     expect(snapshot).not.toContain("super-secret-value");
+  });
+
+  it("accepts a restored legacy password hash and upgrades it after explicit login", () => {
+    const salt = Buffer.alloc(16, 3);
+    const legacyHash = `${salt.toString("hex")}:${scryptSync("legacy-password", salt, 64).toString(
+      "hex",
+    )}`;
+    const store = new UserStore();
+    store.restoreFrom({
+      users: [
+        {
+          id: "legacy-admin",
+          email: "legacy@example.com",
+          name: null,
+          role: "admin",
+          status: "active",
+          passwordHash: legacyHash,
+          inviteToken: null,
+          createdAt: "2026-07-15T00:00:00.000Z",
+        },
+      ],
+      sessions: [],
+    });
+
+    expect(store.snapshot().users[0]?.passwordHash).toBe(legacyHash);
+    expect(store.login("legacy@example.com", "legacy-password").user.id).toBe("legacy-admin");
+    expect(store.snapshot().users[0]?.passwordHash).toMatch(/^scrypt\$v1\$/);
+    expect(store.snapshot().users[0]?.passwordHash).not.toBe(legacyHash);
   });
 
   it("rejects a duplicate email (case-insensitive)", () => {

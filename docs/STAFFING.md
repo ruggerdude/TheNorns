@@ -1,5 +1,11 @@
 # TheNorns — Development Agent Staffing Plan
 
+> **Superseded for new work on 2026-07-16.** This plan governed the
+> plan-centric R4 build and is retained as history. Current role authority,
+> model policy, phase assignments, and concurrency rules are in
+> [REFOUNDATION-PROGRAM.md](REFOUNDATION-PROGRAM.md). ChatGPT Sol is now the
+> Program Manager, Chief Architect, and integration owner.
+
 **Status:** Accepted 2026-07-14 (human direction to proceed with Phase 0A) · **Date:** 2026-07-13
 **Governs:** PRD R4 §Recommended Development Agents; adopts REVIEW-002's
 role structure with concrete, current model assignments.

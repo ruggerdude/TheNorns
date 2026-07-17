@@ -9,6 +9,7 @@ import {
   type EventEnvelopeT,
   type EventPayloadT,
   PROTOCOL_VERSION,
+  type V2DispatchCommandT,
   isCommandExpired,
   parseServerFrame,
 } from "@norns/contracts";
@@ -24,10 +25,15 @@ export interface DaemonOptions {
   heartbeatMs?: number;
   reconnect?: boolean;
   reconnectDelayMs?: number;
+  executeV2?: (
+    command: V2DispatchCommandT,
+    emit: (event: EventPayloadT) => void,
+  ) => Promise<"succeeded" | "failed" | "cancelled">;
 }
 
 export class RunnerDaemon {
-  private readonly opts: Required<DaemonOptions>;
+  private readonly opts: Required<Omit<DaemonOptions, "executeV2">> &
+    Pick<DaemonOptions, "executeV2">;
   private stateFile: RunnerStateFile | null = null;
   private socket: WebSocket | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -54,6 +60,10 @@ export class RunnerDaemon {
 
   get connected(): boolean {
     return this.socket?.readyState === WebSocket.OPEN;
+  }
+
+  get generation(): number {
+    return this.requireState().state.generation;
   }
 
   /** One-time enrollment: generate the keypair and redeem the pairing code. */
@@ -239,6 +249,31 @@ export class RunnerDaemon {
       case "launch_fixture":
         this.executor.launch(`run_${command.command_id}`, payload.fixture, meta);
         break;
+      case "launch_run":
+        if (!payload.dispatch || !this.opts.executeV2) {
+          state.recordExecution(command.command_id, "rejected");
+          this.ack(command.command_id, "rejected", meta);
+          return;
+        }
+        void this.opts
+          .executeV2(payload.dispatch, (event) => this.emit(event, meta))
+          .then((outcome) => {
+            state.recordExecution(command.command_id, outcome);
+            this.ack(command.command_id, outcome, meta);
+          })
+          .catch((error) => {
+            this.emit(
+              {
+                kind: "run_log",
+                run_id: payload.dispatch?.run_id ?? payload.run_id,
+                chunk: `runner execution failed: ${error instanceof Error ? error.message : String(error)}`,
+              },
+              meta,
+            );
+            state.recordExecution(command.command_id, "failed");
+            this.ack(command.command_id, "failed", meta);
+          });
+        return;
       case "interrupt":
         this.executor.interrupt(payload.run_id);
         break;
@@ -255,7 +290,7 @@ export class RunnerDaemon {
         this.executor.cancel(payload.run_id);
         break;
       default:
-        // launch_run / send_message / run_verification arrive with Phase 5
+        // send_message / run_verification require a live runtime session.
         state.recordExecution(command.command_id, "rejected");
         this.ack(command.command_id, "rejected", meta);
         return;

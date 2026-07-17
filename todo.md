@@ -1,5 +1,41 @@
 # TheNorns — todo
 
+> **Historical tracker notice (2026-07-16):** this file records delivery
+> against the previous plan-centric PRD and therefore contains completion
+> claims that do not equal acceptance of the persistent-project Charter MVP.
+> New work is governed by
+> [docs/REFOUNDATION-PROGRAM.md](docs/REFOUNDATION-PROGRAM.md). Treat the
+> remaining entries below as legacy backlog/input until they are migrated into
+> the new phase structure.
+
+## Re-foundation gate
+
+- [x] Record Claude Fable 5 independent Phase 0 baseline and findings.
+- [x] Accept and bind REF-REC-1 through REF-REC-18 to their governing ADRs and
+  phase gates; no rejection, downgrade, or later-gate deferral.
+- [x] Add REF-REC-9 effort/variance baseline and REF-REC-14 commit evidence.
+- [x] Demonstrate the REF-REC-9 150% automatic-pause control in a recorded
+  tabletop.
+- [x] Human decision REF-OPEN-1 — keep GitHub App repository picker in MVP.
+- [x] Human decision REF-OPEN-2 — rotate/revoke sessions and invitations at
+  migration cutover, with encrypted/restricted archives.
+- [x] Human decision REF-OPEN-3 — default to one executing phase per project.
+- [x] Human decision REF-OPEN-4 — authorize 145 FSE maximum and the selected
+  API spend posture.
+- [x] Human authorization — `Start Phase 1 — Domain and Persistence
+  Foundation`.
+- [x] Phase 1 candidate contracts, normalized schema, transactional boundary,
+  compatibility repositories, and required verification evidence.
+- [x] Claude Fable independent review of the Phase 1 candidate contract
+  package, disposition, and final contract freeze.
+- [x] Re-foundation Phase 2 — preservation migration and recovery checkpoint.
+- [x] Re-foundation Phase 3 — persistent project, source binding, and phase workflow.
+- [x] Re-foundation Phase 4 — coordinator and runner execution loop.
+- [x] Re-foundation Phase 5 — attention-first dashboard and execution monitoring.
+- [x] Re-foundation Phase 6 — multi-agent autonomous coordination.
+- [x] Re-foundation Phase 7 — security hardening, existing-project pilot,
+  progressive cutover controls, and separately gated legacy-retirement authorization.
+
 ## Done
 - [x] NORN-001 — Review original MVP PRD; produce corrected R2 (`TheNorns_MVP_PRD.md`)
 - [x] NORN-002 — Choose tech stack → [ADR-001](docs/adr/ADR-001-tech-stack.md)

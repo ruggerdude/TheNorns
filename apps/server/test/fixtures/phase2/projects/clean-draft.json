@@ -1,0 +1,13 @@
+{
+  "id": "proj-clean-draft",
+  "name": "Clean draft",
+  "description": "A legacy project that was never planned",
+  "pmProvider": "anthropic",
+  "pmModel": "claude-sonnet-5",
+  "sourceType": null,
+  "sourceLocation": null,
+  "createdAt": "2026-07-15T12:00:00.000Z",
+  "plan": null,
+  "graph": null,
+  "approval": null
+}

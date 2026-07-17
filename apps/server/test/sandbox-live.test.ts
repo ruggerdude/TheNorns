@@ -8,7 +8,7 @@
 // "live sandbox-escape" remainder. Skips cleanly wherever Docker isn't
 // installed (same pattern as the live-provider smoke tests).
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -36,6 +36,10 @@ let scratch = "";
 async function makeDirs(): Promise<void> {
   worktree = await mkdtemp(join(tmpdir(), "norns-sandbox-wt-"));
   scratch = await mkdtemp(join(tmpdir(), "norns-sandbox-scratch-"));
+  // GitHub-hosted Docker may map container root to an unprivileged host UID.
+  // These are isolated disposable fixtures; make the intended writable bind
+  // mounts writable independent of host/container UID mapping.
+  await Promise.all([chmod(worktree, 0o777), chmod(scratch, 0o777)]);
 }
 
 describe("ADR-003 sandbox — real Docker", () => {
@@ -87,6 +91,9 @@ describe("ADR-003 sandbox — real Docker", () => {
       await makeDirs();
       const roDir = await mkdtemp(join(tmpdir(), "norns-sandbox-ro-"));
       try {
+        // Host permissions allow writes so the failure below proves Docker's
+        // read-only mount enforcement rather than an owner-only temp mode.
+        await chmod(roDir, 0o777);
         const launcher = new SandboxLauncher(probe);
         const spec: SandboxSpec = {
           worktreePath: worktree,

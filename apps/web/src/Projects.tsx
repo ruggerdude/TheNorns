@@ -23,6 +23,55 @@ export interface ProjectSummary {
   source_location?: string | null;
 }
 
+interface AttentionItemDto {
+  key: string;
+  project_id: string;
+  project_name: string;
+  condition_fingerprint: string;
+  kind:
+    | "decision"
+    | "approval"
+    | "blocker"
+    | "failed_run"
+    | "stalled_run"
+    | "budget_exception"
+    | "milestone";
+  severity: "critical" | "high" | "normal" | "low";
+  title: string;
+  summary: string;
+  explanation: string;
+  recommendation: string;
+  tradeoffs: string[];
+  impact: string;
+  resumes: string;
+  occurred_at: string;
+}
+
+interface PortfolioAttentionDto {
+  generated_at: string;
+  counts: {
+    critical: number;
+    high: number;
+    decisions: number;
+    approvals: number;
+    blockers: number;
+    active_projects: number;
+    active_runs: number;
+  };
+  items: AttentionItemDto[];
+  projects: Array<{
+    id: string;
+    name: string;
+    health: "healthy" | "attention" | "blocked";
+    current_phase: string | null;
+    completed_tasks: number;
+    total_tasks: number;
+    active_runs: number;
+    attention_count: number;
+    next_action: string;
+  }>;
+}
+
 async function request<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method: body ? "POST" : "GET",
@@ -104,6 +153,8 @@ export function Projects({
   const [sourceType, setSourceType] = useState<"local" | "github">("local");
   const [sourceLocation, setSourceLocation] = useState("");
   const [creating, setCreating] = useState(false);
+  const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
+  const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -117,6 +168,53 @@ export function Projects({
   }, [onUnauthorized]);
 
   useEffect(() => void refresh(), [refresh]);
+
+  const refreshAttention = useCallback(async () => {
+    try {
+      setAttention(await request<PortfolioAttentionDto>("/api/v2/attention"));
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else if (!(error instanceof ApiError && error.status === 404)) {
+        setError(error instanceof Error ? error.message : String(error));
+      }
+    }
+  }, [onUnauthorized]);
+
+  useEffect(() => {
+    void refreshAttention();
+    const timer = window.setInterval(() => void refreshAttention(), 10_000);
+    return () => window.clearInterval(timer);
+  }, [refreshAttention]);
+
+  const dispositionAttention = useCallback(
+    async (item: AttentionItemDto, disposition: "acknowledged" | "snoozed") => {
+      setAttentionBusy(item.key);
+      try {
+        const response = await fetch("/api/v2/attention/disposition", {
+          method: "POST",
+          headers: authHeaders(true),
+          body: JSON.stringify({
+            item_key: item.key,
+            condition_fingerprint: item.condition_fingerprint,
+            disposition,
+            snoozed_until:
+              disposition === "snoozed" ? new Date(Date.now() + 60 * 60_000).toISOString() : null,
+          }),
+        });
+        if (response.status === 401) throw new UnauthorizedError();
+        if (!response.ok)
+          throw new ApiError("Attention item changed; refresh and try again", response.status);
+        await refreshAttention();
+      } catch (error) {
+        error instanceof UnauthorizedError
+          ? onUnauthorized()
+          : setError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setAttentionBusy(null);
+      }
+    },
+    [onUnauthorized, refreshAttention],
+  );
 
   const create = useCallback(async () => {
     setCreating(true);
@@ -204,6 +302,145 @@ export function Projects({
           </div>
         </div>
         {error ? <Alert testId="projects-error">{error}</Alert> : null}
+        {attention ? (
+          <section className="attention-center" aria-labelledby="attention-heading">
+            <div className="section-head">
+              <div>
+                <div className="eyebrow">Executive operations</div>
+                <h2 id="attention-heading">What needs your attention?</h2>
+              </div>
+              <span className="muted" aria-live="polite">
+                Updated{" "}
+                {new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(
+                  new Date(attention.generated_at),
+                )}
+              </span>
+            </div>
+            <div className="attention-summary" aria-label="Portfolio attention summary">
+              <div className={attention.counts.critical ? "is-critical" : ""}>
+                <strong>{attention.counts.critical}</strong>
+                <span>Critical</span>
+              </div>
+              <div>
+                <strong>{attention.counts.decisions}</strong>
+                <span>Decisions</span>
+              </div>
+              <div>
+                <strong>{attention.counts.approvals}</strong>
+                <span>Approvals</span>
+              </div>
+              <div>
+                <strong>{attention.counts.blockers}</strong>
+                <span>Blockers</span>
+              </div>
+              <div>
+                <strong>{attention.counts.active_runs}</strong>
+                <span>Active runs</span>
+              </div>
+            </div>
+            {attention.items.length ? (
+              <div className="attention-list" data-testid="attention-list">
+                {attention.items.map((item) => (
+                  <article className={`attention-item severity-${item.severity}`} key={item.key}>
+                    <div className="attention-item-main">
+                      <div className="attention-item-labels">
+                        <Badge
+                          tone={
+                            item.severity === "critical"
+                              ? "danger"
+                              : item.severity === "high"
+                                ? "warn"
+                                : "default"
+                          }
+                        >
+                          {item.severity}
+                        </Badge>
+                        <span>{item.project_name}</span>
+                        <span>·</span>
+                        <span>{item.kind.replaceAll("_", " ")}</span>
+                      </div>
+                      <h3>{item.title}</h3>
+                      <p>{item.summary}</p>
+                      <details>
+                        <summary>Why this needs judgment</summary>
+                        <p>{item.explanation}</p>
+                        <p>
+                          <strong>Recommendation:</strong> {item.recommendation}
+                        </p>
+                        <p>
+                          <strong>Impact:</strong> {item.impact}
+                        </p>
+                        <p>
+                          <strong>After resolution:</strong> {item.resumes}
+                        </p>
+                        {item.tradeoffs.length ? (
+                          <ul>
+                            {item.tradeoffs.map((tradeoff) => (
+                              <li key={tradeoff}>{tradeoff}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </details>
+                    </div>
+                    <div className="attention-actions">
+                      <Button
+                        variant="primary"
+                        className="btn-small"
+                        onClick={() => {
+                          const project = projects?.find(
+                            (candidate) => candidate.id === item.project_id,
+                          );
+                          if (project) onOpenProject(project);
+                        }}
+                      >
+                        Open project
+                      </Button>
+                      <Button
+                        className="btn-small"
+                        disabled={attentionBusy === item.key}
+                        onClick={() => void dispositionAttention(item, "acknowledged")}
+                      >
+                        Acknowledge
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        className="btn-small"
+                        disabled={attentionBusy === item.key}
+                        onClick={() => void dispositionAttention(item, "snoozed")}
+                      >
+                        Snooze 1h
+                      </Button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <div className="attention-clear">
+                <strong>No strategic intervention is waiting.</strong>
+                <span>Active work will continue to update here.</span>
+              </div>
+            )}
+            <div className="portfolio-health" aria-label="Portfolio health">
+              {attention.projects.map((projectHealth) => (
+                <div
+                  className={`portfolio-health-row health-${projectHealth.health}`}
+                  key={projectHealth.id}
+                >
+                  <span className="status-dot" />
+                  <div>
+                    <strong>{projectHealth.name}</strong>
+                    <small>{projectHealth.current_phase ?? "No active phase"}</small>
+                  </div>
+                  <span>
+                    {projectHealth.completed_tasks}/{projectHealth.total_tasks} tasks
+                  </span>
+                  <span>{projectHealth.active_runs} agents</span>
+                  <span>{projectHealth.attention_count} attention</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
         <section className="project-stats" aria-label="Project overview">
           <div>
             <strong>{projects?.length ?? "—"}</strong>

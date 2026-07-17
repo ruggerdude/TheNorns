@@ -3,8 +3,13 @@
 // built-in, memory-hard KDF; no extra dependency, no bcrypt native build to
 // fight in Docker). Session tokens are opaque random strings looked up
 // server-side — there is no JWT to sign or verify incorrectly.
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { newId } from "../ids.js";
+import {
+  detectPasswordHashScheme,
+  hashCurrentPassword,
+  verifyAndRehashPassword,
+} from "./passwords.js";
 
 export type UserRole = "admin" | "member";
 export type UserStatus = "active" | "invited";
@@ -34,21 +39,8 @@ export interface UserStoreSnapshot {
   sessions: { token: string; userId: string; createdAt: string }[];
 }
 
-const SCRYPT_KEY_LEN = 64;
-
 function hashPassword(password: string): string {
-  const salt = randomBytes(16);
-  const derived = scryptSync(password, salt, SCRYPT_KEY_LEN);
-  return `${salt.toString("hex")}:${derived.toString("hex")}`;
-}
-
-function verifyPassword(password: string, stored: string): boolean {
-  const [saltHex, hashHex] = stored.split(":");
-  if (!saltHex || !hashHex) return false;
-  const salt = Buffer.from(saltHex, "hex");
-  const expected = Buffer.from(hashHex, "hex");
-  const actual = scryptSync(password, salt, SCRYPT_KEY_LEN);
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
+  return hashCurrentPassword(password);
 }
 
 export class InvalidCredentialsError extends Error {
@@ -193,7 +185,13 @@ export class UserStore {
     if (!record || record.status !== "active" || !record.passwordHash) {
       throw new InvalidCredentialsError();
     }
-    if (!verifyPassword(password, record.passwordHash)) throw new InvalidCredentialsError();
+    const scheme = detectPasswordHashScheme(record.passwordHash);
+    if (scheme === null) throw new InvalidCredentialsError();
+    const verified = verifyAndRehashPassword(password, record.passwordHash, scheme);
+    if (!verified.valid) throw new InvalidCredentialsError();
+    if (verified.upgraded_hash !== null) {
+      record.passwordHash = verified.upgraded_hash;
+    }
     const token = randomBytes(32).toString("hex");
     this.sessions.set(token, { userId: record.id, createdAt: new Date().toISOString() });
     return { token, user: this.summarize(record) };

@@ -2,6 +2,12 @@
 ## AI Program Management Platform
 ### Product Requirements & Technical Design (MVP) — Revision 4
 
+> **Status notice (2026-07-16): Historical plan-centric specification.**
+> The accepted [Program Charter](docs/PROGRAM-CHARTER.md), Phase 0 review,
+> and ADR-004 through ADR-007 supersede this document where they conflict.
+> This PRD remains a reference for useful component contracts, runner
+> security, verification, budgets, approvals, and prior design history.
+
 > **Purpose**
 >
 > TheNorns is a visual AI Program Management platform that orchestrates work

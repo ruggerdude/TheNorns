@@ -1,0 +1,67 @@
+{
+  "id": "proj-deleted",
+  "name": "Deleted module",
+  "description": "Contains a plan module removed from the graph",
+  "pmProvider": "anthropic",
+  "createdAt": "2026-07-15T12:00:00.000Z",
+  "plan": {
+    "objective": "Preserve a deleted module",
+    "modules": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "description": "Implement task A",
+        "deliverables": ["Task A output"],
+        "acceptance": [
+          {
+            "id": "AC-A",
+            "statement": "Task A passes",
+            "verification_type": "command",
+            "verification": "pnpm test"
+          }
+        ],
+        "dependencies": [],
+        "estimated_complexity": "M",
+        "risk": "low",
+        "parallelization": {
+          "safe": false
+        }
+      },
+      {
+        "id": "removed",
+        "title": "Removed task",
+        "description": "This task was removed",
+        "deliverables": ["Removed output"],
+        "acceptance": [
+          {
+            "id": "AC-R",
+            "statement": "Removed task passes",
+            "verification_type": "inspection",
+            "verification": "Inspect output"
+          }
+        ],
+        "dependencies": ["a"],
+        "estimated_complexity": "S",
+        "risk": "medium",
+        "parallelization": {
+          "safe": false
+        }
+      }
+    ]
+  },
+  "graph": {
+    "version": 2,
+    "nodes": [
+      {
+        "id": "a",
+        "title": "Task A",
+        "complexity": "M",
+        "risk": "low",
+        "parallel_safe": false,
+        "dependencies": [],
+        "assignment": null
+      }
+    ]
+  },
+  "approval": null
+}

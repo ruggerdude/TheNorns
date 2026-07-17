@@ -314,6 +314,237 @@ button:disabled {
 .project-dashboard {
   padding-top: clamp(2rem, 4vw, 3.5rem);
 }
+
+.attention-center {
+  display: grid;
+  gap: 18px;
+  margin: 0 0 28px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--surface) 96%, #7c5cff),
+    var(--surface)
+  );
+}
+
+.attention-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(90px, 1fr));
+  gap: 10px;
+}
+
+.attention-summary > div {
+  display: grid;
+  gap: 3px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.attention-summary strong {
+  font-size: 24px;
+}
+.attention-summary span {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+.attention-summary .is-critical {
+  border-color: #b84b5a;
+  background: color-mix(in srgb, #b84b5a 10%, var(--bg));
+}
+
+.attention-list {
+  display: grid;
+  gap: 12px;
+}
+
+.attention-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 20px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--muted);
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.attention-item.severity-critical {
+  border-left-color: #d14d61;
+}
+.attention-item.severity-high {
+  border-left-color: #d4943f;
+}
+.attention-item h3 {
+  margin: 8px 0 4px;
+}
+.attention-item p {
+  margin: 5px 0;
+  color: var(--muted);
+}
+.attention-item details {
+  margin-top: 12px;
+}
+.attention-item details summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 600;
+}
+.attention-item-labels {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: capitalize;
+}
+.attention-actions {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 126px;
+}
+
+.session-row {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  padding: 0.65rem 0;
+}
+
+.session-row p {
+  margin: 0.3rem 0 0;
+}
+.attention-clear {
+  display: flex;
+  justify-content: space-between;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+}
+.attention-clear span {
+  color: var(--muted);
+}
+
+.portfolio-health {
+  display: grid;
+  gap: 7px;
+}
+.portfolio-health-row {
+  display: grid;
+  grid-template-columns: 10px minmax(180px, 1fr) auto auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  color: var(--muted);
+  font-size: 12px;
+}
+.portfolio-health-row > div {
+  display: grid;
+}
+.portfolio-health-row small {
+  color: var(--muted);
+}
+.portfolio-health-row .status-dot {
+  background: #55b882;
+}
+.portfolio-health-row.health-attention .status-dot {
+  background: #d4943f;
+}
+.portfolio-health-row.health-blocked .status-dot {
+  background: #d14d61;
+}
+
+.phase-execution {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+}
+.phase-execution h3 {
+  margin: 2px 0 0;
+}
+.phase-progress {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+.phase-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #6d8cff;
+  transition: width 240ms ease;
+}
+.phase-task-list {
+  display: grid;
+  gap: 9px;
+}
+.phase-task {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.phase-task.task-blocked,
+.phase-task.task-failed {
+  border-left: 3px solid #d14d61;
+}
+.phase-task.task-completed {
+  border-left: 3px solid #55b882;
+}
+.phase-task-head,
+.phase-task-meta,
+.run-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.phase-task-meta,
+.run-line {
+  color: var(--muted);
+  font-size: 11px;
+}
+.phase-task p {
+  margin: 0;
+  font-size: 12px;
+}
+.run-line code {
+  color: var(--text);
+}
+
+@media (max-width: 760px) {
+  .attention-summary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .attention-item {
+    grid-template-columns: 1fr;
+  }
+  .attention-actions {
+    align-items: stretch;
+  }
+  .portfolio-health-row {
+    grid-template-columns: 10px 1fr auto;
+  }
+  .portfolio-health-row > span:nth-last-child(-n + 2) {
+    display: none;
+  }
+}
 .dashboard-hero {
   display: flex;
   align-items: end;

@@ -3,6 +3,7 @@
 // Exactly-once is not claimed. Every envelope carries correlation_id (thread
 // of related activity) and causation_id (the message that directly caused it).
 import { z } from "zod";
+import { V2DispatchCommand } from "./v2/commands.js";
 
 const nonEmpty = z.string().min(1);
 const isoDate = z.string().datetime();
@@ -65,6 +66,7 @@ export const CommandPayload = z.discriminatedUnion("kind", [
     node_id: nonEmpty,
     run_id: nonEmpty,
     prompt_ref: nonEmpty,
+    dispatch: V2DispatchCommand.optional(),
   }),
   z.object({ kind: z.literal("send_message"), run_id: nonEmpty, message: nonEmpty }),
   z.object({ kind: z.literal("interrupt"), run_id: nonEmpty }),

@@ -29,6 +29,7 @@ import {
   authHeaders,
   clearToken,
   consumeInviteToken,
+  consumeRecoveryToken,
   fetchAuthStatus,
   fetchMe,
   getToken,
@@ -106,6 +107,57 @@ export interface PlanReviewResult {
   content_hash: string;
   total_cost_usd: number;
   outstanding: { statement: string }[];
+}
+
+interface ProjectResumeDto {
+  project: { id: string; name: string; status: string; aggregate_version: number };
+  architecture: { title: string; summary: string; repository_revision: string } | null;
+  repositories: Array<{ id: string; display_name: string; status: string; health: string }>;
+  phases: Array<{
+    id: string;
+    objective_summary: string;
+    status: string;
+    tasks: number;
+    completed_tasks: number;
+    blocked_tasks: number;
+  }>;
+  attention: { open_decisions: number; active_runs: number; blocked_tasks: number };
+  next_recommended_action: string;
+}
+
+interface PhaseExecutionDto {
+  phase: {
+    id: string;
+    objective_summary: string;
+    status: string;
+    completed_tasks: number;
+    total_tasks: number;
+  };
+  tasks: Array<{
+    id: string;
+    title: string;
+    state: string;
+    complexity: string;
+    risk: string;
+    dependencies: string[];
+    assignment: { provider: string; model: string; status: string } | null;
+    run: {
+      id: string;
+      state: string;
+      attempt: number;
+      verification_status: string;
+      commit_sha: string | null;
+      failure_detail: string | null;
+    } | null;
+    evidence_count: number;
+  }>;
+}
+
+async function getJson<T>(path: string): Promise<T> {
+  const res = await fetch(path, { headers: authHeaders(false) });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new ApiError(`request failed: ${res.status}`, res.status);
+  return (await res.json()) as T;
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
@@ -193,6 +245,13 @@ function ProjectGraph({
   const [planError, setPlanError] = useState<string | null>(null);
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
+  const [resume, setResume] = useState<ProjectResumeDto | null>(null);
+  const [phaseObjective, setPhaseObjective] = useState("");
+  const [phaseCreating, setPhaseCreating] = useState(false);
+  const [phaseError, setPhaseError] = useState<string | null>(null);
+  const [monitoredPhaseId, setMonitoredPhaseId] = useState<string | null>(null);
+  const [phaseExecution, setPhaseExecution] = useState<PhaseExecutionDto | null>(null);
+  const [executionError, setExecutionError] = useState<string | null>(null);
 
   // Last-known-*good* approval state (never "pending"): what we revert to when
   // an in-flight mutation fails, so the banner is never left stuck at pending.
@@ -276,6 +335,74 @@ function ProjectGraph({
       cancelled = true;
     };
   }, [base, onLogout, reconcileApproval]);
+
+  const loadResume = useCallback(async () => {
+    try {
+      setResume(await getJson<ProjectResumeDto>(`/api/v2/projects/${project.id}/resume`));
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else if (!(err instanceof ApiError && err.status === 404)) {
+        setPhaseError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  }, [project.id, onLogout]);
+
+  useEffect(() => {
+    void loadResume();
+  }, [loadResume]);
+
+  useEffect(() => {
+    if (!resume?.phases.length) return;
+    if (!monitoredPhaseId || !resume.phases.some((phase) => phase.id === monitoredPhaseId)) {
+      const preferred =
+        resume.phases.find((phase) => phase.status === "active") ?? resume.phases[0];
+      setMonitoredPhaseId(preferred?.id ?? null);
+    }
+  }, [resume, monitoredPhaseId]);
+
+  const loadPhaseExecution = useCallback(async () => {
+    if (!monitoredPhaseId) return;
+    try {
+      setExecutionError(null);
+      setPhaseExecution(
+        await getJson<PhaseExecutionDto>(
+          `/api/v2/projects/${project.id}/phases/${monitoredPhaseId}/execution`,
+        ),
+      );
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else setExecutionError(err instanceof Error ? err.message : String(err));
+    }
+  }, [monitoredPhaseId, project.id, onLogout]);
+
+  useEffect(() => {
+    if (!monitoredPhaseId) return;
+    void loadPhaseExecution();
+    const timer = window.setInterval(() => void loadPhaseExecution(), 5_000);
+    return () => window.clearInterval(timer);
+  }, [monitoredPhaseId, loadPhaseExecution]);
+
+  const createPersistentPhase = useCallback(async () => {
+    if (!resume || !phaseObjective.trim()) return;
+    setPhaseCreating(true);
+    setPhaseError(null);
+    try {
+      await postJson(`/api/v2/projects/${project.id}/phases`, {
+        objective_summary: phaseObjective.trim(),
+        priority: resume.phases.length,
+        predecessor_phase_ids: [],
+        expected_project_version: resume.project.aggregate_version,
+        idempotency_key: `phase-${Date.now()}`,
+      });
+      setPhaseObjective("");
+      await loadResume();
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else setPhaseError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPhaseCreating(false);
+    }
+  }, [resume, phaseObjective, project.id, loadResume, onLogout]);
 
   const runPlanning = useCallback(async () => {
     setPlanLoading(true);
@@ -606,6 +733,148 @@ function ProjectGraph({
         )}
         {error ? <Alert testId="error">{error}</Alert> : null}
 
+        {resume ? (
+          <details className="card side-section" open data-testid="project-resume">
+            <summary>Project Resume</summary>
+            <div className="side-body form-stack">
+              <div className="stat-strip">
+                <div className="stat">
+                  <strong>{resume.phases.length}</strong>
+                  <span>PHASES</span>
+                </div>
+                <div className="stat">
+                  <strong>
+                    {resume.attention.open_decisions + resume.attention.blocked_tasks}
+                  </strong>
+                  <span>NEEDS ATTENTION</span>
+                </div>
+              </div>
+              {resume.architecture ? (
+                <div>
+                  <strong>{resume.architecture.title}</strong>
+                  <p className="muted" style={{ fontSize: 12 }}>
+                    {resume.architecture.summary}
+                  </p>
+                </div>
+              ) : null}
+              <Alert>{resume.next_recommended_action}</Alert>
+              {resume.phases.map((phase) => (
+                <div className="project-row" key={phase.id}>
+                  <div>
+                    <strong>{phase.objective_summary}</strong>
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      {phase.status} · {phase.completed_tasks}/{phase.tasks} tasks complete
+                    </div>
+                  </div>
+                  <Button
+                    className="btn-small"
+                    variant={monitoredPhaseId === phase.id ? "primary" : "default"}
+                    onClick={() => setMonitoredPhaseId(phase.id)}
+                  >
+                    {monitoredPhaseId === phase.id ? "Monitoring" : "Monitor"}
+                  </Button>
+                </div>
+              ))}
+              {phaseExecution ? (
+                <section className="phase-execution" aria-labelledby="phase-execution-heading">
+                  <div className="section-head">
+                    <div>
+                      <div className="eyebrow">Live phase</div>
+                      <h3 id="phase-execution-heading">{phaseExecution.phase.objective_summary}</h3>
+                    </div>
+                    <Badge tone={phaseExecution.phase.status === "completed" ? "success" : "info"}>
+                      {phaseExecution.phase.status}
+                    </Badge>
+                  </div>
+                  <div className="phase-progress" aria-label="Phase task progress">
+                    <span
+                      style={{
+                        width: `${phaseExecution.phase.total_tasks ? (phaseExecution.phase.completed_tasks / phaseExecution.phase.total_tasks) * 100 : 0}%`,
+                      }}
+                    />
+                  </div>
+                  <p className="muted">
+                    {phaseExecution.phase.completed_tasks}/{phaseExecution.phase.total_tasks} tasks
+                    complete · updates every 5 seconds
+                  </p>
+                  <div className="phase-task-list" data-testid="phase-task-list">
+                    {phaseExecution.tasks.map((task) => (
+                      <article className={`phase-task task-${task.state}`} key={task.id}>
+                        <div className="phase-task-head">
+                          <strong>{task.title}</strong>
+                          <Badge
+                            tone={
+                              task.state === "completed"
+                                ? "success"
+                                : ["blocked", "failed"].includes(task.state)
+                                  ? "danger"
+                                  : ["in_progress", "verifying", "in_review"].includes(task.state)
+                                    ? "info"
+                                    : "default"
+                            }
+                          >
+                            {task.state.replaceAll("_", " ")}
+                          </Badge>
+                        </div>
+                        <div className="phase-task-meta">
+                          <span>
+                            {task.complexity} · {task.risk} risk
+                          </span>
+                          {task.dependencies.length ? (
+                            <span>Depends on {task.dependencies.length}</span>
+                          ) : (
+                            <span>Ready path</span>
+                          )}
+                          <span>{task.evidence_count} evidence</span>
+                        </div>
+                        {task.assignment ? (
+                          <p>
+                            <strong>Agent:</strong> {task.assignment.model} ·{" "}
+                            {task.assignment.status}
+                          </p>
+                        ) : (
+                          <p className="muted">No agent assigned</p>
+                        )}
+                        {task.run ? (
+                          <div className="run-line">
+                            <span>
+                              Run {task.run.attempt}: {task.run.state}
+                            </span>
+                            <span>Verification: {task.run.verification_status}</span>
+                            {task.run.commit_sha ? (
+                              <code>{task.run.commit_sha.slice(0, 8)}</code>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {task.run?.failure_detail ? <Alert>{task.run.failure_detail}</Alert> : null}
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              ) : monitoredPhaseId && !executionError ? (
+                <Spinner label="Loading phase execution…" />
+              ) : null}
+              {executionError ? <Alert testId="execution-error">{executionError}</Alert> : null}
+              <Field label="Create the next phase">
+                <Input
+                  data-testid="phase-objective"
+                  placeholder="e.g. Add animations"
+                  value={phaseObjective}
+                  onChange={(event) => setPhaseObjective(event.target.value)}
+                />
+              </Field>
+              <Button
+                variant="primary"
+                disabled={phaseCreating || !phaseObjective.trim()}
+                onClick={() => void createPersistentPhase()}
+              >
+                {phaseCreating ? "Creating phase…" : "Create phase"}
+              </Button>
+              {phaseError ? <Alert testId="phase-error">{phaseError}</Alert> : null}
+            </div>
+          </details>
+        ) : null}
+
         <details className="card side-section" open>
           <summary>01 · Live planning</summary>
           <div className="side-body">
@@ -893,17 +1162,18 @@ export function App(): React.ReactElement {
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [needsBootstrap, setNeedsBootstrap] = useState(false);
   const [inviteToken] = useState<string | null>(() => consumeInviteToken());
+  const [recoveryToken, setRecoveryToken] = useState<string | null>(() => consumeRecoveryToken());
   const [showAccount, setShowAccount] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
 
   useEffect(() => {
     // An invite link always wins, regardless of bootstrap state — no need to
     // ask the server at all in that case.
-    if (token || inviteToken) return;
+    if (token || inviteToken || recoveryToken) return;
     fetchAuthStatus()
       .then((status) => setNeedsBootstrap(status.needs_bootstrap))
       .catch(() => setNeedsBootstrap(false));
-  }, [token, inviteToken]);
+  }, [token, inviteToken, recoveryToken]);
 
   useEffect(() => {
     if (!token) {
@@ -927,7 +1197,7 @@ export function App(): React.ReactElement {
     setToken(session.token);
     setUser(session.user);
     setAuthError(null);
-    setTok(session.token);
+    setTok("present");
   }, []);
 
   const logout = useCallback((message: string) => {
@@ -957,11 +1227,19 @@ export function App(): React.ReactElement {
   }, []);
 
   if (!token) {
-    const mode: LoginMode = inviteToken ? "invite" : needsBootstrap ? "bootstrap" : "login";
+    const mode: LoginMode = recoveryToken
+      ? "recovery"
+      : inviteToken
+        ? "invite"
+        : needsBootstrap
+          ? "bootstrap"
+          : "login";
     return (
       <Login
         mode={mode}
         inviteToken={inviteToken}
+        recoveryToken={recoveryToken}
+        onRecoveryComplete={() => setRecoveryToken(null)}
         onAuthenticated={authenticated}
         error={authError}
       />
