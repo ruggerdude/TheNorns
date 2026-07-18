@@ -84,6 +84,11 @@ import {
   reviewerFor,
 } from "./projects/store.js";
 import type { StrategyWorkflowService } from "./projects/strategyWorkflowService.js";
+import {
+  RunnerWorkspaceBroker,
+  WorkspaceBrokerError,
+  WorkspaceSelectionTokens,
+} from "./runners/workspaceBroker.js";
 import type { RelayStores } from "./stores.js";
 import type {
   IdentityService,
@@ -166,6 +171,8 @@ export interface ServerOptions {
     strategies: StrategyWorkflowService;
     resume: ProjectResumeService;
   };
+  /** New-project local onboarding is safe only after durable relational writes are active. */
+  localProjectOnboardingReady?: boolean;
   phase4?: {
     coordinator: Phase4Coordinator;
     completion: Phase4CompletionService;
@@ -220,6 +227,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   await app.register(websocket);
 
   const runnerSockets = new Map<string, WsLike>();
+  const reconciledWorkspaceRunners = new Map<
+    string,
+    { socket: WsLike; generation: number; workspacePicker: boolean }
+  >();
   const sessionSockets = new Map<WsLike, SessionSocketBinding>();
   const loginThrottle = new LoginAttemptThrottle();
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
@@ -307,6 +318,25 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const sendFrame = (socket: WsLike, frame: ServerFrameT): void => {
     socket.send(JSON.stringify(frame));
   };
+  const workspaceBroker = new RunnerWorkspaceBroker((runnerId, generation, request) => {
+    const socket = runnerSockets.get(runnerId);
+    const reconciled = reconciledWorkspaceRunners.get(runnerId);
+    if (
+      !socket ||
+      !reconciled ||
+      reconciled.socket !== socket ||
+      reconciled.generation !== generation ||
+      !reconciled.workspacePicker
+    )
+      return false;
+    try {
+      sendFrame(socket, { type: "workspace_request", generation, request });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const workspaceSelections = new WorkspaceSelectionTokens();
 
   const v2WireCommand = (command: V2DispatchCommandT): CommandEnvelopeT => ({
     protocol: 1,
@@ -366,6 +396,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   app.addHook("onClose", async () => {
     if (phase4DispatchTimer) clearInterval(phase4DispatchTimer);
     if (phase4RecoveryTimer) clearInterval(phase4RecoveryTimer);
+    workspaceBroker.close();
   });
 
   const closeSessionSocket = (binding: SessionSocketBinding, reason: string): void => {
@@ -798,8 +829,16 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         revoked_at: now().toISOString(),
       });
       stores.revokeRunnerSessions(runnerId);
+      reconciledWorkspaceRunners.delete(runnerId);
+      workspaceBroker.disconnect(runnerId);
       const socket = runnerSockets.get(runnerId);
-      socket?.close(1008, "runner revoked");
+      if (socket) {
+        runnerSockets.delete(runnerId);
+        const currentGeneration = stores.runner(runnerId)?.generation;
+        if (currentGeneration !== undefined)
+          sendFrame(socket, { type: "fenced", current_generation: currentGeneration });
+        socket.close(1008, "runner revoked");
+      }
       reply.send({ ok: true });
     });
 
@@ -896,6 +935,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       return reply.code(403).send({ error: "invalid_pairing_code" });
     }
     const record = stores.registerRunner(runner_id, public_key_pem);
+    reconciledWorkspaceRunners.delete(runner_id);
+    workspaceBroker.disconnect(runner_id);
+    const priorSocket = runnerSockets.get(runner_id);
+    if (priorSocket) {
+      runnerSockets.delete(runner_id);
+      sendFrame(priorSocket, { type: "fenced", current_generation: record.generation });
+      priorSocket.close(1008, "runner re-paired");
+      broadcast({ type: "runner_status", runner_id, connected: false });
+    }
     stores.audit(
       `runner:${runner_id}`,
       "pairing.completed",
@@ -972,6 +1020,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         runner_id: r.runner_id,
         generation: r.generation,
         connected: runnerSockets.has(r.runner_id),
+        workspace_picker_ready:
+          reconciledWorkspaceRunners.get(r.runner_id)?.generation === r.generation &&
+          reconciledWorkspaceRunners.get(r.runner_id)?.workspacePicker === true,
+        local_project_onboarding_ready: options.localProjectOnboardingReady === true,
         last_seen_at: r.last_seen_at,
       })),
     );
@@ -1829,11 +1881,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }),
       ])
       .superRefine((value, context) => {
-        if (value.source_type === "local" && !value.source_location) {
+        if (value.source_type === "local" || value.source_location) {
           context.addIssue({
             code: z.ZodIssueCode.custom,
-            path: ["source_location"],
-            message: "source location is required",
+            path: value.source_location ? ["source_location"] : ["source_type"],
+            message:
+              "raw local paths are not accepted; create the project and bind a runner selection token",
           });
         }
         if (value.source_type === "github" && !value.github_connection_id) {
@@ -1848,13 +1901,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             code: z.ZodIssueCode.custom,
             path: ["github_repository_id"],
             message: "select a GitHub repository",
-          });
-        }
-        if (value.source_type === "github" && value.source_location) {
-          context.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["source_location"],
-            message: "raw GitHub URLs are not accepted; select a connected repository",
           });
         }
         if (
@@ -1906,9 +1952,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               sourceRepositoryId: resolvedGitHubRepository.id,
               sourceDefaultBranch: resolvedGitHubRepository.default_branch,
             }
-          : body.data.source_location
-            ? { sourceLocation: body.data.source_location }
-            : {}),
+          : {}),
       });
       stores.audit(
         user.email,
@@ -1931,12 +1975,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
     if (options.phase3) {
       const LocalBindingBody = z.object({
-        runner_id: z.string().min(1),
-        workspace_id: z.string().min(1),
-        repository_id: z.string().min(1),
-        repository_display_name: z.string().min(1),
-        default_branch: z.string().min(1),
-        observed_head: z.string().min(1),
+        selection_token: z.string().min(1),
         verification_policy_ref: z.string().min(1),
       });
       const GitHubBindingBody = z.object({
@@ -1972,6 +2011,119 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         idempotency_key: z.string().min(1),
       });
 
+      const workspaceRequest = async (
+        runnerId: string,
+        input: {
+          operation: "list" | "browse" | "validate";
+          workspace_id?: string;
+          entry_id?: string;
+        },
+      ) => {
+        const runner = stores.runner(runnerId);
+        const reconciled = reconciledWorkspaceRunners.get(runnerId);
+        if (
+          !runner ||
+          !reconciled ||
+          reconciled.socket !== runnerSockets.get(runnerId) ||
+          reconciled.generation !== runner.generation
+        )
+          throw new WorkspaceBrokerError("runner_unavailable");
+        if (!reconciled.workspacePicker) throw new WorkspaceBrokerError("runner_upgrade_required");
+        const generation = runner.generation;
+        const response = await workspaceBroker.request(runnerId, generation, input);
+        return { response, generation };
+      };
+      const workspaceFailure = (reply: FastifyReply, error: unknown): FastifyReply => {
+        // Stable public codes only: never serialize runner/OS failure messages.
+        const code = error instanceof WorkspaceBrokerError ? error.code : "runner_unavailable";
+        return reply.code(code === "request_limit" ? 429 : code === "timeout" ? 504 : 409).send({
+          error: code,
+          ...(code === "runner_upgrade_required"
+            ? { message: "Update this local runner to use folder selection." }
+            : {}),
+        });
+      };
+
+      app.get("/api/runners/:runnerId/workspaces", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { runnerId } = req.params as { runnerId: string };
+        try {
+          const { response } = await workspaceRequest(runnerId, { operation: "list" });
+          if (response.status !== "ok") return reply.code(409).send({ error: response.status });
+          const runner = stores.runner(runnerId);
+          reply.send({
+            runner_id: runnerId,
+            generation: runner?.generation ?? 0,
+            workspaces: response.workspaces ?? [],
+          });
+        } catch (error) {
+          return workspaceFailure(reply, error);
+        }
+      });
+
+      app.post("/api/runners/:runnerId/workspaces/browse", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const body = z
+          .object({ workspace_id: z.string().min(1), entry_id: z.string().min(1).optional() })
+          .safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const { runnerId } = req.params as { runnerId: string };
+        try {
+          const { response } = await workspaceRequest(runnerId, {
+            operation: "browse",
+            workspace_id: body.data.workspace_id,
+            ...(body.data.entry_id ? { entry_id: body.data.entry_id } : {}),
+          });
+          if (response.status !== "ok") return reply.code(409).send({ error: response.status });
+          reply.send({
+            runner_id: runnerId,
+            workspace_id: body.data.workspace_id,
+            entries: response.entries ?? [],
+          });
+        } catch (error) {
+          return workspaceFailure(reply, error);
+        }
+      });
+
+      app.post("/api/runners/:runnerId/workspaces/validate", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const body = z
+          .object({ workspace_id: z.string().min(1), entry_id: z.string().min(1) })
+          .safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const { runnerId } = req.params as { runnerId: string };
+        try {
+          const { response, generation } = await workspaceRequest(runnerId, {
+            operation: "validate",
+            ...body.data,
+          });
+          if (response.status !== "ok" || !response.repository)
+            return reply.code(409).send({ error: response.status });
+          const runner = stores.runner(runnerId);
+          const reconciled = reconciledWorkspaceRunners.get(runnerId);
+          if (
+            !runner ||
+            !reconciled ||
+            reconciled.socket !== runnerSockets.get(runnerId) ||
+            reconciled.generation !== generation ||
+            runner.generation !== generation ||
+            !reconciled.workspacePicker
+          )
+            return reply.code(409).send({ error: "runner_unavailable" });
+          const grant = workspaceSelections.issue(
+            user.id,
+            runnerId,
+            generation,
+            response.repository,
+          );
+          reply.send({ ...grant, repository: { runner_id: runnerId, ...response.repository } });
+        } catch (error) {
+          return workspaceFailure(reply, error);
+        }
+      });
+
       app.get("/api/v2/projects/:id/resume", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
         const { id } = req.params as { id: string };
@@ -1989,16 +2141,39 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         const body = LocalBindingBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: "bad_request" });
         const { id } = req.params as { id: string };
+        const reserved = workspaceSelections.reserve(user.id, body.data.selection_token);
+        if (!reserved) return reply.code(409).send({ error: "local_selection_invalid" });
+        const selection = reserved.selection;
+        const currentRunner = stores.runner(selection.runner_id);
+        if (
+          !currentRunner ||
+          reconciledWorkspaceRunners.get(selection.runner_id)?.socket !==
+            runnerSockets.get(selection.runner_id) ||
+          reconciledWorkspaceRunners.get(selection.runner_id)?.generation !==
+            selection.runner_generation ||
+          reconciledWorkspaceRunners.get(selection.runner_id)?.workspacePicker !== true ||
+          currentRunner.generation !== selection.runner_generation
+        ) {
+          workspaceSelections.release(body.data.selection_token, reserved.reservation_id);
+          return reply.code(409).send({ error: "local_selection_invalid" });
+        }
         try {
-          reply.code(201).send(
-            await options.phase3?.sourceBindings.createLocal({
-              project_id: id,
-              ...body.data,
-              created_by: { actor_type: "human", actor_id: user.id },
-            }),
-          );
+          const binding = await options.phase3?.sourceBindings.createLocal({
+            project_id: id,
+            runner_id: selection.runner_id,
+            workspace_id: selection.workspace_id,
+            repository_id: selection.repository_id,
+            repository_display_name: selection.repository_display_name,
+            default_branch: selection.default_branch,
+            observed_head: selection.observed_head,
+            verification_policy_ref: body.data.verification_policy_ref,
+            created_by: { actor_type: "human", actor_id: user.id },
+          });
+          workspaceSelections.commit(body.data.selection_token, reserved.reservation_id);
+          reply.code(201).send(binding);
         } catch (error) {
-          reply.code(409).send({ error: "source_binding_conflict", detail: String(error) });
+          workspaceSelections.release(body.data.selection_token, reserved.reservation_id);
+          reply.code(409).send({ error: "source_binding_conflict" });
         }
       });
 
@@ -2691,10 +2866,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           return;
         }
         authedRunnerId = frame.runner_id;
-        runnerSockets.set(frame.runner_id, socket);
-        stores.markSeen(frame.runner_id, now());
-        stores.audit(`runner:${frame.runner_id}`, "runner.connected", "", now());
-        broadcast({ type: "runner_status", runner_id: frame.runner_id, connected: true });
         sendFrame(socket, { type: "auth_ok" });
         return;
       }
@@ -2717,6 +2888,21 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           socket.close();
           return;
         }
+        const priorSocket = runnerSockets.get(authedRunnerId);
+        if (priorSocket && priorSocket !== socket) {
+          workspaceBroker.disconnect(authedRunnerId);
+          reconciledWorkspaceRunners.delete(authedRunnerId);
+          priorSocket.close(1008, "superseded runner connection");
+        }
+        runnerSockets.set(authedRunnerId, socket);
+        reconciledWorkspaceRunners.set(authedRunnerId, {
+          socket,
+          generation: runner.generation,
+          workspacePicker: body.capabilities.includes("workspace_picker"),
+        });
+        stores.markSeen(authedRunnerId, now());
+        stores.audit(`runner:${authedRunnerId}`, "runner.connected", "", now());
+        broadcast({ type: "runner_status", runner_id: authedRunnerId, connected: true });
         sendFrame(socket, {
           type: "reconcile_response",
           body: {
@@ -2752,17 +2938,47 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         return;
       }
 
+      if (frame.type === "workspace_response") {
+        // The broker verifies runner identity and generation before resolving
+        // the HTTP request.  Workspace frames are transient and bypass the
+        // durable event log by design: they contain no project mutation.
+        const reconciled = reconciledWorkspaceRunners.get(authedRunnerId);
+        if (
+          runnerSockets.get(authedRunnerId) === socket &&
+          reconciled?.socket === socket &&
+          reconciled.generation === frame.generation
+        ) {
+          workspaceBroker.receive(authedRunnerId, frame.generation, frame.response);
+        }
+        return;
+      }
+
       if (frame.type === "event") {
         const event: EventEnvelopeT = frame.event;
+        const authenticatedRunnerId = authedRunnerId;
         runnerEventDelivery = runnerEventDelivery
           .then(async () => {
-            const currentRunner = stores.runner(event.runner_id);
-            if (!currentRunner || event.generation !== currentRunner.generation) {
+            const currentRunner = stores.runner(authenticatedRunnerId);
+            const reconciled = reconciledWorkspaceRunners.get(authenticatedRunnerId);
+            if (
+              runnerSockets.get(authenticatedRunnerId) !== socket ||
+              reconciled?.socket !== socket ||
+              event.runner_id !== authenticatedRunnerId ||
+              !currentRunner ||
+              reconciled.generation !== currentRunner.generation ||
+              event.generation !== reconciled.generation
+            ) {
+              stores.audit(
+                `runner:${authenticatedRunnerId}`,
+                "runner.event_rejected",
+                "event did not match the current reconciled runner generation",
+                now(),
+              );
               sendFrame(socket, {
                 type: "fenced",
                 current_generation: currentRunner?.generation ?? event.generation + 1,
               });
-              socket.close();
+              socket.close(1008, "runner event rejected");
               return;
             }
             await options.phase4?.events.apply(event);
@@ -2775,7 +2991,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           })
           .catch((error) => {
             stores.audit(
-              `runner:${event.runner_id}`,
+              `runner:${authenticatedRunnerId}`,
               "runner.event_rejected",
               error instanceof Error ? error.message : String(error),
               now(),
@@ -2789,6 +3005,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     socket.on("close", () => {
       if (authedRunnerId && runnerSockets.get(authedRunnerId) === socket) {
         runnerSockets.delete(authedRunnerId);
+        reconciledWorkspaceRunners.delete(authedRunnerId);
+        workspaceBroker.disconnect(authedRunnerId);
         stores.audit(`runner:${authedRunnerId}`, "runner.disconnected", "", now());
         broadcast({ type: "runner_status", runner_id: authedRunnerId, connected: false });
       }

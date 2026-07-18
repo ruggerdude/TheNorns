@@ -63,6 +63,9 @@ interface SchedulingRow {
   runtime: string;
   model: string;
   repository_binding_id: string;
+  runner_repository_id: string | null;
+  repository_binding_type: "local_runner" | "github";
+  repository_runner_id: string;
   expected_revision: string | null;
   max_concurrent_tasks: number;
   max_concurrent_runs: number;
@@ -93,7 +96,10 @@ export class Phase4Coordinator {
                 project.primary_repository_binding_id AS repository_binding_id,
                 project.max_concurrent_tasks, profile.max_concurrent_runs,
                 profile.active_workload,
-                binding.observed_head AS expected_revision
+                binding.observed_head AS expected_revision,
+                binding.repository_id AS runner_repository_id,
+                binding.binding_type AS repository_binding_type,
+                binding.runner_id AS repository_runner_id
          FROM tasks t
          JOIN phases p ON p.id = t.phase_id AND p.project_id = t.project_id
          JOIN projects project ON project.id = t.project_id
@@ -123,6 +129,14 @@ export class Phase4Coordinator {
       }
       if (!row.expected_revision) {
         throw new Phase4CoordinatorConflictError("repository binding has no verified revision");
+      }
+      if (
+        row.repository_binding_type === "local_runner" &&
+        row.repository_runner_id !== input.runner_id
+      ) {
+        throw new Phase4CoordinatorConflictError(
+          "local repository binding belongs to a different runner",
+        );
       }
       if (!["approved", "active"].includes(row.phase_status)) {
         throw new Phase4CoordinatorConflictError("phase is not approved for execution");
@@ -334,6 +348,9 @@ export class Phase4Coordinator {
         runner_id: input.runner_id,
         runner_generation: input.runner_generation,
         repository_binding_id: row.repository_binding_id,
+        ...(row.repository_binding_type === "local_runner" && row.runner_repository_id
+          ? { runner_repository_id: row.runner_repository_id }
+          : {}),
         expected_revision: row.expected_revision,
         target_branch: input.target_branch,
         worktree_policy_ref: input.worktree_policy_ref,

@@ -290,6 +290,14 @@ describe("V2 immutable dispatch identity", () => {
     expect(redelivery.idempotency_key).toBe(first.command_id);
   });
 
+  it("accepts a runner-issued repository id without changing legacy dispatch compatibility", () => {
+    expect(
+      V2DispatchCommand.parse({ ...dispatch, runner_repository_id: "local:repository" })
+        .runner_repository_id,
+    ).toBe("local:repository");
+    expect(V2DispatchCommand.parse(dispatch).runner_repository_id).toBeUndefined();
+  });
+
   it("rejects a freshly minted command id or a different runner dedup key", () => {
     expect(V2DispatchCommand.safeParse({ ...dispatch, command_id: "fresh-command" }).success).toBe(
       false,

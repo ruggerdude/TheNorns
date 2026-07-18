@@ -17,6 +17,7 @@ import WebSocket from "ws";
 import { FixtureExecutor } from "./fixture.js";
 import { Redactor } from "./redact.js";
 import { RunnerStateFile } from "./state.js";
+import type { WorkspaceRegistry } from "./workspaceRegistry.js";
 
 export interface DaemonOptions {
   serverUrl: string; // http://host:port
@@ -29,11 +30,13 @@ export interface DaemonOptions {
     command: V2DispatchCommandT,
     emit: (event: EventPayloadT) => void,
   ) => Promise<"succeeded" | "failed" | "cancelled">;
+  /** Optional runner-local folder registry.  Paths never enter relay frames. */
+  workspaces?: WorkspaceRegistry;
 }
 
 export class RunnerDaemon {
-  private readonly opts: Required<Omit<DaemonOptions, "executeV2">> &
-    Pick<DaemonOptions, "executeV2">;
+  private readonly opts: Required<Omit<DaemonOptions, "executeV2" | "workspaces">> &
+    Pick<DaemonOptions, "executeV2" | "workspaces">;
   private stateFile: RunnerStateFile | null = null;
   private socket: WebSocket | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -128,6 +131,7 @@ export class RunnerDaemon {
                 protocol: PROTOCOL_VERSION,
                 runner_id: this.opts.runnerId,
                 generation: state.state.generation,
+                capabilities: ["workspace_picker"],
                 last_event_seq_sent: state.state.seq,
                 recently_executed_command_ids: state.executedIds(),
               },
@@ -167,6 +171,46 @@ export class RunnerDaemon {
           this.executor.cancelAll();
           this.stopHeartbeat();
           socket.close();
+          break;
+        }
+        case "workspace_request": {
+          if (frame.generation !== state.state.generation) {
+            socket.send(
+              JSON.stringify({
+                type: "workspace_response",
+                generation: state.state.generation,
+                response: {
+                  request_id: frame.request.request_id,
+                  operation: frame.request.operation,
+                  status: "unavailable",
+                },
+              }),
+            );
+            break;
+          }
+          if (!this.opts.workspaces) {
+            socket.send(
+              JSON.stringify({
+                type: "workspace_response",
+                generation: state.state.generation,
+                response: {
+                  request_id: frame.request.request_id,
+                  operation: frame.request.operation,
+                  status: "unavailable",
+                },
+              }),
+            );
+            break;
+          }
+          // WorkspaceRegistry converts all failures to stable codes; never let
+          // a local pathname or operating-system message cross the socket.
+          socket.send(
+            JSON.stringify({
+              type: "workspace_response",
+              generation: state.state.generation,
+              response: this.opts.workspaces.handle(frame.request),
+            }),
+          );
           break;
         }
       }
@@ -229,6 +273,13 @@ export class RunnerDaemon {
    */
   private handleCommand(command: CommandEnvelopeT): void {
     const state = this.requireState();
+    if (command.runner_id !== this.opts.runnerId || command.generation !== state.state.generation) {
+      this.fenced = true;
+      this.executor.cancelAll();
+      this.stopHeartbeat();
+      this.socket?.close(1008, "runner generation fenced");
+      return;
+    }
     const recorded = state.executionState(command.command_id);
     const meta = { correlation: command.correlation_id, causation: command.command_id };
     if (recorded) {

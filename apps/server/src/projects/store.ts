@@ -16,6 +16,7 @@ import type { AllocationApprovalRecord } from "../graph/allocation.js";
 import { type GraphSnapshot, WorkflowGraph } from "../graph/graph.js";
 import { GraphSession } from "../graph/session.js";
 import { newId } from "../ids.js";
+import { safeLocalRepositoryDisplayName } from "./repositoryDisplayName.js";
 
 export type ProjectStatus = "draft" | "planned";
 export type ProjectSourceType = "local" | "github";
@@ -245,7 +246,10 @@ export class ProjectStore {
       created_at: record.createdAt,
       plan_objective: record.session?.plan.objective ?? null,
       source_type: record.sourceType,
-      source_location: record.sourceLocation,
+      source_location:
+        record.sourceType === "local"
+          ? safeLocalRepositoryDisplayName(record.sourceLocation)
+          : record.sourceLocation,
     };
   }
 }

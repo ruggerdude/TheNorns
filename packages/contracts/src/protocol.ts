@@ -161,6 +161,9 @@ export const ReconcileRequest = z.object({
   protocol: z.literal(1),
   runner_id: nonEmpty,
   generation: z.number().int().nonnegative(),
+  // Additive capability negotiation. Legacy runners omit this field and are
+  // treated as supporting no optional side channels.
+  capabilities: z.array(z.enum(["workspace_picker"])).default([]),
   last_event_seq_sent: z.number().int().nonnegative(),
   recently_executed_command_ids: z.array(nonEmpty),
 });

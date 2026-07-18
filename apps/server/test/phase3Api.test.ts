@@ -58,13 +58,13 @@ describe.sequential("Phase 3 authenticated API", () => {
     await pg.close();
   });
 
-  it("requires a session and exposes Resume, binding, and phase creation", async () => {
+  it("requires a session, rejects forgeable local metadata, and exposes Resume and phase creation", async () => {
     expect(
       (await server.app.inject({ method: "GET", url: "/api/v2/projects/project-1/resume" }))
         .statusCode,
     ).toBe(401);
     const headers = { authorization: `Bearer ${token}` };
-    const binding = await server.app.inject({
+    const forgedBinding = await server.app.inject({
       method: "POST",
       url: "/api/v2/projects/project-1/source-bindings/local",
       headers,
@@ -78,7 +78,7 @@ describe.sequential("Phase 3 authenticated API", () => {
         verification_policy_ref: "verification",
       },
     });
-    expect(binding.statusCode).toBe(201);
+    expect(forgedBinding.statusCode).toBe(400);
     const phase = await server.app.inject({
       method: "POST",
       url: "/api/v2/projects/project-1/phases",
@@ -100,7 +100,7 @@ describe.sequential("Phase 3 authenticated API", () => {
     expect(resume.statusCode).toBe(200);
     expect(resume.json()).toMatchObject({
       project: { id: "project-1" },
-      repositories: [expect.objectContaining({ binding_type: "local_runner" })],
+      repositories: [],
       phases: [expect.objectContaining({ objective_summary: "Add animations" })],
     });
   });

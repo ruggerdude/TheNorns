@@ -632,6 +632,14 @@ button:disabled {
   flex-wrap: wrap;
   gap: 0.65rem;
 }
+.pairing-panel > .pairing-command-block {
+  display: grid;
+  align-items: initial;
+}
+.pairing-command-block code {
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
 .pairing-code {
   color: var(--accent);
   font-size: 1.15rem;
@@ -1062,6 +1070,44 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #0d0f12;
+}
+.local-folder-picker {
+  border-color: #3a4a58;
+}
+.local-folder-picker .repository-search {
+  align-items: end;
+}
+.local-folder-picker .repository-search .field {
+  min-width: 0;
+}
+.local-folder-browser {
+  display: grid;
+  gap: .7rem;
+}
+.local-folder-browser-head {
+  display: flex;
+  align-items: center;
+  gap: .65rem;
+  min-width: 0;
+}
+.local-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font: 400 .68rem "DM Mono", monospace;
+}
+.local-breadcrumb span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.local-breadcrumb span + span::before {
+  content: "›";
+  margin-right: .35rem;
+  color: var(--line2);
 }
 .connection-required {
   display: flex;

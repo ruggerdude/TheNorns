@@ -99,6 +99,21 @@ describe("ProjectStore", () => {
     });
   });
 
+  it("never exposes an absolute path from a legacy local project snapshot", () => {
+    const store = new ProjectStore();
+    const project = store.create({
+      name: "Legacy local",
+      description: "d",
+      pmProvider: "openai",
+      sourceType: "local",
+      sourceLocation: "/Users/operator/private/repository",
+    });
+
+    expect(project.source_location).toBe("Local repository");
+    expect(store.list()[0]?.source_location).toBe("Local repository");
+    expect(JSON.stringify(store.summary(project.id))).not.toContain("/Users/operator");
+  });
+
   it("throws ProjectNotFoundError for an unknown id", () => {
     const store = new ProjectStore();
     expect(() => store.summary("proj-does-not-exist")).toThrow(ProjectNotFoundError);

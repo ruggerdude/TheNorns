@@ -6,6 +6,7 @@ import type { GraphNode } from "../graph/graph.js";
 import { newId } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import type { ProjectGraphView, ProjectRepository } from "./repository.js";
+import { safeLocalRepositoryDisplayName } from "./repositoryDisplayName.js";
 import {
   ProjectNotFoundError,
   ProjectNotPlannedError,
@@ -27,6 +28,7 @@ interface ProjectReadRow {
   source_type: ProjectSourceType | null;
   github_owner: string | null;
   github_name: string | null;
+  local_repository_display_name: string | null;
 }
 
 interface ProjectGraphHeaderRow {
@@ -92,13 +94,13 @@ function pmModel(provider: ProviderName, value: string | null): PmModelT | null 
 }
 
 function sourceLocation(row: ProjectReadRow): string | null {
-  if (row.source_type !== "github" || row.github_owner === null || row.github_name === null) {
-    // Local paths deliberately do not enter relational compatibility rows.
-    // The resulting shadow mismatch blocks cutover until Phase 3 promotes an
-    // opaque runner binding, while the legacy response remains authoritative.
-    return null;
+  if (row.source_type === "local") {
+    return safeLocalRepositoryDisplayName(row.local_repository_display_name);
   }
-  return `https://github.com/${row.github_owner}/${row.github_name}.git`;
+  if (row.source_type === "github" && row.github_owner !== null && row.github_name !== null) {
+    return `https://github.com/${row.github_owner}/${row.github_name}.git`;
+  }
+  return null;
 }
 
 function summaryFromRow(row: ProjectReadRow): ProjectSummary {
@@ -197,7 +199,12 @@ async function projectRows(
             preference.pm_provider, preference.pm_model,
             preference.reviewer_provider, imported.plan_hash,
             phase.objective_summary AS plan_objective,
-            candidate.source_type, candidate.github_owner, candidate.github_name
+            COALESCE(candidate.source_type,
+              CASE binding.binding_type WHEN 'local_runner' THEN 'local'::text WHEN 'github' THEN 'github'::text ELSE NULL END
+            )::text AS source_type,
+            COALESCE(candidate.github_owner, binding.github_owner) AS github_owner,
+            COALESCE(candidate.github_name, binding.github_name) AS github_name,
+            CASE WHEN binding.binding_type = 'local_runner' THEN binding.repository_display_name ELSE NULL END AS local_repository_display_name
      FROM projects project
      LEFT JOIN legacy_project_imports imported
        ON imported.project_id = project.id
@@ -221,6 +228,10 @@ async function projectRows(
                 binding.created_at, binding.id
        LIMIT 1
      ) candidate ON true
+     LEFT JOIN repository_bindings binding
+       ON binding.id = project.primary_repository_binding_id
+      AND binding.project_id = project.id
+      AND binding.status = 'connected'
      WHERE true ${projectPredicate}
      ORDER BY project.created_at DESC, imported.imported_at DESC NULLS LAST, project.id DESC`,
     params,

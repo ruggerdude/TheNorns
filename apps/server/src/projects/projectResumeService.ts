@@ -1,5 +1,6 @@
 import { V2ProjectResume, type V2ProjectResumeT } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
+import { safeLocalRepositoryDisplayName } from "./repositoryDisplayName.js";
 
 export class ProjectResumeNotFoundError extends Error {
   constructor(readonly projectId: string) {
@@ -147,7 +148,10 @@ export class ProjectResumeService {
         repositories: repositories.rows.map((repository) => ({
           id: repository.id,
           binding_type: repository.binding_type,
-          display_name: repository.repository_display_name,
+          display_name:
+            repository.binding_type === "local_runner"
+              ? safeLocalRepositoryDisplayName(repository.repository_display_name)
+              : repository.repository_display_name,
           status: repository.status,
           health: repository.repository_health,
           observed_head: repository.observed_head,

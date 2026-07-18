@@ -37,12 +37,28 @@ const V2RepositoryBindingBase = z.object({
   updated_at: V2IsoDateTime,
 });
 
+const V2RepositoryDisplayName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(240)
+  .refine(
+    (value) =>
+      !value.includes("/") &&
+      !value.includes("\\") &&
+      ![...value].some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 32 || code === 127;
+      }),
+    "repository display name must not contain path separators or control characters",
+  );
+
 export const V2LocalRunnerRepositoryBinding = V2RepositoryBindingBase.extend({
   binding_type: z.literal("local_runner"),
   runner_id: V2EntityId,
   workspace_id: V2EntityId,
   repository_id: V2EntityId,
-  repository_display_name: V2NonEmptyString,
+  repository_display_name: V2RepositoryDisplayName,
 }).strict();
 export type V2LocalRunnerRepositoryBindingT = z.infer<typeof V2LocalRunnerRepositoryBinding>;
 
@@ -77,7 +93,7 @@ export const V2CreateLocalRepositoryBinding = z
     runner_id: V2EntityId,
     workspace_id: V2EntityId,
     repository_id: V2EntityId,
-    repository_display_name: V2NonEmptyString,
+    repository_display_name: V2RepositoryDisplayName,
     default_branch: V2NonEmptyString,
     observed_head: V2NonEmptyString,
     verification_policy_ref: V2EntityId,

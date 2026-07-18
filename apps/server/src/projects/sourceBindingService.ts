@@ -8,6 +8,7 @@ import {
   type V2RepositoryBindingT,
 } from "@norns/contracts";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
+import { safeLocalRepositoryDisplayName } from "./repositoryDisplayName.js";
 
 interface RepositoryBindingRow {
   id: string;
@@ -47,6 +48,11 @@ function stableBindingId(parts: readonly string[]): string {
   return `repository-binding:${digest}`;
 }
 
+function stableBindingAuditId(bindingId: string): string {
+  const digest = createHash("sha256").update(bindingId).digest("hex").slice(0, 32);
+  return `audit:repository-binding:${digest}`;
+}
+
 function iso(value: Date | string): string {
   return new Date(value).toISOString();
 }
@@ -79,7 +85,8 @@ function mapBinding(row: RepositoryBindingRow): V2RepositoryBindingT {
           runner_id: row.runner_id,
           workspace_id: row.workspace_id,
           repository_id: row.repository_id,
-          repository_display_name: row.repository_display_name,
+          repository_display_name:
+            safeLocalRepositoryDisplayName(row.repository_display_name) ?? "Local repository",
         }
       : {
           ...base,
@@ -130,6 +137,43 @@ async function insertAndSelect(
   return mapBinding(row);
 }
 
+async function appendBindingAudit(tx: V2SqlExecutor, binding: V2RepositoryBindingT): Promise<void> {
+  await tx.query(
+    `INSERT INTO audit_events (
+       audit_id, audit_type, project_id, actor_type, actor_id, outcome, severity,
+       correlation_id, causation_id, occurred_at, targets, summary, details,
+       redaction_applied
+     ) VALUES (
+       $1,'repository_binding.connected',$2,$3,$4,'succeeded','info',$5,NULL,now(),
+       $6::jsonb,'Repository binding connected',$7::jsonb,true
+     ) ON CONFLICT (audit_id) DO NOTHING`,
+    [
+      stableBindingAuditId(binding.id),
+      binding.project_id,
+      binding.created_by.actor_type,
+      binding.created_by.actor_id,
+      `repository-binding:${binding.id}`,
+      JSON.stringify([
+        { entity_type: "project", entity_id: binding.project_id },
+        { entity_type: "repository_binding", entity_id: binding.id },
+      ]),
+      JSON.stringify({
+        binding_type: binding.binding_type,
+        runner_id: binding.runner_id,
+        ...(binding.binding_type === "local_runner"
+          ? {
+              workspace_id: binding.workspace_id,
+              repository_id: binding.repository_id,
+            }
+          : {
+              github_installation_id: binding.github_installation_id,
+              github_repository_id: binding.github_repository_id,
+            }),
+      }),
+    ],
+  );
+}
+
 export class SourceBindingService {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
@@ -144,7 +188,7 @@ export class SourceBindingService {
     ]);
     return this.transactions.transaction(async (tx) => {
       await assertProject(tx, command.project_id);
-      return insertAndSelect(tx, [
+      const binding = await insertAndSelect(tx, [
         id,
         command.project_id,
         "local_runner",
@@ -162,6 +206,8 @@ export class SourceBindingService {
         command.created_by.actor_type,
         command.created_by.actor_id,
       ]);
+      await appendBindingAudit(tx, binding);
+      return binding;
     });
   }
 
@@ -175,7 +221,7 @@ export class SourceBindingService {
     ]);
     return this.transactions.transaction(async (tx) => {
       await assertProject(tx, command.project_id);
-      return insertAndSelect(tx, [
+      const binding = await insertAndSelect(tx, [
         id,
         command.project_id,
         "github",
@@ -193,6 +239,8 @@ export class SourceBindingService {
         command.created_by.actor_type,
         command.created_by.actor_id,
       ]);
+      await appendBindingAudit(tx, binding);
+      return binding;
     });
   }
 }

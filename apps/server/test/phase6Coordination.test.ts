@@ -303,7 +303,9 @@ describe.sequential("Phase 6 autonomous multi-agent coordination", () => {
     expect(apiAllocation.selected.reviewer_agent_profile_id).toBe("anthropic-reviewer");
 
     const apiRun1 = await schedule("task-api", "assignment-api", "runner-openai");
-    const uiRun = await schedule("task-ui", "assignment-ui", "runner-anthropic");
+    // Provider identity belongs to the assigned agent profile; both providers
+    // may execute through the one local runner that owns this repository.
+    const uiRun = await schedule("task-ui", "assignment-ui", "runner-openai");
 
     // Simulated coordinator restart: all state and provider identity comes back from PostgreSQL.
     coordination = new Phase6CoordinationService(new PGliteTransactionRunner(pg));
@@ -312,7 +314,7 @@ describe.sequential("Phase 6 autonomous multi-agent coordination", () => {
     expect(resumed.active_providers.sort()).toEqual(["anthropic", "openai"]);
 
     await succeed(apiRun1, "runner-openai", "task-api");
-    await succeed(uiRun, "runner-anthropic", "task-ui");
+    await succeed(uiRun, "runner-openai", "task-ui");
     await review(apiRun1.run_id, "task-api", "anthropic-reviewer", "rework", "r");
     const apiRun2 = await schedule("task-api", "assignment-api", "runner-openai", apiRun1.run_id);
     await succeed(apiRun2, "runner-openai", "task-api");

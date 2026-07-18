@@ -49,6 +49,12 @@ describe("V2 repository bindings", () => {
         absolute_path: "/Users/operator/The Norns",
       }).success,
     ).toBe(false);
+    expect(
+      V2RepositoryBinding.safeParse({
+        ...binding,
+        repository_display_name: "/Users/operator/The Norns",
+      }).success,
+    ).toBe(false);
   });
 
   it("represents a GitHub App installation with an explicit least-privilege grant", () => {
