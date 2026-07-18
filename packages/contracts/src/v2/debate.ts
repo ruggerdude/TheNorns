@@ -67,6 +67,18 @@ export type V2DebateActorT = z.infer<typeof V2DebateActor>;
  * change, while a running debate's selected model and conservative charge
  * must not.
  */
+export const V2DebatePricingSnapshot = z
+  .object({
+    provider: V2NonEmptyString.max(200),
+    model: V2NonEmptyString.max(500),
+    input_per_mtok_usd: nonnegativeMoney,
+    output_per_mtok_usd: nonnegativeMoney,
+    pricing_version: V2NonEmptyString.max(200),
+    pricing_is_estimate: z.boolean(),
+  })
+  .strict();
+export type V2DebatePricingSnapshotT = z.infer<typeof V2DebatePricingSnapshot>;
+
 export const V2DebateActorExecutionSnapshot = z
   .object({
     actor_id: V2EntityId,
@@ -77,16 +89,7 @@ export const V2DebateActorExecutionSnapshot = z
     max_output_tokens: z.number().int().positive(),
     budget_limit_usd: nonnegativeMoney,
     max_turns: z.number().int().positive(),
-    pricing: z
-      .object({
-        provider: V2NonEmptyString.max(200),
-        model: V2NonEmptyString.max(500),
-        input_per_mtok_usd: nonnegativeMoney,
-        output_per_mtok_usd: nonnegativeMoney,
-        pricing_version: V2NonEmptyString.max(200),
-        pricing_is_estimate: z.boolean(),
-      })
-      .strict(),
+    pricing: V2DebatePricingSnapshot,
     maximum_turn_charge_usd: nonnegativeMoney,
   })
   .strict()
@@ -204,10 +207,10 @@ export const V2_DEBATE_RUN_TERMINAL_STATES: ReadonlySet<V2DebateRunStateT> = new
 
 export const V2_DEBATE_RUN_TRANSITIONS: Record<V2DebateRunStateT, readonly V2DebateRunStateT[]> = {
   created: ["queued", "cancelling", "cancelled", "failed"],
-  queued: ["running", "cancelling", "cancelled", "failed"],
+  queued: ["running", "paused", "cancelling", "cancelled", "failed"],
   running: ["pausing", "finalizing", "cancelling", "failed"],
   pausing: ["paused", "running", "cancelling", "failed"],
-  paused: ["running", "cancelling", "cancelled", "failed"],
+  paused: ["queued", "cancelling", "cancelled", "failed"],
   finalizing: ["completed", "cancelling", "failed"],
   cancelling: ["cancelled", "failed"],
   completed: [],
@@ -383,11 +386,14 @@ export const V2DebateMessage = z
     actor_snapshot: V2DebateActor.nullable(),
     turn_id: V2EntityId.nullable(),
     turn_attempt_id: V2EntityId.nullable(),
-    intervention_kind: z.enum(["direction", "statement"]).nullable(),
-    intervention_target_actor_id: V2EntityId.nullable(),
-    intervention_apply_at: z.enum(["next_turn", "next_round"]).nullable(),
-    intervention_applies_after_round: z.number().int().nonnegative().nullable(),
-    intervention_applies_after_turn: z.number().int().nonnegative().nullable(),
+    supersedes_message_id: V2EntityId.nullable().default(null),
+    structured_output: z.record(z.unknown()).nullable().default(null),
+    structured_output_hash: V2Sha256Hex.nullable().default(null),
+    intervention_kind: z.enum(["direction", "statement"]).nullable().default(null),
+    intervention_target_actor_id: V2EntityId.nullable().default(null),
+    intervention_apply_at: z.enum(["next_turn", "next_round"]).nullable().default(null),
+    intervention_applies_after_round: z.number().int().nonnegative().nullable().default(null),
+    intervention_applies_after_turn: z.number().int().nonnegative().nullable().default(null),
     content: V2NonEmptyString,
     content_hash: V2Sha256Hex,
     created_at: V2IsoDateTime,
@@ -401,6 +407,13 @@ export const V2DebateMessage = z
         code: z.ZodIssueCode.custom,
         path: ["intervention_kind"],
         message: "human messages carry intervention metadata and generated messages do not",
+      });
+    }
+    if ((message.structured_output === null) !== (message.structured_output_hash === null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["structured_output_hash"],
+        message: "structured output and its hash are present together",
       });
     }
     if (
@@ -602,6 +615,7 @@ export const V2DebateUsageEvent = z
     provider: V2NonEmptyString,
     model: V2NonEmptyString,
     runtime: V2NonEmptyString,
+    pricing_snapshot: V2DebatePricingSnapshot,
     usage: V2DebateUsage,
     occurred_at: V2IsoDateTime,
   })

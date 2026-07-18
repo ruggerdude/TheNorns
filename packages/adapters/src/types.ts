@@ -2,6 +2,7 @@
 // SDKs directly. Both providers pass the same conformance suite.
 import type { UsageEventT } from "@norns/contracts";
 import type { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 
 export type ProviderName = "anthropic" | "openai";
 
@@ -21,6 +22,16 @@ export interface CompletionRequest extends CompletionAttribution {
   prompt: string;
   maxTokens?: number;
   signal?: AbortSignal;
+  /** The caller already appended structuredOutputInstruction verbatim. */
+  structuredOutputPrepared?: boolean;
+}
+
+export function prepareStructuredOutputPrompt<T>(
+  prompt: string,
+  schema: z.ZodType<T>,
+  schemaName: string,
+): string {
+  return `${prompt}\n\n${structuredOutputInstruction(schema, schemaName)}`;
 }
 
 /** Provider-neutral metadata retained when the upstream API exposes it. */
@@ -48,6 +59,19 @@ export interface LlmAdapter {
     schema: z.ZodType<T>,
     schemaName: string,
   ): Promise<StructuredResult<T>>;
+}
+
+/** Provider-neutral full schema instruction used when native schema mode is unavailable. */
+export function structuredOutputInstruction<T>(schema: z.ZodType<T>, schemaName: string): string {
+  const jsonSchema = zodToJsonSchema(schema, {
+    name: schemaName,
+    $refStrategy: "none",
+  });
+  return [
+    `Respond with ONLY one JSON object matching the JSON Schema named "${schemaName}".`,
+    "Do not add prose, Markdown, or code fences.",
+    `JSON Schema:\n${JSON.stringify(jsonSchema)}`,
+  ].join("\n");
 }
 
 // Failure taxonomy (Phase 2 exit): every provider error maps to one kind, so

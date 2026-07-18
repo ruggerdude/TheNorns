@@ -13,9 +13,12 @@ import websocket from "@fastify/websocket";
 import {
   AdapterError,
   AnthropicAdapter,
+  DEFAULT_MODEL_REGISTRY,
   type LlmAdapter,
+  type ModelAvailabilityInput,
   OpenAiAdapter,
   type ProviderName,
+  buildSelectableModelCatalog,
 } from "@norns/adapters";
 import {
   AnthropicPmModel,
@@ -31,11 +34,15 @@ import {
   type ServerFrameT,
   type UsageEventT,
   V2ContentAddressedReference,
+  V2ControlDebateRunCommand,
+  V2CreateDebateCommand,
   V2DecisionResolutionRequest,
   type V2DispatchCommandT,
   V2EvidenceRef,
   V2HumanDirectionRequest,
+  V2InterveneDebateRunCommand,
   V2RepositoryIngestionSeed,
+  V2StartDebateRunCommand,
   V2StrategyVersion,
   parseRunnerFrame,
 } from "@norns/contracts";
@@ -48,6 +55,7 @@ import { type Phase4DispatchRepository, Phase4Dispatcher } from "./coordinator/p
 import type { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
 import type { Phase4RecoveryMonitor } from "./coordinator/phase4RecoveryMonitor.js";
 import type { Phase6CoordinationService } from "./coordinator/phase6Coordination.js";
+import { DebateConflictError, type DebateService } from "./debates/service.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
 import { GraphEditError } from "./graph/graph.js";
@@ -169,6 +177,8 @@ export interface ServerOptions {
   phase5?: { attention: AttentionService };
   phase6?: { coordination: Phase6CoordinationService };
   phase7?: { operations: Phase7OperationsService };
+  /** Durable relational debate workflow, unavailable without its database runtime. */
+  debates?: DebateService;
   integrations?: { github: GitHubIntegrationService | null };
   /**
    * Deployment configuration inspected by safe integration-status routes.
@@ -1057,6 +1067,369 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       ],
     });
   });
+
+  // ---- durable debate workflow ------------------------------------------------
+  // Browser routes construct application commands from the authenticated
+  // identity. Clients never choose actor attribution, command IDs, or
+  // correlation IDs themselves.
+  if (options.debates) {
+    const debates = options.debates;
+    const configuredDebateModels = () => {
+      const availability: ModelAvailabilityInput[] = Object.entries(DEFAULT_MODEL_REGISTRY).map(
+        ([model, entry]) => ({
+          provider: entry.provider,
+          model,
+          available:
+            entry.provider === "anthropic"
+              ? Boolean(integrationEnvironment.ANTHROPIC_API_KEY?.trim())
+              : Boolean(integrationEnvironment.OPENAI_API_KEY?.trim()),
+          reason: "provider_api_key_not_configured",
+        }),
+      );
+      return buildSelectableModelCatalog(availability).filter((entry) => entry.available);
+    };
+    const debateError = (reply: FastifyReply, error: unknown): void => {
+      if (error instanceof DebateConflictError) {
+        const status = ["debate_not_found", "debate_run_not_found", "project_not_found"].includes(
+          error.code,
+        )
+          ? 404
+          : 409;
+        reply.code(status).send({ error: error.code, message: error.message });
+        return;
+      }
+      if (error instanceof z.ZodError) {
+        reply.code(400).send({ error: "bad_request", message: error.message });
+        return;
+      }
+      throw error;
+    };
+    const DebateActorBody = z
+      .object({
+        id: z.string().min(1).optional(),
+        kind: z.enum(["participant", "judge", "synthesizer"]).optional(),
+        actor_kind: z.enum(["participant", "judge", "synthesizer"]).optional(),
+        display_name: z.string().trim().min(1).max(200),
+        role_label: z.string().trim().min(1).max(200),
+        instructions: z.string().trim().min(1).max(100_000),
+        provider: z.enum(["anthropic", "openai"]),
+        model: z.string().trim().min(1).max(500),
+        runtime: z.literal("provider_api").default("provider_api"),
+        enabled: z.boolean().default(true),
+        position: z.number().int().nonnegative(),
+        max_turns: z.number().int().positive().max(200),
+        max_input_tokens: z.number().int().positive(),
+        max_output_tokens: z.number().int().positive(),
+        budget_limit_usd: z.number().finite().nonnegative(),
+      })
+      .strict()
+      .superRefine((actor, context) => {
+        if (actor.kind === undefined && actor.actor_kind === undefined) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["kind"],
+            message: "actor kind is required",
+          });
+        }
+        if (
+          actor.kind !== undefined &&
+          actor.actor_kind !== undefined &&
+          actor.kind !== actor.actor_kind
+        ) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["actor_kind"],
+            message: "kind and actor_kind must agree",
+          });
+        }
+      });
+    const DebateContextBody = z
+      .object({
+        label: z.string().trim().min(1).max(500),
+        artifact_id: z.string().trim().min(1).nullable(),
+        artifact_content_hash: z
+          .string()
+          .regex(/^[a-f0-9]{64}$/)
+          .nullable(),
+        artifact_media_type: z.string().trim().min(1).nullable(),
+        inline_content: z.string().max(100_000).nullable(),
+      })
+      .strict();
+    const CreateDebateBody = z
+      .object({
+        idempotency_key: z.string().trim().min(1),
+        expected_project_version: z.number().int().positive().optional(),
+        configuration: z
+          .object({
+            title: z.string().trim().min(1).max(500),
+            question: z.string().trim().min(1).max(100_000),
+            phase_id: z.string().trim().min(1).nullable().optional(),
+            context_artifact_ids: z.array(z.string().trim().min(1)).default([]),
+            contexts: z.array(DebateContextBody).default([]),
+            actors: z.array(DebateActorBody).min(2).max(32),
+            schedule: z
+              .object({
+                kind: z.literal("round_robin"),
+                participant_ids: z.array(z.string().trim().min(1)).min(2),
+              })
+              .optional(),
+            policy: z.object({
+              exact_rounds: z.number().int().positive().max(50).nullable(),
+              max_rounds: z.number().int().positive().max(50),
+              max_duration_seconds: z.number().int().positive(),
+              max_total_input_tokens: z.number().int().positive(),
+              max_total_output_tokens: z.number().int().positive(),
+              max_total_cost_usd: z.number().finite().nonnegative(),
+              stop_on_consensus: z.boolean(),
+              no_material_change_rounds: z.number().int().positive().max(50).nullable(),
+              repeated_disagreement_rounds: z.number().int().positive().max(50).nullable(),
+              provider_failure_threshold: z.number().int().positive().max(100),
+            }),
+          })
+          .strict(),
+      })
+      .strict();
+    const StartDebateBody = z
+      .object({
+        idempotency_key: z.string().trim().min(1),
+        expected_debate_version: z.number().int().positive().optional(),
+      })
+      .strict();
+    const ControlDebateBody = z
+      .object({
+        action: z.enum(["pause", "resume", "cancel", "stop_after_turn", "stop_after_round"]),
+        expected_version: z.number().int().positive(),
+        idempotency_key: z.string().trim().min(1),
+        reason: z.string().trim().max(10_000).optional(),
+        ambiguity_disposition: z.enum(["assume_full_charge"]).nullable().optional(),
+      })
+      .strict();
+    const InterventionBody = z
+      .object({
+        kind: z.enum(["direction", "statement"]),
+        target: z.string().trim().min(1).max(200),
+        text: z.string().trim().min(1).max(100_000),
+        apply_at: z.enum(["next_turn", "next_round"]),
+        expected_version: z.number().int().positive().optional(),
+        idempotency_key: z.string().trim().min(1),
+      })
+      .strict();
+
+    app.get("/api/v2/capabilities/ai-models", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const models = configuredDebateModels().map((entry) => ({
+        id: entry.model,
+        provider: entry.provider,
+        label: entry.label,
+        configured: true,
+        available: true,
+      }));
+      reply.header("Cache-Control", "no-store").send({ models });
+    });
+
+    app.get("/api/v2/projects/:id/debates", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const { id } = req.params as { id: string };
+      try {
+        reply.send(await debates.list(id));
+      } catch (error) {
+        debateError(reply, error);
+      }
+    });
+
+    app.post("/api/v2/projects/:id/debates", async (req, reply) => {
+      const user = await resolveUser(req);
+      if (!user) return reply.code(401).send({ error: "unauthorized" });
+      const body = CreateDebateBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      const { id: projectId } = req.params as { id: string };
+      if (body.data.configuration.context_artifact_ids.length > 0) {
+        return reply.code(400).send({
+          error: "context_metadata_required",
+          message: "artifact contexts require content hash and media type metadata",
+        });
+      }
+      const selectable = new Set(
+        configuredDebateModels().map((entry) => `${entry.provider}:${entry.model}`),
+      );
+      const enabledActors = body.data.configuration.actors.filter((actor) => actor.enabled);
+      if (enabledActors.some((actor) => !selectable.has(`${actor.provider}:${actor.model}`))) {
+        return reply.code(400).send({ error: "model_not_configured" });
+      }
+      try {
+        const expectedProjectVersion =
+          body.data.expected_project_version ?? (await debates.projectVersion(projectId));
+        const command = V2CreateDebateCommand.parse({
+          schema_version: 2,
+          kind: "create_debate",
+          command_id: newId("command"),
+          command_family: "debate",
+          actor: { actor_type: "human", actor_id: user.id },
+          idempotency_key: body.data.idempotency_key,
+          correlation_id: newId("correlation"),
+          causation_id: null,
+          issued_at: now().toISOString(),
+          project_id: projectId,
+          expected_project_version: expectedProjectVersion,
+          title: body.data.configuration.title,
+          question: body.data.configuration.question,
+          phase_id: body.data.configuration.phase_id ?? null,
+          stopping_policy: body.data.configuration.policy,
+          actors: enabledActors.map((actor) => ({
+            actor_kind: actor.actor_kind ?? actor.kind,
+            role_label: actor.role_label,
+            display_name: actor.display_name,
+            instructions: actor.instructions,
+            provider: actor.provider,
+            model: actor.model,
+            runtime: actor.runtime,
+            position: actor.position,
+            max_turns: actor.max_turns,
+            max_input_tokens: actor.max_input_tokens,
+            max_output_tokens: actor.max_output_tokens,
+            budget_limit_usd: actor.budget_limit_usd,
+          })),
+          contexts: body.data.configuration.contexts,
+        });
+        reply.code(201).send(await debates.create(command));
+      } catch (error) {
+        debateError(reply, error);
+      }
+    });
+
+    app.get("/api/v2/projects/:id/debates/:debateId", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const { id, debateId } = req.params as { id: string; debateId: string };
+      try {
+        reply.send(await debates.get(id, debateId));
+      } catch (error) {
+        debateError(reply, error);
+      }
+    });
+
+    app.post("/api/v2/projects/:id/debates/:debateId/runs", async (req, reply) => {
+      const user = await resolveUser(req);
+      if (!user) return reply.code(401).send({ error: "unauthorized" });
+      const body = StartDebateBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      const { id, debateId } = req.params as { id: string; debateId: string };
+      try {
+        const snapshot = await debates.get(id, debateId);
+        const command = V2StartDebateRunCommand.parse({
+          schema_version: 2,
+          kind: "start_debate_run",
+          command_id: newId("command"),
+          command_family: "debate",
+          actor: { actor_type: "human", actor_id: user.id },
+          idempotency_key: body.data.idempotency_key,
+          correlation_id: newId("correlation"),
+          causation_id: null,
+          issued_at: now().toISOString(),
+          project_id: id,
+          debate_id: debateId,
+          expected_debate_version: body.data.expected_debate_version ?? snapshot.revision,
+        });
+        reply.code(201).send(await debates.start(command));
+      } catch (error) {
+        debateError(reply, error);
+      }
+    });
+
+    app.get("/api/v2/projects/:id/debates/:debateId/runs/:runId", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const { id, debateId, runId } = req.params as { id: string; debateId: string; runId: string };
+      try {
+        reply.send(await debates.getRun(id, debateId, runId));
+      } catch (error) {
+        debateError(reply, error);
+      }
+    });
+
+    app.get("/api/v2/projects/:id/debates/:debateId/runs/:runId/events", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const { id, debateId, runId } = req.params as { id: string; debateId: string; runId: string };
+      const query = z
+        .object({ after_version: z.coerce.number().int().nonnegative().default(0) })
+        .safeParse(req.query);
+      if (!query.success) return reply.code(400).send({ error: "bad_request" });
+      try {
+        reply.send(await debates.events(id, debateId, runId, query.data.after_version));
+      } catch (error) {
+        debateError(reply, error);
+      }
+    });
+
+    app.post("/api/v2/projects/:id/debates/:debateId/runs/:runId/control", async (req, reply) => {
+      const user = await resolveUser(req);
+      if (!user) return reply.code(401).send({ error: "unauthorized" });
+      const body = ControlDebateBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      const { id, debateId, runId } = req.params as { id: string; debateId: string; runId: string };
+      try {
+        const command = V2ControlDebateRunCommand.parse({
+          schema_version: 2,
+          kind: "control_debate_run",
+          command_id: newId("command"),
+          command_family: "debate",
+          actor: { actor_type: "human", actor_id: user.id },
+          idempotency_key: body.data.idempotency_key,
+          correlation_id: newId("correlation"),
+          causation_id: null,
+          issued_at: now().toISOString(),
+          project_id: id,
+          debate_id: debateId,
+          debate_run_id: runId,
+          expected_run_version: body.data.expected_version,
+          action: body.data.action,
+          reason: body.data.reason ?? body.data.action,
+          ambiguity_disposition: body.data.ambiguity_disposition ?? null,
+        });
+        reply.send(await debates.control(command));
+      } catch (error) {
+        debateError(reply, error);
+      }
+    });
+
+    app.post(
+      "/api/v2/projects/:id/debates/:debateId/runs/:runId/interventions",
+      async (req, reply) => {
+        const user = await resolveUser(req);
+        if (!user) return reply.code(401).send({ error: "unauthorized" });
+        const body = InterventionBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const { id, debateId, runId } = req.params as {
+          id: string;
+          debateId: string;
+          runId: string;
+        };
+        try {
+          const run = await debates.getRun(id, debateId, runId);
+          const command = V2InterveneDebateRunCommand.parse({
+            schema_version: 2,
+            kind: "intervene_debate_run",
+            command_id: newId("command"),
+            command_family: "debate",
+            actor: { actor_type: "human", actor_id: user.id },
+            idempotency_key: body.data.idempotency_key,
+            correlation_id: newId("correlation"),
+            causation_id: null,
+            issued_at: now().toISOString(),
+            project_id: id,
+            debate_id: debateId,
+            debate_run_id: runId,
+            expected_run_version: body.data.expected_version ?? run.aggregate_version,
+            intervention_kind: body.data.kind,
+            target_actor_id: body.data.target === "all" ? null : body.data.target,
+            apply_at: body.data.apply_at,
+            text: body.data.text,
+          });
+          reply.code(202).send(await debates.intervene(command));
+        } catch (error) {
+          debateError(reply, error);
+        }
+      },
+    );
+  }
 
   const github = options.integrations?.github ?? null;
   const githubError = (reply: FastifyReply, error: unknown): void => {

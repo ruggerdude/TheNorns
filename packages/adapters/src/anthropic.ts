@@ -11,6 +11,7 @@ import {
   type ProviderCompletionMetadata,
   type StructuredResult,
   kindForStatus,
+  prepareStructuredOutputPrompt,
 } from "./types.js";
 
 export interface AnthropicAdapterOptions {
@@ -52,7 +53,9 @@ export class AnthropicAdapter implements LlmAdapter {
   ): Promise<StructuredResult<T>> {
     const structuredRequest: CompletionRequest = {
       ...request,
-      prompt: `${request.prompt}\n\nRespond with ONLY a JSON object named "${schemaName}" matching the required schema. No prose, no code fences.`,
+      prompt: request.structuredOutputPrepared
+        ? request.prompt
+        : prepareStructuredOutputPrompt(request.prompt, schema, schemaName),
     };
     const response = await this.call(structuredRequest);
     const text = this.textOf(response);

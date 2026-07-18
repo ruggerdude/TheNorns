@@ -10,6 +10,8 @@ interface DebateEvent {
   round_number: number | null;
   turn_number: number | null;
   actor_snapshot: DebateActor | null;
+  actor_type?: string;
+  actor_id?: string | null;
   payload: Record<string, unknown>;
   artifact_ids: string[];
   usage: {
@@ -33,8 +35,29 @@ interface DebateRunDto {
   reserved_usd?: number;
   settled_usd?: number;
   retained_ambiguous_usd?: number;
-  judgment?: { summary?: string; confidence?: number; findings?: Finding[] } | null;
-  final_output?: { title?: string; content?: string; artifact_id?: string } | null;
+  judgment?: {
+    summary?: string;
+    rationale?: string;
+    confidence?: number;
+    findings?: Finding[];
+  } | null;
+  final_output?: {
+    title?: string;
+    content?: string;
+    artifact_id?: string;
+    structured_output?: { summary?: string; conclusion?: string; rationale?: string };
+  } | null;
+  messages?: Array<{
+    id: string;
+    sequence: number;
+    message_kind: string;
+    actor_snapshot?: DebateActor | null;
+    supersedes_message_id?: string | null;
+    content: string;
+    structured_output?: Record<string, unknown> | null;
+  }>;
+  revisions?: Array<Record<string, unknown>>;
+  findings?: Finding[];
 }
 
 interface Finding {
@@ -77,7 +100,7 @@ async function request<T>(path: string, method = "GET", body?: unknown): Promise
 }
 
 function textOf(payload: Record<string, unknown>): string | null {
-  for (const key of ["content", "summary", "message", "output", "detail"]) {
+  for (const key of ["content", "summary", "message", "output", "detail", "text", "failure"]) {
     const value = payload[key];
     if (typeof value === "string" && value.trim()) return value;
   }
@@ -124,8 +147,10 @@ function BudgetMeter({
   );
 }
 
-function actorName(actor: DebateActor | null): string {
-  return actor ? `${actor.display_name} · ${actor.role_label}` : "Debate system";
+function actorName(actor: DebateActor | null, actorType?: string, actorId?: string | null): string {
+  if (actor) return `${actor.display_name} · ${actor.role_label}`;
+  if (actorType === "human") return `Human · ${actorId ?? "operator"}`;
+  return "Debate system";
 }
 
 export function DebateRun({
@@ -180,22 +205,34 @@ export function DebateRun({
     try {
       const runId = run?.id ?? debate?.run?.id ?? debate?.active_run_id;
       if (!runId) return;
-      const response = await request<EventsResponse | DebateEvent[]>(
-        `${base}/runs/${runId}/events?after_version=${cursor.current}`,
-      );
-      const page = Array.isArray(response) ? response : (response.events ?? []);
-      const nextCursor = Array.isArray(response)
-        ? undefined
-        : (response.next_after_version ?? response.latest_version);
-      if (page.length) {
-        setEvents((current) => {
-          const additions = page.filter((event) => !eventIds.current.has(event.id));
-          for (const event of additions) eventIds.current.add(event.id);
-          return [...current, ...additions].sort((left, right) => left.sequence - right.sequence);
-        });
-        cursor.current = Math.max(cursor.current, ...page.map((event) => event.sequence));
+      let after = cursor.current;
+      let latest = after;
+      const additions: DebateEvent[] = [];
+      for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+        const response = await request<EventsResponse | DebateEvent[]>(
+          `${base}/runs/${runId}/events?after_version=${after}`,
+        );
+        const page = Array.isArray(response) ? response : (response.events ?? []);
+        latest = Array.isArray(response) ? after : (response.latest_version ?? after);
+        for (const event of page) {
+          if (!eventIds.current.has(event.id)) {
+            eventIds.current.add(event.id);
+            additions.push(event);
+          }
+        }
+        after = page.length
+          ? Math.max(after, ...page.map((event) => event.sequence))
+          : Array.isArray(response)
+            ? after
+            : (response.next_after_version ?? after);
+        if (page.length < 500 || after >= latest) break;
       }
-      if (nextCursor !== undefined) cursor.current = Math.max(cursor.current, nextCursor);
+      if (additions.length) {
+        setEvents((current) =>
+          [...current, ...additions].sort((left, right) => left.sequence - right.sequence),
+        );
+      }
+      cursor.current = Math.max(cursor.current, after);
     } catch (caught) {
       handleError(caught);
     }
@@ -235,8 +272,7 @@ export function DebateRun({
         idempotency_key: idempotencyKey("start-debate"),
         ...(rerun
           ? {
-              expected_debate_version:
-                debate?.aggregate_version ?? debate?.revision ?? 1,
+              expected_debate_version: debate?.aggregate_version ?? debate?.revision ?? 1,
             }
           : {}),
       });
@@ -267,7 +303,8 @@ export function DebateRun({
           debate?.revision ??
           1,
         idempotency_key: idempotencyKey(`debate-${action}`),
-        ...(action === "resume" && (run?.retained_ambiguous_usd ?? debate?.retained_ambiguous_usd ?? 0) > 0
+        ...(action === "resume" &&
+        (run?.retained_ambiguous_usd ?? debate?.retained_ambiguous_usd ?? 0) > 0
           ? { ambiguity_disposition: "assume_full_charge" }
           : {}),
       });
@@ -308,13 +345,25 @@ export function DebateRun({
   const settled = run?.settled_usd ?? debate?.settled_usd ?? 0;
   const reserved = run?.reserved_usd ?? debate?.reserved_usd ?? 0;
   const retained = run?.retained_ambiguous_usd ?? debate?.retained_ambiguous_usd ?? 0;
-  const findings = useMemo(() => events.flatMap((event) => findingsOf(event.payload)), [events]);
+  const findings = useMemo(
+    () => run?.findings ?? events.flatMap((event) => findingsOf(event.payload)),
+    [events, run?.findings],
+  );
+  const comparison = useMemo(() => {
+    const current = [...(run?.messages ?? [])]
+      .reverse()
+      .find((message) => Boolean(message.supersedes_message_id));
+    if (!current?.supersedes_message_id) return null;
+    const previous = run?.messages?.find((message) => message.id === current.supersedes_message_id);
+    return previous ? { previous, current } : null;
+  }, [run?.messages]);
   const judgment = run?.judgment;
   const finalOutput = run?.final_output;
   const state = run?.status ?? debate?.status;
-  const canRerun = Boolean(run?.id ?? debate?.run?.id ?? debate?.active_run_id) && terminal.has(state ?? "");
   const hasRun = Boolean(run?.id ?? debate?.run?.id ?? debate?.active_run_id);
   const canStart = !hasRun && (state === "draft" || state === "ready");
+  const canControl = hasRun && !terminal.has(state ?? "");
+  const canRerun = hasRun && terminal.has(state ?? "");
 
   if (!debate)
     return (
@@ -399,7 +448,9 @@ export function DebateRun({
                         >
                           {event.type.replaceAll("_", " ")}
                         </Badge>
-                        <strong>{actorName(event.actor_snapshot)}</strong>
+                        <strong>
+                          {actorName(event.actor_snapshot, event.actor_type, event.actor_id)}
+                        </strong>
                       </div>
                       <time dateTime={event.occurred_at}>
                         R{event.round_number ?? "–"} · T{event.turn_number ?? "–"}
@@ -450,7 +501,26 @@ export function DebateRun({
               <div className="eyebrow">Final output</div>
               <h3>{finalOutput.title ?? "Synthesis"}</h3>
               <p>{finalOutput.content ?? "A final output artifact is available."}</p>
+              {finalOutput.structured_output?.rationale ? (
+                <p className="muted">{finalOutput.structured_output.rationale}</p>
+              ) : null}
               {finalOutput.artifact_id ? <code>{finalOutput.artifact_id}</code> : null}
+            </section>
+          ) : null}
+          {comparison ? (
+            <section className="card debate-comparison">
+              <div className="eyebrow">Revision comparison</div>
+              <h3>Previous proposal and current revision</h3>
+              <div className="debate-run-layout">
+                <article>
+                  <strong>Previous</strong>
+                  <p>{comparison.previous.content}</p>
+                </article>
+                <article>
+                  <strong>Revision</strong>
+                  <p>{comparison.current.content}</p>
+                </article>
+              </div>
             </section>
           ) : null}
         </main>
@@ -507,6 +577,7 @@ export function DebateRun({
                   : `${Math.round(judgment.confidence * 100)}% confidence`}
               </h3>
               <p>{judgment.summary ?? "Judge output recorded."}</p>
+              {judgment.rationale ? <p className="muted">{judgment.rationale}</p> : null}
             </section>
           ) : null}
           {findings.length ? (
@@ -515,12 +586,14 @@ export function DebateRun({
               <h3>{findings.length} recorded</h3>
               <ul className="debate-findings">
                 {findings.map((finding, index) => (
-                  <li key={`${finding.key ?? finding.finding}-${index}`}>{finding.finding}</li>
+                  <li key={`${finding.key ?? finding.finding}-${index}`}>
+                    {finding.finding} <Badge tone="info">{finding.disposition ?? "open"}</Badge>
+                  </li>
                 ))}
               </ul>
             </section>
           ) : null}
-          {!terminal.has(state ?? "") && state !== "draft" ? (
+          {canControl ? (
             <section className="card debate-controls">
               <div className="eyebrow">Controls</div>
               <h3>Human control</h3>
@@ -558,16 +631,16 @@ export function DebateRun({
                 >
                   Cancel
                 </Button>
+              </div>
               {state === "paused" && retained > 0 ? (
                 <Alert>
                   This run has ${retained.toFixed(2)} of ambiguous provider usage. Resuming records
                   that amount as the maximum charge before creating a new attempt.
                 </Alert>
               ) : null}
-              </div>
             </section>
           ) : null}
-          {!terminal.has(state ?? "") && state !== "draft" ? (
+          {canControl ? (
             <section className="card debate-intervention">
               <div className="eyebrow">Human intervention</div>
               <h3>Queue guidance</h3>

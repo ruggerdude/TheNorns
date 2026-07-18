@@ -22,7 +22,7 @@ export interface DebateDraft {
     question: string;
     context_artifact_ids: string[];
     actors: DebateActor[];
-    schedule: { kind: "round_robin" | "explicit"; participant_ids: string[] };
+    schedule: { kind: "round_robin"; participant_ids: string[] };
     policy: DebatePolicy;
   };
 }
@@ -217,7 +217,6 @@ export function DebateBuilder({
     blankActor("participant", 1),
   ]);
   const [policy, setPolicy] = useState(defaultPolicy);
-  const [scheduleKind, setScheduleKind] = useState<"round_robin" | "explicit">("round_robin");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -294,7 +293,7 @@ export function DebateBuilder({
           question: question.trim(),
           context_artifact_ids: [],
           actors: finalActors,
-          schedule: { kind: scheduleKind, participant_ids: participants.map((actor) => actor.id) },
+          schedule: { kind: "round_robin", participant_ids: participants.map((actor) => actor.id) },
           policy,
         },
       });
@@ -494,12 +493,8 @@ export function DebateBuilder({
           </Button>
         </div>
         <Field label="Turn schedule">
-          <Select
-            value={scheduleKind}
-            onChange={(event) => setScheduleKind(event.target.value as "round_robin" | "explicit")}
-          >
-            <option value="round_robin">Round robin in row order</option>
-            <option value="explicit">Explicit participant sequence</option>
+          <Select value="round_robin" disabled>
+            <option value="round_robin">Round robin in row order (MVP)</option>
           </Select>
         </Field>
         <div className="debate-actor-list">
@@ -550,10 +545,10 @@ export function DebateBuilder({
           disabled={submitting || Boolean(validation)}
           onClick={() => void submit()}
         >
-          {submitting ? "Saving draft…" : "Save debate draft"}
+          {submitting ? "Creating debate…" : "Create debate"}
         </Button>
       </div>
-      {submitting ? <Spinner label="Saving debate draft…" /> : null}
+      {submitting ? <Spinner label="Creating debate…" /> : null}
     </section>
   );
 }

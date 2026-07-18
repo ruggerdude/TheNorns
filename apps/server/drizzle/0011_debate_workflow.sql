@@ -221,6 +221,9 @@ CREATE TABLE debate_messages (
   actor_snapshot JSONB,
   turn_id TEXT,
   turn_attempt_id TEXT,
+  supersedes_message_id TEXT,
+  structured_output JSONB,
+  structured_output_hash TEXT,
   intervention_kind TEXT,
   intervention_target_actor_id TEXT,
   intervention_apply_at TEXT,
@@ -235,11 +238,20 @@ CREATE TABLE debate_messages (
     REFERENCES debate_turns (debate_run_id, id) ON DELETE RESTRICT,
   CONSTRAINT debate_messages_attempt_scope_fk FOREIGN KEY (turn_id, turn_attempt_id)
     REFERENCES debate_turn_attempts (turn_id, id) ON DELETE RESTRICT,
+  CONSTRAINT debate_messages_supersedes_scope_fk FOREIGN KEY (debate_run_id, supersedes_message_id)
+    REFERENCES debate_messages (debate_run_id, id) ON DELETE RESTRICT,
   CONSTRAINT debate_messages_run_sequence_unique UNIQUE (debate_run_id, sequence),
   CONSTRAINT debate_messages_run_id_id_unique UNIQUE (debate_run_id, id),
   CONSTRAINT debate_messages_kind_check CHECK (message_kind IN ('system','participant','judge','synthesizer','human')),
   CONSTRAINT debate_messages_sequence_check CHECK (sequence > 0),
   CONSTRAINT debate_messages_hash_check CHECK (content_hash ~ '^[a-f0-9]{64}$'),
+  CONSTRAINT debate_messages_structured_hash_check CHECK (
+    structured_output_hash IS NULL OR structured_output_hash ~ '^[a-f0-9]{64}$'
+  ),
+  CONSTRAINT debate_messages_structured_shape_check CHECK (
+    (structured_output IS NULL) = (structured_output_hash IS NULL)
+    AND (message_kind IN ('participant','judge','synthesizer')) = (structured_output IS NOT NULL)
+  ),
   CONSTRAINT debate_messages_intervention_kind_check CHECK (
     intervention_kind IS NULL OR intervention_kind IN ('direction','statement')
   ),
@@ -412,6 +424,7 @@ CREATE TABLE debate_usage_events (
   provider TEXT NOT NULL,
   model TEXT NOT NULL,
   runtime TEXT NOT NULL,
+  pricing_snapshot JSONB NOT NULL,
   input_tokens BIGINT NOT NULL DEFAULT 0,
   output_tokens BIGINT NOT NULL DEFAULT 0,
   cost_usd NUMERIC(18,6) NOT NULL DEFAULT 0,
@@ -419,7 +432,8 @@ CREATE TABLE debate_usage_events (
   occurred_at TIMESTAMPTZ NOT NULL,
   CONSTRAINT debate_usage_events_attempt_fk FOREIGN KEY (project_id, debate_id, debate_run_id, turn_attempt_id)
     REFERENCES debate_turn_attempts (project_id, debate_id, debate_run_id, id) ON DELETE CASCADE,
-  CONSTRAINT debate_usage_events_nonnegative_check CHECK (input_tokens >= 0 AND output_tokens >= 0 AND cost_usd >= 0 AND latency_ms >= 0)
+  CONSTRAINT debate_usage_events_nonnegative_check CHECK (input_tokens >= 0 AND output_tokens >= 0 AND cost_usd >= 0 AND latency_ms >= 0),
+  CONSTRAINT debate_usage_events_pricing_snapshot_check CHECK (jsonb_typeof(pricing_snapshot) = 'object')
 );
 CREATE INDEX debate_usage_events_run_time_idx ON debate_usage_events (debate_run_id, occurred_at);
 

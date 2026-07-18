@@ -5,6 +5,12 @@
 // projects (NORN-027b). It is exposed at GET /api/demo/dashboard and is wholly
 // separate from the real, user-created projects in `ProjectStore` — no real
 // project's data ever flows into it, and none of its state ever flows back.
+import {
+  AnthropicAdapter,
+  OpenAiAdapter,
+  type ProviderName,
+  quoteConservativeMaxCharge,
+} from "@norns/adapters";
 import { UsageEvent } from "@norns/contracts";
 import { Phase4CompletionService } from "./coordinator/phase4Completion.js";
 import { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
@@ -13,6 +19,8 @@ import { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
 import { Phase4RecoveryMonitor } from "./coordinator/phase4RecoveryMonitor.js";
 import { Phase6CoordinationService } from "./coordinator/phase6Coordination.js";
 import { buildDashboard } from "./dashboard.js";
+import { DebateService } from "./debates/service.js";
+import { DebateWorker } from "./debates/worker.js";
 import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
 import { GraphSession } from "./graph/session.js";
@@ -115,6 +123,8 @@ let phase4Services:
 let phase5Services: { attention: AttentionService } | undefined;
 let phase6Services: { coordination: Phase6CoordinationService } | undefined;
 let phase7Services: { operations: Phase7OperationsService } | undefined;
+let debateService: DebateService | undefined;
+let debateWorkerTimer: NodeJS.Timeout | undefined;
 let integrationServices: { github: GitHubIntegrationService | null } | undefined;
 
 const publicOrigin =
@@ -194,6 +204,93 @@ if (databaseUrl) {
     phase5Services = { attention: new AttentionService(runtimeTransactions) };
     phase6Services = { coordination: new Phase6CoordinationService(runtimeTransactions) };
     phase7Services = { operations: new Phase7OperationsService(runtimeTransactions) };
+    const maximumTurnCharge = (input: {
+      provider: string;
+      model: string;
+      max_input_tokens: number;
+      max_output_tokens: number;
+    }) =>
+      quoteConservativeMaxCharge(
+        { provider: input.provider as ProviderName, model: input.model },
+        {
+          max_input_tokens: input.max_input_tokens,
+          max_output_tokens: input.max_output_tokens,
+        },
+      ).max_charge_usd;
+    const actorExecutionSnapshot = (actor: {
+      id: string;
+      provider: string;
+      model: string;
+      runtime: string;
+      max_input_tokens: number;
+      max_output_tokens: number;
+      budget_limit_usd: number;
+      max_turns: number;
+    }) => {
+      const quote = quoteConservativeMaxCharge(
+        { provider: actor.provider as ProviderName, model: actor.model },
+        {
+          max_input_tokens: actor.max_input_tokens,
+          max_output_tokens: actor.max_output_tokens,
+        },
+      );
+      return {
+        actor_id: actor.id,
+        provider: actor.provider,
+        model: actor.model,
+        runtime: actor.runtime,
+        max_input_tokens: actor.max_input_tokens,
+        max_output_tokens: actor.max_output_tokens,
+        budget_limit_usd: actor.budget_limit_usd,
+        max_turns: actor.max_turns,
+        pricing: {
+          provider: quote.pricing.provider,
+          model: quote.pricing.model,
+          input_per_mtok_usd: quote.pricing.input_per_mtok,
+          output_per_mtok_usd: quote.pricing.output_per_mtok,
+          pricing_version: quote.pricing.pricing_version,
+          pricing_is_estimate: quote.pricing.pricing_is_estimate,
+        },
+        maximum_turn_charge_usd: quote.max_charge_usd,
+      };
+    };
+    debateService = new DebateService(runtimeTransactions, {
+      maximumTurnCharge,
+      actorExecutionSnapshot,
+    });
+    const debateWorker = new DebateWorker(
+      runtimeTransactions,
+      (provider, model) => {
+        if (provider === "anthropic") {
+          const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+          if (!apiKey) throw new Error("Anthropic is not configured for debate execution");
+          return new AnthropicAdapter({ apiKey, model });
+        }
+        if (provider === "openai") {
+          const apiKey = process.env.OPENAI_API_KEY?.trim();
+          if (!apiKey) throw new Error("OpenAI is not configured for debate execution");
+          return new OpenAiAdapter({ apiKey, model });
+        }
+        throw new Error(`unsupported debate provider: ${provider}`);
+      },
+      {},
+    );
+    let debateTickRunning = false;
+    debateWorkerTimer = setInterval(() => {
+      if (debateTickRunning) return;
+      debateTickRunning = true;
+      void debateWorker
+        .tick()
+        .catch((error) =>
+          console.error(
+            `debate worker tick failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        )
+        .finally(() => {
+          debateTickRunning = false;
+        });
+    }, 1_000);
+    debateWorkerTimer.unref();
     if (credentialKeyring) {
       await assertCredentialHmacKeyCoverage(runtimeTransactions, credentialKeyring);
     }
@@ -250,6 +347,7 @@ if (databaseUrl) {
       process.on(signal, () => {
         if (shutdownRequested) return;
         shutdownRequested = true;
+        if (debateWorkerTimer) clearInterval(debateWorkerTimer);
         void Promise.all(flushers.map((f) => f.stop()))
           .then(() => persistenceLease?.release())
           .then(() => databasePool?.end())
@@ -429,6 +527,7 @@ const server = await buildServer({
   ...(phase5Services !== undefined ? { phase5: phase5Services } : {}),
   ...(phase6Services !== undefined ? { phase6: phase6Services } : {}),
   ...(phase7Services !== undefined ? { phase7: phase7Services } : {}),
+  ...(debateService !== undefined ? { debates: debateService } : {}),
   ...(integrationServices !== undefined ? { integrations: integrationServices } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),

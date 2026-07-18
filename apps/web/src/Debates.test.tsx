@@ -141,7 +141,7 @@ describe("debate frontend", () => {
     await user.selectOptions(providers[1] as HTMLSelectElement, "openai");
     await user.selectOptions(selectedModels[1] as HTMLSelectElement, "gpt-5.6-terra");
 
-    await user.click(screen.getByRole("button", { name: "Save debate draft" }));
+    await user.click(screen.getByRole("button", { name: "Create debate" }));
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
     expect(create.mock.calls[0]?.[0].configuration.actors).toMatchObject([
       { role_label: "Rollback skeptic", model: "claude-sonnet-5", provider: "anthropic" },
@@ -178,9 +178,9 @@ describe("debate frontend", () => {
     );
     await user.click(await screen.findByRole("button", { name: "Start debate" }));
     await waitFor(() =>
-      expect(mock?.calls.some((call) => call.method === "POST" && call.url === `${base}/runs`)).toBe(
-        true,
-      ),
+      expect(
+        mock?.calls.some((call) => call.method === "POST" && call.url === `${base}/runs`),
+      ).toBe(true),
     );
   });
 
@@ -211,7 +211,9 @@ describe("debate frontend", () => {
     );
     await user.click(await screen.findByRole("button", { name: "Rerun debate (new run)" }));
     await waitFor(() =>
-      expect(mock?.calls.find((call) => call.method === "POST" && call.url === `${base}/runs`)).toMatchObject({
+      expect(
+        mock?.calls.find((call) => call.method === "POST" && call.url === `${base}/runs`),
+      ).toMatchObject({
         body: { expected_debate_version: 3 },
       }),
     );
@@ -246,9 +248,7 @@ describe("debate frontend", () => {
         onBack={vi.fn()}
       />,
     );
-    expect(
-      await screen.findByText(/ambiguous provider usage/i),
-    ).toBeVisible();
+    expect(await screen.findByText(/ambiguous provider usage/i)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Resume — acknowledge max charge" }));
     await waitFor(() =>
       expect(mock?.calls.find((call) => call.url.endsWith("/control"))).toMatchObject({
@@ -337,5 +337,52 @@ describe("debate frontend", () => {
         },
       }),
     );
+  });
+
+  it("drains every event page before rendering a terminal run", async () => {
+    mock = new MockFetch();
+    const base = "/api/v2/projects/project-1/debates/debate-1";
+    mock.get(base, { body: debate({ status: "completed" }) });
+    mock.get(`${base}/runs/run-1`, {
+      body: { id: "run-1", status: "completed", aggregate_version: 9 },
+    });
+    const event = (sequence: number) => ({
+      id: `event-${sequence}`,
+      sequence,
+      type: sequence === 501 ? "human_intervention_recorded" : "turn_completed",
+      round_number: 1,
+      turn_number: sequence,
+      actor_snapshot: null,
+      actor_type: sequence === 501 ? "human" : "system",
+      actor_id: sequence === 501 ? "user-1" : null,
+      payload: { text: sequence === 501 ? "Final human direction" : `Event ${sequence}` },
+      artifact_ids: [],
+      usage: null,
+      occurred_at: "2026-07-18T12:00:00.000Z",
+    });
+    mock.get(`${base}/runs/run-1/events?after_version=0`, {
+      body: {
+        events: Array.from({ length: 500 }, (_, index) => event(index + 1)),
+        next_after_version: 500,
+        latest_version: 501,
+      },
+    });
+    mock.get(`${base}/runs/run-1/events?after_version=500`, {
+      body: { events: [event(501)], next_after_version: 501, latest_version: 501 },
+    });
+    mock.install();
+
+    render(
+      <DebateRun
+        projectId="project-1"
+        debateId="debate-1"
+        onUnauthorized={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("Final human direction")).toBeVisible();
+    expect(screen.getByText("Human · user-1")).toBeVisible();
+    expect(mock.calls.some((call) => call.url.endsWith("after_version=500"))).toBe(true);
   });
 });

@@ -9,6 +9,8 @@ export {
   type ProviderName,
   type StructuredResult,
   kindForStatus,
+  structuredOutputInstruction,
+  prepareStructuredOutputPrompt,
 } from "./types.js";
 export {
   type ActorTokenCaps,

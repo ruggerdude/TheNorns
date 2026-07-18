@@ -3044,6 +3044,9 @@ export const debateMessages = pgTable(
     actorSnapshot: jsonb("actor_snapshot"),
     turnId: text("turn_id"),
     turnAttemptId: text("turn_attempt_id"),
+    supersedesMessageId: text("supersedes_message_id"),
+    structuredOutput: jsonb("structured_output"),
+    structuredOutputHash: text("structured_output_hash"),
     interventionKind: text("intervention_kind"),
     interventionTargetActorId: text("intervention_target_actor_id"),
     interventionApplyAt: text("intervention_apply_at"),
@@ -3071,12 +3074,26 @@ export const debateMessages = pgTable(
       columns: [table.turnId, table.turnAttemptId],
       foreignColumns: [debateTurnAttempts.turnId, debateTurnAttempts.id],
     }).onDelete("restrict"),
+    foreignKey({
+      name: "debate_messages_supersedes_scope_fk",
+      columns: [table.debateRunId, table.supersedesMessageId],
+      foreignColumns: [table.debateRunId, table.id],
+    }).onDelete("restrict"),
     check(
       "debate_messages_kind_check",
       sql`${table.messageKind} IN ('system','participant','judge','synthesizer','human')`,
     ),
     check("debate_messages_sequence_check", sql`${table.sequence} > 0`),
     check("debate_messages_hash_check", sql`${table.contentHash} ~ '^[a-f0-9]{64}$'`),
+    check(
+      "debate_messages_structured_hash_check",
+      sql`${table.structuredOutputHash} IS NULL OR ${table.structuredOutputHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "debate_messages_structured_shape_check",
+      sql`(${table.structuredOutput} IS NULL) = (${table.structuredOutputHash} IS NULL)
+        AND (${table.messageKind} IN ('participant','judge','synthesizer')) = (${table.structuredOutput} IS NOT NULL)`,
+    ),
     check(
       "debate_messages_intervention_kind_check",
       sql`${table.interventionKind} IS NULL OR ${table.interventionKind} IN ('direction','statement')`,
@@ -3352,6 +3369,7 @@ export const debateUsageEvents = pgTable(
     provider: text("provider").notNull(),
     model: text("model").notNull(),
     runtime: text("runtime").notNull(),
+    pricingSnapshot: jsonb("pricing_snapshot").notNull(),
     inputTokens: bigint("input_tokens", { mode: "number" }).notNull().default(0),
     outputTokens: bigint("output_tokens", { mode: "number" }).notNull().default(0),
     costUsd: money("cost_usd"),
@@ -3373,6 +3391,10 @@ export const debateUsageEvents = pgTable(
     check(
       "debate_usage_events_nonnegative_check",
       sql`${table.inputTokens} >= 0 AND ${table.outputTokens} >= 0 AND ${table.costUsd} >= 0 AND ${table.latencyMs} >= 0`,
+    ),
+    check(
+      "debate_usage_events_pricing_snapshot_check",
+      sql`jsonb_typeof(${table.pricingSnapshot}) = 'object'`,
     ),
   ],
 );
