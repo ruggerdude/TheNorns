@@ -4,10 +4,24 @@ import {
   CommandDedupStore,
   CommandEnvelope,
   EventEnvelope,
+  ReconcileRequest,
   TERMINAL_COMMAND_STATES,
   canCommandTransition,
   isCommandExpired,
 } from "../src/protocol.js";
+
+describe("runner capability negotiation", () => {
+  it("treats a legacy reconciliation request as having no optional capabilities", () => {
+    const parsed = ReconcileRequest.parse({
+      protocol: 1,
+      runner_id: "runner-legacy",
+      generation: 1,
+      last_event_seq_sent: 0,
+      recently_executed_command_ids: [],
+    });
+    expect(parsed.capabilities).toEqual([]);
+  });
+});
 
 const validCommand = {
   protocol: 1,

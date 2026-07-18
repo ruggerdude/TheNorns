@@ -23,6 +23,7 @@ import {
   SignedUrlContentFetcher,
   V2RunnerExecutor,
 } from "./v2Execution.js";
+import { runnerVerificationPolicies } from "./verificationPolicies.js";
 import { WorkspaceRegistry } from "./workspaceRegistry.js";
 
 interface Args {
@@ -91,18 +92,7 @@ function createV2Executor(
     }
     repositories.register({ repository_binding_id, repository_path });
   }
-  const policyConfig = jsonObject("NORNS_VERIFICATION_POLICIES_JSON");
-  const policies = new Map<string, [string, ...string[]]>();
-  for (const [policy, command] of Object.entries(policyConfig)) {
-    if (
-      !Array.isArray(command) ||
-      command.length === 0 ||
-      !command.every((part) => typeof part === "string")
-    ) {
-      throw new Error(`verification policy ${policy} must be a non-empty string array`);
-    }
-    policies.set(policy, command as [string, ...string[]]);
-  }
+  const policies = runnerVerificationPolicies(process.env.NORNS_VERIFICATION_POLICIES_JSON);
   return new V2RunnerExecutor(
     { id: runnerId, generation, scratch_root: join(dataDir, "scratch") },
     repositories,
@@ -185,7 +175,7 @@ async function main(): Promise<void> {
   }
 
   if (args.command === "start") {
-    let executor: V2RunnerExecutor | undefined;
+    const execution: { executor?: V2RunnerExecutor } = {};
     const workspaces = new WorkspaceRegistry(dataDir);
     const daemon = new RunnerDaemon({
       serverUrl: server,
@@ -193,8 +183,8 @@ async function main(): Promise<void> {
       dataDir,
       workspaces,
       executeV2: async (command, emit) => {
-        if (!executor) throw new Error("Phase 4 executor is not initialized");
-        return (await executor.execute(command, emit)).outcome;
+        if (!execution.executor) throw new Error("Phase 4 executor is not initialized");
+        return (await execution.executor.execute(command, emit)).outcome;
       },
     });
     try {
@@ -203,11 +193,10 @@ async function main(): Promise<void> {
       process.stderr.write(`error: runner "${runnerId}" is not paired — run \`pair\` first\n`);
       process.exit(2);
     }
-    // A folder selected through the runner registry has no static binding map;
-    // policies are the actual execution prerequisite.
-    if (process.env.NORNS_VERIFICATION_POLICIES_JSON) {
-      executor = createV2Executor(runnerId, daemon.generation, dataDir, workspaces);
-    }
+    // Folder onboarding binds this named policy. A conservative Git commit
+    // check is available by default; deployments may replace it with an
+    // explicit approved command map through NORNS_VERIFICATION_POLICIES_JSON.
+    execution.executor = createV2Executor(runnerId, daemon.generation, dataDir, workspaces);
     daemon.connect();
     process.stdout.write(`runner "${runnerId}" connecting to ${server} — Ctrl-C to stop\n`);
     for (const signal of ["SIGINT", "SIGTERM"] as const) {

@@ -3,7 +3,12 @@ import type { RunnerWorkspaceRequestT, RunnerWorkspaceResponseT } from "@norns/c
 
 export class WorkspaceBrokerError extends Error {
   constructor(
-    readonly code: "runner_unavailable" | "request_limit" | "timeout" | "invalid_response",
+    readonly code:
+      | "runner_unavailable"
+      | "runner_upgrade_required"
+      | "request_limit"
+      | "timeout"
+      | "invalid_response",
   ) {
     super(code);
     this.name = "WorkspaceBrokerError";
@@ -13,6 +18,7 @@ export class WorkspaceBrokerError extends Error {
 interface Pending {
   runnerId: string;
   generation: number;
+  operation: RunnerWorkspaceRequestT["operation"];
   resolve: (response: RunnerWorkspaceResponseT) => void;
   reject: (error: WorkspaceBrokerError) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -28,7 +34,11 @@ export class RunnerWorkspaceBroker {
   private readonly pending = new Map<string, Pending>();
 
   constructor(
-    private readonly send: (runnerId: string, request: RunnerWorkspaceRequestT) => boolean,
+    private readonly send: (
+      runnerId: string,
+      generation: number,
+      request: RunnerWorkspaceRequestT,
+    ) => boolean,
     private readonly options: { timeoutMs?: number; maxPerRunner?: number } = {},
   ) {}
 
@@ -50,8 +60,15 @@ export class RunnerWorkspaceBroker {
         this.pending.delete(request.request_id);
         reject(new WorkspaceBrokerError("timeout"));
       }, this.options.timeoutMs ?? 8_000);
-      this.pending.set(request.request_id, { runnerId, generation, resolve, reject, timer });
-      if (!this.send(runnerId, request)) {
+      this.pending.set(request.request_id, {
+        runnerId,
+        generation,
+        operation: request.operation,
+        resolve,
+        reject,
+        timer,
+      });
+      if (!this.send(runnerId, generation, request)) {
         clearTimeout(timer);
         this.pending.delete(request.request_id);
         reject(new WorkspaceBrokerError("runner_unavailable"));
@@ -65,6 +82,10 @@ export class RunnerWorkspaceBroker {
       return false;
     this.pending.delete(response.request_id);
     clearTimeout(pending.timer);
+    if (pending.operation !== response.operation) {
+      pending.reject(new WorkspaceBrokerError("invalid_response"));
+      return false;
+    }
     pending.resolve(response);
     return true;
   }

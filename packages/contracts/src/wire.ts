@@ -117,7 +117,11 @@ export const RunnerFrame = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("reconcile_request"), body: ReconcileRequest }),
   z.object({ type: z.literal("event"), event: EventEnvelope }),
-  z.object({ type: z.literal("workspace_response"), response: RunnerWorkspaceResponse }),
+  z.object({
+    type: z.literal("workspace_response"),
+    generation: z.number().int().nonnegative(),
+    response: RunnerWorkspaceResponse,
+  }),
 ]);
 export type RunnerFrameT = z.infer<typeof RunnerFrame>;
 
@@ -131,7 +135,11 @@ export const ServerFrame = z.discriminatedUnion("type", [
   z.object({ type: z.literal("event_ack"), ack_event_seq: z.number().int().nonnegative() }),
   // fencing: the runner's generation is stale; it must stop acting and re-pair
   z.object({ type: z.literal("fenced"), current_generation: z.number().int().nonnegative() }),
-  z.object({ type: z.literal("workspace_request"), request: RunnerWorkspaceRequest }),
+  z.object({
+    type: z.literal("workspace_request"),
+    generation: z.number().int().nonnegative(),
+    request: RunnerWorkspaceRequest,
+  }),
 ]);
 export type ServerFrameT = z.infer<typeof ServerFrame>;
 

@@ -131,6 +131,7 @@ export class RunnerDaemon {
                 protocol: PROTOCOL_VERSION,
                 runner_id: this.opts.runnerId,
                 generation: state.state.generation,
+                capabilities: ["workspace_picker"],
                 last_event_seq_sent: state.state.seq,
                 recently_executed_command_ids: state.executedIds(),
               },
@@ -173,10 +174,25 @@ export class RunnerDaemon {
           break;
         }
         case "workspace_request": {
+          if (frame.generation !== state.state.generation) {
+            socket.send(
+              JSON.stringify({
+                type: "workspace_response",
+                generation: state.state.generation,
+                response: {
+                  request_id: frame.request.request_id,
+                  operation: frame.request.operation,
+                  status: "unavailable",
+                },
+              }),
+            );
+            break;
+          }
           if (!this.opts.workspaces) {
             socket.send(
               JSON.stringify({
                 type: "workspace_response",
+                generation: state.state.generation,
                 response: {
                   request_id: frame.request.request_id,
                   operation: frame.request.operation,
@@ -191,6 +207,7 @@ export class RunnerDaemon {
           socket.send(
             JSON.stringify({
               type: "workspace_response",
+              generation: state.state.generation,
               response: this.opts.workspaces.handle(frame.request),
             }),
           );
@@ -256,6 +273,13 @@ export class RunnerDaemon {
    */
   private handleCommand(command: CommandEnvelopeT): void {
     const state = this.requireState();
+    if (command.runner_id !== this.opts.runnerId || command.generation !== state.state.generation) {
+      this.fenced = true;
+      this.executor.cancelAll();
+      this.stopHeartbeat();
+      this.socket?.close(1008, "runner generation fenced");
+      return;
+    }
     const recorded = state.executionState(command.command_id);
     const meta = { correlation: command.correlation_id, causation: command.command_id };
     if (recorded) {

@@ -171,6 +171,8 @@ export interface ServerOptions {
     strategies: StrategyWorkflowService;
     resume: ProjectResumeService;
   };
+  /** New-project local onboarding is safe only after durable relational writes are active. */
+  localProjectOnboardingReady?: boolean;
   phase4?: {
     coordinator: Phase4Coordinator;
     completion: Phase4CompletionService;
@@ -225,6 +227,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   await app.register(websocket);
 
   const runnerSockets = new Map<string, WsLike>();
+  const reconciledWorkspaceRunners = new Map<
+    string,
+    { socket: WsLike; generation: number; workspacePicker: boolean }
+  >();
   const sessionSockets = new Map<WsLike, SessionSocketBinding>();
   const loginThrottle = new LoginAttemptThrottle();
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
@@ -312,11 +318,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const sendFrame = (socket: WsLike, frame: ServerFrameT): void => {
     socket.send(JSON.stringify(frame));
   };
-  const workspaceBroker = new RunnerWorkspaceBroker((runnerId, request) => {
+  const workspaceBroker = new RunnerWorkspaceBroker((runnerId, generation, request) => {
     const socket = runnerSockets.get(runnerId);
-    if (!socket) return false;
+    const reconciled = reconciledWorkspaceRunners.get(runnerId);
+    if (
+      !socket ||
+      !reconciled ||
+      reconciled.socket !== socket ||
+      reconciled.generation !== generation ||
+      !reconciled.workspacePicker
+    )
+      return false;
     try {
-      sendFrame(socket, { type: "workspace_request", request });
+      sendFrame(socket, { type: "workspace_request", generation, request });
       return true;
     } catch {
       return false;
@@ -815,8 +829,16 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         revoked_at: now().toISOString(),
       });
       stores.revokeRunnerSessions(runnerId);
+      reconciledWorkspaceRunners.delete(runnerId);
+      workspaceBroker.disconnect(runnerId);
       const socket = runnerSockets.get(runnerId);
-      socket?.close(1008, "runner revoked");
+      if (socket) {
+        runnerSockets.delete(runnerId);
+        const currentGeneration = stores.runner(runnerId)?.generation;
+        if (currentGeneration !== undefined)
+          sendFrame(socket, { type: "fenced", current_generation: currentGeneration });
+        socket.close(1008, "runner revoked");
+      }
       reply.send({ ok: true });
     });
 
@@ -913,6 +935,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       return reply.code(403).send({ error: "invalid_pairing_code" });
     }
     const record = stores.registerRunner(runner_id, public_key_pem);
+    reconciledWorkspaceRunners.delete(runner_id);
+    workspaceBroker.disconnect(runner_id);
+    const priorSocket = runnerSockets.get(runner_id);
+    if (priorSocket) {
+      runnerSockets.delete(runner_id);
+      sendFrame(priorSocket, { type: "fenced", current_generation: record.generation });
+      priorSocket.close(1008, "runner re-paired");
+      broadcast({ type: "runner_status", runner_id, connected: false });
+    }
     stores.audit(
       `runner:${runner_id}`,
       "pairing.completed",
@@ -989,6 +1020,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         runner_id: r.runner_id,
         generation: r.generation,
         connected: runnerSockets.has(r.runner_id),
+        workspace_picker_ready:
+          reconciledWorkspaceRunners.get(r.runner_id)?.generation === r.generation &&
+          reconciledWorkspaceRunners.get(r.runner_id)?.workspacePicker === true,
+        local_project_onboarding_ready: options.localProjectOnboardingReady === true,
         last_seen_at: r.last_seen_at,
       })),
     );
@@ -1985,23 +2020,35 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         },
       ) => {
         const runner = stores.runner(runnerId);
-        if (!runner || !runnerSockets.has(runnerId))
+        const reconciled = reconciledWorkspaceRunners.get(runnerId);
+        if (
+          !runner ||
+          !reconciled ||
+          reconciled.socket !== runnerSockets.get(runnerId) ||
+          reconciled.generation !== runner.generation
+        )
           throw new WorkspaceBrokerError("runner_unavailable");
-        return workspaceBroker.request(runnerId, runner.generation, input);
+        if (!reconciled.workspacePicker) throw new WorkspaceBrokerError("runner_upgrade_required");
+        const generation = runner.generation;
+        const response = await workspaceBroker.request(runnerId, generation, input);
+        return { response, generation };
       };
       const workspaceFailure = (reply: FastifyReply, error: unknown): FastifyReply => {
         // Stable public codes only: never serialize runner/OS failure messages.
         const code = error instanceof WorkspaceBrokerError ? error.code : "runner_unavailable";
-        return reply
-          .code(code === "request_limit" ? 429 : code === "timeout" ? 504 : 409)
-          .send({ error: code });
+        return reply.code(code === "request_limit" ? 429 : code === "timeout" ? 504 : 409).send({
+          error: code,
+          ...(code === "runner_upgrade_required"
+            ? { message: "Update this local runner to use folder selection." }
+            : {}),
+        });
       };
 
       app.get("/api/runners/:runnerId/workspaces", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
         const { runnerId } = req.params as { runnerId: string };
         try {
-          const response = await workspaceRequest(runnerId, { operation: "list" });
+          const { response } = await workspaceRequest(runnerId, { operation: "list" });
           if (response.status !== "ok") return reply.code(409).send({ error: response.status });
           const runner = stores.runner(runnerId);
           reply.send({
@@ -2022,7 +2069,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         if (!body.success) return reply.code(400).send({ error: "bad_request" });
         const { runnerId } = req.params as { runnerId: string };
         try {
-          const response = await workspaceRequest(runnerId, {
+          const { response } = await workspaceRequest(runnerId, {
             operation: "browse",
             workspace_id: body.data.workspace_id,
             ...(body.data.entry_id ? { entry_id: body.data.entry_id } : {}),
@@ -2048,19 +2095,27 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         if (!body.success) return reply.code(400).send({ error: "bad_request" });
         const { runnerId } = req.params as { runnerId: string };
         try {
-          const response = await workspaceRequest(runnerId, {
+          const { response, generation } = await workspaceRequest(runnerId, {
             operation: "validate",
             ...body.data,
           });
           if (response.status !== "ok" || !response.repository)
             return reply.code(409).send({ error: response.status });
           const runner = stores.runner(runnerId);
-          if (!runner || !runnerSockets.has(runnerId))
+          const reconciled = reconciledWorkspaceRunners.get(runnerId);
+          if (
+            !runner ||
+            !reconciled ||
+            reconciled.socket !== runnerSockets.get(runnerId) ||
+            reconciled.generation !== generation ||
+            runner.generation !== generation ||
+            !reconciled.workspacePicker
+          )
             return reply.code(409).send({ error: "runner_unavailable" });
           const grant = workspaceSelections.issue(
             user.id,
             runnerId,
-            runner.generation,
+            generation,
             response.repository,
           );
           reply.send({ ...grant, repository: { runner_id: runnerId, ...response.repository } });
@@ -2092,7 +2147,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         const currentRunner = stores.runner(selection.runner_id);
         if (
           !currentRunner ||
-          !runnerSockets.has(selection.runner_id) ||
+          reconciledWorkspaceRunners.get(selection.runner_id)?.socket !==
+            runnerSockets.get(selection.runner_id) ||
+          reconciledWorkspaceRunners.get(selection.runner_id)?.generation !==
+            selection.runner_generation ||
+          reconciledWorkspaceRunners.get(selection.runner_id)?.workspacePicker !== true ||
           currentRunner.generation !== selection.runner_generation
         ) {
           workspaceSelections.release(body.data.selection_token, reserved.reservation_id);
@@ -2807,11 +2866,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           return;
         }
         authedRunnerId = frame.runner_id;
-        if (runnerSockets.has(frame.runner_id)) workspaceBroker.disconnect(frame.runner_id);
-        runnerSockets.set(frame.runner_id, socket);
-        stores.markSeen(frame.runner_id, now());
-        stores.audit(`runner:${frame.runner_id}`, "runner.connected", "", now());
-        broadcast({ type: "runner_status", runner_id: frame.runner_id, connected: true });
         sendFrame(socket, { type: "auth_ok" });
         return;
       }
@@ -2834,6 +2888,21 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           socket.close();
           return;
         }
+        const priorSocket = runnerSockets.get(authedRunnerId);
+        if (priorSocket && priorSocket !== socket) {
+          workspaceBroker.disconnect(authedRunnerId);
+          reconciledWorkspaceRunners.delete(authedRunnerId);
+          priorSocket.close(1008, "superseded runner connection");
+        }
+        runnerSockets.set(authedRunnerId, socket);
+        reconciledWorkspaceRunners.set(authedRunnerId, {
+          socket,
+          generation: runner.generation,
+          workspacePicker: body.capabilities.includes("workspace_picker"),
+        });
+        stores.markSeen(authedRunnerId, now());
+        stores.audit(`runner:${authedRunnerId}`, "runner.connected", "", now());
+        broadcast({ type: "runner_status", runner_id: authedRunnerId, connected: true });
         sendFrame(socket, {
           type: "reconcile_response",
           body: {
@@ -2873,8 +2942,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         // The broker verifies runner identity and generation before resolving
         // the HTTP request.  Workspace frames are transient and bypass the
         // durable event log by design: they contain no project mutation.
-        if (runnerSockets.get(authedRunnerId) === socket) {
-          workspaceBroker.receive(authedRunnerId, runner.generation, frame.response);
+        const reconciled = reconciledWorkspaceRunners.get(authedRunnerId);
+        if (
+          runnerSockets.get(authedRunnerId) === socket &&
+          reconciled?.socket === socket &&
+          reconciled.generation === frame.generation
+        ) {
+          workspaceBroker.receive(authedRunnerId, frame.generation, frame.response);
         }
         return;
       }
@@ -2916,6 +2990,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     socket.on("close", () => {
       if (authedRunnerId && runnerSockets.get(authedRunnerId) === socket) {
         runnerSockets.delete(authedRunnerId);
+        reconciledWorkspaceRunners.delete(authedRunnerId);
         workspaceBroker.disconnect(authedRunnerId);
         stores.audit(`runner:${authedRunnerId}`, "runner.disconnected", "", now());
         broadcast({ type: "runner_status", runner_id: authedRunnerId, connected: false });

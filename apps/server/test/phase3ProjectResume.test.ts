@@ -110,4 +110,25 @@ describe.sequential("Phase 3 Project Resume", () => {
       }),
     ]);
   });
+
+  it("redacts a legacy local path from the project resume response", async () => {
+    await pg.exec(
+      `INSERT INTO repository_bindings (
+         id, project_id, binding_type, status, runner_id, workspace_id,
+         repository_id, repository_display_name, granted_permissions,
+         default_branch, observed_head, verification_policy_ref,
+         repository_health, created_by_actor_type, created_by_actor_id
+       ) VALUES (
+         'legacy-local-binding','project-1','local_runner','connected','runner-1',
+         'legacy-workspace','legacy-repository','C:\\Users\\operator\\private',
+         '{}'::jsonb,'main','commit-1','verification','healthy','system','legacy-import'
+       );
+       UPDATE projects SET primary_repository_binding_id='legacy-local-binding'
+       WHERE id='project-1'`,
+    );
+
+    const result = await new ProjectResumeService(transactions).open("project-1");
+    expect(result.repositories[0]?.display_name).toBe("Local repository");
+    expect(JSON.stringify(result)).not.toContain("operator");
+  });
 });

@@ -89,6 +89,7 @@ let projectRuntime = createProjectRuntime({
   projects,
   routes: { new_projects: null, projects: new Map() },
 });
+let localProjectOnboardingReady = false;
 
 const isProd = process.env.NODE_ENV === "production";
 
@@ -341,6 +342,7 @@ if (databaseUrl) {
       routes: projectRoutes,
       transactions: runtimeTransactions,
     });
+    localProjectOnboardingReady = projectRoutes.new_projects?.write_mode === "relational";
 
     // Legacy accounts remain snapshot-backed until the durable route records
     // relational/relational cutover. After cutover, raw legacy users/sessions
@@ -424,6 +426,7 @@ if (databaseUrl) {
       projects,
       routes: { new_projects: null, projects: new Map() },
     });
+    localProjectOnboardingReady = false;
   }
 }
 
@@ -545,6 +548,7 @@ const server = await buildServer({
   ...(identityRuntime.mode === "relational" ? { identity: identityRuntime.identity } : {}),
   projects: projectRuntime.repository,
   ...(phase3Services !== undefined ? { phase3: phase3Services } : {}),
+  localProjectOnboardingReady,
   ...(phase4Services !== undefined ? { phase4: phase4Services } : {}),
   ...(phase5Services !== undefined ? { phase5: phase5Services } : {}),
   ...(phase6Services !== undefined ? { phase6: phase6Services } : {}),

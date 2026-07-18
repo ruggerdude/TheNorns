@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { RunnerWorkspaceRequest, RunnerWorkspaceResponse } from "../src/wire.js";
+import {
+  RunnerFrame,
+  RunnerWorkspaceRequest,
+  RunnerWorkspaceResponse,
+  ServerFrame,
+} from "../src/wire.js";
 
 describe("runner workspace wire", () => {
   it("accepts opaque browse handles and the matching response payload", () => {
@@ -46,5 +51,23 @@ describe("runner workspace wire", () => {
         raw_path: "/Users/operator/projects",
       }).success,
     ).toBe(false);
+  });
+
+  it("requires a runner generation on workspace request and response frames", () => {
+    const request = { request_id: "workspace:request", operation: "list" as const };
+    const response = {
+      request_id: "workspace:request",
+      operation: "list" as const,
+      status: "ok" as const,
+      workspaces: [],
+    };
+    expect(
+      ServerFrame.safeParse({ type: "workspace_request", generation: 4, request }).success,
+    ).toBe(true);
+    expect(ServerFrame.safeParse({ type: "workspace_request", request }).success).toBe(false);
+    expect(
+      RunnerFrame.safeParse({ type: "workspace_response", generation: 4, response }).success,
+    ).toBe(true);
+    expect(RunnerFrame.safeParse({ type: "workspace_response", response }).success).toBe(false);
   });
 });

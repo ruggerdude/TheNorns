@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { type EventPayloadT, V2DispatchCommand } from "@norns/contracts";
 import {
   ApprovedRepositoryRegistry,
   type CodingRuntime,
+  GitWorktreeManager,
   HashVerifiedContextLoader,
+  RunnerStateFile,
   type RunnerVerifier,
   type RunnerWorktreeManager,
   V2RunnerExecutor,
@@ -27,6 +29,8 @@ describe("Phase 4 runner-owned execution", () => {
     cleanup.push(root);
     const repository = resolve(root, "repository");
     await mkdir(repository);
+    const physicalRoot = await realpath(root);
+    const physicalRepository = await realpath(repository);
     const registry = new ApprovedRepositoryRegistry([root]);
     registry.register({ repository_binding_id: "binding-1", repository_path: repository });
     const prompt = new TextEncoder().encode("Implement the verified task.");
@@ -35,7 +39,7 @@ describe("Phase 4 runner-owned execution", () => {
     let worktreeCleaned = false;
     const worktrees: RunnerWorktreeManager = {
       prepare: async (input) => {
-        expect(input.repository_path).toBe(repository);
+        expect(input.repository_path).toBe(physicalRepository);
         expect(input.expected_revision).toBe(COMMIT);
         return {
           path: resolve(root, "worktree"),
@@ -59,7 +63,15 @@ describe("Phase 4 runner-owned execution", () => {
       },
       run: async (request) => {
         receivedPrompt = request.prompt;
-        request.onLog?.("implemented task");
+        request.onLog?.(
+          [
+            `root=${root}`,
+            `physical-root=${physicalRoot}`,
+            `repository=${repository}`,
+            `physical-repository=${physicalRepository}`,
+            `worktree=${request.worktreePath}`,
+          ].join(" "),
+        );
         return {
           outcome: "completed",
           detail: "done",
@@ -130,7 +142,24 @@ describe("Phase 4 runner-owned execution", () => {
       expires_at: "2099-07-16T20:15:00.000Z",
     });
     const events: EventPayloadT[] = [];
-    const result = await executor.execute(command, (event) => events.push(event));
+    const successfulBuffer = new RunnerStateFile(resolve(root, "successful-runner-state"), {
+      runner_id: "runner-1",
+      private_key_pem: "test-only",
+      generation: 3,
+    });
+    const result = await executor.execute(command, (event) => {
+      events.push(event);
+      successfulBuffer.bufferEvent({
+        protocol: 1,
+        event_seq: successfulBuffer.nextSeq(),
+        runner_id: "runner-1",
+        generation: 3,
+        correlation_id: "correlation-1",
+        causation_id: command.command_id,
+        occurred_at: new Date().toISOString(),
+        payload: event,
+      });
+    });
     expect(result).toMatchObject({
       outcome: "succeeded",
       commit_sha: COMMIT,
@@ -141,12 +170,24 @@ describe("Phase 4 runner-owned execution", () => {
     expect(events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ kind: "run_status", status: "started" }),
-        expect.objectContaining({ kind: "run_log", chunk: "implemented task" }),
+        expect.objectContaining({
+          kind: "run_log",
+          chunk: expect.stringContaining("[LOCAL_PATH]"),
+        }),
         expect.objectContaining({ kind: "usage_report", input_tokens: 100 }),
         expect.objectContaining({ kind: "verification_result", passed: true, commit_sha: COMMIT }),
         expect.objectContaining({ kind: "run_status", status: "completed" }),
       ]),
     );
+    for (const serialized of [
+      JSON.stringify(events),
+      JSON.stringify(successfulBuffer.state.buffer),
+    ]) {
+      expect(serialized).not.toContain(root);
+      expect(serialized).not.toContain(repository);
+      expect(serialized).not.toContain(physicalRoot);
+      expect(serialized).not.toContain(physicalRepository);
+    }
 
     const unapprovedLocalCommand = V2DispatchCommand.parse({
       ...command,
@@ -159,5 +200,60 @@ describe("Phase 4 runner-owned execution", () => {
     await expect(executor.execute(unapprovedLocalCommand, () => undefined)).rejects.toThrow(
       "runner repository is not approved on this runner",
     );
+
+    // Git's native error includes the physical `-C` path. The execution
+    // boundary must replace it before the event can enter the daemon buffer.
+    const pathLeakEvents: EventPayloadT[] = [];
+    const durableBuffer = new RunnerStateFile(resolve(root, "runner-state"), {
+      runner_id: "runner-1",
+      private_key_pem: "test-only",
+      generation: 3,
+    });
+    const failingGitExecutor = new V2RunnerExecutor(
+      { id: "runner-1", generation: 3, scratch_root: root },
+      registry,
+      context,
+      new GitWorktreeManager(resolve(root, "worktrees")),
+      new Map([["codex", runtime]]),
+      verifier,
+    );
+    const failingGitCommand = V2DispatchCommand.parse({
+      ...command,
+      dispatch_job_id: "job-failing-git",
+      command_id: "dispatch:job-failing-git",
+      idempotency_key: "dispatch:job-failing-git",
+      run_id: "run-failing-git",
+    });
+    await expect(
+      failingGitExecutor.execute(failingGitCommand, (event) => {
+        pathLeakEvents.push(event);
+        durableBuffer.bufferEvent({
+          protocol: 1,
+          event_seq: durableBuffer.nextSeq(),
+          runner_id: "runner-1",
+          generation: 3,
+          correlation_id: "correlation-failing-git",
+          causation_id: failingGitCommand.command_id,
+          occurred_at: new Date().toISOString(),
+          payload: event,
+        });
+      }),
+    ).resolves.toMatchObject({ outcome: "failed" });
+    expect(pathLeakEvents).toContainEqual(
+      expect.objectContaining({
+        kind: "run_log",
+        chunk: "runner execution failed; inspect the local runner diagnostics",
+      }),
+    );
+    const serializedFailure = JSON.stringify(pathLeakEvents);
+    expect(serializedFailure).not.toContain(root);
+    expect(serializedFailure).not.toContain(repository);
+    expect(serializedFailure).not.toContain(physicalRoot);
+    expect(serializedFailure).not.toContain(physicalRepository);
+    const serializedBuffer = JSON.stringify(durableBuffer.state.buffer);
+    expect(serializedBuffer).not.toContain(root);
+    expect(serializedBuffer).not.toContain(repository);
+    expect(serializedBuffer).not.toContain(physicalRoot);
+    expect(serializedBuffer).not.toContain(physicalRepository);
   });
 });

@@ -45,6 +45,7 @@ const runner = {
   connected: true,
   last_seen_at: "2026-07-18T15:00:00Z",
   workspace_picker_ready: true,
+  local_project_onboarding_ready: true,
 };
 
 describe("unified project onboarding", () => {
@@ -100,7 +101,7 @@ describe("unified project onboarding", () => {
     mock.post("/api/runners/runner-local-1/workspaces/validate", {
       body: {
         selection_token: "opaque-selection-token",
-        expires_at: "2026-07-18T16:00:00Z",
+        expires_at: "2099-07-18T16:00:00Z",
         repository: {
           runner_id: runner.runner_id,
           workspace_id: "workspace-1",
@@ -238,6 +239,84 @@ describe("unified project onboarding", () => {
     ).toBeUndefined();
   });
 
+  it("ignores a late validation response after the selected runner changes", async () => {
+    const secondRunner = { ...runner, runner_id: "runner-local-2", generation: 1 };
+    mock.get("/api/runners", { body: [runner, secondRunner] });
+    mock.get("/api/runners/runner-local-2/workspaces", { body: { workspaces: [] } });
+    let resolveValidation:
+      | ((value: {
+          body: { selection_token: string; expires_at: string; repository: object };
+        }) => void)
+      | undefined;
+    mock.post(
+      "/api/runners/runner-local-1/workspaces/validate",
+      () =>
+        new Promise((resolve) => {
+          resolveValidation = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
+    await user.click(screen.getByRole("button", { name: /local folder/i }));
+    await user.click(await screen.findByRole("button", { name: /development/i }));
+    await user.click(await screen.findByRole("button", { name: /apps/i }));
+    await user.click(await screen.findByRole("button", { name: /local-app/i }));
+    await user.selectOptions(screen.getByTestId("local-runner"), "runner-local-2");
+    resolveValidation?.({
+      body: {
+        selection_token: "stale-runner-a-token",
+        expires_at: "2099-07-18T16:00:00Z",
+        repository: {
+          runner_id: runner.runner_id,
+          workspace_id: "workspace-1",
+          repository_id: "repository-local-app",
+          repository_display_name: "local-app",
+          default_branch: "main",
+          observed_head: "abcdef",
+        },
+      },
+    });
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("local-selection-summary")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /create and open project/i })).toBeDisabled();
+  });
+
+  it("revalidates an ambiguous local binding without creating a duplicate project", async () => {
+    let bindingAttempts = 0;
+    mock.post("/api/v2/projects/project-created/source-bindings/local", () => {
+      bindingAttempts += 1;
+      if (bindingAttempts === 1) throw new TypeError("connection reset after commit");
+      return { status: 201, body: {} };
+    });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
+    await user.click(screen.getByRole("button", { name: /local folder/i }));
+    await user.click(await screen.findByRole("button", { name: /development/i }));
+    await user.click(await screen.findByRole("button", { name: /apps/i }));
+    await user.click(await screen.findByRole("button", { name: /local-app/i }));
+    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+
+    expect(await screen.findByText(/existing project will be reused/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /create and open project/i })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: /local-app/i }));
+    await user.click(await screen.findByRole("button", { name: /retry repository binding/i }));
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
+    expect(
+      mock.calls.filter((call) => call.method === "POST" && call.url === "/api/projects"),
+    ).toHaveLength(1);
+    expect(
+      mock.calls.filter(
+        (call) =>
+          call.method === "POST" &&
+          call.url === "/api/v2/projects/project-created/source-bindings/local",
+      ),
+    ).toHaveLength(2);
+  });
+
   it("explains how to recover when no local runner is online", async () => {
     mock.get("/api/runners", { body: [] });
     const user = userEvent.setup();
@@ -246,6 +325,30 @@ describe("unified project onboarding", () => {
     await user.click(screen.getByRole("button", { name: /local folder/i }));
     expect(await screen.findByText(/no local runner is online/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /manage runners/i })).toBeInTheDocument();
+  });
+
+  it("requires a runner upgrade before offering a legacy runner for folder selection", async () => {
+    mock.get("/api/runners", {
+      body: [{ ...runner, workspace_picker_ready: false }],
+    });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
+    await user.click(screen.getByRole("button", { name: /local folder/i }));
+    expect(await screen.findByText(/local runner update required/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("local-runner")).not.toBeInTheDocument();
+  });
+
+  it("requires relational new-project storage before offering folder selection", async () => {
+    mock.get("/api/runners", {
+      body: [{ ...runner, local_project_onboarding_ready: false }],
+    });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
+    await user.click(screen.getByRole("button", { name: /local folder/i }));
+    expect(await screen.findByText(/project storage activation required/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("local-runner")).not.toBeInTheDocument();
   });
 
   it("creates a GitHub repository before binding a new project", async () => {

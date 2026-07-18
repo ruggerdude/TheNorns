@@ -61,12 +61,26 @@ describe.sequential("Phase 3 source binding", () => {
     });
     expect(JSON.stringify(first)).not.toContain("/Users/");
 
-    const counts = await pg.query<{ bindings: number; primary_id: string }>(
+    const counts = await pg.query<{
+      bindings: number;
+      audits: number;
+      primary_id: string;
+      audit_actor_id: string;
+    }>(
       `SELECT (SELECT count(*)::int FROM repository_bindings) AS bindings,
+              (SELECT count(*)::int FROM audit_events
+               WHERE audit_type='repository_binding.connected') AS audits,
+              (SELECT actor_id FROM audit_events
+               WHERE audit_type='repository_binding.connected') AS audit_actor_id,
               primary_repository_binding_id AS primary_id
        FROM projects WHERE id = 'project-1'`,
     );
-    expect(counts.rows[0]).toEqual({ bindings: 1, primary_id: first.id });
+    expect(counts.rows[0]).toEqual({
+      bindings: 1,
+      audits: 1,
+      audit_actor_id: "admin-1",
+      primary_id: first.id,
+    });
   });
 
   it("creates a GitHub identity without accepting or persisting credentials", async () => {

@@ -357,7 +357,7 @@ describe.sequential("Phase 2 relational project read projection", () => {
     });
 
     const returned = await shadow.summary(source.id);
-    expect(returned.source_location).toBe(source.sourceLocation);
+    expect(returned.source_location).toBe("Local repository");
     expect(sink.comparisons[0]).toMatchObject({
       matched: false,
       differences: ["/source_location"],
@@ -490,5 +490,32 @@ describe.sequential("Phase 2 relational project read projection", () => {
       source_type: "local",
       source_location: "project-a",
     });
+  });
+
+  it("never exposes a legacy local path stored as a repository display name", async () => {
+    const created = await relational().create({
+      name: "Legacy local project",
+      description: "Imported before opaque folder selection",
+      pmProvider: "openai",
+    });
+    await pg.exec(
+      `INSERT INTO repository_bindings (
+         id, project_id, binding_type, status, runner_id, workspace_id,
+         repository_id, repository_display_name, granted_permissions,
+         default_branch, observed_head, verification_policy_ref,
+         repository_health, created_by_actor_type, created_by_actor_id
+       ) VALUES (
+         'legacy-local-binding','${created.id}','local_runner','connected','runner-local',
+         'legacy-workspace','legacy-repository','/Users/operator/private/repository',
+         '{}'::jsonb,'main','abc123','verification-policy:default-v1',
+         'healthy','system','legacy-import'
+       );
+       UPDATE projects SET primary_repository_binding_id='legacy-local-binding'
+       WHERE id='${created.id}'`,
+    );
+
+    const summary = await relational().summary(created.id);
+    expect(summary).toMatchObject({ source_type: "local", source_location: "Local repository" });
+    expect(JSON.stringify(summary)).not.toContain("/Users/operator/private/repository");
   });
 });

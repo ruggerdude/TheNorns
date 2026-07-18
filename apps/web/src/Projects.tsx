@@ -5,7 +5,7 @@ import {
   pmModelOption,
   providerForPmModel,
 } from "@norns/contracts";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GitHubConnection, GitHubIntegrationStatus } from "./Account";
 import { ApiError, type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
@@ -113,6 +113,7 @@ interface LocalRunner {
   connected: boolean;
   last_seen_at: string | null;
   workspace_picker_ready?: boolean;
+  local_project_onboarding_ready?: boolean;
   capabilities?: string[];
 }
 
@@ -351,6 +352,10 @@ export function Projects({
   const [localBrowserLoading, setLocalBrowserLoading] = useState(false);
   const [localSelection, setLocalSelection] = useState<LocalSelection | null>(null);
   const [localValidationLoading, setLocalValidationLoading] = useState(false);
+  const [pendingLocalProject, setPendingLocalProject] = useState<ProjectSummary | null>(null);
+  const localWorkspaceRequestEpoch = useRef(0);
+  const localBrowseRequestEpoch = useRef(0);
+  const localValidationRequestEpoch = useRef(0);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
@@ -426,11 +431,15 @@ export function Projects({
     try {
       const runners = await request<LocalRunner[]>("/api/runners");
       const connected = runners.filter((runner) => runner.connected);
+      const eligible = connected.filter(
+        (runner) =>
+          runner.workspace_picker_ready === true && runner.local_project_onboarding_ready === true,
+      );
       setLocalRunners(connected);
       setSelectedLocalRunnerId((current) =>
-        connected.some((runner) => runner.runner_id === current)
+        eligible.some((runner) => runner.runner_id === current)
           ? current
-          : (connected[0]?.runner_id ?? ""),
+          : (eligible[0]?.runner_id ?? ""),
       );
     } catch (error) {
       if (error instanceof UnauthorizedError) onUnauthorized();
@@ -445,37 +454,47 @@ export function Projects({
       setLocalWorkspaces([]);
       return;
     }
+    const runnerId = selectedLocalRunnerId;
+    const requestEpoch = ++localWorkspaceRequestEpoch.current;
+    localBrowseRequestEpoch.current += 1;
+    localValidationRequestEpoch.current += 1;
     setLocalWorkspacesLoading(true);
     setSourceError(null);
     try {
       const response = await request<{ workspaces: LocalWorkspace[] }>(
-        `/api/runners/${encodeURIComponent(selectedLocalRunnerId)}/workspaces`,
+        `/api/runners/${encodeURIComponent(runnerId)}/workspaces`,
       );
+      if (localWorkspaceRequestEpoch.current !== requestEpoch) return;
       const workspaces = response.workspaces;
       setLocalWorkspaces(workspaces);
       setSelectedLocalWorkspaceId((current) =>
         workspaces.some((workspace) => workspace.workspace_id === current) ? current : "",
       );
     } catch (error) {
+      if (localWorkspaceRequestEpoch.current !== requestEpoch) return;
       if (error instanceof UnauthorizedError) onUnauthorized();
       else setSourceError(error instanceof Error ? error.message : String(error));
     } finally {
-      setLocalWorkspacesLoading(false);
+      if (localWorkspaceRequestEpoch.current === requestEpoch) setLocalWorkspacesLoading(false);
     }
   }, [onUnauthorized, selectedLocalRunnerId]);
 
   const browseLocalWorkspace = useCallback(
     async (workspaceId: string, entryId: string | undefined, navigation: string[]) => {
       if (!selectedLocalRunnerId) return;
+      const runnerId = selectedLocalRunnerId;
+      const requestEpoch = ++localBrowseRequestEpoch.current;
+      localValidationRequestEpoch.current += 1;
       setLocalBrowserLoading(true);
       setSourceError(null);
       try {
         const browser = await request<LocalWorkspaceBrowser>(
-          `/api/runners/${encodeURIComponent(selectedLocalRunnerId)}/workspaces/browse`,
+          `/api/runners/${encodeURIComponent(runnerId)}/workspaces/browse`,
           entryId
             ? { workspace_id: workspaceId, entry_id: entryId }
             : { workspace_id: workspaceId },
         );
+        if (localBrowseRequestEpoch.current !== requestEpoch) return;
         setSelectedLocalWorkspaceId(workspaceId);
         setLocalBrowser({
           ...browser,
@@ -486,10 +505,11 @@ export function Projects({
         setLocalSelection(null);
         setSelectedLocalEntryId(null);
       } catch (error) {
+        if (localBrowseRequestEpoch.current !== requestEpoch) return;
         if (error instanceof UnauthorizedError) onUnauthorized();
         else setSourceError(error instanceof Error ? error.message : String(error));
       } finally {
-        setLocalBrowserLoading(false);
+        if (localBrowseRequestEpoch.current === requestEpoch) setLocalBrowserLoading(false);
       }
     },
     [onUnauthorized, selectedLocalRunnerId],
@@ -498,13 +518,23 @@ export function Projects({
   const validateLocalRepository = useCallback(
     async (entryId: string) => {
       if (!selectedLocalRunnerId || !selectedLocalWorkspaceId) return;
+      const runnerId = selectedLocalRunnerId;
+      const workspaceId = selectedLocalWorkspaceId;
+      const requestEpoch = ++localValidationRequestEpoch.current;
       setLocalValidationLoading(true);
       setSourceError(null);
       try {
         const selection = await request<LocalSelection>(
-          `/api/runners/${encodeURIComponent(selectedLocalRunnerId)}/workspaces/validate`,
-          { workspace_id: selectedLocalWorkspaceId, entry_id: entryId },
+          `/api/runners/${encodeURIComponent(runnerId)}/workspaces/validate`,
+          { workspace_id: workspaceId, entry_id: entryId },
         );
+        if (
+          localValidationRequestEpoch.current !== requestEpoch ||
+          selection.repository.runner_id !== runnerId ||
+          selection.repository.workspace_id !== workspaceId
+        ) {
+          return;
+        }
         setLocalSelection(selection);
         setSelectedLocalEntryId(entryId);
         setName((current) => current || selection.repository.repository_display_name);
@@ -514,10 +544,11 @@ export function Projects({
             `Analyze and continue development of ${selection.repository.repository_display_name}`,
         );
       } catch (error) {
+        if (localValidationRequestEpoch.current !== requestEpoch) return;
         if (error instanceof UnauthorizedError) onUnauthorized();
         else setSourceError(error instanceof Error ? error.message : String(error));
       } finally {
-        setLocalValidationLoading(false);
+        if (localValidationRequestEpoch.current === requestEpoch) setLocalValidationLoading(false);
       }
     },
     [onUnauthorized, selectedLocalRunnerId, selectedLocalWorkspaceId],
@@ -534,6 +565,23 @@ export function Projects({
       void loadLocalWorkspaces();
     }
   }, [dialog, existingSource, loadLocalWorkspaces, startingPoint]);
+
+  useEffect(() => {
+    if (!localSelection) return;
+    const expireSelection = () => {
+      localValidationRequestEpoch.current += 1;
+      setLocalSelection(null);
+      setSelectedLocalEntryId(null);
+      setSourceError("Folder selection expired. Select the repository again to continue.");
+    };
+    const remaining = Date.parse(localSelection.expires_at) - Date.now();
+    if (remaining <= 0) {
+      expireSelection();
+      return;
+    }
+    const timer = window.setTimeout(expireSelection, Math.min(remaining, 2_147_483_647));
+    return () => window.clearTimeout(timer);
+  }, [localSelection]);
 
   const refreshAttention = useCallback(async () => {
     try {
@@ -662,7 +710,17 @@ export function Projects({
         return;
       }
       const selectedLocalRepository =
-        startingPoint === "existing" && existingSource === "local" ? localSelection : null;
+        startingPoint === "existing" &&
+        existingSource === "local" &&
+        localSelection?.repository.runner_id === selectedLocalRunnerId &&
+        localSelection.repository.workspace_id === selectedLocalWorkspaceId &&
+        Date.parse(localSelection.expires_at) > Date.now()
+          ? localSelection
+          : null;
+      if (startingPoint === "existing" && existingSource === "local" && !selectedLocalRepository) {
+        setSourceError("Select and validate the local Git repository again to continue.");
+        return;
+      }
       const projectName =
         name.trim() ||
         repository?.name ||
@@ -676,19 +734,22 @@ export function Projects({
           : selectedLocalRepository
             ? `Analyze and continue development of ${selectedLocalRepository.repository.repository_display_name}`
             : "New project");
-      const project = await request<ProjectSummary>("/api/projects", {
-        name: projectName,
-        description: projectDescription,
-        pm_provider: pmProvider,
-        pm_model: pmModel,
-        ...(repository
-          ? {
-              source_type: "github",
-              github_connection_id: repository.connection_id,
-              github_repository_id: repository.id,
-            }
-          : {}),
-      });
+      const project =
+        selectedLocalRepository && pendingLocalProject
+          ? pendingLocalProject
+          : await request<ProjectSummary>("/api/projects", {
+              name: projectName,
+              description: projectDescription,
+              pm_provider: pmProvider,
+              pm_model: pmModel,
+              ...(repository
+                ? {
+                    source_type: "github",
+                    github_connection_id: repository.connection_id,
+                    github_repository_id: repository.id,
+                  }
+                : {}),
+            });
       const completedProject = selectedLocalRepository
         ? await (async () => {
             try {
@@ -705,17 +766,22 @@ export function Projects({
                 source_location: selectedLocalRepository.repository.repository_display_name,
               };
             } catch (bindingError) {
+              setPendingLocalProject(project);
+              localValidationRequestEpoch.current += 1;
+              setLocalSelection(null);
+              setSelectedLocalEntryId(null);
               await refresh();
               setSourceError(
                 `Project created, but local repository binding failed: ${
                   bindingError instanceof Error ? bindingError.message : String(bindingError)
-                }. Close this dialog, then open the created project to retry the binding.`,
+                }. Correct or reselect the folder, then click Retry repository binding. The existing project will be reused.`,
               );
               return null;
             }
           })()
         : project;
       if (!completedProject) return;
+      setPendingLocalProject(null);
       setProjects((current) => (current ? [completedProject, ...current] : [completedProject]));
       setDialog(false);
       setName("");
@@ -751,6 +817,9 @@ export function Projects({
     repositoryPrivate,
     existingSource,
     localSelection,
+    selectedLocalRunnerId,
+    selectedLocalWorkspaceId,
+    pendingLocalProject,
     refresh,
     onOpenProject,
     onUnauthorized,
@@ -777,12 +846,18 @@ export function Projects({
   const selectedRepository = repositories.find(
     (repository) => repository.id === selectedRepositoryId,
   );
+  const localSelectionReady = Boolean(
+    localSelection &&
+      localSelection.repository.runner_id === selectedLocalRunnerId &&
+      localSelection.repository.workspace_id === selectedLocalWorkspaceId &&
+      Date.parse(localSelection.expires_at) > Date.now(),
+  );
   const sourceRequired = startingPoint === "existing" || newRepository === "github";
   const sourceReady =
     startingPoint === "existing"
       ? existingSource === "github"
         ? Boolean(selectedRepositoryId)
-        : Boolean(localSelection)
+        : localSelectionReady
       : newRepository === "github"
         ? Boolean(selectedConnectionId) && Boolean(repositoryName.trim())
         : true;
@@ -1126,6 +1201,9 @@ export function Projects({
                     type="button"
                     className={startingPoint === "new" ? "is-selected" : ""}
                     onClick={() => {
+                      localWorkspaceRequestEpoch.current += 1;
+                      localBrowseRequestEpoch.current += 1;
+                      localValidationRequestEpoch.current += 1;
                       setStartingPoint("new");
                       setSelectedRepositoryId("");
                       setExistingSource("github");
@@ -1390,6 +1468,31 @@ export function Projects({
                         Manage runners
                       </Button>
                     </div>
+                  ) : !localRunners.some((runner) => runner.workspace_picker_ready === true) ? (
+                    <div className="connection-required">
+                      <div>
+                        <strong>Local runner update required</strong>
+                        <p>
+                          Update and restart the connected local runner to enable secure folder
+                          selection.
+                        </p>
+                      </div>
+                      <Button type="button" className="btn-small" onClick={onOpenAccount}>
+                        Manage runners
+                      </Button>
+                    </div>
+                  ) : !localRunners.some(
+                      (runner) => runner.local_project_onboarding_ready === true,
+                    ) ? (
+                    <div className="connection-required">
+                      <div>
+                        <strong>Project storage activation required</strong>
+                        <p>
+                          Activate durable relational storage for new projects before selecting a
+                          local folder.
+                        </p>
+                      </div>
+                    </div>
                   ) : (
                     <>
                       <div className="repository-search">
@@ -1398,6 +1501,9 @@ export function Projects({
                             data-testid="local-runner"
                             value={selectedLocalRunnerId}
                             onChange={(event) => {
+                              localWorkspaceRequestEpoch.current += 1;
+                              localBrowseRequestEpoch.current += 1;
+                              localValidationRequestEpoch.current += 1;
                               setSelectedLocalRunnerId(event.target.value);
                               setSelectedLocalWorkspaceId("");
                               setLocalBrowser(null);
@@ -1406,11 +1512,14 @@ export function Projects({
                               setSelectedLocalEntryId(null);
                             }}
                           >
-                            {localRunners.map((runner) => (
-                              <option key={runner.runner_id} value={runner.runner_id}>
-                                {runner.runner_id}
-                              </option>
-                            ))}
+                            {localRunners
+                              .filter((runner) => runner.workspace_picker_ready === true)
+                              .filter((runner) => runner.local_project_onboarding_ready === true)
+                              .map((runner) => (
+                                <option key={runner.runner_id} value={runner.runner_id}>
+                                  {runner.runner_id}
+                                </option>
+                              ))}
                           </Select>
                         </Field>
                         <Button
@@ -1625,7 +1734,9 @@ export function Projects({
                   ? newRepository === "github"
                     ? "Creating repository and project…"
                     : "Creating…"
-                  : "Create and open project"}
+                  : pendingLocalProject && localSelectionReady
+                    ? "Retry repository binding"
+                    : "Create and open project"}
               </Button>
             </div>
           </section>

@@ -6,6 +6,7 @@ import type { GraphNode } from "../graph/graph.js";
 import { newId } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import type { ProjectGraphView, ProjectRepository } from "./repository.js";
+import { safeLocalRepositoryDisplayName } from "./repositoryDisplayName.js";
 import {
   ProjectNotFoundError,
   ProjectNotPlannedError,
@@ -93,7 +94,9 @@ function pmModel(provider: ProviderName, value: string | null): PmModelT | null 
 }
 
 function sourceLocation(row: ProjectReadRow): string | null {
-  if (row.source_type === "local") return row.local_repository_display_name;
+  if (row.source_type === "local") {
+    return safeLocalRepositoryDisplayName(row.local_repository_display_name);
+  }
   if (row.source_type === "github" && row.github_owner !== null && row.github_name !== null) {
     return `https://github.com/${row.github_owner}/${row.github_name}.git`;
   }

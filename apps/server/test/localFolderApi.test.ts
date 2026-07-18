@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { RunnerDaemon, WorkspaceRegistry } from "@norns/runner";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import WebSocket from "ws";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import { PhaseWorkflowService } from "../src/projects/phaseWorkflowService.js";
@@ -49,6 +51,7 @@ describe.sequential("runner-owned local folder API", () => {
         strategies: new StrategyWorkflowService(transactions),
         resume: new ProjectResumeService(transactions),
       },
+      localProjectOnboardingReady: true,
     });
     url = await listen(server);
     root = mkdtempSync(join(tmpdir(), "norns-local-root-"));
@@ -114,6 +117,14 @@ describe.sequential("runner-owned local folder API", () => {
 
     const workspaces = await api("/api/runners/runner-local/workspaces");
     expect(workspaces.status).toBe(200);
+    const runners = (await (await api("/api/runners")).json()) as Record<string, unknown>[];
+    expect(runners).toContainEqual(
+      expect.objectContaining({
+        runner_id: "runner-local",
+        workspace_picker_ready: true,
+        local_project_onboarding_ready: true,
+      }),
+    );
     const workspace = ((await workspaces.json()) as { workspaces: { workspace_id: string }[] })
       .workspaces[0];
     if (!workspace) throw new Error("runner returned no approved workspace");
@@ -154,5 +165,137 @@ describe.sequential("runner-owned local folder API", () => {
       }),
     });
     expect(reused.status).toBe(409);
+  });
+
+  it("refuses a stale workspace generation until the replacement runner reconciles", async () => {
+    const pairing = (await (await api("/api/pairing/start", { method: "POST" })).json()) as {
+      code: string;
+    };
+    const replacementData = mkdtempSync(join(tmpdir(), "norns-local-runner-replacement-"));
+    const replacementRegistry = new WorkspaceRegistry(replacementData);
+    replacementRegistry.addWorkspace(root, "Projects");
+    const replacement = new RunnerDaemon({
+      serverUrl: url,
+      runnerId: "runner-local",
+      dataDir: replacementData,
+      workspaces: replacementRegistry,
+      heartbeatMs: 500,
+      reconnectDelayMs: 50,
+    });
+    await replacement.pair(pairing.code);
+    expect(replacement.generation).toBe(2);
+
+    const stale = await api("/api/runners/runner-local/workspaces");
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual({ error: "runner_unavailable" });
+
+    try {
+      replacement.connect();
+      await waitFor(async () => {
+        const response = await api("/api/runners/runner-local/workspaces");
+        return response.status === 200;
+      }, "replacement runner reconciliation");
+      await waitFor(() => daemon.isFenced, "prior runner generation fenced");
+    } finally {
+      replacement.stop();
+    }
+  });
+
+  it("marks a reconciled legacy runner as requiring an upgrade", async () => {
+    const pairing = (await (await api("/api/pairing/start", { method: "POST" })).json()) as {
+      code: string;
+    };
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const paired = await fetch(`${url}/api/pairing/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code: pairing.code,
+        runner_id: "runner-legacy",
+        public_key_pem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+      }),
+    });
+    const { generation } = (await paired.json()) as { generation: number };
+    const socket = new WebSocket(`${url.replace(/^http/, "ws")}/ws/runner`);
+    let competingSocket: WebSocket | undefined;
+    socket.on("message", (data) => {
+      const frame = JSON.parse(data.toString()) as {
+        type: string;
+        nonce?: string;
+      };
+      if (frame.type === "challenge" && frame.nonce) {
+        socket.send(
+          JSON.stringify({
+            type: "auth",
+            runner_id: "runner-legacy",
+            nonce_signature: sign(null, Buffer.from(frame.nonce), privateKey).toString("base64"),
+          }),
+        );
+      } else if (frame.type === "auth_ok") {
+        // Deliberately omit capabilities to model a pre-folder-picker runner.
+        socket.send(
+          JSON.stringify({
+            type: "reconcile_request",
+            body: {
+              protocol: 1,
+              runner_id: "runner-legacy",
+              generation,
+              last_event_seq_sent: 0,
+              recently_executed_command_ids: [],
+            },
+          }),
+        );
+      }
+    });
+    try {
+      await waitFor(async () => {
+        const audit = (await (await api("/api/audit")).json()) as {
+          actor: string;
+          action: string;
+        }[];
+        return audit.some(
+          (entry) => entry.actor === "runner:runner-legacy" && entry.action === "runner.reconciled",
+        );
+      }, "legacy runner reconciliation");
+      const runners = (await (await api("/api/runners")).json()) as {
+        runner_id: string;
+        workspace_picker_ready: boolean;
+      }[];
+      expect(runners).toContainEqual(
+        expect.objectContaining({ runner_id: "runner-legacy", workspace_picker_ready: false }),
+      );
+      const unavailable = await api("/api/runners/runner-legacy/workspaces");
+      expect(unavailable.status).toBe(409);
+      expect(await unavailable.json()).toEqual({
+        error: "runner_upgrade_required",
+        message: "Update this local runner to use folder selection.",
+      });
+
+      // Authentication without reconciliation must not displace the current,
+      // generation-accepted socket or change its negotiated capability state.
+      let competingAuthenticated = false;
+      competingSocket = new WebSocket(`${url.replace(/^http/, "ws")}/ws/runner`);
+      competingSocket.on("message", (data) => {
+        const frame = JSON.parse(data.toString()) as { type: string; nonce?: string };
+        if (frame.type === "challenge" && frame.nonce) {
+          competingSocket?.send(
+            JSON.stringify({
+              type: "auth",
+              runner_id: "runner-legacy",
+              nonce_signature: sign(null, Buffer.from(frame.nonce), privateKey).toString("base64"),
+            }),
+          );
+        } else if (frame.type === "auth_ok") {
+          competingAuthenticated = true;
+        }
+      });
+      await waitFor(() => competingAuthenticated, "competing runner authentication");
+      const stillCurrent = await api("/api/runners/runner-legacy/workspaces");
+      expect(stillCurrent.status).toBe(409);
+      expect(await stillCurrent.json()).toMatchObject({ error: "runner_upgrade_required" });
+    } finally {
+      competingSocket?.terminate();
+      socket.terminate();
+    }
   });
 });

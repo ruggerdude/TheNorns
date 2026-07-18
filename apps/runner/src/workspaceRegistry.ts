@@ -4,12 +4,17 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   existsSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -45,6 +50,12 @@ interface Handle {
   expires_at: number;
 }
 
+const GIT_PROBE_TIMEOUT_MS = 250;
+const BROWSE_DEADLINE_MS = 750;
+const MAX_BROWSE_ENTRIES = 200;
+
+class InvalidWorkspaceRegistryError extends Error {}
+
 function opaque(): string {
   // Random values are persisted locally.  Cloud-facing identity must not be
   // derivable from the physical path, even by someone who knows a candidate.
@@ -69,52 +80,62 @@ function safeError(): "invalid_request" | "not_found" | "unavailable" {
 
 /** A bounded, symlink-safe registry for folders explicitly approved locally. */
 export class WorkspaceRegistry {
+  private readonly dataDirectory: string;
   private readonly file: string;
+  private readonly lockDirectory: string;
   private state: PersistedRegistry;
   private readonly handles = new Map<string, Handle>();
 
   constructor(dataDir: string) {
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    this.dataDirectory = dataDir;
     this.file = join(dataDir, "workspace-registry.json");
-    if (existsSync(this.file)) {
-      this.state = JSON.parse(readFileSync(this.file, "utf8")) as PersistedRegistry;
-    } else {
-      this.state = { version: 1, workspaces: [], repositories: [] };
-      this.persist();
-    }
+    this.lockDirectory = join(dataDir, "workspace-registry.lock");
+    this.state = { version: 1, workspaces: [], repositories: [] };
+    this.withMutationLock(() => {
+      if (existsSync(this.file)) this.reloadOrRecover();
+      else this.persist();
+    });
     chmodSync(this.file, 0o600);
   }
 
   addWorkspace(inputPath: string, label?: string): WorkspaceRecord {
     const root = this.localDirectory(inputPath);
-    const existing = this.state.workspaces.find((entry) => entry.root_path === root);
-    const record: WorkspaceRecord = {
-      workspace_id: existing?.workspace_id ?? opaque(),
-      root_path: root,
-      label: safeLabel(label ?? "", basename(root)),
-    };
-    const index = this.state.workspaces.findIndex(
-      (entry) => entry.workspace_id === record.workspace_id,
-    );
-    if (index >= 0) this.state.workspaces[index] = record;
-    else this.state.workspaces.push(record);
-    this.persist();
-    return record;
+    return this.withMutationLock(() => {
+      this.reloadOrRecover();
+      const existing = this.state.workspaces.find((entry) => entry.root_path === root);
+      const record: WorkspaceRecord = {
+        workspace_id: existing?.workspace_id ?? opaque(),
+        root_path: root,
+        label: safeLabel(label ?? "", basename(root)),
+      };
+      const index = this.state.workspaces.findIndex(
+        (entry) => entry.workspace_id === record.workspace_id,
+      );
+      if (index >= 0) this.state.workspaces[index] = record;
+      else this.state.workspaces.push(record);
+      this.persist();
+      return record;
+    });
   }
 
   removeWorkspace(workspaceId: string): boolean {
-    const before = this.state.workspaces.length;
-    this.state.workspaces = this.state.workspaces.filter(
-      (entry) => entry.workspace_id !== workspaceId,
-    );
-    this.state.repositories = this.state.repositories.filter(
-      (entry) => entry.workspace_id !== workspaceId,
-    );
-    if (before !== this.state.workspaces.length) this.persist();
-    return before !== this.state.workspaces.length;
+    return this.withMutationLock(() => {
+      this.reloadOrRecover();
+      const before = this.state.workspaces.length;
+      this.state.workspaces = this.state.workspaces.filter(
+        (entry) => entry.workspace_id !== workspaceId,
+      );
+      this.state.repositories = this.state.repositories.filter(
+        (entry) => entry.workspace_id !== workspaceId,
+      );
+      if (before !== this.state.workspaces.length) this.persist();
+      return before !== this.state.workspaces.length;
+    });
   }
 
   listConfigured(): readonly { workspace_id: string; label: string }[] {
+    this.reload();
     return this.state.workspaces.map(({ workspace_id, label, root_path }) => ({
       workspace_id,
       label: safeLabel(label, basename(root_path)),
@@ -124,6 +145,7 @@ export class WorkspaceRegistry {
   /** Handles a wire request.  It never throws or returns a raw filesystem path. */
   handle(request: RunnerWorkspaceRequestT): RunnerWorkspaceResponseT {
     try {
+      this.reload();
       this.pruneHandles();
       if (request.operation === "list") {
         return {
@@ -153,19 +175,29 @@ export class WorkspaceRegistry {
           entries: this.browse(workspace, path),
         };
       }
-      const path = this.handlePath(workspace, request.entry_id ?? "", "repository");
-      if (!path)
-        return { request_id: request.request_id, operation: "validate", status: "not_found" };
-      const repository = this.validate(workspace, path);
-      return repository
-        ? { request_id: request.request_id, operation: "validate", status: "ok", repository }
-        : { request_id: request.request_id, operation: "validate", status: "invalid_request" };
+      return this.withMutationLock(() => {
+        // A CLI remove may happen after browse. Reload under the same lock used
+        // by add/remove before accepting the transient handle or persisting a
+        // repository identity, so removal always revokes validation.
+        this.reloadOrRecover();
+        const currentWorkspace = this.workspace(request.workspace_id ?? "");
+        if (!currentWorkspace)
+          return { request_id: request.request_id, operation: "validate", status: "not_found" };
+        const path = this.handlePath(currentWorkspace, request.entry_id ?? "", "repository");
+        if (!path)
+          return { request_id: request.request_id, operation: "validate", status: "not_found" };
+        const repository = this.validate(currentWorkspace, path);
+        return repository
+          ? { request_id: request.request_id, operation: "validate", status: "ok", repository }
+          : { request_id: request.request_id, operation: "validate", status: "invalid_request" };
+      });
     } catch {
       return { request_id: request.request_id, operation: request.operation, status: safeError() };
     }
   }
 
   repositoryPath(repositoryId: string): string | undefined {
+    this.reload();
     const repository = this.state.repositories.find(
       (entry) => entry.repository_id === repositoryId,
     );
@@ -186,12 +218,28 @@ export class WorkspaceRegistry {
     }
   }
 
+  /** Exact local values that must be stripped from any cloud-bound text. */
+  sensitivePaths(repositoryId: string): readonly string[] {
+    this.reload();
+    const repository = this.state.repositories.find(
+      (entry) => entry.repository_id === repositoryId,
+    );
+    if (!repository) return [];
+    const workspace = this.workspace(repository.workspace_id);
+    return workspace ? [workspace.root_path, repository.repository_path] : [];
+  }
+
   private browse(workspace: WorkspaceRecord, path: string): RunnerWorkspaceEntryT[] {
     // One directory level only.  No recursive traversal and no symlink following.
     const entries: RunnerWorkspaceEntryT[] = [];
+    const deadline = Date.now() + BROWSE_DEADLINE_MS;
     // An approved workspace may itself be the repository (the common case for
     // a user who approves one cloned project folder).
-    if (path === workspace.root_path && this.gitMetadata(path) !== null) {
+    if (
+      path === workspace.root_path &&
+      this.mightBeGitRepository(path) &&
+      this.gitMetadata(path) !== null
+    ) {
       const entryId = randomUUID().replaceAll("-", "");
       this.rememberHandle(entryId, {
         workspace_id: workspace.workspace_id,
@@ -206,14 +254,15 @@ export class WorkspaceRegistry {
         can_browse: false,
       });
     }
-    for (const name of readdirSync(path).sort().slice(0, 200)) {
+    for (const name of readdirSync(path).sort()) {
+      if (entries.length >= MAX_BROWSE_ENTRIES || Date.now() >= deadline) break;
       if (name === ".git") continue;
       const child = join(path, name);
       const stat = lstatSync(child);
       if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
       const physical = realpathSync(child);
       if (!this.contains(workspace.root_path, physical)) continue;
-      const repository = this.gitMetadata(physical) !== null;
+      const repository = this.mightBeGitRepository(physical) && this.gitMetadata(physical) !== null;
       const entryId = randomUUID().replaceAll("-", "");
       this.rememberHandle(entryId, {
         workspace_id: workspace.workspace_id,
@@ -223,7 +272,7 @@ export class WorkspaceRegistry {
       });
       entries.push({
         entry_id: entryId,
-        label: name,
+        label: safeLabel(name, repository ? "Repository" : "Folder"),
         kind: repository ? "repository" : "folder",
         can_browse: !repository,
       });
@@ -254,7 +303,7 @@ export class WorkspaceRegistry {
     return {
       workspace_id: workspace.workspace_id,
       repository_id: record.repository_id,
-      repository_display_name: basename(path),
+      repository_display_name: safeLabel(basename(path), "Repository"),
       default_branch: metadata.defaultBranch,
       observed_head: metadata.head,
     };
@@ -264,31 +313,42 @@ export class WorkspaceRegistry {
     try {
       // `-C` accepts a path, but it has already been realpath-contained and no
       // user string reaches the shell (execFileSync does not invoke one).
-      const inside = execFileSync("git", ["-C", path, "rev-parse", "--is-inside-work-tree"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      if (inside !== "true") return null;
-      const topLevel = realpathSync(
-        execFileSync("git", ["-C", path, "rev-parse", "--show-toplevel"], {
+      const [inside, rawTopLevel, head, branch] = execFileSync(
+        "git",
+        [
+          "-C",
+          path,
+          "rev-parse",
+          "--is-inside-work-tree",
+          "--show-toplevel",
+          "HEAD",
+          "--abbrev-ref",
+          "HEAD",
+        ],
+        {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
-        }).trim(),
-      );
+          timeout: GIT_PROBE_TIMEOUT_MS,
+        },
+      )
+        .trim()
+        .split("\n");
+      if (inside !== "true" || !rawTopLevel || !head || !branch || branch === "HEAD") return null;
+      const topLevel = realpathSync(rawTopLevel);
       // Choosing a nested folder must not silently bind its parent repository.
       if (topLevel !== path) return null;
-      const head = execFileSync("git", ["-C", path, "rev-parse", "HEAD"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      const branch = execFileSync(
-        "git",
-        ["-C", path, "symbolic-ref", "--quiet", "--short", "HEAD"],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-      ).trim();
-      return head && branch ? { head, defaultBranch: branch } : null;
+      return { head, defaultBranch: branch };
     } catch {
       return null;
+    }
+  }
+
+  private mightBeGitRepository(path: string): boolean {
+    try {
+      const metadata = lstatSync(join(path, ".git"));
+      return !metadata.isSymbolicLink() && (metadata.isDirectory() || metadata.isFile());
+    } catch {
+      return false;
     }
   }
 
@@ -335,8 +395,122 @@ export class WorkspaceRegistry {
   }
 
   private persist(): void {
-    writeFileSync(this.file, JSON.stringify(this.state), { mode: 0o600 });
+    // Readers must see either the prior complete registry or the next complete
+    // registry. A unique temp name also keeps independent runner/CLI processes
+    // from clobbering one another during atomic replacement.
+    const temporary = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporary, JSON.stringify(this.state), { mode: 0o600 });
+      chmodSync(temporary, 0o600);
+      this.fsync(temporary);
+      renameSync(temporary, this.file);
+      chmodSync(this.file, 0o600);
+      this.fsync(this.dataDirectory);
+    } finally {
+      rmSync(temporary, { force: true });
+    }
+  }
+
+  private reload(): void {
+    try {
+      this.readState();
+    } catch (error) {
+      if (!(error instanceof InvalidWorkspaceRegistryError)) throw error;
+      this.withMutationLock(() => this.reloadOrRecover());
+    }
+  }
+
+  private reloadOrRecover(): void {
+    try {
+      this.readState();
+    } catch (error) {
+      if (!(error instanceof InvalidWorkspaceRegistryError)) throw error;
+      // Never recover authorization from a stale backup. Preserve the invalid
+      // bytes for operator diagnosis and replace them with an empty, fail-closed
+      // registry that must be explicitly re-approved through the CLI.
+      const quarantine = `${this.file}.corrupt-${Date.now()}-${randomUUID()}`;
+      renameSync(this.file, quarantine);
+      chmodSync(quarantine, 0o600);
+      this.state = { version: 1, workspaces: [], repositories: [] };
+      this.persist();
+    }
+  }
+
+  private readState(): void {
+    let candidate: unknown;
+    try {
+      candidate = JSON.parse(readFileSync(this.file, "utf8"));
+    } catch (error) {
+      if (error instanceof SyntaxError) throw new InvalidWorkspaceRegistryError();
+      throw error;
+    }
+    if (!this.validState(candidate)) throw new InvalidWorkspaceRegistryError();
+    this.state = candidate;
     chmodSync(this.file, 0o600);
+  }
+
+  private validState(value: unknown): value is PersistedRegistry {
+    if (!value || typeof value !== "object") return false;
+    const candidate = value as Partial<PersistedRegistry>;
+    return (
+      candidate.version === 1 &&
+      Array.isArray(candidate.workspaces) &&
+      candidate.workspaces.every(
+        (workspace) =>
+          workspace !== null &&
+          typeof workspace === "object" &&
+          typeof workspace.workspace_id === "string" &&
+          typeof workspace.root_path === "string" &&
+          typeof workspace.label === "string",
+      ) &&
+      Array.isArray(candidate.repositories) &&
+      candidate.repositories.every(
+        (repository) =>
+          repository !== null &&
+          typeof repository === "object" &&
+          typeof repository.repository_id === "string" &&
+          typeof repository.workspace_id === "string" &&
+          typeof repository.repository_path === "string",
+      )
+    );
+  }
+
+  private fsync(path: string): void {
+    const descriptor = openSync(path, "r");
+    try {
+      fsyncSync(descriptor);
+    } finally {
+      closeSync(descriptor);
+    }
+  }
+
+  private withMutationLock<T>(operation: () => T): T {
+    const startedAt = Date.now();
+    for (;;) {
+      try {
+        mkdirSync(this.lockDirectory, { mode: 0o700 });
+        break;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST") throw error;
+        try {
+          if (Date.now() - statSync(this.lockDirectory).mtimeMs > 60_000) {
+            rmSync(this.lockDirectory, { recursive: true, force: true });
+            continue;
+          }
+        } catch (lockError) {
+          if ((lockError as NodeJS.ErrnoException).code !== "ENOENT") throw lockError;
+          continue;
+        }
+        if (Date.now() - startedAt >= 5_000) throw new Error("workspace registry is busy");
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+    }
+    try {
+      return operation();
+    } finally {
+      rmSync(this.lockDirectory, { recursive: true, force: true });
+    }
   }
 
   private rememberHandle(id: string, value: Handle): void {

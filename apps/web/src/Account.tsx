@@ -603,7 +603,9 @@ export function Account({
                     <div className="connection-details" id="runner-connection-details">
                       <p className="muted">
                         Pair a runner on the computer that owns your local folders. The runner keeps
-                        raw paths and execution credentials off the web service.
+                        raw paths and execution credentials off the web service. The standard start
+                        command enables a conservative Git verification policy; advanced deployments
+                        can override it with NORNS_VERIFICATION_POLICIES_JSON.
                       </p>
                       <div className="connection-actions">
                         <Button

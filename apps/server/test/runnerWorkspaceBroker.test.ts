@@ -10,7 +10,7 @@ describe("runner workspace broker", () => {
   it("correlates only the current runner generation and bounds outstanding requests", async () => {
     let sent: RunnerWorkspaceRequestT | undefined;
     const broker = new RunnerWorkspaceBroker(
-      (_runner, request) => {
+      (_runner, _generation, request) => {
         sent = request;
         return true;
       },
@@ -33,12 +33,24 @@ describe("runner workspace broker", () => {
     expect(
       broker.receive("runner-1", 3, {
         request_id: requestId,
+        operation: "browse",
+        status: "ok",
+        entries: [],
+      }),
+    ).toBe(false);
+    await expect(waiting).rejects.toMatchObject({ code: "invalid_response" });
+
+    const retried = broker.request("runner-1", 3, { operation: "list" });
+    if (!sent) throw new Error("workspace retry was not sent");
+    expect(
+      broker.receive("runner-1", 3, {
+        request_id: sent.request_id,
         operation: "list",
         status: "ok",
         workspaces: [{ workspace_id: "local:workspace", label: "Work" }],
       }),
     ).toBe(true);
-    await expect(waiting).resolves.toMatchObject({ status: "ok" });
+    await expect(retried).resolves.toMatchObject({ status: "ok" });
   });
 
   it("invalidates a user-bound selection after first consumption", () => {

@@ -221,7 +221,8 @@ describe.sequential("Phase 2 project runtime routing", () => {
     const first = await start(store);
     const shadowRead = await request(first, "GET", `/api/projects/${source.id}`);
     expect(shadowRead.statusCode).toBe(200);
-    expect(shadowRead.json()).toMatchObject({ source_location: source.sourceLocation });
+    expect(shadowRead.json()).toMatchObject({ source_location: "Local repository" });
+    expect(shadowRead.body).not.toContain(source.sourceLocation);
     const evidence = await pg.query<{ matched: boolean; differences: string[] }>(
       `SELECT matched, differences
        FROM shadow_read_comparisons
@@ -234,7 +235,7 @@ describe.sequential("Phase 2 project runtime routing", () => {
     await setRoute("project", source.id, "relational");
     // The running process retains its startup-frozen shadow route.
     expect((await request(first, "GET", `/api/projects/${source.id}`)).json()).toMatchObject({
-      source_location: source.sourceLocation,
+      source_location: "Local repository",
     });
     await first.app.close();
     server = null;
