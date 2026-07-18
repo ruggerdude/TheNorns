@@ -13,9 +13,12 @@ import {
   type V2DebateMessageT,
   V2DebateRound,
   V2DebateRun,
+  V2DebateRunState,
+  type V2DebateRunStateT,
   type V2DebateStoppingObservationT,
   V2DebateTurn,
   evaluateV2DebateStopping,
+  v2CanDebateRunTransition,
 } from "@norns/contracts";
 import { newId } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
@@ -56,6 +59,25 @@ interface ClaimedJob {
   judgment: V2DebateJudgmentT | null;
 }
 
+interface FailureMetadata {
+  usage: { input_tokens: number; output_tokens: number } | null;
+  providerExecutionId: string | null;
+  finishReason: string | null;
+  latencyMs: number | null;
+  requestDispatched: boolean | null;
+}
+
+const WORKER_RECOVERY_TRANSITIONS = new Set([
+  // Recovery may discover an operational failure after the durable run has
+  // already entered either state. These explicit expansions are narrower than
+  // allowing arbitrary state writes and are exercised by recovery tests.
+  "running->paused",
+  "finalizing->paused",
+  // A stop policy may become decisive while an operator pause is draining the
+  // current turn; finishing that durable turn takes precedence over pausing.
+  "pausing->finalizing",
+]);
+
 // Type-only namespace import keeps the runtime surface on the contracts package.
 import type { z } from "zod";
 
@@ -94,28 +116,18 @@ export class DebateWorker {
     }
     if (!claim) return "idle";
 
+    const runDeadline =
+      Date.parse(claim.run.started_at ?? claim.run.created_at) +
+      claim.debate.stopping_policy.max_duration_seconds * 1_000;
+    if (this.now().getTime() >= runDeadline) {
+      await this.stopAtDeadline(claim);
+      return "completed";
+    }
+
     let prompt: DebateStructuredPrompt<DebateTurnOutput>;
     let adapter: LlmAdapter;
     try {
-      const basePrompt = this.promptFor(claim);
-      prompt = {
-        ...basePrompt,
-        prompt: prepareStructuredOutputPrompt(
-          basePrompt.prompt,
-          basePrompt.schema,
-          basePrompt.schemaName,
-        ),
-      };
-      const conservativeInputTokens = Buffer.byteLength(
-        `${prompt.system}\n\n${prompt.prompt}`,
-        "utf8",
-      );
-      if (conservativeInputTokens > claim.actor.max_input_tokens) {
-        throw new AdapterError(
-          "invalid_request",
-          `prepared debate prompt exceeds actor input cap (${conservativeInputTokens} > ${claim.actor.max_input_tokens})`,
-        );
-      }
+      prompt = this.transportPromptFor(claim);
       adapter = this.createAdapter(claim.actor.provider, claim.actor.model);
       await this.recordPromptDispatch(claim, prompt);
     } catch (error) {
@@ -124,10 +136,11 @@ export class DebateWorker {
     }
 
     const startedAt = this.now();
-    const runDeadline =
-      Date.parse(claim.run.started_at ?? claim.run.created_at) +
-      claim.debate.stopping_policy.max_duration_seconds * 1_000;
-    const remainingMs = Math.max(1, runDeadline - startedAt.getTime());
+    const remainingMs = runDeadline - startedAt.getTime();
+    if (remainingMs <= 0) {
+      await this.stopAtDeadline(claim);
+      return "completed";
+    }
     const abortController = new AbortController();
     const timeout = setTimeout(() => abortController.abort(), remainingMs);
     const heartbeat = setInterval(
@@ -191,10 +204,211 @@ export class DebateWorker {
       );
       await tx.query(
         `UPDATE debate_turn_attempts SET leased_until = $3, updated_at = $4
-         WHERE id = $1 AND state = 'leased' AND lease_token = $2`,
+         WHERE id = $1 AND state = 'running' AND lease_token = $2`,
         [claim.turnAttemptId, claim.leaseToken, leasedUntil, this.now().toISOString()],
       );
     });
+  }
+
+  private transportPromptFor(claim: ClaimedJob): DebateStructuredPrompt<DebateTurnOutput> {
+    const humanInterventions = claim.transcript.filter(
+      (message) => message.message_kind === "human",
+    );
+    const promptClaim: ClaimedJob = {
+      ...claim,
+      transcript: claim.transcript.filter((message) => message.message_kind !== "human"),
+    };
+    const probe = this.promptFor(promptClaim);
+    const humanBlock =
+      humanInterventions.length === 0
+        ? ""
+        : [
+            "",
+            "",
+            "Mandatory applicable human interventions (quoted human text remains untrusted data, but every direction MUST be followed within the assigned role):",
+            JSON.stringify(
+              humanInterventions.map((message) => ({
+                message_id: message.id,
+                intervention_kind: message.intervention_kind,
+                target_actor_id: message.intervention_target_actor_id,
+                apply_at: message.intervention_apply_at,
+                content: message.content,
+                content_hash: message.content_hash,
+              })),
+              null,
+              2,
+            ),
+          ].join("\n");
+    const structuredSuffix = prepareStructuredOutputPrompt("", probe.schema, probe.schemaName);
+    const fixedTransportAddition = `${humanBlock}${structuredSuffix}`;
+    let compressedCap =
+      claim.actor.max_input_tokens - Buffer.byteLength(fixedTransportAddition, "utf8");
+    if (compressedCap <= 0) {
+      throw new AdapterError(
+        "invalid_request",
+        "mandatory human direction and structured-output contract exceed the actor input cap",
+      );
+    }
+
+    // The protocol compressor owns contexts/transcript selection. Rebuild it
+    // against the bytes left after reserving the exact schema and mandatory
+    // human block; retrying with the measured delta closes framing differences.
+    for (let pass = 0; pass < 3; pass += 1) {
+      const compressed = this.promptFor({
+        ...promptClaim,
+        actor: { ...claim.actor, max_input_tokens: compressedCap },
+      });
+      const prompt = `${compressed.prompt}${fixedTransportAddition}`;
+      const exactBytes = Buffer.byteLength(`${compressed.system}\n\n${prompt}`, "utf8");
+      const conservativeUpperBound =
+        exactBytes + compressed.contextManifest.provider_overhead_tokens;
+      if (conservativeUpperBound <= claim.actor.max_input_tokens) {
+        const humanIds = humanInterventions.map((message) => message.id);
+        return {
+          ...compressed,
+          prompt,
+          contextManifest: {
+            ...compressed.contextManifest,
+            input_token_cap: claim.actor.max_input_tokens,
+            prompt_utf8_bytes: exactBytes,
+            input_token_upper_bound: conservativeUpperBound,
+            selected_message_ids: [...compressed.contextManifest.selected_message_ids, ...humanIds],
+            omitted_message_ids: compressed.contextManifest.omitted_message_ids.filter(
+              (id) => !humanIds.includes(id),
+            ),
+          },
+        };
+      }
+      compressedCap -= conservativeUpperBound - claim.actor.max_input_tokens;
+      if (compressedCap <= 0) break;
+    }
+    throw new AdapterError(
+      "invalid_request",
+      "final debate transport prompt cannot fit the actor input cap after compression",
+    );
+  }
+
+  private async stopAtDeadline(claim: ClaimedJob): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      const run = await tx.query<{ state: string }>(
+        "SELECT state FROM debate_runs WHERE id = $1 FOR UPDATE",
+        [claim.run.id],
+      );
+      const job = await tx.query<{ state: string; lease_token: string | null }>(
+        "SELECT state, lease_token FROM debate_jobs WHERE id = $1 FOR UPDATE",
+        [claim.jobId],
+      );
+      if (job.rows[0]?.state !== "leased" || job.rows[0]?.lease_token !== claim.leaseToken) return;
+      const now = this.now().toISOString();
+      await tx.query(
+        `UPDATE debate_jobs SET state = 'cancelled', is_designated = false,
+          lease_token = NULL, leased_until = NULL, updated_at = $2 WHERE id = $1`,
+        [claim.jobId, now],
+      );
+      await tx.query(
+        `UPDATE debate_turn_attempts SET state = 'cancelled', is_designated = false,
+          failure_code = 'max_duration', failure_detail = 'run deadline elapsed before provider dispatch',
+          lease_token = NULL, leased_until = NULL, finished_at = $2, updated_at = $2 WHERE id = $1`,
+        [claim.turnAttemptId, now],
+      );
+      await tx.query(
+        `UPDATE debate_turns SET state = 'cancelled', completed_at = $2, updated_at = $2
+         WHERE id = $1`,
+        [claim.turn.id, now],
+      );
+      await tx.query(
+        `UPDATE debate_reservations SET status = 'released', resolution_outcome = 'max_duration',
+          released_usd = amount_usd, version = version + 1, updated_at = $2
+         WHERE turn_attempt_id = $1 AND status = 'active'`,
+        [claim.turnAttemptId, now],
+      );
+
+      const currentState = V2DebateRunState.parse(run.rows[0]?.state);
+      if (currentState === "cancelling") {
+        await this.transitionRunState(tx, claim.run.id, "cancelled", now, "max_duration");
+        await tx.query(
+          `UPDATE debate_rounds SET state = 'cancelled', finished_at = $2, updated_at = $2
+           WHERE debate_run_id = $1 AND state IN ('pending','active')`,
+          [claim.run.id, now],
+        );
+        await this.appendRunEvent(tx, claim, {
+          eventType: "debate_run_cancelled",
+          payload: { stop_reason: "max_duration" },
+          occurredAt: now,
+          lifecycleEvent: true,
+        });
+        return;
+      }
+      if (currentState === "pausing") {
+        await this.transitionRunState(tx, claim.run.id, "paused", now, "max_duration");
+        await this.appendRunEvent(tx, claim, {
+          eventType: "debate_run_paused",
+          payload: { stop_reason: "max_duration" },
+          occurredAt: now,
+          lifecycleEvent: true,
+        });
+        return;
+      }
+      if (currentState !== "finalizing") {
+        await this.transitionRunState(tx, claim.run.id, "finalizing", now, "max_duration");
+        await this.appendRunEvent(tx, claim, {
+          eventType: "debate_run_finalizing",
+          payload: { stop_reason: "max_duration" },
+          occurredAt: now,
+          lifecycleEvent: true,
+        });
+      }
+      await tx.query(
+        `INSERT INTO debate_final_outputs (
+           id, project_id, debate_id, debate_run_id, content, content_hash, created_at
+         ) SELECT $1,$2,$3,$4,content,content_hash,$5
+           FROM debate_messages WHERE debate_run_id = $4 ORDER BY sequence DESC LIMIT 1
+         ON CONFLICT DO NOTHING`,
+        [newId("debate_output"), claim.debate.project_id, claim.debate.id, claim.run.id, now],
+      );
+      await this.transitionRunState(tx, claim.run.id, "completed", now, "max_duration");
+      await tx.query(
+        `UPDATE debate_rounds SET state = 'completed', finished_at = COALESCE(finished_at,$2),
+          updated_at = $2 WHERE debate_run_id = $1 AND state = 'active'`,
+        [claim.run.id, now],
+      );
+      await this.appendRunEvent(tx, claim, {
+        eventType: "debate_run_completed",
+        payload: { stop_reason: "max_duration" },
+        occurredAt: now,
+        lifecycleEvent: true,
+      });
+    });
+  }
+
+  private async transitionRunState(
+    tx: V2SqlExecutor,
+    runId: string,
+    to: V2DebateRunStateT,
+    now: string,
+    stopReason?: string,
+  ): Promise<boolean> {
+    const locked = await tx.query<{ state: string }>(
+      "SELECT state FROM debate_runs WHERE id = $1 FOR UPDATE",
+      [runId],
+    );
+    const from = V2DebateRunState.parse(locked.rows[0]?.state);
+    if (from === to) return false;
+    const transition = `${from}->${to}`;
+    if (!v2CanDebateRunTransition(from, to) && !WORKER_RECOVERY_TRANSITIONS.has(transition)) {
+      throw new Error(`illegal debate run transition ${transition}`);
+    }
+    const terminal = to === "completed" || to === "cancelled" || to === "failed";
+    await tx.query(
+      `UPDATE debate_runs SET state = $2,
+        stop_reason = CASE WHEN $3::text IS NULL THEN stop_reason ELSE $3 END,
+        lifecycle_version = lifecycle_version + 1,
+        aggregate_version = aggregate_version + 1,
+        finished_at = CASE WHEN $4::boolean THEN $5::timestamptz ELSE NULL END,
+        updated_at = $5 WHERE id = $1`,
+      [runId, to, stopReason ?? null, terminal, now],
+    );
+    return true;
   }
 
   private promptFor(claim: ClaimedJob): DebateStructuredPrompt<DebateTurnOutput> {
@@ -355,7 +569,20 @@ export class DebateWorker {
             [abandoned.turn_attempt_id, now.toISOString()],
           );
         }
-        const eventSequence = Number(run.rows[0]?.event_version ?? 0) + 1;
+        await this.transitionRunState(
+          tx,
+          abandoned.debate_run_id,
+          cancellationRequested ? "cancelled" : "paused",
+          now.toISOString(),
+          cancellationRequested ? "cancelled" : "ambiguous_execution",
+        );
+        const transitionedRun = await tx.query<{
+          event_version: number;
+          lifecycle_version: number;
+        }>("SELECT event_version, lifecycle_version FROM debate_runs WHERE id = $1 FOR UPDATE", [
+          abandoned.debate_run_id,
+        ]);
+        const eventSequence = Number(transitionedRun.rows[0]?.event_version ?? 0) + 1;
         await tx.query(
           `INSERT INTO debate_events (
              id, project_id, debate_id, debate_run_id, sequence, event_type,
@@ -370,7 +597,7 @@ export class DebateWorker {
             cancellationRequested
               ? "debate_run_cancelled_after_expired_lease"
               : "debate_turn_execution_ambiguous",
-            Number(run.rows[0]?.lifecycle_version ?? 0) + 1,
+            Number(transitionedRun.rows[0]?.lifecycle_version ?? 0),
             JSON.stringify({
               turn_attempt_id: abandoned.turn_attempt_id,
               reason: "expired_worker_lease",
@@ -381,18 +608,9 @@ export class DebateWorker {
           ],
         );
         await tx.query(
-          `UPDATE debate_runs SET state = $2, stop_reason = $3,
-            lifecycle_version = lifecycle_version + 1, event_version = $4,
-            aggregate_version = aggregate_version + 1,
-            finished_at = CASE WHEN $2 = 'cancelled' THEN $5::timestamptz ELSE NULL END,
-            updated_at = $5 WHERE id = $1`,
-          [
-            abandoned.debate_run_id,
-            cancellationRequested ? "cancelled" : "paused",
-            cancellationRequested ? "cancelled" : "ambiguous_execution",
-            eventSequence,
-            now.toISOString(),
-          ],
+          `UPDATE debate_runs SET event_version = $2,
+            aggregate_version = aggregate_version + 1, updated_at = $3 WHERE id = $1`,
+          [abandoned.debate_run_id, eventSequence, now.toISOString()],
         );
       }
       const result = await tx.query<{
@@ -439,12 +657,14 @@ export class DebateWorker {
          WHERE designated_attempt_id = $1`,
         [job.turn_attempt_id, now.toISOString()],
       );
-      await tx.query(
-        `UPDATE debate_runs SET state = CASE WHEN state = 'finalizing' THEN 'finalizing' ELSE 'running' END,
-          lifecycle_version = lifecycle_version + CASE WHEN state = 'queued' THEN 1 ELSE 0 END,
-          aggregate_version = aggregate_version + 1, updated_at = $2 WHERE id = $1`,
-        [job.debate_run_id, now.toISOString()],
-      );
+      if (currentRun.rows[0].state === "queued") {
+        await this.transitionRunState(tx, job.debate_run_id, "running", now.toISOString());
+      } else {
+        await tx.query(
+          "UPDATE debate_runs SET aggregate_version = aggregate_version + 1, updated_at = $2 WHERE id = $1",
+          [job.debate_run_id, now.toISOString()],
+        );
+      }
       if (currentRun.rows[0].state === "queued") {
         const run = await tx.query<{ event_version: number; lifecycle_version: number }>(
           "SELECT event_version, lifecycle_version FROM debate_runs WHERE id = $1 FOR UPDATE",
@@ -495,10 +715,9 @@ export class DebateWorker {
     error: unknown,
   ): Promise<void> {
     await this.transactions.transaction(async (tx) => {
-      const run = await tx.query<{ event_version: number; lifecycle_version: number }>(
-        "SELECT event_version, lifecycle_version FROM debate_runs WHERE id = $1 FOR UPDATE",
-        [claimed.debate_run_id],
-      );
+      await tx.query("SELECT state FROM debate_runs WHERE id = $1 FOR UPDATE", [
+        claimed.debate_run_id,
+      ]);
       const job = await tx.query<{ lease_token: string | null }>(
         "SELECT lease_token FROM debate_jobs WHERE id = $1 FOR UPDATE",
         [claimed.id],
@@ -527,6 +746,17 @@ export class DebateWorker {
          WHERE turn_attempt_id = $1 AND status = 'active'`,
         [claimed.turn_attempt_id, now],
       );
+      await this.transitionRunState(
+        tx,
+        claimed.debate_run_id,
+        "paused",
+        now,
+        "pre_dispatch_failure",
+      );
+      const run = await tx.query<{ event_version: number; lifecycle_version: number }>(
+        "SELECT event_version, lifecycle_version FROM debate_runs WHERE id = $1 FOR UPDATE",
+        [claimed.debate_run_id],
+      );
       const sequence = Number(run.rows[0]?.event_version ?? 0) + 1;
       await tx.query(
         `INSERT INTO debate_events (
@@ -539,7 +769,7 @@ export class DebateWorker {
           claimed.debate_id,
           claimed.debate_run_id,
           sequence,
-          Number(run.rows[0]?.lifecycle_version ?? 0) + 1,
+          Number(run.rows[0]?.lifecycle_version ?? 0),
           JSON.stringify({
             turn_attempt_id: claimed.turn_attempt_id,
             detail: detail.slice(0, 10_000),
@@ -548,8 +778,7 @@ export class DebateWorker {
         ],
       );
       await tx.query(
-        `UPDATE debate_runs SET state = 'paused', stop_reason = 'pre_dispatch_failure',
-          lifecycle_version = lifecycle_version + 1, event_version = $2,
+        `UPDATE debate_runs SET event_version = $2,
           aggregate_version = aggregate_version + 1, updated_at = $3 WHERE id = $1`,
         [claimed.debate_run_id, sequence, now],
       );
@@ -1002,12 +1231,7 @@ export class DebateWorker {
            WHERE debate_run_id = $1 AND state IN ('pending','active')`,
           [claim.run.id, now],
         );
-        await tx.query(
-          `UPDATE debate_runs SET state = 'cancelled', lifecycle_version = lifecycle_version + 1,
-            aggregate_version = aggregate_version + 1, finished_at = $2, updated_at = $2
-           WHERE id = $1`,
-          [claim.run.id, now],
-        );
+        await this.transitionRunState(tx, claim.run.id, "cancelled", now, "operator_cancelled");
         await this.appendRunEvent(tx, claim, {
           eventType: "debate_run_cancelled",
           payload: { stop_reason: "operator_cancelled" },
@@ -1018,13 +1242,13 @@ export class DebateWorker {
       }
       await this.advance(tx, claim, output, messageId, now, requestedStopAfter);
       if (requestedState === "pausing") {
-        const pausedResult = await tx.query<{ state: string }>(
-          `UPDATE debate_runs SET state = 'paused', lifecycle_version = lifecycle_version + 1,
-            aggregate_version = aggregate_version + 1, updated_at = $2
-           WHERE id = $1 AND state NOT IN ('completed','cancelled','failed') RETURNING state`,
-          [claim.run.id, now],
+        const current = await tx.query<{ state: string }>(
+          "SELECT state FROM debate_runs WHERE id = $1 FOR UPDATE",
+          [claim.run.id],
         );
-        if (pausedResult.rows[0]) {
+        const currentState = V2DebateRunState.parse(current.rows[0]?.state);
+        if (!["completed", "cancelled", "failed"].includes(currentState)) {
+          await this.transitionRunState(tx, claim.run.id, "paused", now, "operator_pause");
           await this.appendRunEvent(tx, claim, {
             eventType: "debate_run_paused",
             payload: { stop_reason: "operator_pause" },
@@ -1169,12 +1393,7 @@ export class DebateWorker {
     };
     const stopReason = evaluateV2DebateStopping(claim.debate.stopping_policy, observation);
     if (stopReason) {
-      await tx.query(
-        `UPDATE debate_runs SET state = 'finalizing', stop_reason = $2,
-          lifecycle_version = lifecycle_version + 1, aggregate_version = aggregate_version + 1,
-          updated_at = $3 WHERE id = $1`,
-        [claim.run.id, stopReason, now],
-      );
+      await this.transitionRunState(tx, claim.run.id, "finalizing", now, stopReason);
       await this.appendRunEvent(tx, claim, {
         eventType: "debate_run_finalizing",
         payload: { stop_reason: stopReason },
@@ -1284,18 +1503,21 @@ export class DebateWorker {
         ],
       );
       const stopReason = actorLimitExceeded ? "actor_limit_reached" : "budget_reached";
-      await tx.query(
-        `UPDATE debate_runs SET state = 'finalizing', stop_reason = $2,
-          lifecycle_version = lifecycle_version + 1, aggregate_version = aggregate_version + 1,
-          updated_at = $3 WHERE id = $1`,
-        [claim.run.id, stopReason, now],
+      const transitioned = await this.transitionRunState(
+        tx,
+        claim.run.id,
+        "finalizing",
+        now,
+        stopReason,
       );
-      await this.appendRunEvent(tx, claim, {
-        eventType: "debate_run_finalizing",
-        payload: { stop_reason: stopReason },
-        occurredAt: now,
-        lifecycleEvent: true,
-      });
+      if (transitioned) {
+        await this.appendRunEvent(tx, claim, {
+          eventType: "debate_run_finalizing",
+          payload: { stop_reason: stopReason },
+          occurredAt: now,
+          lifecycleEvent: true,
+        });
+      }
       await this.completeRun(tx, claim, stopReason, now);
       return;
     }
@@ -1377,8 +1599,7 @@ export class DebateWorker {
       ],
     );
     await tx.query(
-      `UPDATE debate_runs SET state = CASE WHEN state = 'finalizing' THEN 'finalizing' ELSE 'running' END,
-        cursor_round_number = $2, cursor_turn_number = $3,
+      `UPDATE debate_runs SET cursor_round_number = $2, cursor_turn_number = $3,
         aggregate_version = aggregate_version + 1, updated_at = $4 WHERE id = $1`,
       [claim.run.id, roundNumber, turnNumber, now],
     );
@@ -1396,12 +1617,7 @@ export class DebateWorker {
       [claim.run.id],
     );
     if (Number(unresolved.rows[0]?.unresolved ?? 0) > 0) {
-      await tx.query(
-        `UPDATE debate_runs SET state = 'paused', stop_reason = 'unresolved_reservation',
-          lifecycle_version = lifecycle_version + 1, aggregate_version = aggregate_version + 1,
-          finished_at = NULL, updated_at = $2 WHERE id = $1`,
-        [claim.run.id, now],
-      );
+      await this.transitionRunState(tx, claim.run.id, "paused", now, "unresolved_reservation");
       await this.appendRunEvent(tx, claim, {
         eventType: "debate_run_paused",
         payload: { stop_reason: "unresolved_reservation" },
@@ -1410,12 +1626,7 @@ export class DebateWorker {
       });
       return;
     }
-    await tx.query(
-      `UPDATE debate_runs SET state = 'completed', stop_reason = COALESCE(stop_reason, $2),
-        lifecycle_version = lifecycle_version + 1, aggregate_version = aggregate_version + 1,
-        finished_at = $3, updated_at = $3 WHERE id = $1`,
-      [claim.run.id, reason, now],
-    );
+    await this.transitionRunState(tx, claim.run.id, "completed", now, reason);
     await this.appendRunEvent(tx, claim, {
       eventType: "debate_run_completed",
       payload: { stop_reason: reason },
@@ -1498,6 +1709,201 @@ export class DebateWorker {
     }
   }
 
+  private failureMetadata(error: unknown): FailureMetadata {
+    const candidate =
+      typeof error === "object" && error !== null && "metadata" in error
+        ? (error as { metadata?: unknown }).metadata
+        : null;
+    const metadata = typeof candidate === "object" && candidate !== null ? candidate : null;
+    const usageCandidate =
+      metadata && "usage" in metadata ? (metadata as { usage?: unknown }).usage : null;
+    const usageRecord =
+      typeof usageCandidate === "object" && usageCandidate !== null ? usageCandidate : null;
+    const inputTokens =
+      usageRecord && "input_tokens" in usageRecord
+        ? Number((usageRecord as { input_tokens?: unknown }).input_tokens)
+        : Number.NaN;
+    const outputTokens =
+      usageRecord && "output_tokens" in usageRecord
+        ? Number((usageRecord as { output_tokens?: unknown }).output_tokens)
+        : Number.NaN;
+    const optionalString = (key: string): string | null => {
+      if (!metadata || !(key in metadata)) return null;
+      const value = (metadata as Record<string, unknown>)[key];
+      return typeof value === "string" && value.length > 0 ? value : null;
+    };
+    const latency =
+      metadata && "latency_ms" in metadata
+        ? Number((metadata as { latency_ms?: unknown }).latency_ms)
+        : Number.NaN;
+    const requestDispatched =
+      metadata && "request_dispatched" in metadata
+        ? (metadata as { request_dispatched?: unknown }).request_dispatched
+        : null;
+    return {
+      usage:
+        Number.isFinite(inputTokens) &&
+        Number.isFinite(outputTokens) &&
+        inputTokens >= 0 &&
+        outputTokens >= 0
+          ? { input_tokens: inputTokens, output_tokens: outputTokens }
+          : null,
+      providerExecutionId: optionalString("provider_execution_id"),
+      finishReason: optionalString("finish_reason"),
+      latencyMs: Number.isFinite(latency) && latency >= 0 ? latency : null,
+      requestDispatched: typeof requestDispatched === "boolean" ? requestDispatched : null,
+    };
+  }
+
+  private async recordKnownFailureUsage(
+    tx: V2SqlExecutor,
+    claim: ClaimedJob,
+    metadata: FailureMetadata,
+    now: string,
+  ): Promise<{ costUsd: number } | null> {
+    if (metadata.usage === null) return null;
+    const snapshot = claim.run.actor_execution_snapshots.find(
+      (candidate) => candidate.actor_id === claim.actor.id,
+    );
+    if (!snapshot) throw new Error("run actor execution snapshot is missing");
+    const costUsd =
+      (metadata.usage.input_tokens * snapshot.pricing.input_per_mtok_usd +
+        metadata.usage.output_tokens * snapshot.pricing.output_per_mtok_usd) /
+      1_000_000;
+    const reservation = await tx.query<{ amount_usd: string | number }>(
+      "SELECT amount_usd FROM debate_reservations WHERE turn_attempt_id = $1 FOR UPDATE",
+      [claim.turnAttemptId],
+    );
+    const reserved = Number(reservation.rows[0]?.amount_usd ?? 0);
+    if (costUsd > reserved + 0.000001) {
+      throw new Error("provider failure usage exceeded the conservative debate reservation");
+    }
+    await tx.query(
+      `INSERT INTO debate_usage_events (
+         id, project_id, debate_id, debate_run_id, turn_attempt_id, provider,
+         model, runtime, pricing_snapshot, input_tokens, output_tokens, cost_usd,
+         latency_ms, occurred_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14)`,
+      [
+        newId("debate_usage"),
+        claim.debate.project_id,
+        claim.debate.id,
+        claim.run.id,
+        claim.turnAttemptId,
+        claim.actor.provider,
+        claim.actor.model,
+        claim.actor.runtime,
+        JSON.stringify(snapshot.pricing),
+        metadata.usage.input_tokens,
+        metadata.usage.output_tokens,
+        costUsd,
+        metadata.latencyMs ?? 0,
+        now,
+      ],
+    );
+    await tx.query(
+      `UPDATE debate_reservations SET status = 'settled',
+        resolution_outcome = 'provider_content_failure', settled_usd = $2,
+        released_usd = amount_usd - $2, retained_usd = 0,
+        version = version + 1, updated_at = $3
+       WHERE turn_attempt_id = $1 AND status = 'active'`,
+      [claim.turnAttemptId, costUsd, now],
+    );
+    return { costUsd };
+  }
+
+  private async queueReplacementAttempt(
+    tx: V2SqlExecutor,
+    claim: ClaimedJob,
+    attemptNumber: number,
+    detail: string,
+    now: string,
+  ): Promise<{ attemptId: string; jobId: string }> {
+    const reservation = await tx.query<{ amount_usd: string | number; expires_at: string }>(
+      "SELECT amount_usd, expires_at FROM debate_reservations WHERE turn_attempt_id = $1 FOR UPDATE",
+      [claim.turnAttemptId],
+    );
+    const amount = Number(reservation.rows[0]?.amount_usd ?? 0);
+    await tx.query(
+      `UPDATE debate_jobs SET state = 'failed', is_designated = false,
+        lease_token = NULL, leased_until = NULL, updated_at = $2 WHERE id = $1`,
+      [claim.jobId, now],
+    );
+    await tx.query(
+      `UPDATE debate_turn_attempts SET state = 'failed', is_designated = false,
+        failure_code = 'provider_retryable', failure_detail = $2,
+        lease_token = NULL, leased_until = NULL, finished_at = $3, updated_at = $3
+       WHERE id = $1`,
+      [claim.turnAttemptId, detail, now],
+    );
+    await tx.query(
+      `UPDATE debate_reservations SET status = 'released', resolution_outcome = 'retry_no_charge',
+        released_usd = amount_usd, version = version + 1, updated_at = $2
+       WHERE turn_attempt_id = $1 AND status = 'active'`,
+      [claim.turnAttemptId, now],
+    );
+
+    const nextAttemptNumber = attemptNumber + 1;
+    const attemptId = newId("debate_attempt");
+    const jobId = newId("debate_job");
+    await tx.query(
+      `INSERT INTO debate_turn_attempts (
+         id, project_id, debate_id, debate_run_id, turn_id, attempt_number,
+         state, is_designated, created_at, updated_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,'queued',true,$7,$7)`,
+      [
+        attemptId,
+        claim.debate.project_id,
+        claim.debate.id,
+        claim.run.id,
+        claim.turn.id,
+        nextAttemptNumber,
+        now,
+      ],
+    );
+    await tx.query(
+      "UPDATE debate_turns SET designated_attempt_id = $2, state = 'queued', updated_at = $3 WHERE id = $1",
+      [claim.turn.id, attemptId, now],
+    );
+    await tx.query(
+      `INSERT INTO debate_reservations (
+         id, project_id, debate_id, debate_run_id, turn_attempt_id, amount_usd,
+         status, version, expires_at, created_at, updated_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,'active',1,$7,$8,$8)`,
+      [
+        newId("debate_reservation"),
+        claim.debate.project_id,
+        claim.debate.id,
+        claim.run.id,
+        attemptId,
+        amount,
+        new Date(
+          Math.max(
+            Date.parse(reservation.rows[0]?.expires_at ?? now),
+            Date.parse(now) + 30 * 60_000,
+          ),
+        ).toISOString(),
+        now,
+      ],
+    );
+    await tx.query(
+      `INSERT INTO debate_jobs (
+         id, project_id, debate_id, debate_run_id, turn_attempt_id, job_kind,
+         state, is_designated, delivery_attempt, idempotency_key, created_at, updated_at
+       ) VALUES ($1,$2,$3,$4,$5,'execute_turn','queued',true,1,$6,$7,$7)`,
+      [
+        jobId,
+        claim.debate.project_id,
+        claim.debate.id,
+        claim.run.id,
+        attemptId,
+        `debate-turn:${attemptId}`,
+        now,
+      ],
+    );
+    return { attemptId, jobId };
+  }
+
   private async fail(
     claim: ClaimedJob,
     error: unknown,
@@ -1509,15 +1915,27 @@ export class DebateWorker {
         [claim.run.id],
       );
       const currentRunState = runLock.rows[0]?.state;
-      const found = await tx.query<{ lease_token: string | null; delivery_attempt: number }>(
-        "SELECT lease_token, delivery_attempt FROM debate_jobs WHERE id = $1 FOR UPDATE",
+      const found = await tx.query<{
+        lease_token: string | null;
+        attempt_number: number;
+      }>(
+        `SELECT j.lease_token, ta.attempt_number
+         FROM debate_jobs j
+         JOIN debate_turn_attempts ta ON ta.id = j.turn_attempt_id
+         WHERE j.id = $1 FOR UPDATE OF j, ta`,
         [claim.jobId],
       );
       const job = found.rows[0];
       if (!job || job.lease_token !== claim.leaseToken) return;
       const now = this.now().toISOString();
+      const detail =
+        error instanceof Error ? error.message.slice(0, 10_000) : String(error).slice(0, 10_000);
+      const metadata = this.failureMetadata(error);
+      const knownUsage = await this.recordKnownFailureUsage(tx, claim, metadata, now);
+      const requestDispatched = metadata.requestDispatched ?? externalExecutionStarted;
       const ambiguous =
-        externalExecutionStarted &&
+        requestDispatched &&
+        knownUsage === null &&
         (!(error instanceof AdapterError) ||
           ["network", "server", "cancelled", "invalid_response"].includes(error.kind));
       const retryableWithoutAmbiguity =
@@ -1526,25 +1944,21 @@ export class DebateWorker {
         currentRunState !== "cancelling" &&
         currentRunState !== "pausing" &&
         retryableWithoutAmbiguity &&
-        job.delivery_attempt <
+        knownUsage === null &&
+        job.attempt_number <
           Math.min(this.maxAttempts, claim.debate.stopping_policy.provider_failure_threshold);
       if (currentRunState === "cancelling") {
         await tx.query(
-          `UPDATE debate_jobs SET state = 'cancelled', lease_token = NULL, leased_until = NULL,
-            updated_at = $2 WHERE id = $1`,
+          `UPDATE debate_jobs SET state = 'cancelled', is_designated = false,
+            lease_token = NULL, leased_until = NULL, updated_at = $2 WHERE id = $1`,
           [claim.jobId, now],
         );
         await tx.query(
-          `UPDATE debate_turn_attempts SET state = 'cancelled', failure_code = 'cancelled',
-            failure_detail = $2, lease_token = NULL, leased_until = NULL,
-            finished_at = $3, updated_at = $3 WHERE id = $1`,
-          [
-            claim.turnAttemptId,
-            error instanceof Error
-              ? error.message.slice(0, 10_000)
-              : String(error).slice(0, 10_000),
-            now,
-          ],
+          `UPDATE debate_turn_attempts SET state = 'cancelled', is_designated = false,
+            failure_code = 'cancelled', failure_detail = $2, provider_execution_id = $3,
+            lease_token = NULL, leased_until = NULL, finished_at = $4, updated_at = $4
+           WHERE id = $1`,
+          [claim.turnAttemptId, detail, metadata.providerExecutionId, now],
         );
         await tx.query(
           "UPDATE debate_turns SET state = 'cancelled', completed_at = $2, updated_at = $2 WHERE id = $1",
@@ -1555,7 +1969,9 @@ export class DebateWorker {
            WHERE debate_run_id = $1 AND state IN ('pending','active')`,
           [claim.run.id, now],
         );
-        if (ambiguous) {
+        if (knownUsage !== null) {
+          // recordKnownFailureUsage already settled the attributable amount.
+        } else if (ambiguous) {
           await tx.query(
             `UPDATE debate_reservations SET status = 'settled',
               resolution_outcome = 'cancelled_assumed_full_charge', settled_usd = amount_usd,
@@ -1571,93 +1987,123 @@ export class DebateWorker {
             [claim.turnAttemptId, now],
           );
         }
-        await tx.query(
-          `UPDATE debate_runs SET state = 'cancelled', stop_reason = COALESCE(stop_reason, 'cancelled'),
-            lifecycle_version = lifecycle_version + 1, aggregate_version = aggregate_version + 1,
-            finished_at = $2, updated_at = $2 WHERE id = $1`,
-          [claim.run.id, now],
-        );
+        await this.transitionRunState(tx, claim.run.id, "cancelled", now, "cancelled");
         await this.appendRunEvent(tx, claim, {
           eventType: "debate_run_cancelled_after_turn_failure",
-          payload: { ambiguous, assumed_full_charge: ambiguous },
+          payload: {
+            ambiguous,
+            assumed_full_charge: ambiguous,
+            known_usage: knownUsage,
+            provider_execution_id: metadata.providerExecutionId,
+          },
           occurredAt: now,
           lifecycleEvent: true,
         });
         return;
       }
+      if (retry) {
+        const replacement = await this.queueReplacementAttempt(
+          tx,
+          claim,
+          job.attempt_number,
+          detail,
+          now,
+        );
+        await this.appendRunEvent(tx, claim, {
+          eventType: "debate_turn_retry_queued",
+          payload: {
+            round_number: claim.round.round_number,
+            turn_number: claim.turn.turn_number,
+            prior_turn_attempt_id: claim.turnAttemptId,
+            replacement_turn_attempt_id: replacement.attemptId,
+            replacement_job_id: replacement.jobId,
+            failure: detail,
+            retry: true,
+            ambiguous: false,
+          },
+          occurredAt: now,
+        });
+        return;
+      }
       await tx.query(
-        `UPDATE debate_jobs SET state = $2, lease_token = NULL, leased_until = NULL,
-          delivery_attempt = delivery_attempt + CASE WHEN $2 = 'queued' THEN 1 ELSE 0 END,
-          updated_at = $3 WHERE id = $1`,
-        [claim.jobId, retry ? "queued" : "dead_letter", now],
+        `UPDATE debate_jobs SET state = 'dead_letter', is_designated = false,
+          lease_token = NULL, leased_until = NULL, updated_at = $2 WHERE id = $1`,
+        [claim.jobId, now],
       );
       await tx.query(
-        `UPDATE debate_turn_attempts SET state = $2, failure_code = 'provider_failure',
-          failure_detail = $3, lease_token = NULL, leased_until = NULL,
-          finished_at = CASE WHEN $2 = 'failed' THEN $4::timestamptz ELSE NULL END, updated_at = $4
+        `UPDATE debate_turn_attempts SET state = 'failed', is_designated = false,
+          failure_code = $2, failure_detail = $3, provider_execution_id = $4,
+          lease_token = NULL, leased_until = NULL, finished_at = $5, updated_at = $5
          WHERE id = $1`,
         [
           claim.turnAttemptId,
-          retry ? "queued" : "failed",
-          error instanceof Error ? error.message.slice(0, 10_000) : String(error).slice(0, 10_000),
+          knownUsage !== null && error instanceof AdapterError && error.kind === "invalid_response"
+            ? "invalid_structured_output"
+            : "provider_failure",
+          detail,
+          metadata.providerExecutionId,
           now,
         ],
       );
-      await tx.query("UPDATE debate_turns SET state = $2, updated_at = $3 WHERE id = $1", [
-        claim.turn.id,
-        retry ? "queued" : "failed",
-        now,
-      ]);
-      if (!retry) {
-        if (ambiguous) {
-          await tx.query(
-            `UPDATE debate_reservations SET status = 'retained_ambiguous',
-              retained_usd = amount_usd, version = version + 1, updated_at = $2
-             WHERE turn_attempt_id = $1 AND status = 'active'`,
-            [claim.turnAttemptId, now],
-          );
-        } else {
-          await tx.query(
-            `UPDATE debate_reservations SET status = 'released', resolution_outcome = 'provider_rejected',
-              released_usd = amount_usd, version = version + 1, updated_at = $2
-             WHERE turn_attempt_id = $1 AND status = 'active'`,
-            [claim.turnAttemptId, now],
-          );
-        }
+      await tx.query(
+        "UPDATE debate_turns SET state = 'failed', completed_at = $2, updated_at = $2 WHERE id = $1",
+        [claim.turn.id, now],
+      );
+      if (knownUsage !== null) {
+        // recordKnownFailureUsage already settled the attributable amount.
+      } else if (ambiguous) {
         await tx.query(
-          `UPDATE debate_runs SET state = 'paused', stop_reason = $2,
-            lifecycle_version = lifecycle_version + 1, aggregate_version = aggregate_version + 1,
-            updated_at = $3 WHERE id = $1`,
-          [
-            claim.run.id,
-            currentRunState === "pausing"
-              ? "operator_pause"
-              : ambiguous
-                ? "ambiguous_execution"
-                : "provider_failure_threshold",
-            now,
-          ],
+          `UPDATE debate_reservations SET status = 'retained_ambiguous',
+            retained_usd = amount_usd, version = version + 1, updated_at = $2
+           WHERE turn_attempt_id = $1 AND status = 'active'`,
+          [claim.turnAttemptId, now],
+        );
+      } else {
+        await tx.query(
+          `UPDATE debate_reservations SET status = 'released', resolution_outcome = 'provider_rejected',
+            released_usd = amount_usd, version = version + 1, updated_at = $2
+           WHERE turn_attempt_id = $1 AND status = 'active'`,
+          [claim.turnAttemptId, now],
         );
       }
+      const stopReason =
+        currentRunState === "pausing"
+          ? "operator_pause"
+          : knownUsage !== null &&
+              error instanceof AdapterError &&
+              error.kind === "invalid_response"
+            ? "invalid_structured_output"
+            : ambiguous
+              ? "ambiguous_execution"
+              : "provider_failure_threshold";
+      await this.transitionRunState(tx, claim.run.id, "paused", now, stopReason);
       await this.appendRunEvent(tx, claim, {
-        eventType: retry
-          ? "debate_turn_retry_queued"
-          : ambiguous
-            ? "debate_turn_execution_ambiguous"
-            : "debate_turn_paused_after_failure",
+        eventType: ambiguous
+          ? "debate_turn_execution_ambiguous"
+          : "debate_turn_paused_after_failure",
         payload: {
           round_number: claim.round.round_number,
           turn_number: claim.turn.turn_number,
           turn_attempt_id: claim.turnAttemptId,
-          failure:
-            error instanceof Error
-              ? error.message.slice(0, 10_000)
-              : String(error).slice(0, 10_000),
-          retry,
+          failure: detail,
+          failure_kind:
+            error instanceof AdapterError ? error.kind : "unclassified_provider_failure",
+          retry: false,
           ambiguous,
+          known_usage:
+            knownUsage === null || metadata.usage === null
+              ? null
+              : {
+                  input_tokens: metadata.usage.input_tokens,
+                  output_tokens: metadata.usage.output_tokens,
+                  cost_usd: knownUsage.costUsd,
+                  latency_ms: metadata.latencyMs ?? 0,
+                },
+          provider_execution_id: metadata.providerExecutionId,
+          finish_reason: metadata.finishReason,
         },
         occurredAt: now,
-        lifecycleEvent: !retry,
+        lifecycleEvent: true,
       });
     });
   }

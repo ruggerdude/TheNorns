@@ -484,6 +484,218 @@ describe.sequential("debate worker recovery invariants", () => {
     expect(findingKeyMatches).toHaveLength(1);
   });
 
+  it("compresses the final schema-bearing transport prompt without dropping applicable human direction", async () => {
+    const inputCap = 9_000;
+    const { debate, run, actorIds } = await createAndStart({
+      exactRounds: 1,
+      maxInputTokens: inputCap,
+      contexts: [
+        {
+          label: "Oversized evidence",
+          artifact_id: null,
+          artifact_content_hash: null,
+          artifact_media_type: null,
+          inline_content: "EVIDENCE_TO_COMPRESS ".repeat(4_000),
+        },
+      ],
+    });
+    const mandatoryDirection = `MANDATORY_DIRECTION:${"do-not-drop ".repeat(80)}`.trim();
+    await intervene(debate.id, run, {
+      targetActorId: actorIds[1] as string,
+      applyAt: "next_turn",
+      text: mandatoryDirection,
+    });
+    adapter.enqueue(proposal("First actor response"), proposal("Capped transport response"));
+
+    await expect(workerWith(adapter).tick()).resolves.toBe("completed");
+    await expect(workerWith(adapter).tick()).resolves.toBe("completed");
+
+    const request = adapter.requests[1]?.request;
+    expect(request).toBeDefined();
+    expect(request?.prompt).toContain(mandatoryDirection);
+    expect(request?.prompt).toContain("JSON Schema:");
+    expect(
+      Buffer.byteLength(`${request?.system}\n\n${request?.prompt}`, "utf8") + 512,
+    ).toBeLessThanOrEqual(inputCap);
+    expect(request?.prompt.length).toBeLessThan("EVIDENCE_TO_COMPRESS ".repeat(4_000).length);
+  });
+
+  it("does not dispatch a provider call after the durable run deadline", async () => {
+    const { debate, run } = await createAndStart({ exactRounds: 1, maxDurationSeconds: 1 });
+    const worker = new DebateWorker(transactions, () => adapter, {
+      now: () => new Date(Date.parse(NOW) + 1_001),
+    });
+
+    await expect(worker.tick()).resolves.toBe("completed");
+
+    expect(adapter.requests).toHaveLength(0);
+    const stopped = await service.getRun(PROJECT_ID, debate.id, run.id);
+    expect(stopped.status).toBe("completed");
+    expect(stopped.stop_reason).toBe("max_duration");
+    expect(stopped.reserved_usd).toBe(0);
+    expect(await textValue("SELECT state FROM debate_jobs WHERE debate_run_id = $1", run.id)).toBe(
+      "cancelled",
+    );
+    expect(await eventTypesFor(run.id)).toEqual([
+      "debate_run_queued",
+      "debate_run_running",
+      "debate_run_finalizing",
+      "debate_run_completed",
+    ]);
+  });
+
+  it("creates a fresh durable attempt, job, and reservation for a retryable provider response", async () => {
+    const { run } = await createAndStart({ exactRounds: 1 });
+    adapter.enqueueError(new AdapterError("rate_limit", "retry later"));
+    adapter.enqueue(proposal("Retry succeeded"));
+    const worker = workerWith(adapter);
+
+    await expect(worker.tick()).resolves.toBe("failed");
+
+    const attempts = await pg.query<{
+      id: string;
+      attempt_number: number;
+      state: string;
+      is_designated: boolean;
+    }>(
+      `SELECT id, attempt_number, state, is_designated
+       FROM debate_turn_attempts WHERE debate_run_id = $1 ORDER BY attempt_number`,
+      [run.id],
+    );
+    expect(attempts.rows).toHaveLength(2);
+    expect(attempts.rows[0]).toMatchObject({
+      attempt_number: 1,
+      state: "failed",
+      is_designated: false,
+    });
+    expect(attempts.rows[1]).toMatchObject({
+      attempt_number: 2,
+      state: "queued",
+      is_designated: true,
+    });
+    expect(attempts.rows[1]?.id).not.toBe(attempts.rows[0]?.id);
+    expect(await scalar("SELECT COUNT(*) FROM debate_jobs WHERE debate_run_id = $1", run.id)).toBe(
+      2,
+    );
+    expect(
+      await scalar("SELECT COUNT(*) FROM debate_reservations WHERE debate_run_id = $1", run.id),
+    ).toBe(2);
+    expect(
+      await textValue(
+        "SELECT status FROM debate_reservations WHERE debate_run_id = $1 ORDER BY created_at LIMIT 1",
+        run.id,
+      ),
+    ).toBe("released");
+
+    await expect(worker.tick()).resolves.toBe("completed");
+    expect(adapter.requests).toHaveLength(2);
+    expect(
+      await textValue(
+        "SELECT state FROM debate_turn_attempts WHERE debate_run_id = $1 ORDER BY attempt_number DESC LIMIT 1",
+        run.id,
+      ),
+    ).toBe("completed");
+  });
+
+  it("settles known usage from malformed structured output and pauses as a content failure", async () => {
+    const { debate, run } = await createAndStart({ exactRounds: 1 });
+    adapter.enqueueError(
+      new AdapterError("invalid_response", "response did not match the schema", {
+        metadata: {
+          usage: {
+            id: "usage-malformed",
+            provider: "openai",
+            model: "mock-openai",
+            project_id: PROJECT_ID,
+            node_id: null,
+            run_id: run.id,
+            input_tokens: 100,
+            output_tokens: 50,
+            estimated_cost_usd: 0,
+            actual_cost_usd: null,
+            usage_source: "provider_api",
+            pricing_version: "adapter-reported",
+            occurred_at: NOW,
+          },
+          provider_execution_id: "provider-malformed-1",
+          finish_reason: "stop",
+          latency_ms: 321,
+          request_dispatched: true,
+        },
+      }),
+    );
+
+    await expect(workerWith(adapter).tick()).resolves.toBe("failed");
+
+    const paused = await service.getRun(PROJECT_ID, debate.id, run.id);
+    expect(paused.status).toBe("paused");
+    expect(paused.stop_reason).toBe("invalid_structured_output");
+    expect(paused.retained_ambiguous_usd).toBe(0);
+    expect(paused.reserved_usd).toBe(0);
+    expect(paused.settled_usd).toBeCloseTo(0.0004, 8);
+    expect(
+      await scalar("SELECT COUNT(*) FROM debate_usage_events WHERE debate_run_id = $1", run.id),
+    ).toBe(1);
+    expect(
+      await textValue(
+        "SELECT provider_execution_id FROM debate_turn_attempts WHERE debate_run_id = $1",
+        run.id,
+      ),
+    ).toBe("provider-malformed-1");
+    expect(
+      await textValue(
+        "SELECT failure_code FROM debate_turn_attempts WHERE debate_run_id = $1",
+        run.id,
+      ),
+    ).toBe("invalid_structured_output");
+  });
+
+  it("heartbeats the running attempt lease while a provider call is in flight", async () => {
+    const { run } = await createAndStart({ exactRounds: 1 });
+    const inFlight = deferred<AdapterReply>();
+    adapter.enqueueDeferred(inFlight);
+    const worker = new DebateWorker(transactions, () => adapter, {
+      now: () => new Date(NOW),
+      leaseMs: 3_000,
+    });
+    const tick = worker.tick();
+    await eventually(() => expect(adapter.requests).toHaveLength(1));
+    await pg.query("UPDATE debate_turn_attempts SET leased_until = $2 WHERE debate_run_id = $1", [
+      run.id,
+      NOW,
+    ]);
+    let heartbeatObserved = false;
+    for (let check = 0; check < 20; check += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const leasedUntil = await textValue(
+        "SELECT leased_until FROM debate_turn_attempts WHERE debate_run_id = $1",
+        run.id,
+      );
+      if (Date.parse(leasedUntil) > Date.parse(NOW)) {
+        heartbeatObserved = true;
+        break;
+      }
+    }
+    expect(heartbeatObserved).toBe(true);
+    inFlight.resolve({ value: proposal("Lease stayed alive") });
+    await expect(tick).resolves.toBe("completed");
+  });
+
+  it("uses the recovery transition expansion when finalizing work must pause", async () => {
+    const { debate, run } = await createAndStart({ exactRounds: 1 });
+    await pg.query(
+      "UPDATE debate_runs SET state = 'finalizing', lifecycle_version = lifecycle_version + 1 WHERE id = $1",
+      [run.id],
+    );
+    adapter.enqueueError(new AdapterError("auth", "credential revoked"));
+
+    await expect(workerWith(adapter).tick()).resolves.toBe("failed");
+
+    const paused = await service.getRun(PROJECT_ID, debate.id, run.id);
+    expect(paused.status).toBe("paused");
+    expect(paused.stop_reason).toBe("provider_failure_threshold");
+  });
+
   it("honors cancellation when a previously leased turn expires", async () => {
     const { debate, run } = await createAndStart({ exactRounds: 2 });
     await pg.query(
@@ -532,7 +744,18 @@ describe.sequential("debate worker recovery invariants", () => {
     });
   }
 
-  async function createAndStart(input: { exactRounds: number }): Promise<{
+  async function createAndStart(input: {
+    exactRounds: number;
+    maxDurationSeconds?: number;
+    maxInputTokens?: number;
+    contexts?: Array<{
+      label: string;
+      artifact_id: null;
+      artifact_content_hash: null;
+      artifact_media_type: null;
+      inline_content: string;
+    }>;
+  }): Promise<{
     debate: Awaited<ReturnType<DebateService["create"]>>;
     run: DebateRunDto;
     actorIds: string[];
@@ -545,7 +768,7 @@ describe.sequential("debate worker recovery invariants", () => {
       model: "mock-openai",
       runtime: "provider_api",
       max_turns: 10,
-      max_input_tokens: 10_000,
+      max_input_tokens: input.maxInputTokens ?? 10_000,
       max_output_tokens: 1_000,
       budget_limit_usd: 10,
     };
@@ -561,7 +784,7 @@ describe.sequential("debate worker recovery invariants", () => {
       stopping_policy: {
         exact_rounds: input.exactRounds,
         max_rounds: Math.max(input.exactRounds, 3),
-        max_duration_seconds: 600,
+        max_duration_seconds: input.maxDurationSeconds ?? 600,
         max_total_input_tokens: 100_000,
         max_total_output_tokens: 20_000,
         max_total_cost_usd: 20,
@@ -584,7 +807,7 @@ describe.sequential("debate worker recovery invariants", () => {
           position: 1,
         },
       ],
-      contexts: [],
+      contexts: input.contexts ?? [],
     });
     const run = await service.start({
       ...commandBase(`start-${suffix}`),
