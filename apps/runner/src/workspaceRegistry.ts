@@ -10,8 +10,8 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  opendirSync,
   readFileSync,
-  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -53,6 +53,7 @@ interface Handle {
 const GIT_PROBE_TIMEOUT_MS = 250;
 const BROWSE_DEADLINE_MS = 750;
 const MAX_BROWSE_ENTRIES = 200;
+const MAX_BROWSE_SCAN = 400;
 
 class InvalidWorkspaceRegistryError extends Error {}
 
@@ -254,9 +255,19 @@ export class WorkspaceRegistry {
         can_browse: false,
       });
     }
-    for (const name of readdirSync(path).sort()) {
+    const directory = opendirSync(path);
+    const names: string[] = [];
+    try {
+      while (names.length < MAX_BROWSE_SCAN && Date.now() < deadline) {
+        const entry = directory.readSync();
+        if (!entry) break;
+        if (entry.name !== ".git") names.push(entry.name);
+      }
+    } finally {
+      directory.closeSync();
+    }
+    for (const name of names.sort()) {
       if (entries.length >= MAX_BROWSE_ENTRIES || Date.now() >= deadline) break;
-      if (name === ".git") continue;
       const child = join(path, name);
       const stat = lstatSync(child);
       if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
