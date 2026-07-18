@@ -147,5 +147,17 @@ describe("Phase 4 runner-owned execution", () => {
         expect.objectContaining({ kind: "run_status", status: "completed" }),
       ]),
     );
+
+    const unapprovedLocalCommand = V2DispatchCommand.parse({
+      ...command,
+      dispatch_job_id: "job-unapproved-local",
+      command_id: "dispatch:job-unapproved-local",
+      idempotency_key: "dispatch:job-unapproved-local",
+      run_id: "run-unapproved-local",
+      runner_repository_id: "local:missing",
+    });
+    await expect(executor.execute(unapprovedLocalCommand, () => undefined)).rejects.toThrow(
+      "runner repository is not approved on this runner",
+    );
   });
 });

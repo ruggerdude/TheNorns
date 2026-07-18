@@ -114,6 +114,7 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     const result = await schedule();
 
     expect(result.command.command_id).toBe(`dispatch:${result.dispatch_job_id}`);
+    expect(result.command.runner_repository_id).toBe("repository-1");
     const state = await pg.query<{
       task_state: string;
       run_state: string;
@@ -146,6 +147,27 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       command_status: "queued",
       task_events: 2,
     });
+  });
+
+  it("does not send a runner-local repository identity for GitHub bindings", async () => {
+    await pg.exec(
+      `INSERT INTO repository_bindings (
+         id, project_id, binding_type, status, runner_id, repository_id,
+         repository_display_name, github_installation_id, github_owner, github_name,
+         granted_permissions, default_branch, observed_head, verification_policy_ref,
+         repository_health, created_by_actor_type, created_by_actor_id
+       ) VALUES (
+         'binding-github','project-1','github','connected','server',
+         'github-repository-1','octocat/project-one','installation-1','octocat','project-one',
+         '{}'::jsonb,'main','commit-1','verification','healthy','human','admin-1'
+       );
+       UPDATE projects SET primary_repository_binding_id='binding-github' WHERE id='project-1'`,
+    );
+
+    const result = await schedule();
+
+    expect(result.command.repository_binding_id).toBe("binding-github");
+    expect(result.command.runner_repository_id).toBeUndefined();
   });
 
   it("reclaims a crashed dispatcher lease and redelivers the identical command", async () => {

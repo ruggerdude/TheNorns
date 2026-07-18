@@ -224,13 +224,16 @@ export class V2RunnerExecutor {
       throw new Error("dispatch command is fenced from this runner generation");
     }
     if (Date.parse(command.expires_at) <= Date.now()) throw new Error("dispatch command expired");
-    // A runner-issued repository id is the authoritative lookup for folders
-    // picked through the local registry.  The static binding registry remains
-    // the compatibility fallback for existing Phase 4 deployments.
-    const repositoryPath =
-      (command.runner_repository_id
-        ? this.workspaces?.repositoryPath(command.runner_repository_id)
-        : undefined) ?? this.repositories.resolve(command.repository_binding_id);
+    // A runner-issued repository id is authoritative for a folder selected
+    // through the local registry. Never fall back to a static binding when an
+    // explicit local identity is missing or expired on this runner.
+    let repositoryPath: string;
+    if (command.runner_repository_id) {
+      repositoryPath = this.workspaces?.repositoryPath(command.runner_repository_id) ?? "";
+      if (!repositoryPath) throw new Error("runner repository is not approved on this runner");
+    } else {
+      repositoryPath = this.repositories.resolve(command.repository_binding_id);
+    }
     const runtimeProvider = this.runtimes.get(command.runtime);
     if (!runtimeProvider) throw new Error(`runtime ${command.runtime} is unavailable`);
     const runtime =

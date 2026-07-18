@@ -209,6 +209,35 @@ describe("unified project onboarding", () => {
     expect(JSON.stringify(mock.calls)).not.toMatch(/Users|Development\/Apps|local-app\//);
   });
 
+  it("does not bind a previously selected local folder after switching to a new project", async () => {
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
+    await user.click(screen.getByRole("button", { name: /local folder/i }));
+    await user.click(await screen.findByRole("button", { name: /development/i }));
+    await user.click(await screen.findByRole("button", { name: /apps/i }));
+    await user.click(await screen.findByRole("button", { name: /local-app/i }));
+    expect(await screen.findByTestId("local-selection-summary")).toHaveTextContent("local-app");
+
+    await user.click(screen.getByRole("button", { name: /^new project/i }));
+    const nameInput = screen.getByTestId("project-name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Fresh local-free project");
+    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
+    expect(
+      mock.calls.find((call) => call.method === "POST" && call.url === "/api/projects"),
+    ).toMatchObject({ body: { name: "Fresh local-free project" } });
+    expect(
+      mock.calls.find(
+        (call) =>
+          call.method === "POST" &&
+          call.url === "/api/v2/projects/project-created/source-bindings/local",
+      ),
+    ).toBeUndefined();
+  });
+
   it("explains how to recover when no local runner is online", async () => {
     mock.get("/api/runners", { body: [] });
     const user = userEvent.setup();

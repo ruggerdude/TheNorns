@@ -661,18 +661,20 @@ export function Projects({
         setSourceError("Select and validate a local Git repository to continue.");
         return;
       }
+      const selectedLocalRepository =
+        startingPoint === "existing" && existingSource === "local" ? localSelection : null;
       const projectName =
         name.trim() ||
         repository?.name ||
-        localSelection?.repository.repository_display_name ||
+        selectedLocalRepository?.repository.repository_display_name ||
         "Untitled project";
       const projectDescription =
         description.trim() ||
         repository?.description ||
         (repository
           ? `Analyze and continue development of ${repository.full_name}`
-          : localSelection
-            ? `Analyze and continue development of ${localSelection.repository.repository_display_name}`
+          : selectedLocalRepository
+            ? `Analyze and continue development of ${selectedLocalRepository.repository.repository_display_name}`
             : "New project");
       const project = await request<ProjectSummary>("/api/projects", {
         name: projectName,
@@ -687,20 +689,20 @@ export function Projects({
             }
           : {}),
       });
-      const completedProject = localSelection
+      const completedProject = selectedLocalRepository
         ? await (async () => {
             try {
               await request<LocalBindingResult>(
                 `/api/v2/projects/${project.id}/source-bindings/local`,
                 {
-                  selection_token: localSelection.selection_token,
+                  selection_token: selectedLocalRepository.selection_token,
                   verification_policy_ref: "verification-policy:default-v1",
                 },
               );
               return {
                 ...project,
                 source_type: "local" as const,
-                source_location: localSelection.repository.repository_display_name,
+                source_location: selectedLocalRepository.repository.repository_display_name,
               };
             } catch (bindingError) {
               await refresh();
@@ -1126,6 +1128,14 @@ export function Projects({
                     onClick={() => {
                       setStartingPoint("new");
                       setSelectedRepositoryId("");
+                      setExistingSource("github");
+                      setSelectedLocalRunnerId("");
+                      setSelectedLocalWorkspaceId("");
+                      setLocalWorkspaces([]);
+                      setLocalBrowser(null);
+                      setLocalNavigation([]);
+                      setLocalSelection(null);
+                      setSelectedLocalEntryId(null);
                     }}
                   >
                     <strong>New project</strong>

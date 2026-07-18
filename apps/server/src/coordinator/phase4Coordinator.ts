@@ -348,7 +348,9 @@ export class Phase4Coordinator {
         runner_id: input.runner_id,
         runner_generation: input.runner_generation,
         repository_binding_id: row.repository_binding_id,
-        ...(row.runner_repository_id ? { runner_repository_id: row.runner_repository_id } : {}),
+        ...(row.repository_binding_type === "local_runner" && row.runner_repository_id
+          ? { runner_repository_id: row.runner_repository_id }
+          : {}),
         expected_revision: row.expected_revision,
         target_branch: input.target_branch,
         worktree_policy_ref: input.worktree_policy_ref,
