@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   V2ApplicationCommand,
   V2ApproveStrategyVersionCommand,
+  V2CreateDebateCommand,
   V2DispatchCommand,
   V2IdempotencyRecord,
   V2ScheduleAgentRunCommand,
@@ -453,5 +454,120 @@ describe("V2 actor-scoped idempotency", () => {
       expected_phase_version: 2,
     });
     expect(fingerprintV2ApplicationCommand(changedIntent, fakeSha)).toBe(OTHER_HASH);
+  });
+
+  it("accepts runtime-selected debate actors and rejects invalid role cardinality", () => {
+    const base = {
+      schema_version: 2,
+      kind: "create_debate",
+      command_id: "command-debate-1",
+      command_family: "debate",
+      actor,
+      idempotency_key: "create-debate-1",
+      correlation_id: "correlation-debate-1",
+      causation_id: null,
+      issued_at: NOW,
+      project_id: "project-1",
+      expected_project_version: 1,
+      phase_id: null,
+      title: "Architecture debate",
+      question: "Which persistence boundary should we adopt?",
+      stopping_policy: {
+        exact_rounds: 2,
+        max_rounds: 4,
+        max_duration_seconds: 3600,
+        max_total_input_tokens: 100_000,
+        max_total_output_tokens: 25_000,
+        max_total_cost_usd: 25,
+        stop_on_consensus: true,
+        no_material_change_rounds: 2,
+        repeated_disagreement_rounds: 2,
+        provider_failure_threshold: 3,
+      },
+      actors: [
+        {
+          actor_kind: "participant",
+          role_label: "designer",
+          display_name: "Design participant",
+          instructions: "Propose a design.",
+          provider: "anthropic",
+          model: "user-selected-anthropic-model",
+          runtime: "provider_api",
+          position: 0,
+          max_turns: 4,
+          max_input_tokens: 20_000,
+          max_output_tokens: 4_000,
+          budget_limit_usd: 10,
+        },
+        {
+          actor_kind: "participant",
+          role_label: "reviewer",
+          display_name: "Review participant",
+          instructions: "Challenge the proposal.",
+          provider: "openai",
+          model: "user-selected-openai-model",
+          runtime: "provider_api",
+          position: 1,
+          max_turns: 4,
+          max_input_tokens: 20_000,
+          max_output_tokens: 4_000,
+          budget_limit_usd: 10,
+        },
+      ],
+      contexts: [],
+    } as const;
+
+    expect(V2CreateDebateCommand.parse(base).actors.map((entry) => entry.model)).toEqual([
+      "user-selected-anthropic-model",
+      "user-selected-openai-model",
+    ]);
+    expect(
+      V2CreateDebateCommand.safeParse({
+        ...base,
+        actors: [base.actors[0], { ...base.actors[1], actor_kind: "judge" }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("preserves explicit ambiguity disposition and structured human direction intent", () => {
+    const common = {
+      schema_version: 2,
+      command_family: "debate",
+      actor,
+      correlation_id: "correlation-debate-control",
+      causation_id: null,
+      issued_at: NOW,
+      project_id: "project-1",
+      debate_id: "debate-1",
+      debate_run_id: "run-1",
+      expected_run_version: 3,
+    } as const;
+    const resume = V2ApplicationCommand.parse({
+      ...common,
+      kind: "control_debate_run",
+      command_id: "command-resume-debate",
+      idempotency_key: "resume-debate",
+      action: "resume",
+      reason: "Human accepted the conservative charge.",
+      ambiguity_disposition: "assume_full_charge",
+    });
+    expect(resume).toMatchObject({ ambiguity_disposition: "assume_full_charge" });
+
+    const direction = V2ApplicationCommand.parse({
+      ...common,
+      kind: "intervene_debate_run",
+      command_id: "command-direct-debate",
+      idempotency_key: "direct-debate",
+      intervention_kind: "direction",
+      target_actor_id: "actor-2",
+      apply_at: "next_round",
+      text: "Address the recovery evidence before reaching consensus.",
+    });
+    expect(direction).toMatchObject({
+      intervention_kind: "direction",
+      target_actor_id: "actor-2",
+      apply_at: "next_round",
+      text: "Address the recovery evidence before reaching consensus.",
+    });
   });
 });

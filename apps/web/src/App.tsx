@@ -18,6 +18,7 @@ import "@xyflow/react/dist/style.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Account } from "./Account";
 import { Admin } from "./Admin";
+import { Debates } from "./Debates";
 import { Login, type LoginMode } from "./Login";
 import { type PlanLike, PlanReview } from "./PlanReview";
 import { type ProjectSummary, ProjectTabs, Projects } from "./Projects";
@@ -542,6 +543,7 @@ function ProjectGraph({
   const [monitoredPhaseId, setMonitoredPhaseId] = useState<string | null>(null);
   const [phaseExecution, setPhaseExecution] = useState<PhaseExecutionDto | null>(null);
   const [executionError, setExecutionError] = useState<string | null>(null);
+  const [showDebates, setShowDebates] = useState(false);
   const focusedTaskId = project.focus_task_id ?? null;
 
   // Last-known-*good* approval state (never "pending"): what we revert to when
@@ -941,6 +943,16 @@ function ProjectGraph({
 
   const selectedNode = graph?.nodes.find((n) => n.id === selected) ?? null;
 
+  if (showDebates) {
+    return (
+      <Debates
+        projectId={project.id}
+        onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+        onBack={() => setShowDebates(false)}
+      />
+    );
+  }
+
   // UI-6: the "Dashboard" entry is intentionally not rendered for a real
   // project — it fetched a hardcoded global demo session's data (now moved to
   // its own /api/demo/dashboard surface by Agent C). A durable per-project
@@ -974,6 +986,9 @@ function ProjectGraph({
             ← Main menu
           </Button>
           <div className="header-actions">
+            <Button className="btn-small" variant="ghost" onClick={() => setShowDebates(true)}>
+              Debates
+            </Button>
             <Button className="btn-small" variant="ghost" onClick={onOpenAccount}>
               Settings
             </Button>

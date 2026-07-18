@@ -57,6 +57,21 @@ export const V2EntityRefType = z.enum([
   "dispatch_job",
   "command",
   "human_direction",
+  "debate",
+  "debate_actor",
+  "debate_context",
+  "debate_run",
+  "debate_round",
+  "debate_turn",
+  "debate_turn_attempt",
+  "debate_message",
+  "debate_finding",
+  "debate_revision",
+  "debate_judgment",
+  "debate_final_output",
+  "debate_job",
+  "debate_reservation",
+  "debate_usage_event",
 ]);
 export type V2EntityRefTypeT = z.infer<typeof V2EntityRefType>;
 

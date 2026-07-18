@@ -1,7 +1,14 @@
 {
   "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
   "files": {
-    "ignore": ["node_modules", "dist", "*.tsbuildinfo"]
+    "ignore": [
+      "node_modules",
+      "dist",
+      "*.tsbuildinfo",
+      "test-results",
+      "playwright-report",
+      "blob-report"
+    ]
   },
   "formatter": {
     "enabled": true,

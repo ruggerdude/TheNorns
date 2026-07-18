@@ -51,6 +51,11 @@ export const GITHUB_APP_MANIFEST_MIGRATION_URL = new URL(
   "../../../drizzle/0010_github_app_manifest.sql",
   import.meta.url,
 );
+export const DEBATE_WORKFLOW_MIGRATION_NAME = "0011_debate_workflow";
+export const DEBATE_WORKFLOW_MIGRATION_URL = new URL(
+  "../../../drizzle/0011_debate_workflow.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -122,6 +127,10 @@ export async function loadQcCommunicationMigrationSql(): Promise<string> {
 
 export async function loadGitHubAppManifestMigrationSql(): Promise<string> {
   return readFile(GITHUB_APP_MANIFEST_MIGRATION_URL, "utf8");
+}
+
+export async function loadDebateWorkflowMigrationSql(): Promise<string> {
+  return readFile(DEBATE_WORKFLOW_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -271,6 +280,10 @@ export async function runCurrentV2Migrations(
     {
       name: GITHUB_APP_MANIFEST_MIGRATION_NAME,
       sql: await loadGitHubAppManifestMigrationSql(),
+    },
+    {
+      name: DEBATE_WORKFLOW_MIGRATION_NAME,
+      sql: await loadDebateWorkflowMigrationSql(),
     },
   ]);
 }

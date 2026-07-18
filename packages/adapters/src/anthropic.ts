@@ -8,8 +8,10 @@ import {
   type CompletionRequest,
   type CompletionResult,
   type LlmAdapter,
+  type ProviderCompletionMetadata,
   type StructuredResult,
   kindForStatus,
+  prepareStructuredOutputPrompt,
 } from "./types.js";
 
 export interface AnthropicAdapterOptions {
@@ -36,8 +38,13 @@ export class AnthropicAdapter implements LlmAdapter {
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResult> {
+    const startedAt = Date.now();
     const response = await this.call(request);
-    return { text: this.textOf(response), usage: this.usageOf(response, request) };
+    return {
+      text: this.textOf(response),
+      usage: this.usageOf(response, request),
+      ...this.metadataOf(response, startedAt),
+    };
   }
 
   async completeStructured<T>(
@@ -45,9 +52,12 @@ export class AnthropicAdapter implements LlmAdapter {
     schema: z.ZodType<T>,
     schemaName: string,
   ): Promise<StructuredResult<T>> {
+    const startedAt = Date.now();
     const structuredRequest: CompletionRequest = {
       ...request,
-      prompt: `${request.prompt}\n\nRespond with ONLY a JSON object named "${schemaName}" matching the required schema. No prose, no code fences.`,
+      prompt: request.structuredOutputPrepared
+        ? request.prompt
+        : prepareStructuredOutputPrompt(request.prompt, schema, schemaName),
     };
     const response = await this.call(structuredRequest);
     const text = this.textOf(response);
@@ -55,16 +65,24 @@ export class AnthropicAdapter implements LlmAdapter {
     try {
       parsed = JSON.parse(stripFences(text));
     } catch (cause) {
-      throw new AdapterError("invalid_response", `${schemaName}: response is not JSON`, { cause });
+      throw new AdapterError("invalid_response", `${schemaName}: response is not JSON`, {
+        cause,
+        metadata: this.failureMetadata(response, request, startedAt),
+      });
     }
     const result = schema.safeParse(parsed);
     if (!result.success) {
       throw new AdapterError(
         "invalid_response",
         `${schemaName}: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+        { metadata: this.failureMetadata(response, request, startedAt) },
       );
     }
-    return { value: result.data, usage: this.usageOf(response, request) };
+    return {
+      value: result.data,
+      usage: this.usageOf(response, request),
+      ...this.metadataOf(response, startedAt),
+    };
   }
 
   private async call(request: CompletionRequest): Promise<Anthropic.Message> {
@@ -99,6 +117,26 @@ export class AnthropicAdapter implements LlmAdapter {
       response.usage.output_tokens,
       "provider_api",
     );
+  }
+
+  private metadataOf(response: Anthropic.Message, startedAt: number): ProviderCompletionMetadata {
+    return {
+      provider_execution_id: response.id,
+      latency_ms: Math.max(0, Date.now() - startedAt),
+      ...(response.stop_reason !== null ? { finish_reason: response.stop_reason } : {}),
+    };
+  }
+
+  private failureMetadata(
+    response: Anthropic.Message,
+    request: CompletionRequest,
+    startedAt: number,
+  ) {
+    return {
+      ...this.metadataOf(response, startedAt),
+      usage: this.usageOf(response, request),
+      request_dispatched: true,
+    };
   }
 
   private mapError(error: unknown): AdapterError {

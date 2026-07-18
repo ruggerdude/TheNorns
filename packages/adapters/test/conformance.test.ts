@@ -49,6 +49,8 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
     expect(usage.output_tokens).toBe(45);
     expect(usage.usage_source).toBe("provider_api");
     expect(usage.node_id).toBe("node-1");
+    expect(result.provider_execution_id).toBe(name === "anthropic" ? "msg_mock" : "resp_mock");
+    expect(result.finish_reason).toBe(name === "anthropic" ? "end_turn" : "completed");
 
     // ledger reconciliation: estimated cost === registry math, exactly
     const entry = DEFAULT_MODEL_REGISTRY[adapter.model];
@@ -67,12 +69,51 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
     expect(result.value).toEqual({ name: "mock", count: 3 });
   });
 
+  it("enforces an explicit OpenAI output cap through the Responses API", async () => {
+    if (name !== "openai") return;
+    const adapter = make();
+    const requestStart = mock.requests.length;
+    const result = await adapter.complete({
+      prompt: "bounded response",
+      maxTokens: 321,
+      ...attribution,
+    });
+    const request = mock.requests
+      .slice(requestStart)
+      .find((candidate) => candidate.url.endsWith("/responses"));
+    expect(request).toBeDefined();
+    expect(JSON.parse(request?.body ?? "{}")).toMatchObject({
+      model: "mock-openai",
+      input: "bounded response",
+      max_output_tokens: 321,
+    });
+    expect(result).toMatchObject({
+      provider_execution_id: "resp_mock",
+      finish_reason: "completed",
+    });
+  });
+
   it("rejects structured responses that fail the schema", async () => {
     const adapter = make();
     const schema = z.object({ missing_field: z.string() });
-    await expect(
-      adapter.completeStructured({ prompt: "STRUCTURED please", ...attribution }, schema, "strict"),
-    ).rejects.toMatchObject({ kind: "invalid_response", retryable: false });
+    const error = await adapter
+      .completeStructured({ prompt: "STRUCTURED please", ...attribution }, schema, "strict")
+      .then(
+        () => null,
+        (failure: unknown) => failure,
+      );
+    expect(error).toMatchObject({ kind: "invalid_response", retryable: false });
+    expect(error).toBeInstanceOf(AdapterError);
+    expect((error as AdapterError).metadata).toMatchObject({
+      request_dispatched: true,
+      provider_execution_id: name === "anthropic" ? "msg_mock" : "resp_mock",
+      usage: {
+        input_tokens: 120,
+        output_tokens: 45,
+      },
+    });
+    expect((error as AdapterError).metadata?.latency_ms).toEqual(expect.any(Number));
+    expect((error as AdapterError).metadata?.latency_ms).toBeGreaterThanOrEqual(0);
   });
 
   it("maps the failure taxonomy: 429 retryable, 401 fatal, 500 retryable", async () => {

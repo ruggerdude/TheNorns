@@ -7,6 +7,7 @@ import {
   V2PositiveVersion,
   V2Sha256Hex,
 } from "./common.js";
+import { V2DebateStoppingPolicy } from "./debate.js";
 import { type V2StrategyVersionT, fingerprintV2StrategyImmutableContent } from "./domain.js";
 
 const schemaVersion = z.literal(2);
@@ -20,6 +21,7 @@ export const V2CommandFamily = z.enum([
   "human_direction",
   "budget",
   "integration",
+  "debate",
 ]);
 export type V2CommandFamilyT = z.infer<typeof V2CommandFamily>;
 
@@ -157,16 +159,161 @@ export const V2RecordHumanDirectionCommand = V2ApplicationCommandBase.extend({
 }).strict();
 export type V2RecordHumanDirectionCommandT = z.infer<typeof V2RecordHumanDirectionCommand>;
 
-export const V2ApplicationCommand = z.discriminatedUnion("kind", [
-  V2CreatePhaseCommand,
-  V2ApproveStrategyVersionCommand,
-  V2StartPhaseCommand,
-  V2RetryTaskCommand,
-  V2ScheduleAgentRunCommand,
-  V2CancelTaskCommand,
-  V2ResolveDecisionPointCommand,
-  V2RecordHumanDirectionCommand,
-]);
+export const V2DebateActorInput = z
+  .object({
+    actor_kind: z.enum(["participant", "judge", "synthesizer"]),
+    role_label: V2NonEmptyString.max(200),
+    display_name: V2NonEmptyString.max(200),
+    instructions: V2NonEmptyString.max(100_000),
+    provider: V2NonEmptyString.max(200),
+    model: V2NonEmptyString.max(500),
+    runtime: V2NonEmptyString.max(200),
+    position: z.number().int().nonnegative(),
+    max_turns: z.number().int().positive().max(200),
+    max_input_tokens: z.number().int().positive(),
+    max_output_tokens: z.number().int().positive(),
+    budget_limit_usd: z.number().finite().nonnegative(),
+  })
+  .strict();
+export type V2DebateActorInputT = z.infer<typeof V2DebateActorInput>;
+
+export const V2DebateContextInput = z
+  .object({
+    label: V2NonEmptyString.max(500),
+    artifact_id: V2EntityId.nullable(),
+    artifact_content_hash: V2Sha256Hex.nullable(),
+    artifact_media_type: V2NonEmptyString.nullable(),
+    inline_content: z.string().max(100_000).nullable(),
+  })
+  .strict()
+  .superRefine((context, ctx) => {
+    const hasArtifact = context.artifact_id !== null;
+    const completeArtifact =
+      hasArtifact && context.artifact_content_hash !== null && context.artifact_media_type !== null;
+    if (
+      hasArtifact !== completeArtifact ||
+      completeArtifact === (context.inline_content !== null)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["artifact_id"],
+        message: "provide exactly one complete artifact reference or inline_content",
+      });
+    }
+  });
+export type V2DebateContextInputT = z.infer<typeof V2DebateContextInput>;
+
+const V2DebateDefinitionFields = {
+  title: V2NonEmptyString.max(500),
+  question: V2NonEmptyString.max(100_000),
+  phase_id: V2EntityId.nullable(),
+  stopping_policy: V2DebateStoppingPolicy,
+  actors: z.array(V2DebateActorInput).min(2).max(32),
+  contexts: z.array(V2DebateContextInput).max(100),
+};
+
+function validateDebateActors(actors: V2DebateActorInputT[], ctx: z.RefinementCtx): void {
+  const participants = actors.filter((actor) => actor.actor_kind === "participant");
+  if (participants.length < 2) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["actors"],
+      message: "a debate requires at least two participants",
+    });
+  }
+  for (const optionalKind of ["judge", "synthesizer"] as const) {
+    if (actors.filter((actor) => actor.actor_kind === optionalKind).length > 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["actors"],
+        message: `a debate allows at most one ${optionalKind}`,
+      });
+    }
+  }
+  const positions = actors.map((actor) => actor.position);
+  if (new Set(positions).size !== positions.length) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["actors"],
+      message: "debate actor positions must be unique",
+    });
+  }
+}
+
+const V2CreateDebateCommandObject = V2ApplicationCommandBase.extend({
+  kind: z.literal("create_debate"),
+  command_family: z.literal("debate"),
+  project_id: V2EntityId,
+  expected_project_version: V2PositiveVersion,
+  ...V2DebateDefinitionFields,
+}).strict();
+export const V2CreateDebateCommand = V2CreateDebateCommandObject.superRefine((command, ctx) =>
+  validateDebateActors(command.actors, ctx),
+);
+export type V2CreateDebateCommandT = z.infer<typeof V2CreateDebateCommand>;
+
+export const V2StartDebateRunCommand = V2ApplicationCommandBase.extend({
+  kind: z.literal("start_debate_run"),
+  command_family: z.literal("debate"),
+  project_id: V2EntityId,
+  debate_id: V2EntityId,
+  expected_debate_version: V2PositiveVersion,
+}).strict();
+export type V2StartDebateRunCommandT = z.infer<typeof V2StartDebateRunCommand>;
+
+export const V2ControlDebateRunCommand = V2ApplicationCommandBase.extend({
+  kind: z.literal("control_debate_run"),
+  command_family: z.literal("debate"),
+  project_id: V2EntityId,
+  debate_id: V2EntityId,
+  debate_run_id: V2EntityId,
+  expected_run_version: V2PositiveVersion,
+  action: z.enum(["pause", "resume", "cancel", "stop_after_turn", "stop_after_round"]),
+  reason: V2NonEmptyString.max(10_000),
+  ambiguity_disposition: z.enum(["assume_full_charge"]).nullable().optional(),
+}).strict();
+export type V2ControlDebateRunCommandT = z.infer<typeof V2ControlDebateRunCommand>;
+
+export const V2InterveneDebateRunCommand = V2ApplicationCommandBase.extend({
+  kind: z.literal("intervene_debate_run"),
+  command_family: z.literal("debate"),
+  actor: z
+    .object({
+      actor_type: z.literal("human"),
+      actor_id: V2EntityId,
+    })
+    .strict(),
+  project_id: V2EntityId,
+  debate_id: V2EntityId,
+  debate_run_id: V2EntityId,
+  expected_run_version: V2PositiveVersion,
+  intervention_kind: z.enum(["direction", "statement"]),
+  target_actor_id: V2EntityId.nullable(),
+  apply_at: z.enum(["next_turn", "next_round"]),
+  text: V2NonEmptyString.max(100_000),
+}).strict();
+export type V2InterveneDebateRunCommandT = z.infer<typeof V2InterveneDebateRunCommand>;
+
+export const V2ApplicationCommand = z
+  .discriminatedUnion("kind", [
+    V2CreatePhaseCommand,
+    V2ApproveStrategyVersionCommand,
+    V2StartPhaseCommand,
+    V2RetryTaskCommand,
+    V2ScheduleAgentRunCommand,
+    V2CancelTaskCommand,
+    V2ResolveDecisionPointCommand,
+    V2RecordHumanDirectionCommand,
+    V2CreateDebateCommandObject,
+    V2StartDebateRunCommand,
+    V2ControlDebateRunCommand,
+    V2InterveneDebateRunCommand,
+  ])
+  .superRefine((command, ctx) => {
+    if (command.kind === "create_debate") {
+      validateDebateActors(command.actors, ctx);
+    }
+  });
 export type V2ApplicationCommandT = z.infer<typeof V2ApplicationCommand>;
 
 export const V2StrategyApprovalRejection = z.enum([

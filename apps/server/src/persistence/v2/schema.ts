@@ -2710,6 +2710,729 @@ export const attentionItemStates = pgTable(
   ],
 );
 
+/** Durable debate workflow overlays added by migration 0011. */
+export const debates = pgTable(
+  "debates",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    phaseId: text("phase_id"),
+    sourceDebateId: text("source_debate_id"),
+    state: text("state").notNull().default("draft"),
+    title: text("title").notNull(),
+    question: text("question").notNull(),
+    stoppingPolicy: jsonb("stopping_policy").notNull(),
+    contentHash: text("content_hash").notNull(),
+    createdByActorType: text("created_by_actor_type").notNull(),
+    createdByActorId: text("created_by_actor_id"),
+    aggregateVersion: aggregateVersion(),
+    createdAt: createdAt(),
+    archivedAt: timestamp("archived_at", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    uniqueIndex("debates_project_id_id_unique").on(table.projectId, table.id),
+    index("debates_project_state_idx").on(table.projectId, table.state, table.createdAt),
+    foreignKey({
+      name: "debates_project_fk",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "debates_phase_scope_fk",
+      columns: [table.projectId, table.phaseId],
+      foreignColumns: [phases.projectId, phases.id],
+    }).onDelete("restrict"),
+    lazyForeignKey(
+      "debates_source_scope_fk",
+      (): AnyPgColumn[] => [table.projectId, table.sourceDebateId],
+      (): AnyPgColumn[] => [debates.projectId, debates.id],
+    ).onDelete("restrict"),
+    check("debates_state_check", sql`${table.state} IN ('draft','ready','archived')`),
+    check("debates_content_hash_check", sql`${table.contentHash} ~ '^[a-f0-9]{64}$'`),
+    check("debates_aggregate_version_check", sql`${table.aggregateVersion} > 0`),
+    check(
+      "debates_archived_shape_check",
+      sql`(${table.state} = 'archived') = (${table.archivedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+
+export const debateActors = pgTable(
+  "debate_actors",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    actorKind: text("actor_kind").notNull(),
+    roleLabel: text("role_label").notNull(),
+    displayName: text("display_name").notNull(),
+    instructions: text("instructions").notNull(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    runtime: text("runtime").notNull(),
+    position: integer("position").notNull(),
+    maxTurns: integer("max_turns").notNull(),
+    maxInputTokens: integer("max_input_tokens").notNull(),
+    maxOutputTokens: integer("max_output_tokens").notNull(),
+    budgetLimitUsd: money("budget_limit_usd"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("debate_actors_debate_id_id_unique").on(table.debateId, table.id),
+    uniqueIndex("debate_actors_position_unique").on(table.debateId, table.position),
+    uniqueIndex("debate_actors_one_judge_unique")
+      .on(table.debateId)
+      .where(sql`${table.actorKind} = 'judge'`),
+    uniqueIndex("debate_actors_one_synthesizer_unique")
+      .on(table.debateId)
+      .where(sql`${table.actorKind} = 'synthesizer'`),
+    foreignKey({
+      name: "debate_actors_debate_scope_fk",
+      columns: [table.projectId, table.debateId],
+      foreignColumns: [debates.projectId, debates.id],
+    }).onDelete("cascade"),
+    check(
+      "debate_actors_kind_check",
+      sql`${table.actorKind} IN ('participant','judge','synthesizer')`,
+    ),
+    check("debate_actors_position_check", sql`${table.position} >= 0`),
+    check(
+      "debate_actors_limits_check",
+      sql`${table.maxTurns} > 0 AND ${table.maxInputTokens} > 0 AND ${table.maxOutputTokens} > 0 AND ${table.budgetLimitUsd} >= 0`,
+    ),
+  ],
+);
+
+export const debateContexts = pgTable(
+  "debate_contexts",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    label: text("label").notNull(),
+    artifactId: text("artifact_id"),
+    inlineContent: text("inline_content"),
+    contentHash: text("content_hash").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("debate_contexts_debate_ordinal_unique").on(table.debateId, table.ordinal),
+    foreignKey({
+      name: "debate_contexts_debate_scope_fk",
+      columns: [table.projectId, table.debateId],
+      foreignColumns: [debates.projectId, debates.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "debate_contexts_artifact_scope_fk",
+      columns: [table.projectId, table.artifactId],
+      foreignColumns: [artifacts.projectId, artifacts.id],
+    }).onDelete("restrict"),
+    check("debate_contexts_hash_check", sql`${table.contentHash} ~ '^[a-f0-9]{64}$'`),
+    check(
+      "debate_contexts_source_check",
+      sql`(${table.artifactId} IS NULL) <> (${table.inlineContent} IS NULL)`,
+    ),
+    check("debate_contexts_ordinal_check", sql`${table.ordinal} >= 0`),
+  ],
+);
+
+export const debateRuns = pgTable(
+  "debate_runs",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    attempt: integer("attempt").notNull(),
+    state: text("state").notNull().default("created"),
+    lifecycleVersion: integer("lifecycle_version").notNull().default(0),
+    eventVersion: integer("event_version").notNull().default(0),
+    cursorRoundNumber: integer("cursor_round_number").notNull().default(0),
+    cursorTurnNumber: integer("cursor_turn_number").notNull().default(0),
+    stopAfter: text("stop_after").notNull().default("none"),
+    stopReason: text("stop_reason"),
+    actorExecutionSnapshots: jsonb("actor_execution_snapshots").notNull(),
+    aggregateVersion: aggregateVersion(),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
+    finishedAt: timestamp("finished_at", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("debate_runs_project_debate_id_unique").on(
+      table.projectId,
+      table.debateId,
+      table.id,
+    ),
+    uniqueIndex("debate_runs_attempt_unique").on(table.debateId, table.attempt),
+    uniqueIndex("debate_runs_one_nonterminal_unique")
+      .on(table.debateId)
+      .where(sql`${table.state} NOT IN ('completed','cancelled','failed')`),
+    index("debate_runs_project_state_idx").on(table.projectId, table.state, table.updatedAt),
+    foreignKey({
+      name: "debate_runs_debate_scope_fk",
+      columns: [table.projectId, table.debateId],
+      foreignColumns: [debates.projectId, debates.id],
+    }).onDelete("restrict"),
+    check(
+      "debate_runs_state_check",
+      sql`${table.state} IN ('created','queued','running','pausing','paused','finalizing','cancelling','completed','cancelled','failed')`,
+    ),
+    check(
+      "debate_runs_lifecycle_origin_check",
+      sql`${table.lifecycleVersion} > 0 OR ${table.state} = 'created'`,
+    ),
+    check(
+      "debate_runs_cursor_check",
+      sql`${table.eventVersion} >= 0 AND ${table.cursorRoundNumber} >= 0 AND ${table.cursorTurnNumber} >= 0`,
+    ),
+    check("debate_runs_stop_after_check", sql`${table.stopAfter} IN ('none','turn','round')`),
+  ],
+);
+
+export const debateRounds = pgTable(
+  "debate_rounds",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    debateRunId: text("debate_run_id").notNull(),
+    roundNumber: integer("round_number").notNull(),
+    state: text("state").notNull().default("pending"),
+    consensusReported: boolean("consensus_reported").notNull().default(false),
+    materialChange: boolean("material_change"),
+    unresolvedDisagreementFingerprint: text("unresolved_disagreement_fingerprint"),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
+    finishedAt: timestamp("finished_at", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("debate_rounds_run_round_unique").on(table.debateRunId, table.roundNumber),
+    uniqueIndex("debate_rounds_run_id_id_unique").on(table.debateRunId, table.id),
+    foreignKey({
+      name: "debate_rounds_run_scope_fk",
+      columns: [table.projectId, table.debateId, table.debateRunId],
+      foreignColumns: [debateRuns.projectId, debateRuns.debateId, debateRuns.id],
+    }).onDelete("cascade"),
+    check(
+      "debate_rounds_state_check",
+      sql`${table.state} IN ('pending','active','completed','cancelled','failed')`,
+    ),
+    check("debate_rounds_number_check", sql`${table.roundNumber} > 0`),
+  ],
+);
+
+export const debateTurns = pgTable(
+  "debate_turns",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    debateRunId: text("debate_run_id").notNull(),
+    roundId: text("round_id").notNull(),
+    turnNumber: integer("turn_number").notNull(),
+    actorId: text("actor_id").notNull(),
+    state: text("state").notNull().default("pending"),
+    designatedAttemptId: text("designated_attempt_id"),
+    promptHash: text("prompt_hash").notNull(),
+    outputMessageId: text("output_message_id"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    uniqueIndex("debate_turns_run_turn_unique").on(table.debateRunId, table.turnNumber),
+    uniqueIndex("debate_turns_run_id_id_unique").on(table.debateRunId, table.id),
+    foreignKey({
+      name: "debate_turns_run_scope_fk",
+      columns: [table.projectId, table.debateId, table.debateRunId],
+      foreignColumns: [debateRuns.projectId, debateRuns.debateId, debateRuns.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "debate_turns_round_scope_fk",
+      columns: [table.debateRunId, table.roundId],
+      foreignColumns: [debateRounds.debateRunId, debateRounds.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "debate_turns_actor_scope_fk",
+      columns: [table.debateId, table.actorId],
+      foreignColumns: [debateActors.debateId, debateActors.id],
+    }).onDelete("restrict"),
+    check(
+      "debate_turns_state_check",
+      sql`${table.state} IN ('pending','queued','leased','running','completed','failed','cancelled','expired')`,
+    ),
+    check("debate_turns_number_check", sql`${table.turnNumber} > 0`),
+    check("debate_turns_hash_check", sql`${table.promptHash} ~ '^[a-f0-9]{64}$'`),
+    lazyForeignKey(
+      "debate_turns_designated_attempt_scope_fk",
+      (): AnyPgColumn[] => [table.id, table.designatedAttemptId],
+      (): AnyPgColumn[] => [debateTurnAttempts.turnId, debateTurnAttempts.id],
+    ).onDelete("restrict"),
+  ],
+);
+
+export const debateTurnAttempts = pgTable(
+  "debate_turn_attempts",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    debateRunId: text("debate_run_id").notNull(),
+    turnId: text("turn_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    state: text("state").notNull().default("pending"),
+    isDesignated: boolean("is_designated").notNull().default(true),
+    providerExecutionId: text("provider_execution_id"),
+    leaseToken: text("lease_token"),
+    leasedUntil: timestamp("leased_until", { withTimezone: true, mode: "string" }),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
+    finishedAt: timestamp("finished_at", { withTimezone: true, mode: "string" }),
+    failureCode: text("failure_code"),
+    failureDetail: text("failure_detail"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("debate_turn_attempts_turn_attempt_unique").on(table.turnId, table.attemptNumber),
+    uniqueIndex("debate_turn_attempts_turn_id_id_unique").on(table.turnId, table.id),
+    uniqueIndex("debate_turn_attempts_project_run_id_unique").on(
+      table.projectId,
+      table.debateId,
+      table.debateRunId,
+      table.id,
+    ),
+    uniqueIndex("debate_turn_attempts_designated_unique")
+      .on(table.turnId)
+      .where(sql`${table.isDesignated} = true`),
+    foreignKey({
+      name: "debate_turn_attempts_turn_scope_fk",
+      columns: [table.debateRunId, table.turnId],
+      foreignColumns: [debateTurns.debateRunId, debateTurns.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "debate_turn_attempts_run_scope_fk",
+      columns: [table.projectId, table.debateId, table.debateRunId],
+      foreignColumns: [debateRuns.projectId, debateRuns.debateId, debateRuns.id],
+    }).onDelete("cascade"),
+    check(
+      "debate_turn_attempts_state_check",
+      sql`${table.state} IN ('pending','queued','leased','running','completed','failed','cancelled','expired')`,
+    ),
+    check("debate_turn_attempts_number_check", sql`${table.attemptNumber} > 0`),
+  ],
+);
+
+export const debateMessages = pgTable(
+  "debate_messages",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    debateRunId: text("debate_run_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    messageKind: text("message_kind").notNull(),
+    actorSnapshot: jsonb("actor_snapshot"),
+    turnId: text("turn_id"),
+    turnAttemptId: text("turn_attempt_id"),
+    supersedesMessageId: text("supersedes_message_id"),
+    structuredOutput: jsonb("structured_output"),
+    structuredOutputHash: text("structured_output_hash"),
+    interventionKind: text("intervention_kind"),
+    interventionTargetActorId: text("intervention_target_actor_id"),
+    interventionApplyAt: text("intervention_apply_at"),
+    interventionAppliesAfterRound: integer("intervention_applies_after_round"),
+    interventionAppliesAfterTurn: integer("intervention_applies_after_turn"),
+    content: text("content").notNull(),
+    contentHash: text("content_hash").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("debate_messages_run_sequence_unique").on(table.debateRunId, table.sequence),
+    uniqueIndex("debate_messages_run_id_id_unique").on(table.debateRunId, table.id),
+    foreignKey({
+      name: "debate_messages_run_scope_fk",
+      columns: [table.projectId, table.debateId, table.debateRunId],
+      foreignColumns: [debateRuns.projectId, debateRuns.debateId, debateRuns.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "debate_messages_turn_scope_fk",
+      columns: [table.debateRunId, table.turnId],
+      foreignColumns: [debateTurns.debateRunId, debateTurns.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "debate_messages_attempt_scope_fk",
+      columns: [table.turnId, table.turnAttemptId],
+      foreignColumns: [debateTurnAttempts.turnId, debateTurnAttempts.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "debate_messages_supersedes_scope_fk",
+      columns: [table.debateRunId, table.supersedesMessageId],
+      foreignColumns: [table.debateRunId, table.id],
+    }).onDelete("restrict"),
+    check(
+      "debate_messages_kind_check",
+      sql`${table.messageKind} IN ('system','participant','judge','synthesizer','human')`,
+    ),
+    check("debate_messages_sequence_check", sql`${table.sequence} > 0`),
+    check("debate_messages_hash_check", sql`${table.contentHash} ~ '^[a-f0-9]{64}$'`),
+    check(
+      "debate_messages_structured_hash_check",
+      sql`${table.structuredOutputHash} IS NULL OR ${table.structuredOutputHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "debate_messages_structured_shape_check",
+      sql`(${table.structuredOutput} IS NULL) = (${table.structuredOutputHash} IS NULL)
+        AND (${table.messageKind} IN ('participant','judge','synthesizer')) = (${table.structuredOutput} IS NOT NULL)`,
+    ),
+    check(
+      "debate_messages_intervention_kind_check",
+      sql`${table.interventionKind} IS NULL OR ${table.interventionKind} IN ('direction','statement')`,
+    ),
+    check(
+      "debate_messages_intervention_apply_at_check",
+      sql`${table.interventionApplyAt} IS NULL OR ${table.interventionApplyAt} IN ('next_turn','next_round')`,
+    ),
+    check(
+      "debate_messages_intervention_boundary_check",
+      sql`${table.interventionAppliesAfterRound} IS NULL OR ${table.interventionAppliesAfterRound} >= 0`,
+    ),
+    check(
+      "debate_messages_intervention_turn_boundary_check",
+      sql`${table.interventionAppliesAfterTurn} IS NULL OR ${table.interventionAppliesAfterTurn} >= 0`,
+    ),
+    check(
+      "debate_messages_intervention_shape_check",
+      sql`(${table.messageKind} = 'human') = (${table.interventionKind} IS NOT NULL)
+        AND (${table.interventionKind} IS NULL) = (${table.interventionTargetActorId} IS NULL
+          AND ${table.interventionApplyAt} IS NULL
+          AND ${table.interventionAppliesAfterRound} IS NULL
+          AND ${table.interventionAppliesAfterTurn} IS NULL)
+        AND (${table.interventionKind} IS NULL OR (${table.interventionApplyAt} IS NOT NULL
+          AND ${table.interventionAppliesAfterRound} IS NOT NULL
+          AND ${table.interventionAppliesAfterTurn} IS NOT NULL))`,
+    ),
+  ],
+);
+
+export const debateFindings = pgTable(
+  "debate_findings",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    debateRunId: text("debate_run_id").notNull(),
+    messageId: text("message_id").notNull(),
+    findingKey: text("finding_key").notNull(),
+    severity: text("severity").notNull(),
+    finding: text("finding").notNull(),
+    recommendation: text("recommendation").notNull(),
+    disposition: text("disposition").notNull().default("open"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("debate_findings_message_key_unique").on(table.messageId, table.findingKey),
+    foreignKey({
+      name: "debate_findings_message_scope_fk",
+      columns: [table.debateRunId, table.messageId],
+      foreignColumns: [debateMessages.debateRunId, debateMessages.id],
+    }).onDelete("restrict"),
+    check(
+      "debate_findings_severity_check",
+      sql`${table.severity} IN ('must_fix','should_fix','suggestion')`,
+    ),
+    check(
+      "debate_findings_disposition_check",
+      sql`${table.disposition} IN ('open','accepted','rejected','deferred','resolved')`,
+    ),
+  ],
+);
+
+export const debateRevisions = pgTable(
+  "debate_revisions",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    debateRunId: text("debate_run_id").notNull(),
+    revisionNumber: integer("revision_number").notNull(),
+    revisionKind: text("revision_kind").notNull(),
+    supersedesRevisionId: text("supersedes_revision_id"),
+    rationale: text("rationale").notNull(),
+    payload: jsonb("payload").notNull().default({}),
+    createdByActorType: text("created_by_actor_type").notNull(),
+    createdByActorId: text("created_by_actor_id"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("debate_revisions_run_number_unique").on(table.debateRunId, table.revisionNumber),
+    foreignKey({
+      name: "debate_revisions_run_scope_fk",
+      columns: [table.projectId, table.debateId, table.debateRunId],
+      foreignColumns: [debateRuns.projectId, debateRuns.debateId, debateRuns.id],
+    }).onDelete("cascade"),
+    lazyForeignKey(
+      "debate_revisions_supersedes_fk",
+      (): AnyPgColumn[] => [table.supersedesRevisionId],
+      (): AnyPgColumn[] => [debateRevisions.id],
+    ).onDelete("restrict"),
+    check(
+      "debate_revisions_kind_check",
+      sql`${table.revisionKind} IN ('finding_disposition','judgment','final_output','correction')`,
+    ),
+    check("debate_revisions_number_check", sql`${table.revisionNumber} > 0`),
+  ],
+);
+
+export const debateJudgments = pgTable(
+  "debate_judgments",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    debateRunId: text("debate_run_id").notNull(),
+    revisionId: text("revision_id"),
+    judgeActorId: text("judge_actor_id"),
+    conclusion: text("conclusion").notNull(),
+    rationale: text("rationale").notNull(),
+    evidence: jsonb("evidence").notNull().default([]),
+    contentHash: text("content_hash").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    foreignKey({
+      name: "debate_judgments_run_scope_fk",
+      columns: [table.projectId, table.debateId, table.debateRunId],
+      foreignColumns: [debateRuns.projectId, debateRuns.debateId, debateRuns.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "debate_judgments_revision_fk",
+      columns: [table.revisionId],
+      foreignColumns: [debateRevisions.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "debate_judgments_actor_fk",
+      columns: [table.debateId, table.judgeActorId],
+      foreignColumns: [debateActors.debateId, debateActors.id],
+    }).onDelete("restrict"),
+    check("debate_judgments_hash_check", sql`${table.contentHash} ~ '^[a-f0-9]{64}$'`),
+  ],
+);
+
+export const debateFinalOutputs = pgTable(
+  "debate_final_outputs",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    debateRunId: text("debate_run_id").notNull(),
+    revisionId: text("revision_id"),
+    judgmentId: text("judgment_id"),
+    content: text("content").notNull(),
+    contentHash: text("content_hash").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("debate_final_outputs_one_current_run_unique")
+      .on(table.debateRunId)
+      .where(sql`${table.revisionId} IS NULL`),
+    foreignKey({
+      name: "debate_final_outputs_run_scope_fk",
+      columns: [table.projectId, table.debateId, table.debateRunId],
+      foreignColumns: [debateRuns.projectId, debateRuns.debateId, debateRuns.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "debate_final_outputs_revision_fk",
+      columns: [table.revisionId],
+      foreignColumns: [debateRevisions.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "debate_final_outputs_judgment_fk",
+      columns: [table.judgmentId],
+      foreignColumns: [debateJudgments.id],
+    }).onDelete("restrict"),
+    check("debate_final_outputs_hash_check", sql`${table.contentHash} ~ '^[a-f0-9]{64}$'`),
+  ],
+);
+
+export const debateJobs = pgTable(
+  "debate_jobs",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    debateRunId: text("debate_run_id").notNull(),
+    turnAttemptId: text("turn_attempt_id").notNull(),
+    jobKind: text("job_kind").notNull(),
+    state: text("state").notNull().default("queued"),
+    isDesignated: boolean("is_designated").notNull().default(true),
+    deliveryAttempt: integer("delivery_attempt").notNull().default(1),
+    idempotencyKey: text("idempotency_key").notNull(),
+    leaseToken: text("lease_token"),
+    leasedUntil: timestamp("leased_until", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("debate_jobs_attempt_kind_unique").on(table.turnAttemptId, table.jobKind),
+    uniqueIndex("debate_jobs_idempotency_unique").on(table.idempotencyKey),
+    uniqueIndex("debate_jobs_designated_attempt_unique")
+      .on(table.turnAttemptId)
+      .where(sql`${table.isDesignated} = true`),
+    index("debate_jobs_claim_idx").on(table.state, table.leasedUntil, table.createdAt),
+    foreignKey({
+      name: "debate_jobs_attempt_fk",
+      columns: [table.projectId, table.debateId, table.debateRunId, table.turnAttemptId],
+      foreignColumns: [
+        debateTurnAttempts.projectId,
+        debateTurnAttempts.debateId,
+        debateTurnAttempts.debateRunId,
+        debateTurnAttempts.id,
+      ],
+    }).onDelete("cascade"),
+    check("debate_jobs_kind_check", sql`${table.jobKind} = 'execute_turn'`),
+    check(
+      "debate_jobs_state_check",
+      sql`${table.state} IN ('queued','leased','succeeded','failed','cancelled','dead_letter')`,
+    ),
+    check("debate_jobs_delivery_attempt_check", sql`${table.deliveryAttempt} > 0`),
+  ],
+);
+
+export const debateReservations = pgTable(
+  "debate_reservations",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    debateRunId: text("debate_run_id").notNull(),
+    turnAttemptId: text("turn_attempt_id").notNull(),
+    amountUsd: money("amount_usd"),
+    settledUsd: money("settled_usd"),
+    releasedUsd: money("released_usd"),
+    retainedUsd: money("retained_usd"),
+    status: text("status").notNull().default("active"),
+    resolutionOutcome: text("resolution_outcome"),
+    version: integer("version").notNull().default(1),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("debate_reservations_attempt_unique").on(table.turnAttemptId),
+    index("debate_reservations_status_expiry_idx").on(table.status, table.expiresAt),
+    foreignKey({
+      name: "debate_reservations_attempt_fk",
+      columns: [table.projectId, table.debateId, table.debateRunId, table.turnAttemptId],
+      foreignColumns: [
+        debateTurnAttempts.projectId,
+        debateTurnAttempts.debateId,
+        debateTurnAttempts.debateRunId,
+        debateTurnAttempts.id,
+      ],
+    }).onDelete("cascade"),
+    check(
+      "debate_reservations_status_check",
+      sql`${table.status} IN ('active','retained_ambiguous','settled','released')`,
+    ),
+    check(
+      "debate_reservations_balance_check",
+      sql`(${table.status} = 'active' AND ${table.settledUsd} = 0 AND ${table.releasedUsd} = 0 AND ${table.retainedUsd} = 0) OR (${table.status} <> 'active' AND ${table.settledUsd} + ${table.releasedUsd} + ${table.retainedUsd} = ${table.amountUsd})`,
+    ),
+  ],
+);
+
+export const debateUsageEvents = pgTable(
+  "debate_usage_events",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    debateRunId: text("debate_run_id").notNull(),
+    turnAttemptId: text("turn_attempt_id").notNull(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    runtime: text("runtime").notNull(),
+    pricingSnapshot: jsonb("pricing_snapshot").notNull(),
+    inputTokens: bigint("input_tokens", { mode: "number" }).notNull().default(0),
+    outputTokens: bigint("output_tokens", { mode: "number" }).notNull().default(0),
+    costUsd: money("cost_usd"),
+    latencyMs: integer("latency_ms").notNull().default(0),
+    occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "string" }).notNull(),
+  },
+  (table) => [
+    index("debate_usage_events_run_time_idx").on(table.debateRunId, table.occurredAt),
+    foreignKey({
+      name: "debate_usage_events_attempt_fk",
+      columns: [table.projectId, table.debateId, table.debateRunId, table.turnAttemptId],
+      foreignColumns: [
+        debateTurnAttempts.projectId,
+        debateTurnAttempts.debateId,
+        debateTurnAttempts.debateRunId,
+        debateTurnAttempts.id,
+      ],
+    }).onDelete("cascade"),
+    check(
+      "debate_usage_events_nonnegative_check",
+      sql`${table.inputTokens} >= 0 AND ${table.outputTokens} >= 0 AND ${table.costUsd} >= 0 AND ${table.latencyMs} >= 0`,
+    ),
+    check(
+      "debate_usage_events_pricing_snapshot_check",
+      sql`jsonb_typeof(${table.pricingSnapshot}) = 'object'`,
+    ),
+  ],
+);
+
+export const debateEvents = pgTable(
+  "debate_events",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    debateId: text("debate_id").notNull(),
+    debateRunId: text("debate_run_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    eventType: text("event_type").notNull(),
+    lifecycleVersion: integer("lifecycle_version"),
+    actorType: text("actor_type").notNull(),
+    actorId: text("actor_id"),
+    correlationId: text("correlation_id").notNull(),
+    causationId: text("causation_id"),
+    payload: jsonb("payload").notNull().default({}),
+    occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "string" }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("debate_events_run_sequence_unique").on(table.debateRunId, table.sequence),
+    index("debate_events_project_time_idx").on(table.projectId, table.occurredAt),
+    foreignKey({
+      name: "debate_events_run_scope_fk",
+      columns: [table.projectId, table.debateId, table.debateRunId],
+      foreignColumns: [debateRuns.projectId, debateRuns.debateId, debateRuns.id],
+    }).onDelete("cascade"),
+    check("debate_events_sequence_check", sql`${table.sequence} > 0`),
+    check(
+      "debate_events_actor_check",
+      sql`${table.actorType} IN ('human','coordinator','agent','runner','system','legacy')`,
+    ),
+  ],
+);
+
 export const phase2PreservationSchema = {
   archiveEncryptionKeyRegistry,
   credentialHmacKeyRegistry,
@@ -2736,4 +3459,20 @@ export const phase2PreservationSchema = {
   migrationRollbackApprovals,
   legacyApprovalEvidence,
   attentionItemStates,
+  debates,
+  debateActors,
+  debateContexts,
+  debateRuns,
+  debateRounds,
+  debateTurns,
+  debateTurnAttempts,
+  debateMessages,
+  debateFindings,
+  debateRevisions,
+  debateJudgments,
+  debateFinalOutputs,
+  debateJobs,
+  debateReservations,
+  debateUsageEvents,
+  debateEvents,
 };
