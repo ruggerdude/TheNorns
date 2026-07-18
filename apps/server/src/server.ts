@@ -223,6 +223,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       : undefined);
   const SESSION_COOKIE = "norns_session";
   const CSRF_COOKIE = "norns_csrf";
+  const GITHUB_MANIFEST_STATE_COOKIE = "norns_github_manifest_state";
   const RECENT_AUTH_MS = 15 * 60_000;
 
   const cookies = (req: FastifyRequest): Map<string, string> => {
@@ -257,6 +258,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     ]);
     reply.header("Cache-Control", "no-store");
   };
+  const manifestStateCookie = (state: string): string =>
+    `${GITHUB_MANIFEST_STATE_COOKIE}=${encodeURIComponent(state)}; Max-Age=600; Path=/api/integrations/github/manifest/callback; HttpOnly; SameSite=Lax${secureCookies ? "; Secure" : ""}`;
+  const clearManifestStateCookie = (reply: FastifyReply): FastifyReply =>
+    reply.header(
+      "Set-Cookie",
+      `${GITHUB_MANIFEST_STATE_COOKIE}=; Max-Age=0; Path=/api/integrations/github/manifest/callback; HttpOnly; SameSite=Lax${secureCookies ? "; Secure" : ""}`,
+    );
   const externalOrigin = (req: FastifyRequest): string => {
     if (configuredOrigin) {
       const parsed = new URL(configuredOrigin);
@@ -1107,6 +1115,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       const cspNonce = nonce();
       reply
         .header("Cache-Control", "no-store")
+        .header("Set-Cookie", manifestStateCookie(registration.state))
         .header(
           "Content-Security-Policy",
           `default-src 'none'; form-action https://github.com; script-src 'nonce-${cspNonce}'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'`,
@@ -1119,7 +1128,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 </head><body><p>Opening GitHub to create your preconfigured App…</p>
 <form method="post" action="${escapeHtml(registration.action)}">
 <input type="hidden" name="manifest" value="${escapeHtml(registration.manifest)}">
-<input type="hidden" name="state" value="${escapeHtml(registration.state)}">
 <noscript><button type="submit">Continue to GitHub</button></noscript>
 </form><script nonce="${cspNonce}">document.forms[0].submit()</script></body></html>`);
     } catch (error) {
@@ -1133,21 +1141,25 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     error: z.string().optional(),
   });
   app.get("/api/integrations/github/manifest/callback", async (req, reply) => {
+    clearManifestStateCookie(reply);
     if (!github)
       return reply.redirect(`${externalOrigin(req)}/?settings=connections&github=disabled`);
     const query = GitHubManifestCallback.safeParse(req.query);
-    if (!query.success || query.data.error || !query.data.code || !query.data.state) {
+    const state = query.success
+      ? (query.data.state ?? cookies(req).get(GITHUB_MANIFEST_STATE_COOKIE))
+      : undefined;
+    if (!query.success || query.data.error || !query.data.code || !state) {
       return reply.redirect(`${externalOrigin(req)}/?settings=connections&github=denied`);
     }
     try {
-      const stateUserId = github.manifestUserId(query.data.state);
+      const stateUserId = github.manifestUserId(state);
       const currentUser = await resolveUser(req);
       if (currentUser && currentUser.id !== stateUserId) {
         return reply.redirect(
           `${externalOrigin(req)}/?settings=connections&github=invalid_oauth_state`,
         );
       }
-      await github.completeManifest(stateUserId, query.data.code, query.data.state);
+      await github.completeManifest(stateUserId, query.data.code, state);
       stores.audit(
         currentUser?.email ?? stateUserId,
         "integration.github.app_created",

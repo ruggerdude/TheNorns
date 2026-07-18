@@ -155,6 +155,12 @@ describe("GitHub App manifest setup routes", () => {
     expect(response.body).toContain('name="manifest"');
     expect(response.body).toContain("&quot;The Norns&quot;");
     expect(response.body).not.toContain('<input type="hidden" name="manifest" value="{"');
+    const manifestCookie = Array.isArray(response.headers["set-cookie"])
+      ? response.headers["set-cookie"][0]
+      : response.headers["set-cookie"];
+    expect(manifestCookie).toContain("norns_github_manifest_state=signed-state");
+    expect(manifestCookie).toContain("HttpOnly");
+    expect(manifestCookie).toContain("SameSite=Lax");
     expect(manifestRegistration).toHaveBeenCalledWith(expect.any(String), "norns-org");
   });
 
@@ -168,16 +174,17 @@ describe("GitHub App manifest setup routes", () => {
       ),
     } as unknown as GitHubIntegrationService;
     const s = await start({ github });
-    const response = await inject(
-      s,
-      "GET",
-      "/api/integrations/github/manifest/callback?code=manifest-code&state=signed-state",
-    );
+    const response = (await s.app.inject({
+      method: "GET",
+      url: "/api/integrations/github/manifest/callback?code=manifest-code",
+      headers: { cookie: "norns_github_manifest_state=signed-state" },
+    })) as unknown as InjectedResponse;
     expect(response.statusCode).toBe(302);
     expect(response.headers.location).toBe(
       "https://github.com/login/oauth/authorize?client_id=Iv1.guided",
     );
     expect(completeManifest).toHaveBeenCalledWith("admin-1", "manifest-code", "signed-state");
+    expect(response.headers["set-cookie"]).toContain("Max-Age=0");
   });
 });
 
