@@ -252,19 +252,6 @@ export const V2CreateDebateCommand = V2CreateDebateCommandObject.superRefine((co
 );
 export type V2CreateDebateCommandT = z.infer<typeof V2CreateDebateCommand>;
 
-const V2UpdateDebateCommandObject = V2ApplicationCommandBase.extend({
-  kind: z.literal("update_debate"),
-  command_family: z.literal("debate"),
-  project_id: V2EntityId,
-  debate_id: V2EntityId,
-  expected_debate_version: V2PositiveVersion,
-  ...V2DebateDefinitionFields,
-}).strict();
-export const V2UpdateDebateCommand = V2UpdateDebateCommandObject.superRefine((command, ctx) =>
-  validateDebateActors(command.actors, ctx),
-);
-export type V2UpdateDebateCommandT = z.infer<typeof V2UpdateDebateCommand>;
-
 export const V2StartDebateRunCommand = V2ApplicationCommandBase.extend({
   kind: z.literal("start_debate_run"),
   command_family: z.literal("debate"),
@@ -318,13 +305,12 @@ export const V2ApplicationCommand = z
     V2ResolveDecisionPointCommand,
     V2RecordHumanDirectionCommand,
     V2CreateDebateCommandObject,
-    V2UpdateDebateCommandObject,
     V2StartDebateRunCommand,
     V2ControlDebateRunCommand,
     V2InterveneDebateRunCommand,
   ])
   .superRefine((command, ctx) => {
-    if (command.kind === "create_debate" || command.kind === "update_debate") {
+    if (command.kind === "create_debate") {
       validateDebateActors(command.actors, ctx);
     }
   });

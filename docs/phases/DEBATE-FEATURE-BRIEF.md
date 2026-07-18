@@ -45,12 +45,19 @@ These are build agents only. Runtime debate actors remain user-selected records.
 - The MVP uses persisted actor-order round robin and configured OpenAI/Anthropic provider APIs;
   explicit schedules, in-place definition editing, and runner-backed Codex/Claude Code turns are
   truthful follow-on capabilities, not nonfunctional UI choices.
+- Inline text is the only executable context source in the MVP. Artifact-backed context is rejected
+  until the content-addressed resolver and credential-isolated fetch path are implemented.
+- Deployments must set `NORNS_DEBATE_ALLOWED_MODELS` to comma-separated exact provider/model pairs
+  (for example `openai/gpt-5.6-terra,anthropic/claude-sonnet-5`). A provider key alone exposes no
+  model; an absent or malformed allowlist fails closed with an empty debate catalog.
 - Durable round/turn state and ordered transcript replay after restart.
 - Fixed and conditional stopping policies enforced with recorded evidence.
 - Pause, resume, stop, cancel, rerun, intervention, retry, and dead-letter behavior.
 - Budget reserved before dispatch and reconciled after every terminal outcome.
 - Exact usage, latency, tool/provider identifiers when available, and content hashes retained.
 - Browser authorization and project isolation verified.
+- Browser E2E covers create, start, controls, intervention, replay, terminal output, and rerun, and
+  runs in the repository CI command.
 - Full repository CI and independent review green before merge.
 
 ## Explicit non-goals

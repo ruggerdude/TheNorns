@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   V2Actor,
+  V2ActorType,
   V2EntityId,
   V2EntityRef,
   V2EvidenceRef,
@@ -621,6 +622,37 @@ export const V2DebateUsageEvent = z
   })
   .strict();
 export type V2DebateUsageEventT = z.infer<typeof V2DebateUsageEvent>;
+
+/**
+ * Frozen event-replay DTO. `content_hash` addresses the canonical immutable
+ * event envelope (excluding the hash itself), so clients can verify replayed
+ * pages independently of transport pagination.
+ */
+export const V2DebateEvent = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    debate_id: V2EntityId,
+    debate_run_id: V2EntityId,
+    sequence: z.number().int().positive(),
+    type: V2NonEmptyString,
+    round_number: z.number().int().nonnegative().nullable(),
+    turn_number: z.number().int().nonnegative().nullable(),
+    lifecycle_version: z.number().int().nonnegative().nullable(),
+    actor_type: V2ActorType,
+    actor_id: V2EntityId.nullable(),
+    correlation_id: V2EntityId,
+    causation_id: V2EntityId.nullable(),
+    actor_snapshot: z.record(z.unknown()).nullable(),
+    payload: z.record(z.unknown()),
+    artifact_ids: z.array(V2EntityId),
+    usage: V2DebateUsage.nullable(),
+    occurred_at: V2IsoDateTime,
+    content_hash: V2Sha256Hex,
+  })
+  .strict();
+export type V2DebateEventT = z.infer<typeof V2DebateEvent>;
 
 /** Generic references accepted by debate-facing DTOs and evidence. */
 export const V2DebateEntityRef = V2EntityRef;

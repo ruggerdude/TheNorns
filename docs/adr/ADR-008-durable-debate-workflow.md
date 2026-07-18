@@ -47,6 +47,11 @@ adapter can produce the same normalized result without changing the debate domai
 debate turns are not exposed until that durable command/result bridge is implemented and reviewed;
 provider-specific response fields never enter the debate domain.
 
+The first release accepts inline text context only. Artifact-backed context is rejected at the API
+boundary until a project-scoped resolver can fetch by immutable content hash, verify the bytes and
+media type, and stage content without exposing storage credentials. This is a fail-closed scope
+boundary, not a partially implemented context option.
+
 ### 3. Definition and run state machines
 
 Debate definition states:
@@ -78,7 +83,8 @@ Terminal run states cannot be reopened. Only one nonterminal run may exist per D
 ### 4. Transcript and decisions are append-only
 
 Debate events and messages have a contiguous per-run sequence, correlation and causation IDs,
-actor snapshot, content hash, and timestamp. Findings, judgments, and final outputs are immutable;
+actor snapshot, content hash, and timestamp. The replay API returns a frozen V2 event envelope and
+a SHA-256 hash of its canonical immutable fields. Findings, judgments, and final outputs are immutable;
 corrections use supersession links. The current DebateRun row is an operational projection of this
 history and its `event_version` is transactionally advanced with every lifecycle event.
 
@@ -130,4 +136,6 @@ and applies at the next turn or round; it never claims to alter a model call alr
   separately gated extension with its own credential and trust boundary.
 - The MVP schedule is persisted actor-order round robin. Explicit sequencing and in-place editing
   are not exposed until their domain contracts are implemented; executed definitions are cloned.
+- Debate context is inline text for this release; content-addressed artifact resolution remains a
+  separately gated extension.
 - Local-folder work remains a separate follow-on change after the debate feature is merged.

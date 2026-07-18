@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   V2DebateActor,
   V2DebateActorExecutionSnapshot,
+  V2DebateEvent,
   V2DebateMessage,
   V2DebateStoppingPolicy,
   V2DebateTurnAttempt,
@@ -190,5 +191,32 @@ describe("V2 debate contracts", () => {
         updated_at: "2026-07-18T12:00:00.000Z",
       }).success,
     ).toBe(false);
+  });
+
+  it("freezes the content-addressed event replay envelope", () => {
+    expect(
+      V2DebateEvent.safeParse({
+        schema_version: 2,
+        id: "event-1",
+        project_id: "project-1",
+        debate_id: "debate-1",
+        debate_run_id: "run-1",
+        sequence: 1,
+        type: "debate_run_queued",
+        round_number: null,
+        turn_number: null,
+        lifecycle_version: 1,
+        actor_type: "human",
+        actor_id: "user-1",
+        correlation_id: "correlation-1",
+        causation_id: null,
+        actor_snapshot: null,
+        payload: {},
+        artifact_ids: [],
+        usage: null,
+        occurred_at: "2026-07-18T12:00:00.000Z",
+        content_hash: "a".repeat(64),
+      }).success,
+    ).toBe(true);
   });
 });

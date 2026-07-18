@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import type {
-  V2ApplicationCommandT,
-  V2ControlDebateRunCommandT,
-  V2CreateDebateCommandT,
-  V2DebateActorExecutionSnapshotT,
-  V2InterveneDebateRunCommandT,
-  V2StartDebateRunCommandT,
+import {
+  type V2ApplicationCommandT,
+  type V2ControlDebateRunCommandT,
+  type V2CreateDebateCommandT,
+  type V2DebateActorExecutionSnapshotT,
+  V2DebateEvent,
+  type V2InterveneDebateRunCommandT,
+  type V2StartDebateRunCommandT,
 } from "@norns/contracts";
 import { newId } from "../ids.js";
 import {
@@ -111,9 +112,16 @@ interface DebateRunRow {
 }
 
 export interface DebateEventDto {
+  schema_version: 2;
   id: string;
+  project_id: string;
+  debate_id: string;
+  debate_run_id: string;
   sequence: number;
   type: string;
+  lifecycle_version: number | null;
+  correlation_id: string;
+  causation_id: string | null;
   round_number: number | null;
   turn_number: number | null;
   actor_snapshot: Record<string, unknown> | null;
@@ -128,6 +136,7 @@ export interface DebateEventDto {
     latency_ms: number;
   } | null;
   occurred_at: string;
+  content_hash: string;
 }
 
 export interface DebateDto {
@@ -1172,15 +1181,24 @@ export class DebateService {
   ): Promise<{ events: DebateEventDto[]; latest_version: number; next_after_version: number }> {
     return this.transactions.transaction(async (tx) => {
       const rows = await tx.query<{
+        schema_version: number;
         id: string;
+        project_id: string;
+        debate_id: string;
+        debate_run_id: string;
         sequence: number;
         event_type: string;
+        lifecycle_version: number | null;
         actor_type: string;
         actor_id: string | null;
+        correlation_id: string;
+        causation_id: string | null;
         payload: Record<string, unknown>;
         occurred_at: string | Date;
       }>(
-        `SELECT id, sequence, event_type, actor_type, actor_id, payload, occurred_at FROM debate_events
+        `SELECT schema_version, id, project_id, debate_id, debate_run_id, sequence, event_type,
+                lifecycle_version, actor_type, actor_id, correlation_id, causation_id,
+                payload, occurred_at FROM debate_events
          WHERE project_id = $1 AND debate_id = $2 AND debate_run_id = $3 AND sequence > $4
          ORDER BY sequence ASC LIMIT 500`,
         [projectId, debateId, runId, afterVersion],
@@ -1197,10 +1215,17 @@ export class DebateService {
         const attemptId =
           typeof row.payload.turn_attempt_id === "string" ? row.payload.turn_attempt_id : null;
         const rowUsage = attemptId ? usageByAttempt.get(attemptId) : undefined;
-        return {
+        const event = {
+          schema_version: 2 as const,
           id: row.id,
+          project_id: row.project_id,
+          debate_id: row.debate_id,
+          debate_run_id: row.debate_run_id,
           sequence: Number(row.sequence),
           type: row.event_type,
+          lifecycle_version: row.lifecycle_version,
+          correlation_id: row.correlation_id,
+          causation_id: row.causation_id,
           round_number:
             typeof row.payload.round_number === "number" ? row.payload.round_number : null,
           turn_number: typeof row.payload.turn_number === "number" ? row.payload.turn_number : null,
@@ -1224,6 +1249,7 @@ export class DebateService {
             : null,
           occurred_at: iso(row.occurred_at) ?? this.now().toISOString(),
         };
+        return V2DebateEvent.parse({ ...event, content_hash: sha256(canonical(event)) });
       });
       const runVersion = await tx.query<{ event_version: number | string }>(
         "SELECT event_version FROM debate_runs WHERE id = $1 AND project_id = $2 AND debate_id = $3",
