@@ -10,3 +10,4 @@ export * from "./budget.js";
 export * from "./events.js";
 export * from "./attention.js";
 export * from "./coordination.js";
+export * from "./debate.js";

@@ -3,6 +3,7 @@ import { getTableName } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  DEBATE_WORKFLOW_MIGRATION_NAME,
   GITHUB_APP_MANIFEST_MIGRATION_NAME,
   PHASE1_V2_MIGRATION_NAME,
   PHASE2_PRESERVATION_MIGRATION_NAME,
@@ -188,6 +189,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       { name: WORKSPACE_CONNECTIONS_MIGRATION_NAME, applied: false },
       { name: QC_COMMUNICATION_MIGRATION_NAME, applied: false },
       { name: GITHUB_APP_MANIFEST_MIGRATION_NAME, applied: false },
+      { name: DEBATE_WORKFLOW_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -203,6 +205,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       WORKSPACE_CONNECTIONS_MIGRATION_NAME,
       QC_COMMUNICATION_MIGRATION_NAME,
       GITHUB_APP_MANIFEST_MIGRATION_NAME,
+      DEBATE_WORKFLOW_MIGRATION_NAME,
     ]);
   });
 
