@@ -39,6 +39,14 @@ const repository = {
   updated_at: "2026-07-16T20:00:00Z",
 };
 
+const runner = {
+  runner_id: "runner-local-1",
+  generation: 4,
+  connected: true,
+  last_seen_at: "2026-07-18T15:00:00Z",
+  workspace_picker_ready: true,
+};
+
 describe("unified project onboarding", () => {
   let mock: MockFetch;
   const onOpenProject = vi.fn<(project: ProjectSummary) => void>();
@@ -51,6 +59,57 @@ describe("unified project onboarding", () => {
     mock.get("/api/integrations/github/status", { body: githubStatus });
     mock.get("/api/integrations/github/connections/github%3A42/repositories", {
       body: [repository],
+    });
+    mock.get("/api/runners", { body: [runner] });
+    mock.get("/api/runners/runner-local-1/workspaces", {
+      body: {
+        runner_id: runner.runner_id,
+        generation: runner.generation,
+        workspaces: [{ workspace_id: "workspace-1", label: "Development" }],
+      },
+    });
+    mock.post("/api/runners/runner-local-1/workspaces/browse", (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { workspace_id: string; entry_id?: string };
+      return body.entry_id === "folder-apps"
+        ? {
+            body: {
+              runner_id: runner.runner_id,
+              workspace_id: body.workspace_id,
+              breadcrumb: ["Development", "Apps"],
+              entries: [
+                {
+                  entry_id: "repository-local-app",
+                  label: "local-app",
+                  kind: "repository",
+                  can_browse: false,
+                },
+              ],
+            },
+          }
+        : {
+            body: {
+              runner_id: runner.runner_id,
+              workspace_id: body.workspace_id,
+              breadcrumb: ["Development"],
+              entries: [
+                { entry_id: "folder-apps", label: "Apps", kind: "folder", can_browse: true },
+              ],
+            },
+          };
+    });
+    mock.post("/api/runners/runner-local-1/workspaces/validate", {
+      body: {
+        selection_token: "opaque-selection-token",
+        expires_at: "2026-07-18T16:00:00Z",
+        repository: {
+          runner_id: runner.runner_id,
+          workspace_id: "workspace-1",
+          repository_id: "repository-local-app",
+          repository_display_name: "local-app",
+          default_branch: "main",
+          observed_head: "abcdef",
+        },
+      },
     });
     mock.post("/api/projects", (_url, init) => {
       const body = JSON.parse(String(init?.body)) as {
@@ -71,6 +130,7 @@ describe("unified project onboarding", () => {
         }),
       };
     });
+    mock.post("/api/v2/projects/project-created/source-bindings/local", { status: 201, body: {} });
     mock.install();
     render(
       <Projects
@@ -112,6 +172,51 @@ describe("unified project onboarding", () => {
         github_repository_id: "9001",
       },
     });
+  });
+
+  it("creates an existing project from a local runner without ever sending a raw path", async () => {
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
+    await user.click(screen.getByRole("button", { name: /local folder/i }));
+    await user.click(await screen.findByRole("button", { name: /development/i }));
+    await user.click(await screen.findByRole("button", { name: /apps/i }));
+    await user.click(screen.getByRole("button", { name: /back/i }));
+    expect(await screen.findByRole("button", { name: /apps/i })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /apps/i }));
+    await user.click(await screen.findByRole("button", { name: /local-app/i }));
+    expect(await screen.findByTestId("local-selection-summary")).toHaveTextContent("local-app");
+    expect(screen.getByTestId("project-name")).toHaveValue("local-app");
+
+    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
+
+    expect(
+      mock.calls.find((call) => call.method === "POST" && call.url === "/api/projects"),
+    ).toMatchObject({ body: { name: "local-app", description: expect.any(String) } });
+    expect(
+      mock.calls.find(
+        (call) =>
+          call.method === "POST" &&
+          call.url === "/api/v2/projects/project-created/source-bindings/local",
+      ),
+    ).toMatchObject({
+      body: {
+        selection_token: "opaque-selection-token",
+        verification_policy_ref: "verification-policy:default-v1",
+      },
+    });
+    expect(JSON.stringify(mock.calls)).not.toMatch(/Users|Development\/Apps|local-app\//);
+  });
+
+  it("explains how to recover when no local runner is online", async () => {
+    mock.get("/api/runners", { body: [] });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
+    await user.click(screen.getByRole("button", { name: /local folder/i }));
+    expect(await screen.findByText(/no local runner is online/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /manage runners/i })).toBeInTheDocument();
   });
 
   it("creates a GitHub repository before binding a new project", async () => {

@@ -124,6 +124,8 @@ describe("workspace connections settings", () => {
     await userEvent.click(screen.getByRole("button", { name: "Pair new runner" }));
     expect(await screen.findByText("ABC-123")).toBeInTheDocument();
     expect(screen.getByText(/norns-runner pair ABC-123/i)).toBeInTheDocument();
+    expect(screen.getByText(/norns-runner workspace add/i)).toBeInTheDocument();
+    expect(screen.getByText(/norns-runner start/i)).toBeInTheDocument();
   });
 
   it("shows provider readiness and the exact missing deployment variables", async () => {

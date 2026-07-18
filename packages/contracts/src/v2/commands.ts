@@ -419,6 +419,10 @@ export const V2DispatchCommand = z
     runner_id: V2EntityId,
     runner_generation: z.number().int().nonnegative(),
     repository_binding_id: V2EntityId,
+    // Runner-local repository identity, issued only by a paired runner during
+    // folder validation.  Optional so legacy static binding deployments keep
+    // their existing wire compatibility.
+    runner_repository_id: V2EntityId.optional(),
     expected_revision: V2NonEmptyString,
     target_branch: V2NonEmptyString,
     worktree_policy_ref: V2EntityId,

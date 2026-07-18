@@ -266,7 +266,11 @@ export function Account({
   };
 
   const pairingCommand = pairing
-    ? `norns-runner pair ${pairing.code} --server ${window.location.origin}`
+    ? [
+        `norns-runner pair ${pairing.code} --server ${window.location.origin}`,
+        'norns-runner workspace add "/path/to/projects"',
+        `norns-runner start --server ${window.location.origin}`,
+      ].join("\n")
     : null;
 
   const copyPairingCommand = async (): Promise<void> => {
@@ -621,7 +625,7 @@ export function Account({
                       </div>
                       {pairing && pairingCommand ? (
                         <output className="pairing-panel">
-                          <div>
+                          <div className="pairing-command-block">
                             <span className="field-label">Pairing code</span>
                             <strong className="pairing-code mono">{pairing.code}</strong>
                             <span className="muted">
@@ -631,9 +635,16 @@ export function Account({
                               )}
                             </span>
                           </div>
-                          <code>{pairingCommand}</code>
+                          <div>
+                            <span className="field-label">Run locally</span>
+                            <code>{pairingCommand}</code>
+                            <span className="muted">
+                              Replace the example folder with a root you approve. You will browse
+                              only inside that root when creating a project.
+                            </span>
+                          </div>
                           <Button className="btn-small" onClick={() => void copyPairingCommand()}>
-                            {pairingCopied ? "Copied" : "Copy pairing command"}
+                            {pairingCopied ? "Copied" : "Copy setup commands"}
                           </Button>
                         </output>
                       ) : null}

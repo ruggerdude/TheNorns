@@ -22,6 +22,7 @@ import {
   type ProjectShadowComparisonSink,
   ShadowProjectRepository,
 } from "../src/projects/shadowProjectRepository.js";
+import { SourceBindingService } from "../src/projects/sourceBindingService.js";
 import { ProjectStore, type ProjectStoreSnapshot } from "../src/projects/store.js";
 
 const RUN_ID = "migration-shadow-projects";
@@ -466,5 +467,28 @@ describe.sequential("Phase 2 relational project read projection", () => {
         default_branch: "main",
       },
     ]);
+  });
+
+  it("uses an opaque local binding display name on relational project refresh", async () => {
+    const created = await relational().create({
+      name: "Local project",
+      description: "Runner-owned folder",
+      pmProvider: "openai",
+    });
+    await new SourceBindingService(transactions).createLocal({
+      project_id: created.id,
+      runner_id: "runner-local",
+      workspace_id: "local:workspace",
+      repository_id: "local:repository",
+      repository_display_name: "project-a",
+      default_branch: "main",
+      observed_head: "abc123",
+      verification_policy_ref: "verification-policy:default-v1",
+      created_by: { actor_type: "human", actor_id: "norns-user-1" },
+    });
+    expect(await relational().summary(created.id)).toMatchObject({
+      source_type: "local",
+      source_location: "project-a",
+    });
   });
 });

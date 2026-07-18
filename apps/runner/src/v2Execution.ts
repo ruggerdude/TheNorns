@@ -11,6 +11,7 @@ import {
   type V2DispatchCommandT,
 } from "@norns/contracts";
 import type { CodingRuntime, RuntimeRunResult } from "./runtimes/types.js";
+import type { WorkspaceRegistry } from "./workspaceRegistry.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -208,6 +209,7 @@ export class V2RunnerExecutor {
     private readonly worktrees: RunnerWorktreeManager,
     private readonly runtimes: ReadonlyMap<string, RunnerRuntimeProvider>,
     private readonly verifier: RunnerVerifier,
+    private readonly workspaces?: WorkspaceRegistry,
   ) {}
 
   async execute(
@@ -222,7 +224,13 @@ export class V2RunnerExecutor {
       throw new Error("dispatch command is fenced from this runner generation");
     }
     if (Date.parse(command.expires_at) <= Date.now()) throw new Error("dispatch command expired");
-    const repositoryPath = this.repositories.resolve(command.repository_binding_id);
+    // A runner-issued repository id is the authoritative lookup for folders
+    // picked through the local registry.  The static binding registry remains
+    // the compatibility fallback for existing Phase 4 deployments.
+    const repositoryPath =
+      (command.runner_repository_id
+        ? this.workspaces?.repositoryPath(command.runner_repository_id)
+        : undefined) ?? this.repositories.resolve(command.repository_binding_id);
     const runtimeProvider = this.runtimes.get(command.runtime);
     if (!runtimeProvider) throw new Error(`runtime ${command.runtime} is unavailable`);
     const runtime =
