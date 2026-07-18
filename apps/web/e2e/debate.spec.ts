@@ -130,14 +130,25 @@ test("creates, controls, directs, replays, and reruns a debate", async ({ page }
       route.fulfill({ status, contentType: "application/json", body: JSON.stringify(payload) });
 
     if (path === "/api/auth/me")
-      return fulfill({ id: "user-e2e", email: "e2e@norns.test", name: "E2E", role: "admin", status: "active" });
+      return fulfill({
+        id: "user-e2e",
+        email: "e2e@norns.test",
+        name: "E2E",
+        role: "admin",
+        status: "active",
+      });
     if (path === "/api/projects") return fulfill([project]);
     if (path === `/api/projects/${project.id}/graph`) return fulfill(graph);
     if (path === `/api/v2/projects/${project.id}/resume`) return fulfill({}, 404);
     if (path === "/api/v2/capabilities/ai-models")
       return fulfill({
         models: [
-          { id: "claude-sonnet-5", label: "Claude Sonnet 5", provider: "anthropic", configured: true },
+          {
+            id: "claude-sonnet-5",
+            label: "Claude Sonnet 5",
+            provider: "anthropic",
+            configured: true,
+          },
           { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", provider: "openai", configured: true },
         ],
       });
@@ -215,8 +226,8 @@ test("creates, controls, directs, replays, and reruns a debate", async ({ page }
   await page.getByLabel("Message").fill("Show the rollback evidence in the next turn.");
   await page.getByRole("button", { name: "Record intervention" }).click();
   await expect
-    .poll(() =>
-      requests.find((entry) => entry.path.endsWith("/interventions"))?.body.expected_version,
+    .poll(
+      () => requests.find((entry) => entry.path.endsWith("/interventions"))?.body.expected_version,
     )
     .toBe(runVersion);
 
@@ -224,6 +235,10 @@ test("creates, controls, directs, replays, and reruns a debate", async ({ page }
   await expect(page.getByText("The final browser artifact is available.")).toBeVisible();
   await page.getByRole("button", { name: "Rerun debate (new run)" }).click();
   await expect
-    .poll(() => requests.filter((entry) => entry.path.endsWith("/runs")).at(-1)?.body.expected_debate_version)
+    .poll(
+      () =>
+        requests.filter((entry) => entry.path.endsWith("/runs")).at(-1)?.body
+          .expected_debate_version,
+    )
     .toBe(7);
 });
