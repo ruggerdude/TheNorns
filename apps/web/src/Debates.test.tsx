@@ -401,6 +401,10 @@ describe("debate frontend", () => {
     expect(await screen.findByLabelText("Revision changes")).toBeVisible();
     expect(screen.getByText("Use a staged deployment path.")).toBeVisible();
     expect(screen.getByText("Keep the old deployment path.")).toBeVisible();
+    // The final output is part of the snapshot, while the turn artifact is
+    // delivered by the independently scheduled replay request. Wait for the
+    // latter before asserting both non-navigable references are labelled.
+    expect(await screen.findByText("artifact-turn")).toBeVisible();
     expect(screen.getAllByText(/viewer unavailable in this MVP/i)).toHaveLength(2);
   });
 
