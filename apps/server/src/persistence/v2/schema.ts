@@ -2855,6 +2855,7 @@ export const debateRuns = pgTable(
     cursorTurnNumber: integer("cursor_turn_number").notNull().default(0),
     stopAfter: text("stop_after").notNull().default("none"),
     stopReason: text("stop_reason"),
+    actorExecutionSnapshots: jsonb("actor_execution_snapshots").notNull(),
     aggregateVersion: aggregateVersion(),
     startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
     finishedAt: timestamp("finished_at", { withTimezone: true, mode: "string" }),
@@ -3043,6 +3044,11 @@ export const debateMessages = pgTable(
     actorSnapshot: jsonb("actor_snapshot"),
     turnId: text("turn_id"),
     turnAttemptId: text("turn_attempt_id"),
+    interventionKind: text("intervention_kind"),
+    interventionTargetActorId: text("intervention_target_actor_id"),
+    interventionApplyAt: text("intervention_apply_at"),
+    interventionAppliesAfterRound: integer("intervention_applies_after_round"),
+    interventionAppliesAfterTurn: integer("intervention_applies_after_turn"),
     content: text("content").notNull(),
     contentHash: text("content_hash").notNull(),
     createdAt: createdAt(),
@@ -3071,6 +3077,33 @@ export const debateMessages = pgTable(
     ),
     check("debate_messages_sequence_check", sql`${table.sequence} > 0`),
     check("debate_messages_hash_check", sql`${table.contentHash} ~ '^[a-f0-9]{64}$'`),
+    check(
+      "debate_messages_intervention_kind_check",
+      sql`${table.interventionKind} IS NULL OR ${table.interventionKind} IN ('direction','statement')`,
+    ),
+    check(
+      "debate_messages_intervention_apply_at_check",
+      sql`${table.interventionApplyAt} IS NULL OR ${table.interventionApplyAt} IN ('next_turn','next_round')`,
+    ),
+    check(
+      "debate_messages_intervention_boundary_check",
+      sql`${table.interventionAppliesAfterRound} IS NULL OR ${table.interventionAppliesAfterRound} >= 0`,
+    ),
+    check(
+      "debate_messages_intervention_turn_boundary_check",
+      sql`${table.interventionAppliesAfterTurn} IS NULL OR ${table.interventionAppliesAfterTurn} >= 0`,
+    ),
+    check(
+      "debate_messages_intervention_shape_check",
+      sql`(${table.messageKind} = 'human') = (${table.interventionKind} IS NOT NULL)
+        AND (${table.interventionKind} IS NULL) = (${table.interventionTargetActorId} IS NULL
+          AND ${table.interventionApplyAt} IS NULL
+          AND ${table.interventionAppliesAfterRound} IS NULL
+          AND ${table.interventionAppliesAfterTurn} IS NULL)
+        AND (${table.interventionKind} IS NULL OR (${table.interventionApplyAt} IS NOT NULL
+          AND ${table.interventionAppliesAfterRound} IS NOT NULL
+          AND ${table.interventionAppliesAfterTurn} IS NOT NULL))`,
+    ),
   ],
 );
 
@@ -3120,6 +3153,7 @@ export const debateRevisions = pgTable(
     revisionKind: text("revision_kind").notNull(),
     supersedesRevisionId: text("supersedes_revision_id"),
     rationale: text("rationale").notNull(),
+    payload: jsonb("payload").notNull().default({}),
     createdByActorType: text("created_by_actor_type").notNull(),
     createdByActorId: text("created_by_actor_id"),
     createdAt: createdAt(),

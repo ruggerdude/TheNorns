@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   V2DebateActor,
+  V2DebateActorExecutionSnapshot,
+  V2DebateMessage,
   V2DebateStoppingPolicy,
   V2DebateTurnAttempt,
   evaluateV2DebateStopping,
@@ -46,6 +48,72 @@ describe("V2 debate contracts", () => {
     expect(actor.role_label).toBe("contrarian systems economist");
   });
 
+  it("requires a bound immutable per-run actor execution snapshot", () => {
+    const snapshot = V2DebateActorExecutionSnapshot.parse({
+      actor_id: "actor-1",
+      provider: "openai",
+      model: "gpt-selected",
+      runtime: "provider_api",
+      max_input_tokens: 20_000,
+      max_output_tokens: 4_000,
+      budget_limit_usd: 10,
+      max_turns: 3,
+      pricing: {
+        provider: "openai",
+        model: "gpt-selected",
+        input_per_mtok_usd: 2,
+        output_per_mtok_usd: 8,
+        pricing_version: "2026-07-18",
+        pricing_is_estimate: false,
+      },
+      maximum_turn_charge_usd: 0.072,
+    });
+    expect(snapshot.pricing.model).toBe(snapshot.model);
+    expect(
+      V2DebateActorExecutionSnapshot.safeParse({
+        ...snapshot,
+        pricing: { ...snapshot.pricing, model: "different-model" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires a human intervention to bind target and replay boundary metadata", () => {
+    const base = {
+      schema_version: 2,
+      id: "message-1",
+      debate_run_id: "run-1",
+      sequence: 1,
+      actor_snapshot: null,
+      turn_id: null,
+      turn_attempt_id: null,
+      content: "Focus on the cost tradeoff.",
+      content_hash: "a".repeat(64),
+      created_at: "2026-07-18T12:00:00.000Z",
+    };
+    expect(
+      V2DebateMessage.safeParse({
+        ...base,
+        message_kind: "human",
+        intervention_kind: "direction",
+        intervention_target_actor_id: null,
+        intervention_apply_at: "next_turn",
+        intervention_applies_after_round: 0,
+        intervention_applies_after_turn: 0,
+      }).success,
+    ).toBe(true);
+    expect(
+      V2DebateMessage.safeParse({
+        ...base,
+        message_kind: "human",
+        intervention_kind: "direction",
+        intervention_target_actor_id: null,
+        intervention_apply_at: "next_turn",
+        intervention_applies_after_round: 0,
+        intervention_applies_after_turn: null,
+      }).success,
+    ).toBe(false);
+  });
+
   it("freezes terminal run, round, and turn states", () => {
     expect(v2CanDebateDefinitionTransition("draft", "ready")).toBe(true);
     expect(v2CanDebateDefinitionTransition("archived", "ready")).toBe(false);
@@ -69,6 +137,20 @@ describe("V2 debate contracts", () => {
         consensus_reported: false,
         consecutive_no_material_change_rounds: 0,
         consecutive_repeated_disagreement_rounds: 0,
+        consecutive_provider_failures: 0,
+        requested_stop: false,
+      }),
+    ).toBeNull();
+    expect(
+      evaluateV2DebateStopping(parsed, {
+        completed_rounds: 1,
+        elapsed_seconds: 2,
+        input_tokens: 100,
+        output_tokens: 100,
+        cost_usd: 0.1,
+        consensus_reported: true,
+        consecutive_no_material_change_rounds: 2,
+        consecutive_repeated_disagreement_rounds: 2,
         consecutive_provider_failures: 0,
         requested_stop: false,
       }),

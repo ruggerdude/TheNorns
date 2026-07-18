@@ -97,6 +97,9 @@ CREATE TABLE debate_runs (
   cursor_turn_number INTEGER NOT NULL DEFAULT 0,
   stop_after TEXT NOT NULL DEFAULT 'none',
   stop_reason TEXT,
+  -- Captured at start, never re-read from the mutable provider registry. This
+  -- makes later price/model catalog edits unable to change a run in flight.
+  actor_execution_snapshots JSONB NOT NULL,
   aggregate_version INTEGER NOT NULL DEFAULT 1,
   started_at TIMESTAMPTZ,
   finished_at TIMESTAMPTZ,
@@ -110,6 +113,9 @@ CREATE TABLE debate_runs (
   CONSTRAINT debate_runs_lifecycle_origin_check CHECK (lifecycle_version > 0 OR state = 'created'),
   CONSTRAINT debate_runs_nonnegative_check CHECK (event_version >= 0 AND cursor_round_number >= 0 AND cursor_turn_number >= 0),
   CONSTRAINT debate_runs_stop_after_check CHECK (stop_after IN ('none','turn','round')),
+  CONSTRAINT debate_runs_actor_execution_snapshots_shape_check CHECK (
+    jsonb_typeof(actor_execution_snapshots) = 'array' AND jsonb_array_length(actor_execution_snapshots) > 0
+  ),
   CONSTRAINT debate_runs_terminal_time_check CHECK ((state IN ('completed','cancelled','failed')) = (finished_at IS NOT NULL))
 );
 CREATE UNIQUE INDEX debate_runs_one_nonterminal_unique ON debate_runs (debate_id)
@@ -215,6 +221,11 @@ CREATE TABLE debate_messages (
   actor_snapshot JSONB,
   turn_id TEXT,
   turn_attempt_id TEXT,
+  intervention_kind TEXT,
+  intervention_target_actor_id TEXT,
+  intervention_apply_at TEXT,
+  intervention_applies_after_round INTEGER,
+  intervention_applies_after_turn INTEGER,
   content TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -228,7 +239,26 @@ CREATE TABLE debate_messages (
   CONSTRAINT debate_messages_run_id_id_unique UNIQUE (debate_run_id, id),
   CONSTRAINT debate_messages_kind_check CHECK (message_kind IN ('system','participant','judge','synthesizer','human')),
   CONSTRAINT debate_messages_sequence_check CHECK (sequence > 0),
-  CONSTRAINT debate_messages_hash_check CHECK (content_hash ~ '^[a-f0-9]{64}$')
+  CONSTRAINT debate_messages_hash_check CHECK (content_hash ~ '^[a-f0-9]{64}$'),
+  CONSTRAINT debate_messages_intervention_kind_check CHECK (
+    intervention_kind IS NULL OR intervention_kind IN ('direction','statement')
+  ),
+  CONSTRAINT debate_messages_intervention_apply_at_check CHECK (
+    intervention_apply_at IS NULL OR intervention_apply_at IN ('next_turn','next_round')
+  ),
+  CONSTRAINT debate_messages_intervention_boundary_check CHECK (
+    intervention_applies_after_round IS NULL OR intervention_applies_after_round >= 0
+  ),
+  CONSTRAINT debate_messages_intervention_turn_boundary_check CHECK (
+    intervention_applies_after_turn IS NULL OR intervention_applies_after_turn >= 0
+  ),
+  CONSTRAINT debate_messages_intervention_shape_check CHECK (
+    (message_kind = 'human') = (intervention_kind IS NOT NULL)
+    AND (intervention_kind IS NULL) = (intervention_target_actor_id IS NULL AND intervention_apply_at IS NULL
+      AND intervention_applies_after_round IS NULL AND intervention_applies_after_turn IS NULL)
+    AND (intervention_kind IS NULL OR (intervention_apply_at IS NOT NULL
+      AND intervention_applies_after_round IS NOT NULL AND intervention_applies_after_turn IS NOT NULL))
+  )
 );
 ALTER TABLE debate_turns ADD CONSTRAINT debate_turns_output_message_scope_fk
   FOREIGN KEY (debate_run_id, output_message_id) REFERENCES debate_messages (debate_run_id, id) ON DELETE RESTRICT;
@@ -263,6 +293,7 @@ CREATE TABLE debate_revisions (
   revision_kind TEXT NOT NULL,
   supersedes_revision_id TEXT,
   rationale TEXT NOT NULL,
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_by_actor_type TEXT NOT NULL,
   created_by_actor_id TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -61,6 +61,49 @@ export const V2DebateActor = z
   .strict();
 export type V2DebateActorT = z.infer<typeof V2DebateActor>;
 
+/**
+ * Immutable per-run execution data captured at dispatch authorization.  This
+ * deliberately does not reference the provider catalog: catalog values can
+ * change, while a running debate's selected model and conservative charge
+ * must not.
+ */
+export const V2DebateActorExecutionSnapshot = z
+  .object({
+    actor_id: V2EntityId,
+    provider: V2NonEmptyString.max(200),
+    model: V2NonEmptyString.max(500),
+    runtime: V2NonEmptyString.max(200),
+    max_input_tokens: z.number().int().positive(),
+    max_output_tokens: z.number().int().positive(),
+    budget_limit_usd: nonnegativeMoney,
+    max_turns: z.number().int().positive(),
+    pricing: z
+      .object({
+        provider: V2NonEmptyString.max(200),
+        model: V2NonEmptyString.max(500),
+        input_per_mtok_usd: nonnegativeMoney,
+        output_per_mtok_usd: nonnegativeMoney,
+        pricing_version: V2NonEmptyString.max(200),
+        pricing_is_estimate: z.boolean(),
+      })
+      .strict(),
+    maximum_turn_charge_usd: nonnegativeMoney,
+  })
+  .strict()
+  .superRefine((snapshot, ctx) => {
+    if (
+      snapshot.provider !== snapshot.pricing.provider ||
+      snapshot.model !== snapshot.pricing.model
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["pricing"],
+        message: "pricing provider and model match the immutable actor execution selection",
+      });
+    }
+  });
+export type V2DebateActorExecutionSnapshotT = z.infer<typeof V2DebateActorExecutionSnapshot>;
+
 export const V2DebateContext = z
   .object({
     schema_version: schemaVersion,
@@ -190,6 +233,7 @@ export const V2DebateRun = z
     cursor_turn_number: z.number().int().nonnegative(),
     stop_after: z.enum(["none", "turn", "round"]).default("none"),
     stop_reason: z.string().nullable(),
+    actor_execution_snapshots: z.array(V2DebateActorExecutionSnapshot).min(1).max(100),
     started_at: nullableDate,
     finished_at: nullableDate,
     aggregate_version: V2PositiveVersion,
@@ -339,11 +383,39 @@ export const V2DebateMessage = z
     actor_snapshot: V2DebateActor.nullable(),
     turn_id: V2EntityId.nullable(),
     turn_attempt_id: V2EntityId.nullable(),
+    intervention_kind: z.enum(["direction", "statement"]).nullable(),
+    intervention_target_actor_id: V2EntityId.nullable(),
+    intervention_apply_at: z.enum(["next_turn", "next_round"]).nullable(),
+    intervention_applies_after_round: z.number().int().nonnegative().nullable(),
+    intervention_applies_after_turn: z.number().int().nonnegative().nullable(),
     content: V2NonEmptyString,
     content_hash: V2Sha256Hex,
     created_at: V2IsoDateTime,
   })
-  .strict();
+  .strict()
+  .superRefine((message, ctx) => {
+    const isHumanIntervention = message.message_kind === "human";
+    const hasMetadata = message.intervention_kind !== null;
+    if (isHumanIntervention !== hasMetadata) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["intervention_kind"],
+        message: "human messages carry intervention metadata and generated messages do not",
+      });
+    }
+    if (
+      hasMetadata &&
+      (message.intervention_apply_at === null ||
+        message.intervention_applies_after_round === null ||
+        message.intervention_applies_after_turn === null)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["intervention_apply_at"],
+        message: "interventions identify both their boundary and cursor",
+      });
+    }
+  });
 export type V2DebateMessageT = z.infer<typeof V2DebateMessage>;
 
 export const V2DebateFinding = z
@@ -371,6 +443,7 @@ export const V2DebateRevision = z
     revision_kind: z.enum(["finding_disposition", "judgment", "final_output", "correction"]),
     supersedes_revision_id: V2EntityId.nullable(),
     rationale: V2NonEmptyString,
+    payload: z.record(z.unknown()),
     created_by: V2Actor,
     created_at: V2IsoDateTime,
   })
@@ -462,6 +535,13 @@ export function evaluateV2DebateStopping(
   if (observation.input_tokens >= policy.max_total_input_tokens) return "max_input_tokens";
   if (observation.output_tokens >= policy.max_total_output_tokens) return "max_output_tokens";
   if (observation.cost_usd >= policy.max_total_cost_usd) return "max_cost";
+  if (observation.consecutive_provider_failures >= policy.provider_failure_threshold) {
+    return "provider_failures";
+  }
+  // Exact-round mode suppresses semantic early exits. Safety/resource caps and
+  // explicit user stop above still win, but consensus cannot silently turn an
+  // exact three-round run into a one-round run.
+  if (policy.exact_rounds !== null) return null;
   if (policy.stop_on_consensus && observation.consensus_reported) return "consensus";
   if (
     policy.no_material_change_rounds !== null &&
@@ -474,9 +554,6 @@ export function evaluateV2DebateStopping(
     observation.consecutive_repeated_disagreement_rounds >= policy.repeated_disagreement_rounds
   ) {
     return "repeated_disagreement";
-  }
-  if (observation.consecutive_provider_failures >= policy.provider_failure_threshold) {
-    return "provider_failures";
   }
   return null;
 }
