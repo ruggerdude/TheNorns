@@ -5,23 +5,36 @@ import type { z } from "zod";
 
 export type ProviderName = "anthropic" | "openai";
 
-export interface CompletionRequest {
+/** Stable attribution copied into debate usage and execution records by the caller. */
+export interface CompletionAttribution {
+  projectId: string;
+  nodeId?: string | null | undefined;
+  runId?: string | null | undefined;
+  debateId?: string | null | undefined;
+  debateRunId?: string | null | undefined;
+  debateTurnId?: string | null | undefined;
+  debateTurnAttemptId?: string | null | undefined;
+}
+
+export interface CompletionRequest extends CompletionAttribution {
   system?: string;
   prompt: string;
   maxTokens?: number;
   signal?: AbortSignal;
-  /** attribution for the usage ledger */
-  projectId: string;
-  nodeId?: string | null;
-  runId?: string | null;
 }
 
-export interface CompletionResult {
+/** Provider-neutral metadata retained when the upstream API exposes it. */
+export interface ProviderCompletionMetadata {
+  provider_execution_id?: string;
+  finish_reason?: string;
+}
+
+export interface CompletionResult extends ProviderCompletionMetadata {
   text: string;
   usage: UsageEventT;
 }
 
-export interface StructuredResult<T> {
+export interface StructuredResult<T> extends ProviderCompletionMetadata {
   value: T;
   usage: UsageEventT;
 }

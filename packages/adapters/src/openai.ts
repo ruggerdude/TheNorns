@@ -8,6 +8,7 @@ import {
   type CompletionRequest,
   type CompletionResult,
   type LlmAdapter,
+  type ProviderCompletionMetadata,
   type StructuredResult,
   kindForStatus,
 } from "./types.js";
@@ -37,7 +38,11 @@ export class OpenAiAdapter implements LlmAdapter {
 
   async complete(request: CompletionRequest): Promise<CompletionResult> {
     const response = await this.call(request);
-    return { text: this.textOf(response), usage: this.usageOf(response, request) };
+    return {
+      text: this.textOf(response),
+      usage: this.usageOf(response, request),
+      ...this.metadataOf(response),
+    };
   }
 
   async completeStructured<T>(
@@ -64,20 +69,21 @@ export class OpenAiAdapter implements LlmAdapter {
         `${schemaName}: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
       );
     }
-    return { value: result.data, usage: this.usageOf(response, request) };
+    return {
+      value: result.data,
+      usage: this.usageOf(response, request),
+      ...this.metadataOf(response),
+    };
   }
 
-  private async call(request: CompletionRequest): Promise<OpenAI.Chat.Completions.ChatCompletion> {
+  private async call(request: CompletionRequest): Promise<OpenAI.Responses.Response> {
     try {
-      return await this.client.chat.completions.create(
+      return await this.client.responses.create(
         {
           model: this.model,
-          messages: [
-            ...(request.system !== undefined
-              ? [{ role: "system" as const, content: request.system }]
-              : []),
-            { role: "user" as const, content: request.prompt },
-          ],
+          input: request.prompt,
+          ...(request.system !== undefined ? { instructions: request.system } : {}),
+          ...(request.maxTokens !== undefined ? { max_output_tokens: request.maxTokens } : {}),
         },
         request.signal !== undefined ? { signal: request.signal } : {},
       );
@@ -86,19 +92,27 @@ export class OpenAiAdapter implements LlmAdapter {
     }
   }
 
-  private textOf(response: OpenAI.Chat.Completions.ChatCompletion): string {
-    return response.choices[0]?.message?.content ?? "";
+  private textOf(response: OpenAI.Responses.Response): string {
+    return response.output_text;
   }
 
-  private usageOf(response: OpenAI.Chat.Completions.ChatCompletion, request: CompletionRequest) {
+  private usageOf(response: OpenAI.Responses.Response, request: CompletionRequest) {
     return makeUsageEvent(
       this.model,
       this.registry,
       { projectId: request.projectId, nodeId: request.nodeId, runId: request.runId },
-      response.usage?.prompt_tokens ?? 0,
-      response.usage?.completion_tokens ?? 0,
+      response.usage?.input_tokens ?? 0,
+      response.usage?.output_tokens ?? 0,
       "provider_api",
     );
+  }
+
+  private metadataOf(response: OpenAI.Responses.Response): ProviderCompletionMetadata {
+    const finishReason = response.incomplete_details?.reason ?? response.status;
+    return {
+      provider_execution_id: response.id,
+      ...(finishReason !== undefined ? { finish_reason: finishReason } : {}),
+    };
   }
 
   private mapError(error: unknown): AdapterError {

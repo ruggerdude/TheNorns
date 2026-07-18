@@ -8,6 +8,7 @@ import {
   type CompletionRequest,
   type CompletionResult,
   type LlmAdapter,
+  type ProviderCompletionMetadata,
   type StructuredResult,
   kindForStatus,
 } from "./types.js";
@@ -37,7 +38,11 @@ export class AnthropicAdapter implements LlmAdapter {
 
   async complete(request: CompletionRequest): Promise<CompletionResult> {
     const response = await this.call(request);
-    return { text: this.textOf(response), usage: this.usageOf(response, request) };
+    return {
+      text: this.textOf(response),
+      usage: this.usageOf(response, request),
+      ...this.metadataOf(response),
+    };
   }
 
   async completeStructured<T>(
@@ -64,7 +69,11 @@ export class AnthropicAdapter implements LlmAdapter {
         `${schemaName}: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
       );
     }
-    return { value: result.data, usage: this.usageOf(response, request) };
+    return {
+      value: result.data,
+      usage: this.usageOf(response, request),
+      ...this.metadataOf(response),
+    };
   }
 
   private async call(request: CompletionRequest): Promise<Anthropic.Message> {
@@ -99,6 +108,13 @@ export class AnthropicAdapter implements LlmAdapter {
       response.usage.output_tokens,
       "provider_api",
     );
+  }
+
+  private metadataOf(response: Anthropic.Message): ProviderCompletionMetadata {
+    return {
+      provider_execution_id: response.id,
+      ...(response.stop_reason !== null ? { finish_reason: response.stop_reason } : {}),
+    };
   }
 
   private mapError(error: unknown): AdapterError {

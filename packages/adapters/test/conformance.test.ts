@@ -49,6 +49,8 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
     expect(usage.output_tokens).toBe(45);
     expect(usage.usage_source).toBe("provider_api");
     expect(usage.node_id).toBe("node-1");
+    expect(result.provider_execution_id).toBe(name === "anthropic" ? "msg_mock" : "resp_mock");
+    expect(result.finish_reason).toBe(name === "anthropic" ? "end_turn" : "completed");
 
     // ledger reconciliation: estimated cost === registry math, exactly
     const entry = DEFAULT_MODEL_REGISTRY[adapter.model];
@@ -65,6 +67,30 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
       "test_object",
     );
     expect(result.value).toEqual({ name: "mock", count: 3 });
+  });
+
+  it("enforces an explicit OpenAI output cap through the Responses API", async () => {
+    if (name !== "openai") return;
+    const adapter = make();
+    const requestStart = mock.requests.length;
+    const result = await adapter.complete({
+      prompt: "bounded response",
+      maxTokens: 321,
+      ...attribution,
+    });
+    const request = mock.requests
+      .slice(requestStart)
+      .find((candidate) => candidate.url.endsWith("/responses"));
+    expect(request).toBeDefined();
+    expect(JSON.parse(request?.body ?? "{}")).toMatchObject({
+      model: "mock-openai",
+      input: "bounded response",
+      max_output_tokens: 321,
+    });
+    expect(result).toMatchObject({
+      provider_execution_id: "resp_mock",
+      finish_reason: "completed",
+    });
   });
 
   it("rejects structured responses that fail the schema", async () => {

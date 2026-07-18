@@ -21,12 +21,15 @@ function readBody(req: import("node:http").IncomingMessage): Promise<string> {
 
 export interface MockProvider {
   url: string;
+  requests: Array<{ url: string; body: string }>;
   close: () => Promise<void>;
 }
 
 export async function startMockProvider(): Promise<MockProvider> {
+  const requests: Array<{ url: string; body: string }> = [];
   const server: Server = createServer(async (req, res) => {
     const body = await readBody(req);
+    requests.push({ url: req.url ?? "", body });
     const json = (status: number, payload: unknown): void => {
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(payload));
@@ -56,6 +59,34 @@ export async function startMockProvider(): Promise<MockProvider> {
           stop_reason: "end_turn",
           stop_sequence: null,
           usage: { input_tokens: 120, output_tokens: 45 },
+        });
+      } else if (req.url?.includes("/responses")) {
+        // OpenAI Responses API shape
+        json(200, {
+          id: "resp_mock",
+          object: "response",
+          created_at: 0,
+          model: "mock-openai",
+          status: "completed",
+          error: null,
+          incomplete_details: null,
+          output_text: text,
+          output: [
+            {
+              id: "msg_mock",
+              type: "message",
+              status: "completed",
+              role: "assistant",
+              content: [{ type: "output_text", text, annotations: [], logprobs: [] }],
+            },
+          ],
+          usage: {
+            input_tokens: 120,
+            output_tokens: 45,
+            total_tokens: 165,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens_details: { reasoning_tokens: 0 },
+          },
         });
       } else {
         // OpenAI Chat Completions shape
@@ -91,6 +122,7 @@ export async function startMockProvider(): Promise<MockProvider> {
   if (address === null || typeof address === "string") throw new Error("no port");
   return {
     url: `http://127.0.0.1:${address.port}`,
+    requests,
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
