@@ -148,6 +148,9 @@ export function DebateRun({
   const [directionTarget, setDirectionTarget] = useState("all");
   const [directionText, setDirectionText] = useState("");
   const [interventionKind, setInterventionKind] = useState<"direction" | "statement">("direction");
+  const [interventionApplyAt, setInterventionApplyAt] = useState<"next_turn" | "next_round">(
+    "next_turn",
+  );
   const cursor = useRef(0);
   const eventIds = useRef(new Set<string>());
 
@@ -218,17 +221,27 @@ export function DebateRun({
     run?.status,
   ]);
 
-  const start = async () => {
-    setBusy("start");
+  const resetReplay = () => {
+    cursor.current = 0;
+    eventIds.current.clear();
+    setEvents([]);
+  };
+
+  const start = async (rerun = false) => {
+    setBusy(rerun ? "rerun" : "start");
     setError(null);
     try {
       const created = await request<DebateRunDto>(`${base}/runs`, "POST", {
         idempotency_key: idempotencyKey("start-debate"),
+        ...(rerun
+          ? {
+              expected_debate_version:
+                debate?.aggregate_version ?? debate?.revision ?? 1,
+            }
+          : {}),
       });
       setRun(created);
-      cursor.current = 0;
-      eventIds.current.clear();
-      setEvents([]);
+      resetReplay();
       await loadSnapshot();
     } catch (caught) {
       handleError(caught);
@@ -254,6 +267,9 @@ export function DebateRun({
           debate?.revision ??
           1,
         idempotency_key: idempotencyKey(`debate-${action}`),
+        ...(action === "resume" && (run?.retained_ambiguous_usd ?? debate?.retained_ambiguous_usd ?? 0) > 0
+          ? { ambiguity_disposition: "assume_full_charge" }
+          : {}),
       });
       setRun(response);
       await loadSnapshot();
@@ -275,7 +291,7 @@ export function DebateRun({
         kind: interventionKind,
         target: directionTarget,
         text: directionText.trim(),
-        apply_at: "next_turn",
+        apply_at: interventionApplyAt,
         idempotency_key: idempotencyKey("debate-intervention"),
       });
       setDirectionText("");
@@ -296,6 +312,9 @@ export function DebateRun({
   const judgment = run?.judgment;
   const finalOutput = run?.final_output;
   const state = run?.status ?? debate?.status;
+  const canRerun = Boolean(run?.id ?? debate?.run?.id ?? debate?.active_run_id) && terminal.has(state ?? "");
+  const hasRun = Boolean(run?.id ?? debate?.run?.id ?? debate?.active_run_id);
+  const canStart = !hasRun && (state === "draft" || state === "ready");
 
   if (!debate)
     return (
@@ -315,9 +334,14 @@ export function DebateRun({
         </div>
         <div className="actions">
           <Button onClick={onBack}>Back to debates</Button>
-          {state === "draft" ? (
+          {canStart ? (
             <Button variant="primary" disabled={busy === "start"} onClick={() => void start()}>
               {busy === "start" ? "Starting…" : "Start debate"}
+            </Button>
+          ) : null}
+          {canRerun ? (
+            <Button variant="primary" disabled={busy === "rerun"} onClick={() => void start(true)}>
+              {busy === "rerun" ? "Creating new run…" : "Rerun debate (new run)"}
             </Button>
           ) : null}
         </div>
@@ -506,7 +530,11 @@ export function DebateRun({
                   disabled={busy !== null}
                   onClick={() => void control(state === "paused" ? "resume" : "pause")}
                 >
-                  {state === "paused" ? "Resume" : "Pause"}
+                  {state === "paused" && retained > 0
+                    ? "Resume — acknowledge max charge"
+                    : state === "paused"
+                      ? "Resume"
+                      : "Pause"}
                 </Button>
                 <Button
                   className="btn-small"
@@ -530,6 +558,12 @@ export function DebateRun({
                 >
                   Cancel
                 </Button>
+              {state === "paused" && retained > 0 ? (
+                <Alert>
+                  This run has ${retained.toFixed(2)} of ambiguous provider usage. Resuming records
+                  that amount as the maximum charge before creating a new attempt.
+                </Alert>
+              ) : null}
               </div>
             </section>
           ) : null}
@@ -561,6 +595,17 @@ export function DebateRun({
                         {actor.display_name || actor.role_label || actor.id}
                       </option>
                     ))}
+                </Select>
+              </Field>
+              <Field label="Apply at">
+                <Select
+                  value={interventionApplyAt}
+                  onChange={(event) =>
+                    setInterventionApplyAt(event.target.value as "next_turn" | "next_round")
+                  }
+                >
+                  <option value="next_turn">Next applicable turn</option>
+                  <option value="next_round">Next applicable round</option>
                 </Select>
               </Field>
               <Field label="Message">

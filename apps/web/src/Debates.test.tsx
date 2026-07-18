@@ -149,6 +149,114 @@ describe("debate frontend", () => {
     ]);
   });
 
+  it("offers start for the server's ready definition state when no run exists", async () => {
+    const user = userEvent.setup();
+    mock = new MockFetch();
+    const base = "/api/v2/projects/project-1/debates/debate-1";
+    mock.get(base, {
+      body: debate({
+        status: "ready",
+        active_run_id: null,
+        run: null,
+        current_round: 0,
+        current_turn: 0,
+      }),
+    });
+    mock.post(`${base}/runs`, {
+      status: 201,
+      body: { id: "run-ready", status: "queued", aggregate_version: 1 },
+    });
+    mock.install();
+
+    render(
+      <DebateRun
+        projectId="project-1"
+        debateId="debate-1"
+        onUnauthorized={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+    await user.click(await screen.findByRole("button", { name: "Start debate" }));
+    await waitFor(() =>
+      expect(mock?.calls.some((call) => call.method === "POST" && call.url === `${base}/runs`)).toBe(
+        true,
+      ),
+    );
+  });
+
+  it("creates an explicitly new run from a terminal debate and resets replay", async () => {
+    const user = userEvent.setup();
+    mock = new MockFetch();
+    const base = "/api/v2/projects/project-1/debates/debate-1";
+    mock.get(base, {
+      body: debate({ status: "completed", current_round: 3, current_turn: 6 }),
+    });
+    mock.get(`${base}/runs/run-1`, {
+      body: { id: "run-1", status: "completed", aggregate_version: 5 },
+    });
+    mock.get(`${base}/runs/run-1/events?after_version=0`, { body: { events: [] } });
+    mock.post(`${base}/runs`, {
+      status: 201,
+      body: { id: "run-2", status: "queued", aggregate_version: 1 },
+    });
+    mock.install();
+
+    render(
+      <DebateRun
+        projectId="project-1"
+        debateId="debate-1"
+        onUnauthorized={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+    await user.click(await screen.findByRole("button", { name: "Rerun debate (new run)" }));
+    await waitFor(() =>
+      expect(mock?.calls.find((call) => call.method === "POST" && call.url === `${base}/runs`)).toMatchObject({
+        body: { expected_debate_version: 3 },
+      }),
+    );
+  });
+
+  it("makes ambiguous-charge resume an explicit maximum-charge acknowledgement", async () => {
+    const user = userEvent.setup();
+    mock = new MockFetch();
+    const base = "/api/v2/projects/project-1/debates/debate-1";
+    mock.get(base, { body: debate({ status: "paused", retained_ambiguous_usd: 1.25 }) });
+    mock.get(`${base}/runs/run-1`, {
+      body: {
+        id: "run-1",
+        status: "paused",
+        aggregate_version: 5,
+        settled_usd: 4,
+        reserved_usd: 0,
+        retained_ambiguous_usd: 1.25,
+      },
+    });
+    mock.get(`${base}/runs/run-1/events?after_version=0`, { body: { events: [] } });
+    mock.post(`${base}/runs/run-1/control`, {
+      body: { id: "run-1", status: "queued", aggregate_version: 6 },
+    });
+    mock.install();
+
+    render(
+      <DebateRun
+        projectId="project-1"
+        debateId="debate-1"
+        onUnauthorized={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+    expect(
+      await screen.findByText(/ambiguous provider usage/i),
+    ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Resume — acknowledge max charge" }));
+    await waitFor(() =>
+      expect(mock?.calls.find((call) => call.url.endsWith("/control"))).toMatchObject({
+        body: { action: "resume", ambiguity_disposition: "assume_full_charge" },
+      }),
+    );
+  });
+
   it("replays attributed events and sends bounded control and intervention commands", async () => {
     const user = userEvent.setup();
     mock = new MockFetch();
@@ -216,13 +324,15 @@ describe("debate frontend", () => {
       }),
     );
     await user.type(screen.getByLabelText("Message"), "Include the recovery drill.");
+    await user.selectOptions(screen.getByLabelText("Target"), "actor-a");
+    await user.selectOptions(screen.getByLabelText("Apply at"), "next_round");
     await user.click(screen.getByRole("button", { name: "Record intervention" }));
     await waitFor(() =>
       expect(mock?.calls.find((call) => call.url.endsWith("/interventions"))).toMatchObject({
         body: {
           kind: "direction",
-          target: "all",
-          apply_at: "next_turn",
+          target: "actor-a",
+          apply_at: "next_round",
           text: "Include the recovery drill.",
         },
       }),
