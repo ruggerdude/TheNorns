@@ -46,7 +46,7 @@ import {
   assertCredentialHmacKeyCoverage,
   createIdentityRuntime,
   loadDurableIdentityRoute,
-  parseCredentialHmacKeyring,
+  parseOptionalCredentialHmacKeyring,
 } from "./startup/identityRuntime.js";
 import {
   ProjectRuntimeConfigurationError,
@@ -144,10 +144,11 @@ if (databaseUrl) {
       mode: "runtime",
       role: "norns_app",
     });
-    const credentialKeyring =
-      identityRoute?.read_mode === "relational" && identityRoute.write_mode === "relational"
-        ? parseCredentialHmacKeyring(process.env)
-        : null;
+    // GitHub manifest credentials are durable PostgreSQL data and may be used
+    // before identity routing completes its relational cutover. Coupling this
+    // keyring to the identity route incorrectly disabled guided GitHub setup
+    // on otherwise fully configured deployments.
+    const credentialKeyring = parseOptionalCredentialHmacKeyring(process.env);
     const githubConfig = githubIntegrationConfigFromEnvironment(process.env, publicOrigin);
     const githubManifestBootstrap = credentialKeyring
       ? {
