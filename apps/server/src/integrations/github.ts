@@ -513,11 +513,18 @@ export class GitHubIntegrationService {
     const hostLabel =
       new URL(origin).hostname.split(".")[0]?.replace(/[^A-Za-z0-9-]/g, "-") || "workspace";
     const name = `The Norns ${hostLabel} ${randomBytes(3).toString("hex")}`.slice(0, 34);
+    const stateSecret = derivedKey(this.manifestBootstrap.currentKey.key, "state").toString(
+      "base64url",
+    );
+    const state = createState(userId, "manifest", stateSecret);
     const manifest = {
       name,
       url: origin,
       description: "AI project coordination and repository execution for The Norns",
-      redirect_url: `${origin}/api/integrations/github/manifest/callback`,
+      // GitHub returns its conversion code but does not round-trip arbitrary
+      // sibling form fields. Put the signed correlation state in the manifest
+      // redirect URL so it reliably returns with GitHub's callback.
+      redirect_url: `${origin}/api/integrations/github/manifest/callback?state=${encodeURIComponent(state)}`,
       callback_urls: [`${origin}/api/integrations/github/callback`],
       setup_url: `${origin}/api/integrations/github/setup`,
       public: false,
@@ -534,13 +541,10 @@ export class GitHubIntegrationService {
     const action = normalizedOrganization
       ? `https://github.com/organizations/${encodeURIComponent(normalizedOrganization)}/settings/apps/new`
       : "https://github.com/settings/apps/new";
-    const stateSecret = derivedKey(this.manifestBootstrap.currentKey.key, "state").toString(
-      "base64url",
-    );
     return {
       action,
       manifest: JSON.stringify(manifest),
-      state: createState(userId, "manifest", stateSecret),
+      state,
     };
   }
 
