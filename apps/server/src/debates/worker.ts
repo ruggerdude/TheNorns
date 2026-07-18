@@ -18,7 +18,7 @@ import {
   type V2DebateStoppingObservationT,
   V2DebateTurn,
   evaluateV2DebateStopping,
-  v2CanDebateRunTransition,
+  v2AssertDebateRunTransition,
 } from "@norns/contracts";
 import { newId } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
@@ -66,17 +66,6 @@ interface FailureMetadata {
   latencyMs: number | null;
   requestDispatched: boolean | null;
 }
-
-const WORKER_RECOVERY_TRANSITIONS = new Set([
-  // Recovery may discover an operational failure after the durable run has
-  // already entered either state. These explicit expansions are narrower than
-  // allowing arbitrary state writes and are exercised by recovery tests.
-  "running->paused",
-  "finalizing->paused",
-  // A stop policy may become decisive while an operator pause is draining the
-  // current turn; finishing that durable turn takes precedence over pausing.
-  "pausing->finalizing",
-]);
 
 // Type-only namespace import keeps the runtime surface on the contracts package.
 import type { z } from "zod";
@@ -394,10 +383,7 @@ export class DebateWorker {
     );
     const from = V2DebateRunState.parse(locked.rows[0]?.state);
     if (from === to) return false;
-    const transition = `${from}->${to}`;
-    if (!v2CanDebateRunTransition(from, to) && !WORKER_RECOVERY_TRANSITIONS.has(transition)) {
-      throw new Error(`illegal debate run transition ${transition}`);
-    }
+    v2AssertDebateRunTransition(from, to);
     const terminal = to === "completed" || to === "cancelled" || to === "failed";
     await tx.query(
       `UPDATE debate_runs SET state = $2,

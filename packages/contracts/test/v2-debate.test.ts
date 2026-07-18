@@ -7,6 +7,7 @@ import {
   V2DebateStoppingPolicy,
   V2DebateTurnAttempt,
   evaluateV2DebateStopping,
+  v2AssertDebateRunTransition,
   v2CanDebateDefinitionTransition,
   v2CanDebateRoundTransition,
   v2CanDebateRunTransition,
@@ -119,7 +120,15 @@ describe("V2 debate contracts", () => {
     expect(v2CanDebateDefinitionTransition("draft", "ready")).toBe(true);
     expect(v2CanDebateDefinitionTransition("archived", "ready")).toBe(false);
     expect(v2CanDebateRunTransition("created", "queued")).toBe(true);
+    expect(v2CanDebateRunTransition("running", "paused")).toBe(true);
+    expect(v2CanDebateRunTransition("finalizing", "paused")).toBe(true);
+    expect(v2CanDebateRunTransition("pausing", "finalizing")).toBe(true);
+    expect(v2CanDebateRunTransition("running", "cancelled")).toBe(true);
+    expect(v2CanDebateRunTransition("finalizing", "cancelled")).toBe(true);
     expect(v2CanDebateRunTransition("completed", "running")).toBe(false);
+    expect(() => v2AssertDebateRunTransition("created", "paused")).toThrow(
+      "illegal debate run transition created->paused",
+    );
     expect(v2CanDebateRoundTransition("pending", "active")).toBe(true);
     expect(v2CanDebateRoundTransition("completed", "active")).toBe(false);
     expect(v2CanDebateTurnTransition("leased", "running")).toBe(true);

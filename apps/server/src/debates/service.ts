@@ -5,8 +5,12 @@ import {
   type V2CreateDebateCommandT,
   type V2DebateActorExecutionSnapshotT,
   V2DebateEvent,
+  V2DebateEventContentHashEnvelope,
+  V2DebateRunState,
+  type V2DebateRunStateT,
   type V2InterveneDebateRunCommandT,
   type V2StartDebateRunCommandT,
+  v2AssertDebateRunTransition,
 } from "@norns/contracts";
 import { newId } from "../ids.js";
 import {
@@ -599,6 +603,7 @@ export class DebateService {
           actor_id: firstActor.id,
         }),
       );
+      v2AssertDebateRunTransition("created", "queued");
       await tx.executor.query(
         `INSERT INTO debate_runs (
            id, project_id, debate_id, attempt, state, lifecycle_version, event_version,
@@ -912,11 +917,12 @@ export class DebateService {
         }
       }
 
-      let nextState = run.state;
+      const currentState = V2DebateRunState.parse(run.state);
+      let nextState: V2DebateRunStateT = currentState;
       let stopAfter = run.stop_after;
       let stopReason = run.stop_reason;
       let finishedAt: string | null = null;
-      if (parsed.action === "pause") nextState = run.state === "running" ? "pausing" : "paused";
+      if (parsed.action === "pause") nextState = currentState === "running" ? "pausing" : "paused";
       if (parsed.action === "resume") nextState = "queued";
       if (parsed.action === "cancel") {
         const inFlight = await tx.executor.query<{ count: string | number }>(
@@ -938,6 +944,7 @@ export class DebateService {
       if (parsed.action === "stop_after_turn") stopAfter = "turn";
       if (parsed.action === "stop_after_round") stopAfter = "round";
       const updatedAt = this.now().toISOString();
+      v2AssertDebateRunTransition(currentState, nextState);
       await tx.executor.query(
         `UPDATE debate_runs SET state = $2, stop_after = $3, stop_reason = $4,
           lifecycle_version = lifecycle_version + CASE WHEN state <> $2 THEN 1 ELSE 0 END,
@@ -975,7 +982,7 @@ export class DebateService {
         runId: parsed.debate_run_id,
         sequence,
         eventType: `debate_run_${parsed.action}`,
-        lifecycleVersion: nextState === run.state ? null : run.lifecycle_version + 1,
+        lifecycleVersion: nextState === currentState ? null : run.lifecycle_version + 1,
         actorType: parsed.actor.actor_type,
         actorId: parsed.actor.actor_id,
         correlationId: parsed.correlation_id,
@@ -1215,7 +1222,7 @@ export class DebateService {
         const attemptId =
           typeof row.payload.turn_attempt_id === "string" ? row.payload.turn_attempt_id : null;
         const rowUsage = attemptId ? usageByAttempt.get(attemptId) : undefined;
-        const event = {
+        const immutableEvent = V2DebateEventContentHashEnvelope.parse({
           schema_version: 2 as const,
           id: row.id,
           project_id: row.project_id,
@@ -1239,17 +1246,21 @@ export class DebateService {
           artifact_ids: Array.isArray(row.payload.artifact_ids)
             ? row.payload.artifact_ids.filter((value): value is string => typeof value === "string")
             : [],
-          usage: rowUsage
-            ? {
-                input_tokens: numeric(rowUsage.input_tokens),
-                output_tokens: numeric(rowUsage.output_tokens),
-                cost_usd: numeric(rowUsage.cost_usd),
-                latency_ms: rowUsage.latency_ms,
-              }
-            : null,
           occurred_at: iso(row.occurred_at) ?? this.now().toISOString(),
-        };
-        return V2DebateEvent.parse({ ...event, content_hash: sha256(canonical(event)) });
+        });
+        const usageEnrichment = rowUsage
+          ? {
+              input_tokens: numeric(rowUsage.input_tokens),
+              output_tokens: numeric(rowUsage.output_tokens),
+              cost_usd: numeric(rowUsage.cost_usd),
+              latency_ms: rowUsage.latency_ms,
+            }
+          : null;
+        return V2DebateEvent.parse({
+          ...immutableEvent,
+          usage: usageEnrichment,
+          content_hash: sha256(canonical(immutableEvent)),
+        });
       });
       const runVersion = await tx.query<{ event_version: number | string }>(
         "SELECT event_version FROM debate_runs WHERE id = $1 AND project_id = $2 AND debate_id = $3",

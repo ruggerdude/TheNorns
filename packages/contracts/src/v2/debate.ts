@@ -209,10 +209,17 @@ export const V2_DEBATE_RUN_TERMINAL_STATES: ReadonlySet<V2DebateRunStateT> = new
 export const V2_DEBATE_RUN_TRANSITIONS: Record<V2DebateRunStateT, readonly V2DebateRunStateT[]> = {
   created: ["queued", "cancelling", "cancelled", "failed"],
   queued: ["running", "paused", "cancelling", "cancelled", "failed"],
-  running: ["pausing", "finalizing", "cancelling", "failed"],
-  pausing: ["paused", "running", "cancelling", "failed"],
+  // A worker may pause directly when an operational failure is discovered at
+  // a durable turn boundary. Cancellation may also complete directly when no
+  // provider call is leased; otherwise it first enters `cancelling`.
+  running: ["pausing", "paused", "finalizing", "cancelling", "cancelled", "failed"],
+  // A draining pause does not override a stop condition that becomes decisive
+  // when the current turn commits.
+  pausing: ["paused", "running", "finalizing", "cancelling", "cancelled", "failed"],
   paused: ["queued", "cancelling", "cancelled", "failed"],
-  finalizing: ["completed", "cancelling", "failed"],
+  // Finalization can pause for a recoverable failure and can be cancelled
+  // directly while no finalizer call is leased.
+  finalizing: ["paused", "completed", "cancelling", "cancelled", "failed"],
   cancelling: ["cancelled", "failed"],
   completed: [],
   cancelled: [],
@@ -221,6 +228,17 @@ export const V2_DEBATE_RUN_TRANSITIONS: Record<V2DebateRunStateT, readonly V2Deb
 
 export function v2CanDebateRunTransition(from: V2DebateRunStateT, to: V2DebateRunStateT): boolean {
   return V2_DEBATE_RUN_TRANSITIONS[from].includes(to);
+}
+
+/**
+ * The shared runtime guard for every persisted DebateRun lifecycle mutation.
+ * Callers may treat a same-state request as an idempotent no-op; every actual
+ * state change must pass this function before it reaches storage.
+ */
+export function v2AssertDebateRunTransition(from: V2DebateRunStateT, to: V2DebateRunStateT): void {
+  if (from !== to && !v2CanDebateRunTransition(from, to)) {
+    throw new Error(`illegal debate run transition ${from}->${to}`);
+  }
 }
 
 export const V2DebateRun = z
@@ -624,11 +642,11 @@ export const V2DebateUsageEvent = z
 export type V2DebateUsageEventT = z.infer<typeof V2DebateUsageEvent>;
 
 /**
- * Frozen event-replay DTO. `content_hash` addresses the canonical immutable
- * event envelope (excluding the hash itself), so clients can verify replayed
- * pages independently of transport pagination.
+ * The exact immutable preimage addressed by a replay event's `content_hash`.
+ * Usage is intentionally absent: it is mutable query-time enrichment joined
+ * from settlement records and therefore cannot participate in event identity.
  */
-export const V2DebateEvent = z
+export const V2DebateEventContentHashEnvelope = z
   .object({
     schema_version: schemaVersion,
     id: V2EntityId,
@@ -647,12 +665,30 @@ export const V2DebateEvent = z
     actor_snapshot: z.record(z.unknown()).nullable(),
     payload: z.record(z.unknown()),
     artifact_ids: z.array(V2EntityId),
-    usage: V2DebateUsage.nullable(),
     occurred_at: V2IsoDateTime,
-    content_hash: V2Sha256Hex,
   })
   .strict();
+export type V2DebateEventContentHashEnvelopeT = z.infer<typeof V2DebateEventContentHashEnvelope>;
+
+/**
+ * Frozen event-replay DTO. `content_hash` addresses only
+ * `V2DebateEventContentHashEnvelope`; `usage` is separate mutable enrichment.
+ * Thus replaying the same event before and after usage settlement preserves
+ * both its `id` and `content_hash` while its `usage` view may become populated.
+ */
+export const V2DebateEvent = V2DebateEventContentHashEnvelope.extend({
+  usage: V2DebateUsage.nullable(),
+  content_hash: V2Sha256Hex,
+}).strict();
 export type V2DebateEventT = z.infer<typeof V2DebateEvent>;
+
+/** Select the exact canonical preimage used for DebateEvent content hashes. */
+export function v2DebateEventContentHashEnvelope(
+  event: V2DebateEventT,
+): V2DebateEventContentHashEnvelopeT {
+  const { usage: _usage, content_hash: _contentHash, ...envelope } = event;
+  return V2DebateEventContentHashEnvelope.parse(envelope);
+}
 
 /** Generic references accepted by debate-facing DTOs and evidence. */
 export const V2DebateEntityRef = V2EntityRef;

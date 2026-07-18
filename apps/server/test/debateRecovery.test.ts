@@ -248,6 +248,106 @@ describe.sequential("debate worker recovery invariants", () => {
     ).toBe("completed");
   });
 
+  it("keeps an event identity stable when usage settlement enriches its replay", async () => {
+    const { debate, run } = await createAndStart({ exactRounds: 2 });
+    const inFlight = deferred<AdapterReply>();
+    adapter.enqueueDeferred(inFlight);
+    const tick = workerWith(adapter).tick();
+
+    await eventually(() => expect(adapter.requests).toHaveLength(1));
+    const beforeSettlement = await service.events(PROJECT_ID, debate.id, run.id, 0);
+    const beforeDispatch = beforeSettlement.events.find(
+      (event) => event.type === "debate_turn_dispatched",
+    );
+    expect(beforeDispatch?.usage).toBeNull();
+
+    inFlight.resolve({
+      value: proposal("Usage enriches replay without changing event identity."),
+      inputTokens: 120,
+      outputTokens: 30,
+    });
+    await expect(tick).resolves.toBe("completed");
+
+    const afterSettlement = await service.events(PROJECT_ID, debate.id, run.id, 0);
+    const afterDispatch = afterSettlement.events.find(
+      (event) => event.type === "debate_turn_dispatched",
+    );
+    expect(afterDispatch?.usage).toMatchObject({ input_tokens: 120, output_tokens: 30 });
+    expect(afterDispatch?.id).toBe(beforeDispatch?.id);
+    expect(afterDispatch?.content_hash).toBe(beforeDispatch?.content_hash);
+  });
+
+  it("cancels directly between turns through the shared running transition", async () => {
+    const { debate, run } = await createAndStart({ exactRounds: 2 });
+    adapter.enqueue(proposal("First turn completes before cancellation."));
+    await expect(workerWith(adapter).tick()).resolves.toBe("completed");
+
+    const betweenTurns = await service.getRun(PROJECT_ID, debate.id, run.id);
+    expect(betweenTurns.status).toBe("running");
+    expect(
+      await scalar(
+        "SELECT COUNT(*) FROM debate_jobs WHERE debate_run_id = $1 AND state = 'queued'",
+        run.id,
+      ),
+    ).toBe(1);
+
+    const cancelled = await control(debate.id, betweenTurns, "cancel", "Cancel between turns");
+    expect(cancelled.status).toBe("cancelled");
+    expect(await textValue("SELECT state FROM debate_runs WHERE id = $1", run.id)).toBe(
+      "cancelled",
+    );
+  });
+
+  it("cancels directly while finalizing with an unleased synthesizer turn", async () => {
+    const { debate, run } = await createAndStart({ exactRounds: 1, includeSynthesizer: true });
+    adapter.enqueue(
+      proposal("Designer final-round proposal."),
+      proposal("Critic final-round response."),
+    );
+    const worker = workerWith(adapter);
+    await expect(worker.tick()).resolves.toBe("completed");
+    await expect(worker.tick()).resolves.toBe("completed");
+
+    const finalizing = await service.getRun(PROJECT_ID, debate.id, run.id);
+    expect(finalizing.status).toBe("finalizing");
+    expect(
+      await scalar(
+        "SELECT COUNT(*) FROM debate_jobs WHERE debate_run_id = $1 AND state = 'queued'",
+        run.id,
+      ),
+    ).toBe(1);
+
+    const cancelled = await control(debate.id, finalizing, "cancel", "Cancel final synthesis");
+    expect(cancelled.status).toBe("cancelled");
+    expect(await textValue("SELECT state FROM debate_runs WHERE id = $1", run.id)).toBe(
+      "cancelled",
+    );
+  });
+
+  it("rejects an illegal run transition at the service boundary", async () => {
+    const { debate, run } = await createAndStart({ exactRounds: 1 });
+    await pg.query(
+      "UPDATE debate_runs SET state = 'created', lifecycle_version = 0 WHERE id = $1",
+      [run.id],
+    );
+    const created = await service.getRun(PROJECT_ID, debate.id, run.id);
+
+    await expect(
+      service.control({
+        ...commandBase(`illegal-transition-${nextCommandSuffix()}`),
+        kind: "control_debate_run",
+        command_family: "debate",
+        project_id: PROJECT_ID,
+        debate_id: debate.id,
+        debate_run_id: run.id,
+        expected_run_version: created.aggregate_version,
+        action: "pause",
+        reason: "This transition must not persist",
+      }),
+    ).rejects.toThrow("illegal debate run transition created->paused");
+    expect(await textValue("SELECT state FROM debate_runs WHERE id = $1", run.id)).toBe("created");
+  });
+
   it.each([
     ["rate-limit", new AdapterError("rate_limit", "provider asks us to retry")],
     ["ambiguous-network", new AdapterError("network", "socket closed after request write")],
@@ -681,7 +781,7 @@ describe.sequential("debate worker recovery invariants", () => {
     await expect(tick).resolves.toBe("completed");
   });
 
-  it("uses the recovery transition expansion when finalizing work must pause", async () => {
+  it("uses the shared operational transition when finalizing work must pause", async () => {
     const { debate, run } = await createAndStart({ exactRounds: 1 });
     await pg.query(
       "UPDATE debate_runs SET state = 'finalizing', lifecycle_version = lifecycle_version + 1 WHERE id = $1",
@@ -746,6 +846,7 @@ describe.sequential("debate worker recovery invariants", () => {
 
   async function createAndStart(input: {
     exactRounds: number;
+    includeSynthesizer?: boolean;
     maxDurationSeconds?: number;
     maxInputTokens?: number;
     contexts?: Array<{
@@ -806,6 +907,17 @@ describe.sequential("debate worker recovery invariants", () => {
           display_name: "Critic",
           position: 1,
         },
+        ...(input.includeSynthesizer
+          ? [
+              {
+                ...commonActor,
+                actor_kind: "synthesizer" as const,
+                role_label: "synthesizer",
+                display_name: "Synthesizer",
+                position: 2,
+              },
+            ]
+          : []),
       ],
       contexts: input.contexts ?? [],
     });
