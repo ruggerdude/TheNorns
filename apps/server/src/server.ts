@@ -2955,15 +2955,30 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
       if (frame.type === "event") {
         const event: EventEnvelopeT = frame.event;
+        const authenticatedRunnerId = authedRunnerId;
         runnerEventDelivery = runnerEventDelivery
           .then(async () => {
-            const currentRunner = stores.runner(event.runner_id);
-            if (!currentRunner || event.generation !== currentRunner.generation) {
+            const currentRunner = stores.runner(authenticatedRunnerId);
+            const reconciled = reconciledWorkspaceRunners.get(authenticatedRunnerId);
+            if (
+              runnerSockets.get(authenticatedRunnerId) !== socket ||
+              reconciled?.socket !== socket ||
+              event.runner_id !== authenticatedRunnerId ||
+              !currentRunner ||
+              reconciled.generation !== currentRunner.generation ||
+              event.generation !== reconciled.generation
+            ) {
+              stores.audit(
+                `runner:${authenticatedRunnerId}`,
+                "runner.event_rejected",
+                "event did not match the current reconciled runner generation",
+                now(),
+              );
               sendFrame(socket, {
                 type: "fenced",
                 current_generation: currentRunner?.generation ?? event.generation + 1,
               });
-              socket.close();
+              socket.close(1008, "runner event rejected");
               return;
             }
             await options.phase4?.events.apply(event);
@@ -2976,7 +2991,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           })
           .catch((error) => {
             stores.audit(
-              `runner:${event.runner_id}`,
+              `runner:${authenticatedRunnerId}`,
               "runner.event_rejected",
               error instanceof Error ? error.message : String(error),
               now(),
