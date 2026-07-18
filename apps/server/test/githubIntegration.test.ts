@@ -201,11 +201,9 @@ describe.sequential("workspace GitHub integration", () => {
     expect(registration.action).toBe(
       "https://github.com/organizations/norns-org/settings/apps/new",
     );
-    const registeredManifest = JSON.parse(registration.manifest) as {
-      redirect_url: string;
-    };
-    expect(registeredManifest).toMatchObject({
+    expect(JSON.parse(registration.manifest)).toMatchObject({
       url: "https://norns.example",
+      redirect_url: "https://norns.example/api/integrations/github/manifest/callback",
       callback_urls: ["https://norns.example/api/integrations/github/callback"],
       setup_url: "https://norns.example/api/integrations/github/setup",
       default_permissions: {
@@ -213,11 +211,6 @@ describe.sequential("workspace GitHub integration", () => {
         pull_requests: "write",
       },
     });
-    const manifestRedirect = new URL(registeredManifest.redirect_url);
-    expect(`${manifestRedirect.origin}${manifestRedirect.pathname}`).toBe(
-      "https://norns.example/api/integrations/github/manifest/callback",
-    );
-    expect(manifestRedirect.searchParams.get("state")).toBe(registration.state);
 
     await guided.completeManifest("manifest-admin", "manifest-code", registration.state);
     const stored = await pg.query<{
