@@ -2,7 +2,8 @@
 // resolution, invites, and admin user management. UserStore itself is
 // covered at the unit level in userStore.test.ts — this file proves the
 // routes wire it up correctly (status codes, auth gating, audit trail).
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { GitHubIntegrationService } from "../src/integrations/github.js";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
 import { UserStore } from "../src/users/store.js";
@@ -16,6 +17,8 @@ afterEach(async () => {
 
 interface InjectedResponse {
   statusCode: number;
+  body: string;
+  headers: Record<string, string | string[] | undefined>;
   json: () => unknown;
 }
 
@@ -40,6 +43,7 @@ async function start(opts?: {
   users?: UserStore;
   persistUsers?: () => Promise<void>;
   integrationEnvironment?: NodeJS.ProcessEnv;
+  github?: GitHubIntegrationService;
 }): Promise<NornsServer> {
   server = await buildServer({
     stores: new RelayStores(),
@@ -49,6 +53,7 @@ async function start(opts?: {
     ...(opts?.integrationEnvironment !== undefined
       ? { integrationEnvironment: opts.integrationEnvironment }
       : {}),
+    ...(opts?.github !== undefined ? { integrations: { github: opts.github } } : {}),
   });
   return server;
 }
@@ -111,6 +116,68 @@ describe("GET /api/integrations/ai/status", () => {
       ],
     });
     expect(JSON.stringify(status.json())).not.toContain("anthropic-secret");
+  });
+});
+
+describe("GitHub App manifest setup routes", () => {
+  it("serves an authenticated auto-submitting GitHub manifest form", async () => {
+    const manifestRegistration = vi.fn(() => ({
+      action: "https://github.com/organizations/norns-org/settings/apps/new",
+      manifest: JSON.stringify({ name: "The Norns", callback_urls: ["https://norns.example/cb"] }),
+      state: "signed-state",
+    }));
+    const github = { manifestRegistration } as unknown as GitHubIntegrationService;
+    const s = await start({ deployToken: "deploy-secret", github });
+    const bootstrap = await inject(s, "POST", "/api/auth/bootstrap", {
+      deploy_token: "deploy-secret",
+      email: "root@x.com",
+      password: "password123",
+      name: "Root",
+    });
+    const token = (bootstrap.json() as { token: string }).token;
+    expect((await inject(s, "GET", "/api/integrations/github/manifest/start")).statusCode).toBe(
+      401,
+    );
+
+    const response = await inject(
+      s,
+      "GET",
+      "/api/integrations/github/manifest/start?owner_type=organization&organization=norns-org",
+      undefined,
+      token,
+    );
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-security-policy"]).toContain("form-action https://github.com");
+    expect(response.body).toContain('method="post"');
+    expect(response.body).toContain(
+      'action="https://github.com/organizations/norns-org/settings/apps/new"',
+    );
+    expect(response.body).toContain('name="manifest"');
+    expect(response.body).toContain("&quot;The Norns&quot;");
+    expect(response.body).not.toContain('<input type="hidden" name="manifest" value="{"');
+    expect(manifestRegistration).toHaveBeenCalledWith(expect.any(String), "norns-org");
+  });
+
+  it("converts the manifest then continues into authorization and installation", async () => {
+    const completeManifest = vi.fn(async () => undefined);
+    const github = {
+      manifestUserId: vi.fn(() => "admin-1"),
+      completeManifest,
+      authorizationUrl: vi.fn(
+        () => "https://github.com/login/oauth/authorize?client_id=Iv1.guided",
+      ),
+    } as unknown as GitHubIntegrationService;
+    const s = await start({ github });
+    const response = await inject(
+      s,
+      "GET",
+      "/api/integrations/github/manifest/callback?code=manifest-code&state=signed-state",
+    );
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toBe(
+      "https://github.com/login/oauth/authorize?client_id=Iv1.guided",
+    );
+    expect(completeManifest).toHaveBeenCalledWith("admin-1", "manifest-code", "signed-state");
   });
 });
 

@@ -24,6 +24,8 @@ describe("workspace connections settings", () => {
     mock.get("/api/integrations/github/status", {
       body: {
         configured: true,
+        setup_available: false,
+        configuration_source: "manifest",
         user_authorization: { connected: true, login: "octocat" },
         connections: [
           {
@@ -59,6 +61,8 @@ describe("workspace connections settings", () => {
     mock.get("/api/integrations/github/status", {
       body: {
         configured: false,
+        setup_available: true,
+        configuration_source: null,
         user_authorization: { connected: false, login: null },
         connections: [],
       },
@@ -69,13 +73,20 @@ describe("workspace connections settings", () => {
 
     expect(await screen.findByText("Not configured")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Set up GitHub" }));
-    expect(
-      screen.getByText(/GitHub App setup is required once per deployment/i),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /create github app/i })).toHaveAttribute(
-      "href",
-      "https://github.com/settings/apps/new",
+    expect(screen.getByText(/Connect GitHub with guided setup/i)).toBeInTheDocument();
+    const continueButton = screen.getByRole("button", { name: "Continue with GitHub" });
+    expect(continueButton.closest("form")).toHaveAttribute(
+      "action",
+      "/api/integrations/github/manifest/start",
     );
+    await userEvent.selectOptions(
+      screen.getByLabelText("Create the GitHub App under"),
+      "organization",
+    );
+    const organization = screen.getByLabelText("Organization name");
+    expect(continueButton).toBeDisabled();
+    await userEvent.type(organization, "norns-org");
+    expect(continueButton).toBeEnabled();
   });
 
   it("pairs and inventories local runners from the settings card", async () => {
@@ -84,6 +95,8 @@ describe("workspace connections settings", () => {
     mock.get("/api/integrations/github/status", {
       body: {
         configured: false,
+        setup_available: true,
+        configuration_source: null,
         user_authorization: { connected: false, login: null },
         connections: [],
       },
@@ -119,6 +132,8 @@ describe("workspace connections settings", () => {
     mock.get("/api/integrations/github/status", {
       body: {
         configured: false,
+        setup_available: true,
+        configuration_source: null,
         user_authorization: { connected: false, login: null },
         connections: [],
       },

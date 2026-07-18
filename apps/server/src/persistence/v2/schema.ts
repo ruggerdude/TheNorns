@@ -240,6 +240,22 @@ export const githubUserAuthorizations = pgTable(
   () => [],
 );
 
+export const githubAppConfigurations = pgTable(
+  "github_app_configurations",
+  {
+    id: text("id").primaryKey(),
+    keyId: text("key_id").notNull(),
+    appId: text("app_id").notNull(),
+    clientId: text("client_id").notNull(),
+    appSlug: text("app_slug").notNull(),
+    credentialsCiphertext: text("credentials_ciphertext").notNull(),
+    createdByUserId: text("created_by_user_id").notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [check("github_app_configurations_singleton_check", sql`${table.id} = 'primary'`)],
+);
+
 export const phases = pgTable(
   "phases",
   {

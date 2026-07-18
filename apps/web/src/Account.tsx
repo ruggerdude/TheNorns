@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
-import { Alert, Badge, Button, Spinner } from "./ui";
+import { Alert, Badge, Button, Field, Input, Select, Spinner } from "./ui";
 
 interface SessionSummary {
   id: string;
@@ -24,6 +24,8 @@ export interface GitHubConnection {
 
 export interface GitHubIntegrationStatus {
   configured: boolean;
+  setup_available: boolean;
+  configuration_source: "environment" | "manifest" | null;
   user_authorization: { connected: boolean; login: string | null };
   connections: GitHubConnection[];
 }
@@ -96,6 +98,8 @@ export function Account({
   const [pairing, setPairing] = useState<PairingSession | null>(null);
   const [pairingCopied, setPairingCopied] = useState(false);
   const [aiStatus, setAiStatus] = useState<AiIntegrationStatus | null>(null);
+  const [githubOwnerType, setGitHubOwnerType] = useState<"personal" | "organization">("personal");
+  const [githubOrganization, setGitHubOrganization] = useState("");
 
   const loadSessions = useCallback((): void => {
     fetch("/api/auth/sessions", { headers: authHeaders(), credentials: "include" })
@@ -400,56 +404,84 @@ export function Account({
                         {!github.configured ? (
                           <div className="connection-setup">
                             <div>
-                              <strong>GitHub App setup is required once per deployment</strong>
+                              <strong>Connect GitHub with guided setup</strong>
                               <p className="muted">
-                                Create the app, add its credentials to the server secret store, then
-                                return here to authorize your GitHub identity.
+                                The Norns will preconfigure the App, securely store the credentials,
+                                and continue directly into repository access.
                               </p>
                             </div>
-                            <ol>
-                              <li>Create a GitHub App owned by you or your organization.</li>
-                              <li>
-                                Set the callback URL to{" "}
-                                <code>
-                                  {window.location.origin}/api/integrations/github/callback
-                                </code>
-                                and the setup URL to{" "}
-                                <code>{window.location.origin}/api/integrations/github/setup</code>.
-                              </li>
-                              <li>
-                                Configure the seven <code>NORNS_GITHUB_*</code> deployment
-                                variables, then redeploy The Norns.
-                              </li>
-                            </ol>
-                            <div className="connection-actions">
-                              <a
-                                className="btn btn-primary btn-small"
-                                href="https://github.com/settings/apps/new"
-                                target="_blank"
-                                rel="noreferrer"
+                            {github.setup_available && user.role === "admin" ? (
+                              <form
+                                className="github-manifest-form"
+                                action="/api/integrations/github/manifest/start"
+                                method="get"
                               >
-                                Create GitHub App ↗
-                              </a>
-                              <a
-                                className="btn btn-ghost btn-small"
-                                href="https://github.com/settings/apps"
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                Open GitHub App settings ↗
-                              </a>
-                            </div>
+                                <Field label="Create the GitHub App under">
+                                  <Select
+                                    name="owner_type"
+                                    value={githubOwnerType}
+                                    onChange={(event) =>
+                                      setGitHubOwnerType(
+                                        event.currentTarget.value as "personal" | "organization",
+                                      )
+                                    }
+                                  >
+                                    <option value="personal">My personal GitHub account</option>
+                                    <option value="organization">A GitHub organization</option>
+                                  </Select>
+                                </Field>
+                                {githubOwnerType === "organization" ? (
+                                  <Field label="Organization name">
+                                    <Input
+                                      name="organization"
+                                      value={githubOrganization}
+                                      onChange={(event) =>
+                                        setGitHubOrganization(event.currentTarget.value)
+                                      }
+                                      placeholder="your-organization"
+                                      autoComplete="off"
+                                      required
+                                    />
+                                  </Field>
+                                ) : null}
+                                <Button
+                                  type="submit"
+                                  variant="primary"
+                                  disabled={
+                                    githubOwnerType === "organization" &&
+                                    githubOrganization.trim().length === 0
+                                  }
+                                >
+                                  Continue with GitHub
+                                </Button>
+                                <p className="field-help">
+                                  GitHub will show the prefilled App for confirmation. No keys or
+                                  callback URLs need to be copied.
+                                </p>
+                              </form>
+                            ) : (
+                              <Alert>
+                                {user.role === "admin"
+                                  ? "Guided setup needs relational identity persistence on this deployment."
+                                  : "A workspace administrator must connect the GitHub App."}
+                              </Alert>
+                            )}
                             <details>
-                              <summary>Required deployment variables</summary>
-                              <code className="connection-variable-list">
-                                NORNS_GITHUB_APP_ID{"\n"}
-                                NORNS_GITHUB_CLIENT_ID{"\n"}
-                                NORNS_GITHUB_CLIENT_SECRET{"\n"}
-                                NORNS_GITHUB_APP_SLUG{"\n"}
-                                NORNS_GITHUB_PRIVATE_KEY{"\n"}
-                                NORNS_GITHUB_STATE_SECRET{"\n"}
-                                NORNS_GITHUB_TOKEN_ENCRYPTION_KEY
-                              </code>
+                              <summary>Advanced: manage the GitHub App manually</summary>
+                              <p className="muted">
+                                Environment-managed configuration remains available for operators
+                                who do not want The Norns to store App credentials.
+                              </p>
+                              <div className="connection-actions">
+                                <a
+                                  className="btn btn-ghost btn-small"
+                                  href="https://github.com/settings/apps/new"
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  Create GitHub App manually ↗
+                                </a>
+                              </div>
                             </details>
                           </div>
                         ) : (

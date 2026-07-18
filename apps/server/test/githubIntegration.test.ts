@@ -18,6 +18,7 @@ describe.sequential("workspace GitHub integration", () => {
   let pg: PGlite;
   let service: GitHubIntegrationService;
   let http: ReturnType<typeof vi.fn>;
+  let manifestPrivateKey: string;
 
   beforeAll(async () => {
     pg = new PGlite();
@@ -31,13 +32,14 @@ describe.sequential("workspace GitHub integration", () => {
     `);
     await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    manifestPrivateKey = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
     const config = githubIntegrationConfigFromEnvironment(
       {
         NORNS_GITHUB_APP_ID: "1234",
         NORNS_GITHUB_CLIENT_ID: "Iv1.test",
         NORNS_GITHUB_CLIENT_SECRET: "client-secret",
         NORNS_GITHUB_APP_SLUG: "the-norns-test",
-        NORNS_GITHUB_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+        NORNS_GITHUB_PRIVATE_KEY: manifestPrivateKey,
         NORNS_GITHUB_STATE_SECRET: "state-secret-that-is-at-least-thirty-two-bytes",
         NORNS_GITHUB_TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
       },
@@ -54,6 +56,19 @@ describe.sequential("workspace GitHub integration", () => {
           expires_in: 28_800,
           refresh_token_expires_in: 15_552_000,
         });
+      }
+      if (url === "https://api.github.com/app-manifests/manifest-code/conversions") {
+        return json(
+          {
+            id: 5678,
+            slug: "the-norns-guided",
+            client_id: "Iv1.guided",
+            client_secret: "guided-client-secret",
+            pem: manifestPrivateKey,
+            webhook_secret: "guided-webhook-secret",
+          },
+          201,
+        );
       }
       if (url === "https://api.github.com/user") {
         return json({ id: 101, login: "octocat" });
@@ -160,6 +175,78 @@ describe.sequential("workspace GitHub integration", () => {
 
   it("treats an entirely absent GitHub configuration as disabled", () => {
     expect(githubIntegrationConfigFromEnvironment({}, "https://norns.example")).toBeNull();
+  });
+
+  it("creates, encrypts, and reloads a GitHub App through the manifest flow", async () => {
+    const rootKey = { keyId: "credential-v1", key: Buffer.alloc(32, 19) };
+    const bootstrap = {
+      publicOrigin: "https://norns.example",
+      currentKey: rootKey,
+      keys: new Map([[rootKey.keyId, rootKey]]),
+    };
+    const guided = new GitHubIntegrationService(
+      new PGliteTransactionRunner(pg as never),
+      null,
+      http as typeof fetch,
+      bootstrap,
+    );
+    await guided.loadStoredConfiguration();
+    await expect(guided.status("manifest-admin", false)).resolves.toMatchObject({
+      configured: false,
+      setup_available: true,
+      configuration_source: null,
+    });
+
+    const registration = guided.manifestRegistration("manifest-admin", "norns-org");
+    expect(registration.action).toBe(
+      "https://github.com/organizations/norns-org/settings/apps/new",
+    );
+    expect(JSON.parse(registration.manifest)).toMatchObject({
+      url: "https://norns.example",
+      redirect_url: "https://norns.example/api/integrations/github/manifest/callback",
+      callback_urls: ["https://norns.example/api/integrations/github/callback"],
+      setup_url: "https://norns.example/api/integrations/github/setup",
+      default_permissions: {
+        contents: "write",
+        pull_requests: "write",
+      },
+    });
+
+    await guided.completeManifest("manifest-admin", "manifest-code", registration.state);
+    const stored = await pg.query<{
+      key_id: string;
+      app_id: string;
+      client_id: string;
+      app_slug: string;
+      credentials_ciphertext: string;
+    }>(
+      `SELECT key_id, app_id, client_id, app_slug, credentials_ciphertext
+       FROM github_app_configurations`,
+    );
+    expect(stored.rows[0]).toMatchObject({
+      key_id: "credential-v1",
+      app_id: "5678",
+      client_id: "Iv1.guided",
+      app_slug: "the-norns-guided",
+    });
+    expect(stored.rows[0]?.credentials_ciphertext).not.toContain("guided-client-secret");
+    expect(stored.rows[0]?.credentials_ciphertext).not.toContain("PRIVATE KEY");
+
+    const reloaded = new GitHubIntegrationService(
+      new PGliteTransactionRunner(pg as never),
+      null,
+      http as typeof fetch,
+      bootstrap,
+    );
+    await reloaded.loadStoredConfiguration();
+    await expect(reloaded.status("manifest-admin", false)).resolves.toMatchObject({
+      configured: true,
+      setup_available: false,
+      configuration_source: "manifest",
+    });
+    expect(new URL(reloaded.authorizationUrl("manifest-admin")).searchParams.get("client_id")).toBe(
+      "Iv1.guided",
+    );
   });
 });
 
