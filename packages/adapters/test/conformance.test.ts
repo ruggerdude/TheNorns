@@ -96,9 +96,24 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
   it("rejects structured responses that fail the schema", async () => {
     const adapter = make();
     const schema = z.object({ missing_field: z.string() });
-    await expect(
-      adapter.completeStructured({ prompt: "STRUCTURED please", ...attribution }, schema, "strict"),
-    ).rejects.toMatchObject({ kind: "invalid_response", retryable: false });
+    const error = await adapter
+      .completeStructured({ prompt: "STRUCTURED please", ...attribution }, schema, "strict")
+      .then(
+        () => null,
+        (failure: unknown) => failure,
+      );
+    expect(error).toMatchObject({ kind: "invalid_response", retryable: false });
+    expect(error).toBeInstanceOf(AdapterError);
+    expect((error as AdapterError).metadata).toMatchObject({
+      request_dispatched: true,
+      provider_execution_id: name === "anthropic" ? "msg_mock" : "resp_mock",
+      usage: {
+        input_tokens: 120,
+        output_tokens: 45,
+      },
+    });
+    expect((error as AdapterError).metadata?.latency_ms).toEqual(expect.any(Number));
+    expect((error as AdapterError).metadata?.latency_ms).toBeGreaterThanOrEqual(0);
   });
 
   it("maps the failure taxonomy: 429 retryable, 401 fatal, 500 retryable", async () => {

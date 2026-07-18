@@ -9,6 +9,8 @@ import {
   AnthropicAdapter,
   OpenAiAdapter,
   type ProviderName,
+  buildSelectableModelCatalog,
+  modelAvailabilityFromDebateEnvironment,
   quoteConservativeMaxCharge,
 } from "@norns/adapters";
 import { UsageEvent } from "@norns/contracts";
@@ -204,19 +206,36 @@ if (databaseUrl) {
     phase5Services = { attention: new AttentionService(runtimeTransactions) };
     phase6Services = { coordination: new Phase6CoordinationService(runtimeTransactions) };
     phase7Services = { operations: new Phase7OperationsService(runtimeTransactions) };
+    // An API key does not itself authorize every model accessible to that key.
+    // NORNS_DEBATE_ALLOWED_MODELS is the static, deployment-level allowlist;
+    // it is evaluated locally once at startup and never via a provider probe.
+    const configuredDebateModelKeys = new Set(
+      buildSelectableModelCatalog(modelAvailabilityFromDebateEnvironment(process.env))
+        .filter((entry) => entry.available)
+        .map((entry) => `${entry.provider}:${entry.model}`),
+    );
+    const assertDebateModelConfigured = (provider: string, model: string): void => {
+      if (!configuredDebateModelKeys.has(`${provider}:${model}`)) {
+        throw new Error(
+          `debate model ${provider}/${model} is not enabled by NORNS_DEBATE_ALLOWED_MODELS`,
+        );
+      }
+    };
     const maximumTurnCharge = (input: {
       provider: string;
       model: string;
       max_input_tokens: number;
       max_output_tokens: number;
-    }) =>
-      quoteConservativeMaxCharge(
+    }) => {
+      assertDebateModelConfigured(input.provider, input.model);
+      return quoteConservativeMaxCharge(
         { provider: input.provider as ProviderName, model: input.model },
         {
           max_input_tokens: input.max_input_tokens,
           max_output_tokens: input.max_output_tokens,
         },
       ).max_charge_usd;
+    };
     const actorExecutionSnapshot = (actor: {
       id: string;
       provider: string;
@@ -227,6 +246,7 @@ if (databaseUrl) {
       budget_limit_usd: number;
       max_turns: number;
     }) => {
+      assertDebateModelConfigured(actor.provider, actor.model);
       const quote = quoteConservativeMaxCharge(
         { provider: actor.provider as ProviderName, model: actor.model },
         {
@@ -261,6 +281,7 @@ if (databaseUrl) {
     const debateWorker = new DebateWorker(
       runtimeTransactions,
       (provider, model) => {
+        assertDebateModelConfigured(provider, model);
         if (provider === "anthropic") {
           const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
           if (!apiKey) throw new Error("Anthropic is not configured for debate execution");

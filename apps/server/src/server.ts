@@ -13,12 +13,11 @@ import websocket from "@fastify/websocket";
 import {
   AdapterError,
   AnthropicAdapter,
-  DEFAULT_MODEL_REGISTRY,
   type LlmAdapter,
-  type ModelAvailabilityInput,
   OpenAiAdapter,
   type ProviderName,
   buildSelectableModelCatalog,
+  modelAvailabilityFromDebateEnvironment,
 } from "@norns/adapters";
 import {
   AnthropicPmModel,
@@ -1075,18 +1074,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   if (options.debates) {
     const debates = options.debates;
     const configuredDebateModels = () => {
-      const availability: ModelAvailabilityInput[] = Object.entries(DEFAULT_MODEL_REGISTRY).map(
-        ([model, entry]) => ({
-          provider: entry.provider,
-          model,
-          available:
-            entry.provider === "anthropic"
-              ? Boolean(integrationEnvironment.ANTHROPIC_API_KEY?.trim())
-              : Boolean(integrationEnvironment.OPENAI_API_KEY?.trim()),
-          reason: "provider_api_key_not_configured",
-        }),
-      );
-      return buildSelectableModelCatalog(availability).filter((entry) => entry.available);
+      return buildSelectableModelCatalog(
+        modelAvailabilityFromDebateEnvironment(integrationEnvironment),
+      ).filter((entry) => entry.available);
     };
     const debateError = (reply: FastifyReply, error: unknown): void => {
       if (error instanceof DebateConflictError) {
@@ -1210,7 +1200,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         target: z.string().trim().min(1).max(200),
         text: z.string().trim().min(1).max(100_000),
         apply_at: z.enum(["next_turn", "next_round"]),
-        expected_version: z.number().int().positive().optional(),
+        expected_version: z.number().int().positive(),
         idempotency_key: z.string().trim().min(1),
       })
       .strict();
@@ -1243,10 +1233,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       const body = CreateDebateBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
       const { id: projectId } = req.params as { id: string };
-      if (body.data.configuration.context_artifact_ids.length > 0) {
+      const hasArtifactContext =
+        body.data.configuration.context_artifact_ids.length > 0 ||
+        body.data.configuration.contexts.some(
+          (context) =>
+            context.artifact_id !== null ||
+            context.artifact_content_hash !== null ||
+            context.artifact_media_type !== null,
+        );
+      if (hasArtifactContext) {
         return reply.code(400).send({
-          error: "context_metadata_required",
-          message: "artifact contexts require content hash and media type metadata",
+          error: "artifact_contexts_not_supported",
+          message:
+            "debate MVP supports inline contexts only; artifact-backed contexts are unavailable",
         });
       }
       const selectable = new Set(
@@ -1315,6 +1314,18 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       const { id, debateId } = req.params as { id: string; debateId: string };
       try {
         const snapshot = await debates.get(id, debateId);
+        const selectable = new Set(
+          configuredDebateModels().map((entry) => `${entry.provider}:${entry.model}`),
+        );
+        if (
+          snapshot.configuration.actors.some((actor) => {
+            const provider = typeof actor.provider === "string" ? actor.provider : "";
+            const model = typeof actor.model === "string" ? actor.model : "";
+            return !selectable.has(`${provider}:${model}`);
+          })
+        ) {
+          return reply.code(400).send({ error: "model_not_configured" });
+        }
         const command = V2StartDebateRunCommand.parse({
           schema_version: 2,
           kind: "start_debate_run",
@@ -1403,7 +1414,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           runId: string;
         };
         try {
-          const run = await debates.getRun(id, debateId, runId);
           const command = V2InterveneDebateRunCommand.parse({
             schema_version: 2,
             kind: "intervene_debate_run",
@@ -1417,7 +1427,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             project_id: id,
             debate_id: debateId,
             debate_run_id: runId,
-            expected_run_version: body.data.expected_version ?? run.aggregate_version,
+            expected_run_version: body.data.expected_version,
             intervention_kind: body.data.kind,
             target_actor_id: body.data.target === "all" ? null : body.data.target,
             apply_at: body.data.apply_at,

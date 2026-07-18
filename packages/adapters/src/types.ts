@@ -38,6 +38,20 @@ export function prepareStructuredOutputPrompt<T>(
 export interface ProviderCompletionMetadata {
   provider_execution_id?: string;
   finish_reason?: string;
+  /** Wall-clock latency observed by the adapter, when a provider response arrived. */
+  latency_ms?: number;
+}
+
+/**
+ * Evidence retained when a provider accepted a request but its response cannot
+ * be used.  This is intentionally distinct from transport failures: callers
+ * can settle the known usage instead of conservatively treating a malformed
+ * response as an ambiguous execution.
+ */
+export interface AdapterFailureMetadata extends ProviderCompletionMetadata {
+  usage?: UsageEventT;
+  /** True only after the provider has returned a response to this request. */
+  request_dispatched?: boolean;
 }
 
 export interface CompletionResult extends ProviderCompletionMetadata {
@@ -96,12 +110,18 @@ const RETRYABLE: ReadonlySet<AdapterErrorKind> = new Set([
 export class AdapterError extends Error {
   readonly kind: AdapterErrorKind;
   readonly retryable: boolean;
+  readonly metadata: AdapterFailureMetadata | undefined;
 
-  constructor(kind: AdapterErrorKind, message: string, options?: { cause?: unknown }) {
+  constructor(
+    kind: AdapterErrorKind,
+    message: string,
+    options?: { cause?: unknown; metadata?: AdapterFailureMetadata },
+  ) {
     super(message, options);
     this.name = "AdapterError";
     this.kind = kind;
     this.retryable = RETRYABLE.has(kind);
+    this.metadata = options?.metadata;
   }
 }
 

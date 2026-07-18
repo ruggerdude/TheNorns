@@ -1,9 +1,11 @@
 import { PM_MODEL_OPTIONS, PmProvider } from "@norns/contracts";
 import { describe, expect, it } from "vitest";
 import {
+  DEBATE_ALLOWED_MODELS_ENV,
   DEFAULT_MODEL_REGISTRY,
   buildSelectableModelCatalog,
   conservativeMaxChargeUsd,
+  modelAvailabilityFromDebateEnvironment,
   quoteConservativeMaxCharge,
   snapshotModelPricing,
 } from "../src/registry.js";
@@ -66,6 +68,38 @@ describe("selectable PM model metering", () => {
         { provider: "openai", model: "gpt-5.6-sol", available: false },
       ]),
     ).toThrow("duplicate availability");
+  });
+
+  it("requires a deployment allowlist as well as a provider credential for debate execution", () => {
+    const withoutAllowlist = buildSelectableModelCatalog(
+      modelAvailabilityFromDebateEnvironment({
+        OPENAI_API_KEY: "openai-key",
+        ANTHROPIC_API_KEY: "anthropic-key",
+      }),
+    );
+    expect(withoutAllowlist.every((entry) => !entry.available)).toBe(true);
+    expect(withoutAllowlist[0]?.unavailable_reason).toBe(
+      "debate_model_allowlist_not_configured_or_invalid",
+    );
+
+    const configured = buildSelectableModelCatalog(
+      modelAvailabilityFromDebateEnvironment({
+        OPENAI_API_KEY: "openai-key",
+        [DEBATE_ALLOWED_MODELS_ENV]: "openai/gpt-5.6-terra,anthropic/claude-sonnet-5",
+      }),
+    );
+    expect(configured.find((entry) => entry.model === "gpt-5.6-terra")).toMatchObject({
+      available: true,
+      unavailable_reason: null,
+    });
+    expect(configured.find((entry) => entry.model === "claude-sonnet-5")).toMatchObject({
+      available: false,
+      unavailable_reason: "provider_api_key_not_configured",
+    });
+    expect(configured.find((entry) => entry.model === "gpt-5.6-sol")).toMatchObject({
+      available: false,
+      unavailable_reason: "model_not_in_debate_allowlist",
+    });
   });
 
   it("freezes a pricing snapshot and rounds conservative actor-cap quotes upward", () => {

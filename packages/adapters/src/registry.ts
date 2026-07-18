@@ -151,6 +151,83 @@ export interface ModelAvailabilityInput extends ModelSelection {
   reason?: string;
 }
 
+/**
+ * Comma-separated exact provider/model pairs that this deployment permits for
+ * debate execution, for example:
+ *
+ * NORNS_DEBATE_ALLOWED_MODELS=openai/gpt-5.6-terra,anthropic/claude-sonnet-5
+ *
+ * An API credential alone is deliberately insufficient: it could grant access
+ * to models that have not been costed, approved, or tested for debates. An
+ * absent or malformed value therefore exposes no debate models (fail closed).
+ */
+export const DEBATE_ALLOWED_MODELS_ENV = "NORNS_DEBATE_ALLOWED_MODELS";
+
+type DebateEnvironment = Readonly<Record<string, string | undefined>>;
+
+function deploymentCredentialPresent(
+  provider: ProviderName,
+  environment: DebateEnvironment,
+): boolean {
+  return Boolean(
+    (provider === "anthropic" ? environment.ANTHROPIC_API_KEY : environment.OPENAI_API_KEY)?.trim(),
+  );
+}
+
+function parseDebateAllowedSelections(
+  value: string | undefined,
+): Map<string, ModelSelection> | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  const selections = new Map<string, ModelSelection>();
+  for (const rawEntry of trimmed.split(",")) {
+    const entry = rawEntry.trim();
+    const separator = entry.indexOf("/");
+    if (
+      separator <= 0 ||
+      separator === entry.length - 1 ||
+      entry.indexOf("/", separator + 1) !== -1
+    ) {
+      return null;
+    }
+    const provider = entry.slice(0, separator);
+    const model = entry.slice(separator + 1);
+    if ((provider !== "anthropic" && provider !== "openai") || !model.trim()) return null;
+    const selection = { provider: provider as ProviderName, model: model.trim() };
+    const key = selectionKey(selection.provider, selection.model);
+    if (selections.has(key)) return null;
+    selections.set(key, selection);
+  }
+  return selections.size > 0 ? selections : null;
+}
+
+/**
+ * Derive exact, static deployment availability for debate models. This makes
+ * no provider network call. The catalog and create/start validators consume
+ * the same signals, preventing a model from appearing selectable merely
+ * because the deployment has a key for its provider.
+ */
+export function modelAvailabilityFromDebateEnvironment(
+  environment: DebateEnvironment,
+  registry: Readonly<Record<string, ModelEntry>> = DEFAULT_MODEL_REGISTRY,
+): ModelAvailabilityInput[] {
+  const allowed = parseDebateAllowedSelections(environment[DEBATE_ALLOWED_MODELS_ENV]);
+  return Object.entries(registry)
+    .filter(([, entry]) => entry.selectable)
+    .map(([model, entry]) => {
+      const selected = allowed?.has(selectionKey(entry.provider, model)) ?? false;
+      const available = selected && deploymentCredentialPresent(entry.provider, environment);
+      const reason = !allowed
+        ? "debate_model_allowlist_not_configured_or_invalid"
+        : !selected
+          ? "model_not_in_debate_allowlist"
+          : !deploymentCredentialPresent(entry.provider, environment)
+            ? "provider_api_key_not_configured"
+            : undefined;
+      return { provider: entry.provider, model, available, ...(reason ? { reason } : {}) };
+    });
+}
+
 export interface ModelPricingSnapshot extends ModelSelection {
   input_per_mtok: number;
   output_per_mtok: number;

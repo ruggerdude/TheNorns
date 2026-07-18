@@ -38,11 +38,12 @@ export class OpenAiAdapter implements LlmAdapter {
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResult> {
+    const startedAt = Date.now();
     const response = await this.call(request);
     return {
       text: this.textOf(response),
       usage: this.usageOf(response, request),
-      ...this.metadataOf(response),
+      ...this.metadataOf(response, startedAt),
     };
   }
 
@@ -51,6 +52,7 @@ export class OpenAiAdapter implements LlmAdapter {
     schema: z.ZodType<T>,
     schemaName: string,
   ): Promise<StructuredResult<T>> {
+    const startedAt = Date.now();
     const structuredRequest: CompletionRequest = {
       ...request,
       prompt: request.structuredOutputPrepared
@@ -63,19 +65,23 @@ export class OpenAiAdapter implements LlmAdapter {
     try {
       parsed = JSON.parse(stripFences(text));
     } catch (cause) {
-      throw new AdapterError("invalid_response", `${schemaName}: response is not JSON`, { cause });
+      throw new AdapterError("invalid_response", `${schemaName}: response is not JSON`, {
+        cause,
+        metadata: this.failureMetadata(response, request, startedAt),
+      });
     }
     const result = schema.safeParse(parsed);
     if (!result.success) {
       throw new AdapterError(
         "invalid_response",
         `${schemaName}: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+        { metadata: this.failureMetadata(response, request, startedAt) },
       );
     }
     return {
       value: result.data,
       usage: this.usageOf(response, request),
-      ...this.metadataOf(response),
+      ...this.metadataOf(response, startedAt),
     };
   }
 
@@ -110,11 +116,27 @@ export class OpenAiAdapter implements LlmAdapter {
     );
   }
 
-  private metadataOf(response: OpenAI.Responses.Response): ProviderCompletionMetadata {
+  private metadataOf(
+    response: OpenAI.Responses.Response,
+    startedAt: number,
+  ): ProviderCompletionMetadata {
     const finishReason = response.incomplete_details?.reason ?? response.status;
     return {
       provider_execution_id: response.id,
+      latency_ms: Math.max(0, Date.now() - startedAt),
       ...(finishReason !== undefined ? { finish_reason: finishReason } : {}),
+    };
+  }
+
+  private failureMetadata(
+    response: OpenAI.Responses.Response,
+    request: CompletionRequest,
+    startedAt: number,
+  ) {
+    return {
+      ...this.metadataOf(response, startedAt),
+      usage: this.usageOf(response, request),
+      request_dispatched: true,
     };
   }
 

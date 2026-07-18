@@ -1,5 +1,6 @@
 export {
   AdapterError,
+  type AdapterFailureMetadata,
   type AdapterErrorKind,
   type CompletionAttribution,
   type CompletionRequest,
@@ -21,6 +22,8 @@ export {
   type ModelPricingSnapshot,
   type ModelSelection,
   type SelectableModelCatalogEntry,
+  DEBATE_ALLOWED_MODELS_ENV,
+  modelAvailabilityFromDebateEnvironment,
   buildSelectableModelCatalog,
   conservativeMaxChargeUsd,
   estimateCostUsd,

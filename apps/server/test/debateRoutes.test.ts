@@ -125,6 +125,7 @@ describe("durable debate HTTP API", () => {
       integrationEnvironment: {
         ANTHROPIC_API_KEY: "anthropic-test-secret",
         OPENAI_API_KEY: "openai-test-secret",
+        NORNS_DEBATE_ALLOWED_MODELS: "openai/gpt-5.6-terra,anthropic/claude-sonnet-5",
       },
     });
   });
@@ -161,6 +162,10 @@ describe("durable debate HTTP API", () => {
         expect.objectContaining({ provider: "openai", configured: true, available: true }),
       ]),
     });
+    expect(
+      (catalog.json() as { models: Array<{ id: string }> }).models.map((model) => model.id),
+    ).toEqual(expect.arrayContaining(["gpt-5.6-terra", "claude-sonnet-5"]));
+    expect((catalog.json() as { models: Array<{ id: string }> }).models).toHaveLength(2);
     expect(catalog.body).not.toContain("test-secret");
 
     const created = await inject("POST", "/api/v2/projects/project-1/debates", {
@@ -272,18 +277,84 @@ describe("durable debate HTTP API", () => {
         target: "all",
         text: "Compare operational risks explicitly.",
         apply_at: "next_turn",
+        expected_version: 7,
         idempotency_key: "direction-1",
       },
     );
     expect(intervened.statusCode).toBe(202);
     expect(calls.intervene?.[0]).toMatchObject({
       kind: "intervene_debate_run",
-      expected_run_version: run.aggregate_version,
+      expected_run_version: 7,
       actor: { actor_type: "human", actor_id: userId },
       intervention_kind: "direction",
       target_actor_id: null,
       apply_at: "next_turn",
       text: "Compare operational risks explicitly.",
     });
+  });
+
+  it("fails closed for artifact-backed contexts and requires the version shown to the user for interventions", async () => {
+    const artifactContext = await inject("POST", "/api/v2/projects/project-1/debates", {
+      idempotency_key: "artifact-context",
+      configuration: {
+        title: debate.configuration.title,
+        question: debate.configuration.question,
+        context_artifact_ids: [],
+        contexts: [
+          {
+            label: "Repository report",
+            artifact_id: "artifact-1",
+            artifact_content_hash: "a".repeat(64),
+            artifact_media_type: "text/plain",
+            inline_content: null,
+          },
+        ],
+        actors: [
+          {
+            kind: "participant",
+            display_name: "Ada",
+            role_label: "Proposer",
+            instructions: "Argue for the most robust solution.",
+            provider: "openai",
+            model: "gpt-5.6-terra",
+            position: 0,
+            max_turns: 3,
+            max_input_tokens: 2_000,
+            max_output_tokens: 1_000,
+            budget_limit_usd: 1,
+          },
+          {
+            kind: "participant",
+            display_name: "Grace",
+            role_label: "Critic",
+            instructions: "Challenge assumptions and explain tradeoffs.",
+            provider: "anthropic",
+            model: "claude-sonnet-5",
+            position: 1,
+            max_turns: 3,
+            max_input_tokens: 2_000,
+            max_output_tokens: 1_000,
+            budget_limit_usd: 1,
+          },
+        ],
+        schedule: { kind: "round_robin", participant_ids: ["participant-a", "participant-b"] },
+        policy,
+      },
+    });
+    expect(artifactContext.statusCode).toBe(400);
+    expect(artifactContext.json()).toMatchObject({ error: "artifact_contexts_not_supported" });
+
+    const missingVersion = await inject(
+      "POST",
+      "/api/v2/projects/project-1/debates/debate-1/runs/run-1/interventions",
+      {
+        kind: "statement",
+        target: "all",
+        text: "Keep the scope narrow.",
+        apply_at: "next_round",
+        idempotency_key: "missing-version",
+      },
+    );
+    expect(missingVersion.statusCode).toBe(400);
   });
 });
