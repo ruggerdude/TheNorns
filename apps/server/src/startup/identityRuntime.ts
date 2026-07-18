@@ -230,6 +230,25 @@ export function parseCredentialHmacKeyring(
   }
 }
 
+/**
+ * Returns the deployment credential keyring when it is configured, regardless
+ * of the active identity migration route. GitHub's manifest flow uses the same
+ * deployment key material, but its durable configuration is not coupled to
+ * whether identity reads have completed their relational cutover.
+ *
+ * A partial configuration still fails closed instead of silently disabling
+ * credential-backed features.
+ */
+export function parseOptionalCredentialHmacKeyring(
+  environment: IdentityRuntimeEnvironment,
+): CredentialHmacKeyring | null {
+  const configured =
+    environment.NORNS_CREDENTIAL_HMAC_KEY !== undefined ||
+    environment.NORNS_CREDENTIAL_HMAC_KEY_ID !== undefined ||
+    environment.NORNS_CREDENTIAL_HMAC_KEYRING !== undefined;
+  return configured ? parseCredentialHmacKeyring(environment) : null;
+}
+
 /** Backward-compatible current-key parser used by the offline importer. */
 export function parseCredentialHmacKey(environment: IdentityRuntimeEnvironment): CredentialHmacKey {
   return parseCredentialHmacKeyring(environment).current;

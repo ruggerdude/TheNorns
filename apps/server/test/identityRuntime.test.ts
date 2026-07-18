@@ -12,6 +12,7 @@ import {
   loadDurableIdentityRoute,
   parseCredentialHmacKey,
   parseCredentialHmacKeyring,
+  parseOptionalCredentialHmacKeyring,
 } from "../src/startup/identityRuntime.js";
 import { LegacyIdentityService } from "../src/users/legacyIdentityService.js";
 import { RelationalIdentityService } from "../src/users/relationalIdentityService.js";
@@ -224,6 +225,24 @@ describe("identity runtime selection", () => {
 });
 
 describe("relational credential-key configuration", () => {
+  it("makes configured credential keys available before relational identity cutover", () => {
+    const keyring = parseOptionalCredentialHmacKeyring(VALID_ENVIRONMENT);
+
+    expect(keyring?.current.keyId).toBe(VALID_ENVIRONMENT.NORNS_CREDENTIAL_HMAC_KEY_ID);
+    expect(Buffer.from(keyring?.current.key ?? [])).toEqual(Buffer.alloc(32, 23));
+  });
+
+  it("returns null only when no credential-key setting is present", () => {
+    expect(parseOptionalCredentialHmacKeyring({})).toBeNull();
+    expect(() =>
+      parseOptionalCredentialHmacKeyring({ NORNS_CREDENTIAL_HMAC_KEY_ID: "partial" }),
+    ).toThrowError(
+      expect.objectContaining<Partial<IdentityRuntimeConfigurationError>>({
+        code: "credential_key_missing",
+      }),
+    );
+  });
+
   it("parses one canonical base64-encoded 32-byte key and a trimmed key ID", () => {
     const parsed = parseCredentialHmacKey({
       ...VALID_ENVIRONMENT,
