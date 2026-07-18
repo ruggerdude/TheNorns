@@ -120,6 +120,45 @@ function findingsOf(payload: Record<string, unknown>): Finding[] {
     : [];
 }
 
+type DiffLine = { value: string; state: "unchanged" | "added" | "removed" };
+
+/**
+ * A deliberately small, line-oriented diff for revision artifacts. Debate
+ * outputs are usually prose, where a full character diff is noisy rather
+ * than useful. Matching unchanged lines first keeps the reader focused on
+ * what the revising actor actually changed.
+ */
+function revisionDiff(previous: string, current: string): DiffLine[] {
+  const oldLines = previous.split("\n");
+  const newLines = current.split("\n");
+  const remaining = new Map<string, number>();
+  for (const line of newLines) remaining.set(line, (remaining.get(line) ?? 0) + 1);
+
+  const removed: DiffLine[] = [];
+  const shared = new Map<string, number>();
+  for (const line of oldLines) {
+    const count = remaining.get(line) ?? 0;
+    if (count > 0) {
+      remaining.set(line, count - 1);
+      shared.set(line, (shared.get(line) ?? 0) + 1);
+    } else {
+      removed.push({ value: line, state: "removed" });
+    }
+  }
+
+  const result: DiffLine[] = [];
+  for (const line of newLines) {
+    const count = shared.get(line) ?? 0;
+    if (count > 0) {
+      shared.set(line, count - 1);
+      result.push({ value: line, state: "unchanged" });
+    } else {
+      result.push({ value: line, state: "added" });
+    }
+  }
+  return [...removed, ...result];
+}
+
 function BudgetMeter({
   label,
   amount,
@@ -272,7 +311,10 @@ export function DebateRun({
         idempotency_key: idempotencyKey("start-debate"),
         ...(rerun
           ? {
-              expected_debate_version: debate?.aggregate_version ?? debate?.revision ?? 1,
+              // `revision` belongs to the immutable debate definition. A
+              // run's aggregate version is a separate concurrency token and
+              // must never be used to recreate that definition.
+              expected_debate_version: debate?.revision ?? 1,
             }
           : {}),
       });
@@ -329,6 +371,15 @@ export function DebateRun({
         target: directionTarget,
         text: directionText.trim(),
         apply_at: interventionApplyAt,
+        // The user acts on the run state currently rendered above. Send its
+        // exact optimistic-concurrency token so a stale direction cannot be
+        // silently queued after another control action.
+        expected_version:
+          run?.aggregate_version ??
+          run?.version ??
+          debate?.run?.aggregate_version ??
+          debate?.aggregate_version ??
+          1,
         idempotency_key: idempotencyKey("debate-intervention"),
       });
       setDirectionText("");
@@ -357,6 +408,10 @@ export function DebateRun({
     const previous = run?.messages?.find((message) => message.id === current.supersedes_message_id);
     return previous ? { previous, current } : null;
   }, [run?.messages]);
+  const comparisonDiff = useMemo(
+    () => (comparison ? revisionDiff(comparison.previous.content, comparison.current.content) : []),
+    [comparison],
+  );
   const judgment = run?.judgment;
   const finalOutput = run?.final_output;
   const state = run?.status ?? debate?.status;
@@ -472,9 +527,12 @@ export function DebateRun({
                     ) : null}
                     {event.artifact_ids.length ? (
                       <div className="debate-artifact-row">
-                        <strong>Artifacts</strong>
+                        <strong>Artifact references</strong>
                         {event.artifact_ids.map((id) => (
-                          <code key={id}>{id}</code>
+                          <span key={id}>
+                            <code>{id}</code>
+                            <small> Viewer unavailable in this MVP</small>
+                          </span>
                         ))}
                       </div>
                     ) : null}
@@ -504,14 +562,34 @@ export function DebateRun({
               {finalOutput.structured_output?.rationale ? (
                 <p className="muted">{finalOutput.structured_output.rationale}</p>
               ) : null}
-              {finalOutput.artifact_id ? <code>{finalOutput.artifact_id}</code> : null}
+              {finalOutput.artifact_id ? (
+                <p className="debate-artifact-reference">
+                  Artifact reference <code>{finalOutput.artifact_id}</code> — viewer unavailable in
+                  this MVP.
+                </p>
+              ) : null}
             </section>
           ) : null}
           {comparison ? (
             <section className="card debate-comparison">
               <div className="eyebrow">Revision comparison</div>
               <h3>Previous proposal and current revision</h3>
-              <div className="debate-run-layout">
+              <div className="debate-comparison-summary" aria-label="Revision diff legend">
+                <Badge tone="success">Added</Badge>
+                <Badge tone="danger">Removed</Badge>
+                <Badge tone="info">Unchanged</Badge>
+              </div>
+              <div className="debate-revision-diff" aria-label="Revision changes">
+                {comparisonDiff.map((line, index) => (
+                  <p className={`diff-${line.state}`} key={`${line.state}-${index}-${line.value}`}>
+                    <span aria-hidden="true">
+                      {line.state === "added" ? "+" : line.state === "removed" ? "−" : " "}
+                    </span>
+                    {line.value || " "}
+                  </p>
+                ))}
+              </div>
+              <div className="debate-run-layout debate-comparison-source">
                 <article>
                   <strong>Previous</strong>
                   <p>{comparison.previous.content}</p>

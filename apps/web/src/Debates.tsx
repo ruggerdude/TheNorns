@@ -64,7 +64,10 @@ export interface DebateDto {
     title: string;
     question: string;
     actors: DebateActor[];
-    schedule: { kind: "round_robin" | "explicit"; participant_ids: string[] };
+    // The MVP has one durable, deterministic scheduler: round robin. Keep
+    // unsupported schedule kinds out of the frontend contract so the UI
+    // cannot imply that an explicit schedule can be configured.
+    schedule: { kind: "round_robin"; participant_ids: string[] };
     policy: DebatePolicy;
   };
 }

@@ -184,7 +184,7 @@ describe("debate frontend", () => {
     );
   });
 
-  it("creates an explicitly new run from a terminal debate and resets replay", async () => {
+  it("reruns from a terminal debate using the immutable definition revision, not run state", async () => {
     const user = userEvent.setup();
     mock = new MockFetch();
     const base = "/api/v2/projects/project-1/debates/debate-1";
@@ -214,7 +214,9 @@ describe("debate frontend", () => {
       expect(
         mock?.calls.find((call) => call.method === "POST" && call.url === `${base}/runs`),
       ).toMatchObject({
-        body: { expected_debate_version: 3 },
+        // The run's aggregate version is 5, and the (unrelated) projection
+        // aggregate version is 3. Re-running must use definition revision 2.
+        body: { expected_debate_version: 2 },
       }),
     );
   });
@@ -334,9 +336,72 @@ describe("debate frontend", () => {
           target: "actor-a",
           apply_at: "next_round",
           text: "Include the recovery drill.",
+          expected_version: 5,
         },
       }),
     );
+  });
+
+  it("renders a readable revision diff and labels non-navigable artifact references", async () => {
+    mock = new MockFetch();
+    const base = "/api/v2/projects/project-1/debates/debate-1";
+    mock.get(base, { body: debate({ status: "completed" }) });
+    mock.get(`${base}/runs/run-1`, {
+      body: {
+        id: "run-1",
+        status: "completed",
+        aggregate_version: 8,
+        messages: [
+          {
+            id: "proposal-1",
+            sequence: 1,
+            message_kind: "participant",
+            content: "Keep the old deployment path.\nRun a rollback drill.",
+          },
+          {
+            id: "revision-1",
+            sequence: 2,
+            message_kind: "participant",
+            supersedes_message_id: "proposal-1",
+            content: "Use a staged deployment path.\nRun a rollback drill.",
+          },
+        ],
+        final_output: { artifact_id: "artifact-final", content: "Recommendation." },
+      },
+    });
+    mock.get(`${base}/runs/run-1/events?after_version=0`, {
+      body: {
+        events: [
+          {
+            id: "event-artifact",
+            sequence: 1,
+            type: "turn_completed",
+            round_number: 1,
+            turn_number: 1,
+            actor_snapshot: null,
+            payload: { text: "Proposal ready" },
+            artifact_ids: ["artifact-turn"],
+            usage: null,
+            occurred_at: "2026-07-18T12:00:00.000Z",
+          },
+        ],
+      },
+    });
+    mock.install();
+
+    render(
+      <DebateRun
+        projectId="project-1"
+        debateId="debate-1"
+        onUnauthorized={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByLabelText("Revision changes")).toBeVisible();
+    expect(screen.getByText("Use a staged deployment path.")).toBeVisible();
+    expect(screen.getByText("Keep the old deployment path.")).toBeVisible();
+    expect(screen.getAllByText(/viewer unavailable in this MVP/i)).toHaveLength(2);
   });
 
   it("drains every event page before rendering a terminal run", async () => {
