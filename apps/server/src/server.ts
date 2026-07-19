@@ -1604,6 +1604,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       return reply.redirect(github.authorizationUrl(stateUserId, "install"));
     } catch (error) {
       const code = error instanceof GitHubIntegrationError ? error.code : "failed";
+      console.error(
+        `GitHub manifest callback failed [${code}]: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
       return reply.redirect(
         `${externalOrigin(req)}/?settings=connections&github=${encodeURIComponent(code)}`,
       );

@@ -57,6 +57,27 @@ type ConnectionPanel = "github" | "runners" | "ai";
 
 type SettingsTab = "profile" | "connections" | "security";
 
+function githubCallbackError(code: string | null): string | null {
+  switch (code) {
+    case null:
+    case "connected":
+    case "installed":
+      return null;
+    case "denied":
+      return "GitHub did not return the information needed to finish App setup. Please start the setup again.";
+    case "invalid_oauth_state":
+      return "GitHub setup expired or could not be verified. Please start the setup again.";
+    case "github_manifest_conversion_failed":
+      return "GitHub created the App, but The Norns could not exchange GitHub's one-time setup code. Please try once more; the server has recorded the exact failure.";
+    case "github_manifest_conversion_invalid":
+      return "GitHub created the App, but returned incomplete configuration credentials. The server has recorded the exact failure.";
+    case "disabled":
+      return "GitHub setup is not available on this deployment.";
+    default:
+      return "The Norns could not save the GitHub App configuration. The server has recorded the exact failure.";
+  }
+}
+
 async function integrationRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -80,12 +101,14 @@ export function Account({
   onSignOut,
   onUnauthorized = onSignOut,
   initialTab = "profile",
+  githubCallback = null,
 }: {
   user: CurrentUser;
   onClose: () => void;
   onSignOut: () => void;
   onUnauthorized?: () => void;
   initialTab?: SettingsTab;
+  githubCallback?: string | null;
 }): React.ReactElement {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -93,7 +116,9 @@ export function Account({
   const [github, setGitHub] = useState<GitHubIntegrationStatus | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [connectionBusy, setConnectionBusy] = useState<string | null>(null);
-  const [openConnection, setOpenConnection] = useState<ConnectionPanel | null>(null);
+  const [openConnection, setOpenConnection] = useState<ConnectionPanel | null>(
+    githubCallback ? "github" : null,
+  );
   const [runners, setRunners] = useState<RunnerSummary[] | null>(null);
   const [pairing, setPairing] = useState<PairingSession | null>(null);
   const [pairingCopied, setPairingCopied] = useState(false);
@@ -357,6 +382,9 @@ export function Account({
                     Authorize providers once, then select their resources while creating projects.
                   </p>
                 </div>
+                {githubCallbackError(githubCallback) ? (
+                  <Alert>{githubCallbackError(githubCallback)}</Alert>
+                ) : null}
                 {connectionError ? <Alert>{connectionError}</Alert> : null}
                 {github === null ? (
                   <Spinner label="Loading GitHub connection…" />

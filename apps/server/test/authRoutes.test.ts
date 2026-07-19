@@ -3,7 +3,10 @@
 // covered at the unit level in userStore.test.ts — this file proves the
 // routes wire it up correctly (status codes, auth gating, audit trail).
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { GitHubIntegrationService } from "../src/integrations/github.js";
+import {
+  GitHubIntegrationError,
+  type GitHubIntegrationService,
+} from "../src/integrations/github.js";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
 import { UserStore } from "../src/users/store.js";
@@ -185,6 +188,38 @@ describe("GitHub App manifest setup routes", () => {
     );
     expect(completeManifest).toHaveBeenCalledWith("admin-1", "manifest-code", "signed-state");
     expect(response.headers["set-cookie"]).toContain("Max-Age=0");
+  });
+
+  it("reports a manifest conversion failure without exposing the one-time code", async () => {
+    const completeManifest = vi.fn(async () => {
+      throw new GitHubIntegrationError(
+        "github_manifest_conversion_failed",
+        "GitHub rejected the conversion",
+        502,
+      );
+    });
+    const github = {
+      manifestUserId: vi.fn(() => "admin-1"),
+      completeManifest,
+    } as unknown as GitHubIntegrationService;
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const s = await start({ github });
+
+    const response = (await s.app.inject({
+      method: "GET",
+      url: "/api/integrations/github/manifest/callback?code=one-time-secret",
+      headers: { cookie: "norns_github_manifest_state=signed-state" },
+    })) as unknown as InjectedResponse;
+
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toContain(
+      "/?settings=connections&github=github_manifest_conversion_failed",
+    );
+    expect(errorLog).toHaveBeenCalledWith(
+      "GitHub manifest callback failed [github_manifest_conversion_failed]: GitHub rejected the conversion",
+    );
+    expect(errorLog.mock.calls.flat().join(" ")).not.toContain("one-time-secret");
+    errorLog.mockRestore();
   });
 });
 

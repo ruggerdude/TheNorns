@@ -1444,6 +1444,10 @@ export function App(): React.ReactElement {
     typeof window === "undefined"
       ? null
       : new URLSearchParams(window.location.search).get("settings");
+  const githubCallback =
+    typeof window === "undefined"
+      ? null
+      : new URLSearchParams(window.location.search).get("github");
   const [showAccount, setShowAccount] = useState(requestedSettingsTab !== null);
   const [showAdmin, setShowAdmin] = useState(false);
 
@@ -1560,6 +1564,7 @@ export function App(): React.ReactElement {
           onSignOut={() => logout("Signed out.")}
           onUnauthorized={() => logout("Session expired. Sign in again.")}
           initialTab={requestedSettingsTab === "connections" ? "connections" : "profile"}
+          githubCallback={githubCallback}
         />
       ) : null}
       {showAdmin && user?.role === "admin" ? (
