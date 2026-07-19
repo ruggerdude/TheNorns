@@ -89,6 +89,36 @@ describe("workspace connections settings", () => {
     expect(continueButton).toBeEnabled();
   });
 
+  it("surfaces manifest callback failures and opens the GitHub setup details", async () => {
+    mock = new MockFetch();
+    mock.get("/api/auth/sessions", { body: { sessions: [] } });
+    mock.get("/api/integrations/github/status", {
+      body: {
+        configured: false,
+        setup_available: true,
+        configuration_source: null,
+        user_authorization: { connected: false, login: null },
+        connections: [],
+      },
+    });
+    mock.install();
+
+    render(
+      <Account
+        user={admin}
+        initialTab="connections"
+        githubCallback="github_manifest_conversion_failed"
+        onClose={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    expect(
+      await screen.findByText(/could not exchange GitHub's one-time setup code/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Connect GitHub with guided setup/i)).toBeInTheDocument();
+  });
+
   it("pairs and inventories local runners from the settings card", async () => {
     mock = new MockFetch();
     mock.get("/api/auth/sessions", { body: { sessions: [] } });
