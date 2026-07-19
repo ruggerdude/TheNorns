@@ -65,7 +65,7 @@ describe.sequential("workspace GitHub integration", () => {
             client_id: "Iv1.guided",
             client_secret: "guided-client-secret",
             pem: manifestPrivateKey,
-            webhook_secret: "guided-webhook-secret",
+            webhook_secret: null,
           },
           201,
         );
@@ -231,6 +231,7 @@ describe.sequential("workspace GitHub integration", () => {
     });
     expect(stored.rows[0]?.credentials_ciphertext).not.toContain("guided-client-secret");
     expect(stored.rows[0]?.credentials_ciphertext).not.toContain("PRIVATE KEY");
+    expect(stored.rows[0]?.credentials_ciphertext).not.toContain("webhook_secret");
 
     const reloaded = new GitHubIntegrationService(
       new PGliteTransactionRunner(pg as never),
