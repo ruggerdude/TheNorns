@@ -159,7 +159,7 @@ interface StoredAppConfigurationRow {
 interface StoredAppSecrets {
   client_secret: string;
   private_key: string;
-  webhook_secret: string;
+  webhook_secret: string | null;
 }
 
 interface GitHubManifestConversion {
@@ -168,7 +168,7 @@ interface GitHubManifestConversion {
   client_id?: string;
   client_secret?: string;
   pem?: string;
-  webhook_secret?: string;
+  webhook_secret?: string | null;
   message?: string;
 }
 
@@ -592,16 +592,10 @@ export class GitHubIntegrationService {
     const secrets: StoredAppSecrets = {
       client_secret: conversion.client_secret?.trim() ?? "",
       private_key: conversion.pem?.trim() ?? "",
-      webhook_secret: conversion.webhook_secret?.trim() ?? "",
+      // GitHub returns null when the manifest does not configure an active webhook.
+      webhook_secret: conversion.webhook_secret?.trim() ?? null,
     };
-    if (
-      !appId ||
-      !clientId ||
-      !appSlug ||
-      !secrets.client_secret ||
-      !secrets.private_key ||
-      !secrets.webhook_secret
-    ) {
+    if (!appId || !clientId || !appSlug || !secrets.client_secret || !secrets.private_key) {
       throw new GitHubIntegrationError(
         "github_manifest_conversion_invalid",
         "GitHub returned an incomplete App configuration",
@@ -982,10 +976,9 @@ export class GitHubIntegrationService {
       !("private_key" in parsed) ||
       typeof parsed.private_key !== "string" ||
       !("webhook_secret" in parsed) ||
-      typeof parsed.webhook_secret !== "string" ||
+      (parsed.webhook_secret !== null && typeof parsed.webhook_secret !== "string") ||
       !parsed.client_secret ||
-      !parsed.private_key ||
-      !parsed.webhook_secret
+      !parsed.private_key
     ) {
       throw new GitHubIntegrationError(
         "github_configuration_invalid",
