@@ -1,3 +1,4 @@
+import { FakeAdapter } from "@norns/adapters";
 // Graph/allocation HTTP surface: what the React Flow editor drives, now
 // scoped under a project (multi-project management) rather than a single
 // global graph.
@@ -187,6 +188,74 @@ describe("project graph API", () => {
     expect(actions).toContain("graph.auto_allocated");
     expect(actions).toContain("graph.assignment_overridden");
     expect(actions).toContain("allocation.approved");
+  });
+
+  it("asks the selected project manager for a guarded mix of workers and models", async () => {
+    const users = new UserStore();
+    TOKEN = testAdminToken(users);
+    const pm = new FakeAdapter("anthropic", "claude-sonnet-5");
+    pm.enqueue({
+      summary: "Use a mixed-provider team, adding workers only to divisible modules.",
+      recommendations: DEMO_PLAN.modules.map((module, index) => {
+        const provider = index % 2 === 0 ? "anthropic" : "openai";
+        return {
+          node_id: module.id,
+          provider,
+          model: provider === "anthropic" ? "claude-sonnet-5" : "gpt-5.6-terra",
+          worker_count: module.parallelization.safe && module.estimated_complexity === "L" ? 2 : 1,
+          reviewer_model: provider === "anthropic" ? "gpt-5.6-terra" : "claude-sonnet-5",
+          budget_usd: 25 + index,
+          rationale: `Best-fit staffing for ${module.title}.`,
+        };
+      }),
+    });
+    const usage: unknown[] = [];
+    server = await buildServer({
+      stores: new RelayStores(),
+      users,
+      projects: new ProjectStore(),
+      integrationEnvironment: {
+        ANTHROPIC_API_KEY: "test-anthropic",
+        OPENAI_API_KEY: "test-openai",
+        NORNS_DEBATE_ALLOWED_MODELS: "anthropic/claude-sonnet-5,openai/gpt-5.6-terra",
+      },
+      createPlanningAdapter: () => pm,
+      recordUsage: (events) => usage.push(...events),
+    });
+    const created = await inject(server, "POST", "/api/projects", {
+      name: "PM staffed",
+      description: "Choose the right team",
+      pm_provider: "anthropic",
+      pm_model: "claude-sonnet-5",
+    });
+    const { id } = created.json() as { id: string };
+    await inject(server, "POST", `/api/projects/${id}/plan/load`, { plan: DEMO_PLAN });
+
+    const recommended = await inject(
+      server,
+      "POST",
+      `/api/projects/${id}/graph/recommend-allocation`,
+      {},
+    );
+
+    expect(recommended.statusCode).toBe(200);
+    const body = recommended.json() as {
+      nodes: Array<{ assignment: { provider: string; source: string; rationale: string } }>;
+      allocation_advice: { summary: string; pm_model: string };
+    };
+    expect(new Set(body.nodes.map((node) => node.assignment.provider))).toEqual(
+      new Set(["anthropic", "openai"]),
+    );
+    expect(body.nodes.every((node) => node.assignment.source === "pm")).toBe(true);
+    expect(body.allocation_advice.pm_model).toBe("claude-sonnet-5");
+    expect(body.allocation_advice.summary).toMatch(/mixed-provider/i);
+    expect(usage).toHaveLength(1);
+    expect(pm.requests[0]?.schemaName).toBe("project_allocation_recommendation");
+
+    const audit = await inject(server, "GET", "/api/audit");
+    expect((audit.json() as { action: string }[]).map((entry) => entry.action)).toContain(
+      "allocation.pm_recommended",
+    );
   });
 
   it("refuses approval while nodes are unallocated", async () => {

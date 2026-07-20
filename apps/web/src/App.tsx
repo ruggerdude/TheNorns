@@ -37,6 +37,7 @@ import {
   requestLogout,
   setToken,
 } from "./auth";
+import { ThemeToggle, useTheme } from "./theme";
 import { Alert, Badge, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 
 interface Assignment {
@@ -46,7 +47,7 @@ interface Assignment {
   reviewer_model: string;
   budget_usd: number;
   rationale: string;
-  source: "auto" | "override";
+  source: "auto" | "pm" | "override";
 }
 
 interface GraphNodeDto {
@@ -73,6 +74,11 @@ interface GraphDto {
   nodes: GraphNodeDto[];
   cost: { total_usd: number; unallocated: string[] };
   approval?: ApprovalResponse | null;
+  allocation_advice?: {
+    summary: string;
+    pm_provider: string;
+    pm_model: string;
+  };
 }
 
 /** Client-side approval banner state. Distinct from "all nodes allocated" —
@@ -516,11 +522,13 @@ function ProjectGraph({
   onOpenAccount: () => void;
   onOpenAdmin: () => void;
 }): React.ReactElement {
+  const { theme } = useTheme();
   const base = `/api/projects/${project.id}`;
   const [graph, setGraph] = useState<GraphDto | null>(null);
   const [draftOnly, setDraftOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [strategy, setStrategy] = useState("balanced");
+  const [allocationLoading, setAllocationLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [approval, setApproval] = useState<ApprovalState>({ kind: "never" });
   // UI-7: override drafts are keyed by node id (not flat state) so a half-typed
@@ -801,6 +809,19 @@ function ProjectGraph({
     }
   }, [base, onLogout, applyApproval]);
 
+  const allocateProject = useCallback(async () => {
+    setAllocationLoading(true);
+    try {
+      await call(
+        strategy === "pm" ? `${base}/graph/recommend-allocation` : `${base}/graph/allocate`,
+        "POST",
+        strategy === "pm" ? {} : { strategy },
+      );
+    } finally {
+      setAllocationLoading(false);
+    }
+  }, [base, call, strategy]);
+
   // UI-7 draft helpers (keyed by node id).
   const draft = (selected ? overrideDrafts[selected] : undefined) ?? { model: "", budget: "" };
   const setDraft = useCallback(
@@ -882,8 +903,15 @@ function ProjectGraph({
         padding: 10,
         width: 210,
         fontSize: 12,
-        background: node.assignment ? "#132019" : "#14181d",
-        color: "#f3f1eb",
+        background:
+          theme === "light"
+            ? node.assignment
+              ? "#e8f5ed"
+              : "#ffffff"
+            : node.assignment
+              ? "#132019"
+              : "#14181d",
+        color: theme === "light" ? "#17202a" : "#f3f1eb",
         boxShadow:
           node.id === selected ? "0 0 0 5px rgba(229,155,69,.12)" : "0 10px 30px rgba(0,0,0,.2)",
       },
@@ -891,17 +919,41 @@ function ProjectGraph({
         label: (
           <div>
             <strong>{node.title}</strong>
-            <div style={{ color: "#9ba4ae", fontSize: 10, marginTop: 3 }}>
+            <div
+              style={{
+                color: theme === "light" ? "#65717d" : "#9ba4ae",
+                fontSize: 10,
+                marginTop: 3,
+              }}
+            >
               {node.id} · {node.complexity} · {node.risk} risk
             </div>
             {node.assignment ? (
-              <div style={{ marginTop: 7, color: "#9edbb8", fontSize: 10 }}>
+              <div
+                style={{
+                  marginTop: 7,
+                  color: theme === "light" ? "#247147" : "#9edbb8",
+                  fontSize: 10,
+                }}
+              >
                 {node.assignment.model} · {node.assignment.worker_count}w · $
                 {node.assignment.budget_usd}
-                {node.assignment.source === "override" ? " · OVERRIDE" : ""}
+                {node.assignment.source === "override"
+                  ? " · OVERRIDE"
+                  : node.assignment.source === "pm"
+                    ? " · PM PICK"
+                    : ""}
               </div>
             ) : (
-              <div style={{ color: "#ffcf91", marginTop: 7, fontSize: 10 }}>○ Needs allocation</div>
+              <div
+                style={{
+                  color: theme === "light" ? "#8a5715" : "#ffcf91",
+                  marginTop: 7,
+                  fontSize: 10,
+                }}
+              >
+                ○ Needs allocation
+              </div>
             )}
           </div>
         ),
@@ -913,12 +965,12 @@ function ProjectGraph({
         source: dep,
         target: node.id,
         markerEnd: "arrowclosed" as const,
-        style: { stroke: "#66717d", strokeWidth: 1.7 },
+        style: { stroke: theme === "light" ? "#7a8793" : "#66717d", strokeWidth: 1.7 },
         animated: node.id === selected || dep === selected,
       })),
     );
     return { nodes: flowNodes, edges: flowEdges };
-  }, [graph, selected]);
+  }, [graph, selected, theme]);
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -970,7 +1022,7 @@ function ProjectGraph({
           onNodeClick={(_event, node) => setSelected(node.id)}
           fitView
         >
-          <Background color="#353c44" gap={24} size={1} />
+          <Background color={theme === "light" ? "#c5ccd3" : "#353c44"} gap={24} size={1} />
           <Controls />
         </ReactFlow>
       </div>
@@ -1212,24 +1264,44 @@ function ProjectGraph({
               <div className="side-body form-stack">
                 <Field label="Allocation strategy">
                   <Select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
+                    <option value="pm">Project manager · best-fit team</option>
                     <option value="quality">Quality · strongest models</option>
                     <option value="balanced">Balanced · cost and capability</option>
                     <option value="cost">Cost · leanest viable models</option>
                   </Select>
                 </Field>
                 <p className="muted" style={{ fontSize: 12, margin: 0 }}>
-                  {strategy === "quality"
-                    ? "Prioritizes capability on every module."
-                    : strategy === "cost"
-                      ? "Minimizes spend while meeting module needs."
-                      : "Balances model strength against total budget."}
+                  {strategy === "pm"
+                    ? "Asks the selected PM to choose workers, models, reviewers, and budgets for this graph."
+                    : strategy === "quality"
+                      ? "Prioritizes capability on every module."
+                      : strategy === "cost"
+                        ? "Minimizes spend while meeting module needs."
+                        : "Balances model strength against total budget."}
                 </p>
                 <Button
                   variant="primary"
-                  onClick={() => void call(`${base}/graph/allocate`, "POST", { strategy })}
+                  disabled={allocationLoading}
+                  onClick={() => void allocateProject()}
                 >
-                  Auto allocate
+                  {allocationLoading
+                    ? strategy === "pm"
+                      ? "Project manager is staffing…"
+                      : "Allocating…"
+                    : strategy === "pm"
+                      ? "Ask PM to recommend team"
+                      : "Auto allocate"}
                 </Button>
+                {graph.allocation_advice ? (
+                  <div className="policy" data-testid="allocation-advice">
+                    <strong>PM recommendation</strong>
+                    <br />
+                    {graph.allocation_advice.summary}
+                    <div className="meta" style={{ marginTop: 6 }}>
+                      {graph.allocation_advice.pm_provider} · {graph.allocation_advice.pm_model}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             </details>
             <details className="card side-section" open>
@@ -1319,7 +1391,13 @@ function ProjectGraph({
                       <strong>${selectedNode.assignment.budget_usd}</strong>
                       <span>Source</span>
                       <Badge
-                        tone={selectedNode.assignment.source === "override" ? "success" : "default"}
+                        tone={
+                          selectedNode.assignment.source === "override"
+                            ? "success"
+                            : selectedNode.assignment.source === "pm"
+                              ? "info"
+                              : "default"
+                        }
                       >
                         {selectedNode.assignment.source}
                       </Badge>
@@ -1528,19 +1606,23 @@ export function App(): React.ReactElement {
           ? "bootstrap"
           : "login";
     return (
-      <Login
-        mode={mode}
-        inviteToken={inviteToken}
-        recoveryToken={recoveryToken}
-        onRecoveryComplete={() => setRecoveryToken(null)}
-        onAuthenticated={authenticated}
-        error={authError}
-      />
+      <>
+        <ThemeToggle />
+        <Login
+          mode={mode}
+          inviteToken={inviteToken}
+          recoveryToken={recoveryToken}
+          onRecoveryComplete={() => setRecoveryToken(null)}
+          onAuthenticated={authenticated}
+          error={authError}
+        />
+      </>
     );
   }
 
   return (
     <>
+      <ThemeToggle />
       {!activeProject ? (
         <Projects
           onOpenProject={openProject}

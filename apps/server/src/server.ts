@@ -65,6 +65,10 @@ import {
   disabledGitHubStatus,
 } from "./integrations/github.js";
 import type { Phase7OperationsService } from "./operations/phase7Operations.js";
+import {
+  AllocationRecommendationError,
+  recommendProjectAllocation,
+} from "./planning/allocationRecommendation.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
 import { type AttentionService, DecisionResolutionError } from "./projects/attentionService.js";
 import type { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
@@ -235,6 +239,28 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const loginThrottle = new LoginAttemptThrottle();
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
   const integrationEnvironment = options.integrationEnvironment ?? process.env;
+  const configuredWorkerModels = () =>
+    buildSelectableModelCatalog(
+      modelAvailabilityFromDebateEnvironment(integrationEnvironment),
+    ).filter((entry) => entry.available);
+  const buildPlanningAdapter = (provider: ProviderName, model: string): LlmAdapter => {
+    const apiKey =
+      provider === "anthropic"
+        ? integrationEnvironment.ANTHROPIC_API_KEY
+        : integrationEnvironment.OPENAI_API_KEY;
+    if (!apiKey?.trim()) {
+      throw new AllocationRecommendationError(
+        "models_unavailable",
+        `${provider} is not configured for project-manager recommendations.`,
+      );
+    }
+    if (options.createPlanningAdapter) {
+      return options.createPlanningAdapter(provider, model, apiKey);
+    }
+    return provider === "anthropic"
+      ? new AnthropicAdapter({ apiKey, model })
+      : new OpenAiAdapter({ apiKey, model });
+  };
   const configuredOrigin =
     options.publicOrigin ??
     process.env.NORNS_PUBLIC_ORIGIN ??
@@ -1133,11 +1159,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // correlation IDs themselves.
   if (options.debates) {
     const debates = options.debates;
-    const configuredDebateModels = () => {
-      return buildSelectableModelCatalog(
-        modelAvailabilityFromDebateEnvironment(integrationEnvironment),
-      ).filter((entry) => entry.available);
-    };
+    const configuredDebateModels = configuredWorkerModels;
     const debateError = (reply: FastifyReply, error: unknown): void => {
       if (error instanceof DebateConflictError) {
         const status = ["debate_not_found", "debate_run_not_found", "project_not_found"].includes(
@@ -1847,13 +1869,18 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       throw error;
     };
 
-    const sendGraph = (reply: FastifyReply, view: ProjectGraphView): void => {
+    const sendGraph = (
+      reply: FastifyReply,
+      view: ProjectGraphView,
+      extra: Record<string, unknown> = {},
+    ): void => {
       // ADR-1: every graph response carries the server-authoritative approval
       // status, with `current` computed against the live version/fingerprint.
       reply.send({
         ...view.graph,
         cost: view.cost,
         approval: view.approval,
+        ...extra,
       });
     };
 
@@ -2647,6 +2674,75 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       }
     });
 
+    const RecommendAllocationBody = z
+      .object({ objective: z.string().trim().min(1).max(100_000).optional() })
+      .strict();
+    app.post("/api/projects/:id/graph/recommend-allocation", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const { id } = req.params as { id: string };
+      const body = RecommendAllocationBody.safeParse(req.body ?? {});
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      try {
+        const [summary, graphView, pmSelection] = await Promise.all([
+          projects.summary(id),
+          projects.graph(id),
+          projects.pmSelectionOf(id),
+        ]);
+        const pmModel =
+          pmSelection.model ??
+          (pmSelection.provider === "anthropic"
+            ? (integrationEnvironment.NORNS_PM_MODEL ?? DEFAULT_PM_MODEL.anthropic)
+            : (integrationEnvironment.NORNS_OPENAI_MODEL ?? DEFAULT_PM_MODEL.openai));
+        const pm = buildPlanningAdapter(pmSelection.provider, pmModel);
+        stores.audit(
+          "operator",
+          "allocation.pm_recommendation_started",
+          `${id} pm=${pm.provider}:${pm.model}`,
+          now(),
+        );
+        const recommendation = await recommendProjectAllocation({
+          pm,
+          projectId: id,
+          projectName: summary.name,
+          objective: body.data.objective ?? summary.plan_objective ?? summary.description,
+          graph: graphView.graph,
+          models: configuredWorkerModels(),
+        });
+        const view = await projects.applyPmAllocation(id, recommendation.recommendations);
+        options.recordUsage?.([recommendation.usage]);
+        stores.audit(
+          "operator",
+          "allocation.pm_recommended",
+          `${id} pm=${pm.provider}:${pm.model} nodes=${recommendation.recommendations.length} cost_usd=${view.cost.total_usd}`,
+          now(),
+        );
+        sendGraph(reply, view, {
+          allocation_advice: {
+            summary: recommendation.summary,
+            pm_provider: pm.provider,
+            pm_model: pm.model,
+          },
+        });
+      } catch (error) {
+        stores.audit(
+          "operator",
+          "allocation.pm_recommendation_failed",
+          `${id}:${error instanceof Error ? error.message : String(error)}`,
+          now(),
+        );
+        if (error instanceof AllocationRecommendationError) {
+          return reply.code(error.code === "models_unavailable" ? 501 : 422).send({
+            error: error.code,
+            message: error.message,
+          });
+        }
+        if (error instanceof AdapterError) {
+          return reply.code(502).send({ error: error.kind, message: error.message });
+        }
+        projectError(reply, error);
+      }
+    });
+
     const OverrideBody = z.object({
       provider: z.enum(["anthropic", "openai"]).optional(),
       model: z.string().min(1).optional(),
@@ -2689,21 +2785,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       objective: z.string().min(1),
       maxRounds: z.number().int().min(1).max(5).optional(),
     });
-    const buildAdapter = (
-      provider: ProviderName,
-      model: string,
-      anthropicKey: string,
-      openaiKey: string,
-    ): LlmAdapter => {
-      const apiKey = provider === "anthropic" ? anthropicKey : openaiKey;
-      if (options.createPlanningAdapter) {
-        return options.createPlanningAdapter(provider, model, apiKey);
-      }
-      return provider === "anthropic"
-        ? new AnthropicAdapter({ apiKey, model })
-        : new OpenAiAdapter({ apiKey, model });
-    };
-
     app.post("/api/projects/:id/plan", async (req, reply) => {
       if (!(await requireSession(req, reply))) return;
       const { id } = req.params as { id: string };
@@ -2717,19 +2798,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       const body = PlanRequest.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
 
-      const anthropicKey = process.env.ANTHROPIC_API_KEY;
-      const openaiKey = process.env.OPENAI_API_KEY;
+      const anthropicKey = integrationEnvironment.ANTHROPIC_API_KEY;
+      const openaiKey = integrationEnvironment.OPENAI_API_KEY;
       const reviewerProvider = reviewerFor(pmSelection.provider);
       const pmModel =
         pmSelection.model ??
         (pmSelection.provider === "anthropic"
-          ? (process.env.NORNS_PM_MODEL ?? DEFAULT_PM_MODEL.anthropic)
-          : process.env.NORNS_OPENAI_MODEL);
+          ? (integrationEnvironment.NORNS_PM_MODEL ?? DEFAULT_PM_MODEL.anthropic)
+          : integrationEnvironment.NORNS_OPENAI_MODEL);
       const reviewerModel =
         reviewerProvider === "openai"
-          ? process.env.NORNS_OPENAI_MODEL
-          : (process.env.NORNS_REVIEWER_ANTHROPIC_MODEL ??
-            process.env.NORNS_PM_MODEL ??
+          ? integrationEnvironment.NORNS_OPENAI_MODEL
+          : (integrationEnvironment.NORNS_REVIEWER_ANTHROPIC_MODEL ??
+            integrationEnvironment.NORNS_PM_MODEL ??
             DEFAULT_PM_MODEL.anthropic);
       const missing = [
         !anthropicKey && "ANTHROPIC_API_KEY",
@@ -2746,18 +2827,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         });
       }
 
-      const pm = buildAdapter(
-        pmSelection.provider,
-        pmModel as string,
-        anthropicKey as string,
-        openaiKey as string,
-      );
-      const reviewer = buildAdapter(
-        reviewerProvider,
-        reviewerModel as string,
-        anthropicKey as string,
-        openaiKey as string,
-      );
+      const pm = buildPlanningAdapter(pmSelection.provider, pmModel as string);
+      const reviewer = buildPlanningAdapter(reviewerProvider, reviewerModel as string);
 
       stores.audit(
         "operator",

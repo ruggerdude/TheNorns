@@ -3,6 +3,8 @@ import {
   type AllocationApprovalStatus,
   type AllocationStrategyT,
   type CostPreview,
+  type PmAssignmentRecommendation,
+  applyPmAllocation,
   approveAllocation,
   autoAllocate,
   costPreview,
@@ -48,6 +50,10 @@ export interface ProjectRepository {
     mode?: RemoveNodeMode,
   ): Awaitable<{ removed: string[]; view: ProjectGraphView }>;
   allocate(id: string, strategy: AllocationStrategyT): Awaitable<ProjectGraphView>;
+  applyPmAllocation(
+    id: string,
+    recommendations: readonly PmAssignmentRecommendation[],
+  ): Awaitable<ProjectGraphView>;
   overrideAssignment(
     id: string,
     nodeId: string,
@@ -117,6 +123,14 @@ export class LegacyProjectRepository implements ProjectRepository {
 
   allocate(id: string, strategy: AllocationStrategyT): ProjectGraphView {
     autoAllocate(this.store.session(id).graph, strategy);
+    return graphView(this.store, id);
+  }
+
+  applyPmAllocation(
+    id: string,
+    recommendations: readonly PmAssignmentRecommendation[],
+  ): ProjectGraphView {
+    applyPmAllocation(this.store.session(id).graph, recommendations);
     return graphView(this.store, id);
   }
 

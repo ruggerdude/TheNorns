@@ -6,6 +6,7 @@ import type { NodeState } from "@norns/contracts";
 import { describe, expect, it } from "vitest";
 import {
   AllocationError,
+  applyPmAllocation,
   approveAllocation,
   autoAllocate,
   costPreview,
@@ -155,6 +156,36 @@ describe("allocation engine — three strategies over the 10-node graph", () => 
     expect(auth?.assignment?.budget_usd).toBe(99);
     // non-overridden nodes did move to the new strategy
     expect(graph.node("db-schema")?.assignment?.rationale).toContain("cost");
+  });
+
+  it("project-manager recommendations preserve human overrides", () => {
+    const graph = demoGraph();
+    autoAllocate(graph, "balanced");
+    overrideAssignment(graph, "auth", { model: "claude-opus-4-8", budget_usd: 99 });
+
+    applyPmAllocation(
+      graph,
+      graph.snapshot().nodes.map((node) => ({
+        node_id: node.id,
+        provider: "anthropic" as const,
+        model: "claude-sonnet-5",
+        worker_count: 1,
+        reviewer_model: "gpt-5.6-terra",
+        budget_usd: 12,
+        rationale: "Project manager recommendation for this node.",
+      })),
+    );
+
+    expect(graph.node("auth")?.assignment).toMatchObject({
+      source: "override",
+      model: "claude-opus-4-8",
+      budget_usd: 99,
+    });
+    expect(graph.node("db-schema")?.assignment).toMatchObject({
+      source: "pm",
+      model: "claude-sonnet-5",
+      budget_usd: 12,
+    });
   });
 
   it("cost preview totals per-node budgets and lists unallocated nodes", () => {

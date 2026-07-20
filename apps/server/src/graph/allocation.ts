@@ -19,9 +19,13 @@ export const NodeAssignment = z.object({
   reviewer_model: z.string().min(1),
   budget_usd: z.number().positive(),
   rationale: z.string().min(1),
-  source: z.enum(["auto", "override"]),
+  source: z.enum(["auto", "pm", "override"]),
 });
 export type NodeAssignmentT = z.infer<typeof NodeAssignment>;
+
+export type PmAssignmentRecommendation = Omit<NodeAssignmentT, "role" | "source"> & {
+  node_id: string;
+};
 
 // Base budgets by complexity; risk scales them (independent axes, REVIEW-002)
 const BASE_BUDGET_USD: Record<GraphNode["complexity"], number> = {
@@ -91,6 +95,37 @@ export function autoAllocate(graph: WorkflowGraph, strategy: AllocationStrategyT
     if (!record) continue;
     if (record.assignment?.source === "override") continue;
     record.assignment = recommend(record, strategy);
+  }
+}
+
+/**
+ * Apply a validated project-manager recommendation without overwriting an
+ * explicit human override. Recommendation generation is intentionally kept
+ * outside the graph engine; this boundary still parses every assignment so
+ * malformed model output can never enter durable graph state.
+ */
+export function applyPmAllocation(
+  graph: WorkflowGraph,
+  recommendations: readonly PmAssignmentRecommendation[],
+): void {
+  const byNode = new Map(
+    recommendations.map((recommendation) => [recommendation.node_id, recommendation]),
+  );
+  for (const node of graph.snapshot().nodes) {
+    const record = graph.node(node.id);
+    if (!record || record.assignment?.source === "override") continue;
+    const recommendation = byNode.get(node.id);
+    if (!recommendation) {
+      throw new AllocationError(
+        `project manager did not recommend an assignment for node "${node.id}"`,
+      );
+    }
+    const { node_id: _nodeId, ...assignment } = recommendation;
+    record.assignment = NodeAssignment.parse({
+      ...assignment,
+      role: "implementation",
+      source: "pm",
+    });
   }
 }
 

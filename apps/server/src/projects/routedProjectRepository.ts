@@ -152,6 +152,13 @@ export class RoutedProjectRepository implements ProjectRepository {
     return this.projectWrite(id).allocate(id, strategy);
   }
 
+  applyPmAllocation(
+    id: string,
+    recommendations: Parameters<ProjectRepository["applyPmAllocation"]>[1],
+  ): ReturnType<ProjectRepository["applyPmAllocation"]> {
+    return this.projectWrite(id).applyPmAllocation(id, recommendations);
+  }
+
   overrideAssignment(
     id: string,
     nodeId: string,
