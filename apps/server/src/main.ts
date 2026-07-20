@@ -48,6 +48,7 @@ import { ProjectResumeService } from "./projects/projectResumeService.js";
 import { RepositoryIngestionService } from "./projects/repositoryIngestionService.js";
 import { SourceBindingService } from "./projects/sourceBindingService.js";
 import { ProjectStore } from "./projects/store.js";
+import { StrategyBridgeService } from "./projects/strategyBridgeService.js";
 import { StrategyWorkflowService } from "./projects/strategyWorkflowService.js";
 import { buildServer } from "./server.js";
 import { evaluateAuthStartup } from "./startup/authPolicy.js";
@@ -111,6 +112,7 @@ let phase3Services:
       ingestion: RepositoryIngestionService;
       phases: PhaseWorkflowService;
       strategies: StrategyWorkflowService;
+      bridge: StrategyBridgeService;
       resume: ProjectResumeService;
     }
   | undefined;
@@ -193,11 +195,20 @@ if (databaseUrl) {
     integrationServices = {
       github,
     };
+    const phaseWorkflow = new PhaseWorkflowService(runtimeTransactions);
+    const strategyWorkflow = new StrategyWorkflowService(runtimeTransactions);
     phase3Services = {
       sourceBindings: new SourceBindingService(runtimeTransactions),
       ingestion: new RepositoryIngestionService(runtimeTransactions),
-      phases: new PhaseWorkflowService(runtimeTransactions),
-      strategies: new StrategyWorkflowService(runtimeTransactions),
+      phases: phaseWorkflow,
+      strategies: strategyWorkflow,
+      // FRONT DOOR P3: bridges a completed planning run into a proposed
+      // StrategyVersion via the two workflow services above.
+      bridge: new StrategyBridgeService({
+        transactions: runtimeTransactions,
+        phases: phaseWorkflow,
+        strategies: strategyWorkflow,
+      }),
       resume: new ProjectResumeService(runtimeTransactions),
     };
     phase4Services = {

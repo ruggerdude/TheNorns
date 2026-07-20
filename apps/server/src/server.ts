@@ -79,7 +79,10 @@ import {
 import { PlanningRunWorker } from "./planning/runWorker.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
 import { type AttentionService, DecisionResolutionError } from "./projects/attentionService.js";
-import type { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
+import {
+  PhaseWorkflowConflictError,
+  type PhaseWorkflowService,
+} from "./projects/phaseWorkflowService.js";
 import type { ProjectResumeService } from "./projects/projectResumeService.js";
 import { Phase3RequiredError } from "./projects/relationalReadRepository.js";
 import {
@@ -95,7 +98,15 @@ import {
   type ProjectStore,
   reviewerFor,
 } from "./projects/store.js";
-import type { StrategyWorkflowService } from "./projects/strategyWorkflowService.js";
+import {
+  type StrategyBridgeActor,
+  StrategyBridgeError,
+  type StrategyBridgeService,
+} from "./projects/strategyBridgeService.js";
+import {
+  StrategyWorkflowConflictError,
+  type StrategyWorkflowService,
+} from "./projects/strategyWorkflowService.js";
 import {
   RunnerWorkspaceBroker,
   WorkspaceBrokerError,
@@ -181,6 +192,8 @@ export interface ServerOptions {
     ingestion: RepositoryIngestionService;
     phases: PhaseWorkflowService;
     strategies: StrategyWorkflowService;
+    /** FRONT DOOR P3: planning-run -> proposed-StrategyVersion bridge. */
+    bridge: StrategyBridgeService;
     resume: ProjectResumeService;
   };
   /** New-project local onboarding is safe only after durable relational writes are active. */
@@ -2055,6 +2068,64 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         idempotency_key: z.string().min(1),
       });
 
+      // ---- FRONT DOOR P3: planning-run -> strategy bridge -------------------
+      // High-level routes that turn a completed planning run into an editable,
+      // staffed, approvable StrategyVersion. They reuse the phase-3 workflow
+      // services above (no parallel lifecycle); see strategyBridgeService.ts.
+      const bridge = options.phase3.bridge;
+      const CreatePhaseFromRunBody = z
+        .object({
+          planning_run_id: z.string().trim().min(1),
+          name: z.string().trim().min(1).max(200).optional(),
+        })
+        .strict();
+      const StaffingEditBody = z
+        .object({
+          assignments: z
+            .array(
+              z
+                .object({
+                  assignment_id: z.string().trim().min(1),
+                  provider: z.string().trim().min(1).optional(),
+                  model: z.string().trim().min(1).optional(),
+                  reviewer_provider: z.string().trim().min(1).optional(),
+                  reviewer_model: z.string().trim().min(1).optional(),
+                  clear_reviewer: z.boolean().optional(),
+                  budget_limit_usd: z.number().nonnegative().optional(),
+                })
+                .strict(),
+            )
+            .min(1),
+        })
+        .strict();
+      const ApproveFromBridgeBody = z
+        .object({
+          expected_content_hash: z
+            .string()
+            .regex(/^[a-f0-9]{64}$/)
+            .optional(),
+          idempotency_key: z.string().trim().min(1).optional(),
+        })
+        .strict();
+      const bridgeActor = (user: IdentityUser): StrategyBridgeActor => ({ actor_id: user.id });
+      const sendBridgeError = (reply: FastifyReply, error: unknown): void => {
+        if (error instanceof StrategyBridgeError) {
+          const notFound: string[] = ["planning_run_not_found", "phase_not_found"];
+          reply
+            .code(notFound.includes(error.code) ? 404 : 409)
+            .send({ error: error.code, message: error.message });
+          return;
+        }
+        if (
+          error instanceof StrategyWorkflowConflictError ||
+          error instanceof PhaseWorkflowConflictError
+        ) {
+          reply.code(409).send({ error: "strategy_conflict", detail: String(error) });
+          return;
+        }
+        throw error;
+      };
+
       const workspaceRequest = async (
         runnerId: string,
         input: {
@@ -2309,9 +2380,29 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         if (!(await requireSession(req, reply))) return;
         const user = await resolveUser(req);
         if (!user) return;
+        const { id } = req.params as { id: string };
+        // FRONT DOOR P3: a { planning_run_id } body materializes a completed
+        // planning run into a phase + proposed StrategyVersion via the bridge.
+        // Any other body keeps the pre-existing raw create-phase behavior.
+        if (typeof req.body === "object" && req.body !== null && "planning_run_id" in req.body) {
+          const fromRun = CreatePhaseFromRunBody.safeParse(req.body);
+          if (!fromRun.success) return reply.code(400).send({ error: "bad_request" });
+          try {
+            reply.code(201).send(
+              await bridge.createPhaseFromPlanningRun({
+                projectId: id,
+                planningRunId: fromRun.data.planning_run_id,
+                ...(fromRun.data.name !== undefined ? { name: fromRun.data.name } : {}),
+                actor: bridgeActor(user),
+              }),
+            );
+          } catch (error) {
+            sendBridgeError(reply, error);
+          }
+          return;
+        }
         const body = CreatePhaseBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: "bad_request" });
-        const { id } = req.params as { id: string };
         try {
           reply.code(201).send(
             await options.phase3?.phases.create({
@@ -2380,6 +2471,71 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           );
         } catch (error) {
           reply.code(409).send({ error: "strategy_approval_conflict", detail: String(error) });
+        }
+      });
+
+      // ---- FRONT DOOR P3: proposed-strategy review, staffing, approval -----
+      // GET  the plan-review DTO the Plan Review screen renders.
+      app.get("/api/v2/projects/:id/phases/:phaseId/strategy", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id, phaseId } = req.params as { id: string; phaseId: string };
+        try {
+          reply.header("Cache-Control", "no-store").send(await bridge.review(id, phaseId));
+        } catch (error) {
+          sendBridgeError(reply, error);
+        }
+      });
+
+      // PATCH assignment proposals (provider/model/reviewer/budget) on the
+      // proposed strategy. An edit mints a superseding StrategyVersion — it
+      // never mutates an already-approved one (existing staleness semantics).
+      app.patch("/api/v2/projects/:id/phases/:phaseId/strategy/staffing", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const { id, phaseId } = req.params as { id: string; phaseId: string };
+        const body = StaffingEditBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        try {
+          reply.send(
+            await bridge.editStaffing({
+              projectId: id,
+              phaseId,
+              edits: body.data.assignments,
+              actor: bridgeActor(user),
+            }),
+          );
+        } catch (error) {
+          sendBridgeError(reply, error);
+        }
+      });
+
+      // POST approval — reuses StrategyWorkflowService.approve verbatim, which
+      // materializes tasks + dependencies and readies the phase for the
+      // coordinator. No new approval semantics.
+      app.post("/api/v2/projects/:id/phases/:phaseId/strategy/approve", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const { id, phaseId } = req.params as { id: string; phaseId: string };
+        const body = ApproveFromBridgeBody.safeParse(req.body ?? {});
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        try {
+          reply.send(
+            await bridge.approve({
+              projectId: id,
+              phaseId,
+              ...(body.data.expected_content_hash !== undefined
+                ? { expectedContentHash: body.data.expected_content_hash }
+                : {}),
+              ...(body.data.idempotency_key !== undefined
+                ? { idempotencyKey: body.data.idempotency_key }
+                : {}),
+              actor: bridgeActor(user),
+            }),
+          );
+        } catch (error) {
+          sendBridgeError(reply, error);
         }
       });
     }

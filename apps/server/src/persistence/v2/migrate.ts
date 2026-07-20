@@ -61,6 +61,11 @@ export const PLANNING_RUNS_MIGRATION_URL = new URL(
   "../../../drizzle/0012_planning_runs.sql",
   import.meta.url,
 );
+export const FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME = "0013_frontdoor_phase_bridge";
+export const FRONTDOOR_PHASE_BRIDGE_MIGRATION_URL = new URL(
+  "../../../drizzle/0013_frontdoor_phase_bridge.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -140,6 +145,10 @@ export async function loadDebateWorkflowMigrationSql(): Promise<string> {
 
 export async function loadPlanningRunsMigrationSql(): Promise<string> {
   return readFile(PLANNING_RUNS_MIGRATION_URL, "utf8");
+}
+
+export async function loadFrontDoorPhaseBridgeMigrationSql(): Promise<string> {
+  return readFile(FRONTDOOR_PHASE_BRIDGE_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -297,6 +306,10 @@ export async function runCurrentV2Migrations(
     {
       name: PLANNING_RUNS_MIGRATION_NAME,
       sql: await loadPlanningRunsMigrationSql(),
+    },
+    {
+      name: FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
+      sql: await loadFrontDoorPhaseBridgeMigrationSql(),
     },
   ]);
 }
