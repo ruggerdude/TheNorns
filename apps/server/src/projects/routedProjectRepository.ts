@@ -83,11 +83,16 @@ export class RoutedProjectRepository implements ProjectRepository {
   }
 
   private projectRead(id: string): ProjectRepository {
-    return this.repositoryFor(this.projectRoutes.get(id) ?? null);
+    const route =
+      this.projectRoutes.get(id) ??
+      (this.newProjectsRoute?.write_mode === "relational" ? this.newProjectsRoute : null);
+    return this.repositoryFor(route);
   }
 
   private projectWrite(id: string): ProjectRepository {
-    const route = this.projectRoutes.get(id);
+    const route =
+      this.projectRoutes.get(id) ??
+      (this.newProjectsRoute?.write_mode === "relational" ? this.newProjectsRoute : undefined);
     return route?.write_mode === "relational"
       ? this.relationalRepositoryFor(route, false)
       : this.options.legacy;

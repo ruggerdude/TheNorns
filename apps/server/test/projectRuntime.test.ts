@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { isPmModelForProvider } from "@norns/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { GitHubIntegrationService } from "../src/integrations/github.js";
 import {
   LegacyProjectSnapshot,
   type LegacyProjectSnapshotT,
@@ -12,7 +13,12 @@ import { buildLegacyProjectImportPlan } from "../src/persistence/migration/proje
 import { importLegacyProject } from "../src/persistence/migration/projectImportService.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
+import { PhaseWorkflowService } from "../src/projects/phaseWorkflowService.js";
+import { ProjectResumeService } from "../src/projects/projectResumeService.js";
+import { RepositoryIngestionService } from "../src/projects/repositoryIngestionService.js";
+import { SourceBindingService } from "../src/projects/sourceBindingService.js";
 import { ProjectStore, type ProjectStoreSnapshot } from "../src/projects/store.js";
+import { StrategyWorkflowService } from "../src/projects/strategyWorkflowService.js";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { createProjectRuntime, loadDurableProjectRoutes } from "../src/startup/projectRuntime.js";
 import { RelayStores } from "../src/stores.js";
@@ -179,7 +185,10 @@ describe.sequential("Phase 2 project runtime routing", () => {
     );
   }
 
-  async function start(store: ProjectStore): Promise<NornsServer> {
+  async function start(
+    store: ProjectStore,
+    github?: GitHubIntegrationService,
+  ): Promise<NornsServer> {
     const routes = await loadDurableProjectRoutes(pg);
     const runtime = createProjectRuntime({
       projects: store,
@@ -191,6 +200,14 @@ describe.sequential("Phase 2 project runtime routing", () => {
       stores: new RelayStores(),
       users,
       projects: runtime.repository,
+      ...(github ? { integrations: { github } } : {}),
+      phase3: {
+        sourceBindings: new SourceBindingService(transactions),
+        ingestion: new RepositoryIngestionService(transactions),
+        phases: new PhaseWorkflowService(transactions),
+        strategies: new StrategyWorkflowService(transactions),
+        resume: new ProjectResumeService(transactions),
+      },
     });
     return server;
   }
@@ -320,6 +337,20 @@ describe.sequential("Phase 2 project runtime routing", () => {
     expect((await request(running, "GET", "/api/projects")).json()).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: project.id })]),
     );
+    expect((await request(running, "GET", `/api/projects/${project.id}`)).json()).toMatchObject({
+      id: project.id,
+      name: "Relational pilot",
+    });
+    const graph = await request(running, "GET", `/api/projects/${project.id}/graph`);
+    expect(graph.statusCode).toBe(409);
+    expect(graph.json()).toMatchObject({ error: "not_planned" });
+    const resume = await request(running, "GET", `/api/v2/projects/${project.id}/resume`);
+    expect(resume.statusCode).toBe(200);
+    expect(resume.json()).toMatchObject({
+      project: { id: project.id },
+      repositories: [],
+      next_recommended_action: "Connect a project repository",
+    });
     const history = await pg.query<{ count: number }>(
       `SELECT count(*)::int AS count FROM domain_events
        WHERE project_id=$1 AND event_type='project.created'`,
@@ -334,5 +365,73 @@ describe.sequential("Phase 2 project runtime routing", () => {
     expect(mutation.statusCode).toBe(409);
     expect(mutation.json()).toMatchObject({ error: "phase3_required", operation: "addNode" });
     expect(store.session(source.id).graph.node("must-not-write-legacy")).toBeUndefined();
+  });
+
+  it("creates and reopens a GitHub-backed relational project through every read surface", async () => {
+    const store = new ProjectStore();
+    await bindProjectsSnapshotEvidence(store);
+    await setRoute("new_projects", "*", "relational", "relational");
+    await pg.query(
+      `INSERT INTO service_connections (
+         id, provider, display_name, status, owner_type, owner_login,
+         external_account_id, installation_id, repository_selection,
+         connected_by_user_id
+       ) VALUES (
+         'github:42','github','octocat on GitHub','connected','user','octocat',
+         '101','42','all','norns-user-1'
+       )`,
+    );
+    const resolveRepository = vi.fn(async () => ({
+      id: "9001",
+      connection_id: "github:42",
+      owner: "octocat",
+      name: "existing-app",
+      full_name: "octocat/existing-app",
+      private: true,
+      default_branch: "main",
+      html_url: "https://github.com/octocat/existing-app",
+      clone_url: "https://github.com/octocat/existing-app.git",
+      description: "Existing application",
+      language: "TypeScript",
+      archived: false,
+      updated_at: "2026-07-20T00:00:00.000Z",
+    }));
+    const github = { resolveRepository } as unknown as GitHubIntegrationService;
+    const running = await start(store, github);
+
+    const created = await request(running, "POST", "/api/projects", {
+      name: "Existing app",
+      description: "Continue the selected repository",
+      pm_provider: "anthropic",
+      source_type: "github",
+      github_connection_id: "github:42",
+      github_repository_id: "9001",
+    });
+
+    expect(created.statusCode).toBe(201);
+    const project = created.json() as { id: string };
+    expect(resolveRepository).toHaveBeenCalledWith(expect.any(String), "github:42", "9001");
+    expect((await request(running, "GET", `/api/projects/${project.id}`)).json()).toMatchObject({
+      id: project.id,
+      source_type: "github",
+      source_location: "https://github.com/octocat/existing-app.git",
+    });
+    expect((await request(running, "GET", `/api/projects/${project.id}/graph`)).statusCode).toBe(
+      409,
+    );
+    const resume = await request(running, "GET", `/api/v2/projects/${project.id}/resume`);
+    expect(resume.statusCode).toBe(200);
+    expect(resume.json()).toMatchObject({
+      project: { id: project.id },
+      repositories: [
+        {
+          binding_type: "github",
+          display_name: "existing-app",
+          status: "unverified_candidate",
+          health: "unknown",
+        },
+      ],
+      next_recommended_action: "Analyze the repository and record its architecture",
+    });
   });
 });

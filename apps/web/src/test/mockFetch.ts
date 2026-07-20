@@ -43,6 +43,21 @@ export class MockFetch {
   readonly calls: RecordedCall[] = [];
   private previousFetch: typeof fetch | undefined;
 
+  constructor() {
+    // App-level tests seed a session token before rendering. Mirror the
+    // successful session restoration that accompanies that token by default;
+    // auth-specific tests can override this route because newer routes win.
+    this.get("/api/auth/me", {
+      body: {
+        id: "test-user",
+        email: "test@example.com",
+        name: "Test User",
+        role: "member",
+        status: "active",
+      },
+    });
+  }
+
   /** Register a route. Later registrations are checked first, so a test can
    *  override a broad default with a one-off failure response. */
   route(method: string, pattern: string | RegExp, handler: MockResponseInit | MockHandler): this {

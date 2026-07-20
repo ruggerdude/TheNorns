@@ -1192,33 +1192,44 @@ export class GitHubIntegrationService {
   }
 
   private async github<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
-    const response = await this.http(`${API_BASE}${path}`, {
-      ...init,
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${token}`,
-        "X-GitHub-Api-Version": GITHUB_API_VERSION,
-        "User-Agent": "TheNorns",
-        ...(init.body ? { "Content-Type": "application/json" } : {}),
-        ...init.headers,
-      },
-    });
-    const payload = (await response.json().catch(() => ({}))) as T & {
-      message?: string;
-      documentation_url?: string;
-    };
-    if (!response.ok) {
+    const method = (init.method ?? "GET").toUpperCase();
+    const canRetry = method === "GET" || path.endsWith("/access_tokens");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await this.http(`${API_BASE}${path}`, {
+        ...init,
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "X-GitHub-Api-Version": GITHUB_API_VERSION,
+          "User-Agent": "TheNorns",
+          ...(init.body ? { "Content-Type": "application/json" } : {}),
+          ...init.headers,
+        },
+      });
+      const payload = (await response.json().catch(() => ({}))) as T & {
+        message?: string;
+        documentation_url?: string;
+      };
+      if (response.ok) return payload;
+      const transient = [502, 503, 504].includes(response.status);
+      if (canRetry && transient && attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
+        continue;
+      }
       const permissionHint =
         response.status === 403 || response.status === 422
           ? " Check the GitHub App installation and repository permissions."
           : "";
-      throw new GitHubIntegrationError(
-        "github_api_error",
-        `${payload.message ?? `GitHub request failed (${response.status})`}.${permissionHint}`,
-        409,
-      );
+      const message = transient
+        ? "GitHub is temporarily unavailable. Refresh repositories in a moment."
+        : `${payload.message ?? `GitHub request failed (${response.status})`}.${permissionHint}`;
+      throw new GitHubIntegrationError("github_api_error", message, 409);
     }
-    return payload;
+    throw new GitHubIntegrationError(
+      "github_api_error",
+      "GitHub is temporarily unavailable. Refresh repositories in a moment.",
+      409,
+    );
   }
 }
 

@@ -19,6 +19,7 @@ describe.sequential("workspace GitHub integration", () => {
   let service: GitHubIntegrationService;
   let http: ReturnType<typeof vi.fn>;
   let manifestPrivateKey: string;
+  let transientAccessTokenFailures = 0;
 
   beforeAll(async () => {
     pg = new PGlite();
@@ -85,6 +86,10 @@ describe.sequential("workspace GitHub integration", () => {
         });
       }
       if (url === "https://api.github.com/app/installations/42/access_tokens") {
+        if (transientAccessTokenFailures > 0) {
+          transientAccessTokenFailures -= 1;
+          return json({ message: "No server is currently available to service your request" }, 503);
+        }
         expect(init?.headers).toMatchObject({ Authorization: expect.stringMatching(/^Bearer /) });
         return json({ token: "installation-token", expires_at: "2026-07-17T04:00:00Z" });
       }
@@ -155,6 +160,22 @@ describe.sequential("workspace GitHub integration", () => {
     await expect(
       service.resolveRepository("another-workspace-user", "github:42", "9001"),
     ).resolves.toMatchObject({ full_name: "octocat/hello-world" });
+  });
+
+  it("retries a transient GitHub outage while loading repositories", async () => {
+    const tokenRequestsBefore = http.mock.calls.filter(([input]) =>
+      String(input).endsWith("/app/installations/42/access_tokens"),
+    ).length;
+    transientAccessTokenFailures = 1;
+
+    await expect(service.listRepositories("norns-user-1", "github:42")).resolves.toMatchObject([
+      { id: "9001", full_name: "octocat/hello-world" },
+    ]);
+
+    const tokenRequestsAfter = http.mock.calls.filter(([input]) =>
+      String(input).endsWith("/app/installations/42/access_tokens"),
+    ).length;
+    expect(tokenRequestsAfter - tokenRequestsBefore).toBe(2);
   });
 
   it("creates a repository for the authorized personal account", async () => {
