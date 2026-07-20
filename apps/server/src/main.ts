@@ -41,7 +41,7 @@ import {
   assertRestrictedRuntimeDatabase,
   postgresPoolConfig,
 } from "./persistence/postgresConnection.js";
-import { NodePgTransactionRunner } from "./persistence/v2/database.js";
+import { NodePgTransactionRunner, type V2TransactionRunner } from "./persistence/v2/database.js";
 import { AttentionService } from "./projects/attentionService.js";
 import { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
 import { ProjectResumeService } from "./projects/projectResumeService.js";
@@ -129,6 +129,8 @@ let phase7Services: { operations: Phase7OperationsService } | undefined;
 let debateService: DebateService | undefined;
 let debateWorkerTimer: NodeJS.Timeout | undefined;
 let integrationServices: { github: GitHubIntegrationService | null } | undefined;
+// FRONT DOOR P2 §D1: observable planning runs need the relational runtime.
+let planningRunsOptions: { transactions: V2TransactionRunner } | undefined;
 
 const publicOrigin =
   process.env.NORNS_PUBLIC_ORIGIN ??
@@ -317,6 +319,9 @@ if (databaseUrl) {
     if (credentialKeyring) {
       await assertCredentialHmacKeyCoverage(runtimeTransactions, credentialKeyring);
     }
+    // FRONT DOOR P2 §D1: expose observable planning runs over the same
+    // relational runtime the debate workflow uses.
+    planningRunsOptions = { transactions: runtimeTransactions };
     identityRuntime = createIdentityRuntime({
       users,
       route: identityRoute,
@@ -554,6 +559,7 @@ const server = await buildServer({
   ...(phase6Services !== undefined ? { phase6: phase6Services } : {}),
   ...(phase7Services !== undefined ? { phase7: phase7Services } : {}),
   ...(debateService !== undefined ? { debates: debateService } : {}),
+  ...(planningRunsOptions !== undefined ? { planningRuns: planningRunsOptions } : {}),
   ...(integrationServices !== undefined ? { integrations: integrationServices } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),
