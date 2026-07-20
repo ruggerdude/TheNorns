@@ -291,11 +291,7 @@ export function Account({
   };
 
   const pairingCommand = pairing
-    ? [
-        `norns-runner pair ${pairing.code} --server ${window.location.origin}`,
-        'norns-runner workspace add "/path/to/projects"',
-        `norns-runner start --server ${window.location.origin}`,
-      ].join("\n")
+    ? `curl -fsSL ${window.location.origin}/install-runner.sh | sh -s -- ${pairing.code} ${window.location.origin}`
     : null;
 
   const copyPairingCommand = async (): Promise<void> => {
@@ -630,10 +626,9 @@ export function Account({
                   {openConnection === "runners" ? (
                     <div className="connection-details" id="runner-connection-details">
                       <p className="muted">
-                        Pair a runner on the computer that owns your local folders. The runner keeps
-                        raw paths and execution credentials off the web service. The standard start
-                        command enables a conservative Git verification policy; advanced deployments
-                        can override it with NORNS_VERIFICATION_POLICIES_JSON.
+                        Install the companion once on the computer that owns your local folders. It
+                        keeps raw paths and execution credentials off the web service. After
+                        pairing, project creation opens the computer's native folder selector.
                       </p>
                       <div className="connection-actions">
                         <Button
@@ -666,15 +661,15 @@ export function Account({
                             </span>
                           </div>
                           <div>
-                            <span className="field-label">Run locally</span>
+                            <span className="field-label">Install and pair on this Mac</span>
                             <code>{pairingCommand}</code>
                             <span className="muted">
-                              Replace the example folder with a root you approve. You will browse
-                              only inside that root when creating a project.
+                              Paste this one command into Terminal. It installs, pairs, and starts
+                              the companion; you will not enter folder paths in Terminal.
                             </span>
                           </div>
                           <Button className="btn-small" onClick={() => void copyPairingCommand()}>
-                            {pairingCopied ? "Copied" : "Copy setup commands"}
+                            {pairingCopied ? "Copied" : "Copy install command"}
                           </Button>
                         </output>
                       ) : null}

@@ -32,7 +32,7 @@ const safeDisplayLabel = z
 export const RunnerWorkspaceRequest = z
   .object({
     request_id: opaqueId,
-    operation: z.enum(["list", "browse", "validate"]),
+    operation: z.enum(["list", "browse", "validate", "choose"]),
     workspace_id: opaqueId.optional(),
     entry_id: opaqueId.optional(),
   })
@@ -64,8 +64,8 @@ export type RunnerWorkspaceEntryT = z.infer<typeof RunnerWorkspaceEntry>;
 export const RunnerWorkspaceResponse = z
   .object({
     request_id: opaqueId,
-    operation: z.enum(["list", "browse", "validate"]),
-    status: z.enum(["ok", "invalid_request", "not_found", "unavailable"]),
+    operation: z.enum(["list", "browse", "validate", "choose"]),
+    status: z.enum(["ok", "cancelled", "invalid_request", "not_found", "unavailable"]),
     workspaces: z
       .array(z.object({ workspace_id: opaqueId, label: safeDisplayLabel }).strict())
       .optional(),
@@ -97,7 +97,8 @@ export const RunnerWorkspaceResponse = z
     const correctPayload =
       (value.operation === "list" && value.workspaces !== undefined) ||
       (value.operation === "browse" && value.entries !== undefined) ||
-      (value.operation === "validate" && value.repository !== undefined);
+      ((value.operation === "validate" || value.operation === "choose") &&
+        value.repository !== undefined);
     if (!correctPayload || payloads.length !== 1) {
       context.addIssue({
         code: z.ZodIssueCode.custom,

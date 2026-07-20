@@ -153,9 +153,9 @@ describe("workspace connections settings", () => {
     expect(screen.getByText("1 connected")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Pair new runner" }));
     expect(await screen.findByText("ABC-123")).toBeInTheDocument();
-    expect(screen.getByText(/norns-runner pair ABC-123/i)).toBeInTheDocument();
-    expect(screen.getByText(/norns-runner workspace add/i)).toBeInTheDocument();
-    expect(screen.getByText(/norns-runner start/i)).toBeInTheDocument();
+    expect(screen.getByText(/install-runner\.sh.*ABC-123/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /copy install command/i })).toBeInTheDocument();
+    expect(screen.queryByText(/norns-runner workspace add/i)).not.toBeInTheDocument();
   });
 
   it("shows provider readiness and the exact missing deployment variables", async () => {

@@ -27,6 +27,36 @@ describe("runner workspace wire", () => {
     ).toBe(true);
   });
 
+  it("accepts native folder selection without exposing a path", () => {
+    expect(
+      RunnerWorkspaceRequest.safeParse({
+        request_id: "workspace:choose",
+        operation: "choose",
+      }).success,
+    ).toBe(true);
+    expect(
+      RunnerWorkspaceResponse.safeParse({
+        request_id: "workspace:choose",
+        operation: "choose",
+        status: "ok",
+        repository: {
+          workspace_id: "local:workspace",
+          repository_id: "local:repository",
+          repository_display_name: "Project One",
+          default_branch: "main",
+          observed_head: "abc123",
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      RunnerWorkspaceResponse.safeParse({
+        request_id: "workspace:choose",
+        operation: "choose",
+        status: "cancelled",
+      }).success,
+    ).toBe(true);
+  });
+
   it("rejects raw paths, unknown fields, and mismatched operation payloads", () => {
     expect(
       RunnerWorkspaceResponse.safeParse({

@@ -2044,7 +2044,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       const workspaceRequest = async (
         runnerId: string,
         input: {
-          operation: "list" | "browse" | "validate";
+          operation: "list" | "browse" | "validate" | "choose";
           workspace_id?: string;
           entry_id?: string;
         },
@@ -2085,6 +2085,52 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             runner_id: runnerId,
             generation: runner?.generation ?? 0,
             workspaces: response.workspaces ?? [],
+          });
+        } catch (error) {
+          return workspaceFailure(reply, error);
+        }
+      });
+
+      app.post("/api/runners/:runnerId/workspaces/choose", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const { runnerId } = req.params as { runnerId: string };
+        try {
+          const { response, generation } = await workspaceRequest(runnerId, {
+            operation: "choose",
+          });
+          if (response.status === "cancelled") return reply.send({ cancelled: true });
+          if (response.status !== "ok" || !response.repository) {
+            return reply.code(response.status === "invalid_request" ? 422 : 409).send({
+              error: response.status,
+              message:
+                response.status === "invalid_request"
+                  ? "Choose the root folder of a Git repository with at least one commit."
+                  : "The local folder chooser is unavailable.",
+            });
+          }
+          const runner = stores.runner(runnerId);
+          const reconciled = reconciledWorkspaceRunners.get(runnerId);
+          if (
+            !runner ||
+            !reconciled ||
+            reconciled.socket !== runnerSockets.get(runnerId) ||
+            reconciled.generation !== generation ||
+            runner.generation !== generation ||
+            !reconciled.workspacePicker
+          ) {
+            return reply.code(409).send({ error: "runner_unavailable" });
+          }
+          const grant = workspaceSelections.issue(
+            user.id,
+            runnerId,
+            generation,
+            response.repository,
+          );
+          reply.send({
+            ...grant,
+            repository: { runner_id: runnerId, ...response.repository },
           });
         } catch (error) {
           return workspaceFailure(reply, error);

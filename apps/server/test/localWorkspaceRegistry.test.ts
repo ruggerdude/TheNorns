@@ -28,6 +28,46 @@ function gitRepository(root: string, name: string): string {
 }
 
 describe("runner-local workspace registry", () => {
+  it("uses the native chooser to approve and validate a repository in one step", async () => {
+    const data = mkdtempSync(join(tmpdir(), "norns-native-choice-"));
+    const repository = gitRepository(data, "chosen-project");
+    const registry = new WorkspaceRegistry(data, async () => repository);
+
+    const response = await registry.handleAsync({
+      request_id: "choose-project",
+      operation: "choose",
+    });
+
+    expect(response).toMatchObject({
+      operation: "choose",
+      status: "ok",
+      repository: {
+        repository_display_name: "chosen-project",
+        default_branch: "main",
+      },
+    });
+    expect(JSON.stringify(response)).not.toContain(repository);
+    expect(registry.listConfigured()).toEqual([
+      expect.objectContaining({ label: "chosen-project" }),
+    ]);
+    expect(registry.repositoryPath(response.repository?.repository_id ?? "")).toBe(
+      realpathSync(repository),
+    );
+  });
+
+  it("treats closing the native chooser as a clean cancellation", async () => {
+    const data = mkdtempSync(join(tmpdir(), "norns-native-cancel-"));
+    const registry = new WorkspaceRegistry(data, async () => null);
+    await expect(
+      registry.handleAsync({ request_id: "choose-cancelled", operation: "choose" }),
+    ).resolves.toEqual({
+      request_id: "choose-cancelled",
+      operation: "choose",
+      status: "cancelled",
+    });
+    expect(registry.listConfigured()).toEqual([]);
+  });
+
   it("keeps paths local, skips symlinks, and validates an approved Git repository", () => {
     const data = mkdtempSync(join(tmpdir(), "norns-workspaces-"));
     const workspace = join(data, "approved");

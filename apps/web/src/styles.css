@@ -1106,6 +1106,19 @@ button:disabled {
 .local-folder-picker .repository-search .field {
   min-width: 0;
 }
+.native-folder-choice {
+  display: flex;
+  align-items: center;
+  gap: .8rem;
+  padding: .8rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+}
+.native-folder-choice p {
+  margin: 0;
+  font-size: .72rem;
+}
 .local-folder-browser {
   display: grid;
   gap: .7rem;
