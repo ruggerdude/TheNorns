@@ -140,6 +140,13 @@ export class ShadowProjectRepository implements ProjectRepository {
     return this.options.legacy.allocate(id, strategy);
   }
 
+  applyPmAllocation(
+    id: string,
+    recommendations: Parameters<ProjectRepository["applyPmAllocation"]>[1],
+  ): ReturnType<ProjectRepository["applyPmAllocation"]> {
+    return this.options.legacy.applyPmAllocation(id, recommendations);
+  }
+
   overrideAssignment(
     id: string,
     nodeId: string,

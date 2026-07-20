@@ -560,6 +560,13 @@ export class RelationalProjectReadRepository implements ProjectRepository {
     return Promise.reject(new Phase3RequiredError("allocate"));
   }
 
+  applyPmAllocation(
+    _id: string,
+    _recommendations: Parameters<ProjectRepository["applyPmAllocation"]>[1],
+  ): Promise<never> {
+    return Promise.reject(new Phase3RequiredError("applyPmAllocation"));
+  }
+
   overrideAssignment(
     _id: string,
     _nodeId: string,

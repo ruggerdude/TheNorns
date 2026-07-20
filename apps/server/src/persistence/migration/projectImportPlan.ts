@@ -44,7 +44,7 @@ export interface LegacyImportedAssignment {
   budget_limit_usd: number;
   allocation_policy_ref: string;
   legacy_worker_count: number;
-  legacy_source: "auto" | "override" | "unassigned";
+  legacy_source: "auto" | "pm" | "override" | "unassigned";
   source_hash: string;
   non_executable: true;
 }

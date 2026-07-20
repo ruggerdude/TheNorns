@@ -30,7 +30,7 @@ const NodeAssignment = z.object({
   reviewer_model: z.string().min(1),
   budget_usd: z.number().positive(),
   rationale: z.string().min(1),
-  source: z.enum(["auto", "override"]),
+  source: z.enum(["auto", "pm", "override"]),
 });
 export type NodeAssignmentT = z.infer<typeof NodeAssignment>;
 
