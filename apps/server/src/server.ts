@@ -57,7 +57,7 @@ import type { Phase6CoordinationService } from "./coordinator/phase6Coordination
 import { DebateConflictError, type DebateService } from "./debates/service.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
-import { GraphEditError } from "./graph/graph.js";
+import { GraphEditError, WorkflowGraph } from "./graph/graph.js";
 import { newId, nonce, pairingCode } from "./ids.js";
 import {
   GitHubIntegrationError,
@@ -65,10 +65,18 @@ import {
   disabledGitHubStatus,
 } from "./integrations/github.js";
 import type { Phase7OperationsService } from "./operations/phase7Operations.js";
+import type { V2TransactionRunner } from "./persistence/v2/database.js";
 import {
   AllocationRecommendationError,
   recommendProjectAllocation,
 } from "./planning/allocationRecommendation.js";
+import { resolvePlanningParticipants } from "./planning/reviewerSelection.js";
+import {
+  PlanningRunConflictError,
+  PlanningRunService,
+  type PlanningStaffingProposalDto,
+} from "./planning/runService.js";
+import { PlanningRunWorker } from "./planning/runWorker.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
 import { type AttentionService, DecisionResolutionError } from "./projects/attentionService.js";
 import type { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
@@ -189,6 +197,12 @@ export interface ServerOptions {
   phase7?: { operations: Phase7OperationsService };
   /** Durable relational debate workflow, unavailable without its database runtime. */
   debates?: DebateService;
+  /**
+   * Durable, user-configurable, observable planning runs (FRONT DOOR P2 §D1):
+   * wraps runPlanning() with a pollable record. Unavailable without its
+   * database runtime, same as `debates`.
+   */
+  planningRuns?: { transactions: V2TransactionRunner };
   integrations?: { github: GitHubIntegrationService | null };
   /**
    * Deployment configuration inspected by safe integration-status routes.
@@ -2953,6 +2967,141 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         });
       }
     });
+
+    // ---- durable planning runs (FRONT DOOR P2 §D1) --------------------------
+    // A user-configurable, observable wrapper around the runPlanning() loop
+    // above: rounds, reviewer selection, and the terminal result/failure are
+    // held in a durable, pollable record (planning_runs) instead of only a
+    // single request/response. Fully additive — its own tables
+    // (drizzle/0012_planning_runs.sql) and its own route surface; the
+    // existing /api/projects/:id/plan route above is untouched.
+    if (options.planningRuns) {
+      const { transactions: planningTransactions } = options.planningRuns;
+      const planningRunService = new PlanningRunService(planningTransactions);
+      const resolvePlanningModels = async (projectId: string) => {
+        const [pmSelection, persistedReviewer] = await Promise.all([
+          projects.pmSelectionOf(projectId),
+          planningRunService.reviewerSelectionOf(projectId),
+        ]);
+        // Throws PlanningConfigurationError when the deployment lacks what's
+        // needed; the worker catches it and records a truthful failure.
+        return resolvePlanningParticipants({
+          pmSelection,
+          persistedReviewer,
+          env: integrationEnvironment,
+          defaultPmModel: DEFAULT_PM_MODEL,
+        });
+      };
+      const planningWorker = new PlanningRunWorker(planningTransactions, buildPlanningAdapter, {
+        resolveModels: resolvePlanningModels,
+        ...(options.recordUsage ? { recordUsage: options.recordUsage } : {}),
+        buildStaffingProposal: async ({
+          projectId,
+          objective,
+          plan,
+        }): Promise<PlanningStaffingProposalDto | null> => {
+          const [pmSelection, summary] = await Promise.all([
+            projects.pmSelectionOf(projectId),
+            projects.summary(projectId),
+          ]);
+          const pmModel =
+            pmSelection.model ??
+            (pmSelection.provider === "anthropic"
+              ? (integrationEnvironment.NORNS_PM_MODEL ?? DEFAULT_PM_MODEL.anthropic)
+              : (integrationEnvironment.NORNS_OPENAI_MODEL ?? DEFAULT_PM_MODEL.openai));
+          const pm = buildPlanningAdapter(pmSelection.provider, pmModel);
+          const recommendation = await recommendProjectAllocation({
+            pm,
+            projectId,
+            projectName: summary.name,
+            objective,
+            graph: WorkflowGraph.fromPlan(plan).snapshot(),
+            models: configuredWorkerModels(),
+          });
+          options.recordUsage?.([recommendation.usage]);
+          return {
+            summary: recommendation.summary,
+            recommendations: recommendation.recommendations,
+          };
+        },
+      });
+
+      // A restarted process can never resume a run that was mid-flight when
+      // it died (runPlanning() isn't itself resumable mid-round), so any run
+      // left in a non-terminal state is marked failed with a truthful reason
+      // rather than left silently stuck. Single-instance MVP: see
+      // PlanningRunWorker's module comment for the multi-instance caveat.
+      void planningWorker.reconcileOrphans().catch(() => undefined);
+
+      // The common case has no poll latency (the POST handler below kicks
+      // execution immediately after enqueueing); this interval exists only so
+      // a run is never silently stranded if that immediate kick is lost to a
+      // crash between insert and dispatch.
+      let planningTickInFlight = false;
+      const planningWorkerTimer = setInterval(() => {
+        if (planningTickInFlight) return;
+        planningTickInFlight = true;
+        void planningWorker
+          .tick()
+          .catch(() => undefined)
+          .finally(() => {
+            planningTickInFlight = false;
+          });
+      }, 2_000);
+      planningWorkerTimer.unref?.();
+
+      const planningRunError = (reply: FastifyReply, error: unknown): void => {
+        if (error instanceof PlanningRunConflictError) {
+          reply.code(404).send({ error: error.code, message: error.message });
+          return;
+        }
+        throw error;
+      };
+
+      const CreatePlanningRunBody = z
+        .object({
+          objective: z.string().trim().min(1).max(100_000),
+          max_rounds: z.number().int().min(1).max(5).optional(),
+          // Accepted for forward-compatibility; wired to the run in Phase 4.
+          attachment_ids: z.array(z.string().trim().min(1)).max(50).optional(),
+        })
+        .strict();
+
+      app.post("/api/v2/projects/:id/planning-runs", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        const body = CreatePlanningRunBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        try {
+          const run = await planningRunService.create(id, {
+            objective: body.data.objective,
+            ...(body.data.max_rounds !== undefined ? { maxRounds: body.data.max_rounds } : {}),
+          });
+          stores.audit("operator", "planning_run.created", `${id}:${run.id}`, now());
+          reply.code(202).send({ planning_run_id: run.id });
+          void planningWorker.runNow(run.id).catch((error) => {
+            stores.audit(
+              "operator",
+              "planning_run.dispatch_failed",
+              `${id}:${run.id}:${error instanceof Error ? error.message : String(error)}`,
+              now(),
+            );
+          });
+        } catch (error) {
+          planningRunError(reply, error);
+        }
+      });
+
+      app.get("/api/v2/projects/:id/planning-runs/:runId", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id, runId } = req.params as { id: string; runId: string };
+        try {
+          reply.header("Cache-Control", "no-store").send(await planningRunService.get(id, runId));
+        } catch (error) {
+          planningRunError(reply, error);
+        }
+      });
+    }
   }
 
   // ---- runner websocket ----------------------------------------------------------

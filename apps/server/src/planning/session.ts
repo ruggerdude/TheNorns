@@ -63,6 +63,24 @@ export interface PlanningResult {
   usage: UsageEventT[];
 }
 
+/**
+ * Fired at each observable checkpoint of the loop below — after the initial
+ * draft, after each reviewer pass, and after each PM revision. Purely an
+ * observability seam (e.g. persisting per-round progress for a durable
+ * planning run record); it never influences control flow, and a throwing or
+ * slow callback must not be allowed to corrupt the loop's own state, so
+ * callers are responsible for handling their own errors.
+ */
+export interface PlanningRoundEvent {
+  /** The reviewer round this checkpoint belongs to (1-based). */
+  round: number;
+  phase: "draft" | "review" | "revision";
+  plan: PlanContractT;
+  /** Present only for phase "review". */
+  findings?: ReviewFindingT[];
+}
+export type PlanningRoundHook = (event: PlanningRoundEvent) => void | Promise<void>;
+
 export interface PlanningOptions {
   pm: LlmAdapter;
   reviewer: LlmAdapter;
@@ -73,6 +91,8 @@ export interface PlanningOptions {
   maxValidationRetries?: number; // default 2
   /** documented, human-approved exception to cross-provider review */
   reviewException?: { reason: string; approvedBy: string };
+  /** Optional per-round progress observer. See PlanningRoundEvent. */
+  onRound?: PlanningRoundHook;
 }
 
 export async function runPlanning(options: PlanningOptions): Promise<PlanningResult> {
@@ -121,6 +141,7 @@ export async function runPlanning(options: PlanningOptions): Promise<PlanningRes
   const versions: PlanVersionRecord[] = [];
   let plan = await generateValidPlan(draftPlanPrompt(options.objective));
   versions.push({ version: 1, plan, findings: null, responses: null });
+  await options.onRound?.({ round: 1, phase: "draft", plan });
 
   for (let round = 1; round <= maxRounds; round += 1) {
     const review = await options.reviewer.completeStructured(
@@ -132,6 +153,7 @@ export async function runPlanning(options: PlanningOptions): Promise<PlanningRes
     const findings = review.value.findings;
     const current = versions[versions.length - 1];
     if (current) current.findings = [...findings];
+    await options.onRound?.({ round, phase: "review", plan, findings });
 
     if (mustFixCount(findings) === 0) {
       return {
@@ -186,6 +208,7 @@ export async function runPlanning(options: PlanningOptions): Promise<PlanningRes
     }
     if (current) current.responses = [...revision.value.responses];
     versions.push({ version: versions.length + 1, plan, findings: null, responses: null });
+    await options.onRound?.({ round, phase: "revision", plan });
   }
 
   throw new Error("unreachable: round loop always returns");

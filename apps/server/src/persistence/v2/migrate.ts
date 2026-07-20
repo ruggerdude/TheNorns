@@ -56,6 +56,11 @@ export const DEBATE_WORKFLOW_MIGRATION_URL = new URL(
   "../../../drizzle/0011_debate_workflow.sql",
   import.meta.url,
 );
+export const PLANNING_RUNS_MIGRATION_NAME = "0012_planning_runs";
+export const PLANNING_RUNS_MIGRATION_URL = new URL(
+  "../../../drizzle/0012_planning_runs.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -131,6 +136,10 @@ export async function loadGitHubAppManifestMigrationSql(): Promise<string> {
 
 export async function loadDebateWorkflowMigrationSql(): Promise<string> {
   return readFile(DEBATE_WORKFLOW_MIGRATION_URL, "utf8");
+}
+
+export async function loadPlanningRunsMigrationSql(): Promise<string> {
+  return readFile(PLANNING_RUNS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -284,6 +293,10 @@ export async function runCurrentV2Migrations(
     {
       name: DEBATE_WORKFLOW_MIGRATION_NAME,
       sql: await loadDebateWorkflowMigrationSql(),
+    },
+    {
+      name: PLANNING_RUNS_MIGRATION_NAME,
+      sql: await loadPlanningRunsMigrationSql(),
     },
   ]);
 }

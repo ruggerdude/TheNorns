@@ -12,6 +12,7 @@ import {
   PHASE6_COORDINATION_MIGRATION_NAME,
   PHASE7_HARDENING_MIGRATION_NAME,
   PHASE8_CUTOVER_COMPLETION_MIGRATION_NAME,
+  PLANNING_RUNS_MIGRATION_NAME,
   QC_COMMUNICATION_MIGRATION_NAME,
   type V2MigrationDatabase,
   WORKSPACE_CONNECTIONS_MIGRATION_NAME,
@@ -190,6 +191,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       { name: QC_COMMUNICATION_MIGRATION_NAME, applied: false },
       { name: GITHUB_APP_MANIFEST_MIGRATION_NAME, applied: false },
       { name: DEBATE_WORKFLOW_MIGRATION_NAME, applied: false },
+      { name: PLANNING_RUNS_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -206,6 +208,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       QC_COMMUNICATION_MIGRATION_NAME,
       GITHUB_APP_MANIFEST_MIGRATION_NAME,
       DEBATE_WORKFLOW_MIGRATION_NAME,
+      PLANNING_RUNS_MIGRATION_NAME,
     ]);
   });
 
