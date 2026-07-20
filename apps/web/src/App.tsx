@@ -1470,8 +1470,16 @@ export function App(): React.ReactElement {
       .then((u) => {
         if (!cancelled) setUser(u);
       })
-      .catch(() => {
-        if (!cancelled) setUser(null);
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        clearToken();
+        setTok(null);
+        setUser(null);
+        setAuthError(
+          error instanceof UnauthorizedError
+            ? "Session expired. Sign in again."
+            : "The session could not be restored. Sign in again.",
+        );
       });
     return () => {
       cancelled = true;

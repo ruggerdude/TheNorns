@@ -7,7 +7,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { App } from "./App";
-import { setToken } from "./auth";
+import { getToken, setToken } from "./auth";
 import { MockFetch } from "./test/mockFetch";
 
 describe("App — pre-auth screen selection", () => {
@@ -59,6 +59,20 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     setToken("test-token");
     mock = new MockFetch();
     mock.get("/api/projects", { body: [] });
+  });
+
+  test("clears a stale session marker and returns to sign-in when the cookie is gone", async () => {
+    mock.get("/api/auth/me", { status: 401, body: { error: "unauthorized" } });
+    mock.get("/api/auth/status", { body: { needs_bootstrap: false } });
+    mock.install();
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { name: /enter your workspace/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/session expired\. sign in again/i)).toBeInTheDocument();
+    expect(getToken()).toBeNull();
   });
 
   test("shows Settings but not Admin for a member", async () => {
