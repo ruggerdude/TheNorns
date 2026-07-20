@@ -27,6 +27,7 @@ describe.sequential("runner-owned local folder API", () => {
   let token: string;
   let url: string;
   let root: string;
+  let repository: string;
 
   beforeEach(async () => {
     pg = new PGlite();
@@ -55,7 +56,7 @@ describe.sequential("runner-owned local folder API", () => {
     });
     url = await listen(server);
     root = mkdtempSync(join(tmpdir(), "norns-local-root-"));
-    const repository = join(root, "project-a");
+    repository = join(root, "project-a");
     mkdirSync(repository);
     execFileSync("git", ["-C", repository, "init", "-b", "main"]);
     execFileSync("git", ["-C", repository, "config", "user.email", "test@norns.invalid"]);
@@ -64,7 +65,7 @@ describe.sequential("runner-owned local folder API", () => {
     execFileSync("git", ["-C", repository, "add", "README.md"]);
     execFileSync("git", ["-C", repository, "commit", "-m", "initial"]);
     const dataDir = mkdtempSync(join(tmpdir(), "norns-local-runner-"));
-    const registry = new WorkspaceRegistry(dataDir);
+    const registry = new WorkspaceRegistry(dataDir, async () => repository);
     registry.addWorkspace(root, "Projects");
     const pairing = (await (
       await fetch(`${url}/api/pairing/start`, {
@@ -100,6 +101,28 @@ describe.sequential("runner-owned local folder API", () => {
         ...(init?.headers ?? {}),
       },
     });
+
+  it("opens the runner-native chooser and returns an opaque repository selection", async () => {
+    const selected = await api("/api/runners/runner-local/workspaces/choose", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(selected.status).toBe(200);
+    const selection = (await selected.json()) as {
+      selection_token: string;
+      repository: Record<string, string>;
+    };
+    expect(selection).toMatchObject({
+      selection_token: expect.stringMatching(/^selection:/),
+      repository: {
+        runner_id: "runner-local",
+        repository_display_name: "project-a",
+        default_branch: "main",
+      },
+    });
+    expect(JSON.stringify(selection)).not.toContain(root);
+    expect(JSON.stringify(selection)).not.toContain(repository);
+  });
 
   it("selects, creates, binds, and reopens a local project without exposing its path", async () => {
     const rawPathAttempt = await api("/api/projects", {

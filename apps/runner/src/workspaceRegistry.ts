@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 // Runner-local workspace registry.  The relay receives only opaque handles
 // and Git metadata: all physical paths remain in this 0600 local file.
 import { randomUUID } from "node:crypto";
@@ -19,6 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
+import { platform } from "node:process";
 import type {
   RunnerWorkspaceEntryT,
   RunnerWorkspaceRequestT,
@@ -57,6 +58,44 @@ const MAX_BROWSE_SCAN = 400;
 
 class InvalidWorkspaceRegistryError extends Error {}
 
+export type DirectoryPicker = () => Promise<string | null>;
+
+function pickerCommand(command: string, args: string[]): Promise<string | null> {
+  return new Promise((resolvePicker) => {
+    execFile(command, args, { encoding: "utf8" }, (error, stdout) => {
+      if (error) {
+        resolvePicker(null);
+        return;
+      }
+      const selected = stdout.trim();
+      resolvePicker(selected || null);
+    });
+  });
+}
+
+/** Opens the operating system's folder chooser without exposing its result to the relay. */
+export function chooseNativeDirectory(): Promise<string | null> {
+  if (platform === "darwin") {
+    return pickerCommand("osascript", [
+      "-e",
+      'POSIX path of (choose folder with prompt "Choose a Git project folder for The Norns")',
+    ]);
+  }
+  if (platform === "win32") {
+    return pickerCommand("powershell.exe", [
+      "-NoProfile",
+      "-STA",
+      "-Command",
+      "Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = 'Choose a Git project folder for The Norns'; if ($dialog.ShowDialog() -eq 'OK') { $dialog.SelectedPath }",
+    ]);
+  }
+  return pickerCommand("zenity", [
+    "--file-selection",
+    "--directory",
+    "--title=Choose a Git project folder for The Norns",
+  ]);
+}
+
 function opaque(): string {
   // Random values are persisted locally.  Cloud-facing identity must not be
   // derivable from the physical path, even by someone who knows a candidate.
@@ -87,7 +126,10 @@ export class WorkspaceRegistry {
   private state: PersistedRegistry;
   private readonly handles = new Map<string, Handle>();
 
-  constructor(dataDir: string) {
+  constructor(
+    dataDir: string,
+    private readonly directoryPicker: DirectoryPicker = chooseNativeDirectory,
+  ) {
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     this.dataDirectory = dataDir;
     this.file = join(dataDir, "workspace-registry.json");
@@ -98,6 +140,28 @@ export class WorkspaceRegistry {
       else this.persist();
     });
     chmodSync(this.file, 0o600);
+  }
+
+  /** Handles native selection asynchronously so an open dialog never blocks the runner socket. */
+  async handleAsync(request: RunnerWorkspaceRequestT): Promise<RunnerWorkspaceResponseT> {
+    if (request.operation !== "choose") return this.handle(request);
+    try {
+      const selectedPath = await this.directoryPicker();
+      if (!selectedPath) {
+        return { request_id: request.request_id, operation: "choose", status: "cancelled" };
+      }
+      const repository = this.registerSelectedRepository(selectedPath);
+      return repository
+        ? {
+            request_id: request.request_id,
+            operation: "choose",
+            status: "ok",
+            repository,
+          }
+        : { request_id: request.request_id, operation: "choose", status: "invalid_request" };
+    } catch {
+      return { request_id: request.request_id, operation: "choose", status: "unavailable" };
+    }
   }
 
   addWorkspace(inputPath: string, label?: string): WorkspaceRecord {
@@ -320,7 +384,56 @@ export class WorkspaceRegistry {
     };
   }
 
-  private gitMetadata(path: string): { defaultBranch: string; head: string } | null {
+  private registerSelectedRepository(
+    selectedPath: string,
+  ): RunnerWorkspaceResponseT["repository"] | null {
+    const root = this.localDirectory(selectedPath);
+    // An explicit human selection can tolerate a slower probe than passive
+    // directory browsing, especially when the repository lives on an external volume.
+    const metadata = this.gitMetadata(root, 3_000);
+    if (!metadata) return null;
+    return this.withMutationLock(() => {
+      this.reloadOrRecover();
+      const existingWorkspace = this.state.workspaces.find((entry) => entry.root_path === root);
+      const workspace: WorkspaceRecord = {
+        workspace_id: existingWorkspace?.workspace_id ?? opaque(),
+        root_path: root,
+        label: safeLabel("", basename(root)),
+      };
+      const workspaceIndex = this.state.workspaces.findIndex(
+        (entry) => entry.workspace_id === workspace.workspace_id,
+      );
+      if (workspaceIndex >= 0) this.state.workspaces[workspaceIndex] = workspace;
+      else this.state.workspaces.push(workspace);
+
+      const existingRepository = this.state.repositories.find(
+        (entry) => entry.workspace_id === workspace.workspace_id && entry.repository_path === root,
+      );
+      const repository: RepositoryRecord = {
+        repository_id: existingRepository?.repository_id ?? opaque(),
+        workspace_id: workspace.workspace_id,
+        repository_path: root,
+      };
+      const repositoryIndex = this.state.repositories.findIndex(
+        (entry) => entry.repository_id === repository.repository_id,
+      );
+      if (repositoryIndex >= 0) this.state.repositories[repositoryIndex] = repository;
+      else this.state.repositories.push(repository);
+      this.persist();
+      return {
+        workspace_id: workspace.workspace_id,
+        repository_id: repository.repository_id,
+        repository_display_name: safeLabel(basename(root), "Repository"),
+        default_branch: metadata.defaultBranch,
+        observed_head: metadata.head,
+      };
+    });
+  }
+
+  private gitMetadata(
+    path: string,
+    timeoutMs = GIT_PROBE_TIMEOUT_MS,
+  ): { defaultBranch: string; head: string } | null {
     try {
       // `-C` accepts a path, but it has already been realpath-contained and no
       // user string reaches the shell (execFileSync does not invoke one).
@@ -339,7 +452,7 @@ export class WorkspaceRegistry {
         {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
-          timeout: GIT_PROBE_TIMEOUT_MS,
+          timeout: timeoutMs,
         },
       )
         .trim()

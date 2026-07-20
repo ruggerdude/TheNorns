@@ -202,15 +202,20 @@ export class RunnerDaemon {
             );
             break;
           }
-          // WorkspaceRegistry converts all failures to stable codes; never let
-          // a local pathname or operating-system message cross the socket.
-          socket.send(
-            JSON.stringify({
-              type: "workspace_response",
-              generation: state.state.generation,
-              response: this.opts.workspaces.handle(frame.request),
-            }),
-          );
+          // Native selection is asynchronous so the runner can keep its relay
+          // connection alive while the operating-system dialog is open.
+          // WorkspaceRegistry converts every failure to a stable code and no
+          // local pathname or operating-system message crosses this socket.
+          void this.opts.workspaces.handleAsync(frame.request).then((response) => {
+            if (this.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+            socket.send(
+              JSON.stringify({
+                type: "workspace_response",
+                generation: state.state.generation,
+                response,
+              }),
+            );
+          });
           break;
         }
       }

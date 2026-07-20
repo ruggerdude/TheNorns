@@ -126,6 +126,20 @@ describe("unified project onboarding", () => {
         },
       },
     });
+    mock.post("/api/runners/runner-local-1/workspaces/choose", {
+      body: {
+        selection_token: "native-selection-token",
+        expires_at: "2099-07-18T16:00:00Z",
+        repository: {
+          runner_id: runner.runner_id,
+          workspace_id: "workspace-native",
+          repository_id: "repository-native-app",
+          repository_display_name: "native-app",
+          default_branch: "main",
+          observed_head: "fedcba",
+        },
+      },
+    });
     mock.post("/api/projects", (_url, init) => {
       const body = JSON.parse(String(init?.body)) as {
         name: string;
@@ -249,6 +263,34 @@ describe("unified project onboarding", () => {
       },
     });
     expect(JSON.stringify(mock.calls)).not.toMatch(/Users|Development\/Apps|local-app\//);
+  });
+
+  it("selects a local project through the native folder chooser in one step", async () => {
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
+    await user.click(screen.getByRole("button", { name: /local folder/i }));
+    await user.click(await screen.findByRole("button", { name: /choose project folder/i }));
+
+    expect(await screen.findByTestId("local-selection-summary")).toHaveTextContent("native-app");
+    expect(screen.getByTestId("project-name")).toHaveValue("native-app");
+    expect(
+      mock.calls.find(
+        (call) =>
+          call.method === "POST" && call.url === "/api/runners/runner-local-1/workspaces/choose",
+      ),
+    ).toBeDefined();
+
+    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
+    expect(
+      mock.calls.find(
+        (call) =>
+          call.method === "POST" &&
+          call.url === "/api/v2/projects/project-created/source-bindings/local",
+      ),
+    ).toMatchObject({ body: { selection_token: "native-selection-token" } });
+    expect(JSON.stringify(mock.calls)).not.toMatch(/Users|native-app\//);
   });
 
   it("does not bind a previously selected local folder after switching to a new project", async () => {

@@ -352,6 +352,7 @@ export function Projects({
   const [selectedLocalEntryId, setSelectedLocalEntryId] = useState<string | null>(null);
   const [localBrowserLoading, setLocalBrowserLoading] = useState(false);
   const [localSelection, setLocalSelection] = useState<LocalSelection | null>(null);
+  const [localChooserLoading, setLocalChooserLoading] = useState(false);
   const [localValidationLoading, setLocalValidationLoading] = useState(false);
   const [pendingLocalProject, setPendingLocalProject] = useState<ProjectSummary | null>(null);
   const localWorkspaceRequestEpoch = useRef(0);
@@ -558,6 +559,55 @@ export function Projects({
     },
     [onUnauthorized, selectedLocalRunnerId, selectedLocalWorkspaceId],
   );
+
+  const chooseLocalRepository = useCallback(async () => {
+    if (!selectedLocalRunnerId) return;
+    const runnerId = selectedLocalRunnerId;
+    const requestEpoch = ++localValidationRequestEpoch.current;
+    setLocalChooserLoading(true);
+    setSourceError(null);
+    try {
+      const result = await request<LocalSelection | { cancelled: true }>(
+        `/api/runners/${encodeURIComponent(runnerId)}/workspaces/choose`,
+        {},
+      );
+      if (
+        localValidationRequestEpoch.current !== requestEpoch ||
+        selectedLocalRunnerId !== runnerId ||
+        "cancelled" in result
+      ) {
+        return;
+      }
+      setSelectedLocalWorkspaceId(result.repository.workspace_id);
+      setLocalSelection(result);
+      setSelectedLocalEntryId(null);
+      setLocalBrowser(null);
+      setLocalNavigation([]);
+      setLocalWorkspaces((current) =>
+        current.some((workspace) => workspace.workspace_id === result.repository.workspace_id)
+          ? current
+          : [
+              ...current,
+              {
+                workspace_id: result.repository.workspace_id,
+                label: result.repository.repository_display_name,
+              },
+            ],
+      );
+      setName((current) => current || result.repository.repository_display_name);
+      setDescription(
+        (current) =>
+          current ||
+          `Analyze and continue development of ${result.repository.repository_display_name}`,
+      );
+    } catch (error) {
+      if (localValidationRequestEpoch.current !== requestEpoch) return;
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setSourceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (localValidationRequestEpoch.current === requestEpoch) setLocalChooserLoading(false);
+    }
+  }, [onUnauthorized, selectedLocalRunnerId]);
 
   useEffect(() => {
     if (dialog && startingPoint === "existing" && existingSource === "local") {
@@ -1295,7 +1345,7 @@ export function Projects({
                       }}
                     >
                       <strong>Local folder</strong>
-                      <span>Browse folders approved by a paired local runner.</span>
+                      <span>Choose a Git project folder with the native folder selector.</span>
                     </button>
                   </div>
                 </fieldset>
@@ -1537,14 +1587,41 @@ export function Projects({
                         </Button>
                       </div>
 
-                      {localWorkspacesLoading ? (
+                      <div className="native-folder-choice">
+                        <Button
+                          type="button"
+                          variant="primary"
+                          disabled={!selectedLocalRunnerId || localChooserLoading}
+                          onClick={() => void chooseLocalRepository()}
+                        >
+                          {localChooserLoading
+                            ? "Waiting for folder selection…"
+                            : "Choose project folder…"}
+                        </Button>
+                        <p className="muted">
+                          Opens the folder selector on the runner computer. Choose the root of a Git
+                          repository; its full path stays on that computer.
+                        </p>
+                      </div>
+
+                      {localSelection ? (
+                        <p className="policy" data-testid="local-selection-summary">
+                          <strong>{localSelection.repository.repository_display_name}</strong> is
+                          validated on the selected runner
+                          {localSelection.repository.default_branch
+                            ? ` · ${localSelection.repository.default_branch}`
+                            : ""}
+                          . The Norns stores only this safe repository metadata, never its path.
+                        </p>
+                      ) : localWorkspacesLoading ? (
                         <Spinner label="Loading approved folders…" />
                       ) : localWorkspaces.length === 0 ? (
                         <div className="connection-required">
                           <div>
-                            <strong>No approved folders</strong>
+                            <strong>Choose your project folder</strong>
                             <p>
-                              Add an approved root when starting the selected runner, then refresh.
+                              The native selector above approves and validates the repository in one
+                              step.
                             </p>
                           </div>
                         </div>
@@ -1650,16 +1727,6 @@ export function Projects({
                               No folders or Git repositories are available here.
                             </p>
                           )}
-                          {localSelection ? (
-                            <p className="policy" data-testid="local-selection-summary">
-                              <strong>{localSelection.repository.repository_display_name}</strong>{" "}
-                              is validated on the selected runner
-                              {localSelection.repository.default_branch
-                                ? ` · ${localSelection.repository.default_branch}`
-                                : ""}
-                              . The Norns stores only this safe repository metadata, never its path.
-                            </p>
-                          ) : null}
                         </div>
                       )}
                     </>
