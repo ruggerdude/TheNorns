@@ -11,9 +11,9 @@ import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import { PhaseWorkflowService } from "../src/projects/phaseWorkflowService.js";
 import { ProjectResumeService } from "../src/projects/projectResumeService.js";
+import { RelationalProjectReadRepository } from "../src/projects/relationalReadRepository.js";
 import { RepositoryIngestionService } from "../src/projects/repositoryIngestionService.js";
 import { SourceBindingService } from "../src/projects/sourceBindingService.js";
-import { ProjectStore } from "../src/projects/store.js";
 import { StrategyWorkflowService } from "../src/projects/strategyWorkflowService.js";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
@@ -43,7 +43,7 @@ describe.sequential("runner-owned local folder API", () => {
     server = await buildServer({
       stores: new RelayStores(),
       users,
-      projects: new ProjectStore(),
+      projects: new RelationalProjectReadRepository(transactions, "local-folder-api"),
       phase3: {
         sourceBindings: new SourceBindingService(transactions),
         ingestion: new RepositoryIngestionService(transactions),
@@ -101,7 +101,7 @@ describe.sequential("runner-owned local folder API", () => {
       },
     });
 
-  it("mints a one-time selection from runner-only metadata and binds it", async () => {
+  it("selects, creates, binds, and reopens a local project without exposing its path", async () => {
     const rawPathAttempt = await api("/api/projects", {
       method: "POST",
       body: JSON.stringify({
@@ -146,7 +146,17 @@ describe.sequential("runner-owned local folder API", () => {
     };
     expect(selected.status).toBe(200);
     expect(JSON.stringify(selection)).not.toContain(root);
-    const bound = await api("/api/v2/projects/project-1/source-bindings/local", {
+    const created = await api("/api/projects", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Local app",
+        description: "Continue the selected local repository",
+        pm_provider: "anthropic",
+      }),
+    });
+    expect(created.status).toBe(201);
+    const project = (await created.json()) as { id: string };
+    const bound = await api(`/api/v2/projects/${project.id}/source-bindings/local`, {
       method: "POST",
       body: JSON.stringify({
         selection_token: selection.selection_token,
@@ -157,7 +167,31 @@ describe.sequential("runner-owned local folder API", () => {
     expect((await bound.json()) as { repository_id: string }).toMatchObject({
       repository_id: selection.repository.repository_id,
     });
-    const reused = await api("/api/v2/projects/project-1/source-bindings/local", {
+    const summary = await api(`/api/projects/${project.id}`);
+    expect(summary.status).toBe(200);
+    expect(await summary.json()).toMatchObject({
+      id: project.id,
+      source_type: "local",
+      source_location: "project-a",
+    });
+    const graph = await api(`/api/projects/${project.id}/graph`);
+    expect(graph.status).toBe(409);
+    expect(await graph.json()).toMatchObject({ error: "not_planned" });
+    const resume = await api(`/api/v2/projects/${project.id}/resume`);
+    expect(resume.status).toBe(200);
+    expect(await resume.json()).toMatchObject({
+      project: { id: project.id },
+      repositories: [
+        {
+          binding_type: "local_runner",
+          display_name: "project-a",
+          status: "connected",
+          health: "healthy",
+        },
+      ],
+      next_recommended_action: "Analyze the repository and record its architecture",
+    });
+    const reused = await api(`/api/v2/projects/${project.id}/source-bindings/local`, {
       method: "POST",
       body: JSON.stringify({
         selection_token: selection.selection_token,

@@ -74,7 +74,28 @@ export class ProjectResumeService {
       }>(
         `SELECT id, binding_type, repository_display_name, status,
                 repository_health, observed_head
-         FROM repository_bindings WHERE project_id = $1 ORDER BY created_at, id`,
+         FROM (
+           SELECT id, binding_type, repository_display_name, status,
+                  repository_health, observed_head, created_at
+           FROM repository_bindings
+           WHERE project_id = $1
+           UNION ALL
+           SELECT candidate.id, 'github'::text AS binding_type,
+                  candidate.display_name AS repository_display_name,
+                  'unverified_candidate'::text AS status,
+                  'unknown'::text AS repository_health,
+                  NULL::text AS observed_head, candidate.created_at
+           FROM repository_binding_candidates candidate
+           WHERE candidate.project_id = $1
+             AND candidate.source_type = 'github'
+             AND candidate.status <> 'dismissed'
+             AND NOT EXISTS (
+               SELECT 1 FROM repository_bindings binding
+               WHERE binding.project_id = candidate.project_id
+                 AND binding.repository_id = candidate.external_repository_id
+             )
+         ) repository
+         ORDER BY created_at, id`,
         [projectId],
       );
       const phases = await tx.query<{

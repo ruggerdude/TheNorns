@@ -318,7 +318,11 @@ export class RelationalProjectReadRepository implements ProjectRepository {
         [this.migrationRunId, id],
       );
       const header = headerResult.rows[0];
-      if (!header) throw new ProjectNotFoundError(id);
+      if (!header) {
+        const project = await sql.query("SELECT id FROM projects WHERE id = $1", [id]);
+        if (project.rows.length > 0) throw new ProjectNotPlannedError(id);
+        throw new ProjectNotFoundError(id);
+      }
       if (header.plan_hash === null) throw new ProjectNotPlannedError(id);
       if (header.legacy_phase_id === null || header.legacy_strategy_version_id === null) {
         throw new Error(`legacy project ${id} has no phase/strategy projection provenance`);

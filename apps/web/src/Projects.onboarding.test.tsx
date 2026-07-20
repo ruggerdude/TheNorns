@@ -20,6 +20,17 @@ const githubStatus = {
       status: "connected",
       last_validated_at: "2026-07-16T20:00:00Z",
     },
+    {
+      id: "github:43",
+      provider: "github",
+      display_name: "acme on GitHub",
+      owner_type: "organization",
+      owner_login: "acme",
+      installation_id: "43",
+      repository_selection: "all",
+      status: "connected",
+      last_validated_at: "2026-07-16T20:00:00Z",
+    },
   ],
 };
 
@@ -59,6 +70,9 @@ describe("unified project onboarding", () => {
     mock.get("/api/v2/attention", { status: 404, body: {} });
     mock.get("/api/integrations/github/status", { body: githubStatus });
     mock.get("/api/integrations/github/connections/github%3A42/repositories", {
+      body: [repository],
+    });
+    mock.get("/api/integrations/github/connections/github%3A43/repositories", {
       body: [repository],
     });
     mock.get("/api/runners", { body: [runner] });
@@ -173,6 +187,33 @@ describe("unified project onboarding", () => {
         github_repository_id: "9001",
       },
     });
+  });
+
+  it("keeps a successful repository refresh when an older request fails later", async () => {
+    let rejectFirst: ((reason: Error) => void) | undefined;
+    mock.get(
+      "/api/integrations/github/connections/github%3A42/repositories",
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectFirst = reject;
+        }),
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
+    await waitFor(() => expect(rejectFirst).toBeDefined());
+    await user.selectOptions(screen.getByTestId("github-connection"), "github:43");
+
+    expect(
+      await screen.findByRole("button", { name: /octocat\/existing-app/i }),
+    ).toBeInTheDocument();
+    rejectFirst?.(new TypeError("No server is currently available to service your request"));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/No server is currently available to service your request/i),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("creates an existing project from a local runner without ever sending a raw path", async () => {

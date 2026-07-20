@@ -337,6 +337,7 @@ export function Projects({
   const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
   const [repositoryQuery, setRepositoryQuery] = useState("");
   const [repositoryLoading, setRepositoryLoading] = useState(false);
+  const repositoryRequestEpoch = useRef(0);
   const [repositoryName, setRepositoryName] = useState("");
   const [repositoryPrivate, setRepositoryPrivate] = useState(true);
   const [existingSource, setExistingSource] = useState<"github" | "local">("github");
@@ -393,24 +394,28 @@ export function Projects({
 
   const loadRepositories = useCallback(async () => {
     if (!selectedConnectionId) {
+      repositoryRequestEpoch.current += 1;
       setRepositories([]);
       return;
     }
+    const requestEpoch = ++repositoryRequestEpoch.current;
     setRepositoryLoading(true);
     setSourceError(null);
     try {
       const repositories = await request<GitHubRepository[]>(
         `/api/integrations/github/connections/${encodeURIComponent(selectedConnectionId)}/repositories`,
       );
+      if (repositoryRequestEpoch.current !== requestEpoch) return;
       setRepositories(repositories);
       setSelectedRepositoryId((current) =>
         repositories.some((repository) => repository.id === current) ? current : "",
       );
     } catch (error) {
+      if (repositoryRequestEpoch.current !== requestEpoch) return;
       if (error instanceof UnauthorizedError) onUnauthorized();
       else setSourceError(error instanceof Error ? error.message : String(error));
     } finally {
-      setRepositoryLoading(false);
+      if (repositoryRequestEpoch.current === requestEpoch) setRepositoryLoading(false);
     }
   }, [onUnauthorized, selectedConnectionId]);
 
