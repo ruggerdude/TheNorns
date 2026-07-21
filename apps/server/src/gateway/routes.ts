@@ -176,9 +176,25 @@ export async function registerGatewayRoutes(
       done(null, body);
     });
 
+    // VERIFIED against the Claude Code CLI: before its first model call it
+    // issues `HEAD <ANTHROPIC_BASE_URL>` as a reachability probe. Answering it
+    // here costs nothing, touches no provider, requires no credential, and
+    // reveals nothing — and without it a healthy deployment answers 404 to the
+    // very first request an agent makes, which looks exactly like a broken
+    // gateway to anyone reading logs.
+    scope.head(`${GATEWAY_ROUTE_PREFIX}/:provider`, async (req, reply) => {
+      const { provider } = req.params as { provider: string };
+      return reply.code(isGatewayProvider(provider) ? 200 : 404).send();
+    });
+
     scope.all(`${GATEWAY_ROUTE_PREFIX}/:provider/*`, async (req, reply) => {
       const { provider } = req.params as { provider: string };
       const path = `/${(req.params as Record<string, string>)["*"] ?? ""}`;
+      // The query string is NOT part of the allowlist decision but IS part of
+      // the request. Claude Code really sends `?beta=true`; dropping it would
+      // change the call. Taken from the raw URL so it survives byte for byte.
+      const queryStart = req.raw.url?.indexOf("?") ?? -1;
+      const query = queryStart >= 0 ? (req.raw.url?.slice(queryStart) ?? "") : "";
       if (!isGatewayProvider(provider)) {
         return reply
           .header(GATEWAY_REFUSAL_HEADER, "invalid_request")
@@ -197,6 +213,7 @@ export async function registerGatewayRoutes(
       const result = await deps.gateway.forward({
         provider,
         path,
+        query,
         method: req.method,
         headers: req.headers as Record<string, string | string[] | undefined>,
         body: bodyBytes(req),

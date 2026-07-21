@@ -300,6 +300,16 @@ export interface GatewayForwardInput {
   provider: GatewayProvider;
   /** Upstream path, e.g. `/v1/messages`. Matched against the allowlist. */
   path: string;
+  /**
+   * The raw query string INCLUDING its leading `?`, or empty.
+   *
+   * VERIFIED, NOT ASSUMED: the Claude Code CLI issues
+   * `POST <base>/v1/messages?beta=true`. A forwarder that dropped the query
+   * would be silently changing the request — the exact class of bug this phase
+   * exists to avoid — so it is carried separately from `path` (which is what
+   * the allowlist matches) and re-appended verbatim on the way out.
+   */
+  query: string;
   method: string;
   headers: Record<string, string | string[] | undefined>;
   body: Uint8Array;
@@ -585,7 +595,7 @@ export class ProviderGateway {
 
     let upstream: Response;
     try {
-      upstream = await this.fetchImpl(`${surface.origin}${input.path}`, {
+      upstream = await this.fetchImpl(`${surface.origin}${input.path}${input.query}`, {
         method: input.method,
         headers,
         // The bytes the caller sent. Not re-serialized, not normalized, not
