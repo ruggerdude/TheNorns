@@ -495,14 +495,52 @@
 
 ## EXECUTION E11 — real control over a live coding run
 
-- [ ] 🔄 E11-1 — route `cancel`/`interrupt`/`suspend`/`resume_session` to the
-  in-flight V2 execution instead of the Phase 1A fixture. `daemon.ts` held one
-  `FixtureExecutor` and every control reached it, so a live run could not be
-  stopped by any means; `V2RunnerExecutor` never even passed the `AbortSignal`
-  its adapters all accept
-- [ ] 🔄 E11-2 — `send_message` delivery to a live run, with an honest
-  per-runtime capability matrix and an honest answer when the run has ended
-- [ ] 🔄 E11-3 — publish-on-cancel: commits made before a human cancelled must
-  survive
-- [ ] 🔄 E11-4 — resumability design note (ask-then-end-the-job), plus only the
-  self-contained runner-side foundation
+- [x] ✅ E11-1 — controls now reach the in-flight V2 execution. New
+  `LiveRunRegistry` (`apps/runner/src/liveRuns.ts`) owns each live run's
+  `AbortController`; `V2RunnerExecutor` registers for the whole run and finally
+  passes `runtime.run()` the `AbortSignal` every adapter already accepted and
+  none had ever been handed. `daemon.ts` routes `cancel`/`interrupt`/`suspend`/
+  `resume_session`/`stop_after_current`/`send_message` through `routeControl`,
+  which asks the live registry first and falls back to the Phase 1A fixture only
+  for run ids it has never seen
+- [x] ✅ E11-2 — `send_message` delivered. `RuntimeSession` is published by a
+  runtime only when its SDK really supports mid-turn input; the capability
+  matrix gained `send_message`, verified per SDK (claude-code yes — now runs in
+  streaming-input mode, which is also the only mode where the `interrupt()` it
+  already advertised works; codex no; proxied-completion no; process yes, via
+  the child's stdin). A message to an ended run is rejected with
+  "already ended (<outcome>)" and streamed as a run log
+- [x] ✅ E11-3 — publish-on-cancel. A cancelled run publishes the commits made
+  before the human stopped it, marked UNVERIFIED, and stays `cancelled` even if
+  publication fails
+- [x] ✅ E11-4 — ack-ordering bug found by the new tests: the daemon acked
+  `executing` before deciding, and `COMMAND_TRANSITIONS` has no
+  `executing -> rejected` edge, so EVERY rejection was silently dropped by the
+  server and the command sat in `executing` until it expired. Refusals now ack
+  from `accepted`
+- [x] ✅ E11-5 — resumability design note
+  (`docs/phases/EXECUTION-E11-resumability.md`) plus the self-contained runner
+  half: the runtime `session_id` is captured at every exit and emitted as a run
+  log, and `RunnerRuntimeContext.resumeSessionId` is the seam a resuming
+  dispatch will use
+- [ ] 🟡 E11-6 — **PM ROUTING**: no contract field, event payload, or column
+  carries a runtime session id, so resume state cannot be stored. Needs an
+  additive `session_id` on `V2DispatchCommand` (in) and somewhere durable (out)
+- [ ] 🟡 E11-7 — **PM ROUTING**: there is no ask-shaped run status. `RunStatus`
+  has no way to say "the agent is blocked on a human", so the coordinator cannot
+  distinguish an ask from a crash and `onRunSettled` retries it instead of
+  prompting anyone
+- [ ] 🟡 E11-8 — **PM ROUTING**: resume state must be keyed to the task, never
+  the runner — an ephemeral Actions runner enrolls a new runner id and
+  generation per job, so anything keyed to the runner is unreachable by the job
+  that needs it
+- [ ] 🟡 E11-9 — **UNVERIFIED CLAIM to settle before promising resume**: a
+  session id is a pointer into provider-side or local state. On an ephemeral
+  runner the Claude Code transcript and Codex thread state die with the job, so
+  the id alone may resume nothing there. Needs a real cross-machine experiment
+  per provider
+- [ ] 🟡 E11-10 — **E9 SEAM**: the runtime factory map in `apps/runner/src/cli.ts`
+  (E9's lane) must pass `context.resumeSessionId` into
+  `ClaudeCodeRuntime({resumeSessionId})` / `CodexRuntime({resumeThreadId})` once
+  E11-6 lands. Both adapters have accepted it since they were written; nothing
+  has ever set it
