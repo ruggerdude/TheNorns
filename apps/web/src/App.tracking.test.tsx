@@ -54,10 +54,9 @@ describe("FRONT DOOR P5: tracking update interval", () => {
     mock.install();
 
     const { user } = await renderAppAndOpenProject(projectAlpha.name);
+    // FRONT DOOR P1b: the Tracking section now opens by default (it also
+    // hosts the Gantt).
     await screen.findByTestId("tracking-settings");
-    // <details> starts closed; open it to reach the interval buttons.
-    await user.click(screen.getByText("Tracking · update interval"));
-
     await user.click(screen.getByRole("button", { name: "1m" }));
 
     await waitFor(() =>

@@ -221,6 +221,26 @@ async function request<T>(path: string, body?: unknown): Promise<T> {
   return json;
 }
 
+/** Like `request`, but for methods `request`'s POST-if-body/GET-otherwise
+ *  shorthand can't express (PATCH with a body, DELETE with none). A 204
+ *  (both planning-reviewer mutation routes) has no JSON body to parse. */
+async function requestVerb(
+  path: string,
+  method: "PATCH" | "DELETE",
+  body?: unknown,
+): Promise<void> {
+  const res = await fetch(path, {
+    method,
+    headers: authHeaders(body !== undefined),
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) {
+    const json = (await res.json().catch(() => ({}))) as { message?: string };
+    throw new ApiError(json.message ?? `request failed: ${res.status}`, res.status);
+  }
+}
+
 export function AttentionDecisionForm({
   item,
   busy,
@@ -422,6 +442,14 @@ export function Projects({
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
   const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
   const [roundsCount, setRoundsCount] = useState(3);
+  // FRONT DOOR P2b (D2): folder-first local path — the primary local-folder
+  // flow now; the runner-based browse/validate flow (below) is kept as an
+  // online-only enhancement, not a gate.
+  const [localPath, setLocalPath] = useState("");
+  // FRONT DOOR P2b: reviewer selector. "auto" means no explicit override
+  // (the server's automatic opposite-provider default); any other value is
+  // "provider:model" as offered by MODEL_CHOICES below.
+  const [reviewerSelection, setReviewerSelection] = useState("auto");
   // FRONT DOOR P1: after `create()` makes a brand-new project with an
   // objective, the wizard moves to a second in-place step — attach reference
   // screenshots (the real AttachmentInput, which needs a live project id),
@@ -906,8 +934,16 @@ export function Projects({
         setSourceError("Select a GitHub repository to continue.");
         return;
       }
-      if (startingPoint === "existing" && existingSource === "local" && !localSelection) {
-        setSourceError("Select and validate a local Git repository to continue.");
+      const trimmedLocalPath = localPath.trim();
+      if (
+        startingPoint === "existing" &&
+        existingSource === "local" &&
+        !localSelection &&
+        !trimmedLocalPath
+      ) {
+        setSourceError(
+          "Enter a local folder path, or select and validate a folder with a paired runner.",
+        );
         return;
       }
       const selectedLocalRepository =
@@ -918,14 +954,32 @@ export function Projects({
         Date.parse(localSelection.expires_at) > Date.now()
           ? localSelection
           : null;
-      if (startingPoint === "existing" && existingSource === "local" && !selectedLocalRepository) {
+      // FRONT DOOR P2b (D2): folder-first — a plain path with no runner
+      // verification is a fully valid, primary way to create a local
+      // project. Only block when the human was mid-way through the
+      // runner-verified flow (a selection existed) and it's gone stale,
+      // *and* they have no path fallback typed.
+      if (
+        startingPoint === "existing" &&
+        existingSource === "local" &&
+        localSelection &&
+        !selectedLocalRepository &&
+        !trimmedLocalPath
+      ) {
         setSourceError("Select and validate the local Git repository again to continue.");
         return;
       }
+      const usingLocalPath =
+        startingPoint === "existing" &&
+        existingSource === "local" &&
+        !selectedLocalRepository &&
+        trimmedLocalPath.length > 0;
+      const localPathDisplayName = trimmedLocalPath.split(/[/\\]/).filter(Boolean).pop() ?? "";
       const projectName =
         name.trim() ||
         repository?.name ||
         selectedLocalRepository?.repository.repository_display_name ||
+        (usingLocalPath ? localPathDisplayName : "") ||
         "Untitled project";
       const projectDescription =
         description.trim() ||
@@ -934,7 +988,9 @@ export function Projects({
           ? `Analyze and continue development of ${repository.full_name}`
           : selectedLocalRepository
             ? `Analyze and continue development of ${selectedLocalRepository.repository.repository_display_name}`
-            : "New project");
+            : usingLocalPath
+              ? `Analyze and continue development of ${localPathDisplayName || "this local folder"}`
+              : "New project");
       const project =
         selectedLocalRepository && pendingLocalProject
           ? pendingLocalProject
@@ -949,6 +1005,9 @@ export function Projects({
                     github_connection_id: repository.connection_id,
                     github_repository_id: repository.id,
                   }
+                : {}),
+              ...(usingLocalPath
+                ? { source_type: "local" as const, source_location: trimmedLocalPath }
                 : {}),
             });
       const completedProject = selectedLocalRepository
@@ -982,6 +1041,24 @@ export function Projects({
           })()
         : project;
       if (!completedProject) return;
+      // FRONT DOOR P2b: apply the reviewer selection right after creation,
+      // before starting any planning run — resolvePlanningParticipants()
+      // reads this per-project setting on every subsequent run.
+      try {
+        if (reviewerSelection !== "auto") {
+          const [reviewerProviderChoice, ...modelParts] = reviewerSelection.split(":");
+          await requestVerb(`/api/v2/projects/${completedProject.id}/planning-reviewer`, "PATCH", {
+            provider: reviewerProviderChoice,
+            model: modelParts.join(":"),
+          });
+        } else {
+          await requestVerb(`/api/v2/projects/${completedProject.id}/planning-reviewer`, "DELETE");
+        }
+      } catch {
+        // Best-effort: an explicit reviewer preference is a nice-to-have,
+        // not a blocker — the project still exists and planning still works
+        // (falling back to the automatic default) if this call fails.
+      }
       setPendingLocalProject(null);
       setProjects((current) => (current ? [completedProject, ...current] : [completedProject]));
       // FRONT DOOR P1: a brand-new project with an objective moves to the
@@ -1032,6 +1109,8 @@ export function Projects({
     repositoryPrivate,
     existingSource,
     localSelection,
+    localPath,
+    reviewerSelection,
     selectedLocalRunnerId,
     selectedLocalWorkspaceId,
     pendingLocalProject,
@@ -1058,6 +1137,8 @@ export function Projects({
     setSelectedLocalWorkspaceId("");
     setLocalBrowser(null);
     setLocalSelection(null);
+    setLocalPath("");
+    setReviewerSelection("auto");
     setRoundsCount(3);
   }, []);
 
@@ -1137,7 +1218,7 @@ export function Projects({
     startingPoint === "existing"
       ? existingSource === "github"
         ? Boolean(selectedRepositoryId)
-        : localSelectionReady
+        : localSelectionReady || localPath.trim().length > 0
       : newRepository === "github"
         ? Boolean(selectedConnectionId) && Boolean(repositoryName.trim())
         : true;
@@ -1909,28 +1990,43 @@ export function Projects({
                 {startingPoint === "existing" && existingSource === "local" ? (
                   <div className="repository-picker local-folder-picker">
                     {sourceError ? <Alert>{sourceError}</Alert> : null}
+                    {/* FRONT DOOR P2b (D2): folder-first — a plain path is the
+                     *  primary local-folder flow and needs no runner online.
+                     *  The project is created with an unverified binding
+                     *  candidate; a runner only matters later, at execution. */}
+                    <Field label="Local folder path">
+                      <Input
+                        data-testid="local-path-input"
+                        value={localPath}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setLocalPath(value);
+                          if (localSelection) {
+                            // A path the human is now typing supersedes any
+                            // earlier runner-verified selection.
+                            localValidationRequestEpoch.current += 1;
+                            setLocalSelection(null);
+                            setSelectedLocalEntryId(null);
+                          }
+                        }}
+                        placeholder="/Users/you/code/my-project"
+                      />
+                    </Field>
+                    <p className="runner-note">
+                      <span className="dot" /> A runner is only needed once execution starts —
+                      planning and staffing work without it.
+                    </p>
                     {localRunnersLoading ? (
                       <Spinner label="Looking for paired local runners…" />
-                    ) : localRunners.length === 0 ? (
-                      <div className="connection-required">
-                        <div>
-                          <strong>No local runner is online</strong>
-                          <p>
-                            Pair and start a runner on the computer that owns this folder, then
-                            refresh this list. Folder paths never leave that computer.
-                          </p>
-                        </div>
-                        <Button type="button" className="btn-small" onClick={onOpenAccount}>
-                          Manage runners
-                        </Button>
-                      </div>
-                    ) : !localRunners.some((runner) => runner.workspace_picker_ready === true) ? (
+                    ) : localRunners.length === 0 ? null : !localRunners.some(
+                        (runner) => runner.workspace_picker_ready === true,
+                      ) ? (
                       <div className="connection-required">
                         <div>
                           <strong>Local runner update required</strong>
                           <p>
                             Update and restart the connected local runner to enable secure folder
-                            selection.
+                            selection — or just use the path above.
                           </p>
                         </div>
                         <Button type="button" className="btn-small" onClick={onOpenAccount}>
@@ -1944,13 +2040,14 @@ export function Projects({
                         <div>
                           <strong>Project storage activation required</strong>
                           <p>
-                            Activate durable relational storage for new projects before selecting a
-                            local folder.
+                            Activate durable relational storage before browsing with a runner — or
+                            just use the path above.
                           </p>
                         </div>
                       </div>
                     ) : (
-                      <>
+                      <details className="local-runner-enhancement">
+                        <summary>Browse with a paired runner instead</summary>
                         <div className="repository-search">
                           <Field label="Connected local runner">
                             <Select
@@ -2130,7 +2227,7 @@ export function Projects({
                             )}
                           </div>
                         )}
-                      </>
+                      </details>
                     )}
                   </div>
                 ) : null}
@@ -2199,20 +2296,38 @@ export function Projects({
                     </span>
                   </Field>
                   <Field label="Reviewer model">
-                    {/* FRONT DOOR P1: reviewer is always the opposite provider's
-                     *  default model today — the planning backend (P2) has no
-                     *  route to persist a manual reviewer override
-                     *  (planning_reviewer_settings is write-only from tests).
-                     *  Shown as read-only so the wizard never implies a choice
-                     *  it can't actually save; see the P1 report for the gap. */}
-                    <Select data-testid="reviewer-model" value="auto" disabled>
+                    {/* FRONT DOOR P2b: wired to GET/PATCH/DELETE
+                     *  .../planning-reviewer. "Automatic" leaves no override —
+                     *  the server picks the opposite provider from whatever
+                     *  the coordinator is. An explicit pick is PATCHed (or
+                     *  DELETEd back to automatic) right after the project is
+                     *  created, before any planning run starts. */}
+                    <Select
+                      data-testid="reviewer-model"
+                      value={reviewerSelection}
+                      onChange={(e) => setReviewerSelection(e.target.value)}
+                    >
                       <option value="auto">
-                        {reviewerPreviewLabel} · automatic (opposite provider)
+                        Automatic (cross-provider) · {reviewerPreviewLabel}
                       </option>
+                      <optgroup label="Anthropic">
+                        {PM_MODEL_OPTIONS.anthropic.map((model) => (
+                          <option key={model.id} value={`anthropic:${model.id}`}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="OpenAI">
+                        {PM_MODEL_OPTIONS.openai.map((model) => (
+                          <option key={model.id} value={`openai:${model.id}`}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </optgroup>
                     </Select>
                     <span className="field-help">
-                      A second opinion — always the opposite provider for now. Manual reviewer
-                      selection isn't available yet.
+                      A second opinion. Automatic picks the opposite provider from the coordinator;
+                      cross-provider review works best.
                     </span>
                   </Field>
                 </div>

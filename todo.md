@@ -143,6 +143,52 @@
     poll-cadence honoring) plus 4 existing-test updates for the wizard's new two-step flow and
     button label. Verification: biome clean, `tsc --noEmit` clean, full `@norns/web` suite green
     (87 passed, up from 77 — zero regressions), `pnpm run build` clean.
+- [x] FD-P1b — ✅ **Final frontend pass: full Gantt, reviewer selector, folder-first local path**
+  landed on the P1 worktree after merging `frontdoor/integration` (P2b, which closed both gaps
+  FD-P1 reported). Three deliverables, all wired to real endpoints:
+  - **Full Gantt** (new `Gantt.tsx`, pure CSS/percentage-positioned divs, no charting library):
+    one bar per phase, solid fill = `percent_complete`/hatched = remainder, gate diamonds
+    (plan-approval/passed from phase status, red + labeled from a real blocking attention item —
+    not a placeholder), a Today line, and a per-row agent-count chip from real per-phase agent
+    counts (fetched once per phase from `GET .../phases/:phaseId/execution` and counted as
+    distinct implementation+reviewer profile ids — the resume DTO has no per-phase agent count).
+    Mounted twice: the full version in the reopened "Tracking" section (now also hosting the P5
+    interval control), and a compact `mini` strip on the workspace's "Project Resume" phase list
+    (the phase-board placement). **Honesty constraint respected**: the resume DTO has no
+    per-phase start/created timestamps today, so the axis is *proportional ordinal placement*
+    (equal slot per phase in priority order, Today positioned by overall ordinal progress) rather
+    than a fabricated calendar axis — documented in `Gantt.tsx` as a deliberate, data-driven
+    choice, ready to switch to real dates the moment the DTO carries them.
+  - **Reviewer selector**: the wizard's Reviewer field (read-only in FD-P1, since P2 hadn't
+    shipped a write route) is now a real select — same model catalog as Coordinator plus
+    "Automatic (cross-provider)". Wired to P2b's `GET/PATCH/DELETE
+    /api/v2/projects/:id/planning-reviewer`: an explicit pick PATCHes it, leaving it on Automatic
+    DELETEs any override — both applied right after project creation, before the planning run
+    starts, best-effort (a failure there doesn't block opening the workspace).
+  - **Folder-first local path**: rebuilt the wizard's local-folder option per P2b's now-accepted
+    `{source_type:"local", source_location:<raw path>}` creation body. A plain path input is now
+    the primary, always-available flow ("a runner is only needed once execution starts…" helper
+    text) — the old "No local runner is online" wall is gone entirely. The existing
+    runner-pairing/browse/validate flow is kept as a collapsed `<details>` enhancement, shown only
+    when an eligible runner is online, unchanged in its own mechanics (still used by the
+    runner-verified test paths). A stale-`useCallback`-dependency bug (found while debugging the
+    new path flow — `create()`'s deps array wasn't updated for two pieces of new state) was
+    causing silent no-op submits; fixed and now covered by a passing test.
+  - Tests: 3 new files (`Gantt.test.tsx` — 7 unit tests incl. no-signal/empty-phases degradation,
+    ordinal Today placement, blocked-vs-upcoming-vs-passed gates, mini variant, agent-count
+    chip's real-vs-unknown states; `App.gantt.test.tsx` — mini+full Gantt wired into a real
+    workspace render with a genuine blocked-decision gate and real per-phase agent count;
+    `Projects.reviewer-selector.test.tsx` — PATCH/DELETE/failure-is-non-blocking) plus rewrote one
+    existing onboarding test (the removed "no runner" wall) into two (plain-path creation +
+    runner-enhancement-still-offered) and updated the Tracking interval test for the
+    now-open-by-default section. Verification: biome clean, `tsc --noEmit` clean, full
+    `@norns/web` suite green (99 passed, up from 87 — zero regressions), `pnpm run build` clean.
+  - **Not independently visually verified in a browser**: the sandbox's preview tool starts the
+    dev server against a fixed session root, not this worktree's checkout, so a live render would
+    have shown stale (pre-this-branch) code — confirmed via `preview_list`'s reported `cwd`.
+    Reported rather than presented as verified; the RTL suite (real fetch mocking, exact DOM/CSS
+    assertions incl. computed `--today` custom-property values and bar-fill widths) is the
+    verification basis instead.
 - [x] FD-P3 — ✅ **Strategy bridge (planning run → relational phase/strategy)** built + verified on `frontdoor/integration`+P3. New `apps/server/src/projects/strategyBridgeService.ts` consumes a converged/cap_reached planning run and, through the EXISTING phase-3 workflow services (no parallel lifecycle), creates a phase + proposed StrategyVersion (objectives/tasks/assignment-proposals mapped from plan modules + staffing_proposal), resolves/creates AgentProfiles per provider/model pair, edits staffing (superseding version, staleness-respecting), and approves via the existing materialization path. Routes in server.ts "FRONT DOOR P3" section: `POST .../phases` ({planning_run_id}), `GET/PATCH .../phases/:phaseId/strategy[/staffing]`, `POST .../strategy/approve`. Idempotent per run via a new `phases.planning_run_id` link (migration 0013, partial unique index). Zero contract changes. Fixed a latent bug in `strategyWorkflowService.approve` (task_dependencies INSERT referenced non-existent predecessor/successor_phase_id columns; never hit because no prior test materialized task deps). Tests: `apps/server/test/frontDoorStrategyBridge.test.ts` (9 — full lifecycle, idempotency, cap_reached findings, post-approval staleness, authz). Full server suite green (474 passed).
 - [x] FD-P5 — ✅ **Tracking read models (per-phase progress, ETA, burn rate, project aggregate, update-interval setting)** built + verified on the P5 worktree. `ProjectResumeService.open` (resume payload) and `AttentionService.phase` (phase-scoped execution read model) now compute, per phase: `percent_complete`/`tasks_completed`/`tasks_total` (task-weighted, 0 on the empty-phase division-by-zero guard), `eta_at` (linear projection from a 5-sample rolling window of recent task completions — null whenever there's no signal: phase not executing, <2 completions, or a degenerate zero time span, never fabricated), and `burn_rate_usd_per_hour` (cost/hour over recently finished runs, null with no signal or non-positive elapsed time). Resume payload also carries a project-level `progress` aggregate (`overall_percent_complete` task-weighted across non-cancelled phases, `blended_eta_at` = latest executing-phase ETA, `agents_active`/`decisions_waiting` reusing the existing attention/active-run queries — no parallel system) and `update_interval_seconds` (60|300|900, default 300, migration `0014_frontdoor_progress_tracking`), settable via new session-authed `PATCH /api/v2/projects/:id/settings` in server.ts's "FRONT DOOR P5" section, with a server-side floor independent of the allowed-value check. The new fields are additive to `@norns/contracts`' `.strict()` V2ProjectResume/V2PhaseExecution (owned by P3) — validated locally in `projectResumeService.ts` and merged onto the contract-validated base object rather than widening `packages/contracts`, which is outside this phase's ownership (flagged as a deviation for the integration owner). Tests: new `apps/server/test/frontDoorProgressTracking.test.ts` (33 — pure percent/ETA/burn-rate math incl. every no-signal/division-by-zero guard, mixed-phase-state aggregate, settings validation + persistence round-trip, resume/phase-execution payload shape, PATCH route authz/validation/persistence); `v2PreservationSchema.test.ts` updated for the new migration. Full server suite green (507 passed, 8 skipped).
 

@@ -2810,3 +2810,297 @@ button:disabled {
   padding: 0;
   border: 0;
 }
+
+/* ============================================================
+   FRONT DOOR P1b: Gantt (Tracking screen + workspace mini strip).
+   Pure CSS/SVG within the existing token system — no charting lib.
+   ============================================================ */
+.gantt {
+  --lc: 168px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.gantt-empty {
+  padding: 1rem 1.2rem;
+  border: 1px dashed var(--line2);
+  border-radius: 10px;
+  font-size: 0.8rem;
+}
+.gantt-axis-row {
+  display: grid;
+  grid-template-columns: var(--lc) 1fr;
+  background: var(--raised);
+  border-bottom: 1px solid var(--line);
+}
+.gantt-corner {
+  padding: 0 0.7rem;
+  align-self: center;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-right: 1px solid var(--line);
+}
+.gantt-axis {
+  position: relative;
+  height: 44px;
+}
+.gantt-gate {
+  position: absolute;
+  top: 8px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  z-index: 5;
+}
+.gantt-gate .dia {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  transform: rotate(45deg);
+  flex: none;
+}
+.gantt-gate.passed .dia {
+  background: var(--success);
+  border: 1px solid var(--success);
+}
+.gantt-gate.blocked .dia {
+  background: var(--danger);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 16%, transparent);
+}
+.gantt-gate.upcoming .dia {
+  background: var(--surface);
+  border: 1.5px solid var(--line2);
+}
+.gantt-gate .glbl {
+  font-size: 0.6rem;
+  line-height: 1.15;
+  text-align: center;
+  white-space: nowrap;
+  color: var(--muted);
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gantt-gate.blocked .glbl {
+  color: var(--danger);
+  font-weight: 700;
+}
+.gantt-gate.passed .glbl {
+  color: var(--success);
+}
+.gantt-rows {
+  position: relative;
+}
+.gantt-row {
+  display: grid;
+  grid-template-columns: var(--lc) 1fr;
+  height: 38px;
+}
+.gantt-row:not(:last-child) {
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+}
+.gantt-lbl {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0 0.7rem;
+  font-size: 0.75rem;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+}
+.gantt-lbl .pnum {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--text);
+  color: var(--bg);
+  display: grid;
+  place-items: center;
+  font: 600 0.62rem "DM Mono", monospace;
+  flex: none;
+}
+.gantt-lbl .pnum.q {
+  background: var(--line2);
+  color: var(--text);
+}
+.gantt-lbl .pname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gantt-lbl .acount {
+  margin-left: auto;
+  font: 500 0.6rem "DM Mono", monospace;
+  color: var(--muted);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 6px;
+  flex: none;
+}
+.gantt-plot {
+  position: relative;
+  background-image: repeating-linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--line) 50%, transparent) 0 1px,
+    transparent 1px 25%
+  );
+}
+.gantt-bar {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 16px;
+  border-radius: 5px;
+  border: 1px solid var(--line2);
+  overflow: hidden;
+}
+.gantt-bar .fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+}
+.gantt-bar.g {
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--success) 20%, var(--surface)) 0 5px,
+    color-mix(in srgb, var(--success) 8%, var(--surface)) 5px 10px
+  );
+  border-color: color-mix(in srgb, var(--success) 42%, var(--line2));
+}
+.gantt-bar.g .fill {
+  background: var(--success);
+}
+.gantt-bar.q {
+  background: repeating-linear-gradient(-45deg, var(--raised) 0 5px, var(--surface) 5px 10px);
+}
+.gantt-bar.blocked {
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--danger) 18%, var(--surface)) 0 5px,
+    color-mix(in srgb, var(--danger) 7%, var(--surface)) 5px 10px
+  );
+  border-color: var(--danger);
+}
+.gbar-pct {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 0.62rem;
+  font-family: "DM Mono", monospace;
+  color: var(--text);
+  z-index: 2;
+  white-space: nowrap;
+}
+.gantt-today {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+  z-index: 6;
+  left: calc(var(--lc) + (100% - var(--lc)) * var(--today, 0));
+}
+.gantt-today::before {
+  content: "Today";
+  position: absolute;
+  top: -18px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.55rem;
+  font-weight: 700;
+  color: #fff;
+  background: var(--accent);
+  padding: 1px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.gantt-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  margin: 0.6rem 0.8rem;
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+.gantt-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.gantt-legend .dia {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  transform: rotate(45deg);
+}
+.gantt-legend .dia.passed {
+  background: var(--success);
+}
+.gantt-legend .dia.blocked {
+  background: var(--danger);
+}
+.gantt-legend .dia.upcoming {
+  background: var(--surface);
+  border: 1.5px solid var(--line2);
+}
+.gantt-legend .sw {
+  width: 18px;
+  height: 8px;
+  border-radius: 3px;
+}
+.gantt-legend .sw.solid {
+  background: var(--success);
+}
+.gantt-legend .sw.hatch {
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--success) 20%, var(--surface)) 0 4px,
+    color-mix(in srgb, var(--success) 8%, var(--surface)) 4px 8px
+  );
+  border: 1px solid color-mix(in srgb, var(--success) 40%, var(--line2));
+}
+
+/* mini variant embedded in the workspace phase list */
+.gantt-mini {
+  --lc: 26px;
+  margin-bottom: 0.9rem;
+}
+.gantt-mini .gantt-axis {
+  height: 26px;
+}
+.gantt-mini .gantt-corner {
+  padding: 0;
+}
+.gantt-mini .gantt-gate {
+  top: 6px;
+}
+.gantt-mini .gantt-gate .dia {
+  width: 10px;
+  height: 10px;
+}
+.gantt-mini .gantt-row {
+  height: 20px;
+}
+.gantt-mini .gantt-lbl {
+  padding: 0;
+  justify-content: center;
+}
+.gantt-mini .gantt-lbl .pnum {
+  width: 16px;
+  height: 16px;
+}
+.gantt-mini .gantt-bar {
+  height: 9px;
+  border-radius: 4px;
+}
+.gantt-mini .gantt-today::before {
+  display: none;
+}

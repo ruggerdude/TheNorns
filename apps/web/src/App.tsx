@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Account } from "./Account";
 import { Admin } from "./Admin";
 import { Debates } from "./Debates";
+import { Gantt, type GanttPhase } from "./Gantt";
 import { Login, type LoginMode } from "./Login";
 import { type PlanLike, PlanReview } from "./PlanReview";
 import {
@@ -896,29 +897,104 @@ function ProjectGraph({
   }, [strategyReview, project.id, onLogout, loadResume]);
 
   // FRONT DOOR P1 human-approved addition: phase-scoped "needs you" — the
-  // portfolio attention feed filtered to this project + the monitored phase,
-  // rendered alongside the phase's activity feed (phaseExecution above).
-  const loadPhaseAttention = useCallback(async () => {
-    if (!monitoredPhaseId) return;
+  // portfolio attention feed filtered to this project, then (for the
+  // decision-thread panel) to the monitored phase. Kept project-wide (not
+  // phase-scoped at fetch time) because the Gantt's blocked-decision gates
+  // (FRONT DOOR P1b) need every phase's attention state, not just the one
+  // currently monitored.
+  const [projectAttentionItems, setProjectAttentionItems] = useState<AttentionItemDto[]>([]);
+  const loadProjectAttention = useCallback(async () => {
     try {
       const portfolio = await getJson<PortfolioAttentionDto>("/api/v2/attention");
-      setPhaseAttention(
-        portfolio.items.filter(
-          (item) => item.project_id === project.id && item.phase_id === monitoredPhaseId,
-        ),
-      );
+      setProjectAttentionItems(portfolio.items.filter((item) => item.project_id === project.id));
     } catch (err) {
       if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
       // A 404 (no phase3/attention wiring) just means nothing to show here.
     }
-  }, [monitoredPhaseId, project.id, onLogout]);
+  }, [project.id, onLogout]);
 
   useEffect(() => {
-    if (!monitoredPhaseId) return;
-    void loadPhaseAttention();
-    const timer = window.setInterval(() => void loadPhaseAttention(), 10_000);
+    void loadProjectAttention();
+    const timer = window.setInterval(() => void loadProjectAttention(), 10_000);
     return () => window.clearInterval(timer);
-  }, [monitoredPhaseId, loadPhaseAttention]);
+  }, [loadProjectAttention]);
+
+  useEffect(() => {
+    setPhaseAttention(
+      monitoredPhaseId
+        ? projectAttentionItems.filter((item) => item.phase_id === monitoredPhaseId)
+        : [],
+    );
+  }, [projectAttentionItems, monitoredPhaseId]);
+
+  // FRONT DOOR P1b: per-phase blocking-decision label for the Gantt's red
+  // gate diamonds — the first (most relevant) attention item's title for
+  // each phase that has one, kept even for phases other than the one
+  // currently monitored.
+  const blockedPhaseLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    for (const item of projectAttentionItems) {
+      if (!item.phase_id) continue;
+      if (item.kind !== "decision" && item.kind !== "blocker") continue;
+      if (!labels.has(item.phase_id)) labels.set(item.phase_id, item.title);
+    }
+    return labels;
+  }, [projectAttentionItems]);
+
+  // FRONT DOOR P1b: real per-phase agent counts for the Gantt's count chip
+  // (distinct implementation + reviewer agent profiles currently staffed).
+  // The resume DTO has no per-phase agent count, so this fetches each
+  // phase's execution DTO once phases are known — small N (phases per
+  // project), and refreshed on the same cadence as the resume poll.
+  const [phaseAgentCounts, setPhaseAgentCounts] = useState<Record<string, number>>({});
+  const loadPhaseAgentCounts = useCallback(async () => {
+    if (!resume?.phases.length) return;
+    const settled = await Promise.allSettled(
+      resume.phases.map(async (phase) => {
+        const execution = await getJson<PhaseExecutionDto>(
+          `/api/v2/projects/${project.id}/phases/${phase.id}/execution`,
+        );
+        const agentIds = new Set<string>();
+        for (const task of execution.tasks) {
+          if (task.implementation_agent) agentIds.add(task.implementation_agent.profile_id);
+          if (task.reviewer_agent) agentIds.add(task.reviewer_agent.profile_id);
+        }
+        return [phase.id, agentIds.size] as const;
+      }),
+    );
+    setPhaseAgentCounts((current) => {
+      const next = { ...current };
+      for (const outcome of settled) {
+        if (outcome.status === "fulfilled") next[outcome.value[0]] = outcome.value[1];
+      }
+      return next;
+    });
+  }, [resume?.phases, project.id]);
+
+  useEffect(() => {
+    void loadPhaseAgentCounts();
+    const timer = window.setInterval(() => void loadPhaseAgentCounts(), 20_000);
+    return () => window.clearInterval(timer);
+  }, [loadPhaseAgentCounts]);
+
+  // FRONT DOOR P1b: the resume phase list, projected into the Gantt's input
+  // shape. Phases are already priority-ordered by the server (resume SQL:
+  // `ORDER BY p.priority DESC, ...`).
+  const ganttPhases: GanttPhase[] = useMemo(
+    () =>
+      (resume?.phases ?? []).map((phase) => ({
+        id: phase.id,
+        name: phase.objective_summary,
+        status: phase.status,
+        percentComplete:
+          phase.percent_complete ??
+          (phase.tasks > 0 ? Math.round((phase.completed_tasks / phase.tasks) * 100) : 0),
+        etaAt: phase.eta_at ?? null,
+        agentCount: phaseAgentCounts[phase.id],
+        blockedLabel: blockedPhaseLabels.get(phase.id) ?? null,
+      })),
+    [resume?.phases, phaseAgentCounts, blockedPhaseLabels],
+  );
 
   const resolvePhaseDecision = useCallback(
     async (
@@ -945,14 +1021,14 @@ function ProjectGraph({
             idempotency_key: `decision-${decision.decision_point_id}-${globalThis.crypto.randomUUID()}`,
           },
         );
-        await loadPhaseAttention();
+        await loadProjectAttention();
       } catch (err) {
         if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
       } finally {
         setPhaseAttentionBusy(null);
       }
     },
-    [onLogout, loadPhaseAttention],
+    [onLogout, loadProjectAttention],
   );
 
   // FRONT DOOR P5 (tracking): update-interval control, PATCHed to the
@@ -1385,6 +1461,13 @@ function ProjectGraph({
                 </div>
               ) : null}
               <Alert>{resume.next_recommended_action}</Alert>
+              {/* FRONT DOOR P1b: the mini-Gantt strip on the workspace phase
+               *  board — compact per-phase gates + progress at a glance. */}
+              {ganttPhases.length > 0 ? (
+                <div data-testid="workspace-mini-gantt">
+                  <Gantt phases={ganttPhases} mini />
+                </div>
+              ) : null}
               {resume.phases.map((phase) => (
                 <div className="project-row" key={phase.id}>
                   <div>
@@ -1555,10 +1638,16 @@ function ProjectGraph({
         ) : null}
 
         {resume ? (
-          <details className="card side-section" data-testid="tracking-settings">
-            <summary>Tracking · update interval</summary>
+          <details className="card side-section" open data-testid="tracking-settings">
+            <summary>Tracking</summary>
             <div className="side-body">
-              <p className="muted" style={{ fontSize: 12 }}>
+              {/* FRONT DOOR P1b: the full Gantt — one bar per phase on a
+               *  shared axis, gate diamonds (plan-approval / blocked-decision
+               *  / passed), and a Today line. See Gantt.tsx for the ordinal-
+               *  placement rationale (the resume DTO has no phase
+               *  timestamps yet). */}
+              <Gantt phases={ganttPhases} />
+              <p className="muted" style={{ fontSize: 12, marginTop: 14 }}>
                 How often the workspace polls for progress. Faster refresh costs a little more
                 background traffic; slower saves it.
               </p>
