@@ -13,6 +13,13 @@ import {
   type V2PortfolioAttentionT,
 } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
+import {
+  PROGRESS_WINDOW_SIZE,
+  type V2PhaseProgressT,
+  computeBurnRateUsdPerHour,
+  computePercentComplete,
+  computePhaseEta,
+} from "./projectResumeService.js";
 
 interface SourceRow {
   project_id: string;
@@ -800,7 +807,10 @@ export class AttentionService {
     });
   }
 
-  phase(projectId: string, phaseId: string): Promise<V2PhaseExecutionT> {
+  phase(
+    projectId: string,
+    phaseId: string,
+  ): Promise<V2PhaseExecutionT & { phase: V2PhaseExecutionT["phase"] & V2PhaseProgressT }> {
     return this.transactions.transaction(async (sql) => {
       const phase = await sql.query<{
         id: string;
@@ -817,6 +827,25 @@ export class AttentionService {
         [phaseId, projectId],
       );
       if (!phase.rows[0]) throw new AttentionConflictError("phase not found");
+      // FRONT DOOR P5 (tracking): same rolling-window progress math as
+      // ProjectResumeService.open, scoped to this single phase.
+      const recentCompletions = await sql.query<{ completed_at: string | Date }>(
+        `SELECT completed_at FROM tasks
+         WHERE project_id=$1 AND phase_id=$2 AND state='completed'
+         ORDER BY completed_at DESC LIMIT $3`,
+        [projectId, phaseId, PROGRESS_WINDOW_SIZE],
+      );
+      const recentRunCosts = await sql.query<{
+        started_at: string | Date | null;
+        finished_at: string | Date | null;
+        usage_cost_usd: string | number;
+      }>(
+        `SELECT started_at, finished_at, usage_cost_usd FROM agent_runs
+         WHERE project_id=$1 AND phase_id=$2 AND state='succeeded'
+           AND started_at IS NOT NULL AND finished_at IS NOT NULL
+         ORDER BY finished_at DESC LIMIT $3`,
+        [projectId, phaseId, PROGRESS_WINDOW_SIZE],
+      );
       const tasks = await sql.query<{
         id: string;
         title: string;
@@ -889,10 +918,24 @@ export class AttentionService {
         current.push(review);
         reviewsByTask.set(review.task_id, current);
       }
-      return V2PhaseExecution.parse({
+      const phaseRow = phase.rows[0];
+      const isExecuting = phaseRow.status === "active";
+      const progress: V2PhaseProgressT = {
+        percent_complete: computePercentComplete(phaseRow.completed_tasks, phaseRow.total_tasks),
+        tasks_completed: phaseRow.completed_tasks,
+        tasks_total: phaseRow.total_tasks,
+        eta_at: computePhaseEta({
+          isExecuting,
+          tasksCompleted: phaseRow.completed_tasks,
+          tasksTotal: phaseRow.total_tasks,
+          recentCompletionTimestamps: recentCompletions.rows.map((row) => row.completed_at),
+        }),
+        burn_rate_usd_per_hour: computeBurnRateUsdPerHour(recentRunCosts.rows),
+      };
+      const base = V2PhaseExecution.parse({
         schema_version: 2,
         project_id: projectId,
-        phase: phase.rows[0],
+        phase: phaseRow,
         tasks: tasks.rows.map((task) => ({
           id: task.id,
           title: task.title,
@@ -951,6 +994,7 @@ export class AttentionService {
           })),
         })),
       });
+      return { ...base, phase: { ...base.phase, ...progress } };
     });
   }
 }

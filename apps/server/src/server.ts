@@ -83,7 +83,11 @@ import {
   PhaseWorkflowConflictError,
   type PhaseWorkflowService,
 } from "./projects/phaseWorkflowService.js";
-import type { ProjectResumeService } from "./projects/projectResumeService.js";
+import {
+  ProjectResumeNotFoundError,
+  type ProjectResumeService,
+  ProjectSettingsValidationError,
+} from "./projects/projectResumeService.js";
 import { Phase3RequiredError } from "./projects/relationalReadRepository.js";
 import {
   type ProjectGraphView,
@@ -2292,6 +2296,40 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           reply.send(await options.phase3?.resume.open(id));
         } catch (error) {
           reply.code(404).send({ error: "project_not_found", detail: String(error) });
+        }
+      });
+
+      // ---------------------------------------------------------------
+      // FRONT DOOR P5 (tracking): configurable resume-poll cadence. Allowed
+      // values are enforced by both this request schema and, independently,
+      // ProjectResumeService.updateSettings (defense in depth against a
+      // future caller that bypasses this route's validation).
+      // ---------------------------------------------------------------
+      const ProjectSettingsBody = z
+        .object({
+          update_interval_seconds: z.union([z.literal(60), z.literal(300), z.literal(900)]),
+        })
+        .strict();
+      app.patch("/api/v2/projects/:id/settings", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        const body = ProjectSettingsBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        try {
+          const result = await options.phase3?.resume.updateSettings(
+            id,
+            body.data.update_interval_seconds,
+          );
+          if (!result) return reply.code(503).send({ error: "resume_unavailable" });
+          reply.send(result);
+        } catch (error) {
+          if (error instanceof ProjectResumeNotFoundError) {
+            return reply.code(404).send({ error: "project_not_found" });
+          }
+          if (error instanceof ProjectSettingsValidationError) {
+            return reply.code(400).send({ error: "invalid_settings", detail: error.message });
+          }
+          reply.code(500).send({ error: "internal_error", detail: String(error) });
         }
       });
 

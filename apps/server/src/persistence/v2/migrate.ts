@@ -66,6 +66,11 @@ export const FRONTDOOR_PHASE_BRIDGE_MIGRATION_URL = new URL(
   "../../../drizzle/0013_frontdoor_phase_bridge.sql",
   import.meta.url,
 );
+export const FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME = "0014_frontdoor_progress_tracking";
+export const FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL = new URL(
+  "../../../drizzle/0014_frontdoor_progress_tracking.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -149,6 +154,10 @@ export async function loadPlanningRunsMigrationSql(): Promise<string> {
 
 export async function loadFrontDoorPhaseBridgeMigrationSql(): Promise<string> {
   return readFile(FRONTDOOR_PHASE_BRIDGE_MIGRATION_URL, "utf8");
+}
+
+export async function loadFrontDoorProgressTrackingMigrationSql(): Promise<string> {
+  return readFile(FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -310,6 +319,10 @@ export async function runCurrentV2Migrations(
     {
       name: FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
       sql: await loadFrontDoorPhaseBridgeMigrationSql(),
+    },
+    {
+      name: FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
+      sql: await loadFrontDoorProgressTrackingMigrationSql(),
     },
   ]);
 }
