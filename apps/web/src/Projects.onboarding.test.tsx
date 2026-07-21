@@ -1,3 +1,13 @@
+// O1 (ONBOARDING program): the project-creation wizard collapsed to a
+// single question — "Is this new, or existing work?" — because execution
+// moved to GitHub Actions (REDIRECT: nothing is ever installed on the
+// user's machine, so there is no local-folder scenario anymore). Both
+// answers resolve to a GitHub repository:
+//   new_repo:      Norns creates a fresh repository.
+//   existing_repo: the human picks one of the connected account's
+//                  repositories (searchable list, or paste a repo URL).
+// Both require a GitHub connection first, so the connect step is
+// first-class inside the wizard rather than something buried in Settings.
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -50,16 +60,7 @@ const repository = {
   updated_at: "2026-07-16T20:00:00Z",
 };
 
-const runner = {
-  runner_id: "runner-local-1",
-  generation: 4,
-  connected: true,
-  last_seen_at: "2026-07-18T15:00:00Z",
-  workspace_picker_ready: true,
-  local_project_onboarding_ready: true,
-};
-
-describe("unified project onboarding", () => {
+describe("O1: two-question onboarding (GitHub Actions only)", () => {
   let mock: MockFetch;
   const onOpenProject = vi.fn<(project: ProjectSummary) => void>();
 
@@ -75,72 +76,10 @@ describe("unified project onboarding", () => {
     mock.get("/api/integrations/github/connections/github%3A43/repositories", {
       body: [repository],
     });
-    mock.get("/api/runners", { body: [runner] });
-    mock.get("/api/runners/runner-local-1/workspaces", {
-      body: {
-        runner_id: runner.runner_id,
-        generation: runner.generation,
-        workspaces: [{ workspace_id: "workspace-1", label: "Development" }],
-      },
-    });
-    mock.post("/api/runners/runner-local-1/workspaces/browse", (_url, init) => {
-      const body = JSON.parse(String(init?.body)) as { workspace_id: string; entry_id?: string };
-      return body.entry_id === "folder-apps"
-        ? {
-            body: {
-              runner_id: runner.runner_id,
-              workspace_id: body.workspace_id,
-              breadcrumb: ["Development", "Apps"],
-              entries: [
-                {
-                  entry_id: "repository-local-app",
-                  label: "local-app",
-                  kind: "repository",
-                  can_browse: false,
-                },
-              ],
-            },
-          }
-        : {
-            body: {
-              runner_id: runner.runner_id,
-              workspace_id: body.workspace_id,
-              breadcrumb: ["Development"],
-              entries: [
-                { entry_id: "folder-apps", label: "Apps", kind: "folder", can_browse: true },
-              ],
-            },
-          };
-    });
-    mock.post("/api/runners/runner-local-1/workspaces/validate", {
-      body: {
-        selection_token: "opaque-selection-token",
-        expires_at: "2099-07-18T16:00:00Z",
-        repository: {
-          runner_id: runner.runner_id,
-          workspace_id: "workspace-1",
-          repository_id: "repository-local-app",
-          repository_display_name: "local-app",
-          default_branch: "main",
-          observed_head: "abcdef",
-        },
-      },
-    });
-    mock.post("/api/runners/runner-local-1/workspaces/choose", {
-      body: {
-        selection_token: "native-selection-token",
-        expires_at: "2099-07-18T16:00:00Z",
-        repository: {
-          runner_id: runner.runner_id,
-          workspace_id: "workspace-native",
-          repository_id: "repository-native-app",
-          repository_display_name: "native-app",
-          default_branch: "main",
-          observed_head: "fedcba",
-        },
-      },
-    });
-    mock.post("/api/projects", (_url, init) => {
+    // O1 REDIRECT: onboarding always creates/binds a GitHub repository —
+    // POST /api/v2/projects/onboarding is the single creation endpoint
+    // (O2 building it in parallel; see projectSourceRequest.ts's TODO(O2)).
+    mock.post("/api/v2/projects/onboarding", (_url, init) => {
       const body = JSON.parse(String(init?.body)) as {
         name: string;
         description: string;
@@ -159,7 +98,15 @@ describe("unified project onboarding", () => {
         }),
       };
     });
-    mock.post("/api/v2/projects/project-created/source-bindings/local", { status: 201, body: {} });
+  });
+
+  afterEach(() => mock.restore());
+
+  /** Installs the mock and renders — called explicitly (after any
+   *  route overrides) rather than from beforeEach, since mount-time
+   *  effects (refresh/refreshGitHub) fetch immediately on render; a route
+   *  registered after render() is too late to affect what already loaded. */
+  function renderWizard() {
     mock.install();
     render(
       <Projects
@@ -173,19 +120,42 @@ describe("unified project onboarding", () => {
         onOpenAdmin={vi.fn()}
       />,
     );
-  });
+  }
 
-  afterEach(() => mock.restore());
-
-  it("removes the redundant Add existing action", async () => {
-    await screen.findByRole("button", { name: /new project/i });
-    expect(screen.queryByRole("button", { name: /add existing/i })).not.toBeInTheDocument();
-  });
-
-  it("selects existing code from a connected GitHub repository picker", async () => {
+  it("defaults to New, and creating a GitHub repository reaches POST /api/v2/projects/onboarding with scenario=new_repo", async () => {
     const user = userEvent.setup();
+    renderWizard();
     await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
+    await user.type(screen.getByTestId("project-name"), "Fresh app");
+    await user.type(screen.getByTestId("project-description"), "Build a fresh application");
+    await user.type(await screen.findByTestId("github-new-repository-name"), "fresh-app");
+
+    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
+    // A "new" project with an objective moves to the wizard's
+    // attach-and-launch step (FRONT DOOR P1); skip it — this test is only
+    // about the onboarding request shape.
+    await user.click(await screen.findByRole("button", { name: /skip for now/i }));
+
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
+    expect(
+      mock.calls.find(
+        (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
+      ),
+    ).toMatchObject({
+      body: {
+        scenario: "new_repo",
+        github_connection_id: "github:42",
+        repository_name: "fresh-app",
+        private: true,
+      },
+    });
+  });
+
+  it("switches to Existing and selects a repository from the searchable list, reaching scenario=existing_repo", async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /^existing/i }));
     await user.click(await screen.findByRole("button", { name: /octocat\/existing-app/i }));
     expect(screen.getByTestId("project-name")).toHaveValue("existing-app");
     expect(screen.getByTestId("project-description")).toHaveValue("Existing application");
@@ -193,347 +163,115 @@ describe("unified project onboarding", () => {
     await user.click(screen.getByRole("button", { name: /create and open project/i }));
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     expect(
-      mock.calls.find((call) => call.method === "POST" && call.url === "/api/projects"),
+      mock.calls.find(
+        (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
+      ),
     ).toMatchObject({
       body: {
-        source_type: "github",
+        scenario: "existing_repo",
         github_connection_id: "github:42",
         github_repository_id: "9001",
       },
     });
   });
 
-  it("keeps a successful repository refresh when an older request fails later", async () => {
-    let rejectFirst: ((reason: Error) => void) | undefined;
-    mock.get(
-      "/api/integrations/github/connections/github%3A42/repositories",
-      () =>
-        new Promise((_resolve, reject) => {
-          rejectFirst = reject;
-        }),
-    );
+  it("resolves a pasted repo URL to the matching entry in the searchable list", async () => {
     const user = userEvent.setup();
+    renderWizard();
     await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
-    await waitFor(() => expect(rejectFirst).toBeDefined());
-    await user.selectOptions(screen.getByTestId("github-connection"), "github:43");
-
-    expect(
-      await screen.findByRole("button", { name: /octocat\/existing-app/i }),
-    ).toBeInTheDocument();
-    rejectFirst?.(new TypeError("No server is currently available to service your request"));
-
-    await waitFor(() =>
-      expect(
-        screen.queryByText(/No server is currently available to service your request/i),
-      ).not.toBeInTheDocument(),
-    );
-  });
-
-  it("creates an existing project from a local runner without ever sending a raw path", async () => {
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
-    await user.click(screen.getByRole("button", { name: /local folder/i }));
-    await user.click(await screen.findByRole("button", { name: /development/i }));
-    await user.click(await screen.findByRole("button", { name: /apps/i }));
-    await user.click(screen.getByRole("button", { name: /back/i }));
-    expect(await screen.findByRole("button", { name: /apps/i })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /apps/i }));
-    await user.click(await screen.findByRole("button", { name: /local-app/i }));
-    expect(await screen.findByTestId("local-selection-summary")).toHaveTextContent("local-app");
-    expect(screen.getByTestId("project-name")).toHaveValue("local-app");
-
-    await user.click(screen.getByRole("button", { name: /create and open project/i }));
-    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
-
-    expect(
-      mock.calls.find((call) => call.method === "POST" && call.url === "/api/projects"),
-    ).toMatchObject({ body: { name: "local-app", description: expect.any(String) } });
-    expect(
-      mock.calls.find(
-        (call) =>
-          call.method === "POST" &&
-          call.url === "/api/v2/projects/project-created/source-bindings/local",
-      ),
-    ).toMatchObject({
-      body: {
-        selection_token: "opaque-selection-token",
-        verification_policy_ref: "verification-policy:default-v1",
-      },
-    });
-    expect(JSON.stringify(mock.calls)).not.toMatch(/Users|Development\/Apps|local-app\//);
-  });
-
-  it("selects a local project through the native folder chooser in one step", async () => {
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
-    await user.click(screen.getByRole("button", { name: /local folder/i }));
-    await user.click(await screen.findByRole("button", { name: /choose project folder/i }));
-
-    expect(await screen.findByTestId("local-selection-summary")).toHaveTextContent("native-app");
-    expect(screen.getByTestId("project-name")).toHaveValue("native-app");
-    expect(
-      mock.calls.find(
-        (call) =>
-          call.method === "POST" && call.url === "/api/runners/runner-local-1/workspaces/choose",
-      ),
-    ).toBeDefined();
-
-    await user.click(screen.getByRole("button", { name: /create and open project/i }));
-    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
-    expect(
-      mock.calls.find(
-        (call) =>
-          call.method === "POST" &&
-          call.url === "/api/v2/projects/project-created/source-bindings/local",
-      ),
-    ).toMatchObject({ body: { selection_token: "native-selection-token" } });
-    expect(JSON.stringify(mock.calls)).not.toMatch(/Users|native-app\//);
-  });
-
-  it("does not bind a previously selected local folder after switching to a new project", async () => {
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
-    await user.click(screen.getByRole("button", { name: /local folder/i }));
-    await user.click(await screen.findByRole("button", { name: /development/i }));
-    await user.click(await screen.findByRole("button", { name: /apps/i }));
-    await user.click(await screen.findByRole("button", { name: /local-app/i }));
-    expect(await screen.findByTestId("local-selection-summary")).toHaveTextContent("local-app");
-
-    await user.click(screen.getByRole("button", { name: /^new project/i }));
-    const nameInput = screen.getByTestId("project-name");
-    await user.clear(nameInput);
-    await user.type(nameInput, "Fresh local-free project");
-    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
-    // A "new" project with a (carried-over) objective moves to the wizard's
-    // attach-and-launch step (FRONT DOOR P1); skip it — this test is only
-    // about the local-folder-selection isolation, not planning.
-    await user.click(await screen.findByRole("button", { name: /skip for now/i }));
-
-    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
-    expect(
-      mock.calls.find((call) => call.method === "POST" && call.url === "/api/projects"),
-    ).toMatchObject({ body: { name: "Fresh local-free project" } });
-    expect(
-      mock.calls.find(
-        (call) =>
-          call.method === "POST" &&
-          call.url === "/api/v2/projects/project-created/source-bindings/local",
-      ),
-    ).toBeUndefined();
-  });
-
-  it("ignores a late validation response after the selected runner changes", async () => {
-    const secondRunner = { ...runner, runner_id: "runner-local-2", generation: 1 };
-    mock.get("/api/runners", { body: [runner, secondRunner] });
-    mock.get("/api/runners/runner-local-2/workspaces", { body: { workspaces: [] } });
-    let resolveValidation:
-      | ((value: {
-          body: { selection_token: string; expires_at: string; repository: object };
-        }) => void)
-      | undefined;
-    mock.post(
-      "/api/runners/runner-local-1/workspaces/validate",
-      () =>
-        new Promise((resolve) => {
-          resolveValidation = resolve;
-        }),
-    );
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
-    await user.click(screen.getByRole("button", { name: /local folder/i }));
-    await user.click(await screen.findByRole("button", { name: /development/i }));
-    await user.click(await screen.findByRole("button", { name: /apps/i }));
-    await user.click(await screen.findByRole("button", { name: /local-app/i }));
-    await user.selectOptions(screen.getByTestId("local-runner"), "runner-local-2");
-    resolveValidation?.({
-      body: {
-        selection_token: "stale-runner-a-token",
-        expires_at: "2099-07-18T16:00:00Z",
-        repository: {
-          runner_id: runner.runner_id,
-          workspace_id: "workspace-1",
-          repository_id: "repository-local-app",
-          repository_display_name: "local-app",
-          default_branch: "main",
-          observed_head: "abcdef",
-        },
-      },
-    });
-
-    await waitFor(() =>
-      expect(screen.queryByTestId("local-selection-summary")).not.toBeInTheDocument(),
-    );
-    expect(screen.getByRole("button", { name: /create and open project/i })).toBeDisabled();
-  });
-
-  it("revalidates an ambiguous local binding without creating a duplicate project", async () => {
-    let bindingAttempts = 0;
-    mock.post("/api/v2/projects/project-created/source-bindings/local", () => {
-      bindingAttempts += 1;
-      if (bindingAttempts === 1) throw new TypeError("connection reset after commit");
-      return { status: 201, body: {} };
-    });
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
-    await user.click(screen.getByRole("button", { name: /local folder/i }));
-    await user.click(await screen.findByRole("button", { name: /development/i }));
-    await user.click(await screen.findByRole("button", { name: /apps/i }));
-    await user.click(await screen.findByRole("button", { name: /local-app/i }));
-    await user.click(screen.getByRole("button", { name: /create and open project/i }));
-
-    expect(await screen.findByText(/existing project will be reused/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /create and open project/i })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: /local-app/i }));
-    await user.click(await screen.findByRole("button", { name: /retry repository binding/i }));
-    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
-    expect(
-      mock.calls.filter((call) => call.method === "POST" && call.url === "/api/projects"),
-    ).toHaveLength(1);
-    expect(
-      mock.calls.filter(
-        (call) =>
-          call.method === "POST" &&
-          call.url === "/api/v2/projects/project-created/source-bindings/local",
-      ),
-    ).toHaveLength(2);
-  });
-
-  // FRONT DOOR P2b (D2): folder-first — a plain local path is the primary
-  // flow and needs no runner at all. This replaces the old "wall" test (the
-  // human-approved design explicitly removes that block).
-  it("creates a local project from a plain path with no runner online", async () => {
-    mock.get("/api/runners", { body: [] });
-    mock.post("/api/projects", (_url, init) => {
-      const body = JSON.parse(String(init?.body)) as {
-        name: string;
-        description: string;
-        source_type?: string;
-        source_location?: string;
-      };
-      expect(body).toMatchObject({
-        source_type: "local",
-        source_location: "/Users/operator/code/my-secret-startup/apps/web",
-      });
-      return {
-        status: 201,
-        body: makeProject({
-          id: "project-created",
-          name: body.name,
-          description: body.description,
-          source_type: "local",
-          source_location: null,
-        }),
-      };
-    });
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
-    await user.click(screen.getByRole("button", { name: /local folder/i }));
-
-    // No blocking wall — the path input is immediately usable.
-    expect(screen.queryByText(/no local runner is online/i)).not.toBeInTheDocument();
-    expect(
-      await screen.findByText(/a runner is only needed once execution starts/i),
-    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^existing/i }));
+    await screen.findByRole("button", { name: /octocat\/existing-app/i });
 
     await user.type(
-      screen.getByTestId("local-path-input"),
-      "/Users/operator/code/my-secret-startup/apps/web",
+      screen.getByRole("textbox", { name: /search connected repositories/i }),
+      "https://github.com/octocat/existing-app",
     );
-    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+    await user.click(await screen.findByRole("button", { name: /octocat\/existing-app/i }));
 
-    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
-    // The raw path never leaves the browser except in that one create call —
-    // never echoed back, never sent to any other endpoint.
-    expect(
-      mock.calls.filter((call) => JSON.stringify(call).includes("my-secret-startup")),
-    ).toHaveLength(1);
-    expect(
-      mock.calls.find(
-        (call) =>
-          call.method === "POST" &&
-          call.url === "/api/v2/projects/project-created/source-bindings/local",
-      ),
-    ).toBeUndefined();
+    expect(screen.getByTestId("project-name")).toHaveValue("existing-app");
   });
 
-  it("still offers the runner-based browse enhancement when a runner is online, alongside the path input", async () => {
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
-    await user.click(screen.getByRole("button", { name: /local folder/i }));
-
-    expect(screen.getByTestId("local-path-input")).toBeInTheDocument();
-    expect(await screen.findByText(/browse with a paired runner instead/i)).toBeInTheDocument();
-  });
-
-  it("requires a runner upgrade before offering a legacy runner for folder selection", async () => {
-    mock.get("/api/runners", {
-      body: [{ ...runner, workspace_picker_ready: false }],
-    });
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
-    await user.click(screen.getByRole("button", { name: /local folder/i }));
-    expect(await screen.findByText(/local runner update required/i)).toBeInTheDocument();
-    expect(screen.queryByTestId("local-runner")).not.toBeInTheDocument();
-  });
-
-  it("requires relational new-project storage before offering folder selection", async () => {
-    mock.get("/api/runners", {
-      body: [{ ...runner, local_project_onboarding_ready: false }],
-    });
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
-    await user.click(screen.getByRole("button", { name: /local folder/i }));
-    expect(await screen.findByText(/project storage activation required/i)).toBeInTheDocument();
-    expect(screen.queryByTestId("local-runner")).not.toBeInTheDocument();
-  });
-
-  it("creates a GitHub repository before binding a new project", async () => {
-    mock.post("/api/integrations/github/repositories", {
-      status: 201,
+  it("shows a single Connect GitHub button (not a Settings redirect) when nothing is connected yet, and runs the existing authorize flow", async () => {
+    mock.get("/api/integrations/github/status", {
       body: {
-        ...repository,
-        id: "9002",
-        name: "fresh-app",
-        full_name: "octocat/fresh-app",
-        binding_ready: true,
+        configured: true,
+        user_authorization: { connected: false, login: null },
+        connections: [],
+      },
+    });
+    mock.get("/api/integrations/github/authorize", {
+      body: { authorization_url: "https://github.com/login/oauth/authorize?state=abc" },
+    });
+    const assignSpy = vi.fn();
+    Object.defineProperty(window, "location", {
+      value: { ...window.location, assign: assignSpy },
+      writable: true,
+    });
+
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+
+    expect(await screen.findByText(/connect github to continue/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /open settings/i })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^connect github$/i }));
+
+    await waitFor(() =>
+      expect(assignSpy).toHaveBeenCalledWith("https://github.com/login/oauth/authorize?state=abc"),
+    );
+  });
+
+  it("sends the human to Settings only when the GitHub App itself isn't configured (an admin-only setup step)", async () => {
+    mock.get("/api/integrations/github/status", {
+      body: {
+        configured: false,
+        setup_available: true,
+        configuration_source: null,
+        user_authorization: { connected: false, login: null },
+        connections: [],
       },
     });
     const user = userEvent.setup();
+    renderWizard();
     await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.click(screen.getByRole("button", { name: /create on github/i }));
-    await user.type(screen.getByTestId("github-new-repository-name"), "fresh-app");
+
+    expect(await screen.findByText(/github is not configured/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /open settings/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^connect github$/i })).not.toBeInTheDocument();
+  });
+
+  it("shows the plain-language confirmation before the submit button, honest about GitHub Actions and never claiming to touch the user's machine", async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+
+    expect(await screen.findByTestId("setup-confirmation")).toHaveTextContent(
+      /choose or create a github repository/i,
+    );
+
+    await user.type(await screen.findByTestId("github-new-repository-name"), "fresh-app");
+    expect(await screen.findByTestId("setup-confirmation")).toHaveTextContent(
+      "Work happens in a GitHub Actions job inside octocat/fresh-app. Changes arrive as commits and pull requests in that repository — to get the files on your own machine, clone or pull as usual.",
+    );
+
+    await user.click(screen.getByRole("button", { name: /^existing/i }));
+    await user.click(await screen.findByRole("button", { name: /octocat\/existing-app/i }));
+    expect(await screen.findByTestId("setup-confirmation")).toHaveTextContent(
+      /github actions job inside octocat\/existing-app/i,
+    );
+  });
+
+  it("disables Create until a repository is named (new) or selected (existing)", async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.type(screen.getByTestId("project-name"), "Fresh app");
     await user.type(screen.getByTestId("project-description"), "Build a fresh application");
-    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
-    // A "new" project with an objective moves to the wizard's attach-and-launch
-    // step (FRONT DOOR P1); skip it — this test is only about GitHub repository
-    // creation, not planning.
-    await user.click(await screen.findByRole("button", { name: /skip for now/i }));
+    await screen.findByTestId("github-new-repository-name");
+    expect(screen.getByRole("button", { name: /create & draft plan/i })).toBeDisabled();
 
-    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
-    expect(
-      mock.calls.find(
-        (call) => call.method === "POST" && call.url === "/api/integrations/github/repositories",
-      ),
-    ).toMatchObject({
-      body: {
-        connection_id: "github:42",
-        name: "fresh-app",
-        private: true,
-      },
-    });
-    expect(
-      mock.calls.find((call) => call.method === "POST" && call.url === "/api/projects"),
-    ).toMatchObject({ body: { github_repository_id: "9002" } });
+    await user.click(screen.getByRole("button", { name: /^existing/i }));
+    await screen.findByRole("button", { name: /octocat\/existing-app/i });
+    expect(screen.getByRole("button", { name: /create and open project/i })).toBeDisabled();
   });
 });

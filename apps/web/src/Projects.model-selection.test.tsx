@@ -5,6 +5,24 @@ import { type ProjectSummary, Projects } from "./Projects";
 import { makeProject, projectAlpha } from "./test/fixtures";
 import { MockFetch } from "./test/mockFetch";
 
+const githubStatus = {
+  configured: true,
+  user_authorization: { connected: true, login: "octocat" },
+  connections: [
+    {
+      id: "github:42",
+      provider: "github",
+      display_name: "octocat on GitHub",
+      owner_type: "user",
+      owner_login: "octocat",
+      installation_id: "42",
+      repository_selection: "all",
+      status: "connected",
+      last_validated_at: "2026-07-16T20:00:00Z",
+    },
+  ],
+};
+
 describe("project manager model selection", () => {
   let mock: MockFetch;
   const onOpenProject = vi.fn<(project: ProjectSummary) => void>();
@@ -13,7 +31,13 @@ describe("project manager model selection", () => {
     onOpenProject.mockReset();
     mock = new MockFetch();
     mock.get("/api/projects", { body: [projectAlpha] });
-    mock.post("/api/projects", (_url, init) => {
+    mock.get("/api/v2/attention", { status: 404, body: {} });
+    mock.get("/api/integrations/github/status", { body: githubStatus });
+    // O1 REDIRECT: onboarding always creates/binds a GitHub repository —
+    // POST /api/v2/projects/onboarding is the single creation endpoint
+    // (O2 is building it in parallel; see projectSourceRequest.ts's
+    // TODO(O2)).
+    mock.post("/api/v2/projects/onboarding", (_url, init) => {
       const body = JSON.parse(String(init?.body)) as {
         name: string;
         description: string;
@@ -60,13 +84,21 @@ describe("project manager model selection", () => {
   async function submit(name: string) {
     await userEvent.type(screen.getByTestId("project-name"), name);
     await userEvent.type(screen.getByTestId("project-description"), "Plan the delivery");
+    // "Start something new" always creates a GitHub repository now — give
+    // it a name so the create button is enabled.
+    await userEvent.type(
+      await screen.findByTestId("github-new-repository-name"),
+      "plan-the-delivery",
+    );
     // A "new" project with an objective moves to the wizard's attach-and-launch
     // step (FRONT DOOR P1) instead of navigating away immediately; skip it here
     // since this suite is only exercising the PM-model selection, not planning.
     await userEvent.click(screen.getByRole("button", { name: /create & draft plan/i }));
     await userEvent.click(await screen.findByRole("button", { name: /skip for now/i }));
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
-    return mock.calls.find((call) => call.method === "POST" && call.url === "/api/projects");
+    return mock.calls.find(
+      (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
+    );
   }
 
   it("offers current Anthropic and OpenAI models and defaults to Sonnet", async () => {

@@ -21,7 +21,29 @@ describe("new project wizard: create -> attach -> planning run", () => {
     mock = new MockFetch();
     mock.get("/api/projects", { body: [] });
     mock.get("/api/v2/attention", { status: 404, body: {} });
-    mock.post("/api/projects", (_url, init) => {
+    mock.get("/api/integrations/github/status", {
+      body: {
+        configured: true,
+        user_authorization: { connected: true, login: "octocat" },
+        connections: [
+          {
+            id: "github:42",
+            provider: "github",
+            display_name: "octocat on GitHub",
+            owner_type: "user",
+            owner_login: "octocat",
+            installation_id: "42",
+            repository_selection: "all",
+            status: "connected",
+            last_validated_at: "2026-07-16T20:00:00Z",
+          },
+        ],
+      },
+    });
+    // O1 REDIRECT: onboarding always creates/binds a GitHub repository now —
+    // POST /api/v2/projects/onboarding is the single creation endpoint
+    // (O2 building it in parallel; TODO(O2) in projectSourceRequest.ts).
+    mock.post("/api/v2/projects/onboarding", (_url, init) => {
       const body = JSON.parse(String(init?.body)) as { name: string; description: string };
       return {
         status: 201,
@@ -81,6 +103,7 @@ describe("new project wizard: create -> attach -> planning run", () => {
 
     // Bump the rounds stepper from its default of 3 to 4.
     await user.click(screen.getByRole("button", { name: /more rounds/i }));
+    await user.type(await screen.findByTestId("github-new-repository-name"), "ravel-search-index");
 
     await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
 
@@ -88,7 +111,9 @@ describe("new project wizard: create -> attach -> planning run", () => {
     // against it, and the objective carried over automatically.
     expect(await screen.findByTestId("wizard-attach-step")).toBeInTheDocument();
     expect(
-      mock.calls.filter((call) => call.method === "POST" && call.url === "/api/projects"),
+      mock.calls.filter(
+        (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
+      ),
     ).toHaveLength(1);
     expect(screen.getByTestId("wizard-objective")).toHaveValue(
       "Stand up a hybrid vector + keyword index over the docs corpus.",
@@ -130,6 +155,7 @@ describe("new project wizard: create -> attach -> planning run", () => {
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.type(screen.getByTestId("project-name"), "Nimbus API gateway");
     await user.type(screen.getByTestId("project-description"), "Consolidate the edge gateways.");
+    await user.type(await screen.findByTestId("github-new-repository-name"), "nimbus-api-gateway");
     await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
 
     await screen.findByTestId("wizard-attach-step");
@@ -151,6 +177,10 @@ describe("new project wizard: create -> attach -> planning run", () => {
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.type(screen.getByTestId("project-name"), "Helm mobile onboarding");
     await user.type(screen.getByTestId("project-description"), "Rebuild the first-run flow.");
+    await user.type(
+      await screen.findByTestId("github-new-repository-name"),
+      "helm-mobile-onboarding",
+    );
     await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
 
     await screen.findByTestId("wizard-attach-step");
