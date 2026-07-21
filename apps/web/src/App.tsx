@@ -41,6 +41,7 @@ import {
   ProjectTabs,
   Projects,
 } from "./Projects";
+import { StartPhaseControl } from "./StartPhaseControl";
 import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
 import {
   ApiError,
@@ -1392,13 +1393,25 @@ function ProjectGraph({
                           {phase.status} · {phase.completed_tasks}/{phase.tasks} tasks complete
                         </div>
                       </div>
-                      <Button
-                        className="btn-small"
-                        variant={monitoredPhaseId === phase.id ? "primary" : "default"}
-                        onClick={() => setMonitoredPhaseId(phase.id)}
-                      >
-                        {monitoredPhaseId === phase.id ? "Monitoring" : "Monitor"}
-                      </Button>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        {/* EXECUTION E2: the "Start phase" trigger — only
+                         *  ever enabled when the real server-side gate
+                         *  (PhaseLaunchService) reports the phase ready. */}
+                        <StartPhaseControl
+                          projectId={project.id}
+                          phaseId={phase.id}
+                          phaseStatus={phase.status}
+                          onStarted={() => void loadResume()}
+                          onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+                        />
+                        <Button
+                          className="btn-small"
+                          variant={monitoredPhaseId === phase.id ? "primary" : "default"}
+                          onClick={() => setMonitoredPhaseId(phase.id)}
+                        >
+                          {monitoredPhaseId === phase.id ? "Monitoring" : "Monitor"}
+                        </Button>
+                      </div>
                     </div>
                   ))}
                   {phaseExecution ? (
