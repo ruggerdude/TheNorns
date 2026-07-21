@@ -74,6 +74,13 @@ export const ATTACHMENTS_MIGRATION_URL = new URL(
   "../../../drizzle/0014_attachments.sql",
   import.meta.url,
 );
+// FRONT DOOR P5: progress tracking settings. Renumbered 0014 -> 0015 at
+// integration (same parallel-agent numbering collision as attachments).
+export const FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME = "0015_frontdoor_progress_tracking";
+export const FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL = new URL(
+  "../../../drizzle/0015_frontdoor_progress_tracking.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -161,6 +168,10 @@ export async function loadFrontDoorPhaseBridgeMigrationSql(): Promise<string> {
 
 export async function loadAttachmentsMigrationSql(): Promise<string> {
   return readFile(ATTACHMENTS_MIGRATION_URL, "utf8");
+}
+
+export async function loadFrontDoorProgressTrackingMigrationSql(): Promise<string> {
+  return readFile(FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -326,6 +337,10 @@ export async function runCurrentV2Migrations(
     {
       name: ATTACHMENTS_MIGRATION_NAME,
       sql: await loadAttachmentsMigrationSql(),
+    },
+    {
+      name: FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
+      sql: await loadFrontDoorProgressTrackingMigrationSql(),
     },
   ]);
 }
