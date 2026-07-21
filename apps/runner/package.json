@@ -11,6 +11,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "pack:tarball": "node scripts/pack-tarball.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "echo '@norns/runner: covered by @norns/server integration tests'"
   },
