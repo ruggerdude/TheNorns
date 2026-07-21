@@ -114,6 +114,26 @@ export const RunStatus = z.enum([
   "cancelled",
 ]);
 
+/**
+ * EXECUTION E10 — one verification command's REAL result.
+ *
+ * The runner has produced these since E4 and the event contract had nowhere to
+ * put them, so `phase4EventProcessor` wrote `'[]'::jsonb` and a failing
+ * verification reached a human as a red badge over a sha256 digest of text
+ * nobody kept. `output` is the truncated combined stdout/stderr of the command
+ * that actually ran — the single most useful artefact a failed run produces.
+ */
+export const VerificationCommandOutcome = z.object({
+  name: nonEmpty,
+  command: z.array(nonEmpty).min(1),
+  exit_code: z.number().int(),
+  passed: z.boolean(),
+  output: z.string(),
+});
+export type VerificationCommandOutcomeT = z.infer<typeof VerificationCommandOutcome>;
+
+export const PublicationOutcomeKind = z.enum(["pushed", "local_only"]);
+
 export const EventPayload = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("heartbeat") }),
   z.object({
@@ -130,6 +150,30 @@ export const EventPayload = z.discriminatedUnion("kind", [
     commit_sha: nonEmpty,
     passed: z.boolean(),
     output_digest: nonEmpty,
+    // ADDITIVE: defaults to empty, so an event emitted by a runner that
+    // predates E10 parses exactly as it did before and records no results —
+    // which is the truth about that runner, not a silent zero.
+    command_results: z.array(VerificationCommandOutcome).default([]),
+  }),
+  /**
+   * EXECUTION E10 — where the run's work went.
+   *
+   * E4 made the runner push a branch and open a pull request, then reported it
+   * as `run_log` PROSE. Nothing could link a task to its review, because a log
+   * line is not a field. This event carries the same facts structurally; it is
+   * a NEW member of the union, so no existing runner emits it and no existing
+   * server path changes.
+   */
+  z.object({
+    kind: z.literal("run_published"),
+    run_id: nonEmpty,
+    outcome: PublicationOutcomeKind,
+    branch: nonEmpty,
+    commit_sha: nonEmpty,
+    remote: z.string().nullable().default(null),
+    pull_request_url: z.string().url().nullable().default(null),
+    /** Why there is no pull request, when there is none. Never silent. */
+    pull_request_note: z.string().nullable().default(null),
   }),
   z.object({
     kind: z.literal("usage_report"),

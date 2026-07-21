@@ -400,6 +400,41 @@ export function v2CommandIdForDispatchJob(dispatchJobId: string): string {
   return `dispatch:${dispatchJobId}`;
 }
 
+/**
+ * EXECUTION E10 — the ONE policy ref vocabulary.
+ *
+ * Three spellings were in use before this phase: `"verification"` (hardcoded in
+ * strategyBridgeService when materializing a strategy), `"verification-policy:
+ * default-v1"` (projectActivationService, relationalReadRepository, and the
+ * runner's built-in default policy map), and `"policy:legacy-verification:<id>"`
+ * (the migration importer). Only the second is a key the runner can actually
+ * resolve, so it is the one that survives: a vocabulary nobody can look up is
+ * not a vocabulary. Anything else falls through to the repository manifest and,
+ * failing that, fails closed.
+ *
+ * The runner declares the same literal in `verificationPolicies.ts`; the values
+ * are identical by construction and asserted by test.
+ */
+export const V2_DEFAULT_VERIFICATION_POLICY_REF = "verification-policy:default-v1";
+
+/**
+ * A single verification command, as an argv VECTOR — never a shell string.
+ *
+ * There is no interpolation anywhere on this path: a project whose recorded
+ * test command is `rm -rf / #` produces an attempt to execute a program named
+ * `rm` with the literal arguments `-rf`, `/`, `#`, which is not a shell and not
+ * a wildcard expansion. Keeping the vector shape all the way from the server's
+ * ingested project memory to the runner's `execFile` is what makes that true.
+ */
+export const V2VerificationCommand = z
+  .object({
+    /** What a human reads in the report — `build`, `test`, `lint`. */
+    name: V2NonEmptyString.max(200),
+    command: z.array(V2NonEmptyString).min(1).max(64),
+  })
+  .strict();
+export type V2VerificationCommandT = z.infer<typeof V2VerificationCommand>;
+
 export const V2DispatchCommand = z
   .object({
     schema_version: schemaVersion,
@@ -436,6 +471,25 @@ export const V2DispatchCommand = z
     max_output_tokens: z.number().int().nonnegative(),
     max_duration_seconds: z.number().int().positive(),
     verification_policy_ref: V2EntityId,
+    /**
+     * EXECUTION E10 — the project's REAL build/test/lint commands, carried
+     * structurally instead of only as prose inside the agent's prompt.
+     *
+     * They are ingested server-side as `repository_fact` project memory
+     * (`build_command`, `test_command`, `lint_command`) and rendered into the
+     * briefing by E1; until now nothing turned them into something the runner
+     * could execute, so a repository without a committed `.norns/
+     * verification.json` could never verify at all.
+     *
+     * Optional, and therefore strictly additive: a legacy runner ignores the
+     * field and behaves exactly as before. Where a runner does understand it,
+     * it TAKES PRECEDENCE over the committed manifest — the server-side facts
+     * are the human-reviewed record of how this project is built, and the file
+     * in the repository is the fallback for projects that have no such record.
+     * When neither exists, verification still fails closed; nothing here ever
+     * makes a run green by omission.
+     */
+    verification_commands: z.array(V2VerificationCommand).min(1).max(32).optional(),
     sandbox_policy_ref: V2EntityId,
     authorized_by: V2Actor,
     authorized_by_session_id: V2EntityId,

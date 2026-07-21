@@ -231,6 +231,10 @@ export const V2ProjectResume = z
           task_id: V2EntityId,
           title: V2NonEmptyString,
           completed_at: V2IsoDateTime,
+          // EXECUTION E10 — click from a completed task straight to its review.
+          // Defaulted, so every existing caller and fixture parses unchanged.
+          pull_request_url: z.string().nullable().default(null),
+          published_branch: V2NonEmptyString.nullable().default(null),
         })
         .strict(),
     ),
