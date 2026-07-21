@@ -1,6 +1,16 @@
-// Claude Code runtime via the official Claude Agent SDK. Requires Anthropic
-// credentials at run time (NORN-027); construction and the capability matrix
-// are credential-free so scheduling can reason about it.
+// Claude Code runtime via the official Claude Agent SDK.
+//
+// EXECUTION E9 — this runtime is credential-free when a gateway is supplied.
+// Previously it required a real Anthropic key in the process environment
+// (NORN-027), which an ephemeral GitHub Actions job never has and, per the
+// human's decision, must never be given. It points the Claude Code subprocess
+// at the Norns provider-native gateway with a short-lived, per-run credential:
+// the SDK speaks the ordinary Anthropic Messages API and is entirely unaware,
+// while the relay authorizes, meters and budget-checks every call and the real
+// key never leaves the server.
+//
+// WITHOUT a gateway it behaves exactly as before, so a laptop runner with its
+// own key is unaffected.
 //
 // EXECUTION E11 — STREAMING INPUT MODE, ON PURPOSE.
 //
@@ -13,7 +23,20 @@
 // costs nothing on the happy path (the first message yielded is exactly the
 // prompt that used to be passed as a string) and is what makes both `interrupt`
 // and `send_message` real rather than advertised.
+//
+// THE TWO ARE ORTHOGONAL, AND BOTH HOLD HERE.
+//
+// E9's property is about WHEN the credential exists relative to the subprocess;
+// E11's is about WHAT the prompt is. `query()` is the call that spawns the
+// subprocess, so the rule that matters is that nothing may sit between the mint
+// and that call — and nothing does. The prompt is pushed into the queue after
+// the mint purely so the ordering is visible on the page rather than implied:
+// the queue is inert until `query()` consumes it, so it could sit either side,
+// and putting it after removes any chance a later edit inserts awaitable work
+// between minting and spawning. A mint failure still throws before any
+// subprocess exists, and a run cancelled before it starts never mints at all.
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { type GatewayCredentialProvider, gatewayEnvironment } from "../modelGateway.js";
 import type { CodingRuntime, RuntimeRunRequest, RuntimeRunResult, RuntimeUsage } from "./types.js";
 
 type StreamedUserMessage = {
@@ -87,15 +110,28 @@ export class ClaudeCodeRuntime implements CodingRuntime {
     resume_session: true, // options.resume with a session id
     cancel: true, // AbortController
     stop_after_current: false,
-    // VERIFIED AGAINST @anthropic-ai/claude-agent-sdk 0.3.207: `Query` exposes
-    // `streamInput(stream)` and accepts `prompt: AsyncIterable<SDKUserMessage>`,
-    // so a message pushed into the input queue is picked up by the running
-    // session. This is the one runtime we ship that can genuinely be answered
-    // mid-flight.
+    // EXECUTION E11 — VERIFIED AGAINST @anthropic-ai/claude-agent-sdk 0.3.207:
+    // `Query` exposes `streamInput(stream)` and accepts
+    // `prompt: AsyncIterable<SDKUserMessage>`, so a message pushed into the
+    // input queue is picked up by the running session. This is the one runtime
+    // we ship that can genuinely be answered mid-flight.
     send_message: true,
   };
 
-  constructor(private readonly options: { model?: string; resumeSessionId?: string } = {}) {}
+  constructor(
+    private readonly options: {
+      model?: string;
+      resumeSessionId?: string;
+      /**
+       * EXECUTION E9 — resolves the per-run gateway credential, lazily. Absent
+       * means "use whatever credentials this process already has", which is
+       * the laptop case.
+       */
+      gateway?: GatewayCredentialProvider;
+      /** Injectable for tests. Defaults to `process.env`. */
+      baseEnv?: NodeJS.ProcessEnv;
+    } = {},
+  ) {}
 
   async run(request: RuntimeRunRequest): Promise<RuntimeRunResult> {
     const usage: RuntimeUsage = {
@@ -112,15 +148,34 @@ export class ClaudeCodeRuntime implements CodingRuntime {
         input.close();
         controller.abort();
       });
+      // A run cancelled before it began must not mint a credential at all.
       if (request.signal?.aborted) {
         return { outcome: "cancelled", detail: "cancelled by operator", usage };
       }
+      // EXECUTION E9 — minted here, immediately before the subprocess starts,
+      // so a credential is never held for longer than the turn that uses it.
+      // A mint failure fails the run rather than silently falling through to
+      // whatever key might be lying around in the environment.
+      const credential = this.options.gateway ? await this.options.gateway() : null;
+      const env = credential
+        ? gatewayEnvironment(this.options.baseEnv ?? process.env, {
+            ANTHROPIC_BASE_URL: credential.anthropic_base_url,
+            // The SDK sends this as `Authorization: Bearer <token>`, which is
+            // exactly what the gateway reads. ANTHROPIC_API_KEY is deliberately
+            // NOT set: `gatewayEnvironment` strips it, because a surviving real
+            // key would take precedence and the run would bill money nobody is
+            // metering.
+            ANTHROPIC_AUTH_TOKEN: credential.token,
+          })
+        : null;
+      // The first message IS the prompt that used to be passed as a string.
       input.push(request.prompt);
       const stream = query({
         prompt: input as AsyncIterable<never>,
         options: {
           cwd: request.worktreePath,
           abortController: controller,
+          ...(env !== null ? { env } : {}),
           ...(this.options.model !== undefined ? { model: this.options.model } : {}),
           ...(this.options.resumeSessionId !== undefined
             ? { resume: this.options.resumeSessionId }

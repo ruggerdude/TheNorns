@@ -442,10 +442,20 @@ export class ProjectResumeService {
         task_id: string;
         title: string;
         completed_at: Date | string;
+        pull_request_url: string | null;
+        published_branch: string | null;
       }>(
-        `SELECT id AS task_id, title, completed_at
-         FROM tasks WHERE project_id = $1 AND state = 'completed'
-         ORDER BY completed_at DESC, id LIMIT 10`,
+        // EXECUTION E10: a completed task carries the pull request its
+        // designated run published, so the resume surface can link straight to
+        // the review. LEFT JOIN because a task completed before E10 (or by a
+        // runner with no publisher) has no publication, and "no PR" must read
+        // as null rather than dropping the completion from the list.
+        `SELECT task.id AS task_id, task.title, task.completed_at,
+                run.pull_request_url, run.published_branch
+         FROM tasks task
+         LEFT JOIN agent_runs run ON run.id = task.designated_run_id
+         WHERE task.project_id = $1 AND task.state = 'completed'
+         ORDER BY task.completed_at DESC, task.id LIMIT 10`,
         [projectId],
       );
       // FRONT DOOR P5 (tracking): the most recent PROGRESS_WINDOW_SIZE task
@@ -542,6 +552,8 @@ export class ProjectResumeService {
           task_id: task.task_id,
           title: task.title,
           completed_at: new Date(task.completed_at).toISOString(),
+          pull_request_url: task.pull_request_url,
+          published_branch: task.published_branch,
         })),
         next_recommended_action: nextAction({
           repositories: repositories.rows.length,

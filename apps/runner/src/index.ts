@@ -58,6 +58,17 @@ export {
   runnerContextFetchPayload,
 } from "./contextAuth.js";
 export { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
+// EXECUTION E9 — the provider-native gateway credential the agentic runtimes
+// use in place of a real provider key.
+export {
+  GATEWAY_CREDENTIAL_PATH,
+  GatewayCredentialError,
+  ModelGatewayClient,
+  PROVIDER_KEY_ENV_VARS,
+  gatewayEnvironment,
+  type GatewayCredential,
+  type GatewayCredentialProvider,
+} from "./modelGateway.js";
 export { CodexRuntime } from "./runtimes/codex.js";
 export {
   ApprovedRepositoryRegistry,

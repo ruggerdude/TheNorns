@@ -28,9 +28,11 @@ import {
   type V2StrategyObjectiveProposalT,
   type V2StrategyTaskProposalT,
   type V2StrategyVersionT,
+  V2_DEFAULT_VERIFICATION_POLICY_REF,
   fingerprintV2StrategyImmutableContent,
   validatePlan,
 } from "@norns/contracts";
+import { agenticRuntimeForProvider } from "../coordinator/agenticRuntime.js";
 import { newId } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import type { PhaseWorkflowService } from "./phaseWorkflowService.js";
@@ -851,7 +853,13 @@ export class StrategyBridgeService {
       required_inputs: [],
       expected_outputs: expectedOutputs,
       environment_policy_ref: "environment",
-      verification_policy_ref: "verification",
+      // EXECUTION E10. This was the bare word "verification", which is not a
+      // key in the runner's default policy map — so every task materialized
+      // through the normal planning path shipped a policy ref that no runner
+      // could resolve. Before E4 that threw into an opaque catch; after E4 it
+      // fails closed with a message about a manifest the project may not have.
+      // The default deployment could not verify anything at all.
+      verification_policy_ref: V2_DEFAULT_VERIFICATION_POLICY_REF,
       dependency_local_ids: module.dependencies.map((dependency) => taskLocalId(dependency)),
     };
   }
@@ -885,7 +893,15 @@ export class StrategyBridgeService {
           [
             id,
             pair.provider,
-            pair.provider,
+            // EXECUTION E10 (E9-9). This was `pair.provider` — so every profile
+            // the planning bridge created carried runtime `anthropic` or
+            // `openai`, neither of which is a key in the runner's runtime map.
+            // A task staffed through the normal path dispatched a runtime no
+            // runner could construct and died with "runtime anthropic is
+            // unavailable" before doing any work. Since E9's gateway, the
+            // agentic runtimes are credential-free and are the right answer in
+            // an Actions job as well as on a laptop.
+            agenticRuntimeForProvider(pair.provider) ?? pair.provider,
             pair.model,
             JSON.stringify(["implementation", "review"]),
             DEFAULT_CONTEXT_LIMIT_TOKENS,

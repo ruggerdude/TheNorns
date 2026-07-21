@@ -9,6 +9,7 @@ import {
   DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
   FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
   FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
+  GATEWAY_CREDENTIALS_MIGRATION_NAME,
   GITHUB_APP_MANIFEST_MIGRATION_NAME,
   ONBOARDING_BINDINGS_MIGRATION_NAME,
   ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME,
@@ -21,6 +22,7 @@ import {
   PHASE8_CUTOVER_COMPLETION_MIGRATION_NAME,
   PLANNING_RUNS_MIGRATION_NAME,
   QC_COMMUNICATION_MIGRATION_NAME,
+  RUN_PUBLICATION_MIGRATION_NAME,
   TASK_CONTEXT_MIGRATION_NAME,
   type V2MigrationDatabase,
   WORKSPACE_CONNECTIONS_MIGRATION_NAME,
@@ -217,6 +219,11 @@ describe.sequential("Phase 2 preservation schema", () => {
       // EXECUTION E2. Name is still `NNNN_`; the PM assigns the number at
       // integration, which is also when this entry's position changes.
       { name: DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME, applied: false },
+      // EXECUTION E9 — per-run gateway credentials.
+      { name: GATEWAY_CREDENTIALS_MIGRATION_NAME, applied: false },
+      // EXECUTION E10. Name is still `NNNN_`; the PM assigns the number at
+      // integration, which is also when this entry's position changes.
+      { name: RUN_PUBLICATION_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -242,6 +249,8 @@ describe.sequential("Phase 2 preservation schema", () => {
       ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME,
       TASK_CONTEXT_MIGRATION_NAME,
       DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
+      GATEWAY_CREDENTIALS_MIGRATION_NAME,
+      RUN_PUBLICATION_MIGRATION_NAME,
     ]);
   });
 

@@ -275,6 +275,13 @@ export interface RunnerVerifier {
     expected_commit: string;
     /** The commit the worktree started at, so an empty run cannot pass. */
     base_revision: string;
+    /**
+     * EXECUTION E10/E11 — the project's REAL build/test/lint commands, carried
+     * structurally on the dispatch command as argv vectors. Optional: a server
+     * that predates E10, or a project with no ingested facts, sends nothing and
+     * the resolution below is exactly what it was before.
+     */
+    commands?: readonly VerificationCommand[];
   }): Promise<RunnerVerificationResult>;
 }
 
@@ -320,6 +327,7 @@ export class CommandPolicyVerifier implements RunnerVerifier {
     policy_ref: string;
     expected_commit: string;
     base_revision: string;
+    commands?: readonly VerificationCommand[];
   }): Promise<RunnerVerificationResult> {
     const refuse = (reason: string): RunnerVerificationResult => ({
       passed: false,
@@ -347,8 +355,29 @@ export class CommandPolicyVerifier implements RunnerVerifier {
       );
     }
 
-    let commands = this.policies.get(input.policy_ref);
-    let source = `policy ${input.policy_ref}`;
+    // EXECUTION E11 — RESOLUTION ORDER, and why the dispatch field is first.
+    //
+    // E10 closed E4-5 by putting the project's real commands on the dispatch
+    // command, where they are the human-reviewed server-side record of how this
+    // project is built. They must outrank BOTH remaining sources or the feature
+    // is dead on arrival: every deployment that leaves
+    // NORNS_VERIFICATION_POLICIES_JSON unset still has a populated default
+    // policy map, so a map-first order would match `verification-policy:
+    // default-v1` and quietly run the whitespace lint instead of the project's
+    // tests — the exact "green badge that means nothing" E4 removed.
+    //
+    // It is safe to let a server-supplied value win here because it is an argv
+    // VECTOR that reaches `execFile` with `shell: false`, and the server refuses
+    // shell metacharacters before it ever leaves the coordinator. The operator's
+    // local map is not bypassed so much as demoted to what it always really was
+    // — the fallback for a project the server knows nothing about.
+    let commands: readonly VerificationCommand[] | undefined =
+      input.commands && input.commands.length > 0 ? input.commands : undefined;
+    let source = "verification commands from the dispatch command";
+    if (!commands) {
+      commands = this.policies.get(input.policy_ref);
+      source = `policy ${input.policy_ref}`;
+    }
     if (!commands) {
       try {
         const manifest = await readRepositoryVerificationManifest(
@@ -804,6 +833,9 @@ export class V2RunnerExecutor {
                 sensitive,
               ),
             });
+            // A cancelled run that published is still a run with work to
+            // review; the link matters at least as much here as on success.
+            emit(this.publishedEvent(command.run_id, publication));
           } catch (error) {
             // The run stays CANCELLED. A human asked for it to stop and it
             // stopped; relabelling that as `failed` would misattribute their
@@ -867,11 +899,33 @@ export class V2RunnerExecutor {
         });
       }
 
+      // The contract types `command` as `string[]` with a runtime `.min(1)`;
+      // the runner's own type is a non-empty tuple, because `execFile` needs a
+      // file argument that provably exists. Narrow here rather than casting: a
+      // vector that somehow arrived empty is dropped, not spawned with
+      // `undefined` as the program name.
+      const dispatchVerificationCommands = command.verification_commands
+        ?.map((entry) => {
+          const [file, ...args] = entry.command;
+          return file ? { name: entry.name, command: [file, ...args] as const } : null;
+        })
+        .filter((entry): entry is VerificationCommand => entry !== null);
       const verification = await this.verifier.verify({
         worktree_path: worktree.path,
         policy_ref: command.verification_policy_ref,
         expected_commit: commit,
         base_revision: worktree.base_revision,
+        // EXECUTION E11 — E10 put the project's real commands on the dispatch
+        // command and the runner ignored them, so the field it added was inert
+        // and every project without a committed manifest still failed closed.
+        // Length-checked, not just presence-checked. An EMPTY command list
+        // would make `results.every(...)` vacuously true and hand back a green
+        // badge for running nothing at all — precisely the dishonesty E4
+        // removed. Empty falls through to the next source and, failing that,
+        // fails closed.
+        ...(dispatchVerificationCommands && dispatchVerificationCommands.length > 0
+          ? { commands: dispatchVerificationCommands }
+          : {}),
       });
       // The failing output is the single most useful thing a human can be
       // handed, and the event contract carries only a digest of it. Stream the
@@ -902,6 +956,17 @@ export class V2RunnerExecutor {
         commit_sha: commit,
         passed: verification.passed,
         output_digest: createHash("sha256").update(verification.output).digest("hex"),
+        // EXECUTION E11 — the results the executor has always had and never
+        // sent. Without them `phase4EventProcessor` wrote `'[]'::jsonb` and a
+        // failed verification reached a human as a red badge over a sha256
+        // digest of text nobody kept.
+        command_results: verification.command_results.map((result) => ({
+          name: result.name,
+          command: [...result.command],
+          exit_code: result.exit_code,
+          passed: result.passed,
+          output: result.output,
+        })),
       });
 
       // EXECUTION E4 — publish BEFORE the `finally` removes the worktree.
@@ -950,6 +1015,7 @@ export class V2RunnerExecutor {
             ],
           ),
         });
+        emit(this.publishedEvent(command.run_id, publication));
       } catch (error) {
         // A push that did not happen is a FAILED run with a reason, never a
         // success and never a silent loss. Saying "succeeded" here would be
@@ -1022,6 +1088,37 @@ export class V2RunnerExecutor {
       await worktree?.cleanup().catch(() => undefined);
       if (scratch) await rm(scratch, { recursive: true, force: true });
     }
+  }
+
+  /**
+   * EXECUTION E11 — the structural half of "where the run's work went".
+   *
+   * E4 published the branch and opened the pull request, then reported it as
+   * `run_log` PROSE; E10 added the durable columns and the `run_published`
+   * event to carry it, and nothing emitted one, so the columns stayed null and
+   * the UI could not link a task to its review.
+   *
+   * The `outcome` enum on the wire is narrower than the runner's own: the
+   * contract has `pushed | local_only`, while publication distinguishes
+   * `pushed`, `already_published` and `republished`. All three mean the same
+   * load-bearing thing — the commits are on the remote at this commit — so they
+   * collapse to `pushed`, and the finer distinction stays in the run log rather
+   * than being invented into a field that cannot hold it (routed as E11-11).
+   */
+  private publishedEvent(
+    runId: string,
+    publication: PublicationResult,
+  ): Extract<EventPayloadT, { kind: "run_published" }> {
+    return {
+      kind: "run_published",
+      run_id: runId,
+      outcome: publication.outcome === "local_only" ? "local_only" : "pushed",
+      branch: publication.branch,
+      commit_sha: publication.commit,
+      remote: publication.remote,
+      pull_request_url: publication.pull_request_url,
+      pull_request_note: publication.pull_request_note,
+    };
   }
 
   /** Paths the agent changed but never committed. Cannot be published. */

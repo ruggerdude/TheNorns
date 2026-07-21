@@ -64,6 +64,38 @@ function fingerprint(value: unknown): string {
 
 const severityRank = { critical: 0, high: 1, normal: 2, low: 3 } as const;
 
+/**
+ * EXECUTION E10 — project the persisted verification command results down to
+ * just the ones that FAILED, which is all a human reading a red run needs.
+ *
+ * Defensive about the stored shape on purpose: rows written before E10 hold the
+ * hardcoded `[]`, and a runner is an external process whose payload has already
+ * been schema-validated at the event boundary but whose historical rows have
+ * not. Anything unrecognisable yields no entries rather than a 500 on a page
+ * whose entire job is to explain a failure.
+ */
+function failedVerificationCommands(
+  value: unknown,
+): { name: string; command: string[]; exit_code: number; output: string }[] {
+  if (!Array.isArray(value)) return [];
+  const failures: { name: string; command: string[]; exit_code: number; output: string }[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+    if (record.passed !== false) continue;
+    const name = typeof record.name === "string" && record.name ? record.name : "verification";
+    failures.push({
+      name,
+      command: Array.isArray(record.command)
+        ? record.command.filter((part): part is string => typeof part === "string")
+        : [],
+      exit_code: typeof record.exit_code === "number" ? record.exit_code : -1,
+      output: typeof record.output === "string" ? record.output : "",
+    });
+  }
+  return failures;
+}
+
 export class AttentionConflictError extends Error {
   constructor(message: string) {
     super(message);
@@ -868,6 +900,10 @@ export class AttentionService {
         verification_status: string | null;
         commit_sha: string | null;
         failure_detail: string | null;
+        published_branch: string | null;
+        pull_request_url: string | null;
+        publication_note: string | null;
+        command_results: unknown;
         evidence_count: number;
       }>(
         `SELECT t.id, t.title, t.state, t.complexity, t.risk,
@@ -879,6 +915,17 @@ export class AttentionService {
           reviewer.model AS reviewer_model, reviewer.roles AS reviewer_roles,
           run.id AS run_id, run.state AS run_state, run.attempt, run.verification_status,
           run.commit_sha, run.failure_detail,
+          -- EXECUTION E10: the branch and pull request the run published, so a
+          -- finished task is one click from its review instead of one grep
+          -- through a run log.
+          run.published_branch, run.pull_request_url, run.publication_note,
+          -- EXECUTION E10: WHICH command failed, from the designated run's most
+          -- recent verification. A red badge over an opaque digest is not
+          -- evidence; the failing command's own output is.
+          (SELECT verification.command_results FROM verification_results verification
+            WHERE verification.run_id = run.id
+            ORDER BY verification.created_at DESC, verification.id DESC
+            LIMIT 1) AS command_results,
           (SELECT count(*)::int FROM verification_results verification
            WHERE verification.task_id=t.id) AS evidence_count
          FROM tasks t
@@ -974,8 +1021,12 @@ export class AttentionService {
                   verification_status: task.verification_status,
                   commit_sha: task.commit_sha,
                   failure_detail: task.failure_detail,
+                  published_branch: task.published_branch,
+                  pull_request_url: task.pull_request_url,
+                  publication_note: task.publication_note,
                 }
               : null,
+          failed_verification_commands: failedVerificationCommands(task.command_results),
           evidence_count: task.evidence_count,
           reviews: (reviewsByTask.get(task.id) ?? []).map((review) => ({
             id: review.id,

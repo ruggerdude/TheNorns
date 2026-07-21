@@ -193,7 +193,19 @@ interface PhaseExecutionDto {
       verification_status: string;
       commit_sha: string | null;
       failure_detail: string | null;
+      // EXECUTION E10 — where the run's work went, so a finished task links to
+      // the review instead of only to a commit sha.
+      published_branch?: string | null;
+      pull_request_url?: string | null;
+      publication_note?: string | null;
     } | null;
+    // EXECUTION E10 — which verification command failed, and what it printed.
+    failed_verification_commands?: Array<{
+      name: string;
+      command: string[];
+      exit_code: number;
+      output: string;
+    }>;
     evidence_count: number;
     reviews: Array<{
       id: string;
@@ -370,9 +382,50 @@ function TaskQcPanel({
           </span>
           <span>Verification: {task.run.verification_status}</span>
           {task.run.commit_sha ? <code>{task.run.commit_sha.slice(0, 8)}</code> : null}
+          {/* EXECUTION E10 — the click-through to the review. E4 published the
+              branch and opened the pull request; until now that fact lived only
+              in a run-log string and the UI could not link to it. */}
+          {task.run.pull_request_url ? (
+            <a
+              className="run-pull-request"
+              data-testid={`task-pr-${task.id}`}
+              href={task.run.pull_request_url}
+              rel="noreferrer noopener"
+              target="_blank"
+            >
+              View pull request
+            </a>
+          ) : task.run.published_branch ? (
+            <span className="muted" data-testid={`task-branch-${task.id}`}>
+              Branch {task.run.published_branch}
+              {task.run.publication_note ? ` · ${task.run.publication_note}` : ""}
+            </span>
+          ) : null}
         </div>
       ) : null}
       {task.run?.failure_detail ? <Alert>{task.run.failure_detail}</Alert> : null}
+      {/* EXECUTION E10 — WHICH command failed, and its output. A red badge over
+          a sha256 digest is not something a human can act on. */}
+      {task.failed_verification_commands?.length ? (
+        <details
+          className="verification-failures"
+          data-testid={`task-verification-${task.id}`}
+          open
+        >
+          <summary>
+            Verification failed: {task.failed_verification_commands.map((c) => c.name).join(", ")}
+          </summary>
+          {task.failed_verification_commands.map((failure) => (
+            <div className="verification-failure" key={`${task.id}-${failure.name}`}>
+              <div className="verification-failure-head">
+                <code>{failure.command.join(" ")}</code>
+                <span className="muted">exit {failure.exit_code}</span>
+              </div>
+              {failure.output ? <pre className="verification-output">{failure.output}</pre> : null}
+            </div>
+          ))}
+        </details>
+      ) : null}
 
       <details className="task-qc-details" open={focused || Boolean(task.reviews?.length)}>
         <summary>

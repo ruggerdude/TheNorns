@@ -147,6 +147,46 @@ export function estimateInferenceInputTokens(system: string | undefined, prompt:
   return Math.max(1, Math.ceil((chars / 4) * 1.25) + 256);
 }
 
+// ---------------------------------------------------------------------------
+// The one run-authorization decision
+// ---------------------------------------------------------------------------
+
+/**
+ * EXECUTION E9 — extracted VERBATIM from `InferenceProxy.handle` so the
+ * streaming gateway and the completion proxy share one implementation.
+ *
+ * The E9 brief is explicit that two notions of "this runner owns this run" is
+ * how an authorization bypass gets built, and it is right: this used to be four
+ * inline comparisons, and a second caller copying them would have been the
+ * moment the two drifted. `handle` now calls this, so there is nothing to
+ * drift from.
+ *
+ * @param run                the facts resolved from THIS server's records
+ * @param requestedRunId     the run the caller claims to be executing
+ * @param authenticatedRunner the runner identity the transport already proved
+ * @param currentGeneration  the generation this server currently recognises
+ */
+export function authorizeProxiedRunAccess(
+  run: ProxiedRunFacts | null,
+  requestedRunId: string,
+  authenticatedRunner: string,
+  currentGeneration: number,
+): "ok" | "unauthorized" | "run_not_active" {
+  // Unknown run, someone else's run, and a stale dispatch generation all
+  // collapse to the SAME opaque refusal: a compromised job must not be able to
+  // probe run ids and learn which exist.
+  if (
+    !run ||
+    run.runner_id !== authenticatedRunner ||
+    run.runner_generation !== currentGeneration ||
+    run.run_id !== requestedRunId
+  ) {
+    return "unauthorized";
+  }
+  if (!run.active) return "run_not_active";
+  return "ok";
+}
+
 /** Provider failure taxonomy -> the runner-visible refusal code. */
 function codeForAdapterKind(kind: AdapterErrorKind): InferenceErrorCodeT {
   switch (kind) {
@@ -227,12 +267,10 @@ export class InferenceProxy {
     } catch {
       return refuse("provider_error", "run lookup failed");
     }
-    if (
-      !run ||
-      run.runner_id !== authenticated ||
-      run.runner_generation !== currentGeneration ||
-      run.run_id !== request.run_id
-    ) {
+    // EXECUTION E9 — the comparisons that used to be inline here now live in
+    // `authorizeProxiedRunAccess` so the streaming gateway shares them exactly.
+    const access = authorizeProxiedRunAccess(run, request.run_id, authenticated, currentGeneration);
+    if (access === "unauthorized" || !run) {
       return refuse("unauthorized", "not authorized for this run");
     }
     if (run.task_id !== request.task_id) {
@@ -240,7 +278,7 @@ export class InferenceProxy {
       // the caller has already proved it owns this run.
       return refuse("invalid_request", "task does not belong to this run");
     }
-    if (!run.active) {
+    if (access === "run_not_active") {
       return refuse("run_not_active", "run is not in a state that may spend");
     }
 

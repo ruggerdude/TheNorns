@@ -133,6 +133,35 @@ export const DISPATCH_CONTEXT_SCOPE_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+// EXECUTION E9: per-run credentials for the provider-native model gateway
+// (gateway_credentials). Only a sha-256 hash of each token is stored.
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED — the file is literally named
+// `NNNN_gateway_credentials.sql`. 0020 is the highest number merged when E9
+// was written, and three parallel agents have collided on migration numbers
+// already; the PM assigns the real number and renames both the file and the
+// string below at integration.
+export const GATEWAY_CREDENTIALS_MIGRATION_NAME = "NNNN_gateway_credentials";
+export const GATEWAY_CREDENTIALS_MIGRATION_URL = new URL(
+  "../../../drizzle/NNNN_gateway_credentials.sql",
+  import.meta.url,
+);
+
+// EXECUTION E10: persists the branch, remote and pull request a run published,
+// so a completed task can be clicked through to its review instead of having
+// that fact live only in a `run_log` string.
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED — the file is literally named
+// `NNNN_run_publication.sql`, matching E9's convention. 0020 is the highest
+// number merged when E10 was written and E9 is unnumbered in parallel; the PM
+// assigns the real number and renames both the file and the string below at
+// integration.
+export const RUN_PUBLICATION_MIGRATION_NAME = "NNNN_run_publication";
+export const RUN_PUBLICATION_MIGRATION_URL = new URL(
+  "../../../drizzle/NNNN_run_publication.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -243,6 +272,14 @@ export async function loadTaskContextMigrationSql(): Promise<string> {
 
 export async function loadDispatchContextScopeMigrationSql(): Promise<string> {
   return readFile(DISPATCH_CONTEXT_SCOPE_MIGRATION_URL, "utf8");
+}
+
+export async function loadGatewayCredentialsMigrationSql(): Promise<string> {
+  return readFile(GATEWAY_CREDENTIALS_MIGRATION_URL, "utf8");
+}
+
+export async function loadRunPublicationMigrationSql(): Promise<string> {
+  return readFile(RUN_PUBLICATION_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -432,6 +469,14 @@ export async function runCurrentV2Migrations(
     {
       name: DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
       sql: await loadDispatchContextScopeMigrationSql(),
+    },
+    {
+      name: GATEWAY_CREDENTIALS_MIGRATION_NAME,
+      sql: await loadGatewayCredentialsMigrationSql(),
+    },
+    {
+      name: RUN_PUBLICATION_MIGRATION_NAME,
+      sql: await loadRunPublicationMigrationSql(),
     },
   ]);
 }

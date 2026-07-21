@@ -15,6 +15,7 @@ import { type RunnerContextIdentity, RunnerSignedContextFetcher } from "./contex
 import { RunnerDaemon } from "./daemon.js";
 import type { RelayInferenceClient } from "./inferenceClient.js";
 import type { LiveRunRegistry } from "./liveRuns.js";
+import { type GatewayCredential, ModelGatewayClient } from "./modelGateway.js";
 import { GitPublisher } from "./publication.js";
 import { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
 import { CodexRuntime } from "./runtimes/codex.js";
@@ -98,6 +99,14 @@ function createV2Executor(
    */
   inference: RelayInferenceClient,
   /**
+   * EXECUTION E9 — the relay origin the agentic runtimes are pointed at.
+   * When present, `claude-code` and `codex` mint a short-lived, per-run
+   * gateway credential instead of needing a provider key in this process.
+   * Absent (a laptop runner started without --server) leaves both runtimes on
+   * whatever credentials the environment already holds, unchanged.
+   */
+  serverOrigin: string | undefined,
+  /**
    * EXECUTION E11 — the daemon's live-run registry. Required, not optional:
    * without it a dispatched coding run executes with no way to stop it, which
    * is precisely the defect E11 exists to fix. Wiring it here is what makes
@@ -126,6 +135,23 @@ function createV2Executor(
   }
   onRegistry?.(repositories);
   const policies = runnerVerificationPolicies(process.env.NORNS_VERIFICATION_POLICIES_JSON);
+  // EXECUTION E9 — one client for the process, one memoized credential per run.
+  const gatewayClient = serverOrigin ? new ModelGatewayClient(serverOrigin, identity) : null;
+  const minted = new Map<string, Promise<GatewayCredential>>();
+  const gateway = (runId: string) => {
+    if (!gatewayClient) return {};
+    return {
+      gateway: () => {
+        const existing = minted.get(runId);
+        if (existing) return existing;
+        const pending = gatewayClient.mint(runId);
+        minted.set(runId, pending);
+        // A failed mint must not be cached: the run should be able to retry.
+        pending.catch(() => minted.delete(runId));
+        return pending;
+      },
+    };
+  };
   return new V2RunnerExecutor(
     { id: runnerId, generation, scratch_root: join(dataDir, "scratch") },
     repositories,
@@ -136,8 +162,15 @@ function createV2Executor(
     new HashVerifiedContextLoader(new RunnerSignedContextFetcher(identity)),
     new GitWorktreeManager(join(dataDir, "worktrees")),
     new Map<string, RunnerRuntimeProvider>([
-      ["codex", (model: string) => new CodexRuntime({ model })],
-      ["claude-code", (model: string) => new ClaudeCodeRuntime({ model })],
+      // EXECUTION E9 — both agentic runtimes now mint a per-run gateway
+      // credential lazily, at the moment they execute. Minting is per-run and
+      // memoized per runtime instance, so a resumed or retried turn inside one
+      // run reuses one credential rather than accumulating rows.
+      ["codex", (model: string, context) => new CodexRuntime({ model, ...gateway(context.runId) })],
+      [
+        "claude-code",
+        (model: string, context) => new ClaudeCodeRuntime({ model, ...gateway(context.runId) }),
+      ],
       // EXECUTION E3 — credential-free. Gets its model access from the relay,
       // where the call is authorized against the run and charged to the
       // project's budget before it is made.
@@ -311,6 +344,9 @@ async function main(): Promise<void> {
       // The key stays inside the daemon; only a signing capability is handed out.
       { runnerId, sign: (payload) => daemon.sign(payload) },
       daemon.inference,
+      // EXECUTION E9 — the relay origin the agentic runtimes mint against.
+      // `server` is already required to reach this point.
+      server,
       daemon.liveRuns,
       (repositories) => {
         execution.repositories = repositories;
