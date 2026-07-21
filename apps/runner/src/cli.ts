@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { type RunnerContextIdentity, RunnerSignedContextFetcher } from "./contextAuth.js";
 import { RunnerDaemon } from "./daemon.js";
 import type { RelayInferenceClient } from "./inferenceClient.js";
+import type { LiveRunRegistry } from "./liveRuns.js";
 import { GitPublisher } from "./publication.js";
 import { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
 import { CodexRuntime } from "./runtimes/codex.js";
@@ -97,6 +98,14 @@ function createV2Executor(
    */
   inference: RelayInferenceClient,
   /**
+   * EXECUTION E11 — the daemon's live-run registry. Required, not optional:
+   * without it a dispatched coding run executes with no way to stop it, which
+   * is precisely the defect E11 exists to fix. Wiring it here is what makes
+   * cancel/interrupt/send_message reach a real run in production rather than
+   * only in a test that constructs the executor by hand.
+   */
+  liveRuns: LiveRunRegistry,
+  /**
    * ONBOARDING O4: receives the repository registry so the ephemeral CI mode
    * can bind the checked-out workspace to whatever repository binding the
    * dispatch command names. Optional — laptop runners ignore it entirely.
@@ -152,6 +161,7 @@ function createV2Executor(
     // git credential and GitHub exports GITHUB_REPOSITORY/GITHUB_TOKEN, so this
     // asks Norns for no secret and stores none (see pushCredentialProvider.ts).
     new GitPublisher(),
+    liveRuns,
   );
 }
 
@@ -301,6 +311,7 @@ async function main(): Promise<void> {
       // The key stays inside the daemon; only a signing capability is handed out.
       { runnerId, sign: (payload) => daemon.sign(payload) },
       daemon.inference,
+      daemon.liveRuns,
       (repositories) => {
         execution.repositories = repositories;
       },

@@ -1,5 +1,12 @@
 export { RunnerDaemon, type DaemonOptions } from "./daemon.js";
 export { FixtureExecutor } from "./fixture.js";
+export {
+  LiveRunRegistry,
+  type LiveControlKind,
+  type LiveControlOutcome,
+  type LiveRunRegistration,
+  type LiveRunSession,
+} from "./liveRuns.js";
 export { RunnerStateFile } from "./state.js";
 export { WorkspaceRegistry } from "./workspaceRegistry.js";
 export {
@@ -24,6 +31,7 @@ export type {
   RuntimeCapabilities,
   RuntimeRunRequest,
   RuntimeRunResult,
+  RuntimeSession,
   RuntimeUsage,
 } from "./runtimes/types.js";
 export { ProcessRuntime } from "./runtimes/process.js";
