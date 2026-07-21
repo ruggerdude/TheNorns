@@ -37,6 +37,7 @@ import {
   ApprovedRepositoryRegistry,
   ClaudeCodeRuntime,
   CodexRuntime,
+  type CodingRuntime,
   CommandPolicyVerifier,
   GitPublisher,
   GitWorktreeManager,
@@ -507,6 +508,64 @@ describe("EXECUTION E11 — the per-runtime mid-session-input verdict is declare
     expect(outcome?.detail).toContain("was not delivered");
     release("cancelled");
   });
+});
+
+describe("EXECUTION E11 — the resumable session id survives the run", () => {
+  const cleanup: string[] = [];
+  afterEach(async () => {
+    await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  });
+
+  it(
+    "returns and emits the runtime's session id, including on a cancelled run",
+    { timeout: 60_000 },
+    async () => {
+      const h = await harness(cleanup);
+      const liveRuns = new LiveRunRegistry();
+      const events: EventPayloadT[] = [];
+      // A real runtime that reports a session, like claude-code and codex do and
+      // always have. Before E11 the executor threw this value away at every exit.
+      const sessionReporting: CodingRuntime = {
+        name: "process",
+        capabilities: new ProcessRuntime().capabilities,
+        run: async (request) => {
+          const inner = await new ProcessRuntime().run(request);
+          return { ...inner, sessionId: "session-abc-123" };
+        },
+      };
+      const scriptBytes = new TextEncoder().encode(["echo AGENT_WORKING", "sleep 60"].join("\n"));
+      const executor = new V2RunnerExecutor(
+        { id: "runner-1", generation: 3, scratch_root: h.root },
+        h.registry,
+        new HashVerifiedContextLoader({ fetch: async () => scriptBytes }),
+        new GitWorktreeManager(h.worktreeRoot),
+        new Map([["process", sessionReporting]]),
+        new CommandPolicyVerifier(new Map([["verification", PASSING]])),
+        undefined,
+        new GitPublisher({
+          repositorySlug: "acme/widgets",
+          token: "test-token",
+          fetchImpl: githubApi().fetchImpl,
+        }),
+        liveRuns,
+      );
+      const running = executor.execute(dispatchCommand(scriptBytes, h.base), (event) =>
+        events.push(event),
+      );
+      await awaitMarker(events, "AGENT_WORKING", "the agent to start");
+      await liveRuns.control("run-1", "cancel");
+      const result = await running;
+
+      expect(result.outcome).toBe("cancelled");
+      // The run a human most wants to resume is the one they stopped.
+      expect(result.session_id).toBe("session-abc-123");
+      // And it reaches the durable event stream, which on an ephemeral runner is
+      // the only thing that outlives the machine.
+      expect(
+        events.some((event) => event.kind === "run_log" && event.chunk.includes("session-abc-123")),
+      ).toBe(true);
+    },
+  );
 });
 
 describe("EXECUTION E11 — the daemon's control routing", () => {
