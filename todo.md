@@ -527,13 +527,19 @@ Closes E3-9 with the human's decision: a forwarder, not a reimplementation.
 - [x] E9-8 — **BUG FIXED, found by the real-runtime test**: the gateway rebuilt
   the upstream URL from the path alone, silently dropping the query string.
   Claude Code really sends `?beta=true`
-- [ ] E9-9 — **PM ROUTING** (supersedes E3-11): `agent_profiles.runtime` may now
-  name `claude-code` or `codex` for Actions-hosted work — they are no longer
-  credential-dependent. Nothing in E9 writes that column; the coordinator owns
-  it. Until it does, Actions runs still get `proxied-completion`
-- [ ] E9-10 — **PM ROUTING** (same as E3-10): `ServerOptions.runnerInference:
-  { transactions }` from main.ts would beat both E3 and E9 reaching for
-  whichever relational option happens to be present
+- [x] ✅ E9-9 — **CLOSED BY E10**: the coordinator now resolves a real runtime
+  name. `StrategyBridgeService` wrote `agent_profiles.runtime = <provider>`
+  (`anthropic`/`openai`), which is not a key in the runner's runtime map at
+  all, so every task staffed through the normal planning path died with
+  "runtime anthropic is unavailable" before doing any work. Fixed at the source
+  and defensively at dispatch (`resolveDispatchRuntime`), mapping to
+  `claude-code`/`codex` — credential-free since E9, so correct for Actions and
+  laptop alike
+- [x] ✅ E9-10 — **CLOSED BY E10**: `ServerOptions.runnerInference:
+  { transactions }` added and wired from `main.ts`, with a boot-shape test that
+  mounts the gateway credential route from that option ALONE. The old
+  `planningRuns ?? onboarding ?? attachments` chain is retained below it purely
+  for compatibility with existing callers
 - [ ] E9-11 — the model allowlist is keyed on the RESOLVED model id in the
   request body. An operator who sets `NORNS_RUNNER_ALLOWED_MODELS` to an alias
   (`claude-sonnet-4-5`) rather than the registry id will see every call refused
@@ -559,3 +565,42 @@ Closes E3-9 with the human's decision: a forwarder, not a reimplementation.
   provider is free to exceed it. The overshoot is bounded by the model's own
   output cap, not by ours. Requiring the field would stop being a forwarder;
   the alternative is a per-model output cap in the registry
+
+## EXECUTION E10 — joining the pipeline up
+
+- [x] ✅ E10-1 (E4-5) — the project's real build/test/lint commands now reach the
+  runner structurally: `V2DispatchCommand.verification_commands`, populated by
+  `Phase4Coordinator` from the ingested `repository_fact` project memory. Takes
+  precedence at the runner over the committed `.norns/verification.json`, which
+  stays as the fallback; neither present still FAILS CLOSED
+- [x] ✅ E10-2 — one policy-ref vocabulary. `verification-policy:default-v1`
+  (`V2_DEFAULT_VERIFICATION_POLICY_REF`) kept because it is the only spelling
+  the runner's default policy map can resolve; `strategyBridgeService`'s bare
+  `"verification"` replaced
+- [x] ✅ E10-3 — `phase4EventProcessor` no longer writes `'[]'::jsonb` for
+  `command_results`; real per-command results are persisted and surfaced in
+  `AttentionService.phase()` and in the workspace, naming the failing command
+  and showing its output
+- [x] ✅ E10-4 — branch + pull request persisted on `agent_runs` from a new
+  `run_published` event and exposed in `AttentionService.phase()` and the
+  resume payload; the task card links straight to the review
+- [x] ✅ E10-5 (E9-9) — dispatch a real agentic runtime instead of a provider name
+- [x] ✅ E10-6 (E9-10) — `runnerInference` named and wired from `main.ts`
+- [ ] 🔴 E10-7 — **RUNNER-SIDE, ROUTED TO THE PM**: `apps/runner` must (a) prefer
+  `command.verification_commands` over the committed manifest in
+  `CommandPolicyVerifier`, (b) put `verification.command_results` on the
+  `verification_result` event, and (c) emit the new `run_published` event from
+  the publication block in `v2Execution.ts`. The server side of all three is
+  merged and tested; until the runner emits them the columns stay null and the
+  UI shows nothing. E10 was forbidden from touching `apps/runner/**`
+- [ ] 🟡 E10-8 — a verification fact recorded with shell syntax (`pnpm build &&
+  pnpm test`) is DROPPED rather than executed, and the drop is reported on
+  `Phase4ScheduledRun.rejected_verification_commands` but nothing surfaces it to
+  a human yet
+- [ ] 🟡 E10-9 — `projectImportPlan` still mints
+  `policy:legacy-verification:<id>` refs, which no runner resolves. Harmless now
+  that commands travel on the dispatch command, but it is a third vocabulary
+- [ ] 🟡 E10-10 — `verification_results.command_results` is persisted in the
+  RUNNER's shape (inline `output`), not `V2VerificationCommandResult` from the
+  evidence contract (artifact-backed `output_artifact`). Nothing reads the
+  contract shape today; reconciling needs an artifact store on this path
