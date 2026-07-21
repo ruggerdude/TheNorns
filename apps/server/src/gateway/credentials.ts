@@ -27,8 +27,8 @@
 // to remember to delete it.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { newId } from "../ids.js";
-import type { ProxiedRunFacts } from "../runners/inferenceProxy.js";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
+import type { ProxiedRunFacts } from "../runners/inferenceProxy.js";
 
 /**
  * Prefix on every issued token.
@@ -90,11 +90,7 @@ export function digestsEqual(left: string, right: string): boolean {
   return a.length === b.length && a.length > 0 && timingSafeEqual(a, b);
 }
 
-export type GatewayCredentialFailure =
-  | "malformed"
-  | "unknown"
-  | "expired"
-  | "revoked";
+export type GatewayCredentialFailure = "malformed" | "unknown" | "expired" | "revoked";
 
 export type GatewayCredentialResolution =
   | { ok: true; credential: GatewayCredentialRecord }

@@ -270,10 +270,10 @@ export class InferenceProxy {
     // EXECUTION E9 — the comparisons that used to be inline here now live in
     // `authorizeProxiedRunAccess` so the streaming gateway shares them exactly.
     const access = authorizeProxiedRunAccess(run, request.run_id, authenticated, currentGeneration);
-    if (access === "unauthorized") {
+    if (access === "unauthorized" || !run) {
       return refuse("unauthorized", "not authorized for this run");
     }
-    if (run && run.task_id !== request.task_id) {
+    if (run.task_id !== request.task_id) {
       // Distinct from `unauthorized` only because it reveals nothing extra:
       // the caller has already proved it owns this run.
       return refuse("invalid_request", "task does not belong to this run");
