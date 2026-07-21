@@ -1,7 +1,7 @@
 -- EXECUTION E5 — per-dispatch runner identity for GitHub Actions-hosted
 -- execution.
 --
--- NUMBER UNASSIGNED (repo convention): the integrating PM assigns NNNN.
+-- Assigned 0023 at integration.
 -- Additive and forward-only. Nothing here is destructive.
 --
 -- THE BUG THIS CLOSES. `actionsRunnerId(projectId)` used to be the runner

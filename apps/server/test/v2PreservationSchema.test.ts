@@ -254,12 +254,12 @@ describe.sequential("Phase 2 preservation schema", () => {
       TASK_CONTEXT_MIGRATION_NAME,
       DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
       // This query is `ORDER BY name` (alphabetical over the TEXT primary
-      // key), not application/insertion order — unlike the `runCurrentV2Migrations`
-      // array above. All `00NN`-numbered names sort before any `NNNN_`-named
-      // one, and among the `NNNN_` ones, alphabetical order applies.
-      ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
+      // key), not application/insertion order — unlike the
+      // `runCurrentV2Migrations` array above. Every migration is numbered, so
+      // alphabetical and numeric order coincide.
       GATEWAY_CREDENTIALS_MIGRATION_NAME,
       RUN_PUBLICATION_MIGRATION_NAME,
+      ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
     ]);
   });
 

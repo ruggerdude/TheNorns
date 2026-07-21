@@ -137,13 +137,13 @@ export const DISPATCH_CONTEXT_SCOPE_MIGRATION_URL = new URL(
 // (gateway_credentials). Only a sha-256 hash of each token is stored.
 //
 // THE NUMBER IS DELIBERATELY UNASSIGNED — the file is literally named
-// `NNNN_gateway_credentials.sql`. 0020 is the highest number merged when E9
+// `0021_gateway_credentials.sql`. 0020 is the highest number merged when E9
 // was written, and three parallel agents have collided on migration numbers
 // already; the PM assigns the real number and renames both the file and the
 // string below at integration.
-export const GATEWAY_CREDENTIALS_MIGRATION_NAME = "NNNN_gateway_credentials";
+export const GATEWAY_CREDENTIALS_MIGRATION_NAME = "0021_gateway_credentials";
 export const GATEWAY_CREDENTIALS_MIGRATION_URL = new URL(
-  "../../../drizzle/NNNN_gateway_credentials.sql",
+  "../../../drizzle/0021_gateway_credentials.sql",
   import.meta.url,
 );
 
@@ -152,13 +152,13 @@ export const GATEWAY_CREDENTIALS_MIGRATION_URL = new URL(
 // that fact live only in a `run_log` string.
 //
 // THE NUMBER IS DELIBERATELY UNASSIGNED — the file is literally named
-// `NNNN_run_publication.sql`, matching E9's convention. 0020 is the highest
+// `0022_run_publication.sql`, matching E9's convention. 0020 is the highest
 // number merged when E10 was written and E9 is unnumbered in parallel; the PM
 // assigns the real number and renames both the file and the string below at
 // integration.
-export const RUN_PUBLICATION_MIGRATION_NAME = "NNNN_run_publication";
+export const RUN_PUBLICATION_MIGRATION_NAME = "0022_run_publication";
 export const RUN_PUBLICATION_MIGRATION_URL = new URL(
-  "../../../drizzle/NNNN_run_publication.sql",
+  "../../../drizzle/0022_run_publication.sql",
   import.meta.url,
 );
 
@@ -167,14 +167,14 @@ export const RUN_PUBLICATION_MIGRATION_URL = new URL(
 // concurrent Actions-hosted dispatches in one project fencing each other off.
 //
 // THE NUMBER IS DELIBERATELY UNASSIGNED — the file is literally named
-// `NNNN_actions_dispatch_runner_identity.sql`, matching E9/E10's convention.
+// `0023_actions_dispatch_runner_identity.sql`, matching E9/E10's convention.
 // 0020 is the highest assigned number merged when E5 was written, and E9/E10
 // are unnumbered in parallel; the PM assigns the real number and renames both
 // the file and the string below at integration.
 export const ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME =
-  "NNNN_actions_dispatch_runner_identity";
+  "0023_actions_dispatch_runner_identity";
 export const ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_URL = new URL(
-  "../../../drizzle/NNNN_actions_dispatch_runner_identity.sql",
+  "../../../drizzle/0023_actions_dispatch_runner_identity.sql",
   import.meta.url,
 );
 
