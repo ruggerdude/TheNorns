@@ -21,7 +21,15 @@ import { Admin } from "./Admin";
 import { Debates } from "./Debates";
 import { Login, type LoginMode } from "./Login";
 import { type PlanLike, PlanReview } from "./PlanReview";
-import { type ProjectSummary, ProjectTabs, Projects } from "./Projects";
+import {
+  AttentionDecisionForm,
+  type AttentionItemDto,
+  type PortfolioAttentionDto,
+  type ProjectSummary,
+  ProjectTabs,
+  Projects,
+} from "./Projects";
+import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
 import {
   ApiError,
   type AuthSession,
@@ -153,9 +161,25 @@ interface ProjectResumeDto {
     tasks: number;
     completed_tasks: number;
     blocked_tasks: number;
+    // FRONT DOOR P5 (tracking): additive per-phase progress fields on the
+    // resume response (ProjectResumeService.open merges these onto the
+    // Phase-3-owned contract rather than widening it — see that service's
+    // deviation note). Optional here because the resume DTO's shape long
+    // predates them; a stale mock/fixture without them still type-checks.
+    percent_complete?: number;
+    eta_at?: string | null;
+    burn_rate_usd_per_hour?: number | null;
   }>;
   attention: { open_decisions: number; active_runs: number; blocked_tasks: number };
   next_recommended_action: string;
+  // FRONT DOOR P5: aggregate project progress + the persisted poll cadence.
+  progress?: {
+    overall_percent_complete: number;
+    blended_eta_at: string | null;
+    agents_active: number;
+    decisions_waiting: number;
+  };
+  update_interval_seconds?: number;
 }
 
 interface PhaseExecutionDto {
@@ -223,6 +247,27 @@ interface PhaseExecutionDto {
 }
 
 type PhaseExecutionTask = PhaseExecutionDto["tasks"][number];
+
+/** FRONT DOOR P2's durable planning-run DTO (GET .../planning-runs/:runId),
+ *  mirrored client-side. */
+interface PlanningRunPollDto {
+  id: string;
+  status: "queued" | "drafting" | "reviewing" | "revising" | "converged" | "cap_reached" | "failed";
+  round: number;
+  max_rounds: number;
+  transcript: Array<{
+    round: number;
+    role: "pm" | "reviewer";
+    provider: string;
+    model: string;
+    summary: string;
+    finding_counts: { must_fix: number; should_fix: number; suggestion: number } | null;
+  }>;
+  result: { plan: unknown; content_hash: string; total_cost_usd: number } | null;
+  error: string | null;
+}
+
+const NON_TERMINAL_RUN_STATUSES = new Set(["queued", "drafting", "reviewing", "revising"]);
 
 function agentRoleLabel(roles: string[] | undefined): string {
   return roles?.length ? roles.map((role) => role.replaceAll("_", " ")).join(", ") : "Agent";
@@ -473,6 +518,22 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   return json;
 }
 
+async function patchJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: "PATCH",
+    headers: authHeaders(true),
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  const json = (await res.json()) as T & { message?: string };
+  if (!res.ok)
+    throw new ApiError(
+      (json as { message?: string }).message ?? `request failed: ${res.status}`,
+      res.status,
+    );
+  return json;
+}
+
 /** Layered layout: x by longest-path depth, y by index within the layer. */
 function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
   const depths = new Map<string, number>();
@@ -545,14 +606,38 @@ function ProjectGraph({
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
   const [resume, setResume] = useState<ProjectResumeDto | null>(null);
-  const [phaseObjective, setPhaseObjective] = useState("");
-  const [phaseCreating, setPhaseCreating] = useState(false);
-  const [phaseError, setPhaseError] = useState<string | null>(null);
   const [monitoredPhaseId, setMonitoredPhaseId] = useState<string | null>(null);
   const [phaseExecution, setPhaseExecution] = useState<PhaseExecutionDto | null>(null);
   const [executionError, setExecutionError] = useState<string | null>(null);
   const [showDebates, setShowDebates] = useState(false);
   const focusedTaskId = project.focus_task_id ?? null;
+
+  // ------------------------------------------------------------------
+  // FRONT DOOR P1: new-phase creation goes through an observable planning
+  // run -> materialize-into-phase -> strategy review, replacing the old
+  // "Create the next phase" raw-objective text box (UI regression it left:
+  // a phase created that way had no staffing, no reviewer, no plan to
+  // approve — just a bare objective string).
+  // ------------------------------------------------------------------
+  const [nextPhaseObjective, setNextPhaseObjective] = useState("");
+  const [nextPhaseRounds, setNextPhaseRounds] = useState(3);
+  const [activePlanningRunId, setActivePlanningRunId] = useState<string | null>(
+    project.focus_planning_run_id ?? null,
+  );
+  const [planningRun, setPlanningRun] = useState<PlanningRunPollDto | null>(null);
+  const [planningRunStarting, setPlanningRunStarting] = useState(false);
+  const [planningRunError, setPlanningRunError] = useState<string | null>(null);
+  const [materializingPhase, setMaterializingPhase] = useState(false);
+  const [strategyReview, setStrategyReview] = useState<StrategyReviewDto | null>(null);
+  const [strategyBusy, setStrategyBusy] = useState(false);
+  const [strategyError, setStrategyError] = useState<string | null>(null);
+  // Phase-scoped "needs you": the portfolio attention feed filtered to this
+  // project + the currently monitored phase (P1 human-approved addition —
+  // the phase-detail view's Q&A/decision thread).
+  const [phaseAttention, setPhaseAttention] = useState<AttentionItemDto[]>([]);
+  const [phaseAttentionBusy, setPhaseAttentionBusy] = useState<string | null>(null);
+  // FRONT DOOR P5: tracking update-interval control.
+  const [intervalSaving, setIntervalSaving] = useState(false);
 
   // Last-known-*good* approval state (never "pending"): what we revert to when
   // an in-flight mutation fails, so the banner is never left stuck at pending.
@@ -637,13 +722,14 @@ function ProjectGraph({
     };
   }, [base, onLogout, reconcileApproval]);
 
+  const [resumeError, setResumeError] = useState<string | null>(null);
   const loadResume = useCallback(async () => {
     try {
       setResume(await getJson<ProjectResumeDto>(`/api/v2/projects/${project.id}/resume`));
     } catch (err) {
       if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
       else if (!(err instanceof ApiError && err.status === 404)) {
-        setPhaseError(err instanceof Error ? err.message : String(err));
+        setResumeError(err instanceof Error ? err.message : String(err));
       }
     }
   }, [project.id, onLogout]);
@@ -651,6 +737,15 @@ function ProjectGraph({
   useEffect(() => {
     void loadResume();
   }, [loadResume]);
+
+  // FRONT DOOR P5 (tracking): poll cadence honors the persisted
+  // update_interval_seconds once known; falls back to a 15s default until
+  // the first resume response arrives.
+  useEffect(() => {
+    const seconds = resume?.update_interval_seconds ?? 15;
+    const timer = window.setInterval(() => void loadResume(), Math.max(5, seconds) * 1000);
+    return () => window.clearInterval(timer);
+  }, [resume?.update_interval_seconds, loadResume]);
 
   useEffect(() => {
     if (project.focus_phase_id) {
@@ -695,27 +790,189 @@ function ProjectGraph({
     return () => window.clearInterval(timer);
   }, [monitoredPhaseId, loadPhaseExecution]);
 
-  const createPersistentPhase = useCallback(async () => {
-    if (!resume || !phaseObjective.trim()) return;
-    setPhaseCreating(true);
-    setPhaseError(null);
+  // FRONT DOOR P1: replaces the old raw-objective "Create the next phase"
+  // text box. New-phase creation goes through an observable planning run
+  // (poll below), then materializing that run into a phase + proposed
+  // strategy, then the StrategyReview screen for staffing + approval.
+  const startNextPhasePlanningRun = useCallback(async () => {
+    if (!nextPhaseObjective.trim()) return;
+    setPlanningRunStarting(true);
+    setPlanningRunError(null);
     try {
-      await postJson(`/api/v2/projects/${project.id}/phases`, {
-        objective_summary: phaseObjective.trim(),
-        priority: resume.phases.length,
-        predecessor_phase_ids: [],
-        expected_project_version: resume.project.aggregate_version,
-        idempotency_key: `phase-${Date.now()}`,
+      const run = await postJson<{ planning_run_id: string }>(
+        `/api/v2/projects/${project.id}/planning-runs`,
+        { objective: nextPhaseObjective.trim(), max_rounds: nextPhaseRounds },
+      );
+      setActivePlanningRunId(run.planning_run_id);
+      setNextPhaseObjective("");
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else setPlanningRunError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPlanningRunStarting(false);
+    }
+  }, [nextPhaseObjective, nextPhaseRounds, project.id, onLogout]);
+
+  const pollPlanningRun = useCallback(async () => {
+    if (!activePlanningRunId) return;
+    try {
+      setPlanningRun(
+        await getJson<PlanningRunPollDto>(
+          `/api/v2/projects/${project.id}/planning-runs/${activePlanningRunId}`,
+        ),
+      );
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else setPlanningRunError(err instanceof Error ? err.message : String(err));
+    }
+  }, [activePlanningRunId, project.id, onLogout]);
+
+  useEffect(() => {
+    if (!activePlanningRunId) return;
+    void pollPlanningRun();
+    const timer = window.setInterval(() => void pollPlanningRun(), 3_000);
+    return () => window.clearInterval(timer);
+  }, [activePlanningRunId, pollPlanningRun]);
+
+  const materializePhaseFromRun = useCallback(async () => {
+    if (!activePlanningRunId) return;
+    setMaterializingPhase(true);
+    setPlanningRunError(null);
+    try {
+      const review = await postJson<StrategyReviewDto>(`/api/v2/projects/${project.id}/phases`, {
+        planning_run_id: activePlanningRunId,
       });
-      setPhaseObjective("");
+      setStrategyReview(review);
+      setMonitoredPhaseId(review.phase.id);
+      setActivePlanningRunId(null);
+      setPlanningRun(null);
       await loadResume();
     } catch (err) {
       if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
-      else setPhaseError(err instanceof Error ? err.message : String(err));
+      else setPlanningRunError(err instanceof Error ? err.message : String(err));
     } finally {
-      setPhaseCreating(false);
+      setMaterializingPhase(false);
     }
-  }, [resume, phaseObjective, project.id, loadResume, onLogout]);
+  }, [activePlanningRunId, project.id, onLogout, loadResume]);
+
+  const editStrategyStaffing = useCallback(
+    async (edits: StaffingEdit[]) => {
+      if (!strategyReview) return;
+      setStrategyBusy(true);
+      setStrategyError(null);
+      try {
+        const next = await patchJson<StrategyReviewDto>(
+          `/api/v2/projects/${project.id}/phases/${strategyReview.phase.id}/strategy/staffing`,
+          { assignments: edits },
+        );
+        setStrategyReview(next);
+      } catch (err) {
+        if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+        else setStrategyError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setStrategyBusy(false);
+      }
+    },
+    [strategyReview, project.id, onLogout],
+  );
+
+  const approveStrategy = useCallback(async () => {
+    if (!strategyReview?.strategy) return;
+    setStrategyBusy(true);
+    setStrategyError(null);
+    try {
+      await postJson(
+        `/api/v2/projects/${project.id}/phases/${strategyReview.phase.id}/strategy/approve`,
+        { expected_content_hash: strategyReview.strategy.content_hash },
+      );
+      setStrategyReview(null);
+      await loadResume();
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else setStrategyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStrategyBusy(false);
+    }
+  }, [strategyReview, project.id, onLogout, loadResume]);
+
+  // FRONT DOOR P1 human-approved addition: phase-scoped "needs you" — the
+  // portfolio attention feed filtered to this project + the monitored phase,
+  // rendered alongside the phase's activity feed (phaseExecution above).
+  const loadPhaseAttention = useCallback(async () => {
+    if (!monitoredPhaseId) return;
+    try {
+      const portfolio = await getJson<PortfolioAttentionDto>("/api/v2/attention");
+      setPhaseAttention(
+        portfolio.items.filter(
+          (item) => item.project_id === project.id && item.phase_id === monitoredPhaseId,
+        ),
+      );
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      // A 404 (no phase3/attention wiring) just means nothing to show here.
+    }
+  }, [monitoredPhaseId, project.id, onLogout]);
+
+  useEffect(() => {
+    if (!monitoredPhaseId) return;
+    void loadPhaseAttention();
+    const timer = window.setInterval(() => void loadPhaseAttention(), 10_000);
+    return () => window.clearInterval(timer);
+  }, [monitoredPhaseId, loadPhaseAttention]);
+
+  const resolvePhaseDecision = useCallback(
+    async (
+      item: AttentionItemDto,
+      input: {
+        selectedOptionId: string;
+        rationale: string;
+        directionTarget: string;
+        directionText: string;
+      },
+    ) => {
+      const decision = item.decision;
+      if (!decision) return;
+      setPhaseAttentionBusy(item.key);
+      try {
+        await postJson(
+          `/api/v2/projects/${item.project_id}/decision-points/${decision.decision_point_id}/resolve`,
+          {
+            expected_condition_fingerprint: decision.condition_fingerprint,
+            selected_option_id: input.selectedOptionId,
+            rationale: input.rationale,
+            direction_target: input.directionTarget,
+            direction_text: input.directionText,
+            idempotency_key: `decision-${decision.decision_point_id}-${globalThis.crypto.randomUUID()}`,
+          },
+        );
+        await loadPhaseAttention();
+      } catch (err) {
+        if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      } finally {
+        setPhaseAttentionBusy(null);
+      }
+    },
+    [onLogout, loadPhaseAttention],
+  );
+
+  // FRONT DOOR P5 (tracking): update-interval control, PATCHed to the
+  // project settings and honored by the resume poll cadence below.
+  const updateInterval = useCallback(
+    async (seconds: 60 | 300 | 900) => {
+      setIntervalSaving(true);
+      try {
+        await patchJson(`/api/v2/projects/${project.id}/settings`, {
+          update_interval_seconds: seconds,
+        });
+        await loadResume();
+      } catch (err) {
+        if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      } finally {
+        setIntervalSaving(false);
+      }
+    },
+    [project.id, onLogout, loadResume],
+  );
 
   const runPlanning = useCallback(async () => {
     setPlanLoading(true);
@@ -1184,22 +1441,140 @@ function ProjectGraph({
                 <Spinner label="Loading phase execution…" />
               ) : null}
               {executionError ? <Alert testId="execution-error">{executionError}</Alert> : null}
-              <Field label="Create the next phase">
-                <Input
-                  data-testid="phase-objective"
-                  placeholder="e.g. Add animations"
-                  value={phaseObjective}
-                  onChange={(event) => setPhaseObjective(event.target.value)}
-                />
-              </Field>
-              <Button
-                variant="primary"
-                disabled={phaseCreating || !phaseObjective.trim()}
-                onClick={() => void createPersistentPhase()}
-              >
-                {phaseCreating ? "Creating phase…" : "Create phase"}
-              </Button>
-              {phaseError ? <Alert testId="phase-error">{phaseError}</Alert> : null}
+
+              {/* FRONT DOOR P1 human-approved addition: the monitored phase's
+               *  Q&A / decision thread, scoped to exactly this phase — reached
+               *  by clicking a dashboard phase line's "Open →"/"Answer →"
+               *  button (which sets focus_phase_id -> monitoredPhaseId). */}
+              {monitoredPhaseId && phaseAttention.length > 0 ? (
+                <section
+                  className="card needs-you-panel"
+                  aria-labelledby="phase-needs-you-heading"
+                  data-testid="phase-needs-you"
+                >
+                  <div className="section-head">
+                    <div>
+                      <div className="eyebrow">Needs you</div>
+                      <h3 id="phase-needs-you-heading">
+                        {phaseAttention.length} item{phaseAttention.length === 1 ? "" : "s"} in this
+                        phase
+                      </h3>
+                    </div>
+                  </div>
+                  {phaseAttention.map((item) => (
+                    <article key={item.key} className={`attention-item severity-${item.severity}`}>
+                      <h4>{item.title}</h4>
+                      <p>{item.summary}</p>
+                      {item.decision ? (
+                        <AttentionDecisionForm
+                          item={{ ...item, decision: item.decision }}
+                          busy={phaseAttentionBusy === item.key}
+                          onResolve={(input) => resolvePhaseDecision(item, input)}
+                        />
+                      ) : null}
+                    </article>
+                  ))}
+                </section>
+              ) : null}
+
+              {resumeError ? <Alert testId="resume-error">{resumeError}</Alert> : null}
+
+              {/* FRONT DOOR P1: new-phase creation via an observable planning
+               *  run, replacing the old raw-objective text box. */}
+              {activePlanningRunId ? (
+                <section className="card planning-run-status" data-testid="planning-run-status">
+                  <div className="eyebrow">Drafting next phase</div>
+                  <Badge tone={planningRun?.status === "failed" ? "danger" : "info"}>
+                    {planningRun?.status ?? "queued"}
+                  </Badge>
+                  <p className="muted" style={{ fontSize: 12 }}>
+                    Round {planningRun?.round ?? 0} of {planningRun?.max_rounds ?? nextPhaseRounds}
+                  </p>
+                  {planningRun?.transcript.length ? (
+                    <ul className="planning-transcript" data-testid="planning-transcript">
+                      {planningRun.transcript.map((entry, index) => (
+                        <li key={`${entry.round}-${entry.role}-${index}`}>
+                          Round {entry.round} · {entry.role} ({entry.model}): {entry.summary}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {planningRun &&
+                  (planningRun.status === "converged" || planningRun.status === "cap_reached") ? (
+                    <Button
+                      variant="primary"
+                      disabled={materializingPhase}
+                      onClick={() => void materializePhaseFromRun()}
+                    >
+                      {materializingPhase ? "Creating phase…" : "Create phase from this run →"}
+                    </Button>
+                  ) : NON_TERMINAL_RUN_STATUSES.has(planningRun?.status ?? "queued") ? (
+                    <Spinner label="Coordinator and reviewer are drafting…" />
+                  ) : null}
+                </section>
+              ) : (
+                <>
+                  <Field label="Draft the next phase">
+                    <TextArea
+                      data-testid="next-phase-objective"
+                      placeholder="What should this phase deliver?"
+                      value={nextPhaseObjective}
+                      onChange={(event) => setNextPhaseObjective(event.target.value)}
+                    />
+                  </Field>
+                  <Button
+                    variant="primary"
+                    disabled={planningRunStarting || !nextPhaseObjective.trim()}
+                    onClick={() => void startNextPhasePlanningRun()}
+                  >
+                    {planningRunStarting ? "Starting planning run…" : "Draft next phase →"}
+                  </Button>
+                </>
+              )}
+              {planningRunError ? (
+                <Alert testId="planning-run-error">{planningRunError}</Alert>
+              ) : null}
+            </div>
+          </details>
+        ) : null}
+
+        {strategyReview ? (
+          <details className="card side-section" open data-testid="strategy-review-section">
+            <summary>Plan review · {strategyReview.phase.objective_summary}</summary>
+            <div className="side-body">
+              <StrategyReview
+                review={strategyReview}
+                approving={strategyBusy}
+                savingStaffing={strategyBusy}
+                error={strategyError}
+                onEditStaffing={(edits) => void editStrategyStaffing(edits)}
+                onApprove={() => void approveStrategy()}
+              />
+            </div>
+          </details>
+        ) : null}
+
+        {resume ? (
+          <details className="card side-section" data-testid="tracking-settings">
+            <summary>Tracking · update interval</summary>
+            <div className="side-body">
+              <p className="muted" style={{ fontSize: 12 }}>
+                How often the workspace polls for progress. Faster refresh costs a little more
+                background traffic; slower saves it.
+              </p>
+              <fieldset className="interval-picker" aria-label="Update interval">
+                {[60, 300, 900].map((seconds) => (
+                  <Button
+                    key={seconds}
+                    className="btn-small"
+                    variant={resume.update_interval_seconds === seconds ? "primary" : "default"}
+                    disabled={intervalSaving}
+                    onClick={() => void updateInterval(seconds as 60 | 300 | 900)}
+                  >
+                    {seconds < 3600 ? `${Math.round(seconds / 60)}m` : `${seconds / 3600}h`}
+                  </Button>
+                ))}
+              </fieldset>
             </div>
           </details>
         ) : null}

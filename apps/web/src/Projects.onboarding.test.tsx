@@ -307,7 +307,11 @@ describe("unified project onboarding", () => {
     const nameInput = screen.getByTestId("project-name");
     await user.clear(nameInput);
     await user.type(nameInput, "Fresh local-free project");
-    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
+    // A "new" project with a (carried-over) objective moves to the wizard's
+    // attach-and-launch step (FRONT DOOR P1); skip it — this test is only
+    // about the local-folder-selection isolation, not planning.
+    await user.click(await screen.findByRole("button", { name: /skip for now/i }));
 
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     expect(
@@ -451,7 +455,11 @@ describe("unified project onboarding", () => {
     await user.type(screen.getByTestId("github-new-repository-name"), "fresh-app");
     await user.type(screen.getByTestId("project-name"), "Fresh app");
     await user.type(screen.getByTestId("project-description"), "Build a fresh application");
-    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
+    // A "new" project with an objective moves to the wizard's attach-and-launch
+    // step (FRONT DOOR P1); skip it — this test is only about GitHub repository
+    // creation, not planning.
+    await user.click(await screen.findByRole("button", { name: /skip for now/i }));
 
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     expect(

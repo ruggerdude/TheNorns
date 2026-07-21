@@ -7,6 +7,7 @@ import {
 } from "@norns/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GitHubConnection, GitHubIntegrationStatus } from "./Account";
+import { AttachmentInput } from "./AttachmentInput";
 import { ApiError, type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 
@@ -25,9 +26,64 @@ export interface ProjectSummary {
   /** Transient navigation hints attached by the attention center. */
   focus_phase_id?: string | null;
   focus_task_id?: string | null;
+  /** FRONT DOOR P1: set by the New Project wizard when it kicked off a
+   *  planning run for this project — the workspace opens pre-focused on
+   *  that run's progress instead of a blank graph. */
+  focus_planning_run_id?: string | null;
 }
 
-interface AttentionItemDto {
+// ---------------------------------------------------------------------------
+// FRONT DOOR P1 (dashboard): per-project progress, read from
+// GET /api/v2/projects/:id/resume (P5's `progress`/per-phase tracking
+// fields). Kept as a local, loosely-typed slice — the dashboard only reads a
+// handful of fields and tolerates a resume response that omits them (older
+// projects / a resume call that 404s are both handled as "no data yet").
+export interface DashboardPhaseSummary {
+  id: string;
+  objective_summary: string;
+  status: string;
+  percent_complete: number;
+  tasks_completed: number;
+  tasks_total: number;
+  eta_at: string | null;
+  blocked: boolean;
+}
+
+export interface DashboardResumeSummary {
+  phases: DashboardPhaseSummary[];
+  overall_percent_complete: number;
+  blended_eta_at: string | null;
+  agents_active: number;
+  decisions_waiting: number;
+}
+
+/** Human wall-clock ETA from an ISO timestamp, e.g. "~6 hr" / "~2 days". Never
+ *  fabricates a number when there is no signal (null in, null-ish text out). */
+export function formatEta(
+  etaAt: string | null | undefined,
+  now: () => Date = () => new Date(),
+): string {
+  if (!etaAt) return "—";
+  const target = Date.parse(etaAt);
+  if (!Number.isFinite(target)) return "—";
+  const diffMs = target - now().getTime();
+  if (diffMs <= 0) return "due now";
+  const hours = diffMs / 3_600_000;
+  if (hours < 1) return "~< 1 hr";
+  if (hours < 36) return `~${Math.round(hours)} hr`;
+  const days = hours / 24;
+  return `~${Math.round(days)} day${Math.round(days) === 1 ? "" : "s"}`;
+}
+
+/** A calendar-style ETA for the aggregate/blended figure, e.g. "Jul 27". */
+export function formatEtaDate(etaAt: string | null | undefined): string {
+  if (!etaAt) return "—";
+  const target = new Date(etaAt);
+  if (Number.isNaN(target.getTime())) return "—";
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(target);
+}
+
+export interface AttentionItemDto {
   key: string;
   project_id: string;
   project_name: string;
@@ -61,7 +117,7 @@ interface AttentionItemDto {
   } | null;
 }
 
-interface PortfolioAttentionDto {
+export interface PortfolioAttentionDto {
   generated_at: string;
   counts: {
     critical: number;
@@ -165,7 +221,7 @@ async function request<T>(path: string, body?: unknown): Promise<T> {
   return json;
 }
 
-function AttentionDecisionForm({
+export function AttentionDecisionForm({
   item,
   busy,
   onResolve,
@@ -331,6 +387,9 @@ export function Projects({
   const [pmModel, setPmModel] = useState<PmModelT>(DEFAULT_PM_MODEL.anthropic);
   const pmProvider = providerForPmModel(pmModel);
   const selectedModel = pmModelOption(pmModel);
+  const reviewerProviderPreview = pmProvider === "anthropic" ? "openai" : "anthropic";
+  const reviewerPreviewLabel =
+    pmModelOption(DEFAULT_PM_MODEL[reviewerProviderPreview])?.label ?? reviewerProviderPreview;
   const [githubStatus, setGitHubStatus] = useState<GitHubIntegrationStatus | null>(null);
   const [selectedConnectionId, setSelectedConnectionId] = useState("");
   const [repositories, setRepositories] = useState<GitHubRepository[]>([]);
@@ -362,6 +421,24 @@ export function Projects({
   const [creating, setCreating] = useState(false);
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
   const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
+  const [roundsCount, setRoundsCount] = useState(3);
+  // FRONT DOOR P1: after `create()` makes a brand-new project with an
+  // objective, the wizard moves to a second in-place step — attach reference
+  // screenshots (the real AttachmentInput, which needs a live project id),
+  // then explicitly kick off the planning run. `wizardStep` gates which half
+  // of the single wizard screen renders; `draftProject` is the project that
+  // step operates on.
+  const [wizardStep, setWizardStep] = useState<"form" | "attach">("form");
+  const [draftProject, setDraftProject] = useState<ProjectSummary | null>(null);
+  const [wizardAttachmentIds, setWizardAttachmentIds] = useState<string[]>([]);
+  const [wizardObjective, setWizardObjective] = useState("");
+  const [planningStarting, setPlanningStarting] = useState(false);
+  const [planningError, setPlanningError] = useState<string | null>(null);
+  // Per-project phase/progress read model for the dashboard rows (P5's
+  // tracking additions to GET .../resume). Best-effort: a project whose
+  // resume call fails (404 for a brand-new draft, network error, etc.)
+  // simply renders without phase lines rather than blocking the dashboard.
+  const [resumeById, setResumeById] = useState<Record<string, DashboardResumeSummary>>({});
 
   const refresh = useCallback(async () => {
     try {
@@ -375,6 +452,75 @@ export function Projects({
   }, [onUnauthorized]);
 
   useEffect(() => void refresh(), [refresh]);
+
+  // FRONT DOOR P1: fetch each project's resume (phase list + progress) so the
+  // dashboard rows can render per-phase lines, color coding, and aggregate
+  // facts. Best-effort per project — one project's failure never blocks the
+  // others (Promise.allSettled), and a project without a plan yet (404) just
+  // renders with no phase lines, matching the "Draft" card in the mockup.
+  useEffect(() => {
+    if (!projects || projects.length === 0) return;
+    let cancelled = false;
+    const load = async () => {
+      const settled = await Promise.allSettled(
+        projects.map(async (project) => {
+          const resume = await request<{
+            phases: Array<{
+              id: string;
+              objective_summary: string;
+              status: string;
+              percent_complete?: number;
+              tasks_completed?: number;
+              tasks_total?: number;
+              tasks?: number;
+              eta_at?: string | null;
+              blocked_tasks?: number;
+            }>;
+            progress?: {
+              overall_percent_complete: number;
+              blended_eta_at: string | null;
+              agents_active: number;
+              decisions_waiting: number;
+            };
+            attention: { open_decisions: number; active_runs: number; blocked_tasks: number };
+          }>(`/api/v2/projects/${project.id}/resume`);
+          const phases: DashboardPhaseSummary[] = resume.phases.map((phase) => ({
+            id: phase.id,
+            objective_summary: phase.objective_summary,
+            status: phase.status,
+            percent_complete: phase.percent_complete ?? 0,
+            tasks_completed: phase.tasks_completed ?? 0,
+            tasks_total: phase.tasks_total ?? phase.tasks ?? 0,
+            eta_at: phase.eta_at ?? null,
+            blocked: phase.status === "blocked" || (phase.blocked_tasks ?? 0) > 0,
+          }));
+          const summary: DashboardResumeSummary = {
+            phases,
+            overall_percent_complete: resume.progress?.overall_percent_complete ?? 0,
+            blended_eta_at: resume.progress?.blended_eta_at ?? null,
+            agents_active: resume.progress?.agents_active ?? resume.attention.active_runs,
+            decisions_waiting:
+              resume.progress?.decisions_waiting ?? resume.attention.open_decisions,
+          };
+          return [project.id, summary] as const;
+        }),
+      );
+      if (cancelled) return;
+      setResumeById((current) => {
+        const next = { ...current };
+        for (const outcome of settled) {
+          if (outcome.status === "fulfilled") next[outcome.value[0]] = outcome.value[1];
+        }
+        return next;
+      });
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [projects]);
 
   const refreshGitHub = useCallback(async () => {
     try {
@@ -838,6 +984,20 @@ export function Projects({
       if (!completedProject) return;
       setPendingLocalProject(null);
       setProjects((current) => (current ? [completedProject, ...current] : [completedProject]));
+      // FRONT DOOR P1: a brand-new project with an objective moves to the
+      // wizard's attach-and-launch step instead of navigating away — the
+      // objective becomes the planning run's brief once the human confirms
+      // (optionally after attaching reference screenshots). "Existing
+      // codebase" imports (no fresh objective to plan from) keep the
+      // original immediate-navigate behavior.
+      if (startingPoint === "new" && description.trim()) {
+        setDraftProject(completedProject);
+        setWizardObjective(description.trim());
+        setWizardAttachmentIds([]);
+        setPlanningError(null);
+        setWizardStep("attach");
+        return;
+      }
       setDialog(false);
       setName("");
       setDescription("");
@@ -879,6 +1039,71 @@ export function Projects({
     onOpenProject,
     onUnauthorized,
   ]);
+
+  const closeWizard = useCallback(() => {
+    setDialog(false);
+    setWizardStep("form");
+    setDraftProject(null);
+    setWizardAttachmentIds([]);
+    setWizardObjective("");
+    setPlanningError(null);
+    setName("");
+    setDescription("");
+    setStartingPoint("new");
+    setNewRepository("none");
+    setSelectedRepositoryId("");
+    setRepositoryName("");
+    setRepositoryQuery("");
+    setExistingSource("github");
+    setSelectedLocalWorkspaceId("");
+    setLocalBrowser(null);
+    setLocalSelection(null);
+    setRoundsCount(3);
+  }, []);
+
+  // FRONT DOOR P1: the wizard's second step — start the planning run the
+  // objective + rounds + attachments describe. `attachment_ids` come straight
+  // from AttachmentInput's controlled selection (P4's documented contract).
+  const startPlanningRun = useCallback(async () => {
+    if (!draftProject) return;
+    setPlanningStarting(true);
+    setPlanningError(null);
+    try {
+      const run = await request<{ planning_run_id: string }>(
+        `/api/v2/projects/${draftProject.id}/planning-runs`,
+        {
+          objective: wizardObjective,
+          max_rounds: roundsCount,
+          attachment_ids: wizardAttachmentIds,
+        },
+      );
+      const project = draftProject;
+      closeWizard();
+      onOpenProject({ ...project, focus_planning_run_id: run.planning_run_id });
+    } catch (e) {
+      if (e instanceof UnauthorizedError) onUnauthorized();
+      else setPlanningError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPlanningStarting(false);
+    }
+  }, [
+    draftProject,
+    wizardObjective,
+    roundsCount,
+    wizardAttachmentIds,
+    closeWizard,
+    onOpenProject,
+    onUnauthorized,
+  ]);
+
+  /** Skip drafting a plan right now — the project already exists; open its
+   *  (still-empty) workspace directly, same as the "existing codebase" path. */
+  const skipPlanning = useCallback(() => {
+    if (!draftProject) return;
+    const project = draftProject;
+    closeWizard();
+    onOpenProject(project);
+  }, [draftProject, closeWizard, onOpenProject]);
 
   const visible = useMemo(
     () =>
@@ -1165,654 +1390,883 @@ export function Projects({
             </div>
           </div>
         ) : (
-          <div className="project-grid" data-testid="project-list">
-            {visible?.map((project) => (
-              <article className="project-card" key={project.id}>
-                <button
-                  type="button"
-                  className="project-card-main"
-                  onClick={() => onOpenProject(project)}
+          <div className="proj-stack" data-testid="project-list">
+            {visible?.map((project) => {
+              const resume = resumeById[project.id];
+              const blockedPhase = resume?.phases.find((phase) => phase.blocked);
+              const activePhase = resume?.phases.find((phase) => phase.status === "active");
+              // Color coding (P1 dashboard spec): red = decision waiting/
+              // blocked, green = executing, blue = plan ready (staffed but not
+              // yet running), neutral = draft/no plan.
+              const status: "red" | "green" | "blue" | "neutral" =
+                (resume?.decisions_waiting ?? 0) > 0 || blockedPhase
+                  ? "red"
+                  : activePhase
+                    ? "green"
+                    : project.status === "planned" && (resume?.phases.length ?? 0) > 0
+                      ? "blue"
+                      : "neutral";
+              const statusLabel =
+                status === "red"
+                  ? "Decision waiting"
+                  : status === "green"
+                    ? "On track"
+                    : status === "blue"
+                      ? "Plan ready"
+                      : "Draft";
+              return (
+                <article
+                  className={`card proj-row s-${status}`}
+                  key={project.id}
+                  data-testid="proj-row"
                 >
-                  <div className="project-card-head">
-                    <span className="project-monogram">
-                      {project.name.slice(0, 2).toUpperCase()}
-                    </span>
-                    <Badge tone={project.status === "planned" ? "success" : "warn"}>
-                      {project.status}
-                    </Badge>
-                  </div>
-                  <h3>{project.name}</h3>
-                  <p>{project.description}</p>
-                  {project.plan_objective ? (
-                    <div className="project-objective">
-                      <span>Current objective</span>
-                      {project.plan_objective}
+                  <div className="pr-main">
+                    <div className="pr-head">
+                      <span className="monogram">{project.name.slice(0, 2).toUpperCase()}</span>
+                      <div className="pr-titles">
+                        <button
+                          type="button"
+                          className="pr-title-btn"
+                          onClick={() => onOpenProject(project)}
+                        >
+                          {project.name}
+                        </button>
+                        <div className="desc">{project.description}</div>
+                      </div>
                     </div>
-                  ) : null}
-                  {project.source_location ? (
-                    <div className="project-source" title={project.source_location}>
-                      <span>{project.source_type === "github" ? "GitHub" : "Local folder"}</span>
-                      <strong>{project.source_location}</strong>
-                    </div>
-                  ) : null}
-                  <dl className="project-facts">
-                    <div>
-                      <dt>Lead</dt>
-                      <dd>
+                    <div className="pr-staffing">
+                      <span className="role-lbl">Coordinator</span>
+                      <span className="chip model-c">
                         {project.pm_model
                           ? (pmModelOption(project.pm_model)?.label ?? project.pm_model)
-                          : `${project.pm_provider} default (legacy)`}
-                      </dd>
+                          : `${project.pm_provider} default`}
+                      </span>
+                      <span className="role-lbl">Reviewer</span>
+                      <span className="chip model-g">
+                        {pmModelOption(DEFAULT_PM_MODEL[project.reviewer_provider])?.label ??
+                          project.reviewer_provider}
+                      </span>
                     </div>
-                    <div>
-                      <dt>Review</dt>
-                      <dd>{project.reviewer_provider}</dd>
+                    {project.source_location ? (
+                      <div className="project-source" title={project.source_location}>
+                        <span>{project.source_type === "github" ? "GitHub" : "Local folder"}</span>
+                        <strong>{project.source_location}</strong>
+                      </div>
+                    ) : null}
+                    {resume?.phases.length ? (
+                      <div className="pr-phases">
+                        {resume.phases.map((phase, index) => (
+                          <div
+                            className={`pr-phase${phase.blocked ? " blocked" : ""}${
+                              phase.status === "completed" ? " done" : ""
+                            }${phase.status === "queued" || phase.status === "proposed" ? " queued" : ""}`}
+                            key={phase.id}
+                            data-testid="pr-phase"
+                          >
+                            <span className="pp-num">P{index + 1}</span>
+                            <span className="pp-name">{phase.objective_summary}</span>
+                            {phase.blocked ? (
+                              <span className="pp-blocked">blocked — needs you</span>
+                            ) : (
+                              <span className="pp-bar">
+                                <span className="track thin">
+                                  <i style={{ width: `${phase.percent_complete}%` }} />
+                                </span>
+                                <span className="pp-pct">{phase.percent_complete}%</span>
+                              </span>
+                            )}
+                            {!phase.blocked ? (
+                              <span className="pp-eta">
+                                <span className="lbl">ETA</span>
+                                {formatEta(phase.eta_at)}
+                              </span>
+                            ) : null}
+                            {/* FRONT DOOR P1 addition: per-phase navigation into
+                             *  that phase's activity feed / decision thread —
+                             *  opens the project workspace pre-focused on this
+                             *  phase (GET .../phases/:phaseId/execution plus
+                             *  phase-scoped attention items). */}
+                            <button
+                              type="button"
+                              className="pp-open"
+                              data-testid="pp-open"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onOpenProject({ ...project, focus_phase_id: phase.id });
+                              }}
+                            >
+                              <span className="bubble">💬</span>{" "}
+                              {phase.blocked ? "Answer →" : "Open →"}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="pr-phases">
+                        <div className="pr-phase queued no-plan">
+                          <span className="pp-num">—</span>
+                          <span className="pp-name muted">
+                            No plan drafted yet — phases appear once the coordinator drafts one.
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="pr-side">
+                    <Badge
+                      tone={
+                        status === "red"
+                          ? "danger"
+                          : status === "green"
+                            ? "success"
+                            : status === "blue"
+                              ? "info"
+                              : "default"
+                      }
+                    >
+                      {statusLabel}
+                    </Badge>
+                    <div className="pr-agg">
+                      <span className="big tnum">
+                        {resume ? `${resume.overall_percent_complete}%` : "—"}
+                      </span>
+                      <span className="lbl">
+                        overall
+                        <br />
+                        complete
+                      </span>
                     </div>
-                    <div>
-                      <dt>Created</dt>
-                      <dd>
-                        {new Intl.DateTimeFormat(undefined, {
-                          month: "short",
-                          day: "numeric",
-                          year: "numeric",
-                        }).format(new Date(project.created_at))}
-                      </dd>
+                    <div className="pr-facts">
+                      <div className="pr-fact">
+                        <span className="k">Blended ETA</span>
+                        <span className="v">{formatEtaDate(resume?.blended_eta_at)}</span>
+                      </div>
+                      <div className="pr-fact">
+                        <span className="k">Agents active</span>
+                        <span className="v">{resume?.agents_active ?? 0}</span>
+                      </div>
+                      <div className="pr-fact">
+                        <span className="k">Decisions</span>
+                        <span className={`v${(resume?.decisions_waiting ?? 0) > 0 ? " warn" : ""}`}>
+                          {resume?.decisions_waiting
+                            ? `${resume.decisions_waiting} waiting`
+                            : "None"}
+                        </span>
+                      </div>
                     </div>
-                  </dl>
-                  <span className="project-open-link">
-                    Open project <span>→</span>
-                  </span>
-                </button>
-              </article>
-            ))}
+                    <button type="button" className="pr-cta" onClick={() => onOpenProject(project)}>
+                      Open workspace →
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
           </div>
         )}
       </main>
 
       {dialog ? (
-        <dialog open className="modal-overlay" aria-modal="true" aria-label="New project">
-          <button
-            className="modal-backdrop"
-            type="button"
-            aria-label="Close"
-            onClick={() => setDialog(false)}
-          />
-          <section className="modal modal-wide project-create-modal card">
+        <main className="page wizard-page" aria-label="New project">
+          <section className="wizard-shell card">
             <div className="section-head">
               <div>
-                <div className="eyebrow">Create</div>
-                <h2>New project</h2>
-                <p className="muted">Start fresh or bring an existing codebase into The Norns.</p>
+                <div className="eyebrow">New project</div>
+                <h2>Let's set the brief</h2>
+                <p className="muted">
+                  {wizardStep === "attach"
+                    ? "Add reference screenshots, then start the plan."
+                    : "Start fresh or bring an existing codebase into The Norns. Nothing runs until you approve the plan."}
+                </p>
               </div>
-              <Button variant="ghost" className="btn-small" onClick={() => setDialog(false)}>
+              <Button variant="ghost" className="btn-small" onClick={closeWizard}>
                 ×
               </Button>
             </div>
-            <div className="form-stack">
-              <fieldset className="source-picker">
-                <legend>What are you starting with?</legend>
-                <div className="source-options">
-                  <button
-                    type="button"
-                    className={startingPoint === "new" ? "is-selected" : ""}
-                    onClick={() => {
-                      localWorkspaceRequestEpoch.current += 1;
-                      localBrowseRequestEpoch.current += 1;
-                      localValidationRequestEpoch.current += 1;
-                      setStartingPoint("new");
-                      setSelectedRepositoryId("");
-                      setExistingSource("github");
-                      setSelectedLocalRunnerId("");
-                      setSelectedLocalWorkspaceId("");
-                      setLocalWorkspaces([]);
-                      setLocalBrowser(null);
-                      setLocalNavigation([]);
-                      setLocalSelection(null);
-                      setSelectedLocalEntryId(null);
-                    }}
-                  >
-                    <strong>New project</strong>
-                    <span>Define a new objective and optionally create its GitHub repository.</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={startingPoint === "existing" ? "is-selected" : ""}
-                    onClick={() => {
-                      setStartingPoint("existing");
-                      setNewRepository("none");
-                    }}
-                  >
-                    <strong>Existing codebase</strong>
-                    <span>
-                      Select a connected repository and let The Norns establish its current state.
-                    </span>
-                  </button>
-                </div>
-              </fieldset>
-
-              {startingPoint === "new" ? (
-                <fieldset className="source-picker">
-                  <legend>Repository</legend>
-                  <div className="source-options">
-                    <button
+            {wizardStep === "attach" && draftProject ? (
+              <div className="form-stack wizard-attach-step" data-testid="wizard-attach-step">
+                <Alert>
+                  <strong>{draftProject.name}</strong> was created. Attach reference screenshots
+                  (optional), then start planning — Norns drafts a plan you'll review before any
+                  agent starts.
+                </Alert>
+                <Field label="Objective">
+                  <TextArea
+                    data-testid="wizard-objective"
+                    value={wizardObjective}
+                    onChange={(e) => setWizardObjective(e.target.value)}
+                  />
+                </Field>
+                <Field label="Attach screenshots">
+                  <AttachmentInput
+                    projectId={draftProject.id}
+                    value={wizardAttachmentIds}
+                    onChange={setWizardAttachmentIds}
+                    purpose="objective"
+                    disabled={planningStarting}
+                  />
+                </Field>
+                <Field label="Plan review rounds">
+                  <div className="rounds-stepper" data-testid="rounds-stepper">
+                    <Button
                       type="button"
-                      className={newRepository === "none" ? "is-selected" : ""}
-                      onClick={() => setNewRepository("none")}
+                      className="btn-small"
+                      disabled={roundsCount <= 1}
+                      onClick={() => setRoundsCount((n) => Math.max(1, n - 1))}
+                      aria-label="Fewer rounds"
                     >
-                      <strong>Not yet</strong>
-                      <span>Create the Norns project now and connect source code later.</span>
-                    </button>
-                    <button
+                      −
+                    </Button>
+                    <span className="rounds-value mono">{roundsCount}</span>
+                    <Button
                       type="button"
-                      className={newRepository === "github" ? "is-selected" : ""}
-                      onClick={() => setNewRepository("github")}
+                      className="btn-small"
+                      disabled={roundsCount >= 5}
+                      onClick={() => setRoundsCount((n) => Math.min(5, n + 1))}
+                      aria-label="More rounds"
                     >
-                      <strong>Create on GitHub</strong>
-                      <span>
-                        Create and bind a private or public repository through a workspace
-                        connection.
-                      </span>
-                    </button>
+                      +
+                    </Button>
                   </div>
-                </fieldset>
-              ) : null}
-
-              {startingPoint === "existing" ? (
+                  <span className="field-help">
+                    The coordinator and reviewer debate the plan up to this many rounds, then stop
+                    early once they converge.
+                  </span>
+                </Field>
+                {planningError ? <Alert testId="planning-run-error">{planningError}</Alert> : null}
+                <div className="actions">
+                  <Button variant="ghost" disabled={planningStarting} onClick={skipPlanning}>
+                    Skip for now
+                  </Button>
+                  <Button
+                    variant="primary"
+                    disabled={planningStarting || !wizardObjective.trim()}
+                    onClick={() => void startPlanningRun()}
+                  >
+                    {planningStarting ? "Starting planning run…" : "Start planning run →"}
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="form-stack">
                 <fieldset className="source-picker">
-                  <legend>Where is the existing code?</legend>
+                  <legend>What are you starting with?</legend>
                   <div className="source-options">
                     <button
                       type="button"
-                      aria-pressed={existingSource === "github"}
-                      className={existingSource === "github" ? "is-selected" : ""}
+                      className={startingPoint === "new" ? "is-selected" : ""}
                       onClick={() => {
+                        localWorkspaceRequestEpoch.current += 1;
+                        localBrowseRequestEpoch.current += 1;
+                        localValidationRequestEpoch.current += 1;
+                        setStartingPoint("new");
+                        setSelectedRepositoryId("");
                         setExistingSource("github");
+                        setSelectedLocalRunnerId("");
+                        setSelectedLocalWorkspaceId("");
+                        setLocalWorkspaces([]);
+                        setLocalBrowser(null);
+                        setLocalNavigation([]);
                         setLocalSelection(null);
                         setSelectedLocalEntryId(null);
                       }}
                     >
-                      <strong>GitHub repository</strong>
-                      <span>Select a repository from a workspace GitHub connection.</span>
+                      <strong>New project</strong>
+                      <span>
+                        Define a new objective and optionally create its GitHub repository.
+                      </span>
                     </button>
                     <button
                       type="button"
-                      aria-pressed={existingSource === "local"}
-                      className={existingSource === "local" ? "is-selected" : ""}
+                      className={startingPoint === "existing" ? "is-selected" : ""}
                       onClick={() => {
-                        setExistingSource("local");
-                        setSelectedRepositoryId("");
-                        setSelectedLocalEntryId(null);
+                        setStartingPoint("existing");
+                        setNewRepository("none");
                       }}
                     >
-                      <strong>Local folder</strong>
-                      <span>Choose a Git project folder with the native folder selector.</span>
+                      <strong>Existing codebase</strong>
+                      <span>
+                        Select a connected repository and let The Norns establish its current state.
+                      </span>
                     </button>
                   </div>
                 </fieldset>
-              ) : null}
 
-              {sourceRequired && (startingPoint === "new" || existingSource === "github") ? (
-                <div className="repository-picker">
-                  {sourceError ? <Alert>{sourceError}</Alert> : null}
-                  {!githubStatus?.configured ? (
-                    <div className="connection-required">
-                      <div>
-                        <strong>GitHub is not configured</strong>
-                        <p>
-                          Configure the Norns GitHub App in workspace Settings before selecting
-                          repositories.
-                        </p>
-                      </div>
-                      <Button
+                {startingPoint === "new" ? (
+                  <fieldset className="source-picker">
+                    <legend>Repository</legend>
+                    <div className="source-options">
+                      <button
                         type="button"
-                        variant="primary"
-                        className="btn-small"
-                        onClick={onOpenAccount}
+                        className={newRepository === "none" ? "is-selected" : ""}
+                        onClick={() => setNewRepository("none")}
                       >
-                        Open Settings
-                      </Button>
+                        <strong>Not yet</strong>
+                        <span>Create the Norns project now and connect source code later.</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={newRepository === "github" ? "is-selected" : ""}
+                        onClick={() => setNewRepository("github")}
+                      >
+                        <strong>Create on GitHub</strong>
+                        <span>
+                          Create and bind a private or public repository through a workspace
+                          connection.
+                        </span>
+                      </button>
                     </div>
-                  ) : connectedGitHub.length === 0 ? (
-                    <div className="connection-required">
-                      <div>
-                        <strong>No GitHub installations available</strong>
-                        <p>
-                          {githubStatus.user_authorization.connected
-                            ? "Add a personal account or organization in Settings."
-                            : "Authorize GitHub in Settings, then add a personal account or organization."}
-                        </p>
-                      </div>
-                      <Button type="button" className="btn-small" onClick={onOpenAccount}>
-                        Manage connections
-                      </Button>
+                  </fieldset>
+                ) : null}
+
+                {startingPoint === "existing" ? (
+                  <fieldset className="source-picker">
+                    <legend>Where is the existing code?</legend>
+                    <div className="source-options">
+                      <button
+                        type="button"
+                        aria-pressed={existingSource === "github"}
+                        className={existingSource === "github" ? "is-selected" : ""}
+                        onClick={() => {
+                          setExistingSource("github");
+                          setLocalSelection(null);
+                          setSelectedLocalEntryId(null);
+                        }}
+                      >
+                        <strong>GitHub repository</strong>
+                        <span>Select a repository from a workspace GitHub connection.</span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={existingSource === "local"}
+                        className={existingSource === "local" ? "is-selected" : ""}
+                        onClick={() => {
+                          setExistingSource("local");
+                          setSelectedRepositoryId("");
+                          setSelectedLocalEntryId(null);
+                        }}
+                      >
+                        <strong>Local folder</strong>
+                        <span>Choose a Git project folder with the native folder selector.</span>
+                      </button>
                     </div>
-                  ) : (
-                    <>
-                      <Field label="GitHub account or organization">
-                        <Select
-                          data-testid="github-connection"
-                          value={selectedConnectionId}
-                          onChange={(event) => {
-                            setSelectedConnectionId(event.target.value);
-                            setSelectedRepositoryId("");
-                          }}
-                        >
-                          {connectedGitHub.map((connection: GitHubConnection) => (
-                            <option key={connection.id} value={connection.id}>
-                              {connection.owner_login} · {connection.owner_type}
-                            </option>
-                          ))}
-                        </Select>
-                      </Field>
-                      {startingPoint === "new" ? (
-                        <div className="repository-create-fields">
-                          <Field label="Repository name">
-                            <Input
-                              data-testid="github-new-repository-name"
-                              value={repositoryName}
-                              onChange={(event) => setRepositoryName(event.target.value)}
-                              placeholder="notifications-service"
-                            />
-                          </Field>
-                          <Field label="Visibility">
-                            <Select
-                              value={repositoryPrivate ? "private" : "public"}
-                              onChange={(event) =>
-                                setRepositoryPrivate(event.target.value === "private")
-                              }
-                            >
-                              <option value="private">Private</option>
-                              <option value="public">Public</option>
-                            </Select>
-                          </Field>
-                          <p className="field-help">
-                            The selected GitHub installation must allow repository administration to
-                            create a repository.
+                  </fieldset>
+                ) : null}
+
+                {sourceRequired && (startingPoint === "new" || existingSource === "github") ? (
+                  <div className="repository-picker">
+                    {sourceError ? <Alert>{sourceError}</Alert> : null}
+                    {!githubStatus?.configured ? (
+                      <div className="connection-required">
+                        <div>
+                          <strong>GitHub is not configured</strong>
+                          <p>
+                            Configure the Norns GitHub App in workspace Settings before selecting
+                            repositories.
                           </p>
                         </div>
-                      ) : (
-                        <>
-                          <div className="repository-search">
-                            <Input
-                              aria-label="Search connected repositories"
-                              value={repositoryQuery}
-                              onChange={(event) => setRepositoryQuery(event.target.value)}
-                              placeholder={`Search ${selectedConnection?.owner_login ?? "repositories"}…`}
-                            />
-                            <Button
-                              type="button"
-                              className="btn-small"
-                              disabled={repositoryLoading}
-                              onClick={() => void loadRepositories()}
-                            >
-                              Refresh
-                            </Button>
-                          </div>
-                          {repositoryLoading ? (
-                            <Spinner label="Loading repositories…" />
-                          ) : visibleRepositories.length ? (
-                            <div className="repository-list" aria-label="GitHub repositories">
-                              {visibleRepositories.map((repository) => (
-                                <button
-                                  type="button"
-                                  aria-pressed={selectedRepositoryId === repository.id}
-                                  disabled={repository.archived}
-                                  className={
-                                    selectedRepositoryId === repository.id ? "is-selected" : ""
-                                  }
-                                  key={repository.id}
-                                  onClick={() => {
-                                    setSelectedRepositoryId(repository.id);
-                                    setName((current) => current || repository.name);
-                                    setDescription(
-                                      (current) =>
-                                        current ||
-                                        repository.description ||
-                                        `Analyze and continue development of ${repository.full_name}`,
-                                    );
-                                  }}
-                                >
-                                  <span>
-                                    <strong>{repository.full_name}</strong>
-                                    <small>
-                                      {repository.description || "No repository description"}
-                                    </small>
-                                  </span>
-                                  <span className="repository-meta">
-                                    {repository.private ? "Private" : "Public"}
-                                    {repository.language ? ` · ${repository.language}` : ""}
-                                    {repository.archived ? " · Archived" : ""}
-                                  </span>
-                                </button>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="muted">
-                              No repositories match this connection and search.
-                            </p>
-                          )}
-                          {selectedRepository ? (
-                            <p className="policy">
-                              <strong>{selectedRepository.full_name}</strong> will be validated
-                              against the connected installation. Repository metadata is reviewed
-                              immediately; code ingestion begins through an approved runner.
-                            </p>
-                          ) : null}
-                        </>
-                      )}
-                    </>
-                  )}
-                </div>
-              ) : null}
-
-              {startingPoint === "existing" && existingSource === "local" ? (
-                <div className="repository-picker local-folder-picker">
-                  {sourceError ? <Alert>{sourceError}</Alert> : null}
-                  {localRunnersLoading ? (
-                    <Spinner label="Looking for paired local runners…" />
-                  ) : localRunners.length === 0 ? (
-                    <div className="connection-required">
-                      <div>
-                        <strong>No local runner is online</strong>
-                        <p>
-                          Pair and start a runner on the computer that owns this folder, then
-                          refresh this list. Folder paths never leave that computer.
-                        </p>
-                      </div>
-                      <Button type="button" className="btn-small" onClick={onOpenAccount}>
-                        Manage runners
-                      </Button>
-                    </div>
-                  ) : !localRunners.some((runner) => runner.workspace_picker_ready === true) ? (
-                    <div className="connection-required">
-                      <div>
-                        <strong>Local runner update required</strong>
-                        <p>
-                          Update and restart the connected local runner to enable secure folder
-                          selection.
-                        </p>
-                      </div>
-                      <Button type="button" className="btn-small" onClick={onOpenAccount}>
-                        Manage runners
-                      </Button>
-                    </div>
-                  ) : !localRunners.some(
-                      (runner) => runner.local_project_onboarding_ready === true,
-                    ) ? (
-                    <div className="connection-required">
-                      <div>
-                        <strong>Project storage activation required</strong>
-                        <p>
-                          Activate durable relational storage for new projects before selecting a
-                          local folder.
-                        </p>
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="repository-search">
-                        <Field label="Connected local runner">
-                          <Select
-                            data-testid="local-runner"
-                            value={selectedLocalRunnerId}
-                            onChange={(event) => {
-                              localWorkspaceRequestEpoch.current += 1;
-                              localBrowseRequestEpoch.current += 1;
-                              localValidationRequestEpoch.current += 1;
-                              setSelectedLocalRunnerId(event.target.value);
-                              setSelectedLocalWorkspaceId("");
-                              setLocalBrowser(null);
-                              setLocalNavigation([]);
-                              setLocalSelection(null);
-                              setSelectedLocalEntryId(null);
-                            }}
-                          >
-                            {localRunners
-                              .filter((runner) => runner.workspace_picker_ready === true)
-                              .filter((runner) => runner.local_project_onboarding_ready === true)
-                              .map((runner) => (
-                                <option key={runner.runner_id} value={runner.runner_id}>
-                                  {runner.runner_id}
-                                </option>
-                              ))}
-                          </Select>
-                        </Field>
-                        <Button
-                          type="button"
-                          className="btn-small"
-                          disabled={localWorkspacesLoading}
-                          onClick={() => void loadLocalWorkspaces()}
-                        >
-                          Refresh folders
-                        </Button>
-                      </div>
-
-                      <div className="native-folder-choice">
                         <Button
                           type="button"
                           variant="primary"
-                          disabled={!selectedLocalRunnerId || localChooserLoading}
-                          onClick={() => void chooseLocalRepository()}
+                          className="btn-small"
+                          onClick={onOpenAccount}
                         >
-                          {localChooserLoading
-                            ? "Waiting for folder selection…"
-                            : "Choose project folder…"}
+                          Open Settings
                         </Button>
-                        <p className="muted">
-                          Opens the folder selector on the runner computer. Choose the root of a Git
-                          repository; its full path stays on that computer.
-                        </p>
                       </div>
-
-                      {localSelection ? (
-                        <p className="policy" data-testid="local-selection-summary">
-                          <strong>{localSelection.repository.repository_display_name}</strong> is
-                          validated on the selected runner
-                          {localSelection.repository.default_branch
-                            ? ` · ${localSelection.repository.default_branch}`
-                            : ""}
-                          . The Norns stores only this safe repository metadata, never its path.
-                        </p>
-                      ) : localWorkspacesLoading ? (
-                        <Spinner label="Loading approved folders…" />
-                      ) : localWorkspaces.length === 0 ? (
-                        <div className="connection-required">
-                          <div>
-                            <strong>Choose your project folder</strong>
-                            <p>
-                              The native selector above approves and validates the repository in one
-                              step.
+                    ) : connectedGitHub.length === 0 ? (
+                      <div className="connection-required">
+                        <div>
+                          <strong>No GitHub installations available</strong>
+                          <p>
+                            {githubStatus.user_authorization.connected
+                              ? "Add a personal account or organization in Settings."
+                              : "Authorize GitHub in Settings, then add a personal account or organization."}
+                          </p>
+                        </div>
+                        <Button type="button" className="btn-small" onClick={onOpenAccount}>
+                          Manage connections
+                        </Button>
+                      </div>
+                    ) : (
+                      <>
+                        <Field label="GitHub account or organization">
+                          <Select
+                            data-testid="github-connection"
+                            value={selectedConnectionId}
+                            onChange={(event) => {
+                              setSelectedConnectionId(event.target.value);
+                              setSelectedRepositoryId("");
+                            }}
+                          >
+                            {connectedGitHub.map((connection: GitHubConnection) => (
+                              <option key={connection.id} value={connection.id}>
+                                {connection.owner_login} · {connection.owner_type}
+                              </option>
+                            ))}
+                          </Select>
+                        </Field>
+                        {startingPoint === "new" ? (
+                          <div className="repository-create-fields">
+                            <Field label="Repository name">
+                              <Input
+                                data-testid="github-new-repository-name"
+                                value={repositoryName}
+                                onChange={(event) => setRepositoryName(event.target.value)}
+                                placeholder="notifications-service"
+                              />
+                            </Field>
+                            <Field label="Visibility">
+                              <Select
+                                value={repositoryPrivate ? "private" : "public"}
+                                onChange={(event) =>
+                                  setRepositoryPrivate(event.target.value === "private")
+                                }
+                              >
+                                <option value="private">Private</option>
+                                <option value="public">Public</option>
+                              </Select>
+                            </Field>
+                            <p className="field-help">
+                              The selected GitHub installation must allow repository administration
+                              to create a repository.
                             </p>
                           </div>
+                        ) : (
+                          <>
+                            <div className="repository-search">
+                              <Input
+                                aria-label="Search connected repositories"
+                                value={repositoryQuery}
+                                onChange={(event) => setRepositoryQuery(event.target.value)}
+                                placeholder={`Search ${selectedConnection?.owner_login ?? "repositories"}…`}
+                              />
+                              <Button
+                                type="button"
+                                className="btn-small"
+                                disabled={repositoryLoading}
+                                onClick={() => void loadRepositories()}
+                              >
+                                Refresh
+                              </Button>
+                            </div>
+                            {repositoryLoading ? (
+                              <Spinner label="Loading repositories…" />
+                            ) : visibleRepositories.length ? (
+                              <div className="repository-list" aria-label="GitHub repositories">
+                                {visibleRepositories.map((repository) => (
+                                  <button
+                                    type="button"
+                                    aria-pressed={selectedRepositoryId === repository.id}
+                                    disabled={repository.archived}
+                                    className={
+                                      selectedRepositoryId === repository.id ? "is-selected" : ""
+                                    }
+                                    key={repository.id}
+                                    onClick={() => {
+                                      setSelectedRepositoryId(repository.id);
+                                      setName((current) => current || repository.name);
+                                      setDescription(
+                                        (current) =>
+                                          current ||
+                                          repository.description ||
+                                          `Analyze and continue development of ${repository.full_name}`,
+                                      );
+                                    }}
+                                  >
+                                    <span>
+                                      <strong>{repository.full_name}</strong>
+                                      <small>
+                                        {repository.description || "No repository description"}
+                                      </small>
+                                    </span>
+                                    <span className="repository-meta">
+                                      {repository.private ? "Private" : "Public"}
+                                      {repository.language ? ` · ${repository.language}` : ""}
+                                      {repository.archived ? " · Archived" : ""}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="muted">
+                                No repositories match this connection and search.
+                              </p>
+                            )}
+                            {selectedRepository ? (
+                              <p className="policy">
+                                <strong>{selectedRepository.full_name}</strong> will be validated
+                                against the connected installation. Repository metadata is reviewed
+                                immediately; code ingestion begins through an approved runner.
+                              </p>
+                            ) : null}
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ) : null}
+
+                {startingPoint === "existing" && existingSource === "local" ? (
+                  <div className="repository-picker local-folder-picker">
+                    {sourceError ? <Alert>{sourceError}</Alert> : null}
+                    {localRunnersLoading ? (
+                      <Spinner label="Looking for paired local runners…" />
+                    ) : localRunners.length === 0 ? (
+                      <div className="connection-required">
+                        <div>
+                          <strong>No local runner is online</strong>
+                          <p>
+                            Pair and start a runner on the computer that owns this folder, then
+                            refresh this list. Folder paths never leave that computer.
+                          </p>
                         </div>
-                      ) : !localBrowser ? (
-                        <div className="repository-list" aria-label="Approved local folders">
-                          {localWorkspaces.map((workspace) => (
-                            <button
-                              type="button"
-                              key={workspace.workspace_id}
-                              onClick={() =>
-                                void browseLocalWorkspace(workspace.workspace_id, undefined, [])
-                              }
-                            >
-                              <span>
-                                <strong>{workspace.label}</strong>
-                                <small>Approved folder</small>
-                              </span>
-                              <span className="repository-meta">Browse →</span>
-                            </button>
-                          ))}
+                        <Button type="button" className="btn-small" onClick={onOpenAccount}>
+                          Manage runners
+                        </Button>
+                      </div>
+                    ) : !localRunners.some((runner) => runner.workspace_picker_ready === true) ? (
+                      <div className="connection-required">
+                        <div>
+                          <strong>Local runner update required</strong>
+                          <p>
+                            Update and restart the connected local runner to enable secure folder
+                            selection.
+                          </p>
                         </div>
-                      ) : (
-                        <div
-                          className="local-folder-browser"
-                          aria-label="Approved local folder browser"
-                        >
-                          <div className="local-folder-browser-head">
-                            <Button
-                              type="button"
-                              className="btn-small"
-                              onClick={() => {
-                                setLocalBrowser(null);
+                        <Button type="button" className="btn-small" onClick={onOpenAccount}>
+                          Manage runners
+                        </Button>
+                      </div>
+                    ) : !localRunners.some(
+                        (runner) => runner.local_project_onboarding_ready === true,
+                      ) ? (
+                      <div className="connection-required">
+                        <div>
+                          <strong>Project storage activation required</strong>
+                          <p>
+                            Activate durable relational storage for new projects before selecting a
+                            local folder.
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="repository-search">
+                          <Field label="Connected local runner">
+                            <Select
+                              data-testid="local-runner"
+                              value={selectedLocalRunnerId}
+                              onChange={(event) => {
+                                localWorkspaceRequestEpoch.current += 1;
+                                localBrowseRequestEpoch.current += 1;
+                                localValidationRequestEpoch.current += 1;
+                                setSelectedLocalRunnerId(event.target.value);
                                 setSelectedLocalWorkspaceId("");
+                                setLocalBrowser(null);
                                 setLocalNavigation([]);
                                 setLocalSelection(null);
                                 setSelectedLocalEntryId(null);
                               }}
                             >
-                              Change folder
-                            </Button>
-                            <Button
-                              type="button"
-                              className="btn-small"
-                              disabled={localBrowserLoading || localNavigation.length === 0}
-                              onClick={() => {
-                                const nextNavigation = localNavigation.slice(0, -1);
-                                void browseLocalWorkspace(
-                                  localBrowser.workspace_id,
-                                  nextNavigation.at(-1),
-                                  nextNavigation,
-                                );
-                              }}
-                            >
-                              Back
-                            </Button>
-                            <div className="local-breadcrumb" aria-label="Folder location">
-                              {(localBrowser.breadcrumb ?? []).join(" › ")}
+                              {localRunners
+                                .filter((runner) => runner.workspace_picker_ready === true)
+                                .filter((runner) => runner.local_project_onboarding_ready === true)
+                                .map((runner) => (
+                                  <option key={runner.runner_id} value={runner.runner_id}>
+                                    {runner.runner_id}
+                                  </option>
+                                ))}
+                            </Select>
+                          </Field>
+                          <Button
+                            type="button"
+                            className="btn-small"
+                            disabled={localWorkspacesLoading}
+                            onClick={() => void loadLocalWorkspaces()}
+                          >
+                            Refresh folders
+                          </Button>
+                        </div>
+
+                        <div className="native-folder-choice">
+                          <Button
+                            type="button"
+                            variant="primary"
+                            disabled={!selectedLocalRunnerId || localChooserLoading}
+                            onClick={() => void chooseLocalRepository()}
+                          >
+                            {localChooserLoading
+                              ? "Waiting for folder selection…"
+                              : "Choose project folder…"}
+                          </Button>
+                          <p className="muted">
+                            Opens the folder selector on the runner computer. Choose the root of a
+                            Git repository; its full path stays on that computer.
+                          </p>
+                        </div>
+
+                        {localSelection ? (
+                          <p className="policy" data-testid="local-selection-summary">
+                            <strong>{localSelection.repository.repository_display_name}</strong> is
+                            validated on the selected runner
+                            {localSelection.repository.default_branch
+                              ? ` · ${localSelection.repository.default_branch}`
+                              : ""}
+                            . The Norns stores only this safe repository metadata, never its path.
+                          </p>
+                        ) : localWorkspacesLoading ? (
+                          <Spinner label="Loading approved folders…" />
+                        ) : localWorkspaces.length === 0 ? (
+                          <div className="connection-required">
+                            <div>
+                              <strong>Choose your project folder</strong>
+                              <p>
+                                The native selector above approves and validates the repository in
+                                one step.
+                              </p>
                             </div>
                           </div>
-                          {localBrowserLoading ? (
-                            <Spinner label="Browsing approved folder…" />
-                          ) : localBrowser.entries.length ? (
-                            <div className="repository-list" aria-label="Local folder entries">
-                              {localBrowser.entries.map((entry) => (
-                                <button
-                                  type="button"
-                                  key={entry.entry_id}
-                                  disabled={
-                                    localValidationLoading ||
-                                    (!entry.can_browse && entry.kind === "folder")
-                                  }
-                                  className={
-                                    selectedLocalEntryId === entry.entry_id ? "is-selected" : ""
-                                  }
-                                  onClick={() => {
-                                    if (entry.kind === "repository") {
-                                      void validateLocalRepository(entry.entry_id);
-                                    } else {
-                                      void browseLocalWorkspace(
-                                        localBrowser.workspace_id,
-                                        entry.entry_id,
-                                        [...localNavigation, entry.entry_id],
-                                      );
-                                    }
-                                  }}
-                                >
-                                  <span>
-                                    <strong>{entry.label}</strong>
-                                    <small>
-                                      {entry.kind === "repository"
-                                        ? "Git repository · select to validate"
-                                        : "Folder · browse"}
-                                    </small>
-                                  </span>
-                                  <span className="repository-meta">
-                                    {entry.kind === "repository" ? "Select" : "Browse →"}
-                                  </span>
-                                </button>
-                              ))}
+                        ) : !localBrowser ? (
+                          <div className="repository-list" aria-label="Approved local folders">
+                            {localWorkspaces.map((workspace) => (
+                              <button
+                                type="button"
+                                key={workspace.workspace_id}
+                                onClick={() =>
+                                  void browseLocalWorkspace(workspace.workspace_id, undefined, [])
+                                }
+                              >
+                                <span>
+                                  <strong>{workspace.label}</strong>
+                                  <small>Approved folder</small>
+                                </span>
+                                <span className="repository-meta">Browse →</span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          <div
+                            className="local-folder-browser"
+                            aria-label="Approved local folder browser"
+                          >
+                            <div className="local-folder-browser-head">
+                              <Button
+                                type="button"
+                                className="btn-small"
+                                onClick={() => {
+                                  setLocalBrowser(null);
+                                  setSelectedLocalWorkspaceId("");
+                                  setLocalNavigation([]);
+                                  setLocalSelection(null);
+                                  setSelectedLocalEntryId(null);
+                                }}
+                              >
+                                Change folder
+                              </Button>
+                              <Button
+                                type="button"
+                                className="btn-small"
+                                disabled={localBrowserLoading || localNavigation.length === 0}
+                                onClick={() => {
+                                  const nextNavigation = localNavigation.slice(0, -1);
+                                  void browseLocalWorkspace(
+                                    localBrowser.workspace_id,
+                                    nextNavigation.at(-1),
+                                    nextNavigation,
+                                  );
+                                }}
+                              >
+                                Back
+                              </Button>
+                              <div className="local-breadcrumb" aria-label="Folder location">
+                                {(localBrowser.breadcrumb ?? []).join(" › ")}
+                              </div>
                             </div>
-                          ) : (
-                            <p className="muted">
-                              No folders or Git repositories are available here.
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </>
-                  )}
+                            {localBrowserLoading ? (
+                              <Spinner label="Browsing approved folder…" />
+                            ) : localBrowser.entries.length ? (
+                              <div className="repository-list" aria-label="Local folder entries">
+                                {localBrowser.entries.map((entry) => (
+                                  <button
+                                    type="button"
+                                    key={entry.entry_id}
+                                    disabled={
+                                      localValidationLoading ||
+                                      (!entry.can_browse && entry.kind === "folder")
+                                    }
+                                    className={
+                                      selectedLocalEntryId === entry.entry_id ? "is-selected" : ""
+                                    }
+                                    onClick={() => {
+                                      if (entry.kind === "repository") {
+                                        void validateLocalRepository(entry.entry_id);
+                                      } else {
+                                        void browseLocalWorkspace(
+                                          localBrowser.workspace_id,
+                                          entry.entry_id,
+                                          [...localNavigation, entry.entry_id],
+                                        );
+                                      }
+                                    }}
+                                  >
+                                    <span>
+                                      <strong>{entry.label}</strong>
+                                      <small>
+                                        {entry.kind === "repository"
+                                          ? "Git repository · select to validate"
+                                          : "Folder · browse"}
+                                      </small>
+                                    </span>
+                                    <span className="repository-meta">
+                                      {entry.kind === "repository" ? "Select" : "Browse →"}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="muted">
+                                No folders or Git repositories are available here.
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ) : null}
+
+                <div className="project-create-grid">
+                  <Field
+                    label={
+                      startingPoint === "existing" ? "Project name (optional)" : "Project name"
+                    }
+                  >
+                    <Input
+                      data-testid="project-name"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder={
+                        startingPoint === "existing"
+                          ? "Defaults to repository name"
+                          : "e.g. Notifications service"
+                      }
+                      autoFocus
+                    />
+                  </Field>
+                  <Field
+                    label={
+                      startingPoint === "existing" ? "Initial direction (optional)" : "Objective"
+                    }
+                  >
+                    <TextArea
+                      data-testid="project-description"
+                      value={description}
+                      onChange={(e) => setDescription(e.target.value)}
+                      placeholder={
+                        startingPoint === "existing"
+                          ? "What should The Norns focus on after understanding the repository?"
+                          : "What should this project deliver?"
+                      }
+                    />
+                  </Field>
                 </div>
-              ) : null}
 
-              <div className="project-create-grid">
-                <Field
-                  label={startingPoint === "existing" ? "Project name (optional)" : "Project name"}
-                >
-                  <Input
-                    data-testid="project-name"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder={
-                      startingPoint === "existing"
-                        ? "Defaults to repository name"
-                        : "e.g. Notifications service"
-                    }
-                    autoFocus
-                  />
-                </Field>
-                <Field
-                  label={
-                    startingPoint === "existing" ? "Initial direction (optional)" : "Objective"
-                  }
-                >
-                  <TextArea
-                    data-testid="project-description"
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                    placeholder={
-                      startingPoint === "existing"
-                        ? "What should The Norns focus on after understanding the repository?"
-                        : "What should this project deliver?"
-                    }
-                  />
-                </Field>
-              </div>
-
-              <Field label="Project manager model">
-                <Select
-                  data-testid="pm-model"
-                  value={pmModel}
-                  aria-describedby="pm-model-description"
-                  onChange={(e) => setPmModel(e.target.value as PmModelT)}
-                >
-                  <optgroup label="Anthropic">
-                    {PM_MODEL_OPTIONS.anthropic.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.label}
+                <div className="two-col-fields">
+                  <Field label="Coordinator model">
+                    <Select
+                      data-testid="pm-model"
+                      value={pmModel}
+                      aria-describedby="pm-model-description"
+                      onChange={(e) => setPmModel(e.target.value as PmModelT)}
+                    >
+                      <optgroup label="Anthropic">
+                        {PM_MODEL_OPTIONS.anthropic.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="OpenAI">
+                        {PM_MODEL_OPTIONS.openai.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    </Select>
+                    <span className="field-help" id="pm-model-description">
+                      {selectedModel?.description}
+                    </span>
+                  </Field>
+                  <Field label="Reviewer model">
+                    {/* FRONT DOOR P1: reviewer is always the opposite provider's
+                     *  default model today — the planning backend (P2) has no
+                     *  route to persist a manual reviewer override
+                     *  (planning_reviewer_settings is write-only from tests).
+                     *  Shown as read-only so the wizard never implies a choice
+                     *  it can't actually save; see the P1 report for the gap. */}
+                    <Select data-testid="reviewer-model" value="auto" disabled>
+                      <option value="auto">
+                        {reviewerPreviewLabel} · automatic (opposite provider)
                       </option>
-                    ))}
-                  </optgroup>
-                  <optgroup label="OpenAI">
-                    {PM_MODEL_OPTIONS.openai.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.label}
-                      </option>
-                    ))}
-                  </optgroup>
-                </Select>
-                <span className="field-help" id="pm-model-description">
-                  {selectedModel?.description}
-                </span>
-              </Field>
-              <div className="policy">
-                <strong>Cross-provider review is on.</strong>
-                <br />
-                {selectedModel?.label} will lead planning.{" "}
-                {pmProvider === "anthropic" ? "OpenAI" : "Anthropic"} will independently review the
-                plan.
+                    </Select>
+                    <span className="field-help">
+                      A second opinion — always the opposite provider for now. Manual reviewer
+                      selection isn't available yet.
+                    </span>
+                  </Field>
+                </div>
+                {startingPoint === "new" ? (
+                  <Field label="Plan review rounds">
+                    <div className="rounds-stepper" data-testid="rounds-stepper">
+                      <Button
+                        type="button"
+                        className="btn-small"
+                        disabled={roundsCount <= 1}
+                        onClick={() => setRoundsCount((n) => Math.max(1, n - 1))}
+                        aria-label="Fewer rounds"
+                      >
+                        −
+                      </Button>
+                      <span className="rounds-value mono">{roundsCount}</span>
+                      <Button
+                        type="button"
+                        className="btn-small"
+                        disabled={roundsCount >= 5}
+                        onClick={() => setRoundsCount((n) => Math.min(5, n + 1))}
+                        aria-label="More rounds"
+                      >
+                        +
+                      </Button>
+                    </div>
+                    <span className="field-help">
+                      Coordinator and reviewer debate the plan up to this many rounds, then stop
+                      early once they converge.
+                    </span>
+                  </Field>
+                ) : null}
+                <div className="policy">
+                  <strong>Cross-provider review is on.</strong>
+                  <br />
+                  {selectedModel?.label} will lead planning.{" "}
+                  {pmProvider === "anthropic" ? "OpenAI" : "Anthropic"} will independently review
+                  the plan.
+                </div>
+                <Button variant="primary" disabled={!canCreate} onClick={() => void create()}>
+                  {creating
+                    ? newRepository === "github"
+                      ? "Creating repository and project…"
+                      : "Creating…"
+                    : pendingLocalProject && localSelectionReady
+                      ? "Retry repository binding"
+                      : startingPoint === "new"
+                        ? "Create & draft plan →"
+                        : "Create and open project"}
+                </Button>
               </div>
-              <Button variant="primary" disabled={!canCreate} onClick={() => void create()}>
-                {creating
-                  ? newRepository === "github"
-                    ? "Creating repository and project…"
-                    : "Creating…"
-                  : pendingLocalProject && localSelectionReady
-                    ? "Retry repository binding"
-                    : "Create and open project"}
-              </Button>
-            </div>
+            )}
           </section>
-        </dialog>
+        </main>
       ) : null}
     </div>
   );
