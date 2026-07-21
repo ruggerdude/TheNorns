@@ -133,6 +133,19 @@ export const DISPATCH_CONTEXT_SCOPE_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+// EXECUTION E10: persists the branch, remote and pull request a run published,
+// so a completed task can be clicked through to its review instead of having
+// that fact live only in a `run_log` string.
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED. 0020 is the highest number merged when
+// E10 was written; the PM assigns the real number and renames the file at
+// integration.
+export const RUN_PUBLICATION_MIGRATION_NAME = "0021_run_publication";
+export const RUN_PUBLICATION_MIGRATION_URL = new URL(
+  "../../../drizzle/0021_run_publication.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -243,6 +256,10 @@ export async function loadTaskContextMigrationSql(): Promise<string> {
 
 export async function loadDispatchContextScopeMigrationSql(): Promise<string> {
   return readFile(DISPATCH_CONTEXT_SCOPE_MIGRATION_URL, "utf8");
+}
+
+export async function loadRunPublicationMigrationSql(): Promise<string> {
+  return readFile(RUN_PUBLICATION_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -432,6 +449,10 @@ export async function runCurrentV2Migrations(
     {
       name: DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
       sql: await loadDispatchContextScopeMigrationSql(),
+    },
+    {
+      name: RUN_PUBLICATION_MIGRATION_NAME,
+      sql: await loadRunPublicationMigrationSql(),
     },
   ]);
 }
