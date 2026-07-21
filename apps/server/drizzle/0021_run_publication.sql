@@ -29,8 +29,8 @@ CREATE INDEX IF NOT EXISTS agent_runs_pull_request_idx
   ON agent_runs (project_id, pull_request_url)
   WHERE pull_request_url IS NOT NULL;
 
--- agent_runs predates this migration, so it already carries its grants; the
--- repo convention is that every migration touching a table states them, and
--- re-granting is idempotent. Production runs under a restricted role and pglite
--- does not model that, so a missing grant is invisible in CI.
-GRANT SELECT, INSERT, UPDATE ON agent_runs TO norns_app;
+-- NO NEW GRANT IS REQUIRED. agent_runs already carries norns_app's table-level
+-- privileges from 0001_refoundation_v2, and PostgreSQL table privileges extend
+-- to columns added later (same reasoning as 0013 and 0015). The repo rule that
+-- every NEW TABLE needs an explicit GRANT does not reach a column addition, and
+-- issuing a redundant one here would imply otherwise.

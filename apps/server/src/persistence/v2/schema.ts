@@ -691,14 +691,15 @@ export const agentRuns = pgTable(
     usageCostUsd: money("usage_cost_usd"),
     artifacts: jsonb("artifacts").notNull().default([]),
     verificationStatus: text("verification_status").notNull().default("pending"),
-    // EXECUTION E10 — where the run's work went (branch, remote, pull request).
-    publishedBranch: text("published_branch"),
-    publishedCommitSha: text("published_commit_sha"),
-    publishedRemote: text("published_remote"),
-    pullRequestUrl: text("pull_request_url"),
-    publicationNote: text("publication_note"),
-    publicationOutcome: text("publication_outcome"),
-    publishedAt: timestamp("published_at", { withTimezone: true, mode: "string" }),
+    // EXECUTION E10 adds published_branch, published_commit_sha,
+    // published_remote, pull_request_url, publication_note,
+    // publication_outcome and published_at to this table. They are
+    // DELIBERATELY absent here: this object is the frozen 0001 surface that
+    // v2Schema.test asserts against migration 0001 alone, and every prior
+    // forward migration that extended a phase-1 table (0013's
+    // phases.planning_run_id, 0015's projects.update_interval_seconds) left the
+    // column out of Drizzle for the same reason. Every access path to those
+    // columns is raw SQL.
     resultSummary: text("result_summary"),
     failureCode: text("failure_code"),
     failureDetail: text("failure_detail"),
