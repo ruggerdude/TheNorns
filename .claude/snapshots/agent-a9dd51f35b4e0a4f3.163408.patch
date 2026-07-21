@@ -1,0 +1,170 @@
+diff --git a/apps/runner/scripts/pack-tarball.mjs b/apps/runner/scripts/pack-tarball.mjs
+index 5bdad6f..006b363 100644
+--- a/apps/runner/scripts/pack-tarball.mjs
++++ b/apps/runner/scripts/pack-tarball.mjs
+@@ -13,12 +13,37 @@
+ // via `workspace:*`. A naive `npm pack` of apps/runner produces a tarball whose
+ // package.json carries `"@norns/contracts": "workspace:*"`, which npm cannot
+ // resolve outside a pnpm workspace — the install would fail in a *second* way.
+-// The fix is npm's own `bundledDependencies` mechanism: the compiled contracts
+-// package is placed physically inside the tarball under node_modules/ and
+-// declared bundled, so npm uses the copy in the tarball verbatim and never
+-// contacts a registry for it. The three genuinely-external runtime dependencies
+-// (the two coding-agent SDKs, `ws`) and `zod` are ordinary dependencies
+-// resolved from the public registry inside the Actions job.
++//
++// WHY NOT `bundledDependencies` (this is a REGRESSION GUARD, do not "simplify"
++// it back): the first fix shipped `node_modules/@norns/contracts` inside the
++// tarball and declared it in `bundledDependencies`. That install *succeeded*
++// and the CLI still could not start. `@norns/contracts` needs `zod@^3`, while
++// `@anthropic-ai/claude-agent-sdk` drags in `zod@4` and wins the top-level
++// hoist, so npm has to place a second `zod@3` nested under `@norns/runner`.
++// npm's reifier refuses to write inside a package that declares
++// `bundledDependencies`: it creates `node_modules/@norns/runner/node_modules/
++// zod` as an EMPTY DIRECTORY, `npm ls zod` claims it is there, and Node's
++// resolver finds the empty directory first —
++//   Error: Cannot find package '…/@norns/runner/node_modules/zod/index.js'
++//     imported from '…/@norns/contracts/dist/plan.js'  (ERR_MODULE_NOT_FOUND)
++// Every Actions-hosted run died at its first command.
++//
++// THE FIX: ship no nested package at all. The compiled contracts output is
++// copied into the runner's OWN dist as a plain directory (`dist/_contracts/`)
++// and every `@norns/contracts` specifier in the runner's compiled files is
++// rewritten to a relative path. The tarball therefore contains no
++// `node_modules/` and declares no `bundledDependencies`, so npm's reifier has
++// no bundled package to refuse to write into. `zod` becomes an ordinary
++// dependency of `@norns/runner` at the range `@norns/contracts` declares, and
++// npm nests it the perfectly ordinary way — verified end to end by
++// `apps/server/test/runnerTarballInstall.test.ts`, which really installs the
++// tarball with npm and really executes the binary.
++//
++// Considered and rejected: vendoring `zod` itself into dist too (5 MB and a
++// second specifier-rewrite surface, to replace an npm behaviour that is proven
++// to work); realigning the workspace on zod 4 (large blast radius, and it makes
++// the artefact no more structurally sound — the next conflicting transitive
++// dependency reintroduces nesting).
+ //
+ // Output (all under apps/runner/dist-pack/):
+ //   norns-runner-<version>.tgz   the artifact the workflow downloads
+@@ -27,8 +52,16 @@
+ // server publishes is by construction the hash of the file it serves.
+ import { execFileSync } from "node:child_process";
+ import { createHash } from "node:crypto";
+-import { cpSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+-import { dirname, join, resolve } from "node:path";
++import {
++  cpSync,
++  mkdirSync,
++  readFileSync,
++  readdirSync,
++  rmSync,
++  statSync,
++  writeFileSync,
++} from "node:fs";
++import { dirname, join, relative, resolve, sep } from "node:path";
+ import { fileURLToPath } from "node:url";
+ 
+ const runnerRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+@@ -64,33 +97,77 @@ const stageDir = join(outDir, "package");
+ rmSync(outDir, { recursive: true, force: true });
+ mkdirSync(stageDir, { recursive: true });
+ 
+-cpSync(join(runnerRoot, "dist"), join(stageDir, "dist"), { recursive: true });
++const stageDistDir = join(stageDir, "dist");
++cpSync(join(runnerRoot, "dist"), stageDistDir, { recursive: true });
+ 
+-const bundledContractsDir = join(stageDir, "node_modules", "@norns", "contracts");
+-mkdirSync(bundledContractsDir, { recursive: true });
+-cpSync(join(contractsRoot, "dist"), join(bundledContractsDir, "dist"), { recursive: true });
++// The compiled contracts output travels INSIDE the runner's own dist, as a
++// plain directory rather than a package. `_contracts` is prefixed so it can
++// never collide with a module name the runner's own sources emit.
++const INLINED_CONTRACTS_DIR = "_contracts";
++const stageContractsDir = join(stageDistDir, INLINED_CONTRACTS_DIR);
++cpSync(join(contractsRoot, "dist"), stageContractsDir, { recursive: true });
++// Provenance: which contracts build these bytes came from. Not a package
++// manifest — nothing resolves through it — so it cannot reintroduce nesting.
+ writeFileSync(
+-  join(bundledContractsDir, "package.json"),
++  join(stageContractsDir, "INLINED.json"),
+   `${JSON.stringify(
+-    {
+-      name: contractsPkg.name,
+-      version: contractsPkg.version,
+-      type: contractsPkg.type,
+-      main: contractsPkg.main,
+-      types: contractsPkg.types,
+-      dependencies: contractsPkg.dependencies,
+-    },
++    { source: contractsPkg.name, version: contractsPkg.version, inlined_by: "pack-tarball.mjs" },
+     null,
+     2,
+   )}\n`,
+ );
+ 
++function* walkFiles(dir) {
++  for (const entry of readdirSync(dir, { withFileTypes: true })) {
++    const path = join(dir, entry.name);
++    if (entry.isDirectory()) yield* walkFiles(path);
++    else if (entry.isFile()) yield path;
++  }
++}
++
++/** `dist/runtimes/x.js` -> `../_contracts/index.js`; always POSIX, always relative. */
++function contractsSpecifierFrom(file) {
++  const target = join(stageContractsDir, "index.js");
++  const rel = relative(dirname(file), target).split(sep).join("/");
++  return rel.startsWith(".") ? rel : `./${rel}`;
++}
++
++// Rewrite every `@norns/contracts` module specifier in the runner's compiled
++// output to the inlined copy. Only specifier positions are touched: a `from`
++// clause, a dynamic `import(...)`, or a `require(...)`.
++const CONTRACTS_SPECIFIER = /(\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)(["'])@norns\/contracts\2/g;
++let rewrittenFiles = 0;
++for (const file of walkFiles(stageDistDir)) {
++  if (file.startsWith(stageContractsDir + sep)) continue;
++  if (!/\.(js|mjs|cjs|d\.ts|d\.mts|d\.cts|map)$/.test(file)) continue;
++  const before = readFileSync(file, "utf8");
++  if (!before.includes("@norns/contracts")) continue;
++  const after = before.replace(CONTRACTS_SPECIFIER, `$1$2${contractsSpecifierFrom(file)}$2`);
++  writeFileSync(file, after);
++  rewrittenFiles += 1;
++}
++
++// Fail the build rather than ship an artefact that still needs a package npm
++// will never place. This is the assertion the previous shape lacked.
++const provenanceFile = join(stageContractsDir, "INLINED.json");
++for (const file of walkFiles(stageDir)) {
++  if (file === provenanceFile) continue; // records the source package by name
++  if (!readFileSync(file, "utf8").includes("@norns/contracts")) continue;
++  throw new Error(
++    `staged tarball still references @norns/contracts in ${relative(stageDir, file)} — the inlining rewrite missed a specifier`,
++  );
++}
++if (rewrittenFiles === 0) {
++  throw new Error(
++    "no @norns/contracts specifier was rewritten — the runner's compiled output changed shape and this script no longer inlines anything",
++  );
++}
++
+ // The published manifest. Note what is absent: `private`, `devDependencies`,
+-// and every workspace: specifier. An exact-version dependency on the bundled
+-// contracts package keeps npm's integrity check meaningful without letting it
+-// reach a registry for a package that has never been published there.
++// every workspace: specifier — and, deliberately, `bundledDependencies` and any
++// `@norns/contracts` entry at all. See the header comment: a bundled package is
++// exactly what stopped npm from materialising the nested `zod@3` this needs.
+ const dependencies = {
+-  "@norns/contracts": contractsPkg.version,
+   zod: contractsPkg.dependencies.zod,
+ };
+ for (const name of EXTERNAL_DEPENDENCY_NAMES) {
+@@ -111,7 +188,6 @@ writeFileSync(
+       bin: runnerPkg.bin,
+       engines: { node: ">=20" },
+       dependencies: Object.fromEntries(Object.entries(dependencies).sort()),
+-      bundledDependencies: ["@norns/contracts"],
+     },
+     null,
+     2,

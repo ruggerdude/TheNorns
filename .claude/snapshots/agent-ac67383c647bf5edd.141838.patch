@@ -1,0 +1,184 @@
+diff --git a/apps/server/src/coordinator/phase4EventProcessor.ts b/apps/server/src/coordinator/phase4EventProcessor.ts
+index b80319b..4b50eef 100644
+--- a/apps/server/src/coordinator/phase4EventProcessor.ts
++++ b/apps/server/src/coordinator/phase4EventProcessor.ts
+@@ -9,6 +9,13 @@ import {
+   SqlV2BudgetTransaction,
+ } from "../persistence/v2/sqlRepositories.js";
+ 
++/**
++ * Per-command output kept on the verification row. Generous enough to hold a
++ * real failing test suite's tail, bounded so a runaway one cannot make the row
++ * unreadable or the read model expensive.
++ */
++export const VERIFICATION_OUTPUT_LIMIT = 20_000;
++
+ export class Phase4RunnerEventRejectedError extends Error {
+   constructor(message: string) {
+     super(message);
+@@ -278,12 +285,35 @@ export class Phase4EventProcessor {
+           });
+         }
+         const verificationId = `verification:${event.runner_id}:${event.generation}:${event.event_seq}`;
++        // EXECUTION E10 — record the REAL per-command results.
++        //
++        // This column was written as a hardcoded `'[]'::jsonb`. The runner has
++        // produced per-command results since E4 and the event contract had
++        // nowhere to carry them, so every failed verification reached a human
++        // as a red badge above a sha256 digest of text that was never stored.
++        // `command_results` now holds what actually ran, in execution order,
++        // with the failing command's output attached.
++        //
++        // The shape is the RUNNER's (`name`, `command`, `exit_code`, `passed`,
++        // `output`), not `V2VerificationCommandResult` from the evidence
++        // contract, which models each output as a content-addressed artifact
++        // reference. Nothing on this path has an artifact store; writing an
++        // artifact ref that points at nothing would be worse than storing the
++        // output inline. Output is truncated on the way in so one pathological
++        // test suite cannot bloat the row unboundedly.
++        const commandResults = event.payload.command_results.map((result) => ({
++          name: result.name,
++          command: result.command,
++          exit_code: result.exit_code,
++          passed: result.passed,
++          output: result.output.slice(0, VERIFICATION_OUTPUT_LIMIT),
++        }));
+         await sql.query(
+           `INSERT INTO verification_results (
+              id, project_id, phase_id, task_id, run_id, repository_binding_id,
+              commit_sha, verification_policy_ref, passed, command_results,
+              evidence, produced_by_runner_id
+-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'[]'::jsonb,$10::jsonb,$11)`,
++           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$12::jsonb,$10::jsonb,$11)`,
+           [
+             verificationId,
+             scope.project_id,
+@@ -296,6 +326,7 @@ export class Phase4EventProcessor {
+             event.payload.passed,
+             JSON.stringify([{ output_digest: event.payload.output_digest }]),
+             event.runner_id,
++            JSON.stringify(commandResults),
+           ],
+         );
+         await sql.query(
+@@ -303,6 +334,35 @@ export class Phase4EventProcessor {
+            WHERE id = $1`,
+           [scope.id, event.payload.commit_sha, event.payload.passed ? "passed" : "failed"],
+         );
++      } else if (event.payload.kind === "run_published") {
++        // EXECUTION E10 — persist where the run's work went.
++        //
++        // E4 published a branch and opened a pull request, then reported both
++        // as `run_log` prose. Nothing could link a completed task to its
++        // review. These columns are that link; the UI reads them straight out
++        // of the phase read model.
++        //
++        // Deliberately NOT a lifecycle transition. Publication is a fact about
++        // an existing run, orthogonal to its state — a failed run publishes
++        // too, precisely so a human can go read why the tests went red.
++        await sql.query(
++          `UPDATE agent_runs
++              SET published_branch = $2, published_commit_sha = $3,
++                  published_remote = $4, pull_request_url = $5,
++                  publication_note = $6, publication_outcome = $7,
++                  published_at = $8, updated_at = now()
++            WHERE id = $1`,
++          [
++            scope.id,
++            event.payload.branch,
++            event.payload.commit_sha,
++            event.payload.remote,
++            event.payload.pull_request_url,
++            event.payload.pull_request_note,
++            event.payload.outcome,
++            event.occurred_at,
++          ],
++        );
+       } else if (event.payload.kind === "run_status") {
+         const currentRun = await lifecycle.lockAgentRunLifecycle(scope.id);
+         const currentTask = await lifecycle.lockTaskLifecycle(scope.task_id);
+diff --git a/apps/server/src/projects/attentionService.ts b/apps/server/src/projects/attentionService.ts
+index 98e02c2..bd3de77 100644
+--- a/apps/server/src/projects/attentionService.ts
++++ b/apps/server/src/projects/attentionService.ts
+@@ -64,6 +64,38 @@ function fingerprint(value: unknown): string {
+ 
+ const severityRank = { critical: 0, high: 1, normal: 2, low: 3 } as const;
+ 
++/**
++ * EXECUTION E10 — project the persisted verification command results down to
++ * just the ones that FAILED, which is all a human reading a red run needs.
++ *
++ * Defensive about the stored shape on purpose: rows written before E10 hold the
++ * hardcoded `[]`, and a runner is an external process whose payload has already
++ * been schema-validated at the event boundary but whose historical rows have
++ * not. Anything unrecognisable yields no entries rather than a 500 on a page
++ * whose entire job is to explain a failure.
++ */
++function failedVerificationCommands(
++  value: unknown,
++): { name: string; command: string[]; exit_code: number; output: string }[] {
++  if (!Array.isArray(value)) return [];
++  const failures: { name: string; command: string[]; exit_code: number; output: string }[] = [];
++  for (const entry of value) {
++    if (typeof entry !== "object" || entry === null) continue;
++    const record = entry as Record<string, unknown>;
++    if (record.passed !== false) continue;
++    const name = typeof record.name === "string" && record.name ? record.name : "verification";
++    failures.push({
++      name,
++      command: Array.isArray(record.command)
++        ? record.command.filter((part): part is string => typeof part === "string")
++        : [],
++      exit_code: typeof record.exit_code === "number" ? record.exit_code : -1,
++      output: typeof record.output === "string" ? record.output : "",
++    });
++  }
++  return failures;
++}
++
+ export class AttentionConflictError extends Error {
+   constructor(message: string) {
+     super(message);
+@@ -868,6 +900,10 @@ export class AttentionService {
+         verification_status: string | null;
+         commit_sha: string | null;
+         failure_detail: string | null;
++        published_branch: string | null;
++        pull_request_url: string | null;
++        publication_note: string | null;
++        command_results: unknown;
+         evidence_count: number;
+       }>(
+         `SELECT t.id, t.title, t.state, t.complexity, t.risk,
+@@ -879,6 +915,17 @@ export class AttentionService {
+           reviewer.model AS reviewer_model, reviewer.roles AS reviewer_roles,
+           run.id AS run_id, run.state AS run_state, run.attempt, run.verification_status,
+           run.commit_sha, run.failure_detail,
++          -- EXECUTION E10: the branch and pull request the run published, so a
++          -- finished task is one click from its review instead of one grep
++          -- through a run log.
++          run.published_branch, run.pull_request_url, run.publication_note,
++          -- EXECUTION E10: WHICH command failed, from the designated run's most
++          -- recent verification. A red badge over an opaque digest is not
++          -- evidence; the failing command's own output is.
++          (SELECT verification.command_results FROM verification_results verification
++            WHERE verification.run_id = run.id
++            ORDER BY verification.created_at DESC, verification.id DESC
++            LIMIT 1) AS command_results,
+           (SELECT count(*)::int FROM verification_results verification
+            WHERE verification.task_id=t.id) AS evidence_count
+          FROM tasks t
+@@ -974,8 +1021,12 @@ export class AttentionService {
+                   verification_status: task.verification_status,
+                   commit_sha: task.commit_sha,
+                   failure_detail: task.failure_detail,
++                  published_branch: task.published_branch,
++                  pull_request_url: task.pull_request_url,
++                  publication_note: task.publication_note,
+                 }
+               : null,
++          failed_verification_commands: failedVerificationCommands(task.command_results),
+           evidence_count: task.evidence_count,
+           reviews: (reviewsByTask.get(task.id) ?? []).map((review) => ({
+             id: review.id,

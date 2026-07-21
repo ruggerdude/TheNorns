@@ -1,0 +1,27 @@
+diff --git a/apps/server/src/projects/strategyBridgeService.ts b/apps/server/src/projects/strategyBridgeService.ts
+index 7e6d832..171ff52 100644
+--- a/apps/server/src/projects/strategyBridgeService.ts
++++ b/apps/server/src/projects/strategyBridgeService.ts
+@@ -28,6 +28,7 @@ import {
+   type V2StrategyObjectiveProposalT,
+   type V2StrategyTaskProposalT,
+   type V2StrategyVersionT,
++  V2_DEFAULT_VERIFICATION_POLICY_REF,
+   fingerprintV2StrategyImmutableContent,
+   validatePlan,
+ } from "@norns/contracts";
+@@ -851,7 +852,13 @@ export class StrategyBridgeService {
+       required_inputs: [],
+       expected_outputs: expectedOutputs,
+       environment_policy_ref: "environment",
+-      verification_policy_ref: "verification",
++      // EXECUTION E10. This was the bare word "verification", which is not a
++      // key in the runner's default policy map — so every task materialized
++      // through the normal planning path shipped a policy ref that no runner
++      // could resolve. Before E4 that threw into an opaque catch; after E4 it
++      // fails closed with a message about a manifest the project may not have.
++      // The default deployment could not verify anything at all.
++      verification_policy_ref: V2_DEFAULT_VERIFICATION_POLICY_REF,
+       dependency_local_ids: module.dependencies.map((dependency) => taskLocalId(dependency)),
+     };
+   }

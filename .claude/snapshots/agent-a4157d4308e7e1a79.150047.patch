@@ -1,0 +1,66 @@
+diff --git a/apps/server/src/coordinator/actionsExecution.ts b/apps/server/src/coordinator/actionsExecution.ts
+index 3bbba88..50157b4 100644
+--- a/apps/server/src/coordinator/actionsExecution.ts
++++ b/apps/server/src/coordinator/actionsExecution.ts
+@@ -11,6 +11,7 @@ import {
+   enrollmentTokenHash,
+   generateEnrollmentToken,
+ } from "../integrations/githubActions.js";
++import { nonce } from "../ids.js";
+ import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
+ import {
+   type Phase4Coordinator,
+@@ -48,12 +49,27 @@ import {
+ // The design therefore assumes the token WILL leak to anyone with repo write
+ // and bounds what that is worth:
+ //
+-//   1. PROJECT-SCOPED IDENTITY. The token enrolls a runner id that belongs to
+-//      exactly one repository binding (`github_actions_bindings_runner_idx` is
+-//      unique). It is not the user's laptop runner and shares no identity with
+-//      it. Commands for other projects are never routed to it, and the Phase 4
++//   1. DISPATCH-SCOPED IDENTITY (EXECUTION E5). The token enrolls a runner id
++//      that belongs to exactly one DISPATCH — `actionsDispatchRunnerId()`
++//      mints a fresh id (`actions:${projectId}:${nonce}`) inside `schedule()`
++//      for every launch, never reused across launches, and unique per
++//      dispatch at the database level (`github_actions_runs_runner_id_idx`).
++//      It is not the user's laptop runner and shares no identity with it.
++//      Commands for other projects are never routed to it, and the Phase 4
+ //      coordinator independently rejects a run whose repository binding does
+-//      not match. Compromising this repository yields this repository.
++//      not match. Compromising this repository yields this repository, and
++//      compromising one dispatch's identity yields at most that one dispatch.
++//
++//      BEFORE E5, the id was project-scoped (`actions:${projectId}`, one per
++//      project for the project's whole lifetime). That made every dispatch in
++//      a project share one generation counter and one relay socket slot, so
++//      scheduling job B while job A was still running reserved a new
++//      generation FOR JOB A'S OWN IDENTITY and fenced job A off its own run,
++//      unconditionally, regardless of whether job B's own dispatch was itself
++//      accepted or refused by the concurrency cap below. Per-dispatch identity
++//      removes the shared state entirely: two dispatches in the same project
++//      now hold disjoint `RelayStores` records, so nothing about scheduling
++//      one can ever fence the other.
+ //
+ //   2. SINGLE USE, AGAINST AN ALREADY-DISPATCHED JOB. Enrollment must name a
+ //      `github_actions_runs` row that Norns itself created, that is in status
+@@ -62,11 +78,15 @@ import {
+ //      A stolen token cannot be used to sit on the relay waiting for work: it
+ //      can only race the legitimate job for a job Norns already decided to run.
+ //
+-//   3. SHORT GENERATION LIFETIME. Each launch reserves a fresh runner
+-//      generation, which fences the previous one instantly. A token redeemed
+-//      against a superseded generation is refused, and any connection holding
+-//      the old generation is fenced off by the existing generation machinery.
+-//      The credential is therefore worth, at most, one generation.
++//   3. SHORT GENERATION LIFETIME, NOW SCOPED TO ONE DISPATCH. Each launch
++//      reserves a fresh generation for that launch's OWN fresh runner id,
++//      which fences only a previous connection for that SAME dispatch
++//      identity (a re-run GitHub Actions attempt for the same job, or a
++//      resurrected zombie). A token redeemed against a superseded generation
++//      is refused, and any connection holding the old generation is fenced
++//      off by the existing generation machinery — this protection is
++//      unchanged, only its blast radius shrank from "the whole project" to
++//      "this one dispatch".
+ //
+ //   4. NO STANDING AUTHORITY. The enrollment token is not a relay session
+ //      credential and not a GitHub credential. It cannot read Norns data, it

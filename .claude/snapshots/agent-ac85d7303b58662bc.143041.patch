@@ -1,0 +1,179 @@
+diff --git a/apps/runner/src/daemon.ts b/apps/runner/src/daemon.ts
+index 0f01eb4..4b40a9d 100644
+--- a/apps/runner/src/daemon.ts
++++ b/apps/runner/src/daemon.ts
+@@ -17,6 +17,7 @@ import {
+ import WebSocket from "ws";
+ import { FixtureExecutor } from "./fixture.js";
+ import { RelayInferenceClient } from "./inferenceClient.js";
++import { type LiveControlKind, LiveRunRegistry } from "./liveRuns.js";
+ import { Redactor } from "./redact.js";
+ import { RunnerStateFile } from "./state.js";
+ import type { WorkspaceRegistry } from "./workspaceRegistry.js";
+@@ -67,6 +68,18 @@ export class RunnerDaemon {
+    * server refuses with `unsupported` if it does not.
+    */
+   readonly inference: RelayInferenceClient;
++  /**
++   * EXECUTION E11 — the live V2 runs this daemon can actually control.
++   *
++   * Owned here, exposed like `inference`, and handed to the V2 executor by the
++   * CLI. Before E11 every control command in `handleCommand` went to
++   * `this.executor`, the Phase 1A demo fixture, which never holds a real coding
++   * run: cancel, interrupt, suspend and resume all reached a scripted counter
++   * while the actual agent kept spending. Controls now consult this registry
++   * FIRST and fall through to the fixture only for runs it has never heard of,
++   * so the demo path is untouched.
++   */
++  readonly liveRuns = new LiveRunRegistry();
+ 
+   constructor(options: DaemonOptions) {
+     this.opts = {
+@@ -271,6 +284,7 @@ export class RunnerDaemon {
+           this.fenced = true;
+           this.inference.abortAll("runner generation fenced");
+           this.executor.cancelAll();
++          this.liveRuns.cancelAll("runner generation fenced");
+           this.stopHeartbeat();
+           socket.close();
+           break;
+@@ -355,6 +369,7 @@ export class RunnerDaemon {
+     this.stopHeartbeat();
+     this.inference.abortAll("runner stopped");
+     this.executor.cancelAll();
++    this.liveRuns.cancelAll("runner stopped");
+     this.socket?.close();
+   }
+ 
+@@ -396,6 +411,7 @@ export class RunnerDaemon {
+       this.fenced = true;
+       this.inference.abortAll("runner generation fenced");
+       this.executor.cancelAll();
++      this.liveRuns.cancelAll("runner generation fenced");
+       this.stopHeartbeat();
+       this.socket?.close(1008, "runner generation fenced");
+       return;
+@@ -449,37 +465,110 @@ export class RunnerDaemon {
+             this.ack(command.command_id, "failed", meta);
+           });
+         return;
++      // EXECUTION E11 — every control now asks the live V2 run first.
+       case "interrupt":
+-        this.executor.interrupt(payload.run_id);
+-        break;
+       case "resume_session":
+-        this.executor.resume(payload.run_id);
+-        break;
+       case "suspend":
+-        this.executor.interrupt(payload.run_id); // fixture capability matrix: suspend == pause
+-        break;
+       case "stop_after_current":
+-        this.executor.stopAfterCurrent(payload.run_id);
+-        break;
+       case "cancel":
+-        this.executor.cancel(payload.run_id);
+-        break;
++      case "send_message":
++        void this.routeControl(
++          payload.kind,
++          payload.run_id,
++          payload.kind === "send_message" ? payload.message : undefined,
++          command.command_id,
++          meta,
++        );
++        return;
+       default:
+-        // send_message / run_verification require a live runtime session.
++        // run_verification has no runner-side implementation.
+         state.recordExecution(command.command_id, "rejected");
+-        this.ack(command.command_id, "rejected", meta);
++        this.ack(command.command_id, "rejected", meta, "run_verification is not implemented here");
+         return;
+     }
+     state.recordExecution(command.command_id, "succeeded");
+     this.ack(command.command_id, "succeeded", meta);
+   }
+ 
++  /**
++   * EXECUTION E11 — deliver a control to whichever executor actually owns the
++   * run.
++   *
++   * Order matters and is not arbitrary. The live registry is asked first and is
++   * allowed to decline only by never having seen the run id; anything it *has*
++   * seen — including a run that finished ten seconds ago — it answers for. Only
++   * an id it has never heard of falls through to the Phase 1A fixture, which is
++   * how the existing demo and its relay tests keep behaving exactly as before.
++   *
++   * Nothing here is silently successful. A refusal is acked as `rejected` with
++   * the reason attached AND streamed as a `run_log`, because the command ack is
++   * a protocol detail while the run log is where a human is actually looking.
++   */
++  private async routeControl(
++    kind: LiveControlKind,
++    runId: string,
++    message: string | undefined,
++    commandId: string,
++    meta: { correlation?: string; causation?: string },
++  ): Promise<void> {
++    const state = this.requireState();
++    const settle = (ackState: CommandStateT, detail: string, visible: boolean): void => {
++      if (visible) this.emit({ kind: "run_log", run_id: runId, chunk: detail }, meta);
++      state.recordExecution(commandId, ackState);
++      this.ack(commandId, ackState, meta, detail);
++    };
++    try {
++      const live = await this.liveRuns.control(runId, kind, { ...(message ? { message } : {}) });
++      if (live) {
++        settle(live.state, live.detail, !live.applied);
++        return;
++      }
++      if (!this.executor.isActive(runId)) {
++        // Neither a live coding run nor a fixture run. The old code called a
++        // no-op on the fixture and acked `succeeded`, so a control aimed at a
++        // run this runner has never executed reported success. It did not.
++        settle("rejected", `run ${runId} is not running on this runner`, false);
++        return;
++      }
++      switch (kind) {
++        case "interrupt":
++          this.executor.interrupt(runId);
++          break;
++        case "resume_session":
++          this.executor.resume(runId);
++          break;
++        case "suspend":
++          this.executor.interrupt(runId); // fixture capability matrix: suspend == pause
++          break;
++        case "stop_after_current":
++          this.executor.stopAfterCurrent(runId);
++          break;
++        case "cancel":
++          this.executor.cancel(runId);
++          break;
++        case "send_message":
++          settle("rejected", "the fixture executor cannot receive a message", true);
++          return;
++      }
++      settle("succeeded", "", false);
++    } catch (error) {
++      settle(
++        "failed",
++        `the ${kind} could not be applied to run ${runId}: ${
++          error instanceof Error ? error.message : String(error)
++        }`,
++        true,
++      );
++    }
++  }
++
+   private ack(
+     commandId: string,
+     ackState: CommandStateT,
+     meta: { correlation?: string; causation?: string },
++    detail = "",
+   ): void {
+-    this.emit({ kind: "command_ack", command_id: commandId, state: ackState, detail: "" }, meta);
++    this.emit({ kind: "command_ack", command_id: commandId, state: ackState, detail }, meta);
+     // ONBOARDING O4: report the first terminal outcome of a launch_run so an
+     // ephemeral host can shut down. Reported at most once, and only when a
+     // caller asked for it.

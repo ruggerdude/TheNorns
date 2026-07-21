@@ -1,0 +1,469 @@
+diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
+index 7b19e13..13b1a30 100644
+--- a/apps/server/src/server.ts
++++ b/apps/server/src/server.ts
+@@ -3573,33 +3573,30 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer>
+       // contract. Bounded server-side (RUN_LOG_PAGE_LIMIT), so a chatty agent
+       // cannot make either this endpoint or a page polling it unbounded.
+       // -----------------------------------------------------------------
+-      app.get(
+-        "/api/v2/projects/:id/phases/:phaseId/tasks/:taskId/run-log",
+-        async (req, reply) => {
+-          if (!(await requireSession(req, reply))) return;
+-          const { id, phaseId, taskId } = req.params as {
+-            id: string;
+-            phaseId: string;
+-            taskId: string;
+-          };
+-          const query = req.query as { after?: string };
+-          let after: number | undefined;
+-          if (query.after !== undefined) {
+-            after = Number(query.after);
+-            if (!Number.isInteger(after) || after < 0) {
+-              return reply.code(400).send({ error: "bad_request", detail: "invalid after cursor" });
+-            }
++      app.get("/api/v2/projects/:id/phases/:phaseId/tasks/:taskId/run-log", async (req, reply) => {
++        if (!(await requireSession(req, reply))) return;
++        const { id, phaseId, taskId } = req.params as {
++          id: string;
++          phaseId: string;
++          taskId: string;
++        };
++        const query = req.query as { after?: string };
++        let after: number | undefined;
++        if (query.after !== undefined) {
++          after = Number(query.after);
++          if (!Number.isInteger(after) || after < 0) {
++            return reply.code(400).send({ error: "bad_request", detail: "invalid after cursor" });
+           }
+-          reply.send(
+-            await options.phase5?.attention.runLog(
+-              id,
+-              phaseId,
+-              taskId,
+-              after !== undefined ? { after } : {},
+-            ),
+-          );
+-        },
+-      );
++        }
++        reply.send(
++          await options.phase5?.attention.runLog(
++            id,
++            phaseId,
++            taskId,
++            after !== undefined ? { after } : {},
++          ),
++        );
++      });
+     }
+ 
+     app.get("/api/projects/:id/graph", async (req, reply) => {
+diff --git a/apps/server/test/executionE13.test.ts b/apps/server/test/executionE13.test.ts
+index c01dd5c..bd1d2f2 100644
+--- a/apps/server/test/executionE13.test.ts
++++ b/apps/server/test/executionE13.test.ts
+@@ -303,7 +303,9 @@ describe.sequential("EXECUTION E13 — live run-log tail", () => {
+     expect(tail.total_entries).toBe(3);
+     expect(tail.entries.map((entry) => entry.chunk)).toEqual(["line 0\n", "line 1\n", "line 2\n"]);
+     // Ascending sequence, oldest first.
+-    expect(tail.entries[0]?.sequence).toBeLessThan(tail.entries[1]?.sequence ?? Infinity);
++    expect(tail.entries[0]?.sequence).toBeLessThan(
++      tail.entries[1]?.sequence ?? Number.POSITIVE_INFINITY,
++    );
+ 
+     const lastSeen = tail.entries.at(-1)?.sequence;
+     expect(lastSeen).toBeDefined();
+diff --git a/apps/web/src/App.tsx b/apps/web/src/App.tsx
+index 88da4b5..df5a8f1 100644
+--- a/apps/web/src/App.tsx
++++ b/apps/web/src/App.tsx
+@@ -41,6 +41,7 @@ import {
+   ProjectTabs,
+   Projects,
+ } from "./Projects";
++import { RunLog } from "./RunLog";
+ import { StartPhaseControl } from "./StartPhaseControl";
+ import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
+ import {
+@@ -59,7 +60,17 @@ import {
+   setToken,
+ } from "./auth";
+ import { ThemeToggle, useTheme } from "./theme";
+-import { Alert, Badge, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
++import {
++  Alert,
++  Badge,
++  Button,
++  DismissibleNote,
++  Field,
++  Input,
++  Select,
++  Spinner,
++  TextArea,
++} from "./ui";
+ 
+ interface Assignment {
+   provider: string;
+@@ -141,6 +152,13 @@ interface ProjectResumeDto {
+     percent_complete?: number;
+     eta_at?: string | null;
+     burn_rate_usd_per_hour?: number | null;
++    // EXECUTION E13 — live cost, alongside the throughput fields above.
++    // `spend_usd` is real accrued spend from `usage_events`; null means no
++    // metered call has landed for this phase yet (never a fabricated 0).
++    // `budget_usd` is the phase's real approved_budget_usd (0 = nothing
++    // approved yet, which is itself an honest fact, so it is never null).
++    spend_usd?: number | null;
++    budget_usd?: number;
+   }>;
+   attention: { open_decisions: number; active_runs: number; blocked_tasks: number };
+   next_recommended_action: string;
+@@ -154,6 +172,21 @@ interface ProjectResumeDto {
+   update_interval_seconds?: number;
+ }
+ 
++/** EXECUTION E13 — real accrued spend and the real approved/reserved budget
++ *  it is measured against. `spend_usd`/`input_tokens`/`output_tokens` are
++ *  null together when nothing has been metered yet (never a fabricated 0,
++ *  which would read as "confirmed free"). `budget_usd` is null when no
++ *  budget has been reserved for this run yet (distinct from a real
++ *  reservation of $0). Optional on the wire so a payload from before this
++ *  phase still type-checks. */
++interface TaskCostDto {
++  spend_usd: number | null;
++  input_tokens: number | null;
++  output_tokens: number | null;
++  budget_usd: number | null;
++  last_usage_at: string | null;
++}
++
+ interface PhaseExecutionDto {
+   phase: {
+     id: string;
+@@ -161,6 +194,10 @@ interface PhaseExecutionDto {
+     status: string;
+     completed_tasks: number;
+     total_tasks: number;
++    // EXECUTION E13 — live cost at the phase scope; see TaskCostDto's note
++    // on the same honesty rule (null spend != fabricated 0).
++    spend_usd?: number | null;
++    budget_usd?: number;
+   };
+   tasks: Array<{
+     id: string;
+@@ -227,9 +264,16 @@ interface PhaseExecutionDto {
+         roles: string[];
+       };
+     }>;
++    // EXECUTION E13 — live cost for this task's designated run.
++    cost?: TaskCostDto;
+   }>;
+ }
+ 
++/** True while a run is still able to produce log output / accrue spend —
++ *  used both to decide the fast poll cadence (App.tsx) and whether a task's
++ *  RunLog panel should keep polling (RunLog.tsx). */
++const RUN_ACTIVE_STATES = new Set(["created", "dispatched", "running", "verifying"]);
++
+ type PhaseExecutionTask = PhaseExecutionDto["tasks"][number];
+ 
+ /** FRONT DOOR P2's durable planning-run DTO (GET .../planning-runs/:runId),
+@@ -266,6 +310,46 @@ function evidenceLabel(evidence: {
+   return `${evidence.label} · ${evidence.media_type} · ${evidence.content_hash.slice(0, 12)}`;
+ }
+ 
++function formatUsd(amount: number): string {
++  return `$${amount.toFixed(2)}`;
++}
++
++/**
++ * EXECUTION E13 — a single honest line of cost. Renders "—" rather than a
++ * fabricated $0.00 whenever `spendUsd` is null (nothing metered yet), even
++ * when a real budget is already known. Returns null (nothing rendered) only
++ * when there is NEITHER a spend figure NOR a budget figure to show — the
++ * caller decides whether that absence itself is worth a line ("no run yet").
++ */
++function CostLine({
++  spendUsd,
++  budgetUsd,
++  testId,
++}: {
++  spendUsd: number | null | undefined;
++  budgetUsd: number | null | undefined;
++  testId?: string;
++}): React.ReactElement | null {
++  if (spendUsd === undefined && budgetUsd === undefined) return null;
++  const spendText =
++    spendUsd === null || spendUsd === undefined ? (
++      <span className="cost-unknown">no metered spend yet</span>
++    ) : (
++      <span className="cost-amount">{formatUsd(spendUsd)}</span>
++    );
++  return (
++    <div className="cost-line" data-testid={testId}>
++      <span>Spend:</span>
++      {spendText}
++      {budgetUsd !== null && budgetUsd !== undefined ? (
++        <span>of {formatUsd(budgetUsd)} budget</span>
++      ) : (
++        <span className="cost-unknown">budget not reserved yet</span>
++      )}
++    </div>
++  );
++}
++
+ function TaskQcPanel({
+   task,
+   projectId,
+@@ -403,6 +487,28 @@ function TaskQcPanel({
+           ) : null}
+         </div>
+       ) : null}
++      {/* EXECUTION E13 — live cost for this task's designated run. Absent
++          entirely (no line at all) when the task has no run yet; a "—"
++          rather than $0.00 once a run exists but nothing has been metered. */}
++      {task.run && task.cost ? (
++        <CostLine
++          spendUsd={task.cost.spend_usd}
++          budgetUsd={task.cost.budget_usd}
++          testId={`task-cost-${task.id}`}
++        />
++      ) : null}
++      {/* EXECUTION E13 — the run's streamed log output, live while the run is
++          active and frozen (one final fetch, then no more polling) once it
++          is not. */}
++      {task.run ? (
++        <RunLog
++          projectId={projectId}
++          phaseId={phaseId}
++          taskId={task.id}
++          active={RUN_ACTIVE_STATES.has(task.run.state)}
++          onUnauthorized={onUnauthorized}
++        />
++      ) : null}
+       {task.run?.failure_detail ? <Alert>{task.run.failure_detail}</Alert> : null}
+       {/* EXECUTION E10 — WHICH command failed, and its output. A red badge over
+           a sha256 digest is not something a human can act on. */}
+@@ -804,12 +910,39 @@ function ProjectGraph({
+     }
+   }, [monitoredPhaseId, project.id, onLogout]);
+ 
++  // EXECUTION E13 — polling cadence, and why it does NOT simply obey
++  // `update_interval_seconds` here.
++  //
++  // The human's configured interval (60/300/900s) is honored for IDLE
++  // polling — a phase with no run currently executing gets exactly that
++  // cadence, same as the resume poll below. But a live run needs faster
++  // feedback than a 5-minute (or 15-minute) default would ever give, and
++  // that need is inherent to what this phase built (live cost, live logs),
++  // not a reason to silently override the human's choice everywhere. So:
++  // while ANY task in the monitored phase has a run in a still-executing
++  // state, this poll runs at a fixed, fast PHASE_ACTIVE_POLL_MS regardless of
++  // the configured value; the moment no run is active, it reverts to the
++  // configured interval (falling back to the same 15s default the resume
++  // poll uses before the first resume response names one). This is the same
++  // number this poll already used unconditionally before E13 — now it is a
++  // deliberate choice made explicit, rather than an interval that happened to
++  // ignore the setting.
++  const PHASE_ACTIVE_POLL_MS = 5_000;
++  const phaseHasActiveRun = useMemo(
++    () =>
++      (phaseExecution?.tasks ?? []).some(
++        (task) => task.run && RUN_ACTIVE_STATES.has(task.run.state),
++      ),
++    [phaseExecution],
++  );
+   useEffect(() => {
+     if (!monitoredPhaseId) return;
+     void loadPhaseExecution();
+-    const timer = window.setInterval(() => void loadPhaseExecution(), 5_000);
++    const idleMs = Math.max(5, resume?.update_interval_seconds ?? 15) * 1000;
++    const pollMs = phaseHasActiveRun ? PHASE_ACTIVE_POLL_MS : idleMs;
++    const timer = window.setInterval(() => void loadPhaseExecution(), pollMs);
+     return () => window.clearInterval(timer);
+-  }, [monitoredPhaseId, loadPhaseExecution]);
++  }, [monitoredPhaseId, loadPhaseExecution, phaseHasActiveRun, resume?.update_interval_seconds]);
+ 
+   // FRONT DOOR P1: replaces the old raw-objective "Create the next phase"
+   // text box. New-phase creation goes through an observable planning run
+@@ -1491,8 +1624,26 @@ function ProjectGraph({
+                       </div>
+                       <p className="muted">
+                         {phaseExecution.phase.completed_tasks}/{phaseExecution.phase.total_tasks}{" "}
+-                        tasks complete · updates every 5 seconds
++                        tasks complete · updates every{" "}
++                        {phaseHasActiveRun
++                          ? "5 seconds"
++                          : `${Math.max(5, resume?.update_interval_seconds ?? 15)} seconds`}
+                       </p>
++                      {/* EXECUTION E13 — live cost for the whole phase. */}
++                      <CostLine
++                        spendUsd={phaseExecution.phase.spend_usd}
++                        budgetUsd={phaseExecution.phase.budget_usd}
++                        testId="phase-cost"
++                      />
++                      <DismissibleNote
++                        storageKey="norns:e13-cost-log-note"
++                        testId="e13-honesty-note"
++                      >
++                        Spend and run-log figures come from real metered provider calls and streamed
++                        runner output recorded since this instrumentation shipped. A run or task
++                        with nothing recorded yet shows as "no data", never as $0.00 or an empty log
++                        presented as complete.
++                      </DismissibleNote>
+                       <div className="phase-task-list" data-testid="phase-task-list">
+                         {phaseExecution.tasks.map((task) => (
+                           <TaskQcPanel
+diff --git a/apps/web/src/styles.css b/apps/web/src/styles.css
+index 98c20c4..0a84975 100644
+--- a/apps/web/src/styles.css
++++ b/apps/web/src/styles.css
+@@ -846,6 +846,84 @@ button:disabled {
+   white-space: pre-wrap;
+   word-break: break-word;
+ }
++/* EXECUTION E13 — live cost + live run-log. */
++.cost-line {
++  display: flex;
++  align-items: baseline;
++  gap: 6px;
++  font-size: 11px;
++  color: var(--muted);
++}
++.cost-line .cost-amount {
++  color: var(--text);
++  font-weight: 600;
++}
++.cost-line .cost-unknown {
++  font-style: italic;
++}
++.run-log {
++  margin-top: 6px;
++  border: 1px solid var(--line);
++  border-radius: 9px;
++  background: var(--bg);
++}
++.run-log > summary {
++  cursor: pointer;
++  padding: 6px 10px;
++  font-size: 11px;
++  color: var(--muted);
++}
++.run-log-body {
++  border-top: 1px solid var(--line);
++  padding: 8px 10px;
++  display: grid;
++  gap: 6px;
++}
++.run-log-output {
++  margin: 0;
++  max-height: 220px;
++  overflow: auto;
++  padding: 8px;
++  border-radius: 7px;
++  background: var(--surface);
++  color: var(--text);
++  font-size: 11px;
++  white-space: pre-wrap;
++  word-break: break-word;
++}
++.run-log-meta {
++  display: flex;
++  justify-content: space-between;
++  gap: 10px;
++  font-size: 10.5px;
++  color: var(--muted);
++}
++.dismissible-note {
++  display: flex;
++  align-items: flex-start;
++  gap: 10px;
++  border: 1px solid var(--line);
++  background: var(--raised);
++  color: var(--muted);
++  border-radius: 11px;
++  padding: 0.65rem 0.5rem 0.65rem 0.85rem;
++  font-size: 0.78rem;
++  line-height: 1.4;
++  margin: 0.7rem 0;
++}
++.dismissible-note-close {
++  flex: none;
++  border: none;
++  background: transparent;
++  color: var(--muted);
++  font-size: 16px;
++  line-height: 1;
++  cursor: pointer;
++  padding: 2px 6px;
++}
++.dismissible-note-close:hover {
++  color: var(--text);
++}
+ .agent-identity-grid {
+   display: grid;
+   grid-template-columns: minmax(0, 1fr);
+diff --git a/apps/web/src/ui.tsx b/apps/web/src/ui.tsx
+index 637fdee..e056483 100644
+--- a/apps/web/src/ui.tsx
++++ b/apps/web/src/ui.tsx
+@@ -1,4 +1,4 @@
+-import { forwardRef } from "react";
++import { forwardRef, useState } from "react";
+ import type {
+   ButtonHTMLAttributes,
+   InputHTMLAttributes,
+@@ -42,6 +42,52 @@ export function Alert({ children, testId }: { children: ReactNode; testId?: stri
+     </div>
+   );
+ }
++/**
++ * EXECUTION E13 — a plain, one-time explanation that a human can dismiss for
++ * good (persisted in localStorage under `storageKey`), matching the register
++ * FRONT DOOR/EXECUTION established elsewhere: honest and factual, no
++ * marketing, dismissible rather than nagging on every visit. Best-effort
++ * around localStorage (a private-browsing tab, or storage disabled, just
++ * means it re-shows next time — never a thrown error).
++ */
++export function DismissibleNote({
++  storageKey,
++  children,
++  testId,
++}: {
++  storageKey: string;
++  children: ReactNode;
++  testId?: string;
++}) {
++  const [dismissed, setDismissed] = useState<boolean>(() => {
++    try {
++      return window.localStorage.getItem(storageKey) === "1";
++    } catch {
++      return false;
++    }
++  });
++  if (dismissed) return null;
++  return (
++    <div className="dismissible-note" data-testid={testId}>
++      <span className="alert-body">{children}</span>
++      <button
++        type="button"
++        className="dismissible-note-close"
++        aria-label="Dismiss this note"
++        onClick={() => {
++          setDismissed(true);
++          try {
++            window.localStorage.setItem(storageKey, "1");
++          } catch {
++            /* best effort — storage may be unavailable */
++          }
++        }}
++      >
++        ×
++      </button>
++    </div>
++  );
++}
+ export function Spinner({ label = "Loading…" }: { label?: string }) {
+   return (
+     <div className="loading">

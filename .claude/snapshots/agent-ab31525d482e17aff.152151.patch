@@ -1,0 +1,152 @@
+diff --git a/apps/web/src/styles.css b/apps/web/src/styles.css
+index 98c20c4..0a84975 100644
+--- a/apps/web/src/styles.css
++++ b/apps/web/src/styles.css
+@@ -846,6 +846,84 @@ button:disabled {
+   white-space: pre-wrap;
+   word-break: break-word;
+ }
++/* EXECUTION E13 — live cost + live run-log. */
++.cost-line {
++  display: flex;
++  align-items: baseline;
++  gap: 6px;
++  font-size: 11px;
++  color: var(--muted);
++}
++.cost-line .cost-amount {
++  color: var(--text);
++  font-weight: 600;
++}
++.cost-line .cost-unknown {
++  font-style: italic;
++}
++.run-log {
++  margin-top: 6px;
++  border: 1px solid var(--line);
++  border-radius: 9px;
++  background: var(--bg);
++}
++.run-log > summary {
++  cursor: pointer;
++  padding: 6px 10px;
++  font-size: 11px;
++  color: var(--muted);
++}
++.run-log-body {
++  border-top: 1px solid var(--line);
++  padding: 8px 10px;
++  display: grid;
++  gap: 6px;
++}
++.run-log-output {
++  margin: 0;
++  max-height: 220px;
++  overflow: auto;
++  padding: 8px;
++  border-radius: 7px;
++  background: var(--surface);
++  color: var(--text);
++  font-size: 11px;
++  white-space: pre-wrap;
++  word-break: break-word;
++}
++.run-log-meta {
++  display: flex;
++  justify-content: space-between;
++  gap: 10px;
++  font-size: 10.5px;
++  color: var(--muted);
++}
++.dismissible-note {
++  display: flex;
++  align-items: flex-start;
++  gap: 10px;
++  border: 1px solid var(--line);
++  background: var(--raised);
++  color: var(--muted);
++  border-radius: 11px;
++  padding: 0.65rem 0.5rem 0.65rem 0.85rem;
++  font-size: 0.78rem;
++  line-height: 1.4;
++  margin: 0.7rem 0;
++}
++.dismissible-note-close {
++  flex: none;
++  border: none;
++  background: transparent;
++  color: var(--muted);
++  font-size: 16px;
++  line-height: 1;
++  cursor: pointer;
++  padding: 2px 6px;
++}
++.dismissible-note-close:hover {
++  color: var(--text);
++}
+ .agent-identity-grid {
+   display: grid;
+   grid-template-columns: minmax(0, 1fr);
+diff --git a/apps/web/src/ui.tsx b/apps/web/src/ui.tsx
+index 637fdee..e056483 100644
+--- a/apps/web/src/ui.tsx
++++ b/apps/web/src/ui.tsx
+@@ -1,4 +1,4 @@
+-import { forwardRef } from "react";
++import { forwardRef, useState } from "react";
+ import type {
+   ButtonHTMLAttributes,
+   InputHTMLAttributes,
+@@ -42,6 +42,52 @@ export function Alert({ children, testId }: { children: ReactNode; testId?: stri
+     </div>
+   );
+ }
++/**
++ * EXECUTION E13 — a plain, one-time explanation that a human can dismiss for
++ * good (persisted in localStorage under `storageKey`), matching the register
++ * FRONT DOOR/EXECUTION established elsewhere: honest and factual, no
++ * marketing, dismissible rather than nagging on every visit. Best-effort
++ * around localStorage (a private-browsing tab, or storage disabled, just
++ * means it re-shows next time — never a thrown error).
++ */
++export function DismissibleNote({
++  storageKey,
++  children,
++  testId,
++}: {
++  storageKey: string;
++  children: ReactNode;
++  testId?: string;
++}) {
++  const [dismissed, setDismissed] = useState<boolean>(() => {
++    try {
++      return window.localStorage.getItem(storageKey) === "1";
++    } catch {
++      return false;
++    }
++  });
++  if (dismissed) return null;
++  return (
++    <div className="dismissible-note" data-testid={testId}>
++      <span className="alert-body">{children}</span>
++      <button
++        type="button"
++        className="dismissible-note-close"
++        aria-label="Dismiss this note"
++        onClick={() => {
++          setDismissed(true);
++          try {
++            window.localStorage.setItem(storageKey, "1");
++          } catch {
++            /* best effort — storage may be unavailable */
++          }
++        }}
++      >
++        ×
++      </button>
++    </div>
++  );
++}
+ export function Spinner({ label = "Loading…" }: { label?: string }) {
+   return (
+     <div className="loading">

@@ -1,0 +1,58 @@
+diff --git a/todo.md b/todo.md
+index 1c8a227..931c84d 100644
+--- a/todo.md
++++ b/todo.md
+@@ -54,9 +54,52 @@
+   which sends no credentials, so it cannot yet read an assembled context.
+   Swap it for the signing fetcher (`RunnerSignedContextFetcher`) in
+   `apps/runner/**`. Owned by the phase that may touch the runner (E2/E4).
+-- [ ] E1 follow-up — context-fetch authorization is authentication-only: any
++- [x] E1 follow-up — context-fetch authorization is authentication-only: any
+   paired runner may fetch any context document. Bind documents to a dispatch
+   job (or the run's runner id) once E2 creates the dispatch record.
++  **Closed by E2's `dispatchContextScope.ts`** below.
++- [x] E2 Start-phase trigger + dispatch-context scoping — the other two of the
++  five reasons nothing ever ran: nothing triggers work, and
++  `UPDATE phases SET status='active'` only ever happened inside
++  `Phase4Coordinator.schedule()`, which nothing called. Rescued and completed
++  the previous agent's killed session (`worktree-agent-aab290f3bd0186fc0`,
++  which had already landed `phaseLaunchService.ts`, `dispatchContextScope.ts`,
++  and `main.ts`/`server.ts`/`migrate.ts` wiring, but zero tests). New
++  `apps/server/src/coordinator/phaseLaunchService.ts`'s `PhaseLaunchService`
++  finds a phase's dependency-ready tasks, assembles each one's context through
++  E1's assembler, and schedules it through the EXISTING, unweakened
++  `Phase4Coordinator.schedule()` (local-runner projects) or
++  `ActionsExecutionCoordinator.schedule()` (GitHub Actions projects) — every
++  precondition it checks upfront only ever refuses work the gate would also
++  refuse, earlier and with a specific human-readable reason
++  (`phase_not_ready`, `no_execution_binding`, `installation_not_ready`,
++  `unverified_binding`, `actions_execution_unavailable`,
++  `budget_exhausted`, plus every EXECUTION E1 assembly-failure code surfaced
++  verbatim). `dispatchContextScope.ts`'s `DispatchContextScopeRepository`
++  closes E1's authentication-only fetch-route gap: the moment a task is
++  scheduled, the runner it was dispatched to is recorded against every exact
++  context document it was handed, and the fetch route now requires both a
++  valid signature AND that scope row. Wired `execution: {transactions,
++  baseUrl}` into `main.ts` (was built by E1, never passed — the same
++  unwired-service failure mode as FRONT DOOR P4/ONBOARDING O2) plus a new
++  `GET/POST .../phases/:phaseId/start-readiness|start` route pair in
++  server.ts's "EXECUTION E2" section. Minimal `apps/web/src/
++  StartPhaseControl.tsx` "Start phase" trigger, shown only for
++  approved/active phases, enabled only when the real read-only
++  `start-readiness` preflight reports ready — never enabled when the gate
++  would refuse. Found and fixed two bugs surfaced while writing tests: (1)
++  merging E1+E2 broke 2 pre-existing E1 tests because the new authorization
++  layer now 403s a runner that was never scoped (fixed the tests to record
++  scope first, split one test into an authorized-404 case and an
++  unauthorized-403 case); (2) `server.ts`'s Phase4 dispatch-tick/recovery-scan
++  timers had no `.catch()` — an ordinary transient DB error was an unhandled
++  rejection that could crash a production server outright; nothing had ever
++  caught it because no test exercised `buildServer`'s `phase4` option before
++  this program's boot-wiring test. Migration stays `0020_` (previous agent's
++  provisional number; still unassigned, per instruction, for the PM).
++  Suites green: server 667 (+28 net over E1's 639: +14 `phaseLaunchService`,
++  +8 boot-wiring, +5 `dispatchContextScope`, +1 net from the E1 fix), web 113
++  (+10). biome/tsc --noEmit/build all clean.
+ 
+ ## ONBOARDING program
+ 

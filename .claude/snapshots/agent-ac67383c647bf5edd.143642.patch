@@ -1,0 +1,404 @@
+diff --git a/apps/server/src/coordinator/phase4Coordinator.ts b/apps/server/src/coordinator/phase4Coordinator.ts
+index ce26b81..5bac66d 100644
+--- a/apps/server/src/coordinator/phase4Coordinator.ts
++++ b/apps/server/src/coordinator/phase4Coordinator.ts
+@@ -9,6 +9,7 @@ import {
+ import type { V2TransactionRunner } from "../persistence/v2/database.js";
+ import { transitionV2TaskLifecycle } from "../persistence/v2/lifecycleMutation.js";
+ import { SqlV2ApplicationTransaction } from "../persistence/v2/sqlRepositories.js";
++import { resolveDispatchRuntime } from "./agenticRuntime.js";
+ import { resolveProjectVerificationCommands } from "./verificationCommandSource.js";
+ 
+ export class Phase4CoordinatorConflictError extends Error {
+@@ -395,7 +396,12 @@ export class Phase4Coordinator {
+         expected_revision: row.expected_revision,
+         target_branch: input.target_branch,
+         worktree_policy_ref: input.worktree_policy_ref,
+-        runtime: row.runtime,
++        // EXECUTION E10 (E9-9) — dispatch a runtime the runner can construct.
++        // `agent_profiles.runtime` has historically been written as the
++        // PROVIDER name by the planning bridge, which is not a key in the
++        // runner's runtime map; such a run failed before doing any work. Real
++        // runtime names pass through untouched.
++        runtime: resolveDispatchRuntime(row.runtime, row.provider),
+         provider: row.provider,
+         model: row.model,
+         context_refs: contextRefs,
+diff --git a/apps/server/src/main.ts b/apps/server/src/main.ts
+index f6e216e..291242b 100644
+--- a/apps/server/src/main.ts
++++ b/apps/server/src/main.ts
+@@ -168,6 +168,12 @@ let onboardingOptions: { transactions: V2TransactionRunner } | undefined;
+ // constructor throws on anything other than HTTPS (or http on localhost),
+ // so a misconfiguration fails at boot, not silently at runner-fetch time.
+ let executionOptions: { transactions: V2TransactionRunner; baseUrl?: string } | undefined;
++// EXECUTION E10 (E9-10, = E3-10): the relational runtime behind BOTH the E3
++// completion proxy and E9's provider-native model gateway. Both previously
++// reached for `planningRuns ?? onboarding ?? attachments` inside buildServer --
++// working only by the accident that production wires all three from this same
++// runner, and one config change away from silently disabling runner inference.
++let runnerInferenceOptions: { transactions: V2TransactionRunner } | undefined;
+ 
+ const publicOrigin =
+   process.env.NORNS_PUBLIC_ORIGIN ??
+@@ -417,6 +423,9 @@ if (databaseUrl) {
+     // undefined -- exactly the dead-on-arrival state the EXECUTION audit
+     // found.
+     executionOptions = { transactions: runtimeTransactions, baseUrl: publicOrigin };
++    // EXECUTION E10 (E9-10, = E3-10): state the dependency instead of letting
++    // buildServer infer it from an unrelated feature's option.
++    runnerInferenceOptions = { transactions: runtimeTransactions };
+     identityRuntime = createIdentityRuntime({
+       users,
+       route: identityRoute,
+@@ -660,6 +669,8 @@ const server = await buildServer({
+   ...(attachmentsOptions !== undefined ? { attachments: attachmentsOptions } : {}),
+   ...(onboardingOptions !== undefined ? { onboarding: onboardingOptions } : {}),
+   ...(executionOptions !== undefined ? { execution: executionOptions } : {}),
++  // EXECUTION E10 (E9-10, = E3-10): the E3 proxy and the E9 gateway.
++  ...(runnerInferenceOptions !== undefined ? { runnerInference: runnerInferenceOptions } : {}),
+   ...(integrationServices !== undefined ? { integrations: integrationServices } : {}),
+   recordUsage: (events) => ledger.push(...events),
+   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),
+diff --git a/apps/server/src/projects/strategyBridgeService.ts b/apps/server/src/projects/strategyBridgeService.ts
+index 171ff52..2fafa96 100644
+--- a/apps/server/src/projects/strategyBridgeService.ts
++++ b/apps/server/src/projects/strategyBridgeService.ts
+@@ -32,6 +32,7 @@ import {
+   fingerprintV2StrategyImmutableContent,
+   validatePlan,
+ } from "@norns/contracts";
++import { agenticRuntimeForProvider } from "../coordinator/agenticRuntime.js";
+ import { newId } from "../ids.js";
+ import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
+ import type { PhaseWorkflowService } from "./phaseWorkflowService.js";
+@@ -892,7 +893,15 @@ export class StrategyBridgeService {
+           [
+             id,
+             pair.provider,
+-            pair.provider,
++            // EXECUTION E10 (E9-9). This was `pair.provider` — so every profile
++            // the planning bridge created carried runtime `anthropic` or
++            // `openai`, neither of which is a key in the runner's runtime map.
++            // A task staffed through the normal path dispatched a runtime no
++            // runner could construct and died with "runtime anthropic is
++            // unavailable" before doing any work. Since E9's gateway, the
++            // agentic runtimes are credential-free and are the right answer in
++            // an Actions job as well as on a laptop.
++            agenticRuntimeForProvider(pair.provider) ?? pair.provider,
+             pair.model,
+             JSON.stringify(["implementation", "review"]),
+             DEFAULT_CONTEXT_LIMIT_TOKENS,
+diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
+index 209887e..31537e8 100644
+--- a/apps/server/src/server.ts
++++ b/apps/server/src/server.ts
+@@ -300,6 +300,22 @@ export interface ServerOptions {
+    * database runtime, same as `debates`.
+    */
+   planningRuns?: { transactions: V2TransactionRunner };
++  /**
++   * EXECUTION E10 (E9-10, = E3-10) — the relational runtime behind BOTH the E3
++   * completion proxy and the E9 provider-native gateway.
++   *
++   * Before this option existed, each of them reached for
++   * `planningRuns?.transactions ?? onboarding?.transactions ??
++   * attachments?.transactions` — whichever unrelated feature happened to be
++   * configured. That worked only because production wires all three from the
++   * same runner, and would have silently disabled runner inference the day
++   * someone turned planning runs off. Naming it makes the dependency explicit
++   * and makes `main.ts` the single place that decides it exists.
++   *
++   * The fallback chain is retained below purely so existing tests that
++   * construct `buildServer` with only `planningRuns` keep working.
++   */
++  runnerInference?: { transactions: V2TransactionRunner };
+   /**
+    * FRONT DOOR P4 (D3): image attachments (content-addressed Postgres store).
+    * Unavailable without its database runtime, same as `planningRuns`. When
+@@ -437,11 +453,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer>
+   // A deployment with no relational runtime gets no proxy, and every request
+   // is answered `unsupported` — never silently executed without metering.
+   //
+-  // FOLLOW-UP FOR THE PM: a dedicated `ServerOptions.runnerInference:
+-  // { transactions }` passed from main.ts would be cleaner than reaching for
+-  // whichever relational option happens to be present. Reported, not done,
+-  // because main.ts is E2's this phase.
++  // EXECUTION E10 (E9-10, = E3-10) — DONE. `runnerInference` is now a named
++  // option, wired from main.ts alongside the other relational features, so the
++  // dependency is stated rather than inferred from whichever unrelated feature
++  // happens to be configured. The remaining fallbacks are compatibility only:
++  // they keep every existing test (and any deployment not yet passing the new
++  // option) behaving exactly as before. Production always supplies the named
++  // one, and a boot-shape test asserts it.
+   const runtimeTransactionsForInference =
++    options.runnerInference?.transactions ??
+     options.planningRuns?.transactions ??
+     options.onboarding?.transactions ??
+     options.attachments?.transactions;
+@@ -499,10 +519,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer>
+   // notions of "this runner owns this run" is how a bypass gets built; there
+   // is only one.
+   //
+-  // SAME PM FOLLOW-UP AS E3 (E3-10): a dedicated
+-  // `ServerOptions.runnerInference: { transactions }` from main.ts would beat
+-  // reaching for whichever relational option happens to be present. Not done
+-  // here because main.ts is E2's file this phase.
++  // E3-10 / E9-10 CLOSED BY E10: `runtimeTransactionsForInference` above now
++  // prefers the named `ServerOptions.runnerInference`, wired from main.ts. The
++  // gateway and the E3 proxy therefore share one explicitly-supplied runtime
++  // rather than each inferring one.
+   const gatewayOrigin = configuredOrigin ?? "http://127.0.0.1";
+   // The mint route and the gateway MUST agree about run ownership, so they are
+   // handed the same lookup rather than each constructing one.
+diff --git a/apps/server/test/executionE10.test.ts b/apps/server/test/executionE10.test.ts
+index 260b77e..d976ff1 100644
+--- a/apps/server/test/executionE10.test.ts
++++ b/apps/server/test/executionE10.test.ts
+@@ -386,44 +386,16 @@ describe.sequential("EXECUTION E10 — the runner's fallback chain is real", ()
+   });
+ });
+ 
+-// ---------------------------------------------------------------------------
+-// SEAM 2 — the policy-ref vocabulary, and the default that could not resolve.
+-// ---------------------------------------------------------------------------
+-
+-describe.sequential("EXECUTION E10 — the default policy ref actually resolves", () => {
+-  let pg: PGlite;
+-
+-  beforeEach(async () => {
+-    pg = new PGlite();
+-    await seedExecutableProject(pg);
+-  });
+-
+-  afterEach(async () => {
+-    await pg.close();
+-  });
+-
+-  it("keeps ONE vocabulary: the server constant is the runner's default map key", () => {
+-    expect(V2_DEFAULT_VERIFICATION_POLICY_REF).toBe(DEFAULT_VERIFICATION_POLICY_REF);
+-    expect(
+-      runnerVerificationPolicies(undefined).get(V2_DEFAULT_VERIFICATION_POLICY_REF),
+-    ).toBeTruthy();
+-    // The pre-E10 spelling was a bare word that no runner could look up. If it
+-    // ever becomes resolvable again, this assertion is the place to notice.
+-    expect(runnerVerificationPolicies(undefined).get("verification")).toBeUndefined();
+-  });
+-
+-  it("a strategy materialized through the NORMAL path produces a policy ref the runner can resolve", async () => {
+-    const transactions = new PGliteTransactionRunner(pg);
+-    const bridge = new StrategyBridgeService({
+-      transactions,
+-      phases: new PhaseWorkflowService(transactions),
+-      strategies: new StrategyWorkflowService(transactions),
+-      now: () => new Date("2026-07-21T12:00:00.000Z"),
+-    });
++/**
++ * A converged planning run whose result the real StrategyBridgeService will
++ * materialize. Written once and reused, so the "normal path" the tests claim
++ * to exercise really is one path.
++ */
++async function seedConvergedPlanningRun(pg: PGlite, runId: string): Promise<void> {
+     await pg.query(
+       `INSERT INTO planning_runs (
+          id, project_id, status, round, max_rounds, objective, transcript, result, total_cost_usd
+-       ) VALUES ('run-e10','project-1','converged',1,3,'Ship it',$1::jsonb,$2::jsonb,0.5)`,
++       ) VALUES ($3,'project-1','converged',1,3,'Ship it',$1::jsonb,$2::jsonb,0.5)`,
+       [
+         JSON.stringify([
+           {
+@@ -485,8 +457,47 @@ describe.sequential("EXECUTION E10 — the default policy ref actually resolves"
+             ],
+           },
+         }),
++        runId,
+       ],
+     );
++}
++
++
++// ---------------------------------------------------------------------------
++// SEAM 2 — the policy-ref vocabulary, and the default that could not resolve.
++// ---------------------------------------------------------------------------
++
++describe.sequential("EXECUTION E10 — the default policy ref actually resolves", () => {
++  let pg: PGlite;
++
++  beforeEach(async () => {
++    pg = new PGlite();
++    await seedExecutableProject(pg);
++  });
++
++  afterEach(async () => {
++    await pg.close();
++  });
++
++  it("keeps ONE vocabulary: the server constant is the runner's default map key", () => {
++    expect(V2_DEFAULT_VERIFICATION_POLICY_REF).toBe(DEFAULT_VERIFICATION_POLICY_REF);
++    expect(
++      runnerVerificationPolicies(undefined).get(V2_DEFAULT_VERIFICATION_POLICY_REF),
++    ).toBeTruthy();
++    // The pre-E10 spelling was a bare word that no runner could look up. If it
++    // ever becomes resolvable again, this assertion is the place to notice.
++    expect(runnerVerificationPolicies(undefined).get("verification")).toBeUndefined();
++  });
++
++  it("a strategy materialized through the NORMAL path produces a policy ref the runner can resolve", async () => {
++    const transactions = new PGliteTransactionRunner(pg);
++    const bridge = new StrategyBridgeService({
++      transactions,
++      phases: new PhaseWorkflowService(transactions),
++      strategies: new StrategyWorkflowService(transactions),
++      now: () => new Date("2026-07-21T12:00:00.000Z"),
++    });
++    await seedConvergedPlanningRun(pg, "run-e10");
+ 
+     const review = await bridge.createPhaseFromPlanningRun({
+       projectId: "project-1",
+@@ -766,3 +777,146 @@ describe.sequential("EXECUTION E10 — results and publication reach the read mo
+     });
+   });
+ });
++
++// ---------------------------------------------------------------------------
++// E9-9 (supersedes E3-11) — dispatch a runtime the runner can actually build.
++// ---------------------------------------------------------------------------
++
++describe.sequential("EXECUTION E10 — the dispatched runtime is a real one", () => {
++  let pg: PGlite;
++  let coordinator: Phase4Coordinator;
++
++  beforeEach(async () => {
++    pg = new PGlite();
++    await seedExecutableProject(pg);
++    coordinator = new Phase4Coordinator(new PGliteTransactionRunner(pg));
++  });
++
++  afterEach(async () => {
++    await pg.close();
++  });
++
++  it("maps a provider-named runtime to the agentic runtime that provider speaks", () => {
++    expect(agenticRuntimeForProvider("anthropic")).toBe("claude-code");
++    expect(agenticRuntimeForProvider("openai")).toBe("codex");
++    expect(agenticRuntimeForProvider("nobody")).toBeNull();
++    // A real runtime name is authoritative: an operator who deliberately chose
++    // the one-shot completion runtime keeps it.
++    expect(resolveDispatchRuntime("proxied-completion", "anthropic")).toBe("proxied-completion");
++    expect(resolveDispatchRuntime("codex", "anthropic")).toBe("codex");
++    // Unknown runtime AND unknown provider: passed through unchanged so the
++    // runner refuses it by the name it was actually given, rather than
++    // silently running an agent nobody asked for.
++    expect(resolveDispatchRuntime("something-else", "nobody")).toBe("something-else");
++  });
++
++  it("does not dispatch a provider name as a runtime the runner has never registered", async () => {
++    // Exactly what StrategyBridgeService used to write: runtime = provider.
++    await pg.query("UPDATE agent_profiles SET provider='anthropic', runtime='anthropic'");
++
++    const result = await coordinator.schedule(scheduleInput());
++
++    expect(result.command.runtime).toBe("claude-code");
++    expect(RUNNER_RUNTIMES).toContain(result.command.runtime);
++    const stored = await pg.query<{ envelope: { runtime: string } }>(
++      "SELECT envelope FROM commands WHERE command_id = $1",
++      [result.command_id],
++    );
++    expect(stored.rows[0]?.envelope.runtime).toBe("claude-code");
++  });
++
++  it("the planning bridge now creates profiles the runner can construct", async () => {
++    const transactions = new PGliteTransactionRunner(pg);
++    const bridge = new StrategyBridgeService({
++      transactions,
++      phases: new PhaseWorkflowService(transactions),
++      strategies: new StrategyWorkflowService(transactions),
++      now: () => new Date("2026-07-21T12:00:00.000Z"),
++    });
++    await seedConvergedPlanningRun(pg, "run-runtime");
++
++    const review = await bridge.createPhaseFromPlanningRun({
++      projectId: "project-1",
++      planningRunId: "run-runtime",
++      actor: { actor_id: "admin-1" },
++    });
++    await bridge.approve({
++      projectId: "project-1",
++      phaseId: review.phase.id,
++      actor: { actor_id: "admin-1" },
++    });
++
++    const profiles = await pg.query<{ id: string; provider: string; runtime: string }>(
++      "SELECT id, provider, runtime FROM agent_profiles WHERE id <> 'agent-1' ORDER BY id",
++    );
++    expect(profiles.rows.length).toBeGreaterThan(0);
++    for (const profile of profiles.rows) {
++      // The bug: this column held the PROVIDER, which is not a runtime key.
++      expect(RUNNER_RUNTIMES, `${profile.id} (${profile.provider})`).toContain(profile.runtime);
++    }
++  });
++});
++
++// ---------------------------------------------------------------------------
++// E9-10 (= E3-10) — `runnerInference` is a NAMED option, wired from main.ts.
++// ---------------------------------------------------------------------------
++
++describe.sequential("EXECUTION E10 — runnerInference boot wiring", () => {
++  let pg: PGlite;
++  let transactions: PGliteTransactionRunner;
++
++  beforeEach(async () => {
++    pg = new PGlite();
++    await pg.exec("CREATE ROLE norns_app NOLOGIN");
++    await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
++    transactions = new PGliteTransactionRunner(pg);
++  }, 60_000);
++
++  afterEach(async () => {
++    await new Promise((settle) => setTimeout(settle, 50));
++    if (!pg.closed) await pg.close();
++  });
++
++  it("mounts the E9 gateway credential route from `runnerInference` ALONE", async () => {
++    // Deliberately no planningRuns / onboarding / attachments: this is the
++    // configuration that previously left runner inference silently dead, and
++    // it is the whole point of naming the option.
++    const users = new UserStore();
++    const server = await buildServer({
++      stores: new RelayStores(),
++      users,
++      projects: new ProjectStore(),
++      runnerInference: { transactions },
++    });
++    try {
++      const response = await server.app.inject({
++        method: "POST",
++        url: "/api/execution/gateway/credentials",
++        payload: { run_id: "run:task-1:1" },
++      });
++      // 401, not 404: the route is mounted and runner signature auth refuses.
++      expect(response.statusCode).toBe(401);
++    } finally {
++      await server.app.close();
++    }
++  });
++
++  it("mounts nothing when no relational runtime is supplied at all", async () => {
++    const users = new UserStore();
++    const server = await buildServer({
++      stores: new RelayStores(),
++      users,
++      projects: new ProjectStore(),
++    });
++    try {
++      const response = await server.app.inject({
++        method: "POST",
++        url: "/api/execution/gateway/credentials",
++        payload: { run_id: "run:task-1:1" },
++      });
++      expect(response.statusCode).toBe(404);
++    } finally {
++      await server.app.close();
++    }
++  });
++});

@@ -1,0 +1,118 @@
+diff --git a/apps/runner/src/cli.ts b/apps/runner/src/cli.ts
+index ea338a7..da87505 100644
+--- a/apps/runner/src/cli.ts
++++ b/apps/runner/src/cli.ts
+@@ -13,8 +13,10 @@ import { homedir } from "node:os";
+ import { join } from "node:path";
+ import { type RunnerContextIdentity, RunnerSignedContextFetcher } from "./contextAuth.js";
+ import { RunnerDaemon } from "./daemon.js";
++import type { RelayInferenceClient } from "./inferenceClient.js";
+ import { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
+ import { CodexRuntime } from "./runtimes/codex.js";
++import { ProxiedCompletionRuntime } from "./runtimes/proxiedCompletion.js";
+ import {
+   ApprovedRepositoryRegistry,
+   CommandPolicyVerifier,
+@@ -85,6 +87,14 @@ function createV2Executor(
+    * and the agent runs with no prompt at all, so there is no sensible default.
+    */
+   identity: RunnerContextIdentity,
++  /**
++   * EXECUTION E3 — the relay's model-proxy client. Registers the
++   * `proxied-completion` runtime, which is the ONLY runtime that works when
++   * the process holds no provider credentials — which is exactly the situation
++   * in an ephemeral GitHub Actions job. See the E3 report: `claude-code` and
++   * `codex` cannot be served by this proxy, and remain credential-dependent.
++   */
++  inference: RelayInferenceClient,
+   /**
+    * ONBOARDING O4: receives the repository registry so the ephemeral CI mode
+    * can bind the checked-out workspace to whatever repository binding the
+@@ -118,6 +128,20 @@ function createV2Executor(
+     new Map<string, RunnerRuntimeProvider>([
+       ["codex", (model: string) => new CodexRuntime({ model })],
+       ["claude-code", (model: string) => new ClaudeCodeRuntime({ model })],
++      // EXECUTION E3 — credential-free. Gets its model access from the relay,
++      // where the call is authorized against the run and charged to the
++      // project's budget before it is made.
++      [
++        "proxied-completion",
++        (model: string, context) =>
++          new ProxiedCompletionRuntime(inference, {
++            provider: model.startsWith("gpt") || model.startsWith("o") ? "openai" : "anthropic",
++            model,
++            runId: context.runId,
++            taskId: context.taskId,
++            maxTokens: context.maxOutputTokens,
++          }),
++      ],
+     ]),
+     new CommandPolicyVerifier(policies),
+     workspaces,
+@@ -269,6 +293,7 @@ async function main(): Promise<void> {
+       workspaces,
+       // The key stays inside the daemon; only a signing capability is handed out.
+       { runnerId, sign: (payload) => daemon.sign(payload) },
++      daemon.inference,
+       (repositories) => {
+         execution.repositories = repositories;
+       },
+diff --git a/apps/runner/src/v2Execution.ts b/apps/runner/src/v2Execution.ts
+index bd4ee35..64b7b4b 100644
+--- a/apps/runner/src/v2Execution.ts
++++ b/apps/runner/src/v2Execution.ts
+@@ -262,7 +262,24 @@ export class CommandPolicyVerifier implements RunnerVerifier {
+   }
+ }
+ 
+-export type RunnerRuntimeProvider = CodingRuntime | ((model: string) => CodingRuntime);
++/**
++ * EXECUTION E3 — the factory now also receives the run it is building for.
++ *
++ * Additive and source-compatible: a `(model) => runtime` lambda still satisfies
++ * this type, because TypeScript permits a function that ignores trailing
++ * parameters. It exists because a credential-free runtime obtains its model
++ * access from the relay, and the server authorizes that access against the run
++ * and task — so the runtime has to know which run it is.
++ */
++export interface RunnerRuntimeContext {
++  runId: string;
++  taskId: string;
++  maxOutputTokens: number;
++}
++
++export type RunnerRuntimeProvider =
++  | CodingRuntime
++  | ((model: string, context: RunnerRuntimeContext) => CodingRuntime);
+ 
+ export interface V2RunnerExecutionResult {
+   outcome: "succeeded" | "failed" | "cancelled";
+@@ -312,7 +329,13 @@ export class V2RunnerExecutor {
+     const runtimeProvider = this.runtimes.get(command.runtime);
+     if (!runtimeProvider) throw new Error(`runtime ${command.runtime} is unavailable`);
+     const runtime =
+-      typeof runtimeProvider === "function" ? runtimeProvider(command.model) : runtimeProvider;
++      typeof runtimeProvider === "function"
++        ? runtimeProvider(command.model, {
++            runId: command.run_id,
++            taskId: command.task_id,
++            maxOutputTokens: command.max_output_tokens,
++          })
++        : runtimeProvider;
+     let scratch: string | undefined;
+     let worktree: PreparedWorktree | undefined;
+     try {
+diff --git a/apps/server/test/actionsExecution.test.ts b/apps/server/test/actionsExecution.test.ts
+index feea567..5efdba7 100644
+--- a/apps/server/test/actionsExecution.test.ts
++++ b/apps/server/test/actionsExecution.test.ts
+@@ -724,7 +724,8 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
+       built.actions,
+       {
+         serverOrigin: "https://norns.example",
+-        runnerPackage: "0.1.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++        runnerPackage:
++          "0.1.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+         reserveGeneration: (runnerId) => stores.reserveRunnerGeneration(runnerId),
+       },
+     );

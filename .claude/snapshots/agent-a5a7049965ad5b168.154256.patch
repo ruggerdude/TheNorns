@@ -1,0 +1,72 @@
+diff --git a/apps/server/src/persistence/v2/migrate.ts b/apps/server/src/persistence/v2/migrate.ts
+index 0e8d324..90cfa8c 100644
+--- a/apps/server/src/persistence/v2/migrate.ts
++++ b/apps/server/src/persistence/v2/migrate.ts
+@@ -178,6 +178,16 @@ export const ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_URL = new URL(
+   import.meta.url,
+ );
+ 
++// EXECUTION E12 — conflict safety for concurrent tasks inside one phase. The
++// number is unassigned for the same reason as every entry above it: parallel
++// phases each pick the next free number and the PM renames the file and this
++// string at integration.
++export const PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME = "0024_phase_concurrency_conflicts";
++export const PHASE_CONCURRENCY_CONFLICTS_MIGRATION_URL = new URL(
++  "../../../drizzle/0024_phase_concurrency_conflicts.sql",
++  import.meta.url,
++);
++
+ export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
+   rows: TRow[];
+   affectedRows?: number;
+@@ -302,6 +312,10 @@ export async function loadActionsDispatchRunnerIdentityMigrationSql(): Promise<s
+   return readFile(ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_URL, "utf8");
+ }
+ 
++export async function loadPhaseConcurrencyConflictsMigrationSql(): Promise<string> {
++  return readFile(PHASE_CONCURRENCY_CONFLICTS_MIGRATION_URL, "utf8");
++}
++
+ export function v2MigrationChecksum(sql: string): string {
+   return createHash("sha256").update(sql).digest("hex");
+ }
+@@ -502,5 +516,9 @@ export async function runCurrentV2Migrations(
+       name: ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
+       sql: await loadActionsDispatchRunnerIdentityMigrationSql(),
+     },
++    {
++      name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
++      sql: await loadPhaseConcurrencyConflictsMigrationSql(),
++    },
+   ]);
+ }
+diff --git a/apps/server/test/v2PreservationSchema.test.ts b/apps/server/test/v2PreservationSchema.test.ts
+index 6be9ab0..68cf9d5 100644
+--- a/apps/server/test/v2PreservationSchema.test.ts
++++ b/apps/server/test/v2PreservationSchema.test.ts
+@@ -4,6 +4,7 @@ import type { PgTable } from "drizzle-orm/pg-core";
+ import { afterAll, beforeAll, describe, expect, it } from "vitest";
+ import {
+   ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
++  PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
+   ACTIONS_EXECUTION_MIGRATION_NAME,
+   ATTACHMENTS_MIGRATION_NAME,
+   DEBATE_WORKFLOW_MIGRATION_NAME,
+@@ -228,6 +229,9 @@ describe.sequential("Phase 2 preservation schema", () => {
+       // EXECUTION E5. Name is still `NNNN_`; the PM assigns the number at
+       // integration, which is also when this entry's position changes.
+       { name: ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME, applied: false },
++      // EXECUTION E12. Name is still `NNNN_`; the PM assigns the number at
++      // integration, which is also when this entry's position changes.
++      { name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME, applied: false },
+     ]);
+     const tracking = await pg.query<{ name: string }>(
+       "SELECT name FROM norns_schema_migrations ORDER BY name",
+@@ -260,6 +264,7 @@ describe.sequential("Phase 2 preservation schema", () => {
+       GATEWAY_CREDENTIALS_MIGRATION_NAME,
+       RUN_PUBLICATION_MIGRATION_NAME,
+       ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
++      PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
+     ]);
+   });
+ 

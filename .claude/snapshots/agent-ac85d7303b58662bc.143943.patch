@@ -1,0 +1,136 @@
+diff --git a/apps/runner/src/v2Execution.ts b/apps/runner/src/v2Execution.ts
+index 3fa894f..3d8c181 100644
+--- a/apps/runner/src/v2Execution.ts
++++ b/apps/runner/src/v2Execution.ts
+@@ -492,6 +492,19 @@ export interface RunnerRuntimeContext {
+   runId: string;
+   taskId: string;
+   maxOutputTokens: number;
++  /**
++   * EXECUTION E11 — the runtime session a previous job left behind, when the
++   * coordinator is resuming rather than starting fresh.
++   *
++   * The seam exists here, unpopulated, on purpose. `ClaudeCodeRuntime` and
++   * `CodexRuntime` have accepted `resumeSessionId` / `resumeThreadId` since
++   * they were written and nothing has ever set either, because there is no
++   * field on `V2DispatchCommand` that carries a prior session id and no store
++   * that remembers one. Adding that field is a contract change and is routed to
++   * the PM (see docs/phases/EXECUTION-E11-resumability.md); this parameter is
++   * the runner half, ready for it.
++   */
++  resumeSessionId?: string;
+ }
+ 
+ export type RunnerRuntimeProvider =
+@@ -514,6 +527,19 @@ export interface V2RunnerExecutionResult {
+   publication: PublicationResult | null;
+   /** Why the run ended as it did, in words a human can act on. */
+   reason: string | null;
++  /**
++   * EXECUTION E11 — the runtime session this run leaves behind, when the
++   * runtime has a resumable one.
++   *
++   * Both agentic adapters have always reported a `sessionId` and the executor
++   * has always dropped it on the floor, which is why "the agent asks, the job
++   * ends, a later job resumes with prior context" had no foundation at all: the
++   * one identifier that makes a faithful resume possible was discarded within
++   * milliseconds of being produced, on a machine that was about to be deleted.
++   * It is now returned AND emitted as a run log, so it survives in the durable
++   * event stream even before a coordinator learns to store it.
++   */
++  session_id: string | null;
+ }
+ 
+ export class V2RunnerExecutor {
+@@ -587,6 +613,14 @@ export class V2RunnerExecutor {
+     // boundary below so the abort is honoured wherever it lands.
+     const controller = new AbortController();
+     let cancelReason: string | null = null;
++    /**
++     * EXECUTION E11 — the resumable session this run leaves behind.
++     *
++     * Declared out here, before anything can return, because the value is only
++     * useful if EVERY exit carries it: the run a human most wants to resume is
++     * the one that was cancelled or timed out, not the one that succeeded.
++     */
++    let sessionId: string | null = null;
+     let session: RuntimeSession | null = null;
+     let settled: V2RunnerExecutionResult["outcome"] = "failed";
+     const release = this.liveRuns?.register({
+@@ -619,6 +653,7 @@ export class V2RunnerExecutor {
+         usage: { input_tokens: 0, output_tokens: 0, usage_source: "unavailable" },
+         empty: true,
+         publication: null,
++        session_id: sessionId,
+         reason,
+       });
+     };
+@@ -667,6 +702,20 @@ export class V2RunnerExecutor {
+             ]),
+           }),
+       });
++      if (runtimeResult.sessionId) {
++        sessionId = runtimeResult.sessionId;
++        // Emitted as a run log because that is the only durable channel a
++        // runner has today: no event payload, dispatch field, or column exists
++        // to carry a session id (routed to the PM). On an ephemeral Actions
++        // runner this line is the ONLY thing that outlives the machine.
++        // A session id is an opaque local identifier, not a credential — the
++        // provider still requires its own authentication to use one.
++        emit({
++          kind: "run_log",
++          run_id: command.run_id,
++          chunk: `runtime session id (resumable): ${sessionId}`,
++        });
++      }
+       emit({
+         kind: "usage_report",
+         run_id: command.run_id,
+@@ -775,6 +824,7 @@ export class V2RunnerExecutor {
+           usage: runtimeResult.usage,
+           empty: !produced,
+           publication,
++          session_id: sessionId,
+           reason,
+         });
+       }
+@@ -787,6 +837,7 @@ export class V2RunnerExecutor {
+           usage: runtimeResult.usage,
+           empty: false,
+           publication: null,
++          session_id: sessionId,
+           reason: `the coding runtime ${runtimeResult.outcome}`,
+         });
+       }
+@@ -811,6 +862,7 @@ export class V2RunnerExecutor {
+           usage: runtimeResult.usage,
+           empty: true,
+           publication: null,
++          session_id: sessionId,
+           reason,
+         });
+       }
+@@ -915,6 +967,7 @@ export class V2RunnerExecutor {
+           usage: runtimeResult.usage,
+           empty: false,
+           publication: null,
++          session_id: sessionId,
+           reason,
+         });
+       }
+@@ -931,6 +984,7 @@ export class V2RunnerExecutor {
+         usage: runtimeResult.usage,
+         empty: false,
+         publication,
++        session_id: sessionId,
+         reason: verification.passed ? null : (verification.reason ?? "verification failed"),
+       });
+     } catch {
+@@ -957,6 +1011,7 @@ export class V2RunnerExecutor {
+         },
+         empty: false,
+         publication: null,
++        session_id: sessionId,
+         reason: "runner execution failed; inspect the local runner diagnostics",
+       });
+     } finally {
