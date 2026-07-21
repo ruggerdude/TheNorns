@@ -76,6 +76,9 @@ export class MockFetch {
   post(pattern: string | RegExp, handler: MockResponseInit | MockHandler): this {
     return this.route("POST", pattern, handler);
   }
+  patch(pattern: string | RegExp, handler: MockResponseInit | MockHandler): this {
+    return this.route("PATCH", pattern, handler);
+  }
   del(pattern: string | RegExp, handler: MockResponseInit | MockHandler): this {
     return this.route("DELETE", pattern, handler);
   }

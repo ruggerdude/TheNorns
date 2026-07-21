@@ -21,7 +21,10 @@ describe("project model display", () => {
 
     await renderAppAndOpenProject(projectAlpha.name);
 
-    expect(await screen.findByText(/Claude Sonnet 5 PM/i)).toBeInTheDocument();
+    // FRONT DOOR P1d: the PM model now renders as a "Coordinator" chip in
+    // the workspace header (was "Claude Sonnet 5 PM" text before the tab
+    // reorg — same information, mockup-aligned presentation).
+    expect(await screen.findByText(/Claude Sonnet 5.*Coordinator/i)).toBeInTheDocument();
   });
 
   it("opens a newly created relational project as a draft instead of a blank graph error", async () => {
@@ -66,7 +69,10 @@ describe("project model display", () => {
     });
     mock.install();
 
-    await renderAppAndOpenProject(projectAlpha.name);
+    const { user } = await renderAppAndOpenProject(projectAlpha.name);
+    // FRONT DOOR P1d: the graph canvas (and its draft-hint empty state) now
+    // lives under the "Graph" tab.
+    await user.click(screen.getByRole("button", { name: "Graph" }));
 
     expect(await screen.findByTestId("draft-hint")).toHaveTextContent("No plan yet");
     expect(screen.queryByText(/unknown project/i)).not.toBeInTheDocument();

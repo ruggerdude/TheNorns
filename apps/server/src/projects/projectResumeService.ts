@@ -1,4 +1,5 @@
 import { V2ProjectResume, type V2ProjectResumeT } from "@norns/contracts";
+import { z } from "zod";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import { safeLocalRepositoryDisplayName } from "./repositoryDisplayName.js";
 
@@ -6,6 +7,174 @@ export class ProjectResumeNotFoundError extends Error {
   constructor(readonly projectId: string) {
     super(`project ${projectId} not found`);
     this.name = "ProjectResumeNotFoundError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// FRONT DOOR P5 (tracking): per-phase / project progress math.
+//
+// These fields are additive to the `@norns/contracts` V2ProjectResume shape,
+// which is a `.strict()` zod object owned by Phase 3 (packages/contracts is
+// out of this phase's ownership). Rather than widen that contract, the added
+// fields are validated locally with the schemas below and merged onto the
+// contract-validated base object in `ProjectResumeService.open`. See the
+// deviation note in this phase's report for why.
+// ---------------------------------------------------------------------------
+
+/** How many of the most recent samples feed the rolling-window throughput/
+ * burn-rate estimate. Small and fixed for MVP predictability; revisit if a
+ * real project shows noisy per-task timing. Exported so the phase-scoped
+ * read model (attentionService.ts `phase()`) uses the same window. */
+export const PROGRESS_WINDOW_SIZE = 5;
+
+export const V2PhaseProgress = z
+  .object({
+    percent_complete: z.number().int().min(0).max(100),
+    tasks_completed: z.number().int().nonnegative(),
+    tasks_total: z.number().int().nonnegative(),
+    eta_at: z.string().datetime().nullable(),
+    burn_rate_usd_per_hour: z.number().nullable(),
+  })
+  .strict();
+export type V2PhaseProgressT = z.infer<typeof V2PhaseProgress>;
+
+export const V2ProjectProgress = z
+  .object({
+    overall_percent_complete: z.number().int().min(0).max(100),
+    blended_eta_at: z.string().datetime().nullable(),
+    agents_active: z.number().int().nonnegative(),
+    decisions_waiting: z.number().int().nonnegative(),
+  })
+  .strict();
+export type V2ProjectProgressT = z.infer<typeof V2ProjectProgress>;
+
+export type V2ProjectResumeWithTrackingT = Omit<V2ProjectResumeT, "phases"> & {
+  phases: Array<V2ProjectResumeT["phases"][number] & V2PhaseProgressT>;
+  progress: V2ProjectProgressT;
+  update_interval_seconds: number;
+};
+
+/** Task-weighted percent complete, guarded against the empty-phase / no-task
+ * division by zero (an empty phase is defined as 0% complete, not NaN). */
+export function computePercentComplete(tasksCompleted: number, tasksTotal: number): number {
+  if (tasksTotal <= 0) return 0;
+  const ratio = Math.min(1, Math.max(0, tasksCompleted / tasksTotal));
+  return Math.round(ratio * 100);
+}
+
+/**
+ * Linear-projection ETA from a rolling window of recent task-completion
+ * timestamps. Returns null (never a fabricated timestamp) when:
+ *  - the phase is not currently executing,
+ *  - the phase has no remaining tasks,
+ *  - fewer than 2 completions exist in the window (no throughput signal), or
+ *  - the window's timestamps do not span any measurable time (rate would be
+ *    infinite / undefined).
+ */
+export function computePhaseEta(input: {
+  isExecuting: boolean;
+  tasksCompleted: number;
+  tasksTotal: number;
+  recentCompletionTimestamps: ReadonlyArray<string | Date>;
+}): string | null {
+  if (!input.isExecuting) return null;
+  const remaining = input.tasksTotal - input.tasksCompleted;
+  if (remaining <= 0) return null;
+  const timestamps = input.recentCompletionTimestamps
+    .map((value) => new Date(value).getTime())
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b);
+  if (timestamps.length < 2) return null;
+  const first = timestamps[0] as number;
+  const last = timestamps[timestamps.length - 1] as number;
+  const spanMs = last - first;
+  if (spanMs <= 0) return null;
+  const completionsInWindow = timestamps.length - 1;
+  const ratePerMs = completionsInWindow / spanMs;
+  if (!Number.isFinite(ratePerMs) || ratePerMs <= 0) return null;
+  const projectedMs = last + remaining / ratePerMs;
+  if (!Number.isFinite(projectedMs)) return null;
+  return new Date(projectedMs).toISOString();
+}
+
+/**
+ * USD burn rate from a rolling window of recently finished agent runs.
+ * Guards against no-signal (no finished runs) and division-by-zero (zero or
+ * negative elapsed wall-clock time, e.g. malformed started/finished pairs).
+ */
+export function computeBurnRateUsdPerHour(
+  samples: ReadonlyArray<{
+    started_at: string | Date | null;
+    finished_at: string | Date | null;
+    usage_cost_usd: number | string | null;
+  }>,
+): number | null {
+  let totalCostUsd = 0;
+  let totalHours = 0;
+  for (const sample of samples) {
+    if (!sample.started_at || !sample.finished_at) continue;
+    const startedMs = new Date(sample.started_at).getTime();
+    const finishedMs = new Date(sample.finished_at).getTime();
+    if (!Number.isFinite(startedMs) || !Number.isFinite(finishedMs)) continue;
+    if (finishedMs <= startedMs) continue;
+    totalHours += (finishedMs - startedMs) / 3_600_000;
+    totalCostUsd += Number(sample.usage_cost_usd ?? 0);
+  }
+  if (totalHours <= 0) return null;
+  const rate = totalCostUsd / totalHours;
+  return Number.isFinite(rate) ? Math.round(rate * 100) / 100 : null;
+}
+
+/** Task-weighted percent complete across all non-cancelled phases (a
+ * cancelled phase's scope was withdrawn, so — like an archived project —
+ * it should not dilute the aggregate). */
+export function computeOverallPercentComplete(
+  phases: ReadonlyArray<{ tasksCompleted: number; tasksTotal: number; status: string }>,
+): number {
+  const totals = phases.reduce(
+    (acc, phase) => {
+      if (phase.status === "cancelled") return acc;
+      return {
+        completed: acc.completed + phase.tasksCompleted,
+        total: acc.total + phase.tasksTotal,
+      };
+    },
+    { completed: 0, total: 0 },
+  );
+  return computePercentComplete(totals.completed, totals.total);
+}
+
+/** The latest (furthest-out) ETA among phases that have one; null when no
+ * phase currently has an ETA signal. */
+export function computeBlendedEtaAt(phaseEtas: ReadonlyArray<string | null>): string | null {
+  const times = phaseEtas
+    .filter((value): value is string => value !== null)
+    .map((value) => Date.parse(value))
+    .filter((value) => Number.isFinite(value));
+  if (times.length === 0) return null;
+  return new Date(Math.max(...times)).toISOString();
+}
+
+const ALLOWED_UPDATE_INTERVAL_SECONDS = new Set([60, 300, 900]);
+const UPDATE_INTERVAL_FLOOR_SECONDS = 60;
+
+export class ProjectSettingsValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProjectSettingsValidationError";
+  }
+}
+
+function assertValidUpdateIntervalSeconds(value: number): void {
+  if (!Number.isInteger(value) || value < UPDATE_INTERVAL_FLOOR_SECONDS) {
+    throw new ProjectSettingsValidationError(
+      `update_interval_seconds must be an integer of at least ${UPDATE_INTERVAL_FLOOR_SECONDS} seconds`,
+    );
+  }
+  if (!ALLOWED_UPDATE_INTERVAL_SECONDS.has(value)) {
+    throw new ProjectSettingsValidationError(
+      `update_interval_seconds must be one of ${[...ALLOWED_UPDATE_INTERVAL_SECONDS].join(", ")}`,
+    );
   }
 }
 
@@ -35,7 +204,7 @@ function nextAction(input: {
 export class ProjectResumeService {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
-  open(projectId: string): Promise<V2ProjectResumeT> {
+  open(projectId: string): Promise<V2ProjectResumeWithTrackingT> {
     return this.transactions.transaction(async (tx) => {
       const projects = await tx.query<{
         id: string;
@@ -44,9 +213,10 @@ export class ProjectResumeService {
         status: string;
         aggregate_version: number;
         current_architecture_revision_id: string | null;
+        update_interval_seconds: number;
       }>(
         `SELECT id, name, description, status, aggregate_version,
-                current_architecture_revision_id
+                current_architecture_revision_id, update_interval_seconds
          FROM projects WHERE id = $1`,
         [projectId],
       );
@@ -93,6 +263,29 @@ export class ProjectResumeService {
                SELECT 1 FROM repository_bindings binding
                WHERE binding.project_id = candidate.project_id
                  AND binding.repository_id = candidate.external_repository_id
+             )
+           -- FRONT DOOR P2b (D2): a folder-first local project created with
+           -- no runner online has only this candidate row (no real
+           -- repository_bindings row exists yet) until a paired runner
+           -- verifies the workspace via the existing
+           -- source-bindings/local flow, at which point
+           -- SourceBindingService.createLocal marks the candidate
+           -- 'promoted' and the NOT EXISTS below stops surfacing it (the
+           -- real connected binding above takes its place).
+           UNION ALL
+           SELECT candidate.id, 'local_runner'::text AS binding_type,
+                  candidate.display_name AS repository_display_name,
+                  'unverified_candidate'::text AS status,
+                  'unknown'::text AS repository_health,
+                  NULL::text AS observed_head, candidate.created_at
+           FROM repository_binding_candidates candidate
+           WHERE candidate.project_id = $1
+             AND candidate.source_type = 'local'
+             AND candidate.status <> 'dismissed'
+             AND NOT EXISTS (
+               SELECT 1 FROM repository_bindings binding
+               WHERE binding.project_id = candidate.project_id
+                 AND binding.binding_type = 'local_runner'
              )
          ) repository
          ORDER BY created_at, id`,
@@ -150,13 +343,62 @@ export class ProjectResumeService {
          ORDER BY completed_at DESC, id LIMIT 10`,
         [projectId],
       );
+      // FRONT DOOR P5 (tracking): the most recent PROGRESS_WINDOW_SIZE task
+      // completions per phase, feeding the ETA throughput estimate.
+      const recentCompletions = await tx.query<{
+        phase_id: string;
+        completed_at: Date | string;
+      }>(
+        `SELECT phase_id, completed_at
+         FROM (
+           SELECT phase_id, completed_at,
+                  row_number() OVER (PARTITION BY phase_id ORDER BY completed_at DESC) AS rn
+           FROM tasks
+           WHERE project_id = $1 AND state = 'completed'
+         ) ranked
+         WHERE rn <= $2`,
+        [projectId, PROGRESS_WINDOW_SIZE],
+      );
+      // The most recent PROGRESS_WINDOW_SIZE succeeded runs per phase,
+      // feeding the burn-rate estimate (cost / wall-clock time).
+      const recentRunCosts = await tx.query<{
+        phase_id: string;
+        started_at: Date | string | null;
+        finished_at: Date | string | null;
+        usage_cost_usd: string | number;
+      }>(
+        `SELECT phase_id, started_at, finished_at, usage_cost_usd
+         FROM (
+           SELECT phase_id, started_at, finished_at, usage_cost_usd,
+                  row_number() OVER (PARTITION BY phase_id ORDER BY finished_at DESC) AS rn
+           FROM agent_runs
+           WHERE project_id = $1 AND state = 'succeeded'
+             AND started_at IS NOT NULL AND finished_at IS NOT NULL
+         ) ranked
+         WHERE rn <= $2`,
+        [projectId, PROGRESS_WINDOW_SIZE],
+      );
       const metrics = attention.rows[0] ?? {
         open_decisions: 0,
         active_runs: 0,
         blocked_tasks: 0,
         active_memory_entries: 0,
       };
-      return V2ProjectResume.parse({
+
+      const completionsByPhase = new Map<string, Array<Date | string>>();
+      for (const row of recentCompletions.rows) {
+        const current = completionsByPhase.get(row.phase_id) ?? [];
+        current.push(row.completed_at);
+        completionsByPhase.set(row.phase_id, current);
+      }
+      const runCostsByPhase = new Map<string, typeof recentRunCosts.rows>();
+      for (const row of recentRunCosts.rows) {
+        const current = runCostsByPhase.get(row.phase_id) ?? [];
+        current.push(row);
+        runCostsByPhase.set(row.phase_id, current);
+      }
+
+      const baseResume = V2ProjectResume.parse({
         schema_version: 2,
         project: {
           id: project.id,
@@ -198,6 +440,72 @@ export class ProjectResumeService {
           blockedTasks: metrics.blocked_tasks,
         }),
       });
+
+      const phasesWithProgress = baseResume.phases.map((phase) => {
+        const isExecuting = phase.status === "active";
+        const etaAt = computePhaseEta({
+          isExecuting,
+          tasksCompleted: phase.completed_tasks,
+          tasksTotal: phase.tasks,
+          recentCompletionTimestamps: completionsByPhase.get(phase.id) ?? [],
+        });
+        const progress = V2PhaseProgress.parse({
+          percent_complete: computePercentComplete(phase.completed_tasks, phase.tasks),
+          tasks_completed: phase.completed_tasks,
+          tasks_total: phase.tasks,
+          eta_at: etaAt,
+          burn_rate_usd_per_hour: computeBurnRateUsdPerHour(runCostsByPhase.get(phase.id) ?? []),
+        });
+        return { ...phase, ...progress };
+      });
+
+      const overallPercentComplete = computeOverallPercentComplete(
+        phases.rows.map((phase) => ({
+          tasksCompleted: phase.completed_tasks,
+          tasksTotal: phase.tasks,
+          status: phase.status,
+        })),
+      );
+      const blendedEtaAt = computeBlendedEtaAt(phasesWithProgress.map((phase) => phase.eta_at));
+      const progress = V2ProjectProgress.parse({
+        overall_percent_complete: overallPercentComplete,
+        blended_eta_at: blendedEtaAt,
+        agents_active: metrics.active_runs,
+        decisions_waiting: metrics.open_decisions,
+      });
+
+      return {
+        ...baseResume,
+        phases: phasesWithProgress,
+        progress,
+        update_interval_seconds: project.update_interval_seconds,
+      };
+    });
+  }
+
+  /**
+   * FRONT DOOR P5 (tracking): persists the per-project polling cadence for
+   * the resume endpoint. Enforces the allowed-value set and a >=60s floor
+   * independently of any request-layer validation (defense in depth).
+   */
+  async updateSettings(
+    projectId: string,
+    updateIntervalSeconds: number,
+  ): Promise<{ update_interval_seconds: number }> {
+    // Awaited via `async` so an invalid value is surfaced as a rejected
+    // Promise (not a synchronous throw) — callers can uniformly `await` or
+    // `.catch()` this method regardless of which branch fails.
+    assertValidUpdateIntervalSeconds(updateIntervalSeconds);
+    return this.transactions.transaction(async (tx) => {
+      const updated = await tx.query<{ update_interval_seconds: number }>(
+        `UPDATE projects SET update_interval_seconds = $2, updated_at = now()
+         WHERE id = $1
+         RETURNING update_interval_seconds`,
+        [projectId, updateIntervalSeconds],
+      );
+      const row = updated.rows[0];
+      if (!row) throw new ProjectResumeNotFoundError(projectId);
+      return row;
     });
   }
 }

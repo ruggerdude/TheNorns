@@ -21,12 +21,15 @@ describe("project debate navigation", () => {
     mock.install();
 
     const { user } = await renderAppAndOpenProject(projectAlpha.name);
+    // FRONT DOOR P1d: the graph canvas/stats live under the "Graph" tab now.
+    await user.click(screen.getByRole("button", { name: "Graph" }));
     await screen.findByTestId("graph-version");
     await user.click(screen.getByRole("button", { name: "Debates" }));
     expect(await screen.findByRole("heading", { name: "Debates" })).toBeVisible();
     expect(screen.getByText("No debates yet")).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Back to project" }));
+    // The Graph tab selection survives the round-trip through Debates.
     expect(await screen.findByTestId("graph-version")).toBeVisible();
   });
 });

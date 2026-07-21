@@ -305,19 +305,20 @@ export class StrategyWorkflowService {
         );
       }
       for (const dependency of materialized.task_dependencies) {
+        // task_dependencies is phase-local: the schema keys the edge on a single
+        // phase_id (predecessor_phase_id === successor_phase_id === phase_id is a
+        // contract invariant), so only the task ids vary per row.
         await tx.query(
           `INSERT INTO task_dependencies (
-             id, project_id, phase_id, predecessor_task_id, predecessor_phase_id,
-             successor_task_id, successor_phase_id, created_at
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+             id, project_id, phase_id, predecessor_task_id,
+             successor_task_id, created_at
+           ) VALUES ($1,$2,$3,$4,$5,$6)`,
           [
             dependency.id,
             dependency.project_id,
             dependency.phase_id,
             dependency.predecessor_task_id,
-            dependency.predecessor_phase_id,
             dependency.successor_task_id,
-            dependency.successor_phase_id,
             dependency.created_at,
           ],
         );

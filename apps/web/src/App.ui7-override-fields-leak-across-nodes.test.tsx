@@ -20,6 +20,9 @@ describe("UI-7: override draft fields must be scoped to the selected node", () =
 
   test("typing an override for node A, then selecting node B, does not carry A's draft over", async () => {
     const { user } = await renderAppAndOpenProject(projectAlpha.name);
+    // FRONT DOOR P1d: the graph canvas and node inspector live under the
+    // "Graph" tab now.
+    await user.click(screen.getByRole("button", { name: "Graph" }));
     await screen.findByTestId("graph-version");
 
     // Select "Core API" (fullyAllocatedGraph's first node). Use fireEvent

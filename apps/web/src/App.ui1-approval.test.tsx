@@ -38,6 +38,10 @@ describe("UI-1: approval indicator must reflect staleness after mutation", () =>
   test("approving, then mutating the graph, clears or updates the approval indicator", async () => {
     const { user } = await renderAppAndOpenProject(projectAlpha.name);
 
+    // FRONT DOOR P1d: the graph/allocate/approve UI lives under the "Graph"
+    // tab now.
+    await user.click(screen.getByRole("button", { name: "Graph" }));
+
     // Wait for the initial (fully-allocated, pre-approval) graph to load.
     await screen.findByTestId("graph-version");
     expect(screen.getByTestId("graph-version")).toHaveTextContent("v3");

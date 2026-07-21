@@ -1,11 +1,22 @@
 import { pmModelOption } from "@norns/contracts";
 // TheNorns web app: sole point of entry. Login gates everything; Projects is
-// the landing view (list/create); opening a project shows its graph editor —
-// React Flow rendering with editing (edges with cycle rejection, node
-// deletion with re-parent/cascade confirmation), live cross-provider
-// planning with a QC/acceptance-criteria review step before committing, Auto
-// Allocate, per-node overrides, cost preview, and allocation approval — all
-// through the project-scoped server API.
+// the landing view (list/create); opening a project shows its workspace.
+//
+// FRONT DOOR P1c: planning (first phase and every subsequent one) goes
+// through exactly one canonical path — a durable, observable planning run
+// (POST .../planning-runs, polled), materialized into a phase + proposed
+// strategy (POST .../phases {planning_run_id}), reviewed/staffed/approved in
+// StrategyReview.tsx. The old synchronous `${base}/plan` + `/plan/load` +
+// PlanReview.tsx flow (this file's former "01 · Live planning" box) has no
+// remaining caller here per the design freeze; PlanReview.tsx itself is kept
+// only because its own component tests still exercise it directly.
+//
+// The graph editor below (React Flow rendering with editing — edges with
+// cycle rejection, node deletion with re-parent/cascade confirmation, Auto
+// Allocate, per-node overrides, cost preview, allocation approval) is the
+// pre-existing execution path for a project whose graph was already loaded
+// before this change; it renders once `graph` exists and is otherwise
+// dormant behind the "No plan yet" hint.
 import {
   Background,
   type Connection,
@@ -18,10 +29,19 @@ import "@xyflow/react/dist/style.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Account } from "./Account";
 import { Admin } from "./Admin";
+import { AttachmentInput } from "./AttachmentInput";
 import { Debates } from "./Debates";
+import { Gantt, type GanttPhase } from "./Gantt";
 import { Login, type LoginMode } from "./Login";
-import { type PlanLike, PlanReview } from "./PlanReview";
-import { type ProjectSummary, ProjectTabs, Projects } from "./Projects";
+import {
+  AttentionDecisionForm,
+  type AttentionItemDto,
+  type PortfolioAttentionDto,
+  type ProjectSummary,
+  ProjectTabs,
+  Projects,
+} from "./Projects";
+import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
 import {
   ApiError,
   type AuthSession,
@@ -101,47 +121,6 @@ async function api(path: string, method = "GET", body?: unknown): Promise<GraphD
   return json;
 }
 
-/**
- * Frozen contract between App.tsx (orchestration) and PlanReview.tsx
- * (presentation): the *whole* planning result the QC screen needs, not just
- * the plan. Agent B builds PlanReview to accept exactly this as `result`.
- * `outstanding` is already pre-filtered to must-fix findings by the server.
- */
-export interface PlanReviewResult {
-  status: "converged" | "cap_reached";
-  rounds: number;
-  plan: PlanLike;
-  content_hash: string;
-  total_cost_usd: number;
-  outstanding: Array<{
-    finding?: string;
-    statement?: string;
-    recommendation?: string;
-    module_id?: string | null;
-    severity?: "must_fix" | "should_fix" | "suggestion";
-  }>;
-  policy?: {
-    pm_provider: string;
-    pm_model?: string;
-    reviewer_provider: string;
-    reviewer_model?: string;
-  };
-  versions?: Array<{
-    version: number;
-    findings: Array<{
-      severity: "must_fix" | "should_fix" | "suggestion";
-      module_id: string | null;
-      finding: string;
-      recommendation: string;
-    }> | null;
-    responses: Array<{
-      finding_index: number;
-      disposition: "accept" | "rebut";
-      rationale: string;
-    }> | null;
-  }>;
-}
-
 interface ProjectResumeDto {
   project: { id: string; name: string; status: string; aggregate_version: number };
   architecture: { title: string; summary: string; repository_revision: string } | null;
@@ -153,9 +132,25 @@ interface ProjectResumeDto {
     tasks: number;
     completed_tasks: number;
     blocked_tasks: number;
+    // FRONT DOOR P5 (tracking): additive per-phase progress fields on the
+    // resume response (ProjectResumeService.open merges these onto the
+    // Phase-3-owned contract rather than widening it — see that service's
+    // deviation note). Optional here because the resume DTO's shape long
+    // predates them; a stale mock/fixture without them still type-checks.
+    percent_complete?: number;
+    eta_at?: string | null;
+    burn_rate_usd_per_hour?: number | null;
   }>;
   attention: { open_decisions: number; active_runs: number; blocked_tasks: number };
   next_recommended_action: string;
+  // FRONT DOOR P5: aggregate project progress + the persisted poll cadence.
+  progress?: {
+    overall_percent_complete: number;
+    blended_eta_at: string | null;
+    agents_active: number;
+    decisions_waiting: number;
+  };
+  update_interval_seconds?: number;
 }
 
 interface PhaseExecutionDto {
@@ -223,6 +218,27 @@ interface PhaseExecutionDto {
 }
 
 type PhaseExecutionTask = PhaseExecutionDto["tasks"][number];
+
+/** FRONT DOOR P2's durable planning-run DTO (GET .../planning-runs/:runId),
+ *  mirrored client-side. */
+interface PlanningRunPollDto {
+  id: string;
+  status: "queued" | "drafting" | "reviewing" | "revising" | "converged" | "cap_reached" | "failed";
+  round: number;
+  max_rounds: number;
+  transcript: Array<{
+    round: number;
+    role: "pm" | "reviewer";
+    provider: string;
+    model: string;
+    summary: string;
+    finding_counts: { must_fix: number; should_fix: number; suggestion: number } | null;
+  }>;
+  result: { plan: unknown; content_hash: string; total_cost_usd: number } | null;
+  error: string | null;
+}
+
+const NON_TERMINAL_RUN_STATUSES = new Set(["queued", "drafting", "reviewing", "revising"]);
 
 function agentRoleLabel(roles: string[] | undefined): string {
   return roles?.length ? roles.map((role) => role.replaceAll("_", " ")).join(", ") : "Agent";
@@ -473,6 +489,22 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   return json;
 }
 
+async function patchJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: "PATCH",
+    headers: authHeaders(true),
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  const json = (await res.json()) as T & { message?: string };
+  if (!res.ok)
+    throw new ApiError(
+      (json as { message?: string }).message ?? `request failed: ${res.status}`,
+      res.status,
+    );
+  return json;
+}
+
 /** Layered layout: x by longest-path depth, y by index within the layer. */
 function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
   const depths = new Map<string, number>();
@@ -538,30 +570,50 @@ function ProjectGraph({
     Record<string, { model: string; budget: string }>
   >({});
   const [overrideError, setOverrideError] = useState<string | null>(null);
-  const [planObjective, setPlanObjective] = useState("");
-  const [planLoading, setPlanLoading] = useState(false);
-  const [planResult, setPlanResult] = useState<PlanReviewResult | null>(null);
-  const [planError, setPlanError] = useState<string | null>(null);
-  const [committing, setCommitting] = useState(false);
-  const [commitError, setCommitError] = useState<string | null>(null);
   const [resume, setResume] = useState<ProjectResumeDto | null>(null);
-  const [phaseObjective, setPhaseObjective] = useState("");
-  const [phaseCreating, setPhaseCreating] = useState(false);
-  const [phaseError, setPhaseError] = useState<string | null>(null);
   const [monitoredPhaseId, setMonitoredPhaseId] = useState<string | null>(null);
   const [phaseExecution, setPhaseExecution] = useState<PhaseExecutionDto | null>(null);
   const [executionError, setExecutionError] = useState<string | null>(null);
   const [showDebates, setShowDebates] = useState(false);
+  // FRONT DOOR P1d (layout): the workspace shell reorganized into a normal
+  // top-width page with a tab bar, per the approved mockup — the graph
+  // canvas was the dominant panel before this, everything else crammed into
+  // a narrow sidebar. Purely a layout change: every section below is the
+  // exact same JSX/logic that existed already, just grouped under a tab.
+  const [workspaceTab, setWorkspaceTab] = useState<"overview" | "plan" | "graph">("overview");
   const focusedTaskId = project.focus_task_id ?? null;
+
+  // ------------------------------------------------------------------
+  // FRONT DOOR P1: new-phase creation goes through an observable planning
+  // run -> materialize-into-phase -> strategy review, replacing the old
+  // "Create the next phase" raw-objective text box (UI regression it left:
+  // a phase created that way had no staffing, no reviewer, no plan to
+  // approve — just a bare objective string).
+  // ------------------------------------------------------------------
+  const [nextPhaseObjective, setNextPhaseObjective] = useState("");
+  const [nextPhaseRounds, setNextPhaseRounds] = useState(3);
+  const [nextPhaseAttachmentIds, setNextPhaseAttachmentIds] = useState<string[]>([]);
+  const [activePlanningRunId, setActivePlanningRunId] = useState<string | null>(
+    project.focus_planning_run_id ?? null,
+  );
+  const [planningRun, setPlanningRun] = useState<PlanningRunPollDto | null>(null);
+  const [planningRunStarting, setPlanningRunStarting] = useState(false);
+  const [planningRunError, setPlanningRunError] = useState<string | null>(null);
+  const [materializingPhase, setMaterializingPhase] = useState(false);
+  const [strategyReview, setStrategyReview] = useState<StrategyReviewDto | null>(null);
+  const [strategyBusy, setStrategyBusy] = useState(false);
+  const [strategyError, setStrategyError] = useState<string | null>(null);
+  // Phase-scoped "needs you": the portfolio attention feed filtered to this
+  // project + the currently monitored phase (P1 human-approved addition —
+  // the phase-detail view's Q&A/decision thread).
+  const [phaseAttention, setPhaseAttention] = useState<AttentionItemDto[]>([]);
+  const [phaseAttentionBusy, setPhaseAttentionBusy] = useState<string | null>(null);
+  // FRONT DOOR P5: tracking update-interval control.
+  const [intervalSaving, setIntervalSaving] = useState(false);
 
   // Last-known-*good* approval state (never "pending"): what we revert to when
   // an in-flight mutation fails, so the banner is never left stuck at pending.
   const lastGoodApprovalRef = useRef<ApprovalState>({ kind: "never" });
-  // Guards against double-submit of a plan/load while one is already in flight.
-  const committingRef = useRef(false);
-  // The exact (still-edited) plan last handed to commitPlan, so Retry resubmits
-  // it rather than a stale copy.
-  const lastCommitPlanRef = useRef<PlanLike | null>(null);
 
   const applyApproval = useCallback((next: ApprovalState) => {
     lastGoodApprovalRef.current = next;
@@ -637,13 +689,14 @@ function ProjectGraph({
     };
   }, [base, onLogout, reconcileApproval]);
 
+  const [resumeError, setResumeError] = useState<string | null>(null);
   const loadResume = useCallback(async () => {
     try {
       setResume(await getJson<ProjectResumeDto>(`/api/v2/projects/${project.id}/resume`));
     } catch (err) {
       if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
       else if (!(err instanceof ApiError && err.status === 404)) {
-        setPhaseError(err instanceof Error ? err.message : String(err));
+        setResumeError(err instanceof Error ? err.message : String(err));
       }
     }
   }, [project.id, onLogout]);
@@ -651,6 +704,15 @@ function ProjectGraph({
   useEffect(() => {
     void loadResume();
   }, [loadResume]);
+
+  // FRONT DOOR P5 (tracking): poll cadence honors the persisted
+  // update_interval_seconds once known; falls back to a 15s default until
+  // the first resume response arrives.
+  useEffect(() => {
+    const seconds = resume?.update_interval_seconds ?? 15;
+    const timer = window.setInterval(() => void loadResume(), Math.max(5, seconds) * 1000);
+    return () => window.clearInterval(timer);
+  }, [resume?.update_interval_seconds, loadResume]);
 
   useEffect(() => {
     if (project.focus_phase_id) {
@@ -695,85 +757,269 @@ function ProjectGraph({
     return () => window.clearInterval(timer);
   }, [monitoredPhaseId, loadPhaseExecution]);
 
-  const createPersistentPhase = useCallback(async () => {
-    if (!resume || !phaseObjective.trim()) return;
-    setPhaseCreating(true);
-    setPhaseError(null);
+  // FRONT DOOR P1: replaces the old raw-objective "Create the next phase"
+  // text box. New-phase creation goes through an observable planning run
+  // (poll below), then materializing that run into a phase + proposed
+  // strategy, then the StrategyReview screen for staffing + approval.
+  const startNextPhasePlanningRun = useCallback(async () => {
+    if (!nextPhaseObjective.trim()) return;
+    setPlanningRunStarting(true);
+    setPlanningRunError(null);
     try {
-      await postJson(`/api/v2/projects/${project.id}/phases`, {
-        objective_summary: phaseObjective.trim(),
-        priority: resume.phases.length,
-        predecessor_phase_ids: [],
-        expected_project_version: resume.project.aggregate_version,
-        idempotency_key: `phase-${Date.now()}`,
+      const run = await postJson<{ planning_run_id: string }>(
+        `/api/v2/projects/${project.id}/planning-runs`,
+        {
+          objective: nextPhaseObjective.trim(),
+          max_rounds: nextPhaseRounds,
+          attachment_ids: nextPhaseAttachmentIds,
+        },
+      );
+      setActivePlanningRunId(run.planning_run_id);
+      setNextPhaseObjective("");
+      setNextPhaseAttachmentIds([]);
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else setPlanningRunError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPlanningRunStarting(false);
+    }
+  }, [nextPhaseObjective, nextPhaseRounds, nextPhaseAttachmentIds, project.id, onLogout]);
+
+  const pollPlanningRun = useCallback(async () => {
+    if (!activePlanningRunId) return;
+    try {
+      setPlanningRun(
+        await getJson<PlanningRunPollDto>(
+          `/api/v2/projects/${project.id}/planning-runs/${activePlanningRunId}`,
+        ),
+      );
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else setPlanningRunError(err instanceof Error ? err.message : String(err));
+    }
+  }, [activePlanningRunId, project.id, onLogout]);
+
+  useEffect(() => {
+    if (!activePlanningRunId) return;
+    void pollPlanningRun();
+    const timer = window.setInterval(() => void pollPlanningRun(), 3_000);
+    return () => window.clearInterval(timer);
+  }, [activePlanningRunId, pollPlanningRun]);
+
+  const materializePhaseFromRun = useCallback(async () => {
+    if (!activePlanningRunId) return;
+    setMaterializingPhase(true);
+    setPlanningRunError(null);
+    try {
+      const review = await postJson<StrategyReviewDto>(`/api/v2/projects/${project.id}/phases`, {
+        planning_run_id: activePlanningRunId,
       });
-      setPhaseObjective("");
+      setStrategyReview(review);
+      setMonitoredPhaseId(review.phase.id);
+      setActivePlanningRunId(null);
+      setPlanningRun(null);
       await loadResume();
     } catch (err) {
       if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
-      else setPhaseError(err instanceof Error ? err.message : String(err));
+      else setPlanningRunError(err instanceof Error ? err.message : String(err));
     } finally {
-      setPhaseCreating(false);
+      setMaterializingPhase(false);
     }
-  }, [resume, phaseObjective, project.id, loadResume, onLogout]);
+  }, [activePlanningRunId, project.id, onLogout, loadResume]);
 
-  const runPlanning = useCallback(async () => {
-    setPlanLoading(true);
-    setPlanError(null);
-    setCommitError(null);
-    setPlanResult(null);
-    try {
-      const result = await postJson<PlanReviewResult>(`${base}/plan`, { objective: planObjective });
-      setPlanResult(result);
-    } catch (err) {
-      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
-      else setPlanError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setPlanLoading(false);
-    }
-  }, [planObjective, base, onLogout]);
-
-  // UI-2: commit is error-aware — it does NOT go through call() (which swallows
-  // errors). QC review state (planResult/planObjective) is cleared only after a
-  // confirmed-successful load; a failure keeps everything the human edited.
-  const commitPlan = useCallback(
-    async (plan: PlanLike) => {
-      if (committingRef.current) return; // no double-submit while in flight
-      committingRef.current = true;
-      lastCommitPlanRef.current = plan;
-      setCommitting(true);
-      setCommitError(null);
-      const prevApproval = lastGoodApprovalRef.current;
-      setApproval({ kind: "pending" });
+  const editStrategyStaffing = useCallback(
+    async (edits: StaffingEdit[]) => {
+      if (!strategyReview) return;
+      setStrategyBusy(true);
+      setStrategyError(null);
       try {
-        const next = await api(`${base}/plan/load`, "POST", { plan });
-        setGraph(next);
-        setDraftOnly(false);
-        setError(null);
-        reconcileApproval(next);
-        setPlanResult(null); // success only: safe to leave the QC screen
-        setPlanObjective("");
-        setCommitError(null);
+        const next = await patchJson<StrategyReviewDto>(
+          `/api/v2/projects/${project.id}/phases/${strategyReview.phase.id}/strategy/staffing`,
+          { assignments: edits },
+        );
+        setStrategyReview(next);
       } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          onLogout("Session expired. Sign in again."); // 401 still signs out
-          return;
-        }
-        setCommitError(err instanceof Error ? err.message : String(err));
-        setApproval(prevApproval);
-        // planResult / planObjective deliberately untouched -> edits survive
+        if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+        else setStrategyError(err instanceof Error ? err.message : String(err));
       } finally {
-        committingRef.current = false;
-        setCommitting(false);
+        setStrategyBusy(false);
       }
     },
-    [base, onLogout, reconcileApproval],
+    [strategyReview, project.id, onLogout],
   );
 
-  const retryCommit = useCallback(async () => {
-    const plan = lastCommitPlanRef.current;
-    if (plan) await commitPlan(plan); // committingRef guard blocks concurrent retries
-  }, [commitPlan]);
+  const approveStrategy = useCallback(async () => {
+    if (!strategyReview?.strategy) return;
+    setStrategyBusy(true);
+    setStrategyError(null);
+    try {
+      await postJson(
+        `/api/v2/projects/${project.id}/phases/${strategyReview.phase.id}/strategy/approve`,
+        { expected_content_hash: strategyReview.strategy.content_hash },
+      );
+      setStrategyReview(null);
+      await loadResume();
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else setStrategyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStrategyBusy(false);
+    }
+  }, [strategyReview, project.id, onLogout, loadResume]);
+
+  // FRONT DOOR P1 human-approved addition: phase-scoped "needs you" — the
+  // portfolio attention feed filtered to this project, then (for the
+  // decision-thread panel) to the monitored phase. Kept project-wide (not
+  // phase-scoped at fetch time) because the Gantt's blocked-decision gates
+  // (FRONT DOOR P1b) need every phase's attention state, not just the one
+  // currently monitored.
+  const [projectAttentionItems, setProjectAttentionItems] = useState<AttentionItemDto[]>([]);
+  const loadProjectAttention = useCallback(async () => {
+    try {
+      const portfolio = await getJson<PortfolioAttentionDto>("/api/v2/attention");
+      setProjectAttentionItems(portfolio.items.filter((item) => item.project_id === project.id));
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      // A 404 (no phase3/attention wiring) just means nothing to show here.
+    }
+  }, [project.id, onLogout]);
+
+  useEffect(() => {
+    void loadProjectAttention();
+    const timer = window.setInterval(() => void loadProjectAttention(), 10_000);
+    return () => window.clearInterval(timer);
+  }, [loadProjectAttention]);
+
+  useEffect(() => {
+    setPhaseAttention(
+      monitoredPhaseId
+        ? projectAttentionItems.filter((item) => item.phase_id === monitoredPhaseId)
+        : [],
+    );
+  }, [projectAttentionItems, monitoredPhaseId]);
+
+  // FRONT DOOR P1b: per-phase blocking-decision label for the Gantt's red
+  // gate diamonds — the first (most relevant) attention item's title for
+  // each phase that has one, kept even for phases other than the one
+  // currently monitored.
+  const blockedPhaseLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    for (const item of projectAttentionItems) {
+      if (!item.phase_id) continue;
+      if (item.kind !== "decision" && item.kind !== "blocker") continue;
+      if (!labels.has(item.phase_id)) labels.set(item.phase_id, item.title);
+    }
+    return labels;
+  }, [projectAttentionItems]);
+
+  // FRONT DOOR P1b: real per-phase agent counts for the Gantt's count chip
+  // (distinct implementation + reviewer agent profiles currently staffed).
+  // The resume DTO has no per-phase agent count, so this fetches each
+  // phase's execution DTO once phases are known — small N (phases per
+  // project), and refreshed on the same cadence as the resume poll.
+  const [phaseAgentCounts, setPhaseAgentCounts] = useState<Record<string, number>>({});
+  const loadPhaseAgentCounts = useCallback(async () => {
+    if (!resume?.phases.length) return;
+    const settled = await Promise.allSettled(
+      resume.phases.map(async (phase) => {
+        const execution = await getJson<PhaseExecutionDto>(
+          `/api/v2/projects/${project.id}/phases/${phase.id}/execution`,
+        );
+        const agentIds = new Set<string>();
+        for (const task of execution.tasks) {
+          if (task.implementation_agent) agentIds.add(task.implementation_agent.profile_id);
+          if (task.reviewer_agent) agentIds.add(task.reviewer_agent.profile_id);
+        }
+        return [phase.id, agentIds.size] as const;
+      }),
+    );
+    setPhaseAgentCounts((current) => {
+      const next = { ...current };
+      for (const outcome of settled) {
+        if (outcome.status === "fulfilled") next[outcome.value[0]] = outcome.value[1];
+      }
+      return next;
+    });
+  }, [resume?.phases, project.id]);
+
+  useEffect(() => {
+    void loadPhaseAgentCounts();
+    const timer = window.setInterval(() => void loadPhaseAgentCounts(), 20_000);
+    return () => window.clearInterval(timer);
+  }, [loadPhaseAgentCounts]);
+
+  // FRONT DOOR P1b: the resume phase list, projected into the Gantt's input
+  // shape. Phases are already priority-ordered by the server (resume SQL:
+  // `ORDER BY p.priority DESC, ...`).
+  const ganttPhases: GanttPhase[] = useMemo(
+    () =>
+      (resume?.phases ?? []).map((phase) => ({
+        id: phase.id,
+        name: phase.objective_summary,
+        status: phase.status,
+        percentComplete:
+          phase.percent_complete ??
+          (phase.tasks > 0 ? Math.round((phase.completed_tasks / phase.tasks) * 100) : 0),
+        etaAt: phase.eta_at ?? null,
+        agentCount: phaseAgentCounts[phase.id],
+        blockedLabel: blockedPhaseLabels.get(phase.id) ?? null,
+      })),
+    [resume?.phases, phaseAgentCounts, blockedPhaseLabels],
+  );
+
+  const resolvePhaseDecision = useCallback(
+    async (
+      item: AttentionItemDto,
+      input: {
+        selectedOptionId: string;
+        rationale: string;
+        directionTarget: string;
+        directionText: string;
+      },
+    ) => {
+      const decision = item.decision;
+      if (!decision) return;
+      setPhaseAttentionBusy(item.key);
+      try {
+        await postJson(
+          `/api/v2/projects/${item.project_id}/decision-points/${decision.decision_point_id}/resolve`,
+          {
+            expected_condition_fingerprint: decision.condition_fingerprint,
+            selected_option_id: input.selectedOptionId,
+            rationale: input.rationale,
+            direction_target: input.directionTarget,
+            direction_text: input.directionText,
+            idempotency_key: `decision-${decision.decision_point_id}-${globalThis.crypto.randomUUID()}`,
+          },
+        );
+        await loadProjectAttention();
+      } catch (err) {
+        if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      } finally {
+        setPhaseAttentionBusy(null);
+      }
+    },
+    [onLogout, loadProjectAttention],
+  );
+
+  // FRONT DOOR P5 (tracking): update-interval control, PATCHed to the
+  // project settings and honored by the resume poll cadence below.
+  const updateInterval = useCallback(
+    async (seconds: 60 | 300 | 900) => {
+      setIntervalSaving(true);
+      try {
+        await patchJson(`/api/v2/projects/${project.id}/settings`, {
+          update_interval_seconds: seconds,
+        });
+        await loadResume();
+      } catch (err) {
+        if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      } finally {
+        setIntervalSaving(false);
+      }
+    },
+    [project.id, onLogout, loadResume],
+  );
 
   // ADR-1: approval is a POST that persists server-side; on success the server
   // reports it as current, so we show the hash as evidence.
@@ -1012,56 +1258,41 @@ function ProjectGraph({
   // dashboard entry and fires no dashboard fetch.
 
   return (
-    <div className="graph-shell">
-      <div className="graph-canvas" data-testid="graph-canvas">
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          onConnect={onConnect}
-          onEdgesDelete={onEdgesDelete}
-          onNodeClick={(_event, node) => setSelected(node.id)}
-          fitView
-        >
-          <Background color={theme === "light" ? "#c5ccd3" : "#353c44"} gap={24} size={1} />
-          <Controls />
-        </ReactFlow>
-      </div>
-      <aside className="sidebar">
-        <ProjectTabs
-          projects={openProjects}
-          activeId={project.id}
-          onSelect={onOpenProject}
-          onClose={onCloseProject}
-        />
-        <div className="sidebar-head">
-          <Button className="btn-small" variant="ghost" onClick={onBack}>
-            ← Main menu
+    <div className="workspace-shell">
+      <ProjectTabs
+        projects={openProjects}
+        activeId={project.id}
+        onSelect={onOpenProject}
+        onClose={onCloseProject}
+      />
+      <header className="workspace-topbar">
+        <Button className="btn-small" variant="ghost" onClick={onBack}>
+          ← Main menu
+        </Button>
+        <div className="header-actions">
+          {user?.role === "admin" ? (
+            <Button className="btn-small" variant="ghost" onClick={onOpenAdmin}>
+              Admin
+            </Button>
+          ) : null}
+          <Button className="btn-small" variant="ghost" onClick={() => onLogout("Signed out.")}>
+            Sign out
           </Button>
-          <div className="header-actions">
-            <Button className="btn-small" variant="ghost" onClick={() => setShowDebates(true)}>
-              Debates
-            </Button>
-            <Button className="btn-small" variant="ghost" onClick={onOpenAccount}>
-              Settings
-            </Button>
-            {user?.role === "admin" ? (
-              <Button className="btn-small" variant="ghost" onClick={onOpenAdmin}>
-                Admin
-              </Button>
-            ) : null}
-            <Button className="btn-small" variant="ghost" onClick={() => onLogout("Signed out.")}>
-              Sign out
-            </Button>
-          </div>
         </div>
-        <div className="project-heading">
-          <div className="eyebrow">Graph workspace</div>
+      </header>
+      <main className="page workspace-page">
+        <div className="project-heading workspace-header">
+          <div className="eyebrow">Workspace</div>
           <h1>{project.name}</h1>
           <div className="meta">
-            {project.pm_model
-              ? (pmModelOption(project.pm_model)?.label ?? project.pm_model)
-              : `${project.pm_provider} default (legacy)`}{" "}
-            PM · {project.pm_provider} · {project.reviewer_provider} REVIEW
+            <Badge tone={project.status === "planned" ? "success" : "warn"}>{project.status}</Badge>
+            <span className="chip model-c">
+              {project.pm_model
+                ? (pmModelOption(project.pm_model)?.label ?? project.pm_model)
+                : `${project.pm_provider} default (legacy)`}{" "}
+              · Coordinator
+            </span>
+            <span className="chip model-g">{project.reviewer_provider} · Reviewer</span>
           </div>
           {project.source_location ? (
             <div className="project-detail-source" title={project.source_location}>
@@ -1070,441 +1301,675 @@ function ProjectGraph({
             </div>
           ) : null}
         </div>
-        {graph ? (
-          <>
-            <div className="actions">
-              <Badge tone={graph.cost.unallocated.length ? "warn" : "success"}>
-                {graph.cost.unallocated.length
-                  ? `${graph.cost.unallocated.length} unallocated`
-                  : "Ready"}
-              </Badge>
-            </div>
-            <div className="stat-strip">
-              <div className="stat" data-testid="graph-version">
-                <strong>v{graph.version}</strong>
-                <span>GRAPH VERSION</span>
-              </div>
-              <div className="stat" data-testid="cost-total">
-                <strong>${graph.cost.total_usd}</strong>
-                <span>COST PREVIEW</span>
-              </div>
-            </div>
-          </>
-        ) : draftOnly ? (
-          <div className="empty" data-testid="draft-hint">
-            <div>
-              <div className="empty-icon">◇</div>
-              <strong>No plan yet</strong>
-              <p>Describe the outcome below to begin live planning.</p>
-            </div>
-          </div>
-        ) : (
-          <Spinner label="Loading graph…" />
-        )}
-        {error ? <Alert testId="error">{error}</Alert> : null}
 
-        {resume ? (
-          <details className="card side-section" open data-testid="project-resume">
-            <summary>Project Resume</summary>
-            <div className="side-body form-stack">
-              <div className="stat-strip">
-                <div className="stat">
-                  <strong>{resume.phases.length}</strong>
-                  <span>PHASES</span>
-                </div>
-                <div className="stat">
-                  <strong>
-                    {resume.attention.open_decisions + resume.attention.blocked_tasks}
-                  </strong>
-                  <span>NEEDS ATTENTION</span>
-                </div>
-              </div>
-              {resume.architecture ? (
-                <div>
-                  <strong>{resume.architecture.title}</strong>
-                  <p className="muted" style={{ fontSize: 12 }}>
-                    {resume.architecture.summary}
-                  </p>
-                </div>
-              ) : null}
-              <Alert>{resume.next_recommended_action}</Alert>
-              {resume.phases.map((phase) => (
-                <div className="project-row" key={phase.id}>
-                  <div>
-                    <strong>{phase.objective_summary}</strong>
-                    <div className="muted" style={{ fontSize: 12 }}>
-                      {phase.status} · {phase.completed_tasks}/{phase.tasks} tasks complete
-                    </div>
-                  </div>
-                  <Button
-                    className="btn-small"
-                    variant={monitoredPhaseId === phase.id ? "primary" : "default"}
-                    onClick={() => setMonitoredPhaseId(phase.id)}
-                  >
-                    {monitoredPhaseId === phase.id ? "Monitoring" : "Monitor"}
-                  </Button>
-                </div>
-              ))}
-              {phaseExecution ? (
-                <section className="phase-execution" aria-labelledby="phase-execution-heading">
-                  <div className="section-head">
-                    <div>
-                      <div className="eyebrow">Live phase</div>
-                      <h3 id="phase-execution-heading">{phaseExecution.phase.objective_summary}</h3>
-                    </div>
-                    <Badge tone={phaseExecution.phase.status === "completed" ? "success" : "info"}>
-                      {phaseExecution.phase.status}
-                    </Badge>
-                  </div>
-                  <div className="phase-progress" aria-label="Phase task progress">
-                    <span
-                      style={{
-                        width: `${phaseExecution.phase.total_tasks ? (phaseExecution.phase.completed_tasks / phaseExecution.phase.total_tasks) * 100 : 0}%`,
-                      }}
-                    />
-                  </div>
-                  <p className="muted">
-                    {phaseExecution.phase.completed_tasks}/{phaseExecution.phase.total_tasks} tasks
-                    complete · updates every 5 seconds
-                  </p>
-                  <div className="phase-task-list" data-testid="phase-task-list">
-                    {phaseExecution.tasks.map((task) => (
-                      <TaskQcPanel
-                        key={task.id}
-                        task={task}
-                        projectId={project.id}
-                        phaseId={phaseExecution.phase.id}
-                        focused={focusedTaskId === task.id}
-                        onUnauthorized={() => onLogout("Session expired. Sign in again.")}
-                      />
-                    ))}
-                  </div>
-                </section>
-              ) : monitoredPhaseId && !executionError ? (
-                <Spinner label="Loading phase execution…" />
-              ) : null}
-              {executionError ? <Alert testId="execution-error">{executionError}</Alert> : null}
-              <Field label="Create the next phase">
-                <Input
-                  data-testid="phase-objective"
-                  placeholder="e.g. Add animations"
-                  value={phaseObjective}
-                  onChange={(event) => setPhaseObjective(event.target.value)}
-                />
-              </Field>
-              <Button
-                variant="primary"
-                disabled={phaseCreating || !phaseObjective.trim()}
-                onClick={() => void createPersistentPhase()}
+        {/* FRONT DOOR P1d: Overview | Plan | Graph | Debates | Settings — the
+         *  approved mockup's workspace tab bar. Debates and Settings keep
+         *  their pre-existing behavior (a full-page swap / the Account
+         *  modal) unchanged; they're just reachable from this row now. */}
+        <nav className="workspace-tabs" aria-label="Workspace sections">
+          <button
+            type="button"
+            className={workspaceTab === "overview" ? "on" : ""}
+            onClick={() => setWorkspaceTab("overview")}
+          >
+            Overview
+          </button>
+          <button
+            type="button"
+            className={workspaceTab === "plan" ? "on" : ""}
+            onClick={() => setWorkspaceTab("plan")}
+          >
+            Plan
+          </button>
+          <button
+            type="button"
+            className={workspaceTab === "graph" ? "on" : ""}
+            onClick={() => setWorkspaceTab("graph")}
+          >
+            Graph
+          </button>
+          <button type="button" onClick={() => setShowDebates(true)}>
+            Debates
+          </button>
+          <button type="button" onClick={onOpenAccount}>
+            Settings
+          </button>
+        </nav>
+
+        {workspaceTab === "overview" ? (
+          <div className="workspace-tab-panel" data-testid="workspace-tab-overview">
+            {error ? <Alert testId="error">{error}</Alert> : null}
+
+            {resume && resume.phases.length === 0 && !strategyReview && !activePlanningRunId ? (
+              <button
+                type="button"
+                className="card workspace-empty-pointer"
+                data-testid="overview-no-plan-pointer"
+                onClick={() => setWorkspaceTab("plan")}
               >
-                {phaseCreating ? "Creating phase…" : "Create phase"}
-              </Button>
-              {phaseError ? <Alert testId="phase-error">{phaseError}</Alert> : null}
-            </div>
-          </details>
+                <strong>No plan yet</strong>
+                <span>Draft the plan →</span>
+              </button>
+            ) : null}
+
+            {resume ? (
+              <details className="card side-section" open data-testid="project-resume">
+                <summary>Project Resume</summary>
+                <div className="side-body form-stack">
+                  <div className="stat-strip">
+                    <div className="stat">
+                      <strong>{resume.phases.length}</strong>
+                      <span>PHASES</span>
+                    </div>
+                    <div className="stat">
+                      <strong>
+                        {resume.attention.open_decisions + resume.attention.blocked_tasks}
+                      </strong>
+                      <span>NEEDS ATTENTION</span>
+                    </div>
+                  </div>
+                  {resume.architecture ? (
+                    <div>
+                      <strong>{resume.architecture.title}</strong>
+                      <p className="muted" style={{ fontSize: 12 }}>
+                        {resume.architecture.summary}
+                      </p>
+                    </div>
+                  ) : null}
+                  <Alert>{resume.next_recommended_action}</Alert>
+                  {/* FRONT DOOR P1b: the mini-Gantt strip on the workspace phase
+                   *  board — compact per-phase gates + progress at a glance. */}
+                  {ganttPhases.length > 0 ? (
+                    <div data-testid="workspace-mini-gantt">
+                      <Gantt phases={ganttPhases} mini />
+                    </div>
+                  ) : null}
+                  {resume.phases.map((phase) => (
+                    <div className="project-row" key={phase.id}>
+                      <div>
+                        <strong>{phase.objective_summary}</strong>
+                        <div className="muted" style={{ fontSize: 12 }}>
+                          {phase.status} · {phase.completed_tasks}/{phase.tasks} tasks complete
+                        </div>
+                      </div>
+                      <Button
+                        className="btn-small"
+                        variant={monitoredPhaseId === phase.id ? "primary" : "default"}
+                        onClick={() => setMonitoredPhaseId(phase.id)}
+                      >
+                        {monitoredPhaseId === phase.id ? "Monitoring" : "Monitor"}
+                      </Button>
+                    </div>
+                  ))}
+                  {phaseExecution ? (
+                    <section className="phase-execution" aria-labelledby="phase-execution-heading">
+                      <div className="section-head">
+                        <div>
+                          <div className="eyebrow">Live phase</div>
+                          <h3 id="phase-execution-heading">
+                            {phaseExecution.phase.objective_summary}
+                          </h3>
+                        </div>
+                        <Badge
+                          tone={phaseExecution.phase.status === "completed" ? "success" : "info"}
+                        >
+                          {phaseExecution.phase.status}
+                        </Badge>
+                      </div>
+                      <div className="phase-progress" aria-label="Phase task progress">
+                        <span
+                          style={{
+                            width: `${phaseExecution.phase.total_tasks ? (phaseExecution.phase.completed_tasks / phaseExecution.phase.total_tasks) * 100 : 0}%`,
+                          }}
+                        />
+                      </div>
+                      <p className="muted">
+                        {phaseExecution.phase.completed_tasks}/{phaseExecution.phase.total_tasks}{" "}
+                        tasks complete · updates every 5 seconds
+                      </p>
+                      <div className="phase-task-list" data-testid="phase-task-list">
+                        {phaseExecution.tasks.map((task) => (
+                          <TaskQcPanel
+                            key={task.id}
+                            task={task}
+                            projectId={project.id}
+                            phaseId={phaseExecution.phase.id}
+                            focused={focusedTaskId === task.id}
+                            onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+                          />
+                        ))}
+                      </div>
+                    </section>
+                  ) : monitoredPhaseId && !executionError ? (
+                    <Spinner label="Loading phase execution…" />
+                  ) : null}
+                  {executionError ? <Alert testId="execution-error">{executionError}</Alert> : null}
+
+                  {/* FRONT DOOR P1 human-approved addition: the monitored phase's
+                   *  Q&A / decision thread, scoped to exactly this phase — reached
+                   *  by clicking a dashboard phase line's "Open →"/"Answer →"
+                   *  button (which sets focus_phase_id -> monitoredPhaseId). */}
+                  {monitoredPhaseId && phaseAttention.length > 0 ? (
+                    <section
+                      className="card needs-you-panel"
+                      aria-labelledby="phase-needs-you-heading"
+                      data-testid="phase-needs-you"
+                    >
+                      <div className="section-head">
+                        <div>
+                          <div className="eyebrow">Needs you</div>
+                          <h3 id="phase-needs-you-heading">
+                            {phaseAttention.length} item{phaseAttention.length === 1 ? "" : "s"} in
+                            this phase
+                          </h3>
+                        </div>
+                      </div>
+                      {phaseAttention.map((item) => (
+                        <article
+                          key={item.key}
+                          className={`attention-item severity-${item.severity}`}
+                        >
+                          <h4>{item.title}</h4>
+                          <p>{item.summary}</p>
+                          {item.decision ? (
+                            <AttentionDecisionForm
+                              item={{ ...item, decision: item.decision }}
+                              busy={phaseAttentionBusy === item.key}
+                              onResolve={(input) => resolvePhaseDecision(item, input)}
+                            />
+                          ) : null}
+                        </article>
+                      ))}
+                    </section>
+                  ) : null}
+
+                  {resumeError ? <Alert testId="resume-error">{resumeError}</Alert> : null}
+                </div>
+              </details>
+            ) : null}
+
+            {resume ? (
+              <details className="card side-section" open data-testid="tracking-settings">
+                <summary>Tracking</summary>
+                <div className="side-body">
+                  {/* FRONT DOOR P1b: the full Gantt — one bar per phase on a
+                   *  shared axis, gate diamonds (plan-approval / blocked-decision
+                   *  / passed), and a Today line. See Gantt.tsx for the ordinal-
+                   *  placement rationale (the resume DTO has no phase
+                   *  timestamps yet). */}
+                  <Gantt phases={ganttPhases} />
+                  <p className="muted" style={{ fontSize: 12, marginTop: 14 }}>
+                    How often the workspace polls for progress. Faster refresh costs a little more
+                    background traffic; slower saves it.
+                  </p>
+                  <fieldset className="interval-picker" aria-label="Update interval">
+                    {[60, 300, 900].map((seconds) => (
+                      <Button
+                        key={seconds}
+                        className="btn-small"
+                        variant={resume.update_interval_seconds === seconds ? "primary" : "default"}
+                        disabled={intervalSaving}
+                        onClick={() => void updateInterval(seconds as 60 | 300 | 900)}
+                      >
+                        {seconds < 3600 ? `${Math.round(seconds / 60)}m` : `${seconds / 3600}h`}
+                      </Button>
+                    ))}
+                  </fieldset>
+                </div>
+              </details>
+            ) : null}
+          </div>
         ) : null}
 
-        <details className="card side-section" open>
-          <summary>01 · Live planning</summary>
-          <div className="side-body">
-            {planResult ? (
-              <>
-                <PlanReview
-                  result={planResult}
-                  committing={committing}
-                  onCancel={() => {
-                    setPlanResult(null);
-                    setCommitError(null);
-                  }}
-                  onCommit={(plan) => void commitPlan(plan)}
-                />
-                {commitError ? (
-                  <Alert testId="commit-error">
-                    <div>Couldn’t load the plan: {commitError}</div>
-                    <Button
-                      className="btn-small"
-                      data-testid="commit-retry"
-                      disabled={committing}
-                      onClick={() => void retryCommit()}
-                    >
-                      {committing ? "Retrying…" : "Retry load"}
-                    </Button>
-                  </Alert>
-                ) : null}
-              </>
-            ) : (
-              <div className="form-stack">
-                <Field label="What should this program deliver?">
-                  <TextArea
-                    data-testid="plan-objective"
-                    placeholder="Describe the outcome, constraints, and success conditions…"
-                    value={planObjective}
-                    onChange={(e) => setPlanObjective(e.target.value)}
-                  />
-                </Field>
-                <Button
-                  variant="primary"
-                  className="btn-block"
-                  disabled={planLoading || !planObjective.trim()}
-                  onClick={() => void runPlanning()}
-                >
-                  {planLoading ? "Planning with both providers…" : "Run live planning →"}
-                </Button>
-                {planLoading ? <Spinner label="Usually takes 30–90 seconds" /> : null}
-                {planError ? <Alert testId="plan-error">{planError}</Alert> : null}
-              </div>
-            )}
-          </div>
-        </details>
-
-        {graph ? (
-          <>
-            <details className="card side-section" open>
-              <summary>02 · Allocate</summary>
-              <div className="side-body form-stack">
-                <Field label="Allocation strategy">
-                  <Select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
-                    <option value="pm">Project manager · best-fit team</option>
-                    <option value="quality">Quality · strongest models</option>
-                    <option value="balanced">Balanced · cost and capability</option>
-                    <option value="cost">Cost · leanest viable models</option>
-                  </Select>
-                </Field>
-                <p className="muted" style={{ fontSize: 12, margin: 0 }}>
-                  {strategy === "pm"
-                    ? "Asks the selected PM to choose workers, models, reviewers, and budgets for this graph."
-                    : strategy === "quality"
-                      ? "Prioritizes capability on every module."
-                      : strategy === "cost"
-                        ? "Minimizes spend while meeting module needs."
-                        : "Balances model strength against total budget."}
-                </p>
-                <Button
-                  variant="primary"
-                  disabled={allocationLoading}
-                  onClick={() => void allocateProject()}
-                >
-                  {allocationLoading
-                    ? strategy === "pm"
-                      ? "Project manager is staffing…"
-                      : "Allocating…"
-                    : strategy === "pm"
-                      ? "Ask PM to recommend team"
-                      : "Auto allocate"}
-                </Button>
-                {graph.allocation_advice ? (
-                  <div className="policy" data-testid="allocation-advice">
-                    <strong>PM recommendation</strong>
-                    <br />
-                    {graph.allocation_advice.summary}
-                    <div className="meta" style={{ marginTop: 6 }}>
-                      {graph.allocation_advice.pm_provider} · {graph.allocation_advice.pm_model}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            </details>
-            <details className="card side-section" open>
-              <summary>03 · Approve</summary>
-              <div className="side-body">
-                <p className="muted" style={{ fontSize: 12 }}>
-                  Locks the current graph and budget with a verifiable content hash. Every node must
-                  be allocated first.
-                </p>
-                <Button
-                  className="btn-block"
-                  disabled={graph.cost.unallocated.length > 0 || approval.kind === "pending"}
-                  onClick={() => void approveAllocationAction()}
-                >
-                  Approve graph & budget
-                </Button>
-                {/* Status is conveyed with visible text, not colour alone (UI-1.6). */}
-                {approval.kind === "current" ? (
-                  <div
-                    data-testid="approval-hash"
-                    className="policy mono"
-                    style={{ marginTop: 8, wordBreak: "break-all" }}
-                  >
-                    ✓ Approved · current
-                    <br />
-                    {approval.hash}
-                  </div>
-                ) : approval.kind === "stale" ? (
-                  <output data-testid="approval-stale" className="policy" style={{ marginTop: 8 }}>
-                    ⚠ Approval out of date — the graph or allocation changed since it was approved.
-                    Re-approve to lock the current graph and budget.
-                  </output>
-                ) : approval.kind === "pending" ? (
-                  <output
-                    data-testid="approval-pending"
-                    className="policy"
-                    style={{ marginTop: 8 }}
-                  >
-                    Checking approval status…
-                  </output>
-                ) : (
-                  <output data-testid="approval-none" className="policy" style={{ marginTop: 8 }}>
-                    Not yet approved.
-                  </output>
-                )}
-              </div>
-            </details>
-            <section
-              className="card side-section"
-              data-testid={selectedNode ? "node-panel" : undefined}
-            >
-              <div className="section-head">
-                <div>
-                  <div className="eyebrow">Node inspector</div>
-                  <h3>{selectedNode?.title ?? "No node selected"}</h3>
-                </div>
-                {selectedNode ? (
-                  <Badge
-                    tone={
-                      selectedNode.risk === "critical" || selectedNode.risk === "high"
-                        ? "danger"
-                        : "info"
-                    }
-                  >
-                    {selectedNode.risk}
-                  </Badge>
-                ) : null}
-              </div>
-              {selectedNode ? (
-                <div className="form-stack">
-                  <div className="meta">
-                    {selectedNode.id} · {selectedNode.complexity} COMPLEXITY
-                    <br />
-                    DEPENDS ON: {selectedNode.dependencies.join(", ") || "NOTHING"}
-                  </div>
-                  {selectedNode.assignment ? (
-                    <div className="assignment">
-                      <span>Provider</span>
-                      <strong>{selectedNode.assignment.provider}</strong>
-                      <span>Model</span>
-                      <strong>{selectedNode.assignment.model}</strong>
-                      <span>Workers</span>
-                      <strong>{selectedNode.assignment.worker_count}</strong>
-                      <span>Reviewer</span>
-                      <strong>{selectedNode.assignment.reviewer_model}</strong>
-                      <span>Budget</span>
-                      <strong>${selectedNode.assignment.budget_usd}</strong>
-                      <span>Source</span>
-                      <Badge
-                        tone={
-                          selectedNode.assignment.source === "override"
-                            ? "success"
-                            : selectedNode.assignment.source === "pm"
-                              ? "info"
-                              : "default"
+        {workspaceTab === "plan" ? (
+          <div className="workspace-tab-panel" data-testid="workspace-tab-plan">
+            {/* FRONT DOOR P1: new-phase creation via an observable planning
+             *  run, replacing the old raw-objective text box. FRONT DOOR
+             *  P1c: also the one canonical entry point for a project's very
+             *  first plan (see the "Draft the plan" label below). */}
+            {resume ? (
+              <details className="card side-section" open data-testid="planning-section">
+                <summary>Plan</summary>
+                <div className="side-body form-stack">
+                  {activePlanningRunId ? (
+                    <section className="card planning-run-status" data-testid="planning-run-status">
+                      <div className="eyebrow">Drafting next phase</div>
+                      <Badge tone={planningRun?.status === "failed" ? "danger" : "info"}>
+                        {planningRun?.status ?? "queued"}
+                      </Badge>
+                      <p className="muted" style={{ fontSize: 12 }}>
+                        Round {planningRun?.round ?? 0} of{" "}
+                        {planningRun?.max_rounds ?? nextPhaseRounds}
+                      </p>
+                      {planningRun?.result ? (
+                        <p className="meta mono" data-testid="planning-run-cost">
+                          Planning cost so far: ${planningRun.result.total_cost_usd.toFixed(2)}
+                        </p>
+                      ) : null}
+                      {planningRun?.transcript.length ? (
+                        <ul className="planning-transcript" data-testid="planning-transcript">
+                          {planningRun.transcript.map((entry, index) => (
+                            <li key={`${entry.round}-${entry.role}-${index}`}>
+                              Round {entry.round} · {entry.role} ({entry.model}): {entry.summary}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                      {planningRun &&
+                      (planningRun.status === "converged" ||
+                        planningRun.status === "cap_reached") ? (
+                        <Button
+                          variant="primary"
+                          disabled={materializingPhase}
+                          onClick={() => void materializePhaseFromRun()}
+                        >
+                          {materializingPhase ? "Creating phase…" : "Create phase from this run →"}
+                        </Button>
+                      ) : NON_TERMINAL_RUN_STATUSES.has(planningRun?.status ?? "queued") ? (
+                        <Spinner label="Coordinator and reviewer are drafting…" />
+                      ) : null}
+                    </section>
+                  ) : (
+                    <>
+                      {/* FRONT DOOR P1c: this is the ONE canonical planning
+                       *  entry point — a brand-new draft project's very first
+                       *  plan goes through exactly the same durable planning-run
+                       *  flow as every subsequent phase (no separate legacy
+                       *  "01 · Live planning" box anymore). */}
+                      <Field
+                        label={
+                          resume.phases.length === 0 ? "Draft the plan" : "Draft the next phase"
                         }
                       >
-                        {selectedNode.assignment.source}
-                      </Badge>
-                      <span>Rationale</span>
-                      <strong>{selectedNode.assignment.rationale}</strong>
-                    </div>
-                  ) : (
-                    <p className="muted">This node has not been allocated.</p>
+                        <TextArea
+                          data-testid="next-phase-objective"
+                          placeholder="What should this phase deliver?"
+                          value={nextPhaseObjective}
+                          onChange={(event) => setNextPhaseObjective(event.target.value)}
+                        />
+                      </Field>
+                      <Field label="Attach screenshots">
+                        <AttachmentInput
+                          projectId={project.id}
+                          value={nextPhaseAttachmentIds}
+                          onChange={setNextPhaseAttachmentIds}
+                          purpose="objective"
+                          disabled={planningRunStarting}
+                        />
+                      </Field>
+                      <Field label="Plan review rounds">
+                        <div className="rounds-stepper" data-testid="next-phase-rounds-stepper">
+                          <Button
+                            type="button"
+                            className="btn-small"
+                            disabled={nextPhaseRounds <= 1}
+                            onClick={() => setNextPhaseRounds((n) => Math.max(1, n - 1))}
+                            aria-label="Fewer rounds"
+                          >
+                            −
+                          </Button>
+                          <span className="rounds-value mono">{nextPhaseRounds}</span>
+                          <Button
+                            type="button"
+                            className="btn-small"
+                            disabled={nextPhaseRounds >= 5}
+                            onClick={() => setNextPhaseRounds((n) => Math.min(5, n + 1))}
+                            aria-label="More rounds"
+                          >
+                            +
+                          </Button>
+                        </div>
+                      </Field>
+                      <Button
+                        variant="primary"
+                        disabled={planningRunStarting || !nextPhaseObjective.trim()}
+                        onClick={() => void startNextPhasePlanningRun()}
+                      >
+                        {planningRunStarting
+                          ? "Starting planning run…"
+                          : resume.phases.length === 0
+                            ? "Draft plan →"
+                            : "Draft next phase →"}
+                      </Button>
+                    </>
                   )}
-                  <div className="divider" />
-                  <Field label="Override model">
-                    <Input
-                      placeholder="Model identifier"
-                      value={draft.model}
-                      onChange={(e) => setDraft({ model: e.target.value })}
-                    />
-                  </Field>
-                  <Field label="Override budget (USD)">
-                    <Input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      placeholder="0.00"
-                      value={draft.budget}
-                      onChange={(e) => setDraft({ budget: e.target.value })}
-                    />
-                  </Field>
-                  {overrideError ? <Alert testId="override-error">{overrideError}</Alert> : null}
-                  <div className="actions">
+                  {planningRunError ? (
+                    <Alert testId="planning-run-error">{planningRunError}</Alert>
+                  ) : null}
+                </div>
+              </details>
+            ) : null}
+
+            {strategyReview ? (
+              <details className="card side-section" open data-testid="strategy-review-section">
+                <summary>Plan review · {strategyReview.phase.objective_summary}</summary>
+                <div className="side-body">
+                  <StrategyReview
+                    review={strategyReview}
+                    approving={strategyBusy}
+                    savingStaffing={strategyBusy}
+                    error={strategyError}
+                    onEditStaffing={(edits) => void editStrategyStaffing(edits)}
+                    onApprove={() => void approveStrategy()}
+                  />
+                </div>
+              </details>
+            ) : null}
+          </div>
+        ) : null}
+
+        {workspaceTab === "graph" ? (
+          <div className="workspace-tab-panel" data-testid="workspace-tab-graph">
+            {/* FRONT DOOR P1d: the React Flow canvas, demoted to its own tab —
+             *  same component, same props, same handlers as before; only the
+             *  surrounding layout changed. */}
+            <div className="graph-canvas" data-testid="graph-canvas">
+              <ReactFlow
+                nodes={nodes}
+                edges={edges}
+                onConnect={onConnect}
+                onEdgesDelete={onEdgesDelete}
+                onNodeClick={(_event, node) => setSelected(node.id)}
+                fitView
+              >
+                <Background color={theme === "light" ? "#c5ccd3" : "#353c44"} gap={24} size={1} />
+                <Controls />
+              </ReactFlow>
+            </div>
+            {graph ? (
+              <>
+                <div className="actions">
+                  <Badge tone={graph.cost.unallocated.length ? "warn" : "success"}>
+                    {graph.cost.unallocated.length
+                      ? `${graph.cost.unallocated.length} unallocated`
+                      : "Ready"}
+                  </Badge>
+                </div>
+                <div className="stat-strip">
+                  <div className="stat" data-testid="graph-version">
+                    <strong>v{graph.version}</strong>
+                    <span>GRAPH VERSION</span>
+                  </div>
+                  <div className="stat" data-testid="cost-total">
+                    <strong>${graph.cost.total_usd}</strong>
+                    <span>COST PREVIEW</span>
+                  </div>
+                </div>
+              </>
+            ) : draftOnly ? (
+              <div className="empty" data-testid="draft-hint">
+                <div>
+                  <div className="empty-icon">◇</div>
+                  <strong>No plan yet</strong>
+                  <p>Describe the outcome below to begin live planning.</p>
+                </div>
+              </div>
+            ) : (
+              <Spinner label="Loading graph…" />
+            )}
+
+            {graph ? (
+              <>
+                <details className="card side-section" open>
+                  <summary>02 · Allocate</summary>
+                  <div className="side-body form-stack">
+                    <Field label="Allocation strategy">
+                      <Select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
+                        <option value="pm">Project manager · best-fit team</option>
+                        <option value="quality">Quality · strongest models</option>
+                        <option value="balanced">Balanced · cost and capability</option>
+                        <option value="cost">Cost · leanest viable models</option>
+                      </Select>
+                    </Field>
+                    <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                      {strategy === "pm"
+                        ? "Asks the selected PM to choose workers, models, reviewers, and budgets for this graph."
+                        : strategy === "quality"
+                          ? "Prioritizes capability on every module."
+                          : strategy === "cost"
+                            ? "Minimizes spend while meeting module needs."
+                            : "Balances model strength against total budget."}
+                    </p>
                     <Button
                       variant="primary"
-                      className="btn-small"
-                      disabled={
-                        approval.kind === "pending" || (!draft.model.trim() && !draft.budget.trim())
-                      }
-                      onClick={() => void saveOverride()}
+                      disabled={allocationLoading}
+                      onClick={() => void allocateProject()}
                     >
-                      Save override
+                      {allocationLoading
+                        ? strategy === "pm"
+                          ? "Project manager is staffing…"
+                          : "Allocating…"
+                        : strategy === "pm"
+                          ? "Ask PM to recommend team"
+                          : "Auto allocate"}
                     </Button>
-                    <Button
-                      variant="ghost"
-                      className="btn-small"
-                      disabled={!draft.model.trim() && !draft.budget.trim()}
-                      onClick={cancelOverride}
-                    >
-                      Cancel
-                    </Button>
+                    {graph.allocation_advice ? (
+                      <div className="policy" data-testid="allocation-advice">
+                        <strong>PM recommendation</strong>
+                        <br />
+                        {graph.allocation_advice.summary}
+                        <div className="meta" style={{ marginTop: 6 }}>
+                          {graph.allocation_advice.pm_provider} · {graph.allocation_advice.pm_model}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
-                  <div className="divider" />
-                  <div>
-                    <div className="field-label">Delete node</div>
+                </details>
+                <details className="card side-section" open>
+                  <summary>03 · Approve</summary>
+                  <div className="side-body">
                     <p className="muted" style={{ fontSize: 12 }}>
-                      Re-parent preserves dependents. Cascade also removes everything that depends
-                      on this node.
+                      Locks the current graph and budget with a verifiable content hash. Every node
+                      must be allocated first.
                     </p>
-                    <div className="actions">
-                      <Button
-                        variant="danger"
-                        className="btn-small"
-                        onClick={() => {
-                          if (
-                            window.confirm(
-                              `Delete ${selectedNode.title} and re-parent its dependents?`,
-                            )
-                          )
-                            void call(
-                              `${base}/graph/nodes/${selectedNode.id}?mode=reparent`,
-                              "DELETE",
-                            );
-                        }}
+                    <Button
+                      className="btn-block"
+                      disabled={graph.cost.unallocated.length > 0 || approval.kind === "pending"}
+                      onClick={() => void approveAllocationAction()}
+                    >
+                      Approve graph & budget
+                    </Button>
+                    {/* Status is conveyed with visible text, not colour alone (UI-1.6). */}
+                    {approval.kind === "current" ? (
+                      <div
+                        data-testid="approval-hash"
+                        className="policy mono"
+                        style={{ marginTop: 8, wordBreak: "break-all" }}
                       >
-                        Re-parent
-                      </Button>
-                      <Button
-                        variant="danger"
-                        className="btn-small"
-                        onClick={() => {
-                          if (
-                            window.confirm(
-                              `Cascade delete ${selectedNode.title} and all dependent nodes? This cannot be undone.`,
-                            )
-                          )
-                            void call(
-                              `${base}/graph/nodes/${selectedNode.id}?mode=cascade`,
-                              "DELETE",
-                            );
-                        }}
+                        ✓ Approved · current
+                        <br />
+                        {approval.hash}
+                      </div>
+                    ) : approval.kind === "stale" ? (
+                      <output
+                        data-testid="approval-stale"
+                        className="policy"
+                        style={{ marginTop: 8 }}
                       >
-                        Cascade delete
-                      </Button>
+                        ⚠ Approval out of date — the graph or allocation changed since it was
+                        approved. Re-approve to lock the current graph and budget.
+                      </output>
+                    ) : approval.kind === "pending" ? (
+                      <output
+                        data-testid="approval-pending"
+                        className="policy"
+                        style={{ marginTop: 8 }}
+                      >
+                        Checking approval status…
+                      </output>
+                    ) : (
+                      <output
+                        data-testid="approval-none"
+                        className="policy"
+                        style={{ marginTop: 8 }}
+                      >
+                        Not yet approved.
+                      </output>
+                    )}
+                  </div>
+                </details>
+                <section
+                  className="card side-section"
+                  data-testid={selectedNode ? "node-panel" : undefined}
+                >
+                  <div className="section-head">
+                    <div>
+                      <div className="eyebrow">Node inspector</div>
+                      <h3>{selectedNode?.title ?? "No node selected"}</h3>
                     </div>
+                    {selectedNode ? (
+                      <Badge
+                        tone={
+                          selectedNode.risk === "critical" || selectedNode.risk === "high"
+                            ? "danger"
+                            : "info"
+                        }
+                      >
+                        {selectedNode.risk}
+                      </Badge>
+                    ) : null}
                   </div>
-                </div>
-              ) : (
-                <div className="empty" style={{ minHeight: 140 }}>
-                  <div>
-                    <div className="empty-icon">⌖</div>
-                    <p>
-                      Select a node to inspect its assignment, override its budget, or delete it.
-                    </p>
-                  </div>
-                </div>
-              )}
-            </section>
-          </>
+                  {selectedNode ? (
+                    <div className="form-stack">
+                      <div className="meta">
+                        {selectedNode.id} · {selectedNode.complexity} COMPLEXITY
+                        <br />
+                        DEPENDS ON: {selectedNode.dependencies.join(", ") || "NOTHING"}
+                      </div>
+                      {selectedNode.assignment ? (
+                        <div className="assignment">
+                          <span>Provider</span>
+                          <strong>{selectedNode.assignment.provider}</strong>
+                          <span>Model</span>
+                          <strong>{selectedNode.assignment.model}</strong>
+                          <span>Workers</span>
+                          <strong>{selectedNode.assignment.worker_count}</strong>
+                          <span>Reviewer</span>
+                          <strong>{selectedNode.assignment.reviewer_model}</strong>
+                          <span>Budget</span>
+                          <strong>${selectedNode.assignment.budget_usd}</strong>
+                          <span>Source</span>
+                          <Badge
+                            tone={
+                              selectedNode.assignment.source === "override"
+                                ? "success"
+                                : selectedNode.assignment.source === "pm"
+                                  ? "info"
+                                  : "default"
+                            }
+                          >
+                            {selectedNode.assignment.source}
+                          </Badge>
+                          <span>Rationale</span>
+                          <strong>{selectedNode.assignment.rationale}</strong>
+                        </div>
+                      ) : (
+                        <p className="muted">This node has not been allocated.</p>
+                      )}
+                      <div className="divider" />
+                      <Field label="Override model">
+                        <Input
+                          placeholder="Model identifier"
+                          value={draft.model}
+                          onChange={(e) => setDraft({ model: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="Override budget (USD)">
+                        <Input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          placeholder="0.00"
+                          value={draft.budget}
+                          onChange={(e) => setDraft({ budget: e.target.value })}
+                        />
+                      </Field>
+                      {overrideError ? (
+                        <Alert testId="override-error">{overrideError}</Alert>
+                      ) : null}
+                      <div className="actions">
+                        <Button
+                          variant="primary"
+                          className="btn-small"
+                          disabled={
+                            approval.kind === "pending" ||
+                            (!draft.model.trim() && !draft.budget.trim())
+                          }
+                          onClick={() => void saveOverride()}
+                        >
+                          Save override
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          className="btn-small"
+                          disabled={!draft.model.trim() && !draft.budget.trim()}
+                          onClick={cancelOverride}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                      <div className="divider" />
+                      <div>
+                        <div className="field-label">Delete node</div>
+                        <p className="muted" style={{ fontSize: 12 }}>
+                          Re-parent preserves dependents. Cascade also removes everything that
+                          depends on this node.
+                        </p>
+                        <div className="actions">
+                          <Button
+                            variant="danger"
+                            className="btn-small"
+                            onClick={() => {
+                              if (
+                                window.confirm(
+                                  `Delete ${selectedNode.title} and re-parent its dependents?`,
+                                )
+                              )
+                                void call(
+                                  `${base}/graph/nodes/${selectedNode.id}?mode=reparent`,
+                                  "DELETE",
+                                );
+                            }}
+                          >
+                            Re-parent
+                          </Button>
+                          <Button
+                            variant="danger"
+                            className="btn-small"
+                            onClick={() => {
+                              if (
+                                window.confirm(
+                                  `Cascade delete ${selectedNode.title} and all dependent nodes? This cannot be undone.`,
+                                )
+                              )
+                                void call(
+                                  `${base}/graph/nodes/${selectedNode.id}?mode=cascade`,
+                                  "DELETE",
+                                );
+                            }}
+                          >
+                            Cascade delete
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="empty" style={{ minHeight: 140 }}>
+                      <div>
+                        <div className="empty-icon">⌖</div>
+                        <p>
+                          Select a node to inspect its assignment, override its budget, or delete
+                          it.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </section>
+              </>
+            ) : null}
+          </div>
         ) : null}
-      </aside>
+      </main>
     </div>
   );
 }

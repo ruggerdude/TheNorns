@@ -41,13 +41,14 @@ import {
   assertRestrictedRuntimeDatabase,
   postgresPoolConfig,
 } from "./persistence/postgresConnection.js";
-import { NodePgTransactionRunner } from "./persistence/v2/database.js";
+import { NodePgTransactionRunner, type V2TransactionRunner } from "./persistence/v2/database.js";
 import { AttentionService } from "./projects/attentionService.js";
 import { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
 import { ProjectResumeService } from "./projects/projectResumeService.js";
 import { RepositoryIngestionService } from "./projects/repositoryIngestionService.js";
 import { SourceBindingService } from "./projects/sourceBindingService.js";
 import { ProjectStore } from "./projects/store.js";
+import { StrategyBridgeService } from "./projects/strategyBridgeService.js";
 import { StrategyWorkflowService } from "./projects/strategyWorkflowService.js";
 import { buildServer } from "./server.js";
 import { evaluateAuthStartup } from "./startup/authPolicy.js";
@@ -111,6 +112,7 @@ let phase3Services:
       ingestion: RepositoryIngestionService;
       phases: PhaseWorkflowService;
       strategies: StrategyWorkflowService;
+      bridge: StrategyBridgeService;
       resume: ProjectResumeService;
     }
   | undefined;
@@ -129,6 +131,10 @@ let phase7Services: { operations: Phase7OperationsService } | undefined;
 let debateService: DebateService | undefined;
 let debateWorkerTimer: NodeJS.Timeout | undefined;
 let integrationServices: { github: GitHubIntegrationService | null } | undefined;
+// FRONT DOOR P2 §D1: observable planning runs need the relational runtime.
+let planningRunsOptions: { transactions: V2TransactionRunner } | undefined;
+// FRONT DOOR P4 (D3): image attachments need the same relational runtime.
+let attachmentsOptions: { transactions: V2TransactionRunner } | undefined;
 
 const publicOrigin =
   process.env.NORNS_PUBLIC_ORIGIN ??
@@ -191,11 +197,20 @@ if (databaseUrl) {
     integrationServices = {
       github,
     };
+    const phaseWorkflow = new PhaseWorkflowService(runtimeTransactions);
+    const strategyWorkflow = new StrategyWorkflowService(runtimeTransactions);
     phase3Services = {
       sourceBindings: new SourceBindingService(runtimeTransactions),
       ingestion: new RepositoryIngestionService(runtimeTransactions),
-      phases: new PhaseWorkflowService(runtimeTransactions),
-      strategies: new StrategyWorkflowService(runtimeTransactions),
+      phases: phaseWorkflow,
+      strategies: strategyWorkflow,
+      // FRONT DOOR P3: bridges a completed planning run into a proposed
+      // StrategyVersion via the two workflow services above.
+      bridge: new StrategyBridgeService({
+        transactions: runtimeTransactions,
+        phases: phaseWorkflow,
+        strategies: strategyWorkflow,
+      }),
       resume: new ProjectResumeService(runtimeTransactions),
     };
     phase4Services = {
@@ -317,6 +332,10 @@ if (databaseUrl) {
     if (credentialKeyring) {
       await assertCredentialHmacKeyCoverage(runtimeTransactions, credentialKeyring);
     }
+    // FRONT DOOR P2 §D1: expose observable planning runs over the same
+    // relational runtime the debate workflow uses.
+    planningRunsOptions = { transactions: runtimeTransactions };
+    attachmentsOptions = { transactions: runtimeTransactions };
     identityRuntime = createIdentityRuntime({
       users,
       route: identityRoute,
@@ -554,6 +573,8 @@ const server = await buildServer({
   ...(phase6Services !== undefined ? { phase6: phase6Services } : {}),
   ...(phase7Services !== undefined ? { phase7: phase7Services } : {}),
   ...(debateService !== undefined ? { debates: debateService } : {}),
+  ...(planningRunsOptions !== undefined ? { planningRuns: planningRunsOptions } : {}),
+  ...(attachmentsOptions !== undefined ? { attachments: attachmentsOptions } : {}),
   ...(integrationServices !== undefined ? { integrations: integrationServices } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),

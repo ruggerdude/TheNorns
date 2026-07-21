@@ -307,7 +307,11 @@ describe("unified project onboarding", () => {
     const nameInput = screen.getByTestId("project-name");
     await user.clear(nameInput);
     await user.type(nameInput, "Fresh local-free project");
-    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
+    // A "new" project with a (carried-over) objective moves to the wizard's
+    // attach-and-launch step (FRONT DOOR P1); skip it — this test is only
+    // about the local-folder-selection isolation, not planning.
+    await user.click(await screen.findByRole("button", { name: /skip for now/i }));
 
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     expect(
@@ -400,14 +404,73 @@ describe("unified project onboarding", () => {
     ).toHaveLength(2);
   });
 
-  it("explains how to recover when no local runner is online", async () => {
+  // FRONT DOOR P2b (D2): folder-first — a plain local path is the primary
+  // flow and needs no runner at all. This replaces the old "wall" test (the
+  // human-approved design explicitly removes that block).
+  it("creates a local project from a plain path with no runner online", async () => {
     mock.get("/api/runners", { body: [] });
+    mock.post("/api/projects", (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        name: string;
+        description: string;
+        source_type?: string;
+        source_location?: string;
+      };
+      expect(body).toMatchObject({
+        source_type: "local",
+        source_location: "/Users/operator/code/my-secret-startup/apps/web",
+      });
+      return {
+        status: 201,
+        body: makeProject({
+          id: "project-created",
+          name: body.name,
+          description: body.description,
+          source_type: "local",
+          source_location: null,
+        }),
+      };
+    });
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.click(screen.getByRole("button", { name: /existing codebase/i }));
     await user.click(screen.getByRole("button", { name: /local folder/i }));
-    expect(await screen.findByText(/no local runner is online/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /manage runners/i })).toBeInTheDocument();
+
+    // No blocking wall — the path input is immediately usable.
+    expect(screen.queryByText(/no local runner is online/i)).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(/a runner is only needed once execution starts/i),
+    ).toBeInTheDocument();
+
+    await user.type(
+      screen.getByTestId("local-path-input"),
+      "/Users/operator/code/my-secret-startup/apps/web",
+    );
+    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
+    // The raw path never leaves the browser except in that one create call —
+    // never echoed back, never sent to any other endpoint.
+    expect(
+      mock.calls.filter((call) => JSON.stringify(call).includes("my-secret-startup")),
+    ).toHaveLength(1);
+    expect(
+      mock.calls.find(
+        (call) =>
+          call.method === "POST" &&
+          call.url === "/api/v2/projects/project-created/source-bindings/local",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("still offers the runner-based browse enhancement when a runner is online, alongside the path input", async () => {
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /existing codebase/i }));
+    await user.click(screen.getByRole("button", { name: /local folder/i }));
+
+    expect(screen.getByTestId("local-path-input")).toBeInTheDocument();
+    expect(await screen.findByText(/browse with a paired runner instead/i)).toBeInTheDocument();
   });
 
   it("requires a runner upgrade before offering a legacy runner for folder selection", async () => {
@@ -451,7 +514,11 @@ describe("unified project onboarding", () => {
     await user.type(screen.getByTestId("github-new-repository-name"), "fresh-app");
     await user.type(screen.getByTestId("project-name"), "Fresh app");
     await user.type(screen.getByTestId("project-description"), "Build a fresh application");
-    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
+    // A "new" project with an objective moves to the wizard's attach-and-launch
+    // step (FRONT DOOR P1); skip it — this test is only about GitHub repository
+    // creation, not planning.
+    await user.click(await screen.findByRole("button", { name: /skip for now/i }));
 
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     expect(

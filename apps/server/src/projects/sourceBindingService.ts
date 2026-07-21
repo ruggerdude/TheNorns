@@ -206,6 +206,20 @@ export class SourceBindingService {
         command.created_by.actor_type,
         command.created_by.actor_id,
       ]);
+      // FRONT DOOR P2b (D2): "when a paired runner later reports the
+      // workspace, existing verification flows mark it verified" — this is
+      // that state connection. A folder-first local project (created with
+      // no runner online) has only an 'unverified' repository_binding_candidates
+      // row; once this runner-verified binding lands, close that candidate
+      // out as 'promoted' so it stops appearing as a separate pending
+      // repository in the resume view (see projectResumeService's NOT
+      // EXISTS clause).
+      await tx.query(
+        `UPDATE repository_binding_candidates
+           SET status = 'promoted', updated_at = now()
+         WHERE project_id = $1 AND source_type = 'local' AND status = 'unverified'`,
+        [command.project_id],
+      );
       await appendBindingAudit(tx, binding);
       return binding;
     });

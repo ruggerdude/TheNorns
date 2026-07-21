@@ -3,7 +3,10 @@ import { getTableName } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  ATTACHMENTS_MIGRATION_NAME,
   DEBATE_WORKFLOW_MIGRATION_NAME,
+  FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
+  FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
   GITHUB_APP_MANIFEST_MIGRATION_NAME,
   PHASE1_V2_MIGRATION_NAME,
   PHASE2_PRESERVATION_MIGRATION_NAME,
@@ -12,6 +15,7 @@ import {
   PHASE6_COORDINATION_MIGRATION_NAME,
   PHASE7_HARDENING_MIGRATION_NAME,
   PHASE8_CUTOVER_COMPLETION_MIGRATION_NAME,
+  PLANNING_RUNS_MIGRATION_NAME,
   QC_COMMUNICATION_MIGRATION_NAME,
   type V2MigrationDatabase,
   WORKSPACE_CONNECTIONS_MIGRATION_NAME,
@@ -190,6 +194,10 @@ describe.sequential("Phase 2 preservation schema", () => {
       { name: QC_COMMUNICATION_MIGRATION_NAME, applied: false },
       { name: GITHUB_APP_MANIFEST_MIGRATION_NAME, applied: false },
       { name: DEBATE_WORKFLOW_MIGRATION_NAME, applied: false },
+      { name: PLANNING_RUNS_MIGRATION_NAME, applied: false },
+      { name: FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME, applied: false },
+      { name: ATTACHMENTS_MIGRATION_NAME, applied: false },
+      { name: FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -206,6 +214,10 @@ describe.sequential("Phase 2 preservation schema", () => {
       QC_COMMUNICATION_MIGRATION_NAME,
       GITHUB_APP_MANIFEST_MIGRATION_NAME,
       DEBATE_WORKFLOW_MIGRATION_NAME,
+      PLANNING_RUNS_MIGRATION_NAME,
+      FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
+      ATTACHMENTS_MIGRATION_NAME,
+      FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
     ]);
   });
 

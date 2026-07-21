@@ -6,6 +6,38 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 
 export type ProviderName = "anthropic" | "openai";
 
+// ---- FRONT DOOR P4: multi-part message content ---------------------------
+// Provider-neutral message content. A message's user content is either a plain
+// string (the historical, unchanged form) or an ordered array of parts. Only
+// the two part kinds below exist; adapters render `image` parts to each
+// provider's native image encoding (Anthropic base64 source blocks, OpenAI
+// data-URI image_url). This shape is the PM-signed contract addition in the
+// FRONT DOOR design freeze (docs/phases/FRONTDOOR-PROGRAM.md §D3) — nothing
+// beyond it. Callers that keep passing a string `prompt` are unaffected.
+
+/** The image formats accepted end-to-end (matches the attachments caps). */
+export type ImageMime = "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+
+export interface TextPart {
+  type: "text";
+  text: string;
+}
+
+export interface ImagePart {
+  type: "image";
+  mime: ImageMime;
+  /** Raw base64 payload (no `data:` prefix). */
+  base64: string;
+}
+
+export type MessagePart = TextPart | ImagePart;
+
+/** Either the legacy plain string or the new ordered part array. */
+export type MessageContent = string | readonly MessagePart[];
+
+/** Per-request image cap (cost control), enforced by both adapters. */
+export const MAX_IMAGE_PARTS_PER_REQUEST = 8;
+
 /** Stable attribution copied into debate usage and execution records by the caller. */
 export interface CompletionAttribution {
   projectId: string;
@@ -24,6 +56,14 @@ export interface CompletionRequest extends CompletionAttribution {
   signal?: AbortSignal;
   /** The caller already appended structuredOutputInstruction verbatim. */
   structuredOutputPrepared?: boolean;
+  /**
+   * FRONT DOOR P4: optional image parts attached to the user message. When
+   * absent (the default for every legacy caller) the user message is exactly
+   * `prompt` and the wire request is byte-identical to before. When present,
+   * the adapter sends multi-part content: the `prompt` text followed by these
+   * images. Capped at MAX_IMAGE_PARTS_PER_REQUEST.
+   */
+  images?: readonly ImagePart[];
 }
 
 export function prepareStructuredOutputPrompt<T>(
@@ -123,6 +163,22 @@ export class AdapterError extends Error {
     this.retryable = RETRYABLE.has(kind);
     this.metadata = options?.metadata;
   }
+}
+
+/**
+ * FRONT DOOR P4: validate the per-request image cap once, in provider-neutral
+ * code, so both adapters reject an oversized request identically (invalid_request,
+ * non-retryable). Returns the parts unchanged (empty array when none).
+ */
+export function boundedImageParts(images: readonly ImagePart[] | undefined): readonly ImagePart[] {
+  const parts = images ?? [];
+  if (parts.length > MAX_IMAGE_PARTS_PER_REQUEST) {
+    throw new AdapterError(
+      "invalid_request",
+      `too many image parts: ${parts.length} exceeds the per-request cap of ${MAX_IMAGE_PARTS_PER_REQUEST}`,
+    );
+  }
+  return parts;
 }
 
 /** Shared status-code mapping for both providers' HTTP errors. */

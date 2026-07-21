@@ -376,6 +376,8 @@ export interface ProjectSummaryFixture {
   status: "draft" | "planned";
   created_at: string;
   plan_objective: string | null;
+  source_type?: "local" | "github" | null;
+  source_location?: string | null;
 }
 
 export function makeProject(overrides: Partial<ProjectSummaryFixture> = {}): ProjectSummaryFixture {

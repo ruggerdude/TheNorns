@@ -56,6 +56,31 @@ export const DEBATE_WORKFLOW_MIGRATION_URL = new URL(
   "../../../drizzle/0011_debate_workflow.sql",
   import.meta.url,
 );
+export const PLANNING_RUNS_MIGRATION_NAME = "0012_planning_runs";
+export const PLANNING_RUNS_MIGRATION_URL = new URL(
+  "../../../drizzle/0012_planning_runs.sql",
+  import.meta.url,
+);
+export const FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME = "0013_frontdoor_phase_bridge";
+export const FRONTDOOR_PHASE_BRIDGE_MIGRATION_URL = new URL(
+  "../../../drizzle/0013_frontdoor_phase_bridge.sql",
+  import.meta.url,
+);
+// FRONT DOOR P4 (D3): image attachments + planning_runs.attachment_ids.
+// Renumbered 0013 -> 0014 at integration: P3 and P4 ran in parallel and both
+// claimed 0013; the bridge migration merged first.
+export const ATTACHMENTS_MIGRATION_NAME = "0014_attachments";
+export const ATTACHMENTS_MIGRATION_URL = new URL(
+  "../../../drizzle/0014_attachments.sql",
+  import.meta.url,
+);
+// FRONT DOOR P5: progress tracking settings. Renumbered 0014 -> 0015 at
+// integration (same parallel-agent numbering collision as attachments).
+export const FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME = "0015_frontdoor_progress_tracking";
+export const FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL = new URL(
+  "../../../drizzle/0015_frontdoor_progress_tracking.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -131,6 +156,22 @@ export async function loadGitHubAppManifestMigrationSql(): Promise<string> {
 
 export async function loadDebateWorkflowMigrationSql(): Promise<string> {
   return readFile(DEBATE_WORKFLOW_MIGRATION_URL, "utf8");
+}
+
+export async function loadPlanningRunsMigrationSql(): Promise<string> {
+  return readFile(PLANNING_RUNS_MIGRATION_URL, "utf8");
+}
+
+export async function loadFrontDoorPhaseBridgeMigrationSql(): Promise<string> {
+  return readFile(FRONTDOOR_PHASE_BRIDGE_MIGRATION_URL, "utf8");
+}
+
+export async function loadAttachmentsMigrationSql(): Promise<string> {
+  return readFile(ATTACHMENTS_MIGRATION_URL, "utf8");
+}
+
+export async function loadFrontDoorProgressTrackingMigrationSql(): Promise<string> {
+  return readFile(FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -284,6 +325,22 @@ export async function runCurrentV2Migrations(
     {
       name: DEBATE_WORKFLOW_MIGRATION_NAME,
       sql: await loadDebateWorkflowMigrationSql(),
+    },
+    {
+      name: PLANNING_RUNS_MIGRATION_NAME,
+      sql: await loadPlanningRunsMigrationSql(),
+    },
+    {
+      name: FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
+      sql: await loadFrontDoorPhaseBridgeMigrationSql(),
+    },
+    {
+      name: ATTACHMENTS_MIGRATION_NAME,
+      sql: await loadAttachmentsMigrationSql(),
+    },
+    {
+      name: FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
+      sql: await loadFrontDoorProgressTrackingMigrationSql(),
     },
   ]);
 }

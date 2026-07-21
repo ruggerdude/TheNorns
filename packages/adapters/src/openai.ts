@@ -10,6 +10,7 @@ import {
   type LlmAdapter,
   type ProviderCompletionMetadata,
   type StructuredResult,
+  boundedImageParts,
   kindForStatus,
   prepareStructuredOutputPrompt,
 } from "./types.js";
@@ -90,7 +91,7 @@ export class OpenAiAdapter implements LlmAdapter {
       return await this.client.responses.create(
         {
           model: this.model,
-          input: request.prompt,
+          input: this.buildInput(request),
           ...(request.system !== undefined ? { instructions: request.system } : {}),
           ...(request.maxTokens !== undefined ? { max_output_tokens: request.maxTokens } : {}),
         },
@@ -99,6 +100,31 @@ export class OpenAiAdapter implements LlmAdapter {
     } catch (error) {
       throw this.mapError(error);
     }
+  }
+
+  /**
+   * FRONT DOOR P4: legacy string input by default; when the request carries
+   * image parts, a single user message whose content is the prompt text
+   * followed by one `input_image` per attachment, each a base64 data-URI.
+   */
+  private buildInput(request: CompletionRequest): OpenAI.Responses.ResponseInput | string {
+    const images = boundedImageParts(request.images);
+    if (images.length === 0) return request.prompt;
+    return [
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: request.prompt },
+          ...images.map(
+            (image): OpenAI.Responses.ResponseInputImage => ({
+              type: "input_image",
+              image_url: `data:${image.mime};base64,${image.base64}`,
+              detail: "auto",
+            }),
+          ),
+        ],
+      },
+    ];
   }
 
   private textOf(response: OpenAI.Responses.Response): string {

@@ -32,7 +32,9 @@ describe("UI-6 (contained): a real project's workspace exposes no demo Dashboard
   });
 
   test("no Dashboard button is rendered and no dashboard fetch fires", async () => {
-    await renderAppAndOpenProject(projectAlpha.name);
+    const { user } = await renderAppAndOpenProject(projectAlpha.name);
+    // FRONT DOOR P1d: the graph canvas lives under the "Graph" tab now.
+    await user.click(screen.getByRole("button", { name: "Graph" }));
     await screen.findByTestId("graph-version");
 
     // The entry point is gone entirely.

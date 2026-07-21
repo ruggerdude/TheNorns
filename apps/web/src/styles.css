@@ -1270,7 +1270,7 @@ button:disabled {
   overflow-x: auto;
   padding: .35rem clamp(1rem, 3vw, 2.5rem);
   border-bottom: 1px solid var(--line);
-  background: #0d1013;
+  background: var(--raised);
 }
 .project-tabs-label {
   color: var(--muted);
@@ -1284,7 +1284,7 @@ button:disabled {
   align-items: center;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #13171b;
+  background: var(--surface);
   white-space: nowrap;
 }
 .project-tab.is-active {
@@ -1453,30 +1453,97 @@ button:disabled {
 .login-card {
   width: min(390px, 100%);
 }
-.graph-shell {
-  height: 100vh;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 390px;
-  overflow: hidden;
+/* ============================================================
+   FRONT DOOR P1d: the workspace shell — a normal top-width page
+   (header + Overview | Plan | Graph tab bar) replacing the old
+   graph-canvas-dominant + narrow-sidebar layout. Every section
+   inside each tab panel is unchanged; only this outer shell and
+   the tab bar are new. Token-based throughout (the old shell had
+   a few hardcoded dark hexes that never worked in light mode —
+   fixed here since this area is being touched anyway).
+   ============================================================ */
+.workspace-shell {
+  min-height: 100vh;
+}
+.workspace-topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: .5rem;
+  padding: .6rem clamp(1rem, 3vw, 2.5rem);
+  border-bottom: 1px solid var(--line);
+}
+.workspace-page {
+  max-width: 1100px;
+}
+.workspace-header {
+  margin: 1.4rem 0 0;
+}
+.workspace-header .meta {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  flex-wrap: wrap;
+}
+.workspace-tabs {
+  display: flex;
+  gap: .2rem;
+  margin: 1.2rem 0 1.6rem;
+  padding: .3rem;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  width: fit-content;
+}
+.workspace-tabs button {
+  padding: .45rem .9rem;
+  border-radius: 8px;
+  font-size: .85rem;
+  font-weight: 600;
+  color: var(--muted);
+  transition: .14s ease;
+}
+.workspace-tabs button:hover {
+  color: var(--text);
+}
+.workspace-tabs button.on {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.workspace-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: .9rem;
+}
+.workspace-empty-pointer {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.2rem;
+  text-align: left;
+  border: 1px dashed var(--line2);
+  background: transparent;
+}
+.workspace-empty-pointer:hover {
+  border-color: var(--accent);
+  background: var(--raised);
+}
+.workspace-empty-pointer span {
+  color: var(--accent2);
+  font-weight: 700;
 }
 .graph-canvas {
   min-width: 0;
-  background: #0b0e11;
-}
-.sidebar {
-  border-left: 1px solid var(--line);
-  background: #101317;
-  overflow: auto;
-  padding: 1rem;
-}
-.sidebar > .project-tabs {
-  margin: -1rem -1rem 1rem;
-  padding: .35rem .6rem;
-}
-.sidebar-head {
-  display: flex;
-  justify-content: space-between;
-  gap: .5rem;
+  height: 65vh;
+  min-height: 420px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: .9rem;
 }
 .project-heading {
   margin: 1rem 0;
@@ -1492,7 +1559,7 @@ button:disabled {
   margin: .8rem 0;
 }
 .stat {
-  background: #0c0f12;
+  background: var(--raised);
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: .65rem;
@@ -2244,12 +2311,6 @@ button:disabled {
 :root[data-theme="light"] .login-art {
   background: radial-gradient(circle at 30% 40%, #f3d9b2 0, transparent 25rem);
 }
-:root[data-theme="light"] .graph-canvas {
-  background: #eef1f3;
-}
-:root[data-theme="light"] .sidebar {
-  background: #faf9f5;
-}
 :root[data-theme="light"] .react-flow__controls-button {
   color: var(--text);
   fill: var(--text);
@@ -2297,20 +2358,12 @@ button:disabled {
   .login-panel {
     padding: 3rem 1rem;
   }
-  .graph-shell {
-    grid-template-columns: 1fr;
-    grid-template-rows: 52vh 1fr;
-    overflow: auto;
-    height: auto;
-    min-height: 100vh;
-  }
-  .sidebar {
-    border-left: 0;
-    border-top: 1px solid var(--line);
-    overflow: visible;
-  }
   .graph-canvas {
     height: 52vh;
+  }
+  .workspace-tabs {
+    width: 100%;
+    overflow-x: auto;
   }
   .dashboard-grid {
     grid-template-columns: 1fr;
@@ -2379,4 +2432,728 @@ button:disabled {
     align-items: flex-start;
     flex-direction: column;
   }
+}
+
+/* FRONT DOOR P4 (D3): AttachmentInput — objective image picker. Uses the
+   existing design tokens so it inherits both light and dark themes. */
+.attachment-input {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.attachment-dropzone {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px dashed var(--line2);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.attachment-dropzone.is-full {
+  border-style: solid;
+  opacity: 0.7;
+}
+.attachment-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.attachment-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.attachment-chip {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--raised);
+}
+.attachment-chip img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.attachment-chip-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  line-height: 18px;
+  text-align: center;
+  border: none;
+  border-radius: 50%;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  cursor: pointer;
+}
+.attachment-chip-remove:hover {
+  background: var(--danger);
+  color: var(--bg);
+}
+.attachment-chip-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* ============================================================
+   FRONT DOOR P1: dashboard rows (full-width, color-coded,
+   phase-lined project cards) and the New Project wizard.
+   Uses the existing token system only — no new hardcoded hexes —
+   so both themes stay correct automatically.
+   ============================================================ */
+.proj-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.proj-row {
+  --status: var(--line2);
+  --status-soft: transparent;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 1.75rem;
+  padding: 1.3rem 1.5rem 1.3rem 1.3rem;
+  cursor: default;
+  border-left: 4px solid var(--status);
+  background: linear-gradient(90deg, var(--status-soft), transparent 42%), var(--surface);
+  transition: 0.16s ease;
+}
+.proj-row.s-green {
+  --status: var(--success);
+  --status-soft: color-mix(in srgb, var(--success) 10%, transparent);
+}
+.proj-row.s-red {
+  --status: var(--danger);
+  --status-soft: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+.proj-row.s-blue {
+  --status: var(--info);
+  --status-soft: color-mix(in srgb, var(--info) 10%, transparent);
+}
+.proj-row.s-neutral {
+  --status: var(--line2);
+  --status-soft: transparent;
+}
+.pr-main {
+  min-width: 0;
+}
+.pr-head {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+.pr-titles {
+  min-width: 0;
+  flex: 1;
+}
+.pr-title-btn {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--text);
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-align: left;
+}
+.pr-title-btn:hover {
+  color: var(--accent2);
+  text-decoration: underline;
+}
+.pr-titles .desc {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 0.15rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-staffing {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  margin: 0.85rem 0 0.25rem;
+}
+.pr-staffing .role-lbl {
+  font-size: 0.62rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 7px;
+  font: 500 0.68rem "DM Mono", monospace;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--line);
+}
+.chip.model-c::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.chip.model-g::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  background: #8b7fe0;
+}
+.pr-phases {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-top: 0.85rem;
+}
+.pr-phase {
+  display: grid;
+  grid-template-columns: 32px minmax(100px, 1fr) minmax(130px, 190px) 90px auto;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.4rem 0;
+  border-top: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  font-size: 0.78rem;
+}
+.pr-phase:first-child {
+  border-top: none;
+}
+.pr-phase.no-plan {
+  grid-template-columns: 32px 1fr;
+}
+.pr-phase .pp-num {
+  font: 600 0.65rem "DM Mono", monospace;
+  color: var(--muted);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.1rem 0;
+  text-align: center;
+}
+.pr-phase .pp-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.pr-phase .pp-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.pr-phase .pp-bar .track {
+  flex: 1;
+}
+.pr-phase .pp-bar .pp-pct {
+  font: 500 0.68rem "DM Mono", monospace;
+  color: var(--text);
+  flex: none;
+  width: 30px;
+  text-align: right;
+}
+.pr-phase .pp-eta {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.pr-phase .pp-eta .lbl {
+  font-size: 0.58rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-right: 0.3rem;
+}
+.pr-phase.blocked .pp-num {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, var(--raised));
+}
+.pr-phase.blocked .pp-name {
+  color: var(--danger);
+  font-weight: 600;
+}
+.pr-phase.blocked .pp-blocked {
+  grid-column: 3 / 4;
+  color: var(--danger);
+  font-weight: 600;
+  font-size: 0.74rem;
+}
+.pr-phase.queued {
+  opacity: 0.75;
+}
+.pr-phase.done .pp-name {
+  color: var(--muted);
+}
+.pp-open {
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: none;
+  height: 26px;
+  padding: 0 0.6rem;
+  border-radius: 7px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  border: 1px solid var(--line2);
+  background: var(--surface);
+  color: var(--text);
+}
+.pp-open:hover {
+  border-color: var(--accent);
+  color: var(--accent2);
+}
+.pr-phase.blocked .pp-open {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+}
+.pr-phase.blocked .pp-open:hover {
+  background: color-mix(in srgb, var(--danger) 20%, var(--surface));
+}
+.pr-side {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  padding-left: 1.6rem;
+  border-left: 1px solid var(--line);
+}
+.pr-agg {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.pr-agg .big {
+  font-size: 1.7rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.pr-agg .lbl {
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+.pr-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.pr-fact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-size: 0.72rem;
+}
+.pr-fact .k {
+  color: var(--muted);
+}
+.pr-fact .v {
+  font-weight: 600;
+}
+.pr-fact .v.warn {
+  color: var(--danger);
+}
+.pr-cta {
+  margin-top: auto;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--accent2);
+}
+.pr-cta:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 900px) {
+  .proj-row {
+    grid-template-columns: 1fr;
+  }
+  .pr-side {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.9rem 1.4rem;
+    border-left: none;
+    border-top: 1px solid var(--line);
+    padding-left: 0;
+    padding-top: 1rem;
+  }
+  .pr-side .pr-cta {
+    margin-top: 0;
+    margin-left: auto;
+  }
+}
+
+/* ---- New Project wizard (full page, replaces the former modal) ---- */
+.wizard-page {
+  max-width: 820px;
+}
+.wizard-shell {
+  padding: 1.6rem 1.8rem;
+}
+.two-col-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8rem;
+}
+.rounds-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.rounds-stepper .rounds-value {
+  min-width: 1.6rem;
+  text-align: center;
+  font-weight: 700;
+}
+.wizard-attach-step {
+  gap: 1rem;
+}
+@media (max-width: 720px) {
+  .two-col-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ============================================================
+   FRONT DOOR P1/P5: phase-scoped needs-you, planning-run status,
+   and tracking interval controls inside the workspace sidebar.
+   ============================================================ */
+.needs-you-panel {
+  border-color: var(--accent);
+  padding: 1rem 1.2rem;
+}
+.planning-run-status {
+  padding: 1rem 1.2rem;
+  display: grid;
+  gap: 0.6rem;
+}
+.planning-transcript {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.interval-picker {
+  display: inline-flex;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+/* ============================================================
+   FRONT DOOR P1b: Gantt (Tracking screen + workspace mini strip).
+   Pure CSS/SVG within the existing token system — no charting lib.
+   ============================================================ */
+.gantt {
+  --lc: 168px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.gantt-empty {
+  padding: 1rem 1.2rem;
+  border: 1px dashed var(--line2);
+  border-radius: 10px;
+  font-size: 0.8rem;
+}
+.gantt-axis-row {
+  display: grid;
+  grid-template-columns: var(--lc) 1fr;
+  background: var(--raised);
+  border-bottom: 1px solid var(--line);
+}
+.gantt-corner {
+  padding: 0 0.7rem;
+  align-self: center;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-right: 1px solid var(--line);
+}
+.gantt-axis {
+  position: relative;
+  height: 44px;
+}
+.gantt-gate {
+  position: absolute;
+  top: 8px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  z-index: 5;
+}
+.gantt-gate .dia {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  transform: rotate(45deg);
+  flex: none;
+}
+.gantt-gate.passed .dia {
+  background: var(--success);
+  border: 1px solid var(--success);
+}
+.gantt-gate.blocked .dia {
+  background: var(--danger);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 16%, transparent);
+}
+.gantt-gate.upcoming .dia {
+  background: var(--surface);
+  border: 1.5px solid var(--line2);
+}
+.gantt-gate .glbl {
+  font-size: 0.6rem;
+  line-height: 1.15;
+  text-align: center;
+  white-space: nowrap;
+  color: var(--muted);
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gantt-gate.blocked .glbl {
+  color: var(--danger);
+  font-weight: 700;
+}
+.gantt-gate.passed .glbl {
+  color: var(--success);
+}
+.gantt-rows {
+  position: relative;
+}
+.gantt-row {
+  display: grid;
+  grid-template-columns: var(--lc) 1fr;
+  height: 38px;
+}
+.gantt-row:not(:last-child) {
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+}
+.gantt-lbl {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0 0.7rem;
+  font-size: 0.75rem;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+}
+.gantt-lbl .pnum {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--text);
+  color: var(--bg);
+  display: grid;
+  place-items: center;
+  font: 600 0.62rem "DM Mono", monospace;
+  flex: none;
+}
+.gantt-lbl .pnum.q {
+  background: var(--line2);
+  color: var(--text);
+}
+.gantt-lbl .pname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gantt-lbl .acount {
+  margin-left: auto;
+  font: 500 0.6rem "DM Mono", monospace;
+  color: var(--muted);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 6px;
+  flex: none;
+}
+.gantt-plot {
+  position: relative;
+  background-image: repeating-linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--line) 50%, transparent) 0 1px,
+    transparent 1px 25%
+  );
+}
+.gantt-bar {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 16px;
+  border-radius: 5px;
+  border: 1px solid var(--line2);
+  overflow: hidden;
+}
+.gantt-bar .fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+}
+.gantt-bar.g {
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--success) 20%, var(--surface)) 0 5px,
+    color-mix(in srgb, var(--success) 8%, var(--surface)) 5px 10px
+  );
+  border-color: color-mix(in srgb, var(--success) 42%, var(--line2));
+}
+.gantt-bar.g .fill {
+  background: var(--success);
+}
+.gantt-bar.q {
+  background: repeating-linear-gradient(-45deg, var(--raised) 0 5px, var(--surface) 5px 10px);
+}
+.gantt-bar.blocked {
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--danger) 18%, var(--surface)) 0 5px,
+    color-mix(in srgb, var(--danger) 7%, var(--surface)) 5px 10px
+  );
+  border-color: var(--danger);
+}
+.gbar-pct {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 0.62rem;
+  font-family: "DM Mono", monospace;
+  color: var(--text);
+  z-index: 2;
+  white-space: nowrap;
+}
+.gantt-today {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+  z-index: 6;
+  left: calc(var(--lc) + (100% - var(--lc)) * var(--today, 0));
+}
+.gantt-today::before {
+  content: "Today";
+  position: absolute;
+  top: -18px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.55rem;
+  font-weight: 700;
+  color: #fff;
+  background: var(--accent);
+  padding: 1px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.gantt-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  margin: 0.6rem 0.8rem;
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+.gantt-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.gantt-legend .dia {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  transform: rotate(45deg);
+}
+.gantt-legend .dia.passed {
+  background: var(--success);
+}
+.gantt-legend .dia.blocked {
+  background: var(--danger);
+}
+.gantt-legend .dia.upcoming {
+  background: var(--surface);
+  border: 1.5px solid var(--line2);
+}
+.gantt-legend .sw {
+  width: 18px;
+  height: 8px;
+  border-radius: 3px;
+}
+.gantt-legend .sw.solid {
+  background: var(--success);
+}
+.gantt-legend .sw.hatch {
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--success) 20%, var(--surface)) 0 4px,
+    color-mix(in srgb, var(--success) 8%, var(--surface)) 4px 8px
+  );
+  border: 1px solid color-mix(in srgb, var(--success) 40%, var(--line2));
+}
+
+/* mini variant embedded in the workspace phase list */
+.gantt-mini {
+  --lc: 26px;
+  margin-bottom: 0.9rem;
+}
+.gantt-mini .gantt-axis {
+  height: 26px;
+}
+.gantt-mini .gantt-corner {
+  padding: 0;
+}
+.gantt-mini .gantt-gate {
+  top: 6px;
+}
+.gantt-mini .gantt-gate .dia {
+  width: 10px;
+  height: 10px;
+}
+.gantt-mini .gantt-row {
+  height: 20px;
+}
+.gantt-mini .gantt-lbl {
+  padding: 0;
+  justify-content: center;
+}
+.gantt-mini .gantt-lbl .pnum {
+  width: 16px;
+  height: 16px;
+}
+.gantt-mini .gantt-bar {
+  height: 9px;
+  border-radius: 4px;
+}
+.gantt-mini .gantt-today::before {
+  display: none;
 }

@@ -10,6 +10,7 @@ import {
   type LlmAdapter,
   type ProviderCompletionMetadata,
   type StructuredResult,
+  boundedImageParts,
   kindForStatus,
   prepareStructuredOutputPrompt,
 } from "./types.js";
@@ -92,13 +93,32 @@ export class AnthropicAdapter implements LlmAdapter {
           model: this.model,
           max_tokens: request.maxTokens ?? 16000,
           ...(request.system !== undefined ? { system: request.system } : {}),
-          messages: [{ role: "user", content: request.prompt }],
+          messages: [{ role: "user", content: this.userContent(request) }],
         },
         request.signal !== undefined ? { signal: request.signal } : {},
       );
     } catch (error) {
       throw this.mapError(error);
     }
+  }
+
+  /**
+   * FRONT DOOR P4: legacy string content by default; when the request carries
+   * image parts, a multi-block content array — the prompt text followed by
+   * one base64 `image` source block per attachment.
+   */
+  private userContent(request: CompletionRequest): string | Anthropic.ContentBlockParam[] {
+    const images = boundedImageParts(request.images);
+    if (images.length === 0) return request.prompt;
+    return [
+      { type: "text", text: request.prompt },
+      ...images.map(
+        (image): Anthropic.ImageBlockParam => ({
+          type: "image",
+          source: { type: "base64", media_type: image.mime, data: image.base64 },
+        }),
+      ),
+    ];
   }
 
   private textOf(response: Anthropic.Message): string {

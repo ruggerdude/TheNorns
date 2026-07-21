@@ -60,7 +60,11 @@ describe("project manager model selection", () => {
   async function submit(name: string) {
     await userEvent.type(screen.getByTestId("project-name"), name);
     await userEvent.type(screen.getByTestId("project-description"), "Plan the delivery");
-    await userEvent.click(screen.getByRole("button", { name: /create and open project/i }));
+    // A "new" project with an objective moves to the wizard's attach-and-launch
+    // step (FRONT DOOR P1) instead of navigating away immediately; skip it here
+    // since this suite is only exercising the PM-model selection, not planning.
+    await userEvent.click(screen.getByRole("button", { name: /create & draft plan/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /skip for now/i }));
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     return mock.calls.find((call) => call.method === "POST" && call.url === "/api/projects");
   }

@@ -7,6 +7,7 @@ import { ProjectResumeService } from "../src/projects/projectResumeService.js";
 import { RepositoryIngestionService } from "../src/projects/repositoryIngestionService.js";
 import { SourceBindingService } from "../src/projects/sourceBindingService.js";
 import { ProjectStore } from "../src/projects/store.js";
+import { StrategyBridgeService } from "../src/projects/strategyBridgeService.js";
 import { StrategyWorkflowService } from "../src/projects/strategyWorkflowService.js";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
@@ -48,6 +49,11 @@ describe.sequential("Phase 3 authenticated API", () => {
         ingestion: new RepositoryIngestionService(transactions),
         phases: new PhaseWorkflowService(transactions),
         strategies: new StrategyWorkflowService(transactions),
+        bridge: new StrategyBridgeService({
+          transactions,
+          phases: new PhaseWorkflowService(transactions),
+          strategies: new StrategyWorkflowService(transactions),
+        }),
         resume: new ProjectResumeService(transactions),
       },
     });
