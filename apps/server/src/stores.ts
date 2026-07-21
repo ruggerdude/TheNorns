@@ -111,6 +111,54 @@ export class RelayStores {
     return record;
   }
 
+  /**
+   * ONBOARDING O4 — reserve the generation an ephemeral GitHub Actions runner
+   * will enroll at, *before* the job that will occupy it exists.
+   *
+   * A laptop runner pairs first and is scheduled second, so its generation is
+   * known when the command is built. An Actions runner is the other way round:
+   * the job cannot exist until Norns dispatches it, and Norns cannot dispatch
+   * until a run is scheduled. Reserving the generation up front lets the
+   * command be built with the generation the job will later prove it owns,
+   * instead of re-stamping a queued command after the fact.
+   *
+   * The reserved record deliberately carries an EMPTY public key: it fences the
+   * previous generation immediately, and until `enrollRunnerAtGeneration`
+   * supplies a real key nothing can authenticate as this runner
+   * (`verifyRunnerSignature` fails closed on an unparseable key).
+   */
+  reserveRunnerGeneration(runnerId: string): number {
+    const existing = this.state.runners[runnerId];
+    const record: RunnerRecord = {
+      runner_id: runnerId,
+      public_key_pem: "",
+      generation: (existing?.generation ?? 0) + 1,
+      last_seen_at: null,
+    };
+    this.state.runners[runnerId] = record;
+    return record.generation;
+  }
+
+  /**
+   * ONBOARDING O4 — complete a reservation by binding the ephemeral runner's
+   * freshly generated public key to the generation that was reserved for it.
+   *
+   * Returns false when the reservation has moved on (a newer generation was
+   * reserved, or the runner re-paired). The caller must treat that as a
+   * rejected enrollment: a job whose generation has been superseded has already
+   * lost its claim and must not be handed a live runner identity.
+   */
+  enrollRunnerAtGeneration(
+    runnerId: string,
+    publicKeyPem: string,
+    generation: number,
+  ): RunnerRecord | null {
+    const record = this.state.runners[runnerId];
+    if (!record || record.generation !== generation) return null;
+    record.public_key_pem = publicKeyPem;
+    return record;
+  }
+
   runner(runnerId: string): RunnerRecord | undefined {
     return this.state.runners[runnerId];
   }

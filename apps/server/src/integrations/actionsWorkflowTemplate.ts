@@ -65,9 +65,9 @@ export interface NornsWorkflowTemplateOptions {
   /** npm spec for the runner, e.g. `@norns/runner@0.1.0`. */
   runnerPackage: string;
   /** Node major version the runner is supported on. */
-  nodeVersion?: string;
+  nodeVersion?: string | undefined;
   /** Hard wall-clock ceiling for one Norns run. */
-  timeoutMinutes?: number;
+  timeoutMinutes?: number | undefined;
 }
 
 function assertSafeOrigin(origin: string): string {
