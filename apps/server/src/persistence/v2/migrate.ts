@@ -82,6 +82,16 @@ export const FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+// ONBOARDING O4: GitHub Actions execution path. The number is UNASSIGNED on
+// purpose — the PM assigns it at integration, because this list is maintained
+// by hand and parallel agents have collided on numbers twice already. Rename
+// `drizzle/NNNN_actions_execution.sql` and this constant together.
+export const ACTIONS_EXECUTION_MIGRATION_NAME = "NNNN_actions_execution";
+export const ACTIONS_EXECUTION_MIGRATION_URL = new URL(
+  "../../../drizzle/NNNN_actions_execution.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -172,6 +182,10 @@ export async function loadAttachmentsMigrationSql(): Promise<string> {
 
 export async function loadFrontDoorProgressTrackingMigrationSql(): Promise<string> {
   return readFile(FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL, "utf8");
+}
+
+export async function loadActionsExecutionMigrationSql(): Promise<string> {
+  return readFile(ACTIONS_EXECUTION_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -341,6 +355,10 @@ export async function runCurrentV2Migrations(
     {
       name: FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
       sql: await loadFrontDoorProgressTrackingMigrationSql(),
+    },
+    {
+      name: ACTIONS_EXECUTION_MIGRATION_NAME,
+      sql: await loadActionsExecutionMigrationSql(),
     },
   ]);
 }
