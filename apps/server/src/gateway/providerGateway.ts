@@ -34,6 +34,7 @@
 // hold is taken BEFORE the request goes out and resolved after the stream
 // ends, so two concurrent streams cannot each observe the same "remaining".
 import {
+  DEFAULT_MODEL_REGISTRY,
   type ModelEntry,
   type ProviderName,
   conservativeMaxChargeUsd,
@@ -336,7 +337,7 @@ export class ProviderGateway {
   private readonly now: () => Date;
 
   constructor(private readonly options: ProviderGatewayOptions) {
-    this.registry = options.registry ?? {};
+    this.registry = options.registry ?? DEFAULT_MODEL_REGISTRY;
     this.allowed = new Set(options.allowedModels ?? []);
     this.surfaces = options.surfaces ?? SURFACES;
     this.fetchImpl = options.fetchImpl ?? fetch;
