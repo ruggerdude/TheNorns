@@ -11,6 +11,7 @@ import {
   enrollmentTokenHash,
   generateEnrollmentToken,
 } from "../integrations/githubActions.js";
+import { nonce } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   type Phase4Coordinator,
@@ -48,12 +49,27 @@ import {
 // The design therefore assumes the token WILL leak to anyone with repo write
 // and bounds what that is worth:
 //
-//   1. PROJECT-SCOPED IDENTITY. The token enrolls a runner id that belongs to
-//      exactly one repository binding (`github_actions_bindings_runner_idx` is
-//      unique). It is not the user's laptop runner and shares no identity with
-//      it. Commands for other projects are never routed to it, and the Phase 4
+//   1. DISPATCH-SCOPED IDENTITY (EXECUTION E5). The token enrolls a runner id
+//      that belongs to exactly one DISPATCH — `actionsDispatchRunnerId()`
+//      mints a fresh id (`actions:${projectId}:${nonce}`) inside `schedule()`
+//      for every launch, never reused across launches, and unique per
+//      dispatch at the database level (`github_actions_runs_runner_id_idx`).
+//      It is not the user's laptop runner and shares no identity with it.
+//      Commands for other projects are never routed to it, and the Phase 4
 //      coordinator independently rejects a run whose repository binding does
-//      not match. Compromising this repository yields this repository.
+//      not match. Compromising this repository yields this repository, and
+//      compromising one dispatch's identity yields at most that one dispatch.
+//
+//      BEFORE E5, the id was project-scoped (`actions:${projectId}`, one per
+//      project for the project's whole lifetime). That made every dispatch in
+//      a project share one generation counter and one relay socket slot, so
+//      scheduling job B while job A was still running reserved a new
+//      generation FOR JOB A'S OWN IDENTITY and fenced job A off its own run,
+//      unconditionally, regardless of whether job B's own dispatch was itself
+//      accepted or refused by the concurrency cap below. Per-dispatch identity
+//      removes the shared state entirely: two dispatches in the same project
+//      now hold disjoint `RelayStores` records, so nothing about scheduling
+//      one can ever fence the other.
 //
 //   2. SINGLE USE, AGAINST AN ALREADY-DISPATCHED JOB. Enrollment must name a
 //      `github_actions_runs` row that Norns itself created, that is in status
@@ -62,11 +78,15 @@ import {
 //      A stolen token cannot be used to sit on the relay waiting for work: it
 //      can only race the legitimate job for a job Norns already decided to run.
 //
-//   3. SHORT GENERATION LIFETIME. Each launch reserves a fresh runner
-//      generation, which fences the previous one instantly. A token redeemed
-//      against a superseded generation is refused, and any connection holding
-//      the old generation is fenced off by the existing generation machinery.
-//      The credential is therefore worth, at most, one generation.
+//   3. SHORT GENERATION LIFETIME, NOW SCOPED TO ONE DISPATCH. Each launch
+//      reserves a fresh generation for that launch's OWN fresh runner id,
+//      which fences only a previous connection for that SAME dispatch
+//      identity (a re-run GitHub Actions attempt for the same job, or a
+//      resurrected zombie). A token redeemed against a superseded generation
+//      is refused, and any connection holding the old generation is fenced
+//      off by the existing generation machinery — this protection is
+//      unchanged, only its blast radius shrank from "the whole project" to
+//      "this one dispatch".
 //
 //   4. NO STANDING AUTHORITY. The enrollment token is not a relay session
 //      credential and not a GitHub credential. It cannot read Norns data, it
@@ -154,9 +174,43 @@ export interface ActionsExecutionBindingInput {
   runner_id?: string;
 }
 
-/** The project-scoped ephemeral runner identity. Never a laptop runner id. */
+/**
+ * The project-scoped placeholder identity written onto
+ * `github_actions_execution_bindings.runner_id` at provisioning time (see
+ * `ensureBindingForProject`/`upsertBinding` below). This is now PROVENANCE
+ * ONLY — a stable tag identifying which project's binding a row belongs to —
+ * and is never itself reserved a generation, never itself dispatched, and
+ * never itself presented by a runner for enrollment. `repository_bindings`'s
+ * own mirror of this same value (`ProjectActivationService.actionsRunnerIdFor`,
+ * for `binding_type='github'` rows) is exactly as documented there: it is not
+ * gate-checked by `Phase4Coordinator.schedule()` either.
+ *
+ * The identity a runner actually enrolls and authenticates as is
+ * `actionsDispatchRunnerId()`, below — one fresh value per dispatch, never
+ * this one.
+ */
 export function actionsRunnerId(projectId: string): string {
   return `actions:${projectId}`;
+}
+
+/**
+ * EXECUTION E5 — the identity an Actions-hosted ephemeral runner actually
+ * enrolls, authenticates, and is fenced or revoked as: one fresh value per
+ * DISPATCH, never reused, and never shared across two dispatches even in the
+ * same project. `dispatchNonce` must be unpredictable and never reused by the
+ * caller (see `ActionsExecutionCoordinator.schedule()`, which draws it from
+ * `nonce()` exactly once per launch).
+ *
+ * This is the fix for the cross-dispatch fencing bug: when every dispatch in
+ * a project shared `actionsRunnerId(projectId)`, scheduling a second job
+ * reserved a new generation for the FIRST job's identity too (they were the
+ * same string), fencing a still-running job off its own connection. Per-
+ * dispatch identity means `RelayStores` holds a disjoint record — disjoint
+ * generation counter, disjoint relay socket slot — for every dispatch, so
+ * nothing about scheduling one can ever affect another's connection.
+ */
+export function actionsDispatchRunnerId(projectId: string, dispatchNonce: string): string {
+  return `${actionsRunnerId(projectId)}:${dispatchNonce}`;
 }
 
 function repositoryRef(binding: ActionsExecutionBindingRow): ActionsRepositoryRef {
@@ -174,6 +228,16 @@ const BINDING_COLUMNS = `repository_binding_id, project_id, connection_id, insta
           workflow_installed_at, workflow_blocked_reason, runner_id,
           enrollment_secret_hash, enabled`;
 
+// EXECUTION E5 — the same columns, qualified for a query that joins
+// `github_actions_execution_bindings` against `github_actions_runs`, which has
+// its own (different-meaning) `project_id`, `repository_binding_id`, and
+// `runner_id` columns. Unqualified `BINDING_COLUMNS` would be ambiguous there.
+const QUALIFIED_BINDING_COLUMNS = `bindings.repository_binding_id, bindings.project_id,
+          bindings.connection_id, bindings.installation_id, bindings.repository_github_id,
+          bindings.owner, bindings.name, bindings.default_branch, bindings.workflow_version,
+          bindings.workflow_installed_at, bindings.workflow_blocked_reason, bindings.runner_id,
+          bindings.enrollment_secret_hash, bindings.enabled`;
+
 export class ActionsExecutionRepository {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
@@ -187,11 +251,32 @@ export class ActionsExecutionRepository {
     });
   }
 
-  bindingForRunner(runnerId: string): Promise<ActionsExecutionBindingRow | null> {
+  /**
+   * EXECUTION E5 — resolve the binding an ENROLLING RUNNER should be checked
+   * against, now that `runner_id` is minted fresh per dispatch and no longer
+   * lives on `github_actions_execution_bindings` (that table's own `runner_id`
+   * is the per-project provisioning placeholder documented on
+   * `actionsRunnerId()`, not a per-dispatch value — it will never match).
+   *
+   * Resolved through `github_actions_runs`, which already records exactly
+   * which dispatch a runner id belongs to (`createRun()` stores it there at
+   * schedule time). Matching on BOTH `dispatch_job_id` (globally unique) AND
+   * `runner_id` is redundant with `redeemEnrollment`'s own predicate by
+   * design — two independent checks of "this runner id belongs to this
+   * dispatch" is exactly the kind of duplication that is safe to keep, unlike
+   * duplicating an authorization DECISION.
+   */
+  bindingForDispatch(
+    dispatchJobId: string,
+    runnerId: string,
+  ): Promise<ActionsExecutionBindingRow | null> {
     return this.transactions.transaction(async (sql) => {
       const result = await sql.query<ActionsExecutionBindingRow>(
-        `SELECT ${BINDING_COLUMNS} FROM github_actions_execution_bindings WHERE runner_id = $1`,
-        [runnerId],
+        `SELECT ${QUALIFIED_BINDING_COLUMNS}
+         FROM github_actions_execution_bindings bindings
+         JOIN github_actions_runs runs ON runs.repository_binding_id = bindings.repository_binding_id
+         WHERE runs.dispatch_job_id = $1 AND runs.runner_id = $2`,
+        [dispatchJobId, runnerId],
       );
       return result.rows[0] ?? null;
     });
@@ -561,15 +646,25 @@ export class ActionsExecutionCoordinator {
       );
     }
 
+    // EXECUTION E5 — a fresh identity for THIS dispatch alone, never reused
+    // across launches and never shared with any other dispatch in this (or
+    // any other) project. See `actionsDispatchRunnerId()` for why: reusing
+    // `prepared.runner_id` (the project-scoped placeholder) here used to mean
+    // every dispatch in a project reserved a generation for the SAME identity,
+    // so scheduling job B fenced job A off its own still-running connection.
+    const dispatchRunnerId = actionsDispatchRunnerId(input.project_id, nonce());
+
     // Reserve the generation the job will enroll at BEFORE building the
     // command, so the command carries the generation the runner will prove it
-    // owns. Reserving also fences any previous ephemeral generation at once.
-    const runnerGeneration = this.options.reserveGeneration(prepared.runner_id);
+    // owns. Reserving also fences any previous connection for THIS dispatch
+    // identity (a re-run GitHub Actions attempt for the same job) — never any
+    // other dispatch's identity, since no two dispatches ever share one.
+    const runnerGeneration = this.options.reserveGeneration(dispatchRunnerId);
 
     // --- The existing Phase 4 gate, called unchanged. ---
     const scheduled = await this.coordinator.schedule({
       ...input,
-      runner_id: prepared.runner_id,
+      runner_id: dispatchRunnerId,
       runner_generation: runnerGeneration,
     });
 
@@ -578,7 +673,7 @@ export class ActionsExecutionCoordinator {
       repository_binding_id: prepared.repository_binding_id,
       dispatch_job_id: scheduled.dispatch_job_id,
       run_id: scheduled.run_id,
-      runner_id: prepared.runner_id,
+      runner_id: dispatchRunnerId,
       runner_generation: runnerGeneration,
     });
 
@@ -586,7 +681,7 @@ export class ActionsExecutionCoordinator {
     try {
       await this.actions.dispatchWorkflow(reference, {
         norns_job_id: scheduled.dispatch_job_id,
-        norns_runner_id: prepared.runner_id,
+        norns_runner_id: dispatchRunnerId,
         norns_run_id: scheduled.run_id,
       });
       // Commit `dispatched` IMMEDIATELY after the 204, before any further
@@ -624,7 +719,7 @@ export class ActionsExecutionCoordinator {
     return {
       ...scheduled,
       actions: {
-        runner_id: prepared.runner_id,
+        runner_id: dispatchRunnerId,
         runner_generation: runnerGeneration,
         workflow,
         github_run_id: located?.id ?? null,
@@ -691,7 +786,10 @@ export class ActionsEnrollmentService {
       "invalid_enrollment",
       "This Norns enrollment request was rejected.",
     );
-    const binding = await this.repository.bindingForRunner(input.runner_id);
+    const binding = await this.repository.bindingForDispatch(
+      input.dispatch_job_id,
+      input.runner_id,
+    );
     if (!binding || !binding.enabled || !binding.enrollment_secret_hash) throw rejected;
     // Compare hashes, never the token, and compare them in constant time.
     // Both operands are fixed-length hex, so a length mismatch means a
