@@ -460,3 +460,13 @@
   dispatching a runtime the job has no credentials for
 - [ ] E3-12 — proxied inference is complete-response only; streaming needs a
   streaming method on `LlmAdapter` first (additive on both sides when wanted)
+
+## EXECUTION E4 — runner publication + honest verification
+
+- [ ] 🔄 E4-1 — publish the run's work before cleanup: push `target_branch` to
+  `origin` and open/reuse a pull request, so an ephemeral Actions checkout no
+  longer takes the agent's only copy of the commits to the grave
+- [ ] 🔄 E4-2 — replace the tautological verification comparison
+  (`expected_commit` read from the same worktree) with real execution of the
+  repository's ingested build/test/lint commands at the exact commit
+- [ ] 🟡 E4-3 — regression test that the old tautology cannot return
