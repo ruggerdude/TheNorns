@@ -340,3 +340,76 @@ describe.sequential("EXECUTION E9 gateway credential mint route", () => {
     expect(resolvedRun?.active).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Boot wiring
+// ---------------------------------------------------------------------------
+//
+// THE REPO'S OWN RULE: a service that exists, is tested, and is never actually
+// composed by `buildServer` is dead in production while CI is green. That has
+// shipped three times here (attachments, the onboarding route, Actions
+// execution bindings). Every E9 test above injects `modelGateway`, so without
+// this one the DEFAULT composition — the only path production takes — would be
+// entirely unexercised.
+describe.sequential("EXECUTION E9 boot wiring", () => {
+  it("composes the gateway from the option shape main.ts actually supplies", async () => {
+    const pg = new PGlite();
+    await pg.exec(`
+      CREATE ROLE norns_app NOLOGIN;
+      CREATE TABLE norns_state (
+        key TEXT PRIMARY KEY, snapshot JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
+    const transactions = new PGliteTransactionRunner(pg);
+
+    // Exactly what main.ts passes: `planningRuns: { transactions }` plus a
+    // publicOrigin. No gateway, no credential service, no run lookup.
+    const server = await buildServer({
+      stores: new RelayStores(),
+      users: new UserStore(),
+      planningRuns: { transactions },
+      publicOrigin: "https://norns.example",
+    });
+    const origin = await listen(server);
+    try {
+      // The mint route exists and authenticates (401, not 404).
+      const mint = await fetch(`${origin}${GATEWAY_CREDENTIAL_ROUTE}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ run_id: "run-1" }),
+      });
+      expect(mint.status).toBe(401);
+
+      // The Anthropic surface exists and refuses an unknown credential
+      // (401 with the gateway's own refusal header), rather than 404ing.
+      const forwarded = await fetch(`${anthropicGatewayBaseUrl(origin)}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer nrngw_nope" },
+        body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 8, messages: [] }),
+      });
+      expect(forwarded.status).toBe(401);
+      expect(forwarded.headers.get("x-norns-gateway-refusal")).toBe("unauthorized");
+
+      // And Claude Code's reachability probe is answered rather than 404'd.
+      const probe = await fetch(anthropicGatewayBaseUrl(origin), { method: "HEAD" });
+      expect(probe.status).toBe(200);
+
+      // The gateway_credentials table the default composition writes to really
+      // exists in a migrated database.
+      const columns = await transactions.transaction(async (sql) => {
+        const result = await sql.query<{ column_name: string }>(
+          "SELECT column_name FROM information_schema.columns WHERE table_name = 'gateway_credentials'",
+        );
+        return result.rows.map((row) => row.column_name).sort();
+      });
+      expect(columns).toContain("token_hash");
+      expect(columns).toContain("runner_generation");
+      expect(columns).not.toContain("token");
+    } finally {
+      await server.app.close();
+      await pg.close();
+    }
+  });
+});

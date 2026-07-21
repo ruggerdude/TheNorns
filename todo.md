@@ -464,23 +464,53 @@
 ## EXECUTION E9 — provider-native streaming gateway
 
 Closes E3-9 with the human's decision: a forwarder, not a reimplementation.
+`claude-code` and `codex` now run with NO provider credentials in the process.
 
-- [ ] 🔄 E9-1 — Anthropic-compatible endpoint (`/v1/messages`, streaming and
-  non-streaming) that forwards the request body VERBATIM upstream and streams
-  the response bytes back verbatim
-- [ ] 🔄 E9-2 — OpenAI-compatible endpoint (`/v1/responses`, the surface the
-  installed `@openai/codex-sdk` 0.144.3 actually calls) with the same
-  verbatim-forwarding contract
-- [ ] 🔄 E9-3 — per-run, short-lived, revocable, generation-fenced gateway
-  credential resolving server-side to run/task/project/budget; the provider key
-  never leaves the server and a client-supplied model key is never accepted
-- [ ] 🔄 E9-4 — usage metered out of the SSE stream for both providers, written
-  through E3's `SqlInferenceMeter`; a stream that dies mid-flight still meters
-- [ ] 🔄 E9-5 — budget refused before forwarding via E3's
-  `SqlRunReservationBudget`, with honest post-hoc reconciliation
-- [ ] 🔄 E9-6 — runner points Claude Code / Codex at the gateway
-- [ ] 🔄 E9-7 — **BUG FOUND**: E1's server verifier and E3's runner client
-  disagree on the context-fetch signing scheme (`x-norns-runner-timestamp` vs
+- [x] E9-1 — Anthropic-compatible endpoint. `ANTHROPIC_BASE_URL =
+  <origin>/api/gateway/anthropic`; Claude Code issues `POST .../v1/messages`
+  (streaming AND non-streaming — both observed in one real turn),
+  `/v1/messages/count_tokens`, `/v1/models`, and a `HEAD` probe on the base URL
+- [x] E9-2 — OpenAI-compatible endpoint. Codex's `baseUrl =
+  <origin>/api/gateway/openai/v1` and it issues `POST .../responses`, verified
+  by reading `@openai/codex-sdk` 0.144.3 (`--config openai_base_url`,
+  `CODEX_API_KEY`) and the bundled binary, not by guessing
+- [x] E9-3 — per-run gateway credential: 32 bytes CSPRNG, stored only as
+  sha-256, 90-minute TTL, revocable, generation-fenced, resolved through E3's
+  `SqlProxiedRunLookup` + the extracted `authorizeProxiedRunAccess` on EVERY
+  request. A client-supplied model key is stripped, never honoured
+- [x] E9-4 — usage metered from the stream for both providers and written by
+  E3's `SqlInferenceMeter`; a provider-killed stream and a client that
+  disconnects mid-stream both still meter
+- [x] E9-5 — budget refused before forwarding via E3's
+  `SqlRunReservationBudget`; post-hoc reconciliation settles the TRUE cost even
+  when it exceeds the hold, so an over-run is self-correcting on the next call
+- [x] E9-6 — the runner mints per-run and points both agentic runtimes at the
+  gateway, stripping every provider key from the child environment first
+- [x] E9-7 — **BUG FIXED**: E1's server verifier and E3's runner client
+  disagreed on the context-fetch signing scheme (`x-norns-runner-timestamp` vs
   `x-norns-timestamp`; `\n`-joined vs `|`-joined payload). Every real context
-  fetch 401s. No test caught it because the E3 test drives a hand-rolled fake
-  server implementing the runner's spelling. Runner side fixed here.
+  fetch 401'd, so every dispatched run started with an empty prompt. No test
+  caught it because the only test drove a fake server implementing the
+  runner's spelling on both sides. Runner side fixed; the two canonical-payload
+  functions are now asserted byte-identical
+- [x] E9-8 — **BUG FIXED, found by the real-runtime test**: the gateway rebuilt
+  the upstream URL from the path alone, silently dropping the query string.
+  Claude Code really sends `?beta=true`
+- [ ] E9-9 — **PM ROUTING** (supersedes E3-11): `agent_profiles.runtime` may now
+  name `claude-code` or `codex` for Actions-hosted work — they are no longer
+  credential-dependent. Nothing in E9 writes that column; the coordinator owns
+  it. Until it does, Actions runs still get `proxied-completion`
+- [ ] E9-10 — **PM ROUTING** (same as E3-10): `ServerOptions.runnerInference:
+  { transactions }` from main.ts would beat both E3 and E9 reaching for
+  whichever relational option happens to be present
+- [ ] E9-11 — the model allowlist is keyed on the RESOLVED model id in the
+  request body. An operator who sets `NORNS_RUNNER_ALLOWED_MODELS` to an alias
+  (`claude-sonnet-4-5`) rather than the registry id will see every call refused
+  `model_unavailable`. Worth a startup warning
+- [ ] E9-12 — a request whose stream dies before ANY usage appears is released,
+  not charged. On Anthropic that window is one event wide; on OpenAI Responses
+  usage only arrives at the end, so a long OpenAI stream killed near completion
+  currently costs the run nothing. Audited as `gateway.unmetered` so it is
+  measurable; closing it needs a provider-side usage signal we do not have
+- [ ] E9-13 — no purge job calls `GatewayCredentialService.purgeExpired()`.
+  Expired rows are inert (every request re-checks expiry) but accumulate
