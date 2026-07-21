@@ -26,6 +26,16 @@
 // rather than being handed to a shell or silently truncated at the `&&` into a
 // command that means something different from what the human wrote.
 //
+// WHAT THIS IS AND IS NOT. It guarantees that no shell ever interprets the
+// text, so nothing here can expand a glob, substitute a variable, chain a
+// second command, or redirect a file. It is NOT a safety review of the program
+// being invoked: a fact recorded as `rm -rf /` tokenizes cleanly and would run
+// `rm`. That is the same trust posture the rest of this path already holds and
+// cannot escape — the runner has, by this point, executed an autonomous coding
+// agent with write access in the same worktree, and these facts are
+// human-reviewed project memory written during repository ingestion. Pretending
+// a tokenizer is an authorization boundary would be the more dangerous claim.
+//
 // A rejected command is DROPPED, not substituted and not fatal: the remaining
 // well-formed commands are still sent, and if none survive the field is omitted
 // so the manifest fallback applies. Dispatch is never blocked by a malformed
