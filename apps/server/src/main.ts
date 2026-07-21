@@ -38,6 +38,11 @@ import {
 } from "./integrations/github.js";
 // ONBOARDING O4: Actions-hosted execution.
 import { GitHubActionsService } from "./integrations/githubActions.js";
+import {
+  defaultRunnerTarballDir,
+  formatRunnerTarballSpec,
+  loadRunnerTarball,
+} from "./integrations/runnerDistribution.js";
 import { Phase7OperationsService } from "./operations/phase7Operations.js";
 import {
   Phase2ApplicationPersistenceLease,
@@ -154,6 +159,21 @@ let attachmentsOptions: { transactions: V2TransactionRunner } | undefined;
 // ONBOARDING O2: the two GitHub-backed project-creation scenarios, over the
 // same relational runtime.
 let onboardingOptions: { transactions: V2TransactionRunner } | undefined;
+// EXECUTION E1/E2: task-context assembly, its fetch route, and the
+// start-phase trigger all need the relational runtime. `buildServer` shipped
+// this option in EXECUTION E1 but nothing here ever passed it, leaving the
+// assembler permanently inert in production -- the same failure mode that
+// shipped an unwired attachments service and a dead onboarding route in
+// earlier programs. `baseUrl` must be the deployment's public origin: the
+// constructor throws on anything other than HTTPS (or http on localhost),
+// so a misconfiguration fails at boot, not silently at runner-fetch time.
+let executionOptions: { transactions: V2TransactionRunner; baseUrl?: string } | undefined;
+// EXECUTION E10 (E9-10, = E3-10): the relational runtime behind BOTH the E3
+// completion proxy and E9's provider-native model gateway. Both previously
+// reached for `planningRuns ?? onboarding ?? attachments` inside buildServer --
+// working only by the accident that production wires all three from this same
+// runner, and one config change away from silently disabling runner inference.
+let runnerInferenceOptions: { transactions: V2TransactionRunner } | undefined;
 
 const publicOrigin =
   process.env.NORNS_PUBLIC_ORIGIN ??
@@ -253,7 +273,16 @@ if (databaseUrl) {
           actionsService,
           {
             serverOrigin: publicOrigin,
-            runnerPackage: process.env.NORNS_RUNNER_PACKAGE ?? "@norns/runner",
+            // EXECUTION E3 — the pinned tarball this server is actually able
+            // to serve, `<version>@sha256:<hex>`. Resolved here (inside the
+            // `if (github)` branch) so that a deployment which never uses
+            // Actions execution is not required to stage a runner artifact.
+            // Loading fails loudly: a missing or hash-mismatched tarball must
+            // stop startup rather than commit a workflow into a user's
+            // repository that is guaranteed to fail at the install step.
+            runnerPackage:
+              process.env.NORNS_RUNNER_PACKAGE ??
+              formatRunnerTarballSpec(loadRunnerTarball(defaultRunnerTarballDir())),
             ...(process.env.NORNS_ACTIONS_NODE_VERSION
               ? { nodeVersion: process.env.NORNS_ACTIONS_NODE_VERSION }
               : {}),
@@ -388,6 +417,15 @@ if (databaseUrl) {
     // service still mounts and refuses honestly with github_not_configured
     // rather than mounting a route that silently does nothing.
     onboardingOptions = { transactions: runtimeTransactions };
+    // EXECUTION E1/E2: wire the assembler + start-phase trigger in. Without
+    // this, `buildServer` never receives `options.execution`, the fetch route
+    // and start-phase routes never mount, and `server.taskContext` stays
+    // undefined -- exactly the dead-on-arrival state the EXECUTION audit
+    // found.
+    executionOptions = { transactions: runtimeTransactions, baseUrl: publicOrigin };
+    // EXECUTION E10 (E9-10, = E3-10): state the dependency instead of letting
+    // buildServer infer it from an unrelated feature's option.
+    runnerInferenceOptions = { transactions: runtimeTransactions };
     identityRuntime = createIdentityRuntime({
       users,
       route: identityRoute,
@@ -630,6 +668,9 @@ const server = await buildServer({
   ...(planningRunsOptions !== undefined ? { planningRuns: planningRunsOptions } : {}),
   ...(attachmentsOptions !== undefined ? { attachments: attachmentsOptions } : {}),
   ...(onboardingOptions !== undefined ? { onboarding: onboardingOptions } : {}),
+  ...(executionOptions !== undefined ? { execution: executionOptions } : {}),
+  // EXECUTION E10 (E9-10, = E3-10): the E3 proxy and the E9 gateway.
+  ...(runnerInferenceOptions !== undefined ? { runnerInference: runnerInferenceOptions } : {}),
   ...(integrationServices !== undefined ? { integrations: integrationServices } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),

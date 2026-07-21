@@ -108,6 +108,86 @@ export const ONBOARDING_REPOSITORY_INTENTS_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+// EXECUTION E1: content-addressed assembled task context (task_context_blobs +
+// task_context_documents), the payload every dispatched run fetches.
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED. 0018 is the highest number merged when
+// E1 was written; the PM assigns the real number and renames the file at
+// integration.
+export const TASK_CONTEXT_MIGRATION_NAME = "0019_task_context";
+export const TASK_CONTEXT_MIGRATION_URL = new URL(
+  "../../../drizzle/0019_task_context.sql",
+  import.meta.url,
+);
+
+// EXECUTION E2: binds an assembled task-context document to the runner that
+// was actually dispatched to read it (the fetch route's missing
+// authorization check, on top of E1's authentication).
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED. 0019 is the highest number merged
+// when E2 was written; the PM assigns the real number and renames the file at
+// integration.
+export const DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME = "0020_dispatch_context_scope";
+export const DISPATCH_CONTEXT_SCOPE_MIGRATION_URL = new URL(
+  "../../../drizzle/0020_dispatch_context_scope.sql",
+  import.meta.url,
+);
+
+// EXECUTION E9: per-run credentials for the provider-native model gateway
+// (gateway_credentials). Only a sha-256 hash of each token is stored.
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED — the file is literally named
+// `0021_gateway_credentials.sql`. 0020 is the highest number merged when E9
+// was written, and three parallel agents have collided on migration numbers
+// already; the PM assigns the real number and renames both the file and the
+// string below at integration.
+export const GATEWAY_CREDENTIALS_MIGRATION_NAME = "0021_gateway_credentials";
+export const GATEWAY_CREDENTIALS_MIGRATION_URL = new URL(
+  "../../../drizzle/0021_gateway_credentials.sql",
+  import.meta.url,
+);
+
+// EXECUTION E10: persists the branch, remote and pull request a run published,
+// so a completed task can be clicked through to its review instead of having
+// that fact live only in a `run_log` string.
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED — the file is literally named
+// `0022_run_publication.sql`, matching E9's convention. 0020 is the highest
+// number merged when E10 was written and E9 is unnumbered in parallel; the PM
+// assigns the real number and renames both the file and the string below at
+// integration.
+export const RUN_PUBLICATION_MIGRATION_NAME = "0022_run_publication";
+export const RUN_PUBLICATION_MIGRATION_URL = new URL(
+  "../../../drizzle/0022_run_publication.sql",
+  import.meta.url,
+);
+
+// EXECUTION E5: per-dispatch runner identity for GitHub Actions-hosted
+// execution (github_actions_runs_runner_id_unique_idx) — the fix for
+// concurrent Actions-hosted dispatches in one project fencing each other off.
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED — the file is literally named
+// `0023_actions_dispatch_runner_identity.sql`, matching E9/E10's convention.
+// 0020 is the highest assigned number merged when E5 was written, and E9/E10
+// are unnumbered in parallel; the PM assigns the real number and renames both
+// the file and the string below at integration.
+export const ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME =
+  "0023_actions_dispatch_runner_identity";
+export const ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_URL = new URL(
+  "../../../drizzle/0023_actions_dispatch_runner_identity.sql",
+  import.meta.url,
+);
+
+// EXECUTION E12 — conflict safety for concurrent tasks inside one phase. The
+// number is unassigned for the same reason as every entry above it: parallel
+// phases each pick the next free number and the PM renames the file and this
+// string at integration.
+export const PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME = "0024_phase_concurrency_conflicts";
+export const PHASE_CONCURRENCY_CONFLICTS_MIGRATION_URL = new URL(
+  "../../../drizzle/0024_phase_concurrency_conflicts.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -210,6 +290,30 @@ export async function loadActionsExecutionMigrationSql(): Promise<string> {
 
 export async function loadOnboardingRepositoryIntentsMigrationSql(): Promise<string> {
   return readFile(ONBOARDING_REPOSITORY_INTENTS_MIGRATION_URL, "utf8");
+}
+
+export async function loadTaskContextMigrationSql(): Promise<string> {
+  return readFile(TASK_CONTEXT_MIGRATION_URL, "utf8");
+}
+
+export async function loadDispatchContextScopeMigrationSql(): Promise<string> {
+  return readFile(DISPATCH_CONTEXT_SCOPE_MIGRATION_URL, "utf8");
+}
+
+export async function loadGatewayCredentialsMigrationSql(): Promise<string> {
+  return readFile(GATEWAY_CREDENTIALS_MIGRATION_URL, "utf8");
+}
+
+export async function loadRunPublicationMigrationSql(): Promise<string> {
+  return readFile(RUN_PUBLICATION_MIGRATION_URL, "utf8");
+}
+
+export async function loadActionsDispatchRunnerIdentityMigrationSql(): Promise<string> {
+  return readFile(ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_URL, "utf8");
+}
+
+export async function loadPhaseConcurrencyConflictsMigrationSql(): Promise<string> {
+  return readFile(PHASE_CONCURRENCY_CONFLICTS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -391,6 +495,30 @@ export async function runCurrentV2Migrations(
     {
       name: ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME,
       sql: await loadOnboardingRepositoryIntentsMigrationSql(),
+    },
+    {
+      name: TASK_CONTEXT_MIGRATION_NAME,
+      sql: await loadTaskContextMigrationSql(),
+    },
+    {
+      name: DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
+      sql: await loadDispatchContextScopeMigrationSql(),
+    },
+    {
+      name: GATEWAY_CREDENTIALS_MIGRATION_NAME,
+      sql: await loadGatewayCredentialsMigrationSql(),
+    },
+    {
+      name: RUN_PUBLICATION_MIGRATION_NAME,
+      sql: await loadRunPublicationMigrationSql(),
+    },
+    {
+      name: ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
+      sql: await loadActionsDispatchRunnerIdentityMigrationSql(),
+    },
+    {
+      name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
+      sql: await loadPhaseConcurrencyConflictsMigrationSql(),
     },
   ]);
 }

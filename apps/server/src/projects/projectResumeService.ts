@@ -43,6 +43,15 @@ export const V2PhaseProgress = z
     tasks_total: z.number().int().nonnegative(),
     eta_at: z.string().datetime().nullable(),
     burn_rate_usd_per_hour: z.number().nullable(),
+    // EXECUTION E13 — live cost, alongside the throughput/ETA fields above.
+    // `spend_usd` is the phase's real accrued spend from `usage_events`;
+    // null means no metered call has landed for this phase YET (never a
+    // fabricated 0, which would read as "confirmed free"). `budget_usd` is
+    // `phases.approved_budget_usd`, a real, always-populated column — 0
+    // there honestly means "nothing approved yet", not "unknown", so it is
+    // not nullable.
+    spend_usd: z.number().nonnegative().nullable(),
+    budget_usd: z.number().nonnegative(),
   })
   .strict();
 export type V2PhaseProgressT = z.infer<typeof V2PhaseProgress>;
@@ -406,9 +415,10 @@ export class ProjectResumeService {
         tasks: number;
         completed_tasks: number;
         blocked_tasks: number;
+        approved_budget_usd: string | number;
       }>(
         `SELECT p.id, p.objective_summary, p.priority, p.status,
-                p.approved_strategy_version_id,
+                p.approved_strategy_version_id, p.approved_budget_usd,
                 count(DISTINCT o.id)::int AS objectives,
                 count(DISTINCT t.id)::int AS tasks,
                 count(DISTINCT t.id) FILTER (WHERE t.state = 'completed')::int AS completed_tasks,
@@ -421,6 +431,16 @@ export class ProjectResumeService {
          ORDER BY p.priority DESC, p.created_at, p.id`,
         [projectId],
       );
+      // EXECUTION E13 — live cost, per phase: the phase's total accrued
+      // spend from real `usage_events` rows. A phase absent from this map has
+      // never had a metered call recorded against it — null, not 0.
+      const phaseUsage = await tx.query<{ phase_id: string; cost_usd: string | number | null }>(
+        `SELECT phase_id, SUM(cost_usd) AS cost_usd
+         FROM usage_events WHERE project_id = $1 AND phase_id IS NOT NULL
+         GROUP BY phase_id`,
+        [projectId],
+      );
+      const spendByPhase = new Map(phaseUsage.rows.map((row) => [row.phase_id, row.cost_usd]));
       const attention = await tx.query<{
         open_decisions: number;
         active_runs: number;
@@ -442,10 +462,20 @@ export class ProjectResumeService {
         task_id: string;
         title: string;
         completed_at: Date | string;
+        pull_request_url: string | null;
+        published_branch: string | null;
       }>(
-        `SELECT id AS task_id, title, completed_at
-         FROM tasks WHERE project_id = $1 AND state = 'completed'
-         ORDER BY completed_at DESC, id LIMIT 10`,
+        // EXECUTION E10: a completed task carries the pull request its
+        // designated run published, so the resume surface can link straight to
+        // the review. LEFT JOIN because a task completed before E10 (or by a
+        // runner with no publisher) has no publication, and "no PR" must read
+        // as null rather than dropping the completion from the list.
+        `SELECT task.id AS task_id, task.title, task.completed_at,
+                run.pull_request_url, run.published_branch
+         FROM tasks task
+         LEFT JOIN agent_runs run ON run.id = task.designated_run_id
+         WHERE task.project_id = $1 AND task.state = 'completed'
+         ORDER BY task.completed_at DESC, task.id LIMIT 10`,
         [projectId],
       );
       // FRONT DOOR P5 (tracking): the most recent PROGRESS_WINDOW_SIZE task
@@ -509,6 +539,10 @@ export class ProjectResumeService {
         current.push(row);
         runCostsByPhase.set(row.phase_id, current);
       }
+      // EXECUTION E13 — approved_budget_usd was stripped from `phases.rows`
+      // before the strict contract parse above; kept here, by id, for the
+      // per-phase budget merged in below.
+      const budgetByPhase = new Map(phases.rows.map((row) => [row.id, row.approved_budget_usd]));
 
       const baseResume = V2ProjectResume.parse({
         schema_version: 2,
@@ -531,7 +565,12 @@ export class ProjectResumeService {
           health: repository.repository_health,
           observed_head: repository.observed_head,
         })),
-        phases: phases.rows,
+        // `phases.rows` also carries `approved_budget_usd` (EXECUTION E13,
+        // for the per-phase budget merged in below) which is NOT part of the
+        // strict, contracts-owned phase shape — stripped here so it is not
+        // fed back through `.parse()`, same pattern as the `.strict()`
+        // deviation note above.
+        phases: phases.rows.map(({ approved_budget_usd: _budget, ...rest }) => rest),
         attention: {
           open_decisions: metrics.open_decisions,
           active_runs: metrics.active_runs,
@@ -542,6 +581,8 @@ export class ProjectResumeService {
           task_id: task.task_id,
           title: task.title,
           completed_at: new Date(task.completed_at).toISOString(),
+          pull_request_url: task.pull_request_url,
+          published_branch: task.published_branch,
         })),
         next_recommended_action: nextAction({
           repositories: repositories.rows.length,
@@ -562,12 +603,18 @@ export class ProjectResumeService {
           tasksTotal: phase.tasks,
           recentCompletionTimestamps: completionsByPhase.get(phase.id) ?? [],
         });
+        const phaseCostUsd = spendByPhase.get(phase.id) ?? null;
         const progress = V2PhaseProgress.parse({
           percent_complete: computePercentComplete(phase.completed_tasks, phase.tasks),
           tasks_completed: phase.completed_tasks,
           tasks_total: phase.tasks,
           eta_at: etaAt,
           burn_rate_usd_per_hour: computeBurnRateUsdPerHour(runCostsByPhase.get(phase.id) ?? []),
+          // EXECUTION E13 — live cost. `spendByPhase` only has entries for
+          // phases with at least one real usage_events row; absent (or a
+          // Postgres-NULL sum) means no data yet, not a fabricated 0.
+          spend_usd: phaseCostUsd === null ? null : Number(phaseCostUsd),
+          budget_usd: Number(budgetByPhase.get(phase.id) ?? 0),
         });
         return { ...phase, ...progress };
       });

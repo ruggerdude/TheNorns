@@ -14,6 +14,12 @@ export class ProcessRuntime implements CodingRuntime {
     resume_session: false,
     cancel: true,
     stop_after_current: false,
+    // EXECUTION E11 — a human's answer is written to the script's stdin. This
+    // is real delivery, not a stand-in: the script receives the bytes and can
+    // block on `read` until they arrive. Whether the script does anything with
+    // them is the script's business, exactly as it is the coding agent's
+    // business what it does with an answer.
+    send_message: true,
   };
 
   /** The "prompt" for a process runtime is the script to execute. */
@@ -39,6 +45,19 @@ export class ProcessRuntime implements CodingRuntime {
         }
       };
       const usage = { input_tokens: 0, output_tokens: 0, usage_source: "unavailable" as const };
+
+      // EXECUTION E11 — publish the live session before any output arrives, so
+      // a message that races the first log line still has somewhere to go.
+      request.onSession?.({
+        sendMessage: async (message: string) => {
+          if (settled || child.stdin.destroyed) {
+            throw new Error("the run's process is no longer accepting input");
+          }
+          await new Promise<void>((ok, fail) => {
+            child.stdin.write(`${message}\n`, (error) => (error ? fail(error) : ok()));
+          });
+        },
+      });
 
       child.stdout.on("data", (chunk) => {
         output += String(chunk);

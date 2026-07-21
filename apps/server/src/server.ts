@@ -30,6 +30,8 @@ import {
   PROTOCOL_VERSION,
   PlanContract,
   ReconcileRequest,
+  // EXECUTION E3 — the proxied-inference response frame body.
+  type RunnerInferenceResponseT,
   type ServerFrameT,
   type UsageEventT,
   V2ContentAddressedReference,
@@ -60,14 +62,51 @@ import {
   ActionsExecutionError,
   type ActionsExecutionRepository,
 } from "./coordinator/actionsExecution.js";
+// EXECUTION E2: turns an approved strategy into scheduled work.
+import { DispatchContextScopeRepository } from "./coordinator/dispatchContextScope.js";
 import type { Phase4CompletionService } from "./coordinator/phase4Completion.js";
 import type { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
 import { type Phase4DispatchRepository, Phase4Dispatcher } from "./coordinator/phase4Dispatcher.js";
 import type { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
 import type { Phase4RecoveryMonitor } from "./coordinator/phase4RecoveryMonitor.js";
 import type { Phase6CoordinationService } from "./coordinator/phase6Coordination.js";
+import { describePhaseConcurrency } from "./coordinator/phaseConcurrency.js";
+import { PhaseLaunchError, PhaseLaunchService } from "./coordinator/phaseLaunchService.js";
+import { PhaseQueueDrainer } from "./coordinator/phaseQueueDrainer.js";
+import {
+  RunConflictResolutionRequest,
+  RunIntegrationConflictError,
+  RunIntegrationConflictService,
+} from "./coordinator/runIntegrationConflicts.js";
+
+/**
+ * EXECUTION E12 — how long a queued task can sit after a slot frees.
+ *
+ * Five seconds, matching the order of magnitude of the dispatch loop (500ms)
+ * without adding a per-second query for every active phase. The cost of the
+ * interval is latency on an operation that already takes minutes; the benefit
+ * of not going lower is that this poll touches several tables per active phase.
+ */
+const PHASE_QUEUE_DRAIN_INTERVAL_MS = 5_000;
 import { DebateConflictError, type DebateService } from "./debates/service.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
+// EXECUTION E1: task-context assembly + the runner-facing context fetch route.
+import {
+  RUNNER_CONTEXT_RUNNER_ID_HEADER,
+  RelationalTaskContextAssembler,
+  TASK_CONTEXT_ROUTE_PREFIX,
+  type TaskContextAssembler,
+  TaskContextStore,
+  authenticateRunnerContextRequest,
+} from "./execution/index.js";
+// EXECUTION E9 — the provider-native streaming gateway that lets Claude Code
+// and Codex run credential-free. Everything about it lives in src/gateway/.
+import {
+  GatewayCredentialService,
+  ProviderGateway,
+  SqlGatewayCredentialStore,
+  registerGatewayRoutes,
+} from "./gateway/index.js";
 import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
 import { GraphEditError, WorkflowGraph } from "./graph/graph.js";
 import { newId, nonce, pairingCode } from "./ids.js";
@@ -76,6 +115,13 @@ import {
   type GitHubIntegrationService,
   disabledGitHubStatus,
 } from "./integrations/github.js";
+// EXECUTION E3: serving the runner tarball the Actions workflow installs.
+import {
+  type RunnerTarball,
+  defaultRunnerTarballDir,
+  loadRunnerTarball,
+  runnerTarballPath,
+} from "./integrations/runnerDistribution.js";
 import type { Phase7OperationsService } from "./operations/phase7Operations.js";
 import type { V2TransactionRunner } from "./persistence/v2/database.js";
 import {
@@ -143,6 +189,16 @@ import {
   StrategyWorkflowConflictError,
   type StrategyWorkflowService,
 } from "./projects/strategyWorkflowService.js";
+// EXECUTION E3: proxied model inference for credential-free runners.
+import {
+  InferenceProxy,
+  type ProxiedRunLookup,
+  RUNNER_ALLOWED_MODELS_ENV,
+  SqlInferenceMeter,
+  SqlProxiedRunLookup,
+  SqlRunReservationBudget,
+  parseRunnerAllowedModels,
+} from "./runners/inferenceProxy.js";
 import {
   RunnerWorkspaceBroker,
   WorkspaceBrokerError,
@@ -262,11 +318,35 @@ export interface ServerOptions {
    */
   planningRuns?: { transactions: V2TransactionRunner };
   /**
+   * EXECUTION E10 (E9-10, = E3-10) — the relational runtime behind BOTH the E3
+   * completion proxy and the E9 provider-native gateway.
+   *
+   * Before this option existed, each of them reached for
+   * `planningRuns?.transactions ?? onboarding?.transactions ??
+   * attachments?.transactions` — whichever unrelated feature happened to be
+   * configured. That worked only because production wires all three from the
+   * same runner, and would have silently disabled runner inference the day
+   * someone turned planning runs off. Naming it makes the dependency explicit
+   * and makes `main.ts` the single place that decides it exists.
+   *
+   * The fallback chain is retained below purely so existing tests that
+   * construct `buildServer` with only `planningRuns` keep working.
+   */
+  runnerInference?: { transactions: V2TransactionRunner };
+  /**
    * FRONT DOOR P4 (D3): image attachments (content-addressed Postgres store).
    * Unavailable without its database runtime, same as `planningRuns`. When
    * both are present, objective attachments are injected into planning round 1.
    */
   attachments?: { transactions: V2TransactionRunner };
+  /**
+   * EXECUTION E1: task-context assembly + the runner-facing fetch route.
+   * Needs the relational runtime, same as `attachments`. `baseUrl` is the
+   * origin a runner resolves this deployment at and must be HTTPS (or http on
+   * localhost, matching the runner's own check); it defaults to
+   * `publicOrigin`.
+   */
+  execution?: { transactions: V2TransactionRunner; baseUrl?: string };
   /**
    * ONBOARDING O2: the two project-creation scenarios (new_repo,
    * existing_repo). Every project is GitHub-backed and executes in a GitHub
@@ -293,6 +373,29 @@ export interface ServerOptions {
   recordUsage?: (events: UsageEventT[]) => void;
   /** Test/deployment seam for constructing an adapter for an exact provider model. */
   createPlanningAdapter?: (provider: ProviderName, model: string, apiKey: string) => LlmAdapter;
+  /**
+   * EXECUTION E3 — proxied model inference for runners that hold no provider
+   * credentials. Supplying one overrides the default composition below; the
+   * default is used whenever a relational runtime is available, so a normal
+   * deployment gets the proxy without extra wiring.
+   */
+  inferenceProxy?: InferenceProxy;
+  /**
+   * EXECUTION E9 — the provider-native streaming gateway. Supplying one
+   * overrides the default composition below (tests point its surfaces at a
+   * local upstream this way); the default is used whenever a relational
+   * runtime is available, so a normal deployment gets the gateway with no
+   * extra wiring, exactly as E3's proxy does.
+   */
+  modelGateway?: ProviderGateway;
+  /** EXECUTION E9 — override the credential service (tests, and only tests). */
+  gatewayCredentials?: GatewayCredentialService;
+  /**
+   * EXECUTION E9 — the run-ownership lookup shared by the gateway and its mint
+   * route. Defaults to E3's `SqlProxiedRunLookup`; overridden only so a test
+   * can drive the real decision logic without a database.
+   */
+  gatewayRuns?: ProxiedRunLookup;
   /** Force Secure browser cookies in production and production-shaped tests. */
   secureCookies?: boolean;
   /** Canonical browser origin used in emailed links. */
@@ -304,6 +407,11 @@ export interface NornsServer {
   stores: RelayStores;
   /** runner_ids with a live authenticated socket */
   connectedRunners(): string[];
+  /**
+   * EXECUTION E1: assembles a task's agent context into content-addressed refs.
+   * Present only when `options.execution` supplied the relational runtime.
+   */
+  taskContext?: TaskContextAssembler;
 }
 
 export async function buildServer(options: ServerOptions): Promise<NornsServer> {
@@ -313,6 +421,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const now = options.clock ?? (() => new Date());
   const app = Fastify({ logger: false });
   await app.register(websocket);
+
+  // EXECUTION E1: assigned in the task-context section below when the
+  // relational runtime is present, and handed back on NornsServer so E2's
+  // trigger can assemble refs without reaching into route internals.
+  let taskContextAssembler: TaskContextAssembler | undefined;
+  // EXECUTION E2: authorizes the fetch route above (not merely authenticates
+  // it) and is shared with the start-phase section below.
+  let dispatchContextScope: DispatchContextScopeRepository | undefined;
 
   const runnerSockets = new Map<string, WsLike>();
   const reconciledWorkspaceRunners = new Map<
@@ -345,12 +461,139 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       ? new AnthropicAdapter({ apiKey, model })
       : new OpenAiAdapter({ apiKey, model });
   };
+
+  // === EXECUTION E3 (proxied model inference) ==============================
+  // Composed here rather than in main.ts because main.ts belongs to another
+  // phase in flight. Every input already exists on ServerOptions: the runtime
+  // transaction runner (the same instance behind planningRuns/onboarding/
+  // attachments in production), the provider credentials, and the usage sink.
+  // A deployment with no relational runtime gets no proxy, and every request
+  // is answered `unsupported` — never silently executed without metering.
+  //
+  // EXECUTION E10 (E9-10, = E3-10) — DONE. `runnerInference` is now a named
+  // option, wired from main.ts alongside the other relational features, so the
+  // dependency is stated rather than inferred from whichever unrelated feature
+  // happens to be configured. The remaining fallbacks are compatibility only:
+  // they keep every existing test (and any deployment not yet passing the new
+  // option) behaving exactly as before. Production always supplies the named
+  // one, and a boot-shape test asserts it.
+  const runtimeTransactionsForInference =
+    options.runnerInference?.transactions ??
+    options.planningRuns?.transactions ??
+    options.onboarding?.transactions ??
+    options.attachments?.transactions;
+  const inferenceProxy: InferenceProxy | null =
+    options.inferenceProxy ??
+    (runtimeTransactionsForInference
+      ? new InferenceProxy({
+          runs: new SqlProxiedRunLookup(runtimeTransactionsForInference),
+          budget: new SqlRunReservationBudget(runtimeTransactionsForInference),
+          meter: new SqlInferenceMeter(runtimeTransactionsForInference, options.recordUsage),
+          allowedModels: parseRunnerAllowedModels(
+            integrationEnvironment[RUNNER_ALLOWED_MODELS_ENV],
+          ),
+          createAdapter: (provider, model) => {
+            // The raw key never leaves this closure: the adapter holds it, the
+            // proxy holds the adapter, and nothing that touches a runner frame
+            // can read it back out.
+            const apiKey =
+              provider === "anthropic"
+                ? integrationEnvironment.ANTHROPIC_API_KEY
+                : integrationEnvironment.OPENAI_API_KEY;
+            if (!apiKey?.trim()) return null;
+            if (options.createPlanningAdapter) {
+              return options.createPlanningAdapter(provider, model, apiKey);
+            }
+            return provider === "anthropic"
+              ? new AnthropicAdapter({ apiKey, model })
+              : new OpenAiAdapter({ apiKey, model });
+          },
+          audit: (actor, action, detail) => stores.audit(actor, action, detail, now()),
+        })
+      : null);
+  // === end EXECUTION E3 (proxied model inference) ==========================
   const configuredOrigin =
     options.publicOrigin ??
     process.env.NORNS_PUBLIC_ORIGIN ??
     (process.env.RAILWAY_PUBLIC_DOMAIN
       ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
       : undefined);
+  // === EXECUTION E9 (provider-native streaming gateway) ====================
+  //
+  // WHY IT EXISTS. E3's completion proxy works and is metered, but it cannot
+  // serve Claude Code or Codex: both speak a provider's own streaming HTTP API
+  // and `LlmAdapter` has no token-level surface. An agent on the E3 proxy
+  // cannot read a second file, so it cannot write code (E3-9). The human's
+  // decision was a provider-native gateway: keys never leave this server,
+  // never enter a repository, and spend stays metered.
+  //
+  // IT REUSES E3 WHOLESALE — deliberately, and this is the security-critical
+  // part. Same `SqlProxiedRunLookup` for run ownership, same
+  // `authorizeProxiedRunAccess` decision (extracted from `InferenceProxy` so
+  // there is one implementation and not two), same `SqlRunReservationBudget`,
+  // same `SqlInferenceMeter` writing the same `usage_events` rows, same
+  // `NORNS_RUNNER_ALLOWED_MODELS` allowlist failing closed on empty. Two
+  // notions of "this runner owns this run" is how a bypass gets built; there
+  // is only one.
+  //
+  // E3-10 / E9-10 CLOSED BY E10: `runtimeTransactionsForInference` above now
+  // prefers the named `ServerOptions.runnerInference`, wired from main.ts. The
+  // gateway and the E3 proxy therefore share one explicitly-supplied runtime
+  // rather than each inferring one.
+  const gatewayOrigin = configuredOrigin ?? "http://127.0.0.1";
+  // The mint route and the gateway MUST agree about run ownership, so they are
+  // handed the same lookup rather than each constructing one.
+  const gatewayRuns =
+    options.gatewayRuns ??
+    (runtimeTransactionsForInference
+      ? new SqlProxiedRunLookup(runtimeTransactionsForInference)
+      : undefined);
+  const gatewayCredentials =
+    options.gatewayCredentials ??
+    (runtimeTransactionsForInference
+      ? new GatewayCredentialService(
+          new SqlGatewayCredentialStore(runtimeTransactionsForInference),
+          now,
+        )
+      : undefined);
+  const modelGateway =
+    options.modelGateway ??
+    (runtimeTransactionsForInference && gatewayCredentials
+      ? new ProviderGateway({
+          runs: gatewayRuns ?? new SqlProxiedRunLookup(runtimeTransactionsForInference),
+          credentials: gatewayCredentials,
+          budget: new SqlRunReservationBudget(runtimeTransactionsForInference),
+          meter: new SqlInferenceMeter(runtimeTransactionsForInference, options.recordUsage),
+          allowedModels: parseRunnerAllowedModels(
+            integrationEnvironment[RUNNER_ALLOWED_MODELS_ENV],
+          ),
+          // The raw provider key is read here and used in exactly one place —
+          // the outbound request's auth header. It is never audited, never put
+          // in a refusal body, and never returned on any error path.
+          apiKey: (provider) => {
+            const key =
+              provider === "anthropic"
+                ? integrationEnvironment.ANTHROPIC_API_KEY
+                : integrationEnvironment.OPENAI_API_KEY;
+            return key?.trim() ? key.trim() : null;
+          },
+          audit: (actor, action, detail) => stores.audit(actor, action, detail, now()),
+          now,
+        })
+      : undefined);
+  if (modelGateway && gatewayCredentials && gatewayRuns) {
+    await registerGatewayRoutes(app, {
+      gateway: modelGateway,
+      credentials: gatewayCredentials,
+      runs: gatewayRuns,
+      runnerPublicKey: (runnerId) => stores.runner(runnerId)?.public_key_pem ?? null,
+      audit: (actor, action, detail) => stores.audit(actor, action, detail, now()),
+      now,
+      publicOrigin: gatewayOrigin,
+    });
+  }
+  // === end EXECUTION E9 (provider-native streaming gateway) ================
+
   const SESSION_COOKIE = "norns_session";
   const CSRF_COOKIE = "norns_csrf";
   const GITHUB_MANIFEST_STATE_COOKIE = "norns_github_manifest_state";
@@ -471,6 +714,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
   let phase4DispatchTimer: ReturnType<typeof setInterval> | undefined;
   let phase4RecoveryTimer: ReturnType<typeof setInterval> | undefined;
+  // EXECUTION E12 — declared here, assigned far below where PhaseLaunchService
+  // is constructed, so the onClose hook can clear it alongside its siblings.
+  let phaseQueueDrainTimer: ReturnType<typeof setInterval> | undefined;
   if (options.phase4) {
     const dispatcher = new Phase4Dispatcher(
       options.phase4.dispatch,
@@ -488,24 +734,45 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     phase4DispatchTimer = setInterval(() => {
       if (ticking) return;
       ticking = true;
-      void dispatcher.tick().finally(() => {
-        ticking = false;
-      });
+      // EXECUTION E2: a rejection here (a transient DB error, or the pool
+      // closing during shutdown) was previously unhandled — `.finally()`
+      // does not catch, and nothing else held the promise. Node treats an
+      // unhandled rejection as fatal by default, so a single failed tick
+      // could crash the whole server. Caught and logged the same way the
+      // debate worker's own tick already is in main.ts.
+      void dispatcher
+        .tick()
+        .catch((error) =>
+          console.error(
+            `phase 4 dispatch tick failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        )
+        .finally(() => {
+          ticking = false;
+        });
     }, 500);
     phase4DispatchTimer.unref();
     let scanning = false;
     phase4RecoveryTimer = setInterval(() => {
       if (scanning) return;
       scanning = true;
-      void options.phase4?.recovery.scan().finally(() => {
-        scanning = false;
-      });
+      void options.phase4?.recovery
+        .scan()
+        .catch((error) =>
+          console.error(
+            `phase 4 recovery scan failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        )
+        .finally(() => {
+          scanning = false;
+        });
     }, 60_000);
     phase4RecoveryTimer.unref();
   }
   app.addHook("onClose", async () => {
     if (phase4DispatchTimer) clearInterval(phase4DispatchTimer);
     if (phase4RecoveryTimer) clearInterval(phase4RecoveryTimer);
+    if (phaseQueueDrainTimer) clearInterval(phaseQueueDrainTimer);
     workspaceBroker.close();
   });
 
@@ -1291,6 +1558,68 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   app.get("/health", (_req, reply) => {
     reply.send({ ok: true, contracts: "1.2.0" });
   });
+
+  // === EXECUTION E3 =======================================================
+  // Runner distribution. The GitHub Actions workflow installs the runner from
+  // here instead of npm (apps/runner is private and unpublished, so the old
+  // `npm install --global @norns/runner` step could never succeed).
+  //
+  // DELIBERATELY UNAUTHENTICATED. The workflow fetches this before it holds
+  // any Norns identity — enrollment happens after the runner is installed, so
+  // there is nothing to authenticate with. That is acceptable because the
+  // response is the same public build for everyone and contains no secret,
+  // and because confidentiality is not what protects the job: integrity is.
+  // The dispatch pins a sha256 into the committed workflow and the job refuses
+  // any other bytes, so serving this openly does not let anyone substitute
+  // code into a run.
+  //
+  // The artifact is loaded and re-hashed once, lazily, and cached: the server
+  // will not advertise a digest it is not serving.
+  let runnerTarballCache: RunnerTarball | null = null;
+  const currentRunnerTarball = (): RunnerTarball | null => {
+    if (runnerTarballCache) return runnerTarballCache;
+    try {
+      runnerTarballCache = loadRunnerTarball(defaultRunnerTarballDir());
+      return runnerTarballCache;
+    } catch {
+      return null;
+    }
+  };
+
+  app.get("/install/runner/manifest.json", (_req, reply) => {
+    const tarball = currentRunnerTarball();
+    if (!tarball) return reply.code(503).send({ error: "runner_tarball_unavailable" });
+    return reply.send({
+      version: tarball.version,
+      sha256: tarball.sha256,
+      byte_size: tarball.byte_size,
+      url: runnerTarballPath(tarball.version),
+    });
+  });
+
+  app.get<{ Params: { version: string } }>(
+    "/install/runner/:version/norns-runner.tgz",
+    (req, reply) => {
+      const tarball = currentRunnerTarball();
+      if (!tarball) return reply.code(503).send({ error: "runner_tarball_unavailable" });
+      // Version-scoped and exact-matched. A job pinned to a version this
+      // server no longer has must fail rather than silently receive a
+      // different build than the digest in its workflow file expects.
+      if (req.params.version !== tarball.version) {
+        return reply.code(404).send({ error: "runner_version_unavailable" });
+      }
+      return (
+        reply
+          .header("content-type", "application/gzip")
+          .header("content-length", String(tarball.byte_size))
+          // The bytes for a given version never change, so this is immutable.
+          .header("cache-control", "public, max-age=31536000, immutable")
+          .header("x-norns-runner-sha256", tarball.sha256)
+          .send(tarball.bytes)
+      );
+    },
+  );
+  // === end EXECUTION E3 (runner distribution) ============================
 
   // The legacy Phase 1A page asked operators to paste a raw session token.
   // Account auth in the React app supersedes it; keep old bookmarks safe by
@@ -3258,6 +3587,37 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           reply.code(404).send({ error: "phase_not_found", detail: String(error) });
         }
       });
+
+      // -----------------------------------------------------------------
+      // EXECUTION E13 — live run-log tail for a task's designated run. See
+      // `AttentionService.runLog` for the two-mode (tail / `after`-cursor)
+      // contract. Bounded server-side (RUN_LOG_PAGE_LIMIT), so a chatty agent
+      // cannot make either this endpoint or a page polling it unbounded.
+      // -----------------------------------------------------------------
+      app.get("/api/v2/projects/:id/phases/:phaseId/tasks/:taskId/run-log", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id, phaseId, taskId } = req.params as {
+          id: string;
+          phaseId: string;
+          taskId: string;
+        };
+        const query = req.query as { after?: string };
+        let after: number | undefined;
+        if (query.after !== undefined) {
+          after = Number(query.after);
+          if (!Number.isInteger(after) || after < 0) {
+            return reply.code(400).send({ error: "bad_request", detail: "invalid after cursor" });
+          }
+        }
+        reply.send(
+          await options.phase5?.attention.runLog(
+            id,
+            phaseId,
+            taskId,
+            after !== undefined ? { after } : {},
+          ),
+        );
+      });
     }
 
     app.get("/api/projects/:id/graph", async (req, reply) => {
@@ -3918,6 +4278,265 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     }
   }
 
+  // ---- EXECUTION E1: assembled task context --------------------------------
+  //
+  // The one route a dispatched runner uses to read the prompt Norns assembled
+  // for its task. Everything else about assembly lives in src/execution/.
+  //
+  // AUTH: this route is NOT session-authenticated — the caller is a runner, not
+  // a browser. It reuses the runner's EXISTING relay identity: the Ed25519
+  // keypair registered at pairing, the same key /ws/runner challenges. The
+  // runner signs the method, path, its runner id, and a timestamp; the server
+  // verifies with the registered public key inside a 5-minute skew window. No
+  // new credential is minted and nothing secret appears in the URL, so a
+  // `storage_ref` is safe to persist in a dispatch command, a log, or an audit
+  // record.
+  //
+  // INTEGRITY: the bytes are content-addressed. The runner's
+  // HashVerifiedContextLoader recomputes the sha256 and the byte size and
+  // refuses anything that does not match the ref it was dispatched with, so a
+  // tampered response is caught at the runner regardless of transport.
+  if (options.execution) {
+    const taskContextStore = new TaskContextStore(options.execution.transactions);
+    taskContextAssembler = new RelationalTaskContextAssembler(
+      options.execution.transactions,
+      taskContextStore,
+      { baseUrl: options.execution.baseUrl ?? options.publicOrigin ?? "http://127.0.0.1" },
+    );
+    // EXECUTION E2: the fetch route below authenticates identity; this is
+    // what additionally authorizes a specific document to a specific runner.
+    dispatchContextScope = new DispatchContextScopeRepository(options.execution.transactions);
+
+    app.get(`${TASK_CONTEXT_ROUTE_PREFIX}/:documentId`, async (req, reply) => {
+      const auth = authenticateRunnerContextRequest(
+        {
+          method: req.method,
+          // Sign the path only: the origin is not the runner's to assert, and a
+          // query string is not part of this route's identity.
+          path: new URL(req.url, "http://placeholder.invalid").pathname,
+          headers: req.headers as Record<string, string | string[] | undefined>,
+        },
+        (runnerId) => stores.runner(runnerId)?.public_key_pem ?? null,
+        now().getTime(),
+      );
+      if (!auth.ok) {
+        stores.audit(
+          `runner:${req.headers[RUNNER_CONTEXT_RUNNER_ID_HEADER] ?? "unknown"}`,
+          "execution.context.auth_failed",
+          auth.reason,
+          now(),
+        );
+        return reply.code(401).send({ error: "unauthorized" });
+      }
+      const { documentId } = req.params as { documentId: string };
+      // EXECUTION E2: a valid signature proves WHO is asking, not WHAT they
+      // are entitled to read. Without this, any paired runner could fetch any
+      // project's assembled context by document id. Checked before the
+      // existence lookup below so an unscoped caller learns nothing about
+      // whether the id is real.
+      if (!(await dispatchContextScope?.isAuthorized(auth.runner_id, documentId))) {
+        stores.audit(
+          `runner:${auth.runner_id}`,
+          "execution.context.auth_failed",
+          "not_scoped_to_runner",
+          now(),
+        );
+        return reply.code(403).send({ error: "forbidden" });
+      }
+      const document = await taskContextStore.content(documentId);
+      if (!document) return reply.code(404).send({ error: "not_found" });
+      return reply
+        .header("content-type", document.media_type)
+        .header("cache-control", "private, max-age=0, no-store")
+        .send(document.bytes);
+    });
+  }
+
+  // ---- EXECUTION E2: start a phase ------------------------------------------
+  //
+  // The caller `Phase4Coordinator.schedule()` never had. Given an approved (or
+  // already active) phase, finds its dependency-ready tasks, assembles each
+  // one's context through EXECUTION E1's assembler, and schedules it through
+  // the EXISTING coordinator gate -- unchanged, unweakened. See
+  // coordinator/phaseLaunchService.ts for the full design note.
+  if (options.phase4 && options.execution && taskContextAssembler && dispatchContextScope) {
+    const phaseLaunch = new PhaseLaunchService(
+      options.execution.transactions,
+      options.phase4.coordinator,
+      taskContextAssembler,
+      dispatchContextScope,
+      (runnerId) => {
+        const runner = stores.runner(runnerId);
+        return runner
+          ? { runner_id: runner.runner_id, runner_generation: runner.generation }
+          : null;
+      },
+      options.actionsExecution
+        ? {
+            coordinator: options.actionsExecution.coordinator,
+            repository: options.actionsExecution.repository,
+          }
+        : undefined,
+    );
+
+    // ---- EXECUTION E12: drain the queue when a slot frees -------------------
+    //
+    // `startPhase` was always idempotent and always meant to be called again
+    // after a task finishes. Nothing ever called it, so over-cap work was
+    // dropped rather than queued. This timer is that caller; see
+    // coordinator/phaseQueueDrainer.ts for why it is a poll rather than an
+    // event hook, and for how it derives its authorization from the human who
+    // started the phase.
+    // Narrowed once here: the enclosing `if` already established it, but the
+    // route closures below outlive that narrowing.
+    const executionTransactions = options.execution.transactions;
+    const phaseQueueDrainer = new PhaseQueueDrainer(executionTransactions, phaseLaunch, {
+      now,
+      onError: (projectId, phaseId, error) => {
+        app.log.error(
+          { projectId, phaseId, err: error },
+          "phase queue drain failed; queued tasks in this phase are not being dispatched",
+        );
+      },
+    });
+    let draining = false;
+    phaseQueueDrainTimer = setInterval(() => {
+      // Non-overlapping: a slow drain must never stack up parallel drains,
+      // which would race each other for the same free slot. Losing a tick is
+      // harmless -- the next one re-derives the queue from scratch.
+      if (draining) return;
+      draining = true;
+      void phaseQueueDrainer
+        .drain()
+        .catch((error) => app.log.error({ err: error }, "phase queue drain tick failed"))
+        .finally(() => {
+          draining = false;
+        });
+    }, PHASE_QUEUE_DRAIN_INTERVAL_MS);
+    phaseQueueDrainTimer.unref();
+
+    // ---- EXECUTION E12: fan-out visibility ---------------------------------
+    //
+    // "How many are running, how many are queued, and is anything waiting on
+    // me?" -- the three numbers a human needs before they trust a cap above 1.
+    app.get("/api/v2/projects/:id/phases/:phaseId/concurrency", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const { id, phaseId } = req.params as { id: string; phaseId: string };
+      try {
+        const snapshot = await executionTransactions.transaction((tx) =>
+          describePhaseConcurrency(tx, id, phaseId),
+        );
+        reply.send(snapshot);
+      } catch (error) {
+        reply.code(409).send({ error: "concurrency_unavailable", detail: String(error) });
+      }
+    });
+
+    // ---- EXECUTION E12: integration conflicts a human must resolve ---------
+    //
+    // Norns never merges and never resolves. These two routes are the entire
+    // human interface to a conflict: read what was observed, and record what
+    // you did about it. Completion of either task stays refused until then.
+    const runConflicts = new RunIntegrationConflictService(executionTransactions);
+
+    app.get("/api/v2/projects/:id/phases/:phaseId/conflicts", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const { phaseId } = req.params as { id: string; phaseId: string };
+      const query = req.query as { open_only?: string };
+      try {
+        reply.send({
+          conflicts: await runConflicts.listForPhase(phaseId, {
+            open_only: query.open_only === "true",
+          }),
+        });
+      } catch (error) {
+        reply.code(409).send({ error: "conflicts_unavailable", detail: String(error) });
+      }
+    });
+
+    app.post("/api/v2/run-conflicts/:conflictId/resolve", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const user = await resolveUser(req);
+      if (!user) return;
+      const { conflictId } = req.params as { conflictId: string };
+      const parsed = RunConflictResolutionRequest.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: "invalid_resolution", detail: parsed.error.message });
+      }
+      const resolvedAt = now();
+      try {
+        const conflict = await runConflicts.resolve({
+          conflict_id: conflictId,
+          resolution: parsed.data.resolution,
+          note: parsed.data.note ?? null,
+          // A human, named. The database CHECK constraint refuses a resolved
+          // row without an actor, so there is no path on which this becomes
+          // an anonymous or automatic resolution.
+          actor: { actor_type: "human", actor_id: user.id },
+          resolved_at: resolvedAt.toISOString(),
+        });
+        stores.audit(
+          user.email,
+          "execution.conflict.resolve",
+          `${conflictId} -> ${parsed.data.resolution}`,
+          resolvedAt,
+        );
+        reply.send(conflict);
+      } catch (error) {
+        if (error instanceof RunIntegrationConflictError) {
+          return reply.code(409).send({ error: error.code, detail: error.message });
+        }
+        reply.code(409).send({ error: "conflict_resolution_failed", detail: String(error) });
+      }
+    });
+
+    // Read-only preflight so the UI can show a truthful disabled reason
+    // without side effects a human didn't ask for -- never schedules
+    // anything and never spends budget.
+    app.get("/api/v2/projects/:id/phases/:phaseId/start-readiness", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const { id, phaseId } = req.params as { id: string; phaseId: string };
+      try {
+        reply.send(await phaseLaunch.readiness({ project_id: id, phase_id: phaseId }));
+      } catch (error) {
+        reply.code(409).send({ error: "start_readiness_unavailable", detail: String(error) });
+      }
+    });
+
+    app.post("/api/v2/projects/:id/phases/:phaseId/start", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const user = await resolveUser(req);
+      if (!user) return;
+      const { id, phaseId } = req.params as { id: string; phaseId: string };
+      const issuedAt = now();
+      try {
+        const result = await phaseLaunch.startPhase({
+          project_id: id,
+          phase_id: phaseId,
+          authorized_by: { actor_type: "human", actor_id: user.id },
+          authorized_by_session_id: `authenticated-request:${req.id}`,
+          issued_at: issuedAt.toISOString(),
+        });
+        stores.audit(
+          user.email,
+          "execution.phase.start",
+          `${result.scheduled.length} scheduled, ${result.blocked.length} blocked`,
+          issuedAt,
+        );
+        reply.code(202).send(result);
+      } catch (error) {
+        if (error instanceof PhaseLaunchError) {
+          return reply.code(409).send({
+            error: error.code,
+            detail: error.message,
+            action_required: error.action_required,
+          });
+        }
+        reply.code(409).send({ error: "phase_start_conflict", detail: String(error) });
+      }
+    });
+  }
+
   // ---- runner websocket ----------------------------------------------------------
 
   app.get("/ws/runner", { websocket: true }, (conn) => {
@@ -4033,6 +4652,62 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         ) {
           workspaceBroker.receive(authedRunnerId, frame.generation, frame.response);
         }
+        return;
+      }
+
+      // EXECUTION E3 — proxied model inference. The socket has already proved
+      // this runner's identity; `authedRunnerId` is that proof and is the only
+      // identity passed on. The frame's own fields are treated as claims.
+      //
+      // Answered inline and asynchronously: unlike events there is no ordering
+      // requirement between calls, and serialising them behind the event chain
+      // would make one slow provider call stall the run's event stream.
+      if (frame.type === "inference_request") {
+        const requestingRunnerId = authedRunnerId;
+        const reconciled = reconciledWorkspaceRunners.get(requestingRunnerId);
+        const respond = (response: RunnerInferenceResponseT): void => {
+          // Only answer on the socket that asked, and only while it is still
+          // the current one — a superseded connection must not receive a
+          // completion the project paid for.
+          if (runnerSockets.get(requestingRunnerId) === socket) {
+            sendFrame(socket, {
+              type: "inference_response",
+              generation: frame.generation,
+              response,
+            });
+          }
+        };
+        if (!inferenceProxy) {
+          respond({
+            request_id: frame.request.request_id,
+            status: "error",
+            code: "unsupported",
+            message: "model proxying is not enabled on this deployment",
+          });
+          return;
+        }
+        if (runnerSockets.get(requestingRunnerId) !== socket || reconciled?.socket !== socket) {
+          respond({
+            request_id: frame.request.request_id,
+            status: "error",
+            code: "unauthorized",
+            message: "not authorized for this run",
+          });
+          return;
+        }
+        void inferenceProxy
+          .handle(frame.request, requestingRunnerId, frame.generation, runner.generation)
+          .then(respond)
+          .catch(() => {
+            // The proxy is written not to throw; if it ever does, the runner
+            // still gets an answer rather than blocking until its timeout.
+            respond({
+              request_id: frame.request.request_id,
+              status: "error",
+              code: "provider_error",
+              message: "inference failed",
+            });
+          });
         return;
       }
 
@@ -4226,5 +4901,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     app,
     stores,
     connectedRunners: () => [...runnerSockets.keys()],
+    ...(taskContextAssembler ? { taskContext: taskContextAssembler } : {}),
   };
 }

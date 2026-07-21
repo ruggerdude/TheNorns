@@ -1,4 +1,8 @@
-import { EventEnvelope, type EventEnvelopeT, resolveV2BudgetReservation } from "@norns/contracts";
+import {
+  EventEnvelope,
+  type EventEnvelopeInputT,
+  resolveV2BudgetReservation,
+} from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   transitionV2AgentRunLifecycle,
@@ -8,6 +12,14 @@ import {
   SqlV2ApplicationTransaction,
   SqlV2BudgetTransaction,
 } from "../persistence/v2/sqlRepositories.js";
+import { RunIntegrationConflictService } from "./runIntegrationConflicts.js";
+
+/**
+ * Per-command output kept on the verification row. Generous enough to hold a
+ * real failing test suite's tail, bounded so a runaway one cannot make the row
+ * unreadable or the read model expensive.
+ */
+export const VERIFICATION_OUTPUT_LIMIT = 20_000;
 
 export class Phase4RunnerEventRejectedError extends Error {
   constructor(message: string) {
@@ -33,7 +45,7 @@ interface RunScope {
 export class Phase4EventProcessor {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
-  apply(input: EventEnvelopeT): Promise<{ duplicate: boolean; ignored?: boolean }> {
+  apply(input: EventEnvelopeInputT): Promise<{ duplicate: boolean; ignored?: boolean }> {
     const event = EventEnvelope.parse(input);
     return this.transactions.transaction(async (sql) => {
       const revocation = await sql.query<{ revoked_through_generation: number }>(
@@ -278,12 +290,35 @@ export class Phase4EventProcessor {
           });
         }
         const verificationId = `verification:${event.runner_id}:${event.generation}:${event.event_seq}`;
+        // EXECUTION E10 — record the REAL per-command results.
+        //
+        // This column was written as a hardcoded `'[]'::jsonb`. The runner has
+        // produced per-command results since E4 and the event contract had
+        // nowhere to carry them, so every failed verification reached a human
+        // as a red badge above a sha256 digest of text that was never stored.
+        // `command_results` now holds what actually ran, in execution order,
+        // with the failing command's output attached.
+        //
+        // The shape is the RUNNER's (`name`, `command`, `exit_code`, `passed`,
+        // `output`), not `V2VerificationCommandResult` from the evidence
+        // contract, which models each output as a content-addressed artifact
+        // reference. Nothing on this path has an artifact store; writing an
+        // artifact ref that points at nothing would be worse than storing the
+        // output inline. Output is truncated on the way in so one pathological
+        // test suite cannot bloat the row unboundedly.
+        const commandResults = (event.payload.command_results ?? []).map((result) => ({
+          name: result.name,
+          command: result.command,
+          exit_code: result.exit_code,
+          passed: result.passed,
+          output: result.output.slice(0, VERIFICATION_OUTPUT_LIMIT),
+        }));
         await sql.query(
           `INSERT INTO verification_results (
              id, project_id, phase_id, task_id, run_id, repository_binding_id,
              commit_sha, verification_policy_ref, passed, command_results,
              evidence, produced_by_runner_id
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'[]'::jsonb,$10::jsonb,$11)`,
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$12::jsonb,$10::jsonb,$11)`,
           [
             verificationId,
             scope.project_id,
@@ -296,6 +331,7 @@ export class Phase4EventProcessor {
             event.payload.passed,
             JSON.stringify([{ output_digest: event.payload.output_digest }]),
             event.runner_id,
+            JSON.stringify(commandResults),
           ],
         );
         await sql.query(
@@ -303,6 +339,45 @@ export class Phase4EventProcessor {
            WHERE id = $1`,
           [scope.id, event.payload.commit_sha, event.payload.passed ? "passed" : "failed"],
         );
+      } else if (event.payload.kind === "run_published") {
+        // EXECUTION E10 — persist where the run's work went.
+        //
+        // E4 published a branch and opened a pull request, then reported both
+        // as `run_log` prose. Nothing could link a completed task to its
+        // review. These columns are that link; the UI reads them straight out
+        // of the phase read model.
+        //
+        // Deliberately NOT a lifecycle transition. Publication is a fact about
+        // an existing run, orthogonal to its state — a failed run publishes
+        // too, precisely so a human can go read why the tests went red.
+        await sql.query(
+          `UPDATE agent_runs
+              SET published_branch = $2, published_commit_sha = $3,
+                  published_remote = $4, pull_request_url = $5,
+                  publication_note = $6, publication_outcome = $7,
+                  published_at = $8, updated_at = now()
+            WHERE id = $1`,
+          [
+            scope.id,
+            event.payload.branch,
+            event.payload.commit_sha,
+            event.payload.remote,
+            event.payload.pull_request_url,
+            event.payload.pull_request_note,
+            event.payload.outcome,
+            event.occurred_at,
+          ],
+        );
+        // EXECUTION E12 — detect an in-phase integration conflict IN THE SAME
+        // TRANSACTION as the publication that creates it.
+        //
+        // Atomicity is the point, not tidiness: if detection ran afterwards
+        // and the process died in between, the branch would exist and nothing
+        // would have warned anybody. Committing them together makes "a second
+        // branch was published" and "a human has been told about it"
+        // inseparable facts. Detection never merges, never mutates a run, and
+        // never blocks the publication -- it only writes a row a human reads.
+        await RunIntegrationConflictService.detect(sql, scope.id);
       } else if (event.payload.kind === "run_status") {
         const currentRun = await lifecycle.lockAgentRunLifecycle(scope.id);
         const currentTask = await lifecycle.lockTaskLifecycle(scope.task_id);

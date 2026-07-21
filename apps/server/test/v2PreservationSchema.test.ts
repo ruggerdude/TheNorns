@@ -3,11 +3,14 @@ import { getTableName } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
   ACTIONS_EXECUTION_MIGRATION_NAME,
   ATTACHMENTS_MIGRATION_NAME,
   DEBATE_WORKFLOW_MIGRATION_NAME,
+  DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
   FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
   FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
+  GATEWAY_CREDENTIALS_MIGRATION_NAME,
   GITHUB_APP_MANIFEST_MIGRATION_NAME,
   ONBOARDING_BINDINGS_MIGRATION_NAME,
   ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME,
@@ -18,8 +21,11 @@ import {
   PHASE6_COORDINATION_MIGRATION_NAME,
   PHASE7_HARDENING_MIGRATION_NAME,
   PHASE8_CUTOVER_COMPLETION_MIGRATION_NAME,
+  PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
   PLANNING_RUNS_MIGRATION_NAME,
   QC_COMMUNICATION_MIGRATION_NAME,
+  RUN_PUBLICATION_MIGRATION_NAME,
+  TASK_CONTEXT_MIGRATION_NAME,
   type V2MigrationDatabase,
   WORKSPACE_CONNECTIONS_MIGRATION_NAME,
   runCurrentV2Migrations,
@@ -209,6 +215,23 @@ describe.sequential("Phase 2 preservation schema", () => {
       // ONBOARDING O6. Name is still `NNNN_`; the PM assigns the number at
       // integration, which is also when this entry's position changes.
       { name: ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME, applied: false },
+      // EXECUTION E1. Name is still `NNNN_`; the PM assigns the number at
+      // integration, which is also when this entry's position changes.
+      { name: TASK_CONTEXT_MIGRATION_NAME, applied: false },
+      // EXECUTION E2. Name is still `NNNN_`; the PM assigns the number at
+      // integration, which is also when this entry's position changes.
+      { name: DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME, applied: false },
+      // EXECUTION E9 — per-run gateway credentials.
+      { name: GATEWAY_CREDENTIALS_MIGRATION_NAME, applied: false },
+      // EXECUTION E10. Name is still `NNNN_`; the PM assigns the number at
+      // integration, which is also when this entry's position changes.
+      { name: RUN_PUBLICATION_MIGRATION_NAME, applied: false },
+      // EXECUTION E5. Name is still `NNNN_`; the PM assigns the number at
+      // integration, which is also when this entry's position changes.
+      { name: ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME, applied: false },
+      // EXECUTION E12. Name is still `NNNN_`; the PM assigns the number at
+      // integration, which is also when this entry's position changes.
+      { name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -232,6 +255,16 @@ describe.sequential("Phase 2 preservation schema", () => {
       ONBOARDING_BINDINGS_MIGRATION_NAME,
       ACTIONS_EXECUTION_MIGRATION_NAME,
       ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME,
+      TASK_CONTEXT_MIGRATION_NAME,
+      DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
+      // This query is `ORDER BY name` (alphabetical over the TEXT primary
+      // key), not application/insertion order — unlike the
+      // `runCurrentV2Migrations` array above. Every migration is numbered, so
+      // alphabetical and numeric order coincide.
+      GATEWAY_CREDENTIALS_MIGRATION_NAME,
+      RUN_PUBLICATION_MIGRATION_NAME,
+      ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
+      PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
     ]);
   });
 

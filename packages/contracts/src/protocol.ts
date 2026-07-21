@@ -114,6 +114,26 @@ export const RunStatus = z.enum([
   "cancelled",
 ]);
 
+/**
+ * EXECUTION E10 — one verification command's REAL result.
+ *
+ * The runner has produced these since E4 and the event contract had nowhere to
+ * put them, so `phase4EventProcessor` wrote `'[]'::jsonb` and a failing
+ * verification reached a human as a red badge over a sha256 digest of text
+ * nobody kept. `output` is the truncated combined stdout/stderr of the command
+ * that actually ran — the single most useful artefact a failed run produces.
+ */
+export const VerificationCommandOutcome = z.object({
+  name: nonEmpty,
+  command: z.array(nonEmpty).min(1),
+  exit_code: z.number().int(),
+  passed: z.boolean(),
+  output: z.string(),
+});
+export type VerificationCommandOutcomeT = z.infer<typeof VerificationCommandOutcome>;
+
+export const PublicationOutcomeKind = z.enum(["pushed", "local_only"]);
+
 export const EventPayload = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("heartbeat") }),
   z.object({
@@ -130,6 +150,36 @@ export const EventPayload = z.discriminatedUnion("kind", [
     commit_sha: nonEmpty,
     passed: z.boolean(),
     output_digest: nonEmpty,
+    // ADDITIVE, and deliberately `.optional()` rather than `.default([])`.
+    //
+    // A default would make the field REQUIRED on the parsed output type, and
+    // the runner emits that type — so every existing emit site would stop
+    // compiling and a legacy runner build would be unable to construct a valid
+    // payload at all. Optional keeps the field absent-able in both directions:
+    // a runner that predates E10 emits exactly what it emitted before, and the
+    // server records no results, which is the truth about that runner rather
+    // than a fabricated empty pass.
+    command_results: z.array(VerificationCommandOutcome).optional(),
+  }),
+  /**
+   * EXECUTION E10 — where the run's work went.
+   *
+   * E4 made the runner push a branch and open a pull request, then reported it
+   * as `run_log` PROSE. Nothing could link a task to its review, because a log
+   * line is not a field. This event carries the same facts structurally; it is
+   * a NEW member of the union, so no existing runner emits it and no existing
+   * server path changes.
+   */
+  z.object({
+    kind: z.literal("run_published"),
+    run_id: nonEmpty,
+    outcome: PublicationOutcomeKind,
+    branch: nonEmpty,
+    commit_sha: nonEmpty,
+    remote: z.string().nullable().default(null),
+    pull_request_url: z.string().url().nullable().default(null),
+    /** Why there is no pull request, when there is none. Never silent. */
+    pull_request_note: z.string().nullable().default(null),
   }),
   z.object({
     kind: z.literal("usage_report"),
@@ -151,6 +201,15 @@ export const EventEnvelope = z.object({
   payload: EventPayload,
 });
 export type EventEnvelopeT = z.infer<typeof EventEnvelope>;
+/**
+ * The PRE-parse shape. EXECUTION E10 gave `verification_result` a defaulted
+ * `command_results`, which makes the field required on the OUTPUT type and
+ * still optional on the input — exactly the additive property we want, since a
+ * runner that predates E10 emits an envelope without it. Anything that accepts
+ * an envelope and parses it should take this type, not the output type, or the
+ * compiler would demand a field the wire is allowed to omit.
+ */
+export type EventEnvelopeInputT = z.input<typeof EventEnvelope>;
 
 // ---------------------------------------------------------------------------
 // Reconciliation handshake (every reconnect: exchange watermarks, replay both
@@ -163,7 +222,12 @@ export const ReconcileRequest = z.object({
   generation: z.number().int().nonnegative(),
   // Additive capability negotiation. Legacy runners omit this field and are
   // treated as supporting no optional side channels.
-  capabilities: z.array(z.enum(["workspace_picker"])).default([]),
+  // EXECUTION E3 adds "model_proxy": the runner is able to obtain model
+  // completions through the relay instead of from its own environment. Adding
+  // an enum member here is backwards compatible in the direction that matters
+  // — a legacy runner simply never sends it and the server never offers the
+  // side channel — and the server must not assume the capability's presence.
+  capabilities: z.array(z.enum(["workspace_picker", "model_proxy"])).default([]),
   last_event_seq_sent: z.number().int().nonnegative(),
   recently_executed_command_ids: z.array(nonEmpty),
 });

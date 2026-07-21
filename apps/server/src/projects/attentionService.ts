@@ -12,6 +12,7 @@ import {
   V2PortfolioAttention,
   type V2PortfolioAttentionT,
 } from "@norns/contracts";
+import { z } from "zod";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   PROGRESS_WINDOW_SIZE,
@@ -63,6 +64,132 @@ function fingerprint(value: unknown): string {
 }
 
 const severityRank = { critical: 0, high: 1, normal: 2, low: 3 } as const;
+
+/**
+ * EXECUTION E10 — project the persisted verification command results down to
+ * just the ones that FAILED, which is all a human reading a red run needs.
+ *
+ * Defensive about the stored shape on purpose: rows written before E10 hold the
+ * hardcoded `[]`, and a runner is an external process whose payload has already
+ * been schema-validated at the event boundary but whose historical rows have
+ * not. Anything unrecognisable yields no entries rather than a 500 on a page
+ * whose entire job is to explain a failure.
+ */
+function failedVerificationCommands(
+  value: unknown,
+): { name: string; command: string[]; exit_code: number; output: string }[] {
+  if (!Array.isArray(value)) return [];
+  const failures: { name: string; command: string[]; exit_code: number; output: string }[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+    if (record.passed !== false) continue;
+    const name = typeof record.name === "string" && record.name ? record.name : "verification";
+    failures.push({
+      name,
+      command: Array.isArray(record.command)
+        ? record.command.filter((part): part is string => typeof part === "string")
+        : [],
+      exit_code: typeof record.exit_code === "number" ? record.exit_code : -1,
+      output: typeof record.output === "string" ? record.output : "",
+    });
+  }
+  return failures;
+}
+
+// ---------------------------------------------------------------------------
+// EXECUTION E13 (read model) — live cost and live log tail.
+//
+// `V2PhaseExecution`'s `phase` and `tasks[]` objects are `.strict()` zod
+// shapes owned by `packages/contracts` (out of this phase's ownership, same
+// constraint FRONT DOOR P5 recorded in projectResumeService.ts). The fields
+// below are validated locally and merged onto the contract-parsed object in
+// `AttentionService.phase()` AFTER `V2PhaseExecution.parse(...)` has already
+// accepted the contract-owned shape — never fed back through the strict
+// schema itself. Same pattern, same reason.
+//
+// HONESTY IS THE POINT (per the phase brief): a task or phase that has not
+// yet accrued any `usage_events` rows reports `spend_usd: null` and
+// `tokens: null` — NEVER a fabricated `0`, which would read as "confirmed
+// free" rather than "nothing metered yet". `budget_usd` on a TASK is
+// likewise `null` when no `budget_reservations` row exists for its run (the
+// run has not been scheduled/reserved) — distinct from a real reservation of
+// $0. The PHASE's `budget_usd` is not nullable: `phases.approved_budget_usd`
+// is a real, always-populated column (defaulted to 0 until a strategy is
+// approved), so 0 there honestly means "nothing approved yet", not "unknown".
+// The phase-level fields reuse `V2PhaseProgress` from projectResumeService.ts
+// (FRONT DOOR P5 extended it with the same `spend_usd`/`budget_usd` pair)
+// rather than a second local schema, so both read models share one shape.
+// ---------------------------------------------------------------------------
+const V2TaskCost = z
+  .object({
+    spend_usd: z.number().nonnegative().nullable(),
+    input_tokens: z.number().int().nonnegative().nullable(),
+    output_tokens: z.number().int().nonnegative().nullable(),
+    budget_usd: z.number().nonnegative().nullable(),
+    last_usage_at: z.string().datetime().nullable(),
+  })
+  .strict();
+type V2TaskCostT = z.infer<typeof V2TaskCost>;
+
+/** Per-run usage aggregated from `usage_events`, keyed by `run_id`. A run
+ *  absent from this map has never had a metered call recorded for it. */
+interface RunUsageAggregate {
+  input_tokens: string | number;
+  output_tokens: string | number;
+  cost_usd: string | number | null;
+  last_usage_at: string | Date | null;
+}
+
+function buildTaskCost(
+  usage: RunUsageAggregate | undefined,
+  budgetUsd: string | number | undefined,
+): V2TaskCostT {
+  const hasUsage = usage !== undefined && usage.cost_usd !== null;
+  return V2TaskCost.parse({
+    spend_usd: hasUsage ? Number(usage?.cost_usd) : null,
+    input_tokens: hasUsage ? Number(usage?.input_tokens ?? 0) : null,
+    output_tokens: hasUsage ? Number(usage?.output_tokens ?? 0) : null,
+    budget_usd: budgetUsd === undefined ? null : Number(budgetUsd),
+    last_usage_at:
+      hasUsage && usage?.last_usage_at ? new Date(usage.last_usage_at).toISOString() : null,
+  });
+}
+
+/**
+ * Bounds on the live run-log tail, so a chatty agent cannot make either this
+ * endpoint or the page rendering it unbounded:
+ *  - at most `RUN_LOG_PAGE_LIMIT` entries returned per call, and
+ *  - each entry's `chunk` capped at `RUN_LOG_MAX_CHUNK_CHARS` (defensive; the
+ *    wire protocol does not itself bound a runner's chunk size).
+ * `truncated` is set whenever more matching entries exist than were
+ * returned, so the caller can say so rather than silently showing a partial
+ * log as if it were complete.
+ */
+export const RUN_LOG_PAGE_LIMIT = 200;
+export const RUN_LOG_MAX_CHUNK_CHARS = 20_000;
+
+const V2RunLogEntry = z
+  .object({
+    sequence: z.number().int().nonnegative(),
+    occurred_at: z.string().datetime(),
+    chunk: z.string(),
+  })
+  .strict();
+
+const V2RunLogTail = z
+  .object({
+    run_id: z.string().nullable(),
+    entries: z.array(V2RunLogEntry),
+    /** True when older/newer matching entries exist beyond what was
+     *  returned — the caller must say so, never drop it silently. */
+    truncated: z.boolean(),
+    /** Total run_log entries known for this run; null only when `run_id`
+     *  itself is null (no run to report on at all). */
+    total_entries: z.number().int().nonnegative().nullable(),
+  })
+  .strict();
+export type V2RunLogTailT = z.infer<typeof V2RunLogTail>;
 
 export class AttentionConflictError extends Error {
   constructor(message: string) {
@@ -810,7 +937,18 @@ export class AttentionService {
   phase(
     projectId: string,
     phaseId: string,
-  ): Promise<V2PhaseExecutionT & { phase: V2PhaseExecutionT["phase"] & V2PhaseProgressT }> {
+    // `Omit<..., "phase" | "tasks">` rather than `V2PhaseExecutionT & {phase:
+    // ..., tasks: ...}`: intersecting a type with an override of its OWN
+    // array-valued property (`tasks`) does not replace that property's
+    // element type the way it does for a plain object property (`phase`) —
+    // TS keeps both array types and can resolve `.find()`/`.map()` against
+    // the wrong one. Omitting the keys first avoids the ambiguity entirely.
+  ): Promise<
+    Omit<V2PhaseExecutionT, "phase" | "tasks"> & {
+      phase: V2PhaseExecutionT["phase"] & V2PhaseProgressT;
+      tasks: Array<V2PhaseExecutionT["tasks"][number] & { cost: V2TaskCostT }>;
+    }
+  > {
     return this.transactions.transaction(async (sql) => {
       const phase = await sql.query<{
         id: string;
@@ -818,8 +956,9 @@ export class AttentionService {
         status: string;
         completed_tasks: number;
         total_tasks: number;
+        approved_budget_usd: string | number;
       }>(
-        `SELECT p.id, p.objective_summary, p.status,
+        `SELECT p.id, p.objective_summary, p.status, p.approved_budget_usd,
           count(t.id) FILTER (WHERE t.state='completed')::int AS completed_tasks,
           count(t.id)::int AS total_tasks
          FROM phases p LEFT JOIN tasks t ON t.phase_id=p.id
@@ -827,6 +966,41 @@ export class AttentionService {
         [phaseId, projectId],
       );
       if (!phase.rows[0]) throw new AttentionConflictError("phase not found");
+      // EXECUTION E13 — live cost. Real `usage_events` rows, aggregated per
+      // run (for the per-task figure) and across the whole phase (for the
+      // phase figure). A run/phase with zero matching rows gets `cost_usd:
+      // null` back from Postgres (SUM of an empty set), which is exactly the
+      // "no data yet" signal `buildTaskCost` and the phase merge below need —
+      // never coalesced to 0, which would read as a confirmed free run.
+      const runUsage = await sql.query<{
+        run_id: string;
+        input_tokens: string | number;
+        output_tokens: string | number;
+        cost_usd: string | number | null;
+        last_usage_at: string | Date | null;
+      }>(
+        `SELECT run_id, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+                SUM(cost_usd) AS cost_usd, MAX(occurred_at) AS last_usage_at
+         FROM usage_events
+         WHERE phase_id=$1 AND run_id IS NOT NULL
+         GROUP BY run_id`,
+        [phaseId],
+      );
+      const usageByRun = new Map(runUsage.rows.map((row) => [row.run_id, row]));
+      const phaseUsage = await sql.query<{
+        cost_usd: string | number | null;
+      }>("SELECT SUM(cost_usd) AS cost_usd FROM usage_events WHERE phase_id=$1", [phaseId]);
+      // Each run's OWN reservation (`SqlRunReservationBudget` charges exactly
+      // this, so it is "the budget approved for this task" in the same sense
+      // the human who approved it would recognise). A run absent here was
+      // never scheduled/reserved — null, not a fabricated $0.
+      const runBudget = await sql.query<{ run_id: string; amount_usd: string | number }>(
+        `SELECT DISTINCT ON (run_id) run_id, amount_usd
+         FROM budget_reservations WHERE phase_id=$1
+         ORDER BY run_id, created_at DESC`,
+        [phaseId],
+      );
+      const budgetByRun = new Map(runBudget.rows.map((row) => [row.run_id, row.amount_usd]));
       // FRONT DOOR P5 (tracking): same rolling-window progress math as
       // ProjectResumeService.open, scoped to this single phase.
       const recentCompletions = await sql.query<{ completed_at: string | Date }>(
@@ -868,6 +1042,10 @@ export class AttentionService {
         verification_status: string | null;
         commit_sha: string | null;
         failure_detail: string | null;
+        published_branch: string | null;
+        pull_request_url: string | null;
+        publication_note: string | null;
+        command_results: unknown;
         evidence_count: number;
       }>(
         `SELECT t.id, t.title, t.state, t.complexity, t.risk,
@@ -879,6 +1057,17 @@ export class AttentionService {
           reviewer.model AS reviewer_model, reviewer.roles AS reviewer_roles,
           run.id AS run_id, run.state AS run_state, run.attempt, run.verification_status,
           run.commit_sha, run.failure_detail,
+          -- EXECUTION E10: the branch and pull request the run published, so a
+          -- finished task is one click from its review instead of one grep
+          -- through a run log.
+          run.published_branch, run.pull_request_url, run.publication_note,
+          -- EXECUTION E10: WHICH command failed, from the designated run's most
+          -- recent verification. A red badge over an opaque digest is not
+          -- evidence; the failing command's own output is.
+          (SELECT verification.command_results FROM verification_results verification
+            WHERE verification.run_id = run.id
+            ORDER BY verification.created_at DESC, verification.id DESC
+            LIMIT 1) AS command_results,
           (SELECT count(*)::int FROM verification_results verification
            WHERE verification.task_id=t.id) AS evidence_count
          FROM tasks t
@@ -920,6 +1109,7 @@ export class AttentionService {
       }
       const phaseRow = phase.rows[0];
       const isExecuting = phaseRow.status === "active";
+      const phaseCostUsd = phaseUsage.rows[0]?.cost_usd ?? null;
       const progress: V2PhaseProgressT = {
         percent_complete: computePercentComplete(phaseRow.completed_tasks, phaseRow.total_tasks),
         tasks_completed: phaseRow.completed_tasks,
@@ -931,11 +1121,20 @@ export class AttentionService {
           recentCompletionTimestamps: recentCompletions.rows.map((row) => row.completed_at),
         }),
         burn_rate_usd_per_hour: computeBurnRateUsdPerHour(recentRunCosts.rows),
+        // EXECUTION E13 — live cost (see the header note above this class for
+        // the honesty rules these two fields follow).
+        spend_usd: phaseCostUsd === null ? null : Number(phaseCostUsd),
+        budget_usd: Number(phaseRow.approved_budget_usd),
       };
+      // `phaseRow` also carries `approved_budget_usd`, which is NOT part of
+      // the strict, contracts-owned `phase` shape — stripped here so it is
+      // not fed back through `.parse()` (it is folded into `progress` above
+      // instead, merged on afterwards same as every other additive field).
+      const { approved_budget_usd: _approvedBudgetUsd, ...phaseRowForContract } = phaseRow;
       const base = V2PhaseExecution.parse({
         schema_version: 2,
         project_id: projectId,
-        phase: phaseRow,
+        phase: phaseRowForContract,
         tasks: tasks.rows.map((task) => ({
           id: task.id,
           title: task.title,
@@ -974,8 +1173,12 @@ export class AttentionService {
                   verification_status: task.verification_status,
                   commit_sha: task.commit_sha,
                   failure_detail: task.failure_detail,
+                  published_branch: task.published_branch,
+                  pull_request_url: task.pull_request_url,
+                  publication_note: task.publication_note,
                 }
               : null,
+          failed_verification_commands: failedVerificationCommands(task.command_results),
           evidence_count: task.evidence_count,
           reviews: (reviewsByTask.get(task.id) ?? []).map((review) => ({
             id: review.id,
@@ -994,7 +1197,125 @@ export class AttentionService {
           })),
         })),
       });
-      return { ...base, phase: { ...base.phase, ...progress } };
+      // EXECUTION E13 — merge the per-task live-cost field onto the
+      // contract-parsed object, same as `progress` (with its own spend/budget
+      // fields, set above) is merged onto `base.phase`: `V2PhaseExecution`'s
+      // per-task shape is a `.strict()` contract owned by packages/contracts,
+      // so `cost` is validated locally (`V2TaskCost`) and merged AFTER
+      // `.parse()` rather than fed back through it.
+      const costByTaskId = new Map(
+        tasks.rows.map((task) => [
+          task.id,
+          buildTaskCost(
+            task.run_id ? usageByRun.get(task.run_id) : undefined,
+            task.run_id ? budgetByRun.get(task.run_id) : undefined,
+          ),
+        ]),
+      );
+      return {
+        ...base,
+        phase: { ...base.phase, ...progress },
+        tasks: base.tasks.map((task) => ({
+          ...task,
+          cost: costByTaskId.get(task.id) ?? buildTaskCost(undefined, undefined),
+        })),
+      };
+    });
+  }
+
+  /**
+   * EXECUTION E13 — live activity: the streamed `run_log` output for a
+   * task's designated run, tailed from `runner_events` (the durable store
+   * every runner event already lands in; `run_log` rows were previously
+   * write-only — recorded, never read back anywhere a human could see them).
+   *
+   * Two modes, chosen by `options.after`:
+   *  - omitted: returns the current TAIL (the most recent
+   *    `RUN_LOG_PAGE_LIMIT` entries) — the shape a panel wants on first open.
+   *  - provided: returns entries with `sequence` strictly greater than the
+   *    cursor, oldest first — what a panel wants on every poll after that,
+   *    so it can append rather than re-render the whole log.
+   *
+   * `runner_events.run_id` is never populated by the event processor (an
+   * existing gap outside this phase's ownership — see the E13 report), so
+   * this scopes by `(runner_id, runner_generation)` — the same durable
+   * dispatch fence `SqlProxiedRunLookup` authorizes against — and then
+   * filters on the run id carried inside the `run_log` payload itself, which
+   * IS schema-validated at the event boundary.
+   */
+  runLog(
+    projectId: string,
+    phaseId: string,
+    taskId: string,
+    options: { after?: number } = {},
+  ): Promise<V2RunLogTailT> {
+    return this.transactions.transaction(async (sql) => {
+      const scope = await sql.query<{
+        run_id: string;
+        runner_id: string | null;
+        runner_generation: number | string | null;
+      }>(
+        `SELECT run.id AS run_id, run.runner_id,
+                (SELECT command.runner_generation FROM commands command
+                  WHERE command.run_id = run.id
+                  ORDER BY command.created_at DESC, command.command_id DESC LIMIT 1) AS runner_generation
+         FROM tasks t
+         JOIN agent_runs run ON run.id = t.designated_run_id
+         WHERE t.id=$1 AND t.project_id=$2 AND t.phase_id=$3`,
+        [taskId, projectId, phaseId],
+      );
+      const row = scope.rows[0];
+      // No designated run, or a run this server cannot fence (no runner_id /
+      // no dispatch generation) — nothing to tail. Honest empty, not an error:
+      // a task with no run yet is a completely normal state.
+      if (!row || !row.runner_id || row.runner_generation === null) {
+        return V2RunLogTail.parse({
+          run_id: row?.run_id ?? null,
+          entries: [],
+          truncated: false,
+          total_entries: null,
+        });
+      }
+      const runnerId = row.runner_id;
+      const generation = Number(row.runner_generation);
+      const runId = row.run_id;
+      // -1 is a safe "no cursor" sentinel: `sequence` is a positive per-runner
+      // counter (see EventEnvelope), so `sequence > -1` matches everything.
+      const cursor = options.after ?? -1;
+      const tailMode = options.after === undefined;
+
+      const total = await sql.query<{ total: number | string }>(
+        `SELECT count(*)::int AS total FROM runner_events
+         WHERE runner_id=$1 AND runner_generation=$2 AND event_type='run_log'
+           AND payload->>'run_id'=$3 AND sequence > $4`,
+        [runnerId, generation, runId, cursor],
+      );
+      const totalCount = Number(total.rows[0]?.total ?? 0);
+
+      const entries = await sql.query<{
+        sequence: number | string;
+        received_at: string | Date;
+        chunk: string | null;
+      }>(
+        `SELECT sequence, received_at, payload->>'chunk' AS chunk
+         FROM runner_events
+         WHERE runner_id=$1 AND runner_generation=$2 AND event_type='run_log'
+           AND payload->>'run_id'=$3 AND sequence > $4
+         ORDER BY sequence ${tailMode ? "DESC" : "ASC"}
+         LIMIT $5`,
+        [runnerId, generation, runId, cursor, RUN_LOG_PAGE_LIMIT],
+      );
+      const ordered = tailMode ? entries.rows.slice().reverse() : entries.rows;
+      return V2RunLogTail.parse({
+        run_id: runId,
+        entries: ordered.map((entry) => ({
+          sequence: Number(entry.sequence),
+          occurred_at: iso(entry.received_at),
+          chunk: (entry.chunk ?? "").slice(0, RUN_LOG_MAX_CHUNK_CHARS),
+        })),
+        truncated: totalCount > entries.rows.length,
+        total_entries: totalCount,
+      });
     });
   }
 }

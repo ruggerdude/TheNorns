@@ -2,6 +2,7 @@
 // Auth is a challenge/response over the runner's Ed25519 keypair; after auth
 // the reconciliation handshake runs, then commands/events flow.
 import { z } from "zod";
+import { RunnerInferenceRequest, RunnerInferenceResponse } from "./inference.js";
 import { CommandEnvelope, EventEnvelope, ReconcileRequest, ReconcileResponse } from "./protocol.js";
 
 const nonEmpty = z.string().min(1);
@@ -123,6 +124,14 @@ export const RunnerFrame = z.discriminatedUnion("type", [
     generation: z.number().int().nonnegative(),
     response: RunnerWorkspaceResponse,
   }),
+  // EXECUTION E3 — proxied model inference. Additive: a runner that never
+  // sends this frame is unaffected, and the generation travels with it so a
+  // superseded runner cannot spend a project's budget.
+  z.object({
+    type: z.literal("inference_request"),
+    generation: z.number().int().nonnegative(),
+    request: RunnerInferenceRequest,
+  }),
 ]);
 export type RunnerFrameT = z.infer<typeof RunnerFrame>;
 
@@ -140,6 +149,13 @@ export const ServerFrame = z.discriminatedUnion("type", [
     type: z.literal("workspace_request"),
     generation: z.number().int().nonnegative(),
     request: RunnerWorkspaceRequest,
+  }),
+  // EXECUTION E3 — the completion, or a typed refusal, correlated by
+  // request_id back to the runner's pending call.
+  z.object({
+    type: z.literal("inference_response"),
+    generation: z.number().int().nonnegative(),
+    response: RunnerInferenceResponse,
   }),
 ]);
 export type ServerFrameT = z.infer<typeof ServerFrame>;

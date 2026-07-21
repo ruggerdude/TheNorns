@@ -33,6 +33,11 @@
 // ADR-006 note — "the server executes no repository shell commands" still
 // holds. The server writes a workflow file and triggers it; every git, build,
 // and test command runs runner-side, inside the job.
+import {
+  RUNNER_TARBALL_SPEC_PATTERN,
+  parseRunnerTarballSpec,
+  runnerTarballPath,
+} from "./runnerDistribution.js";
 
 /**
  * Bumped whenever the rendered workflow changes in a way an already-installed
@@ -44,7 +49,12 @@
 // exfiltrate the enrollment secret), an explicit approved-roots allowlist
 // without which the runner could not execute at all, and an exact delimited
 // run-name marker. Every already-installed v1 file is upgraded in place.
-export const NORNS_WORKFLOW_VERSION = 2;
+// v3 (EXECUTION E3): the runner is installed from a version-pinned,
+// sha256-verified tarball served by the Norns server instead of
+// `npm install --global @norns/runner`, which could never have worked — the
+// package is private and unpublished. Every already-installed v1/v2 file is
+// upgraded in place, because every one of them is currently broken.
+export const NORNS_WORKFLOW_VERSION = 3;
 
 /** Canonical path. Committing here requires the App's `workflows` permission. */
 export const NORNS_WORKFLOW_PATH = ".github/workflows/norns-agent.yml";
@@ -81,7 +91,16 @@ export interface NornsWorkflowTemplateOptions {
    * committed, reviewable, history-recorded file.
    */
   serverOrigin: string;
-  /** npm spec for the runner, e.g. `@norns/runner@0.1.0`. */
+  /**
+   * EXECUTION E3 — the pinned Norns runner tarball, `<version>@sha256:<hex>`
+   * (e.g. `0.1.0@sha256:7c38…`), NOT an npm spec.
+   *
+   * The runner is served by the Norns server itself rather than published to
+   * npm, so this identifies which build to fetch AND the exact bytes to accept.
+   * Version and digest are one token because they must never be recombined:
+   * a version pinned with the wrong hash would either fail the job or, worse,
+   * describe an artifact nobody verified.
+   */
   runnerPackage: string;
   /** Node major version the runner is supported on. */
   nodeVersion?: string | undefined;
@@ -117,11 +136,14 @@ function assertSafeToken(name: string, value: string, pattern: RegExp): string {
 /** Render the workflow exactly as it will be committed. Deterministic. */
 export function renderNornsAgentWorkflow(options: NornsWorkflowTemplateOptions): string {
   const origin = assertSafeOrigin(options.serverOrigin);
-  const runnerPackage = assertSafeToken(
-    "runner package",
-    options.runnerPackage,
-    /^(@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*(@[\w.\-+]+)?$/i,
+  // EXECUTION E3 — note this pattern is strictly NARROWER than the npm-spec
+  // pattern it replaces: digits, dots, a fixed `@sha256:` separator and lower
+  // hex only. Serving our own tarball did not require widening the template's
+  // safe-token grammar; it let us tighten it.
+  const { version: runnerVersion, sha256: runnerSha256 } = parseRunnerTarballSpec(
+    assertSafeToken("runner tarball", options.runnerPackage, RUNNER_TARBALL_SPEC_PATTERN),
   );
+  const runnerTarballUrl = `${origin}${runnerTarballPath(runnerVersion)}`;
   const nodeVersion = assertSafeToken("node version", options.nodeVersion ?? "24", /^\d+(\.\d+)*$/);
   const timeoutMinutes = options.timeoutMinutes ?? 60;
   if (!Number.isInteger(timeoutMinutes) || timeoutMinutes < 1 || timeoutMinutes > 360) {
@@ -192,7 +214,25 @@ jobs:
           node-version: "${nodeVersion}"
 
       - name: Install the Norns runner
-        run: npm install --global --no-fund --no-audit "${runnerPackage}"
+        env:
+          # Baked at dispatch, exactly like NORNS_SERVER and for the same
+          # reason: changing where the runner comes from, or which bytes are
+          # acceptable, must require a reviewable commit to this file rather
+          # than a workflow_dispatch input anyone with write access can set.
+          NORNS_RUNNER_TARBALL_URL: "${runnerTarballUrl}"
+          NORNS_RUNNER_TARBALL_SHA256: "${runnerSha256}"
+        run: |
+          set -euo pipefail
+          # Fail closed, in this order: a download that does not succeed, or
+          # whose bytes do not hash to the digest pinned above, must never
+          # reach \`npm install\`. sha256sum --check exits non-zero on any
+          # mismatch and \`set -e\` turns that into a failed job, so a swapped
+          # or corrupted artifact is never executed — it is not merely logged.
+          curl --fail --silent --show-error --location \\
+            --retry 3 --retry-connrefused --max-time 180 \\
+            --output norns-runner.tgz "$NORNS_RUNNER_TARBALL_URL"
+          printf '%s  norns-runner.tgz\\n' "$NORNS_RUNNER_TARBALL_SHA256" | sha256sum --check --strict -
+          npm install --global --no-fund --no-audit ./norns-runner.tgz
 
       - name: Run the dispatched Norns job
         env:

@@ -1,21 +1,74 @@
 export { RunnerDaemon, type DaemonOptions } from "./daemon.js";
 export { FixtureExecutor } from "./fixture.js";
+export {
+  LiveRunRegistry,
+  type LiveControlKind,
+  type LiveControlOutcome,
+  type LiveRunRegistration,
+  type LiveRunSession,
+} from "./liveRuns.js";
 export { RunnerStateFile } from "./state.js";
 export { WorkspaceRegistry } from "./workspaceRegistry.js";
 export {
   DEFAULT_VERIFICATION_POLICY_REF,
+  REPOSITORY_VERIFICATION_MANIFEST,
+  isHygieneOnly,
+  readRepositoryVerificationManifest,
   runnerVerificationPolicies,
+  type VerificationCommand,
+  type VerificationPolicyMap,
 } from "./verificationPolicies.js";
+export {
+  GitPublisher,
+  PublicationError,
+  type GitPublisherOptions,
+  type PublicationOutcome,
+  type PublicationResult,
+  type RunnerPublisher,
+} from "./publication.js";
 export type {
   CodingRuntime,
   RuntimeCapabilities,
   RuntimeRunRequest,
   RuntimeRunResult,
+  RuntimeSession,
   RuntimeUsage,
 } from "./runtimes/types.js";
 export { ProcessRuntime } from "./runtimes/process.js";
+export {
+  PROXIED_COMPLETION_OUTPUT,
+  ProxiedCompletionRuntime,
+  type ProxiedCompletionRuntimeOptions,
+} from "./runtimes/proxiedCompletion.js";
 export { REDACTED, Redactor } from "./redact.js";
+export {
+  InferenceProxyError,
+  RelayInferenceClient,
+  type InferenceCompletion,
+  type InferenceTransport,
+} from "./inferenceClient.js";
+export {
+  RUNNER_AUTHORIZATION_SCHEME,
+  RUNNER_CONTEXT_FETCH_DOMAIN,
+  RUNNER_ID_HEADER,
+  RUNNER_TIMESTAMP_HEADER,
+  RunnerSignedContextFetcher,
+  type RunnerContextIdentity,
+  privateKeySigner,
+  runnerContextFetchPayload,
+} from "./contextAuth.js";
 export { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
+// EXECUTION E9 — the provider-native gateway credential the agentic runtimes
+// use in place of a real provider key.
+export {
+  GATEWAY_CREDENTIAL_PATH,
+  GatewayCredentialError,
+  ModelGatewayClient,
+  PROVIDER_KEY_ENV_VARS,
+  gatewayEnvironment,
+  type GatewayCredential,
+  type GatewayCredentialProvider,
+} from "./modelGateway.js";
 export { CodexRuntime } from "./runtimes/codex.js";
 export {
   ApprovedRepositoryRegistry,
@@ -30,6 +83,7 @@ export {
   type RunnerRuntimeProvider,
   type RunnerVerificationResult,
   type RunnerVerifier,
+  type VerificationCommandResult,
   type RunnerWorktreeManager,
   type V2RunnerExecutionResult,
 } from "./v2Execution.js";

@@ -9,11 +9,51 @@ import {
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import { transitionV2TaskLifecycle } from "../persistence/v2/lifecycleMutation.js";
 import { SqlV2ApplicationTransaction } from "../persistence/v2/sqlRepositories.js";
+import { resolveDispatchRuntime } from "./agenticRuntime.js";
+import { resolveProjectVerificationCommands } from "./verificationCommandSource.js";
 
 export class Phase4CoordinatorConflictError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "Phase4CoordinatorConflictError";
+  }
+}
+
+/**
+ * EXECUTION E12 — why this refusal is TEMPORARY.
+ *
+ * Three of this gate's refusals are not "this task cannot run"; they are "this
+ * task cannot run YET, and will become runnable when a sibling finishes":
+ * the project concurrency cap, the agent profile concurrency cap, and the
+ * repository-scope mutual exclusion. Every other refusal here is a real block
+ * that needs a human to change something (no verified binding, phase not
+ * approved, budget insufficient, dependencies incomplete).
+ *
+ * Before E12 the caller could not tell those apart except by matching on the
+ * message text, so `PhaseLaunchService` reported all of them as BLOCKED and
+ * nothing ever retried them: a phase with three ready tasks and a cap of two
+ * dispatched two and silently abandoned the third until a human clicked Start
+ * again. That is the "fan-out control" hole -- over-cap work FAILED instead of
+ * queueing.
+ *
+ * This is a SUBCLASS, deliberately. Every existing `catch (e) { if (e
+ * instanceof Phase4CoordinatorConflictError) }` site keeps behaving exactly as
+ * it did, and the messages below are byte-for-byte the ones this gate has
+ * always thrown -- callers that never learn about this type lose nothing. The
+ * gate's decisions are entirely unchanged; only their *classification* is new.
+ */
+export type Phase4DeferralReason =
+  | "project_concurrency"
+  | "profile_concurrency"
+  | "repository_scope_conflict";
+
+export class Phase4CoordinatorDeferredError extends Phase4CoordinatorConflictError {
+  constructor(
+    readonly deferral_reason: Phase4DeferralReason,
+    message: string,
+  ) {
+    super(message);
+    this.name = "Phase4CoordinatorDeferredError";
   }
 }
 
@@ -47,6 +87,13 @@ export interface Phase4ScheduledRun {
   command_id: string;
   budget_reservation_id: string;
   command: V2DispatchCommandT;
+  /**
+   * EXECUTION E10 — ingested verification facts that could not be turned into
+   * an argv vector and were therefore NOT sent. Reported rather than swallowed:
+   * a dropped test command is exactly the kind of silent degradation that made
+   * a green verification badge meaningless before E4.
+   */
+  rejected_verification_commands: { name: string; value: string }[];
 }
 
 interface SchedulingRow {
@@ -184,11 +231,26 @@ export class Phase4Coordinator {
         [input.project_id, row.agent_profile_id],
       );
       const capacity = activeCapacity.rows[0] ?? { project_count: 0, profile_count: 0 };
+      // EXECUTION E12 — the fan-out cap, enforced here and nowhere else.
+      //
+      // This count is the authority. `PhaseLaunchService` pre-computes free
+      // slots to avoid assembling context for work it knows cannot run, but
+      // that is an optimisation, not a second gate: this transaction takes
+      // `FOR UPDATE` on the task/phase/assignment rows and re-counts inside
+      // it, so two concurrent launches racing for the last slot cannot both
+      // win. Over-cap work is DEFERRED (queued), never failed -- see
+      // Phase4CoordinatorDeferredError.
       if (capacity.project_count >= row.max_concurrent_tasks) {
-        throw new Phase4CoordinatorConflictError("project concurrency capacity is exhausted");
+        throw new Phase4CoordinatorDeferredError(
+          "project_concurrency",
+          "project concurrency capacity is exhausted",
+        );
       }
       if (capacity.profile_count >= row.max_concurrent_runs) {
-        throw new Phase4CoordinatorConflictError("agent profile concurrency capacity is exhausted");
+        throw new Phase4CoordinatorDeferredError(
+          "profile_concurrency",
+          "agent profile concurrency capacity is exhausted",
+        );
       }
       const conflictRows = await sql.query<{ task_id: string; conflict_keys: unknown }>(
         `SELECT constraint_row.task_id, constraint_row.conflict_keys
@@ -216,7 +278,20 @@ export class Phase4Coordinator {
             entry.conflict_keys.some((key) => typeof key === "string" && ownKeys.has(key)),
         )
       ) {
-        throw new Phase4CoordinatorConflictError("task conflicts with active repository scope");
+        // EXECUTION E12 — the FIRST of two conflict-safety layers, and the
+        // cheap one: two tasks that declare overlapping file scope are never
+        // allowed to run at the same time, so the conflict never gets written.
+        // Deferred, not blocked: the moment the sibling reaches a terminal
+        // state this task becomes dispatchable, and E12's drainer retries it.
+        //
+        // Its reach is exactly as wide as `task_coordination_constraints`
+        // actually being populated -- which, before E12, was never. See
+        // `TaskConflictScopeRepository` and the second (fail-closed) layer in
+        // `runIntegrationConflicts.ts` for what covers the undeclared case.
+        throw new Phase4CoordinatorDeferredError(
+          "repository_scope_conflict",
+          "task conflicts with active repository scope",
+        );
       }
       const incompleteDependencies = await sql.query<{ count: number }>(
         `SELECT count(*)::int AS count
@@ -355,6 +430,14 @@ export class Phase4Coordinator {
           input.expires_at,
         ],
       );
+      // EXECUTION E10 — carry the project's real build/test/lint commands.
+      //
+      // Absent facts produce an absent field, which lands the runner on its
+      // committed-manifest fallback and, failing that, on its fail-closed
+      // refusal. Dispatch is never blocked on this, and this never makes a run
+      // green: the only thing it can do is give the runner something real to
+      // execute where previously it had only an unresolvable policy ref.
+      const verification = await resolveProjectVerificationCommands(sql, input.project_id);
       const command = V2DispatchCommand.parse({
         schema_version: 2,
         protocol_version: 2,
@@ -379,7 +462,12 @@ export class Phase4Coordinator {
         expected_revision: row.expected_revision,
         target_branch: input.target_branch,
         worktree_policy_ref: input.worktree_policy_ref,
-        runtime: row.runtime,
+        // EXECUTION E10 (E9-9) — dispatch a runtime the runner can construct.
+        // `agent_profiles.runtime` has historically been written as the
+        // PROVIDER name by the planning bridge, which is not a key in the
+        // runner's runtime map; such a run failed before doing any work. Real
+        // runtime names pass through untouched.
+        runtime: resolveDispatchRuntime(row.runtime, row.provider),
         provider: row.provider,
         model: row.model,
         context_refs: contextRefs,
@@ -389,6 +477,9 @@ export class Phase4Coordinator {
         max_output_tokens: input.max_output_tokens,
         max_duration_seconds: input.max_duration_seconds,
         verification_policy_ref: row.verification_policy_ref,
+        ...(verification.commands.length > 0
+          ? { verification_commands: verification.commands }
+          : {}),
         sandbox_policy_ref: input.sandbox_policy_ref,
         authorized_by: input.authorized_by,
         authorized_by_session_id: input.authorized_by_session_id,
@@ -441,6 +532,7 @@ export class Phase4Coordinator {
         command_id: commandId,
         budget_reservation_id: reservationId,
         command,
+        rejected_verification_commands: verification.rejected,
       };
     });
   }

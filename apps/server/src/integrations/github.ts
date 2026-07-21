@@ -365,6 +365,19 @@ export class GitHubIntegrationError extends Error {
   }
 }
 
+/**
+ * E14 — a narrow, deliberate exception to E10-3 / audit defect #3 ("GitHub
+ * errors collapse into one generic code"). This ONE failure earns its own
+ * code because it has exactly one fix, and the fix is a human clicking
+ * through GitHub's UI rather than a retry: the installation's CURRENT
+ * permission grant (fixed at install/re-authorization time) does not cover a
+ * permission `GITHUB_TOKEN_SCOPES` requested when minting a token. See
+ * `installationToken` below for where this is thrown, and
+ * docs/runbooks/GITHUB-CONNECTIONS.md for the upgrade path this message
+ * tells the human to follow.
+ */
+export const GITHUB_APP_PERMISSION_MISSING = "github_app_permission_missing";
+
 function base64Url(value: string | Uint8Array): string {
   return Buffer.from(value).toString("base64url");
 }
@@ -645,8 +658,10 @@ export class GitHubIntegrationService {
       public: false,
       request_oauth_on_install: false,
       setup_on_update: true,
-      // ONBOARDING O4 — DELIBERATELY UNCHANGED. Actions-hosted execution needs
-      // three permissions this manifest does not request:
+      // E14 — human-approved privilege increase. Actions-hosted execution
+      // needs three permissions beyond the original four; the earlier
+      // ONBOARDING O4 agent deliberately left them out so a human could
+      // decide (see the O4 report). The human has now approved adding them.
       //
       //   workflows: "write"  -> commit .github/workflows/norns-agent.yml.
       //                          GitHub rejects any Contents write that touches
@@ -656,16 +671,22 @@ export class GitHubIntegrationService {
       //   secrets:   "write"  -> read the repository public key and PUT the
       //                          runner's enrollment secret.
       //
-      // Adding them here is a HUMAN decision, not an agent one, because it is
-      // a real privilege increase and because GitHub requires every EXISTING
-      // installation to be re-authorized before a new permission takes effect —
-      // until each owner accepts, those installations keep the old set and the
-      // Actions path fails closed. See the O4 report for the exact steps.
+      // This ONLY changes what a newly created App requests. GitHub does not
+      // retroactively change an already-created App's permissions when the
+      // manifest changes, and every EXISTING installation must be
+      // re-authorized before a new permission takes effect — until each owner
+      // accepts, those installations keep the old set and the Actions path
+      // fails closed with `github_app_permission_missing` (see
+      // `installationToken` below). See docs/runbooks/GITHUB-CONNECTIONS.md
+      // for the exact upgrade steps.
       default_permissions: {
         metadata: "read",
         contents: "write",
         pull_requests: "write",
         administration: "write",
+        workflows: "write",
+        actions: "write",
+        secrets: "write",
       },
       default_events: [],
     };
@@ -1363,11 +1384,7 @@ export class GitHubIntegrationService {
     }
     const body: Record<string, unknown> = { permissions: scope.permissions };
     if (scope.repository_ids !== undefined) body.repository_ids = [...scope.repository_ids];
-    const response = await this.github<InstallationTokenResponse>(
-      `/app/installations/${encodeURIComponent(installationId)}/access_tokens`,
-      this.appJwt(),
-      { method: "POST", body: JSON.stringify(body) },
-    );
+    const response = await this.mintInstallationToken(installationId, body, scope.permissions);
     if (cacheable) {
       const expiresAtMs = Date.parse(response.expires_at);
       this.installationTokens.set(key, {
@@ -1378,6 +1395,77 @@ export class GitHubIntegrationService {
       });
     }
     return response.token;
+  }
+
+  /**
+   * E14 — mint the token, with error handling kept separate from the shared
+   * `github<T>` request path used everywhere else in this class.
+   *
+   * That separation is deliberate and narrow: this is the ONE GitHub endpoint
+   * where a 422 has a single, well-known meaning — "the `permissions` this
+   * request asked for exceed what the App's CURRENT grant on this
+   * installation allows" (GitHub's docs: "the installation access token
+   * cannot be granted permissions that the app was not granted"). An App or
+   * installation created before a permission existed keeps its old grant
+   * until a human updates the App's permissions on GitHub AND accepts the
+   * pending update on the installation — no retry or narrower request fixes
+   * it. A 403 here means something unrelated (a suspended installation) and
+   * is left on the generic path below. Every other GitHub failure this module
+   * reports still collapses into one generic code (E10-3 / audit defect #3);
+   * this is a deliberately narrow exception, not the start of a broader
+   * refactor of that error path.
+   */
+  private async mintInstallationToken(
+    installationId: string,
+    body: Record<string, unknown>,
+    requestedPermissions: Readonly<Record<string, "read" | "write">>,
+  ): Promise<InstallationTokenResponse> {
+    const path = `/app/installations/${encodeURIComponent(installationId)}/access_tokens`;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await this.http(`${API_BASE}${path}`, {
+        method: "POST",
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${this.appJwt()}`,
+          "X-GitHub-Api-Version": GITHUB_API_VERSION,
+          "User-Agent": "TheNorns",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      const payload = (await response.json().catch(() => ({}))) as InstallationTokenResponse & {
+        message?: string;
+      };
+      if (response.ok) return payload;
+      const transient = [502, 503, 504].includes(response.status);
+      if (transient && attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
+        continue;
+      }
+      if (response.status === 422) {
+        const permissionList = Object.entries(requestedPermissions)
+          .map(([name, level]) => `${name}: ${level}`)
+          .join(", ");
+        throw new GitHubIntegrationError(
+          GITHUB_APP_PERMISSION_MISSING,
+          `The GitHub App's permission grant on this installation does not cover an operation that needs (${permissionList}). This happens when the App was created (or the installation last accepted permissions) before this permission existed. A human must update it: on GitHub, open Settings → Developer settings → GitHub Apps → the app → Permissions & events, add the missing permission there, save, and then accept the pending permission update on the installation at Settings → Applications → Installed GitHub Apps → Configure. See docs/runbooks/GITHUB-CONNECTIONS.md for the full steps.`,
+          409,
+        );
+      }
+      const permissionHint =
+        response.status === 403
+          ? " Check whether the GitHub App installation has been suspended."
+          : "";
+      const message = transient
+        ? "GitHub is temporarily unavailable. Refresh repositories in a moment."
+        : `${payload.message ?? `GitHub request failed (${response.status})`}.${permissionHint}`;
+      throw new GitHubIntegrationError("github_api_error", message, 409);
+    }
+    throw new GitHubIntegrationError(
+      "github_api_error",
+      "GitHub is temporarily unavailable. Refresh repositories in a moment.",
+      409,
+    );
   }
 
   /** Drop every cached installation token (revocation / re-installation path). */

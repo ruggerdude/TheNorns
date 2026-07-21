@@ -1,0 +1,39 @@
+-- EXECUTION E5 — per-dispatch runner identity for GitHub Actions-hosted
+-- execution.
+--
+-- Assigned 0023 at integration.
+-- Additive and forward-only. Nothing here is destructive.
+--
+-- THE BUG THIS CLOSES. `actionsRunnerId(projectId)` used to be the runner
+-- identity every Actions-hosted dispatch in a project enrolled as — one
+-- string, shared, for the project's whole lifetime. `github_actions_bindings_
+-- runner_idx` (migration 0017) enforced that value unique PER PROJECT, which
+-- read as "one identity per project" but was really just "one binding row per
+-- project" (repository_binding_id was already the table's primary key, so the
+-- uniqueness was incidental). The real consequence of sharing that string
+-- across dispatches lived in `RelayStores`: every dispatch reserved a fresh
+-- GENERATION for the SAME identity, so scheduling a second job in a project
+-- fenced a still-running first job off its own connection, unconditionally,
+-- before the concurrency cap even had a chance to refuse the second one.
+--
+-- THE FIX. `actionsDispatchRunnerId()` (apps/server/src/coordinator/
+-- actionsExecution.ts) mints a fresh runner id per DISPATCH — never per
+-- project — and `github_actions_runs.runner_id` is where it is recorded, one
+-- row per dispatch, already. The new unique index below is the real successor
+-- to 0017's binding-level index: it is the database-enforced fact that a
+-- runner identity belongs to exactly one dispatch, ever.
+--
+-- `github_actions_execution_bindings.runner_id` (and its 0017 unique index)
+-- are UNTOUCHED. That column is now provenance only — a stable per-project
+-- placeholder written at provisioning time — and was never gate-checked by
+-- `Phase4Coordinator.schedule()` for `binding_type='github'` rows in the first
+-- place (only `local_runner` bindings are matched against the dispatched
+-- `runner_id`). Leaving it as-is costs nothing and changes no behavior.
+
+-- One runner identity, at most one dispatch, forever. Enforced here rather
+-- than trusted to `actionsDispatchRunnerId()`'s nonce alone: a bug that ever
+-- reused a nonce (or a future caller that forgets to mint a fresh one) fails
+-- loudly as a constraint violation instead of silently re-arming the old
+-- cross-dispatch collision this migration exists to close.
+CREATE UNIQUE INDEX IF NOT EXISTS github_actions_runs_runner_id_unique_idx
+  ON github_actions_runs (runner_id);

@@ -194,9 +194,36 @@ export const V2PhaseExecution = z
               verification_status: V2NonEmptyString,
               commit_sha: V2NonEmptyString.nullable(),
               failure_detail: z.string().nullable(),
+              // EXECUTION E10 — a completed task must be clickable through to
+              // its review. Defaulted so every existing producer and fixture
+              // keeps parsing unchanged.
+              published_branch: V2NonEmptyString.nullable().default(null),
+              pull_request_url: z.string().nullable().default(null),
+              /** Why there is no pull request, when the run published without one. */
+              publication_note: z.string().nullable().default(null),
             })
             .strict()
             .nullable(),
+          /**
+           * EXECUTION E10 — WHICH command failed, and what it printed.
+           *
+           * A red verification badge over an opaque digest is not evidence. The
+           * failing commands from the designated run's most recent verification
+           * are surfaced here so a human sees the actual output without leaving
+           * the workspace.
+           */
+          failed_verification_commands: z
+            .array(
+              z
+                .object({
+                  name: V2NonEmptyString,
+                  command: z.array(z.string()),
+                  exit_code: z.number().int(),
+                  output: z.string(),
+                })
+                .strict(),
+            )
+            .default([]),
           evidence_count: z.number().int().nonnegative(),
           reviews: z.array(V2PhaseReviewRound),
         })
