@@ -15,6 +15,16 @@ export type {
 } from "./runtimes/types.js";
 export { ProcessRuntime } from "./runtimes/process.js";
 export { REDACTED, Redactor } from "./redact.js";
+export {
+  RUNNER_AUTHORIZATION_SCHEME,
+  RUNNER_CONTEXT_FETCH_DOMAIN,
+  RUNNER_ID_HEADER,
+  RUNNER_TIMESTAMP_HEADER,
+  RunnerSignedContextFetcher,
+  type RunnerContextIdentity,
+  privateKeySigner,
+  runnerContextFetchPayload,
+} from "./contextAuth.js";
 export { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
 export { CodexRuntime } from "./runtimes/codex.js";
 export {

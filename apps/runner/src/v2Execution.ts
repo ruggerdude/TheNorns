@@ -108,6 +108,13 @@ export interface RunnerContentFetcher {
   fetch(reference: V2ContentAddressedReferenceT): Promise<Uint8Array>;
 }
 
+/**
+ * @deprecated EXECUTION E3 — sends NO credentials. Against an authenticated
+ * context route every fetch returns 401 and the coding agent runs with an empty
+ * prompt, which is exactly the failure E3 fixed. Use
+ * `RunnerSignedContextFetcher` (contextAuth.ts) instead. Retained only so a
+ * caller pinned to the old export keeps compiling; nothing in the CLI uses it.
+ */
 export class SignedUrlContentFetcher implements RunnerContentFetcher {
   async fetch(reference: V2ContentAddressedReferenceT): Promise<Uint8Array> {
     const url = new URL(reference.storage_ref);

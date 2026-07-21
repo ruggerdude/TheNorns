@@ -82,6 +82,27 @@ export class RunnerDaemon {
     return this.requireState().state.generation;
   }
 
+  /**
+   * EXECUTION E3 — sign a domain-separated payload with the runner's existing
+   * relay keypair, for authenticating outbound HTTP (context fetches) to the
+   * same server this socket talks to.
+   *
+   * Exposed as a signing operation rather than as a key accessor on purpose:
+   * the private key never leaves this object, so no other component can log,
+   * persist, or forward it. Callers must domain-separate their payloads (see
+   * contextAuth.ts) so a signature minted for one purpose cannot be replayed
+   * as another — this method deliberately does not add a prefix itself, since
+   * doing so here would silently break the relay's own challenge signing if it
+   * were ever routed through the same path.
+   */
+  sign(payload: string): string {
+    return edSign(
+      null,
+      Buffer.from(payload, "utf8"),
+      this.requireState().state.private_key_pem,
+    ).toString("base64");
+  }
+
   /** One-time enrollment: generate the keypair and redeem the pairing code. */
   async pair(code: string): Promise<void> {
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
