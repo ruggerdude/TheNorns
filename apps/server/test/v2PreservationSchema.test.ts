@@ -3,6 +3,7 @@ import { getTableName } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
   ACTIONS_EXECUTION_MIGRATION_NAME,
   ATTACHMENTS_MIGRATION_NAME,
   DEBATE_WORKFLOW_MIGRATION_NAME,
@@ -224,6 +225,9 @@ describe.sequential("Phase 2 preservation schema", () => {
       // EXECUTION E10. Name is still `NNNN_`; the PM assigns the number at
       // integration, which is also when this entry's position changes.
       { name: RUN_PUBLICATION_MIGRATION_NAME, applied: false },
+      // EXECUTION E5. Name is still `NNNN_`; the PM assigns the number at
+      // integration, which is also when this entry's position changes.
+      { name: ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -249,6 +253,11 @@ describe.sequential("Phase 2 preservation schema", () => {
       ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME,
       TASK_CONTEXT_MIGRATION_NAME,
       DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
+      // This query is `ORDER BY name` (alphabetical over the TEXT primary
+      // key), not application/insertion order — unlike the `runCurrentV2Migrations`
+      // array above. All `00NN`-numbered names sort before any `NNNN_`-named
+      // one, and among the `NNNN_` ones, alphabetical order applies.
+      ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
       GATEWAY_CREDENTIALS_MIGRATION_NAME,
       RUN_PUBLICATION_MIGRATION_NAME,
     ]);

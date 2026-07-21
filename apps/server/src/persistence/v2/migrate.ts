@@ -162,6 +162,22 @@ export const RUN_PUBLICATION_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+// EXECUTION E5: per-dispatch runner identity for GitHub Actions-hosted
+// execution (github_actions_runs_runner_id_unique_idx) — the fix for
+// concurrent Actions-hosted dispatches in one project fencing each other off.
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED — the file is literally named
+// `NNNN_actions_dispatch_runner_identity.sql`, matching E9/E10's convention.
+// 0020 is the highest assigned number merged when E5 was written, and E9/E10
+// are unnumbered in parallel; the PM assigns the real number and renames both
+// the file and the string below at integration.
+export const ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME =
+  "NNNN_actions_dispatch_runner_identity";
+export const ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_URL = new URL(
+  "../../../drizzle/NNNN_actions_dispatch_runner_identity.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -280,6 +296,10 @@ export async function loadGatewayCredentialsMigrationSql(): Promise<string> {
 
 export async function loadRunPublicationMigrationSql(): Promise<string> {
   return readFile(RUN_PUBLICATION_MIGRATION_URL, "utf8");
+}
+
+export async function loadActionsDispatchRunnerIdentityMigrationSql(): Promise<string> {
+  return readFile(ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -477,6 +497,10 @@ export async function runCurrentV2Migrations(
     {
       name: RUN_PUBLICATION_MIGRATION_NAME,
       sql: await loadRunPublicationMigrationSql(),
+    },
+    {
+      name: ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
+      sql: await loadActionsDispatchRunnerIdentityMigrationSql(),
     },
   ]);
 }

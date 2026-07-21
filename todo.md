@@ -680,3 +680,48 @@ Closes E3-9 with the human's decision: a forwarder, not a reimplementation.
   refuses shell metacharacters — but it IS a widening of what the server can
   cause a runner to execute, and the PM should confirm it
 
+## EXECUTION E5 — per-dispatch runner identity (concurrent Actions-hosted dispatch fencing)
+
+- [x] ✅ E5 — fixed: `actionsRunnerId(projectId)` was ONE runner identity shared
+  by every GitHub Actions dispatch in a project. `RelayStores.
+  reserveRunnerGeneration` bumps a single generation counter keyed by that
+  identity, so scheduling a second concurrent dispatch reserved a new
+  generation for the FIRST dispatch's own identity too, fencing a still-running
+  job off its own relay connection — unconditionally, even when the second
+  dispatch's own request was itself later refused by the concurrency cap.
+  New `actionsDispatchRunnerId(projectId, nonce)`
+  (`apps/server/src/coordinator/actionsExecution.ts`) mints a fresh identity
+  per dispatch (never reused, never shared, not even across dispatches in the
+  same project), so two dispatches now hold disjoint `RelayStores` records —
+  disjoint generation, disjoint relay socket slot — and nothing about
+  scheduling one can fence the other. `github_actions_execution_bindings.
+  runner_id` is untouched (it was never gate-checked for `binding_type=
+  'github'` rows and remains a per-project provisioning placeholder);
+  enrollment now resolves the binding through a new `ActionsExecutionRepository
+  .bindingForDispatch(dispatchJobId, runnerId)`, joined through
+  `github_actions_runs` (which already records the per-dispatch id at schedule
+  time). New migration `NNNN_actions_dispatch_runner_identity.sql` (number
+  unassigned, PM assigns at integration) adds
+  `github_actions_runs_runner_id_unique_idx`, the real successor to 0017's
+  binding-level uniqueness. The project concurrency cap
+  (`projects.max_concurrent_tasks`, defaulting to 1 — REFOUNDATION-PROGRAM.md's
+  "one executing phase per project by default") already existed inside
+  `Phase4Coordinator.schedule()` and needed no new mechanism; it is now
+  reachable without a wasted/harmful generation reservation racing ahead of it.
+  Every fencing/authorization property audited and preserved: a stale/
+  superseded generation is still fenced on its very next frame (no
+  reconnection needed — matches how the real bug manifested); `authorize
+  ProxiedRunAccess`/`SqlProxiedRunLookup` (E3) and the gateway (E9) both
+  resolve run ownership through `agent_runs.runner_id` + `commands.
+  runner_generation`, string-comparison based and untouched, and now MORE
+  precise since two dispatches never share an identity; revocation
+  (`/api/admin/runners/:id/revoke`) still cuts a runner off immediately, with
+  no restart; laptop-runner pairing (`repository_bindings.runner_id` for
+  `local_runner` bindings, `/api/pairing/*`) is completely separate code and
+  unchanged. Verified the regression suite actually catches the bug: reverting
+  to the old shared identity trips the new unique index immediately and fails
+  5 of its 6 new end-to-end tests. Tests use the REAL relay (real WebSocket,
+  real Ed25519 challenge/response via `@norns/runner`'s `RunnerDaemon`, real
+  pglite Postgres, real GitHub-Actions-secret sealing/unsealing) — no mocked
+  fencing logic. Suites green: server 797 (+7 over the 790-test integration
+  baseline), biome/tsc --noEmit/build all clean.

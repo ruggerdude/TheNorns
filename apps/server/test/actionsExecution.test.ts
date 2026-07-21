@@ -777,21 +777,88 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
     const scheduled = await coordinator.schedule(scheduleInput);
 
     expect(scheduled.run_id).toBe("run:task-1:1");
-    // The runner identity is project-scoped and server-chosen, never a laptop.
-    expect(scheduled.command.runner_id).toBe("actions:project-1");
-    expect(scheduled.actions.runner_id).toBe("actions:project-1");
+    // EXECUTION E5 — the runner identity is DISPATCH-scoped and server-chosen,
+    // never a laptop, and never the same value across two calls: a fresh
+    // nonce is minted per dispatch specifically so two concurrent Actions
+    // jobs in the same project never share (and therefore never fence) one
+    // another's relay identity.
+    expect(scheduled.command.runner_id).toMatch(/^actions:project-1:[0-9a-f]{32}$/);
+    expect(scheduled.actions.runner_id).toBe(scheduled.command.runner_id);
     expect(scheduled.actions.workflow.action).toBe("created");
     expect(scheduled.actions.github_run_url).toBe(
       "https://github.com/octo/widgets/actions/runs/99",
     );
     // The command carries the generation the job will later prove it owns.
     expect(scheduled.command.runner_generation).toBe(scheduled.actions.runner_generation);
-    expect(stores.runner("actions:project-1")?.generation).toBe(
+    expect(stores.runner(scheduled.actions.runner_id)?.generation).toBe(
       scheduled.actions.runner_generation,
     );
     // Reserved identities cannot authenticate until enrollment supplies a key.
-    expect(stores.runner("actions:project-1")?.public_key_pem).toBe("");
+    expect(stores.runner(scheduled.actions.runner_id)?.public_key_pem).toBe("");
     expect(dispatched[0]?.inputs.norns_job_id).toBe(scheduled.dispatch_job_id);
+    expect(dispatched[0]?.inputs.norns_runner_id).toBe(scheduled.actions.runner_id);
+  });
+
+  it("EXECUTION E5 — two dispatches for two different tasks never share a runner identity", async () => {
+    const { coordinator, repository: repo } = await build();
+    await seed("connected");
+    // A second, independent schedulable task in the same project/phase.
+    await pg.exec(`
+      INSERT INTO tasks (
+        id, project_id, phase_id, objective_id, strategy_version_id, title,
+        description, deliverables, acceptance_criteria, complexity, risk,
+        required_roles, required_capabilities, required_inputs, expected_outputs,
+        environment_policy_ref, verification_policy_ref, state, lifecycle_version
+      ) VALUES ('task-2','project-1','phase-1','objective-1','strategy-1','Do more work',
+        'A second, independent unit of work','["change"]'::jsonb,'["verified"]'::jsonb,
+        'M','medium','["implementation"]'::jsonb,'[]'::jsonb,'[]'::jsonb,
+        '["commit"]'::jsonb,'environment','verification','pending',0);
+      INSERT INTO agent_assignments (
+        id, project_id, phase_id, task_id, agent_profile_id, status, rationale,
+        rationale_factors, budget_limit_usd, allocation_policy_ref
+      ) VALUES ('assignment-2','project-1','phase-1','task-2','agent-1','proposed',
+        'Best implementation agent','["capability"]'::jsonb,10,'allocation');
+      -- Raise the project and agent-profile caps: the default of 1 is a
+      -- deliberate policy choice (REFOUNDATION-PROGRAM.md's "one executing
+      -- phase per project by default"), tested separately below. This test
+      -- isolates the identity fix from those caps.
+      UPDATE projects SET max_concurrent_tasks = 2 WHERE id = 'project-1';
+      UPDATE agent_profiles SET max_concurrent_runs = 2 WHERE id = 'agent-1';
+    `);
+
+    const first = await coordinator.schedule(scheduleInput);
+    const second = await coordinator.schedule({
+      ...scheduleInput,
+      task_id: "task-2",
+      assignment_id: "assignment-2",
+    });
+
+    expect(first.actions.runner_id).not.toBe(second.actions.runner_id);
+
+    // The defining property: scheduling the SECOND job must not touch the
+    // FIRST job's already-reserved generation or relay record at all. Before
+    // EXECUTION E5, both shared `actions:project-1`, so `second`'s reservation
+    // bumped the generation `first` had already been dispatched at — the exact
+    // mechanism that fenced a still-running job off its own connection.
+    const firstRunnerAfter = stores.runner(first.actions.runner_id);
+    expect(firstRunnerAfter?.generation).toBe(first.actions.runner_generation);
+
+    // And the binding an enrolling runner resolves against is scoped to its
+    // OWN dispatch, not shared or ambiguous between the two.
+    const boundToFirst = await repo.bindingForDispatch(
+      first.dispatch_job_id,
+      first.actions.runner_id,
+    );
+    const boundToSecond = await repo.bindingForDispatch(
+      second.dispatch_job_id,
+      second.actions.runner_id,
+    );
+    expect(boundToFirst?.repository_binding_id).toBe("binding-1");
+    expect(boundToSecond?.repository_binding_id).toBe("binding-1");
+    // Cross-matching a runner id against the OTHER dispatch's job id must fail.
+    expect(
+      await repo.bindingForDispatch(first.dispatch_job_id, second.actions.runner_id),
+    ).toBeNull();
   });
 
   it("does NOT weaken the gate: an unconnected binding is still refused", async () => {
