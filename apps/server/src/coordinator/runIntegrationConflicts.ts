@@ -73,7 +73,27 @@
 // The wording carried to the UI says that in those terms rather than asserting
 // a merge conflict that may not exist.
 import type { V2ActorT } from "@norns/contracts";
+import { z } from "zod";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
+
+/**
+ * The body of `POST /api/v2/run-conflicts/:conflictId/resolve`.
+ *
+ * Deliberately server-local rather than added to `@norns/contracts`: it is a
+ * request shape for one HTTP route, not a protocol message crossing the
+ * relay/runner boundary, and E12's contract budget is better spent on nothing
+ * at all. Add it to contracts if and when a non-web client needs it.
+ *
+ * There is no `resolution: "auto"`. Every accepted value describes something a
+ * HUMAN did, which is the point.
+ */
+export const RunConflictResolutionRequest = z
+  .object({
+    resolution: z.enum(["merged_manually", "superseded", "not_a_conflict"]),
+    note: z.string().max(4_000).nullable().optional(),
+  })
+  .strict();
+export type RunConflictResolutionRequestT = z.infer<typeof RunConflictResolutionRequest>;
 
 export class RunIntegrationConflictError extends Error {
   constructor(
