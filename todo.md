@@ -728,9 +728,45 @@ Closes E3-9 with the human's decision: a forwarder, not a reimplementation.
 
 ## EXECUTION E12 — concurrent tasks within one phase (fan-out + conflict safety)
 
-- [ ] 🔄 Make `projects.max_concurrent_tasks > 1` genuinely work: dependency-
-  ready tasks dispatch in parallel up to the cap, each with its own run
-  identity, context and budget reservation; over-cap work QUEUES rather than
-  failing; conflicts between two branches touching one repository surface to a
-  human and are never silently resolved; one run failing/cancelled/exhausting
-  its budget cannot corrupt or abort a sibling. Shipped default cap stays 1.
+- [x] ✅ Made `projects.max_concurrent_tasks > 1` genuinely work. **The shipped
+  default is UNCHANGED at 1** — raising it is the human's cost decision, and
+  E12 recommends 2 as the first step up, not more. Four findings and four
+  fixes. (1) FAN-OUT. `PhaseLaunchService.startPhase()` already looped every
+  dependency-ready task, but over-cap tasks hit the coordinator's
+  concurrency refusal and were reported `blocked` — a failure — and nothing
+  ever retried them, so a phase with a cap of 2 and three ready tasks
+  dispatched two and silently abandoned the third until a human clicked Start
+  again. New `Phase4CoordinatorDeferredError` (a SUBCLASS, so every existing
+  catch site and every existing message is byte-identical) separates
+  temporary refusals (project cap, profile cap, repository-scope conflict)
+  from real blocks; over-cap work now lands in a new `deferred` bucket. (2)
+  THE MISSING CALLER, again. `startPhase` was documented as safe to call
+  after each completion and nothing ever did; new `PhaseQueueDrainer` polls
+  every 5s for active phases with a free slot AND a ready task. A poll, not
+  an event hook, because a slot also frees on paths that emit no event
+  (dead-letter, recovery expiry, restart) and a missed hook is invisible.
+  (3) CONFLICT SAFETY. `apps/server/src/engine/**` is SUPERSEDED, not
+  adapted: its mechanism does `git merge` in a server-side checkout, and the
+  V2 relay has no repository (the code is on the user's laptop or in an
+  ephemeral Actions job). Its RULE is adopted whole — nothing merges,
+  anywhere, so there is no auto-resolution path to reach. New
+  `run_integration_conflicts` table + `RunIntegrationConflictService` detects,
+  IN THE SAME TRANSACTION as the publication that creates it, when two sibling
+  runs publish unintegrated branches off the same base revision, and refuses
+  `Phase4CompletionService.complete()` on either task until a named human
+  records a resolution. A DB CHECK constraint makes "no silent resolution" an
+  invariant: a resolved row without an actor cannot be written. (4) A SIXTH
+  DEAD PATH, found by reading. `task_coordination_constraints` — which
+  `Phase4Coordinator.schedule()` reads to enforce repository-scope mutual
+  exclusion — has two readers and had ZERO WRITERS. That gate has never once
+  fired in production; it was real code over a permanently empty table. New
+  `TaskConflictScopeRepository.declare()` is the missing writer, and the
+  migration adds `conflict_scope_declared` so "nothing to declare" and
+  "nobody declared" stop being the same empty array — they must fail in
+  opposite directions. Detection is fail-closed: undeclared scope means
+  unproven disjointness means conflict. Migration
+  `NNNN_phase_concurrency_conflicts.sql` (number unassigned; PM assigns at
+  integration). Zero contract changes. New routes: phase `/concurrency`,
+  phase `/conflicts`, `POST /api/v2/run-conflicts/:id/resolve`. Suites green:
+  server 832 (+17 over the 815 integration baseline), contracts 122,
+  biome / `tsc --noEmit` / `pnpm run build` all clean.
