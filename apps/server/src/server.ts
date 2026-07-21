@@ -3566,6 +3566,40 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           reply.code(404).send({ error: "phase_not_found", detail: String(error) });
         }
       });
+
+      // -----------------------------------------------------------------
+      // EXECUTION E13 — live run-log tail for a task's designated run. See
+      // `AttentionService.runLog` for the two-mode (tail / `after`-cursor)
+      // contract. Bounded server-side (RUN_LOG_PAGE_LIMIT), so a chatty agent
+      // cannot make either this endpoint or a page polling it unbounded.
+      // -----------------------------------------------------------------
+      app.get(
+        "/api/v2/projects/:id/phases/:phaseId/tasks/:taskId/run-log",
+        async (req, reply) => {
+          if (!(await requireSession(req, reply))) return;
+          const { id, phaseId, taskId } = req.params as {
+            id: string;
+            phaseId: string;
+            taskId: string;
+          };
+          const query = req.query as { after?: string };
+          let after: number | undefined;
+          if (query.after !== undefined) {
+            after = Number(query.after);
+            if (!Number.isInteger(after) || after < 0) {
+              return reply.code(400).send({ error: "bad_request", detail: "invalid after cursor" });
+            }
+          }
+          reply.send(
+            await options.phase5?.attention.runLog(
+              id,
+              phaseId,
+              taskId,
+              after !== undefined ? { after } : {},
+            ),
+          );
+        },
+      );
     }
 
     app.get("/api/projects/:id/graph", async (req, reply) => {

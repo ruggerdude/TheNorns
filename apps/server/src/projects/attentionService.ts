@@ -117,6 +117,9 @@ function failedVerificationCommands(
 // $0. The PHASE's `budget_usd` is not nullable: `phases.approved_budget_usd`
 // is a real, always-populated column (defaulted to 0 until a strategy is
 // approved), so 0 there honestly means "nothing approved yet", not "unknown".
+// The phase-level fields reuse `V2PhaseProgress` from projectResumeService.ts
+// (FRONT DOOR P5 extended it with the same `spend_usd`/`budget_usd` pair)
+// rather than a second local schema, so both read models share one shape.
 // ---------------------------------------------------------------------------
 const V2TaskCost = z
   .object({
@@ -128,14 +131,6 @@ const V2TaskCost = z
   })
   .strict();
 type V2TaskCostT = z.infer<typeof V2TaskCost>;
-
-const V2PhaseSpend = z
-  .object({
-    spend_usd: z.number().nonnegative().nullable(),
-    budget_usd: z.number().nonnegative(),
-  })
-  .strict();
-type V2PhaseSpendT = z.infer<typeof V2PhaseSpend>;
 
 /** Per-run usage aggregated from `usage_events`, keyed by `run_id`. A run
  *  absent from this map has never had a metered call recorded for it. */
@@ -944,7 +939,7 @@ export class AttentionService {
     phaseId: string,
   ): Promise<
     V2PhaseExecutionT & {
-      phase: V2PhaseExecutionT["phase"] & V2PhaseProgressT & V2PhaseSpendT;
+      phase: V2PhaseExecutionT["phase"] & V2PhaseProgressT;
       tasks: Array<V2PhaseExecutionT["tasks"][number] & { cost: V2TaskCostT }>;
     }
   > {
@@ -1108,6 +1103,7 @@ export class AttentionService {
       }
       const phaseRow = phase.rows[0];
       const isExecuting = phaseRow.status === "active";
+      const phaseCostUsd = phaseUsage.rows[0]?.cost_usd ?? null;
       const progress: V2PhaseProgressT = {
         percent_complete: computePercentComplete(phaseRow.completed_tasks, phaseRow.total_tasks),
         tasks_completed: phaseRow.completed_tasks,
@@ -1119,11 +1115,20 @@ export class AttentionService {
           recentCompletionTimestamps: recentCompletions.rows.map((row) => row.completed_at),
         }),
         burn_rate_usd_per_hour: computeBurnRateUsdPerHour(recentRunCosts.rows),
+        // EXECUTION E13 — live cost (see the header note above this class for
+        // the honesty rules these two fields follow).
+        spend_usd: phaseCostUsd === null ? null : Number(phaseCostUsd),
+        budget_usd: Number(phaseRow.approved_budget_usd),
       };
+      // `phaseRow` also carries `approved_budget_usd`, which is NOT part of
+      // the strict, contracts-owned `phase` shape — stripped here so it is
+      // not fed back through `.parse()` (it is folded into `progress` above
+      // instead, merged on afterwards same as every other additive field).
+      const { approved_budget_usd: _approvedBudgetUsd, ...phaseRowForContract } = phaseRow;
       const base = V2PhaseExecution.parse({
         schema_version: 2,
         project_id: projectId,
-        phase: phaseRow,
+        phase: phaseRowForContract,
         tasks: tasks.rows.map((task) => ({
           id: task.id,
           title: task.title,
@@ -1186,17 +1191,12 @@ export class AttentionService {
           })),
         })),
       });
-      // EXECUTION E13 — merge the live-cost fields onto the contract-parsed
-      // object, same as `progress` above: `V2PhaseExecution`'s `phase` and
-      // per-task shapes are `.strict()` contracts owned by packages/contracts,
-      // so the additive fields are validated locally (`V2PhaseSpend`,
-      // `V2TaskCost`) and merged AFTER `.parse()` rather than fed back
-      // through it.
-      const phaseCostUsd = phaseUsage.rows[0]?.cost_usd ?? null;
-      const phaseSpend: V2PhaseSpendT = V2PhaseSpend.parse({
-        spend_usd: phaseCostUsd === null ? null : Number(phaseCostUsd),
-        budget_usd: Number(phaseRow.approved_budget_usd),
-      });
+      // EXECUTION E13 — merge the per-task live-cost field onto the
+      // contract-parsed object, same as `progress` (with its own spend/budget
+      // fields, set above) is merged onto `base.phase`: `V2PhaseExecution`'s
+      // per-task shape is a `.strict()` contract owned by packages/contracts,
+      // so `cost` is validated locally (`V2TaskCost`) and merged AFTER
+      // `.parse()` rather than fed back through it.
       const costByTaskId = new Map(
         tasks.rows.map((task) => [
           task.id,
@@ -1208,7 +1208,7 @@ export class AttentionService {
       );
       return {
         ...base,
-        phase: { ...base.phase, ...progress, ...phaseSpend },
+        phase: { ...base.phase, ...progress },
         tasks: base.tasks.map((task) => ({
           ...task,
           cost: costByTaskId.get(task.id) ?? buildTaskCost(undefined, undefined),
