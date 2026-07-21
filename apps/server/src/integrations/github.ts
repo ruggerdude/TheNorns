@@ -1405,10 +1405,7 @@ export class GitHubIntegrationService {
       reason: "repository_not_in_installation",
       repository_selection: connection.repository_selection,
       installation_id: connection.installation_id,
-      action_required:
-        `The Norns GitHub App is installed on ${connection.owner_login}, but ${owner}/${name} ` +
-        "is not one of the repositories it can access, so Norns cannot run work there yet. " +
-        "Open the installation settings, add this repository under “Repository access”, and save.",
+      action_required: `The Norns GitHub App is installed on ${connection.owner_login}, but ${owner}/${name} is not one of the repositories it can access, so Norns cannot run work there yet. Open the installation settings, add this repository under “Repository access”, and save.`,
       manage_installation_url: manageUrl,
     };
   }
