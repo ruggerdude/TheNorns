@@ -390,9 +390,15 @@
 - [x] O4-4 — pushes use the job's own `GITHUB_TOKEN`; no Norns token broker
 - [x] O4-5 — remediated `installationToken()` scoping, expiry caching, and the
   inert `binding_ready` flag in `apps/server/src/integrations/github.ts`
-- [ ] O4-6 — **HUMAN**: add `workflows: write`, `actions: write`,
-  `secrets: write` to the GitHub App manifest and re-authorize every existing
-  installation (deliberately not changed by the agent)
+- [x] O4-6 — **E14**: added `workflows: write`, `actions: write`,
+  `secrets: write` to the GitHub App manifest (human approved). Existing
+  installations still need re-authorization by their owner — documented in
+  docs/runbooks/GITHUB-CONNECTIONS.md ("Upgrading an existing App"). Also gave
+  the token-mint 422 caused by a not-yet-upgraded installation its own
+  identifiable code, `github_app_permission_missing`, narrowly scoped to
+  `installationToken()` — a deliberately narrow exception to the known
+  "GitHub errors collapse into one generic code" limitation flagged (not
+  fixed) in `apps/server/src/projects/githubRemoteRepositoryPort.ts`
 - [x] O4-7 — migration numbered 0017 at integration; stale unassigned-number
   headers removed from 0016 and 0017
 - [ ] O4-8 — publish `@norns/runner` to a registry the Actions job can install
