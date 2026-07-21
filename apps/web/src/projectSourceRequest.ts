@@ -93,7 +93,7 @@ export function parseGitHubRepoRef(text: string): { owner: string; name: string 
   ];
   for (const pattern of patterns) {
     const match = trimmed.match(pattern);
-    if (match) return { owner: match[1], name: match[2] };
+    if (match?.[1] && match[2]) return { owner: match[1], name: match[2] };
   }
   return null;
 }
