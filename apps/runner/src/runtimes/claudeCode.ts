@@ -1,7 +1,18 @@
-// Claude Code runtime via the official Claude Agent SDK. Requires Anthropic
-// credentials at run time (NORN-027); construction and the capability matrix
-// are credential-free so scheduling can reason about it.
+// Claude Code runtime via the official Claude Agent SDK.
+//
+// EXECUTION E9 — this runtime is now credential-free when a gateway is
+// supplied. Previously it required a real Anthropic key in the process
+// environment (NORN-027), which an ephemeral GitHub Actions job never has and,
+// per the human's decision, must never be given. It now points the Claude Code
+// subprocess at the Norns provider-native gateway with a short-lived, per-run
+// credential: the SDK speaks the ordinary Anthropic Messages API and is
+// entirely unaware, while the relay authorizes, meters and budget-checks every
+// call and the real key never leaves the server.
+//
+// WITHOUT a gateway it behaves exactly as before, so a laptop runner with its
+// own key is unaffected.
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { type GatewayCredentialProvider, gatewayEnvironment } from "../modelGateway.js";
 import type { CodingRuntime, RuntimeRunRequest, RuntimeRunResult, RuntimeUsage } from "./types.js";
 
 export class ClaudeCodeRuntime implements CodingRuntime {
@@ -14,7 +25,20 @@ export class ClaudeCodeRuntime implements CodingRuntime {
     stop_after_current: false,
   };
 
-  constructor(private readonly options: { model?: string; resumeSessionId?: string } = {}) {}
+  constructor(
+    private readonly options: {
+      model?: string;
+      resumeSessionId?: string;
+      /**
+       * EXECUTION E9 — resolves the per-run gateway credential, lazily. Absent
+       * means "use whatever credentials this process already has", which is
+       * the laptop case.
+       */
+      gateway?: GatewayCredentialProvider;
+      /** Injectable for tests. Defaults to `process.env`. */
+      baseEnv?: NodeJS.ProcessEnv;
+    } = {},
+  ) {}
 
   async run(request: RuntimeRunRequest): Promise<RuntimeRunResult> {
     const usage: RuntimeUsage = {
@@ -25,11 +49,28 @@ export class ClaudeCodeRuntime implements CodingRuntime {
     try {
       const controller = new AbortController();
       request.signal?.addEventListener("abort", () => controller.abort());
+      // EXECUTION E9 — minted here, immediately before the subprocess starts,
+      // so a credential is never held for longer than the turn that uses it.
+      // A mint failure fails the run rather than silently falling through to
+      // whatever key might be lying around in the environment.
+      const credential = this.options.gateway ? await this.options.gateway() : null;
+      const env = credential
+        ? gatewayEnvironment(this.options.baseEnv ?? process.env, {
+            ANTHROPIC_BASE_URL: credential.anthropic_base_url,
+            // The SDK sends this as `Authorization: Bearer <token>`, which is
+            // exactly what the gateway reads. ANTHROPIC_API_KEY is deliberately
+            // NOT set: `gatewayEnvironment` strips it, because a surviving real
+            // key would take precedence and the run would bill money nobody is
+            // metering.
+            ANTHROPIC_AUTH_TOKEN: credential.token,
+          })
+        : null;
       const stream = query({
         prompt: request.prompt,
         options: {
           cwd: request.worktreePath,
           abortController: controller,
+          ...(env !== null ? { env } : {}),
           ...(this.options.model !== undefined ? { model: this.options.model } : {}),
           ...(this.options.resumeSessionId !== undefined
             ? { resume: this.options.resumeSessionId }
