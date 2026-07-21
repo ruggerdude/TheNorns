@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   cpSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -68,35 +69,49 @@ describe("the packed runner tarball", () => {
       execFileSync("tar", ["-xzOf", join(packDir, tarball.filename), "package/package.json"], {
         encoding: "utf8",
       }),
-    ) as { dependencies: Record<string, string>; bundledDependencies: string[]; private?: boolean };
+    ) as {
+      dependencies: Record<string, string>;
+      bundledDependencies?: string[];
+      private?: boolean;
+    };
     for (const [name, range] of Object.entries(manifest.dependencies)) {
       expect(`${name}@${range}`).not.toContain("workspace:");
     }
-    // The workspace package travels inside the tarball instead.
-    expect(manifest.bundledDependencies).toContain("@norns/contracts");
+    // The workspace package is INLINED into the runner's own dist, not bundled.
+    // `bundledDependencies` is what made this artifact uninstallable: npm's
+    // reifier will not materialise a nested dependency inside a bundled
+    // package, so the zod@3 that @norns/contracts needs was created as an empty
+    // directory and every Actions run died on ERR_MODULE_NOT_FOUND. The real
+    // proof now lives in runnerTarballInstall.test.ts, which npm-installs this
+    // tarball and executes the installed binary.
+    expect(manifest.bundledDependencies).toBeUndefined();
+    expect(manifest.dependencies["@norns/contracts"]).toBeUndefined();
     expect(manifest.private).toBeUndefined();
   });
 
-  it("physically contains the compiled contracts package it bundles", () => {
+  it("physically contains the compiled contracts output, inlined into its own dist", () => {
     const tarball = loadRunnerTarball(packDir);
     const entries = execFileSync("tar", ["-tzf", join(packDir, tarball.filename)], {
       encoding: "utf8",
     });
     expect(entries).toContain("package/dist/cli.js");
-    expect(entries).toContain("package/node_modules/@norns/contracts/package.json");
-    expect(entries).toContain("package/node_modules/@norns/contracts/dist/index.js");
+    expect(entries).toContain("package/dist/_contracts/index.js");
+    // No nested package at all — that is the whole point of the shape.
+    expect(entries).not.toContain("node_modules");
   });
 
-  // THE REAL-PATH TEST. Not a mock: this extracts the shipped artifact and
-  // executes its CLI entry point on Node, proving the bundled contracts
-  // package actually resolves at run time. The three registry dependencies are
-  // linked in from the workspace because the sandbox has no network — that is
-  // exactly what `npm install` would place in the same directory.
-  it("runs its CLI when extracted, with the bundled contracts resolving", () => {
+  // A fast, offline smoke test: extract the shipped artifact and execute its
+  // CLI entry point, proving the INLINED contracts code resolves relative to
+  // dist/ with no package boundary involved. The three registry dependencies
+  // are linked in from the workspace so this stays runnable without a network.
+  // It is deliberately NOT the proof that the artifact installs — that claim
+  // requires a real `npm install`, and it lives in runnerTarballInstall.test.ts.
+  it("runs its CLI when extracted, with the inlined contracts resolving", () => {
     const tarball = loadRunnerTarball(packDir);
     const dir = tempDir();
     execFileSync("tar", ["-xzf", join(packDir, tarball.filename), "-C", dir]);
     const nodeModules = join(dir, "package", "node_modules");
+    mkdirSync(nodeModules, { recursive: true });
     for (const dep of ["@anthropic-ai", "@openai", "ws"]) {
       symlinkSync(join(runnerRoot, "node_modules", dep), join(nodeModules, dep));
     }

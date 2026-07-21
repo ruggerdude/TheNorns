@@ -37,8 +37,12 @@ interface Args {
   flags: Record<string, string>;
 }
 
+/** `--help` / `-h` in the command position is a request for usage, not a flag. */
+const HELP_TOKENS = new Set(["--help", "-h", "-help", "help"]);
+
 function parseArgs(argv: string[]): Args {
-  const [command, ...rest] = argv;
+  const [rawCommand, ...rest] = argv;
+  const command = rawCommand !== undefined && HELP_TOKENS.has(rawCommand) ? "help" : rawCommand;
   const positional: string[] = [];
   const flags: Record<string, string> = {};
   for (let i = 0; i < rest.length; i += 1) {
