@@ -937,8 +937,14 @@ export class AttentionService {
   phase(
     projectId: string,
     phaseId: string,
+    // `Omit<..., "phase" | "tasks">` rather than `V2PhaseExecutionT & {phase:
+    // ..., tasks: ...}`: intersecting a type with an override of its OWN
+    // array-valued property (`tasks`) does not replace that property's
+    // element type the way it does for a plain object property (`phase`) —
+    // TS keeps both array types and can resolve `.find()`/`.map()` against
+    // the wrong one. Omitting the keys first avoids the ambiguity entirely.
   ): Promise<
-    V2PhaseExecutionT & {
+    Omit<V2PhaseExecutionT, "phase" | "tasks"> & {
       phase: V2PhaseExecutionT["phase"] & V2PhaseProgressT;
       tasks: Array<V2PhaseExecutionT["tasks"][number] & { cost: V2TaskCostT }>;
     }

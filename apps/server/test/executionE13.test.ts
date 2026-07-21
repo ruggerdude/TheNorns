@@ -303,7 +303,9 @@ describe.sequential("EXECUTION E13 — live run-log tail", () => {
     expect(tail.total_entries).toBe(3);
     expect(tail.entries.map((entry) => entry.chunk)).toEqual(["line 0\n", "line 1\n", "line 2\n"]);
     // Ascending sequence, oldest first.
-    expect(tail.entries[0]?.sequence).toBeLessThan(tail.entries[1]?.sequence ?? Infinity);
+    expect(tail.entries[0]?.sequence).toBeLessThan(
+      tail.entries[1]?.sequence ?? Number.POSITIVE_INFINITY,
+    );
 
     const lastSeen = tail.entries.at(-1)?.sequence;
     expect(lastSeen).toBeDefined();
