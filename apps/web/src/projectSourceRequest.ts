@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
-// O1 onboarding, redirected: execution moves to GitHub Actions — nothing is
-// ever installed on the human's machine. That collapses the setup wizard's
-// source step to two scenarios, both GitHub-backed:
+// O1 onboarding: execution runs in GitHub Actions — nothing is ever
+// installed on the human's machine. The setup wizard's source step is two
+// scenarios, both GitHub-backed:
 //
 //   new_repo:      "Start something new" -> Norns creates a GitHub
 //                  repository (name + private/public), backed by
@@ -14,16 +14,11 @@
 // Both scenarios need a connected GitHub account first — there is no
 // GitHub-free path anymore.
 //
-// TODO(O2): this module shapes requests against POST
-// /api/v2/projects/onboarding, which the O2 agent is building in parallel
-// (scenarios "new_repo"/"existing_repo") — it does not exist yet. The exact
-// field names and response shape below are a best-effort guess (mirroring
-// today's POST /api/projects + POST /api/integrations/github/repositories
-// field names), assuming the new endpoint creates the GitHub repository
-// (for new_repo) and the project atomically in one call and returns
-// something shaped like today's ProjectSummary. Reconcile at integration —
-// every caller in the wizard goes through buildOnboardingFields rather than
-// constructing this body inline, so this is a one-file change.
+// This is now the REAL, confirmed contract for POST
+// /api/v2/projects/onboarding (reconciled against O2's implementation —
+// this previously guessed field names that didn't match; see git history
+// if you need the old assumed shape). Response: 201 on first creation, 200
+// on an idempotent replay of the same idempotency_key.
 // ---------------------------------------------------------------------------
 
 export type ProjectOnboardingScenario = "new_repo" | "existing_repo";
@@ -52,16 +47,17 @@ export interface BuildOnboardingFieldsInput {
 
 /**
  * Shape the POST /api/v2/projects/onboarding body's scenario-specific
- * fields (name/description/pm_provider/pm_model are the same for both and
- * added by the caller). See the TODO(O2) note above this file's scenario
- * summary — no server contract exists yet for this endpoint.
+ * fields — connection_id + repository_name/private for new_repo,
+ * connection_id + repository_id for existing_repo. The caller adds the
+ * shared fields (name, description, pm_provider, pm_model, idempotency_key,
+ * scenario is included here for convenience).
  */
 export function buildOnboardingFields(input: BuildOnboardingFieldsInput): Record<string, unknown> {
   if (input.scenario === "new_repo") {
     if (!input.newRepo) return { scenario: "new_repo" };
     return {
       scenario: "new_repo",
-      github_connection_id: input.newRepo.connectionId,
+      connection_id: input.newRepo.connectionId,
       repository_name: input.newRepo.repositoryName,
       private: input.newRepo.private,
     };
@@ -69,9 +65,43 @@ export function buildOnboardingFields(input: BuildOnboardingFieldsInput): Record
   if (!input.existingRepo) return { scenario: "existing_repo" };
   return {
     scenario: "existing_repo",
-    github_connection_id: input.existingRepo.connectionId,
-    github_repository_id: input.existingRepo.repositoryId,
+    connection_id: input.existingRepo.connectionId,
+    repository_id: input.existingRepo.repositoryId,
   };
+}
+
+/** POST /api/v2/projects/onboarding's response. `blockers` is the field
+ *  that needs surfacing prominently — e.g. "installation_not_ready" means
+ *  the repository isn't in the GitHub App's installation, so nothing will
+ *  ever run until that's fixed on GitHub's side. `workspace`/`remote`/
+ *  `push` are read loosely (only the optional readiness flags are used
+ *  today) since their full shape isn't needed by the wizard yet. */
+export interface OnboardingResponse {
+  project_id: string;
+  scenario: ProjectOnboardingScenario;
+  replayed: boolean;
+  workspace: Record<string, unknown> | null;
+  remote: {
+    location?: string;
+    installation_ready?: boolean;
+    workflow_installed?: boolean;
+  } | null;
+  push: Record<string, unknown> | null;
+  blockers: string[];
+}
+
+/** Turn a blocker code into an actionable message — never a generic
+ *  "something went wrong". `installation_not_ready` is the one named
+ *  explicitly by the backend: very common for GitHub App installs scoped
+ *  to "selected repositories", and it means execution can never start
+ *  until fixed. */
+export function describeBlocker(code: string): string {
+  switch (code) {
+    case "installation_not_ready":
+      return "This repository isn't included in the Norns GitHub App installation, so nothing will run until it is. Add this repository to the Norns app on GitHub (Settings → Applications → Norns → Repository access), then continue.";
+    default:
+      return `Setup needs attention before this project can run: ${code.replaceAll("_", " ")}.`;
+  }
 }
 
 /** Parse a pasted GitHub repo reference into `{owner, name}` — the "paste a
@@ -104,6 +134,11 @@ export function parseGitHubRepoRef(text: string): { owner: string; name: string 
  * inside their repository, never anything running on their own computer.
  * `repositoryFullName` is null before a repository has been chosen/named
  * (the confirmation step then just prompts for that instead).
+ *
+ * This is a pre-creation preview computed client-side because there is no
+ * server data to prefer yet (the project doesn't exist). Once a project
+ * exists, prefer the resume payload's own `onboarding.summary_line` instead
+ * of calling this function again — see Projects.tsx's dashboard cards.
  */
 export function describeSetup(repositoryFullName: string | null): string {
   if (!repositoryFullName) return "Choose or create a GitHub repository to continue.";

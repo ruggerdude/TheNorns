@@ -10,8 +10,10 @@ import type { GitHubConnection, GitHubIntegrationStatus } from "./Account";
 import { AttachmentInput } from "./AttachmentInput";
 import { ApiError, type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
 import {
+  type OnboardingResponse,
   type ProjectOnboardingScenario,
   buildOnboardingFields,
+  describeBlocker,
   describeSetup,
   parseGitHubRepoRef,
 } from "./projectSourceRequest";
@@ -29,6 +31,13 @@ export interface ProjectSummary {
   plan_objective: string | null;
   source_type?: "local" | "github" | null;
   source_location?: string | null;
+  // O1: fields the onboarding endpoint's project record now carries
+  // (workspace_location/remote_location describe where the code actually
+  // lives; onboarding_scenario is "new_repo" | "existing_repo"). Optional —
+  // older projects created before this endpoint existed won't have them.
+  workspace_location?: string | null;
+  remote_location?: string | null;
+  onboarding_scenario?: ProjectOnboardingScenario | null;
   /** Transient navigation hints attached by the attention center. */
   focus_phase_id?: string | null;
   focus_task_id?: string | null;
@@ -61,6 +70,11 @@ export interface DashboardResumeSummary {
   blended_eta_at: string | null;
   agents_active: number;
   decisions_waiting: number;
+  // O1: the resume payload's own plain-language summary (e.g. "Runs in
+  // github.com/acme/app · Pushes to github.com/acme/app") — prefer this
+  // over re-deriving the sentence client-side; it's only absent for
+  // projects that predate the onboarding endpoint or haven't resumed yet.
+  onboardingSummaryLine: string | null;
 }
 
 /** Human wall-clock ETA from an ISO timestamp, e.g. "~6 hr" / "~2 days". Never
@@ -396,13 +410,24 @@ export function Projects({
   // screenshots (the real AttachmentInput, which needs a live project id),
   // then explicitly kick off the planning run. `wizardStep` gates which half
   // of the single wizard screen renders; `draftProject` is the project that
-  // step operates on.
-  const [wizardStep, setWizardStep] = useState<"form" | "attach">("form");
+  // step operates on. "blocker" is a third step: the onboarding call
+  // succeeded but came back with something like installation_not_ready —
+  // shown before "attach"/navigating away so it isn't missed.
+  const [wizardStep, setWizardStep] = useState<"form" | "blocker" | "attach">("form");
   const [draftProject, setDraftProject] = useState<ProjectSummary | null>(null);
   const [wizardAttachmentIds, setWizardAttachmentIds] = useState<string[]>([]);
   const [wizardObjective, setWizardObjective] = useState("");
   const [planningStarting, setPlanningStarting] = useState(false);
   const [planningError, setPlanningError] = useState<string | null>(null);
+  // O1: onboarding blockers (e.g. installation_not_ready) surfaced after a
+  // successful create — the project exists either way, this just needs the
+  // human's attention before execution can actually run.
+  const [onboardingBlockers, setOnboardingBlockers] = useState<string[]>([]);
+  // O1: stable per-submit-attempt idempotency key — regenerated each time
+  // the wizard opens (a genuinely new submission), NOT on every keystroke or
+  // failed-attempt retry, so a double-click or a retried request replays the
+  // same outcome instead of creating a second project/repository.
+  const [idempotencyKey, setIdempotencyKey] = useState(() => globalThis.crypto.randomUUID());
   // Per-project phase/progress read model for the dashboard rows (P5's
   // tracking additions to GET .../resume). Best-effort: a project whose
   // resume call fails (404 for a brand-new draft, network error, etc.)
@@ -452,6 +477,8 @@ export function Projects({
               decisions_waiting: number;
             };
             attention: { open_decisions: number; active_runs: number; blocked_tasks: number };
+            // O1: the resume payload's own plain-language onboarding summary.
+            onboarding?: { summary_line?: string | null } | null;
           }>(`/api/v2/projects/${project.id}/resume`);
           const phases: DashboardPhaseSummary[] = resume.phases.map((phase) => ({
             id: phase.id,
@@ -470,6 +497,7 @@ export function Projects({
             agents_active: resume.progress?.agents_active ?? resume.attention.active_runs,
             decisions_waiting:
               resume.progress?.decisions_waiting ?? resume.attention.open_decisions,
+            onboardingSummaryLine: resume.onboarding?.summary_line ?? null,
           };
           return [project.id, summary] as const;
         }),
@@ -662,6 +690,41 @@ export function Projects({
     [onUnauthorized, refreshAttention],
   );
 
+  // FRONT DOOR P1: a brand-new project with an objective moves to the
+  // wizard's attach-and-launch step instead of navigating away — the
+  // objective becomes the planning run's brief once the human confirms
+  // (optionally after attaching reference screenshots). "Existing work"
+  // imports (no fresh objective to plan from) keep the original
+  // immediate-navigate behavior. Shared by the direct success path and by
+  // "Continue" on the onboarding-blockers step, so a blocker doesn't skip
+  // this logic.
+  const proceedAfterCreate = useCallback(
+    (completedProject: ProjectSummary) => {
+      setProjects((current) => (current ? [completedProject, ...current] : [completedProject]));
+      if (startingPoint === "new" && description.trim()) {
+        setDraftProject(completedProject);
+        setWizardObjective(description.trim());
+        setWizardAttachmentIds([]);
+        setPlanningError(null);
+        setWizardStep("attach");
+        return;
+      }
+      setDialog(false);
+      setWizardStep("form");
+      setDraftProject(null);
+      setOnboardingBlockers([]);
+      setName("");
+      setDescription("");
+      setStartingPoint("new");
+      setSelectedRepositoryId("");
+      setRepositoryName("");
+      setRepositoryQuery("");
+      setIdempotencyKey(globalThis.crypto.randomUUID());
+      onOpenProject(completedProject);
+    },
+    [startingPoint, description, onOpenProject],
+  );
+
   const create = useCallback(async () => {
     setCreating(true);
     setError(null);
@@ -703,16 +766,21 @@ export function Projects({
         (repository
           ? `Analyze and continue development of ${repository.full_name}`
           : "New project");
-      // TODO(O2): POST /api/v2/projects/onboarding doesn't exist yet — see
-      // projectSourceRequest.ts. Assumed to create the GitHub repository
-      // (new_repo) and the project in one call, returning a ProjectSummary.
-      const completedProject = await request<ProjectSummary>("/api/v2/projects/onboarding", {
+      const onboarding = await request<OnboardingResponse>("/api/v2/projects/onboarding", {
         name: projectName,
         description: projectDescription,
         pm_provider: pmProvider,
         pm_model: pmModel,
+        idempotency_key: idempotencyKey,
         ...onboardingFields,
       });
+      // The onboarding response is a lean summary (project_id, scenario,
+      // replayed, workspace/remote/push, blockers) — not the full project
+      // record the rest of the app expects, so fetch that separately
+      // through the existing GET /api/projects/:id route.
+      const completedProject = await request<ProjectSummary>(
+        `/api/projects/${onboarding.project_id}`,
+      );
       // FRONT DOOR P2b: apply the reviewer selection right after creation,
       // before starting any planning run — resolvePlanningParticipants()
       // reads this per-project setting on every subsequent run.
@@ -731,29 +799,17 @@ export function Projects({
         // not a blocker — the project still exists and planning still works
         // (falling back to the automatic default) if this call fails.
       }
-      setProjects((current) => (current ? [completedProject, ...current] : [completedProject]));
-      // FRONT DOOR P1: a brand-new project with an objective moves to the
-      // wizard's attach-and-launch step instead of navigating away — the
-      // objective becomes the planning run's brief once the human confirms
-      // (optionally after attaching reference screenshots). "Existing work"
-      // imports (no fresh objective to plan from) keep the original
-      // immediate-navigate behavior.
-      if (startingPoint === "new" && description.trim()) {
+      if (onboarding.blockers.length > 0) {
+        // The project exists either way — a blocker (e.g.
+        // installation_not_ready) means execution can't actually run yet,
+        // not that creation failed. Surface it plainly and require an
+        // explicit "Continue" before moving on, so it isn't missed.
+        setOnboardingBlockers(onboarding.blockers);
         setDraftProject(completedProject);
-        setWizardObjective(description.trim());
-        setWizardAttachmentIds([]);
-        setPlanningError(null);
-        setWizardStep("attach");
+        setWizardStep("blocker");
         return;
       }
-      setDialog(false);
-      setName("");
-      setDescription("");
-      setStartingPoint("new");
-      setSelectedRepositoryId("");
-      setRepositoryName("");
-      setRepositoryQuery("");
-      onOpenProject(completedProject);
+      proceedAfterCreate(completedProject);
     } catch (e) {
       e instanceof UnauthorizedError
         ? onUnauthorized()
@@ -768,15 +824,26 @@ export function Projects({
     pmModel,
     repositories,
     selectedRepositoryId,
-    startingPoint,
     scenario,
     selectedConnectionId,
     repositoryName,
     repositoryPrivate,
     reviewerSelection,
-    onOpenProject,
+    idempotencyKey,
+    proceedAfterCreate,
     onUnauthorized,
   ]);
+
+  /** The "blocker" step's Continue action — the project already exists;
+   *  this just resumes the normal post-creation flow (attach-and-launch for
+   *  a fresh objective, or straight into the workspace). */
+  const continueFromBlockers = useCallback(() => {
+    if (!draftProject) return;
+    const project = draftProject;
+    setOnboardingBlockers([]);
+    setWizardStep("form");
+    proceedAfterCreate(project);
+  }, [draftProject, proceedAfterCreate]);
 
   const closeWizard = useCallback(() => {
     setDialog(false);
@@ -785,6 +852,7 @@ export function Projects({
     setWizardAttachmentIds([]);
     setWizardObjective("");
     setPlanningError(null);
+    setOnboardingBlockers([]);
     setName("");
     setDescription("");
     setStartingPoint("new");
@@ -793,6 +861,7 @@ export function Projects({
     setRepositoryQuery("");
     setReviewerSelection("auto");
     setRoundsCount(3);
+    setIdempotencyKey(globalThis.crypto.randomUUID());
   }, []);
 
   // FRONT DOOR P1: the wizard's second step — start the planning run the
@@ -922,7 +991,13 @@ export function Projects({
             </p>
           </div>
           <div className="dashboard-actions">
-            <Button variant="primary" onClick={() => setDialog(true)}>
+            <Button
+              variant="primary"
+              onClick={() => {
+                setIdempotencyKey(globalThis.crypto.randomUUID());
+                setDialog(true);
+              }}
+            >
               + New project
             </Button>
           </div>
@@ -1193,7 +1268,16 @@ export function Projects({
                           project.reviewer_provider}
                       </span>
                     </div>
-                    {project.source_location ? (
+                    {/* O1: prefer the resume payload's own plain-language
+                     *  onboarding summary over re-deriving it client-side;
+                     *  fall back to the legacy source_location display for
+                     *  projects that predate the onboarding endpoint. */}
+                    {resume?.onboardingSummaryLine ? (
+                      <div className="project-source" title={resume.onboardingSummaryLine}>
+                        <span>GitHub</span>
+                        <strong>{resume.onboardingSummaryLine}</strong>
+                      </div>
+                    ) : project.source_location ? (
                       <div className="project-source" title={project.source_location}>
                         <span>{project.source_type === "github" ? "GitHub" : "Local folder"}</span>
                         <strong>{project.source_location}</strong>
@@ -1321,7 +1405,9 @@ export function Projects({
                 <p className="muted">
                   {wizardStep === "attach"
                     ? "Add reference screenshots, then start the plan."
-                    : "Start fresh or bring an existing codebase into The Norns. Nothing runs until you approve the plan."}
+                    : wizardStep === "blocker"
+                      ? "One thing needs fixing before this project can run."
+                      : "Start fresh or bring an existing codebase into The Norns. Nothing runs until you approve the plan."}
                 </p>
               </div>
               <Button variant="ghost" className="btn-small" onClick={closeWizard}>
@@ -1389,6 +1475,23 @@ export function Projects({
                     onClick={() => void startPlanningRun()}
                   >
                     {planningStarting ? "Starting planning run…" : "Start planning run →"}
+                  </Button>
+                </div>
+              </div>
+            ) : wizardStep === "blocker" && draftProject ? (
+              <div className="form-stack" data-testid="wizard-blocker-step">
+                <Alert testId="onboarding-blockers">
+                  <strong>{draftProject.name}</strong> was created, but needs attention before it
+                  can run:
+                  <ul>
+                    {onboardingBlockers.map((code) => (
+                      <li key={code}>{describeBlocker(code)}</li>
+                    ))}
+                  </ul>
+                </Alert>
+                <div className="actions">
+                  <Button variant="primary" onClick={continueFromBlockers}>
+                    Continue →
                   </Button>
                 </div>
               </div>
