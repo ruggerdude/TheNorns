@@ -32,7 +32,7 @@ import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
-import { type EventPayloadT, V2DispatchCommand } from "@norns/contracts";
+import { EventPayload, type EventPayloadT, V2DispatchCommand } from "@norns/contracts";
 import {
   ApprovedRepositoryRegistry,
   ClaudeCodeRuntime,
@@ -155,7 +155,11 @@ function executorFor(
   return { executor, scriptBytes };
 }
 
-function dispatchCommand(scriptBytes: Uint8Array, base: string) {
+function dispatchCommand(
+  scriptBytes: Uint8Array,
+  base: string,
+  overrides: Record<string, unknown> = {},
+) {
   return V2DispatchCommand.parse({
     schema_version: 2,
     protocol_version: 2,
@@ -199,6 +203,7 @@ function dispatchCommand(scriptBytes: Uint8Array, base: string) {
     authorized_by_session_id: "session-1",
     issued_at: "2026-07-16T20:00:00.000Z",
     expires_at: "2099-07-16T20:15:00.000Z",
+    ...overrides,
   });
 }
 
@@ -566,6 +571,175 @@ describe("EXECUTION E11 — the resumable session id survives the run", () => {
       ).toBe(true);
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// EXECUTION E11, routed from E10: the server accepts, persists and displays
+// three things the runner never emitted, so the columns stayed null and the UI
+// showed nothing. All three facts already existed inside the executor.
+// ---------------------------------------------------------------------------
+
+describe("EXECUTION E11 — the three emits E10 was waiting on", () => {
+  const cleanup: string[] = [];
+  afterEach(async () => {
+    await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  });
+
+  /** A run that commits real work and exits, so verification really runs. */
+  const COMMITTING = [
+    "node -e \"require('fs').writeFileSync('agent.txt','work\\n')\"",
+    "git add -A",
+    'git commit -q -m "agent work"',
+  ].join("\n");
+
+  it("prefers the dispatch command's verification_commands over the local policy map", async () => {
+    const h = await harness(cleanup);
+    const events: EventPayloadT[] = [];
+    const { executor, scriptBytes } = executorFor(
+      h,
+      COMMITTING,
+      new LiveRunRegistry(),
+      githubApi().fetchImpl,
+    );
+    // The local map holds `verification` -> a command that always passes. The
+    // dispatch carries the project's REAL command, which fails. If the map won,
+    // this run would be green — which is exactly the dead field E10 shipped.
+    const result = await executor.execute(
+      dispatchCommand(scriptBytes, h.base, {
+        verification_commands: [
+          {
+            name: "test",
+            command: ["node", "-e", "console.error('3 tests failed'); process.exit(1)"],
+          },
+        ],
+      }),
+      (event) => events.push(event),
+    );
+
+    expect(result.verification_passed).toBe(false);
+    expect(result.outcome).toBe("failed");
+    const verification = events.find((event) => event.kind === "verification_result");
+    expect(verification?.kind === "verification_result" && verification.command_results).toEqual([
+      {
+        name: "test",
+        command: ["node", "-e", "console.error('3 tests failed'); process.exit(1)"],
+        exit_code: 1,
+        passed: false,
+        output: expect.stringContaining("3 tests failed"),
+      },
+    ]);
+    // The failing output is preserved verbatim, not reduced to a digest.
+    expect(
+      events.some((event) => event.kind === "run_log" && event.chunk.includes("3 tests failed")),
+    ).toBe(true);
+  });
+
+  it("falls back to the local policy map when the dispatch carries no commands", async () => {
+    const h = await harness(cleanup);
+    const events: EventPayloadT[] = [];
+    const { executor, scriptBytes } = executorFor(
+      h,
+      COMMITTING,
+      new LiveRunRegistry(),
+      githubApi().fetchImpl,
+    );
+    const result = await executor.execute(dispatchCommand(scriptBytes, h.base), (event) =>
+      events.push(event),
+    );
+    expect(result.outcome).toBe("succeeded");
+    const verification = events.find((event) => event.kind === "verification_result");
+    expect(verification?.kind === "verification_result" && verification.command_results).toEqual([
+      {
+        name: "test",
+        command: ["node", "-e", "process.exit(0)"],
+        exit_code: 0,
+        passed: true,
+        output: expect.any(String),
+      },
+    ]);
+  });
+
+  it("emits run_published carrying the branch, commit and pull request", async () => {
+    const h = await harness(cleanup);
+    const events: EventPayloadT[] = [];
+    const { executor, scriptBytes } = executorFor(
+      h,
+      COMMITTING,
+      new LiveRunRegistry(),
+      githubApi().fetchImpl,
+    );
+    const result = await executor.execute(dispatchCommand(scriptBytes, h.base), (event) =>
+      events.push(event),
+    );
+    expect(result.outcome).toBe("succeeded");
+    const published = events.find((event) => event.kind === "run_published");
+    expect(published).toEqual({
+      kind: "run_published",
+      run_id: "run-1",
+      outcome: "pushed",
+      branch: "norns/task-task-1",
+      commit_sha: result.commit_sha,
+      remote: "origin",
+      pull_request_url: "https://github.test/pull/1",
+      pull_request_note: null,
+    });
+    // It describes the REMOTE, not the runner's opinion of it.
+    expect(await git(h.remote, "rev-parse", "refs/heads/norns/task-task-1")).toBe(
+      published?.kind === "run_published" ? published.commit_sha : null,
+    );
+    // And it is a real payload the contract accepts on the wire.
+    expect(() => EventPayload.parse(published)).not.toThrow();
+  });
+
+  it(
+    "emits run_published for a CANCELLED run too — that work still needs reviewing",
+    { timeout: 60_000 },
+    async () => {
+      const h = await harness(cleanup);
+      const liveRuns = new LiveRunRegistry();
+      const events: EventPayloadT[] = [];
+      const { executor, scriptBytes } = executorFor(
+        h,
+        [
+          "node -e \"require('fs').writeFileSync('agent.txt','half\\n')\"",
+          "git add -A",
+          'git commit -q -m "partial"',
+          "echo AGENT_COMMITTED",
+          "sleep 60",
+        ].join("\n"),
+        liveRuns,
+        githubApi().fetchImpl,
+      );
+      const running = executor.execute(dispatchCommand(scriptBytes, h.base), (event) =>
+        events.push(event),
+      );
+      await awaitMarker(events, "AGENT_COMMITTED", "the agent's commit");
+      await liveRuns.control("run-1", "cancel");
+      const result = await running;
+
+      expect(result.outcome).toBe("cancelled");
+      const published = events.find((event) => event.kind === "run_published");
+      expect(published?.kind === "run_published" && published.branch).toBe("norns/task-task-1");
+      expect(published?.kind === "run_published" && published.commit_sha).toBe(result.commit_sha);
+    },
+  );
+
+  it("an empty verification_commands list can never green-light a run", async () => {
+    const h = await harness(cleanup);
+    // The dispatch contract enforces min(1), so the only way an empty list
+    // reaches the verifier is through the verifier's own door. Assert THERE:
+    // zero commands must not be a vacuous pass.
+    const verifier = new CommandPolicyVerifier(new Map());
+    const result = await verifier.verify({
+      worktree_path: h.repository,
+      policy_ref: "no-such-policy",
+      expected_commit: await git(h.repository, "rev-parse", "HEAD"),
+      base_revision: "0".repeat(40),
+      commands: [],
+    });
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("not approved on this runner");
+  });
 });
 
 describe("EXECUTION E11 — the daemon's control routing", () => {

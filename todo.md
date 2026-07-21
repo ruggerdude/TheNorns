@@ -657,3 +657,26 @@ Closes E3-9 with the human's decision: a forwarder, not a reimplementation.
   `ClaudeCodeRuntime({resumeSessionId})` / `CodexRuntime({resumeThreadId})` once
   E11-6 lands. Both adapters have accepted it since they were written; nothing
   has ever set it
+- [x] ✅ E11-11 — **CLOSED (routed from E10)**: the runner now prefers the
+  dispatch command's `verification_commands` over BOTH the local policy map and
+  the committed manifest, attaches `command_results` to `verification_result`,
+  and emits `run_published` — on the cancel path as well as the success path,
+  because cancelled work still needs reviewing. The three E10 columns are no
+  longer null in production
+- [ ] 🟡 E11-12 — **PM ROUTING (lossy, low priority)**: `PublicationOutcomeKind`
+  on the wire is `pushed | local_only`, while the runner distinguishes `pushed`,
+  `already_published` and `republished`. The latter two collapse to `pushed`
+  because all three mean "the commits are on the remote at this commit"; the
+  finer fact survives only in the run log. Widening the enum is additive if the
+  UI ever wants to say "a redelivery converged"
+- [ ] 🟡 E11-13 — **DECISION RECORDED, worth confirming**: dispatch-supplied
+  verification commands now outrank the operator's local
+  `NORNS_VERIFICATION_POLICIES_JSON` map, not just the committed manifest. E10's
+  contract comment only claimed precedence over the manifest, but a map-first
+  order makes the field inert for every deployment that leaves the variable
+  unset (the default map still resolves `verification-policy:default-v1`), so
+  the project's real tests would be silently replaced by the whitespace lint.
+  Safe because the vectors reach `execFile` with `shell: false` and the server
+  refuses shell metacharacters — but it IS a widening of what the server can
+  cause a runner to execute, and the PM should confirm it
+
