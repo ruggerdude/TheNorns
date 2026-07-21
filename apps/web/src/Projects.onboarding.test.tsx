@@ -76,20 +76,46 @@ describe("O1: two-question onboarding (GitHub Actions only)", () => {
     mock.get("/api/integrations/github/connections/github%3A43/repositories", {
       body: [repository],
     });
-    // O1 REDIRECT: onboarding always creates/binds a GitHub repository —
-    // POST /api/v2/projects/onboarding is the single creation endpoint
-    // (O2 building it in parallel; see projectSourceRequest.ts's TODO(O2)).
+    // O1: onboarding always creates/binds a GitHub repository — POST
+    // /api/v2/projects/onboarding is the single creation endpoint. It
+    // returns a lean { project_id, scenario, replayed, ... } summary, not
+    // the full project record — that's fetched separately through the
+    // existing GET /api/projects/:id route. Each call gets a distinct
+    // project_id (first is "project-created", to match the id most tests
+    // assert on; later calls in the same test get their own id) so a test
+    // that submits twice doesn't collide on one id.
+    let onboardingCount = 0;
+    const onboardingBodies = new Map<string, Record<string, unknown>>();
     mock.post("/api/v2/projects/onboarding", (_url, init) => {
-      const body = JSON.parse(String(init?.body)) as {
+      const body = JSON.parse(String(init?.body)) as { scenario: string };
+      onboardingCount += 1;
+      const projectId =
+        onboardingCount === 1 ? "project-created" : `project-created-${onboardingCount}`;
+      onboardingBodies.set(projectId, body);
+      return {
+        status: 201,
+        body: {
+          project_id: projectId,
+          scenario: body.scenario,
+          replayed: false,
+          workspace: null,
+          remote: null,
+          push: null,
+          blockers: [],
+        },
+      };
+    });
+    mock.get(/^\/api\/projects\/project-created(-\d+)?$/, (url) => {
+      const id = url.slice(url.lastIndexOf("/") + 1);
+      const body = (onboardingBodies.get(id) ?? {}) as {
         name: string;
         description: string;
         pm_provider: "anthropic" | "openai";
         pm_model: ProjectSummary["pm_model"];
       };
       return {
-        status: 201,
         body: makeProject({
-          id: "project-created",
+          id,
           name: body.name,
           description: body.description,
           pm_provider: body.pm_provider,
@@ -137,18 +163,23 @@ describe("O1: two-question onboarding (GitHub Actions only)", () => {
     await user.click(await screen.findByRole("button", { name: /skip for now/i }));
 
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
-    expect(
-      mock.calls.find(
-        (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
-      ),
-    ).toMatchObject({
+    const onboardingCall = mock.calls.find(
+      (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
+    );
+    expect(onboardingCall).toMatchObject({
       body: {
         scenario: "new_repo",
-        github_connection_id: "github:42",
+        name: "Fresh app",
+        description: "Build a fresh application",
+        pm_provider: "anthropic",
+        connection_id: "github:42",
         repository_name: "fresh-app",
         private: true,
       },
     });
+    expect(typeof (onboardingCall?.body as { idempotency_key?: unknown })?.idempotency_key).toBe(
+      "string",
+    );
   });
 
   it("switches to Existing and selects a repository from the searchable list, reaching scenario=existing_repo", async () => {
@@ -169,8 +200,8 @@ describe("O1: two-question onboarding (GitHub Actions only)", () => {
     ).toMatchObject({
       body: {
         scenario: "existing_repo",
-        github_connection_id: "github:42",
-        github_repository_id: "9001",
+        connection_id: "github:42",
+        repository_id: "9001",
       },
     });
   });
@@ -273,5 +304,106 @@ describe("O1: two-question onboarding (GitHub Actions only)", () => {
     await user.click(screen.getByRole("button", { name: /^existing/i }));
     await screen.findByRole("button", { name: /octocat\/existing-app/i });
     expect(screen.getByRole("button", { name: /create and open project/i })).toBeDisabled();
+  });
+
+  it("surfaces installation_not_ready as a clear, actionable message and requires Continue before proceeding", async () => {
+    mock.post("/api/v2/projects/onboarding", (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { scenario: string };
+      return {
+        status: 201,
+        body: {
+          project_id: "project-created",
+          scenario: body.scenario,
+          replayed: false,
+          workspace: null,
+          remote: null,
+          push: null,
+          blockers: ["installation_not_ready"],
+        },
+      };
+    });
+    // The override above bypasses the shared beforeEach handler (and the
+    // name/description lookup it populates), so this test's GET needs its
+    // own fixed body.
+    mock.get("/api/projects/project-created", {
+      body: makeProject({ id: "project-created", name: "existing-app" }),
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /^existing/i }));
+    await user.click(await screen.findByRole("button", { name: /octocat\/existing-app/i }));
+    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+
+    expect(await screen.findByTestId("wizard-blocker-step")).toBeInTheDocument();
+    expect(screen.getByTestId("onboarding-blockers")).toHaveTextContent(
+      /add this repository to the norns app on github/i,
+    );
+    // Not a dead end / generic error — the project exists and a Continue
+    // action resumes the normal flow.
+    expect(onOpenProject).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
+  });
+
+  it("keeps the same idempotency_key across the same submit attempt (double-click doesn't send two different keys)", async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.type(screen.getByTestId("project-name"), "Fresh app");
+    await user.type(screen.getByTestId("project-description"), "Build a fresh application");
+    await user.type(await screen.findByTestId("github-new-repository-name"), "fresh-app");
+    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
+    await user.click(await screen.findByRole("button", { name: /skip for now/i }));
+
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
+    const firstKey = (
+      mock.calls.find(
+        (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
+      )?.body as { idempotency_key?: string }
+    )?.idempotency_key;
+    expect(firstKey).toBeTruthy();
+
+    // Reopening the wizard for a new project gets a fresh key — keys are
+    // per-submit-attempt, not global constants.
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.type(screen.getByTestId("project-name"), "Second app");
+    await user.type(screen.getByTestId("project-description"), "Build a second application");
+    await user.type(await screen.findByTestId("github-new-repository-name"), "second-app");
+    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
+    await user.click(await screen.findByRole("button", { name: /skip for now/i }));
+
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledTimes(2));
+    const secondKey = (
+      mock.calls.filter(
+        (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
+      )[1]?.body as { idempotency_key?: string }
+    )?.idempotency_key;
+    expect(secondKey).toBeTruthy();
+    expect(secondKey).not.toBe(firstKey);
+  });
+
+  it("prefers the resume payload's onboarding.summary_line on the dashboard card over re-deriving it client-side", async () => {
+    mock.get("/api/projects", {
+      body: [
+        makeProject({
+          id: "project-created",
+          name: "Fresh app",
+          description: "Build a fresh application",
+        }),
+      ],
+    });
+    mock.get("/api/v2/projects/project-created/resume", {
+      body: {
+        phases: [],
+        attention: { open_decisions: 0, active_runs: 0, blocked_tasks: 0 },
+        onboarding: { summary_line: "Runs in github.com/acme/app · Pushes to github.com/acme/app" },
+      },
+    });
+    renderWizard();
+
+    expect(
+      await screen.findByText("Runs in github.com/acme/app · Pushes to github.com/acme/app"),
+    ).toBeInTheDocument();
   });
 });

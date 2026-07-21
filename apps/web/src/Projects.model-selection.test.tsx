@@ -33,19 +33,39 @@ describe("project manager model selection", () => {
     mock.get("/api/projects", { body: [projectAlpha] });
     mock.get("/api/v2/attention", { status: 404, body: {} });
     mock.get("/api/integrations/github/status", { body: githubStatus });
-    // O1 REDIRECT: onboarding always creates/binds a GitHub repository —
-    // POST /api/v2/projects/onboarding is the single creation endpoint
-    // (O2 is building it in parallel; see projectSourceRequest.ts's
-    // TODO(O2)).
+    // O1: onboarding always creates/binds a GitHub repository — POST
+    // /api/v2/projects/onboarding is the single creation endpoint, returning
+    // a lean { project_id, scenario, replayed, ... } summary rather than the
+    // full project record (fetched separately via GET /api/projects/:id).
     mock.post("/api/v2/projects/onboarding", (_url, init) => {
-      const body = JSON.parse(String(init?.body)) as {
+      const body = JSON.parse(String(init?.body)) as { scenario: string };
+      return {
+        status: 201,
+        body: {
+          project_id: "proj_created",
+          scenario: body.scenario,
+          replayed: false,
+          workspace: null,
+          remote: null,
+          push: null,
+          blockers: [],
+        },
+      };
+    });
+    mock.get("/api/projects/proj_created", (_url2, init2) => {
+      // Not reachable via init2 (GET has no body) — the project's fields
+      // come from the onboarding POST body instead, captured via the call
+      // log rather than re-parsed here.
+      const onboardingCall = mock.calls.find(
+        (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
+      );
+      const body = (onboardingCall?.body ?? {}) as {
         name: string;
         description: string;
         pm_provider: "anthropic" | "openai";
         pm_model: Exclude<ProjectSummary["pm_model"], null>;
       };
       return {
-        status: 201,
         body: makeProject({
           id: "proj_created",
           name: body.name,

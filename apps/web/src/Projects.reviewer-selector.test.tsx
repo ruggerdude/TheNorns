@@ -40,13 +40,28 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
     mock.get("/api/projects", { body: [] });
     mock.get("/api/v2/attention", { status: 404, body: {} });
     mock.get("/api/integrations/github/status", { body: githubStatus });
-    // O1 REDIRECT: onboarding always creates/binds a GitHub repository now —
-    // POST /api/v2/projects/onboarding is the single creation endpoint
-    // (O2 building it in parallel; TODO(O2) in projectSourceRequest.ts).
-    mock.post("/api/v2/projects/onboarding", (_url, init) => {
-      const body = JSON.parse(String(init?.body)) as { name: string; description: string };
+    // O1: onboarding always creates/binds a GitHub repository now — POST
+    // /api/v2/projects/onboarding is the single creation endpoint, returning
+    // a lean { project_id, scenario, replayed, ... } summary rather than the
+    // full project record (fetched separately via GET /api/projects/:id).
+    mock.post("/api/v2/projects/onboarding", {
+      status: 201,
+      body: {
+        project_id: "project-created",
+        scenario: "new_repo",
+        replayed: false,
+        workspace: null,
+        remote: null,
+        push: null,
+        blockers: [],
+      },
+    });
+    mock.get("/api/projects/project-created", (_url, _init) => {
+      const onboardingCall = mock.calls.find(
+        (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
+      );
+      const body = (onboardingCall?.body ?? {}) as { name: string; description: string };
       return {
-        status: 201,
         body: makeProject({
           id: "project-created",
           name: body.name,
