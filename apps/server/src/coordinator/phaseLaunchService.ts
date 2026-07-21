@@ -44,7 +44,8 @@ export type PhaseLaunchBlockingCode =
   | "installation_not_ready"
   | "unverified_binding"
   | "actions_execution_unavailable"
-  | "no_schedulable_tasks";
+  | "no_schedulable_tasks"
+  | "budget_exhausted";
 
 export class PhaseLaunchError extends Error {
   constructor(
