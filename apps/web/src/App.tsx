@@ -41,6 +41,7 @@ import {
   ProjectTabs,
   Projects,
 } from "./Projects";
+import { RunLog } from "./RunLog";
 import { StartPhaseControl } from "./StartPhaseControl";
 import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
 import {
@@ -59,7 +60,17 @@ import {
   setToken,
 } from "./auth";
 import { ThemeToggle, useTheme } from "./theme";
-import { Alert, Badge, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
+import {
+  Alert,
+  Badge,
+  Button,
+  DismissibleNote,
+  Field,
+  Input,
+  Select,
+  Spinner,
+  TextArea,
+} from "./ui";
 
 interface Assignment {
   provider: string;
@@ -141,6 +152,13 @@ interface ProjectResumeDto {
     percent_complete?: number;
     eta_at?: string | null;
     burn_rate_usd_per_hour?: number | null;
+    // EXECUTION E13 — live cost, alongside the throughput fields above.
+    // `spend_usd` is real accrued spend from `usage_events`; null means no
+    // metered call has landed for this phase yet (never a fabricated 0).
+    // `budget_usd` is the phase's real approved_budget_usd (0 = nothing
+    // approved yet, which is itself an honest fact, so it is never null).
+    spend_usd?: number | null;
+    budget_usd?: number;
   }>;
   attention: { open_decisions: number; active_runs: number; blocked_tasks: number };
   next_recommended_action: string;
@@ -154,6 +172,21 @@ interface ProjectResumeDto {
   update_interval_seconds?: number;
 }
 
+/** EXECUTION E13 — real accrued spend and the real approved/reserved budget
+ *  it is measured against. `spend_usd`/`input_tokens`/`output_tokens` are
+ *  null together when nothing has been metered yet (never a fabricated 0,
+ *  which would read as "confirmed free"). `budget_usd` is null when no
+ *  budget has been reserved for this run yet (distinct from a real
+ *  reservation of $0). Optional on the wire so a payload from before this
+ *  phase still type-checks. */
+interface TaskCostDto {
+  spend_usd: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  budget_usd: number | null;
+  last_usage_at: string | null;
+}
+
 interface PhaseExecutionDto {
   phase: {
     id: string;
@@ -161,6 +194,10 @@ interface PhaseExecutionDto {
     status: string;
     completed_tasks: number;
     total_tasks: number;
+    // EXECUTION E13 — live cost at the phase scope; see TaskCostDto's note
+    // on the same honesty rule (null spend != fabricated 0).
+    spend_usd?: number | null;
+    budget_usd?: number;
   };
   tasks: Array<{
     id: string;
@@ -227,8 +264,15 @@ interface PhaseExecutionDto {
         roles: string[];
       };
     }>;
+    // EXECUTION E13 — live cost for this task's designated run.
+    cost?: TaskCostDto;
   }>;
 }
+
+/** True while a run is still able to produce log output / accrue spend —
+ *  used both to decide the fast poll cadence (App.tsx) and whether a task's
+ *  RunLog panel should keep polling (RunLog.tsx). */
+const RUN_ACTIVE_STATES = new Set(["created", "dispatched", "running", "verifying"]);
 
 type PhaseExecutionTask = PhaseExecutionDto["tasks"][number];
 
@@ -264,6 +308,46 @@ function evidenceLabel(evidence: {
   label: string;
 }): string {
   return `${evidence.label} · ${evidence.media_type} · ${evidence.content_hash.slice(0, 12)}`;
+}
+
+function formatUsd(amount: number): string {
+  return `$${amount.toFixed(2)}`;
+}
+
+/**
+ * EXECUTION E13 — a single honest line of cost. Renders "—" rather than a
+ * fabricated $0.00 whenever `spendUsd` is null (nothing metered yet), even
+ * when a real budget is already known. Returns null (nothing rendered) only
+ * when there is NEITHER a spend figure NOR a budget figure to show — the
+ * caller decides whether that absence itself is worth a line ("no run yet").
+ */
+function CostLine({
+  spendUsd,
+  budgetUsd,
+  testId,
+}: {
+  spendUsd: number | null | undefined;
+  budgetUsd: number | null | undefined;
+  testId?: string;
+}): React.ReactElement | null {
+  if (spendUsd === undefined && budgetUsd === undefined) return null;
+  const spendText =
+    spendUsd === null || spendUsd === undefined ? (
+      <span className="cost-unknown">no metered spend yet</span>
+    ) : (
+      <span className="cost-amount">{formatUsd(spendUsd)}</span>
+    );
+  return (
+    <div className="cost-line" data-testid={testId}>
+      <span>Spend:</span>
+      {spendText}
+      {budgetUsd !== null && budgetUsd !== undefined ? (
+        <span>of {formatUsd(budgetUsd)} budget</span>
+      ) : (
+        <span className="cost-unknown">budget not reserved yet</span>
+      )}
+    </div>
+  );
 }
 
 function TaskQcPanel({
@@ -402,6 +486,28 @@ function TaskQcPanel({
             </span>
           ) : null}
         </div>
+      ) : null}
+      {/* EXECUTION E13 — live cost for this task's designated run. Absent
+          entirely (no line at all) when the task has no run yet; a "—"
+          rather than $0.00 once a run exists but nothing has been metered. */}
+      {task.run && task.cost ? (
+        <CostLine
+          spendUsd={task.cost.spend_usd}
+          budgetUsd={task.cost.budget_usd}
+          testId={`task-cost-${task.id}`}
+        />
+      ) : null}
+      {/* EXECUTION E13 — the run's streamed log output, live while the run is
+          active and frozen (one final fetch, then no more polling) once it
+          is not. */}
+      {task.run ? (
+        <RunLog
+          projectId={projectId}
+          phaseId={phaseId}
+          taskId={task.id}
+          active={RUN_ACTIVE_STATES.has(task.run.state)}
+          onUnauthorized={onUnauthorized}
+        />
       ) : null}
       {task.run?.failure_detail ? <Alert>{task.run.failure_detail}</Alert> : null}
       {/* EXECUTION E10 — WHICH command failed, and its output. A red badge over
@@ -804,12 +910,39 @@ function ProjectGraph({
     }
   }, [monitoredPhaseId, project.id, onLogout]);
 
+  // EXECUTION E13 — polling cadence, and why it does NOT simply obey
+  // `update_interval_seconds` here.
+  //
+  // The human's configured interval (60/300/900s) is honored for IDLE
+  // polling — a phase with no run currently executing gets exactly that
+  // cadence, same as the resume poll below. But a live run needs faster
+  // feedback than a 5-minute (or 15-minute) default would ever give, and
+  // that need is inherent to what this phase built (live cost, live logs),
+  // not a reason to silently override the human's choice everywhere. So:
+  // while ANY task in the monitored phase has a run in a still-executing
+  // state, this poll runs at a fixed, fast PHASE_ACTIVE_POLL_MS regardless of
+  // the configured value; the moment no run is active, it reverts to the
+  // configured interval (falling back to the same 15s default the resume
+  // poll uses before the first resume response names one). This is the same
+  // number this poll already used unconditionally before E13 — now it is a
+  // deliberate choice made explicit, rather than an interval that happened to
+  // ignore the setting.
+  const PHASE_ACTIVE_POLL_MS = 5_000;
+  const phaseHasActiveRun = useMemo(
+    () =>
+      (phaseExecution?.tasks ?? []).some(
+        (task) => task.run && RUN_ACTIVE_STATES.has(task.run.state),
+      ),
+    [phaseExecution],
+  );
   useEffect(() => {
     if (!monitoredPhaseId) return;
     void loadPhaseExecution();
-    const timer = window.setInterval(() => void loadPhaseExecution(), 5_000);
+    const idleMs = Math.max(5, resume?.update_interval_seconds ?? 15) * 1000;
+    const pollMs = phaseHasActiveRun ? PHASE_ACTIVE_POLL_MS : idleMs;
+    const timer = window.setInterval(() => void loadPhaseExecution(), pollMs);
     return () => window.clearInterval(timer);
-  }, [monitoredPhaseId, loadPhaseExecution]);
+  }, [monitoredPhaseId, loadPhaseExecution, phaseHasActiveRun, resume?.update_interval_seconds]);
 
   // FRONT DOOR P1: replaces the old raw-objective "Create the next phase"
   // text box. New-phase creation goes through an observable planning run
@@ -1491,8 +1624,26 @@ function ProjectGraph({
                       </div>
                       <p className="muted">
                         {phaseExecution.phase.completed_tasks}/{phaseExecution.phase.total_tasks}{" "}
-                        tasks complete · updates every 5 seconds
+                        tasks complete · updates every{" "}
+                        {phaseHasActiveRun
+                          ? "5 seconds"
+                          : `${Math.max(5, resume?.update_interval_seconds ?? 15)} seconds`}
                       </p>
+                      {/* EXECUTION E13 — live cost for the whole phase. */}
+                      <CostLine
+                        spendUsd={phaseExecution.phase.spend_usd}
+                        budgetUsd={phaseExecution.phase.budget_usd}
+                        testId="phase-cost"
+                      />
+                      <DismissibleNote
+                        storageKey="norns:e13-cost-log-note"
+                        testId="e13-honesty-note"
+                      >
+                        Spend and run-log figures come from real metered provider calls and streamed
+                        runner output recorded since this instrumentation shipped. A run or task
+                        with nothing recorded yet shows as "no data", never as $0.00 or an empty log
+                        presented as complete.
+                      </DismissibleNote>
                       <div className="phase-task-list" data-testid="phase-task-list">
                         {phaseExecution.tasks.map((task) => (
                           <TaskQcPanel

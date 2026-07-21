@@ -1,4 +1,4 @@
-import { forwardRef } from "react";
+import { forwardRef, useState } from "react";
 import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
@@ -39,6 +39,52 @@ export function Alert({ children, testId }: { children: ReactNode; testId?: stri
   return (
     <div className="alert" data-testid={testId}>
       <span className="alert-body">{children}</span>
+    </div>
+  );
+}
+/**
+ * EXECUTION E13 — a plain, one-time explanation that a human can dismiss for
+ * good (persisted in localStorage under `storageKey`), matching the register
+ * FRONT DOOR/EXECUTION established elsewhere: honest and factual, no
+ * marketing, dismissible rather than nagging on every visit. Best-effort
+ * around localStorage (a private-browsing tab, or storage disabled, just
+ * means it re-shows next time — never a thrown error).
+ */
+export function DismissibleNote({
+  storageKey,
+  children,
+  testId,
+}: {
+  storageKey: string;
+  children: ReactNode;
+  testId?: string;
+}) {
+  const [dismissed, setDismissed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(storageKey) === "1";
+    } catch {
+      return false;
+    }
+  });
+  if (dismissed) return null;
+  return (
+    <div className="dismissible-note" data-testid={testId}>
+      <span className="alert-body">{children}</span>
+      <button
+        type="button"
+        className="dismissible-note-close"
+        aria-label="Dismiss this note"
+        onClick={() => {
+          setDismissed(true);
+          try {
+            window.localStorage.setItem(storageKey, "1");
+          } catch {
+            /* best effort — storage may be unavailable */
+          }
+        }}
+      >
+        ×
+      </button>
     </div>
   );
 }
