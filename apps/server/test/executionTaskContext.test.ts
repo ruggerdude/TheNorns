@@ -9,6 +9,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
 import { HashVerifiedContextLoader } from "@norns/runner";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DispatchContextScopeRepository } from "../src/coordinator/dispatchContextScope.js";
 import {
   MAX_TOTAL_CONTEXT_BYTES,
   RUNNER_CONTEXT_RUNNER_ID_HEADER,
@@ -502,6 +503,7 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
     let server: NornsServer;
     let origin: string;
     let privateKeyPem: string;
+    let dispatchScope: DispatchContextScopeRepository;
 
     beforeEach(async () => {
       const stores = new RelayStores();
@@ -519,6 +521,7 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
         execution: { transactions, baseUrl: "http://127.0.0.1" },
       });
       origin = await listen(server);
+      dispatchScope = new DispatchContextScopeRepository(transactions);
     });
 
     afterEach(async () => {
@@ -529,6 +532,22 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
       return `${origin}${new URL(storageRef).pathname}`;
     }
 
+    // EXECUTION E2: the fetch route now ALSO requires a
+    // dispatch_context_documents row naming this runner for the exact
+    // document requested (authorization on top of E1's authentication). Every
+    // case below models the realistic sequence — the document is scoped to
+    // the runner the moment a task is actually scheduled — before exercising
+    // E1's own signature/hash/existence behavior, so this suite still proves
+    // what it proved before E2 landed, against the now-stricter route.
+    async function authorize(
+      refs: ReadonlyArray<{ artifact_id: string; content_hash: string; byte_size: number }>,
+    ): Promise<void> {
+      await dispatchScope.recordScope(
+        { runnerId: RUNNER, dispatchJobId: "dispatch-job:test", runId: "run:test" },
+        refs.map((ref) => ({ ...ref, storage_ref: "unused://scope-only" })),
+      );
+    }
+
     it("is exposed on NornsServer for E2's trigger", () => {
       expect(server.taskContext).toBeDefined();
     });
@@ -536,6 +555,7 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
     it("serves bytes the REAL HashVerifiedContextLoader verifies and accepts", async () => {
       const refs = (await server.taskContext?.assembleForTask(TASK)) ?? [];
       expect(refs.length).toBeGreaterThan(0);
+      await authorize(refs);
       const loader = new HashVerifiedContextLoader(
         new RunnerSignedContextFetcher(RUNNER, privateKeyPem),
       );
@@ -549,6 +569,7 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
 
     it("makes the loader reject a tampered content_hash", async () => {
       const refs = (await server.taskContext?.assembleForTask(TASK)) ?? [];
+      await authorize(refs);
       const loader = new HashVerifiedContextLoader(
         new RunnerSignedContextFetcher(RUNNER, privateKeyPem),
       );
@@ -613,11 +634,29 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
       ).rejects.toThrow(/401/);
     });
 
-    it("404s an unknown document for an authenticated runner", async () => {
+    it("404s an unknown document for an authenticated, authorized runner", async () => {
+      // Authorized for this exact (never-created) document id, so the 404
+      // proves existence is checked, not just masked behind a 403 — the
+      // authorization check alone is covered by the dispatch-scope suite.
+      await authorize([
+        { artifact_id: "taskctx_missing", content_hash: "a".repeat(64), byte_size: 1 },
+      ]);
       const fetcher = new RunnerSignedContextFetcher(RUNNER, privateKeyPem);
       await expect(
         fetcher.fetch({ storage_ref: `${origin}${TASK_CONTEXT_ROUTE_PREFIX}/taskctx_missing` }),
       ).rejects.toThrow(/404/);
+    });
+
+    it("403s a document the runner was never scoped to, before existence is checked", async () => {
+      const refs = (await server.taskContext?.assembleForTask(TASK)) ?? [];
+      const first = refs[0];
+      if (!first) throw new Error("no refs");
+      // Deliberately no `authorize(...)` call: a valid signature from a real,
+      // paired runner is not enough on its own (E2's fix for the E1 gap).
+      const fetcher = new RunnerSignedContextFetcher(RUNNER, privateKeyPem);
+      await expect(
+        fetcher.fetch({ storage_ref: rebase(first.storage_ref) }),
+      ).rejects.toThrow(/403/);
     });
 
     it("sends the runner id and timestamp headers it signs over", async () => {

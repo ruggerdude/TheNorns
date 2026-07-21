@@ -6,6 +6,7 @@ import {
   ACTIONS_EXECUTION_MIGRATION_NAME,
   ATTACHMENTS_MIGRATION_NAME,
   DEBATE_WORKFLOW_MIGRATION_NAME,
+  DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
   FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
   FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
   GITHUB_APP_MANIFEST_MIGRATION_NAME,
@@ -213,6 +214,9 @@ describe.sequential("Phase 2 preservation schema", () => {
       // EXECUTION E1. Name is still `NNNN_`; the PM assigns the number at
       // integration, which is also when this entry's position changes.
       { name: TASK_CONTEXT_MIGRATION_NAME, applied: false },
+      // EXECUTION E2. Name is still `NNNN_`; the PM assigns the number at
+      // integration, which is also when this entry's position changes.
+      { name: DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -237,6 +241,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       ACTIONS_EXECUTION_MIGRATION_NAME,
       ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME,
       TASK_CONTEXT_MIGRATION_NAME,
+      DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
     ]);
   });
 
