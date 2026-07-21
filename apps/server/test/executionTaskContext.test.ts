@@ -654,9 +654,9 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
       // Deliberately no `authorize(...)` call: a valid signature from a real,
       // paired runner is not enough on its own (E2's fix for the E1 gap).
       const fetcher = new RunnerSignedContextFetcher(RUNNER, privateKeyPem);
-      await expect(
-        fetcher.fetch({ storage_ref: rebase(first.storage_ref) }),
-      ).rejects.toThrow(/403/);
+      await expect(fetcher.fetch({ storage_ref: rebase(first.storage_ref) })).rejects.toThrow(
+        /403/,
+      );
     });
 
     it("sends the runner id and timestamp headers it signs over", async () => {

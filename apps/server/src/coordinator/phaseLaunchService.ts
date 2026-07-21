@@ -18,11 +18,8 @@
 // below only ever REFUSES work the gate would also refuse, earlier and with a
 // clearer reason.
 import type { V2ActorT, V2ContentAddressedReferenceT } from "@norns/contracts";
+import { type TaskContextAssembler, TaskContextAssemblyError } from "../execution/index.js";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
-import {
-  TaskContextAssemblyError,
-  type TaskContextAssembler,
-} from "../execution/index.js";
 import {
   type ActionsExecutionCoordinator,
   ActionsExecutionError,
@@ -32,8 +29,8 @@ import { DispatchContextScopeRepository } from "./dispatchContextScope.js";
 import {
   Phase4Coordinator,
   Phase4CoordinatorConflictError,
-  type Phase4ScheduledRun,
   type Phase4ScheduleInput,
+  type Phase4ScheduledRun,
 } from "./phase4Coordinator.js";
 
 /** Everything the caller must show the human when a phase cannot be started
@@ -165,10 +162,7 @@ export class PhaseLaunchService {
     this.policy = policy;
   }
 
-  private async loadPhaseBinding(
-    projectId: string,
-    phaseId: string,
-  ): Promise<PhaseBindingRow> {
+  private async loadPhaseBinding(projectId: string, phaseId: string): Promise<PhaseBindingRow> {
     return this.transactions.transaction(async (tx) => {
       const result = await tx.query<PhaseBindingRow>(
         `SELECT p.status AS phase_status, p.approved_budget_usd AS approved_budget_usd,
@@ -415,9 +409,7 @@ export class PhaseLaunchService {
         if (row.binding_type === "github") {
           // The base gate is called unchanged, inside
           // ActionsExecutionCoordinator.schedule() -- see that file's header.
-          const withActions = await this.mustActionsExecution().coordinator.schedule(
-            scheduleInput,
-          );
+          const withActions = await this.mustActionsExecution().coordinator.schedule(scheduleInput);
           result = withActions;
           runnerId = withActions.actions.runner_id;
         } else {

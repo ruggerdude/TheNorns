@@ -10,11 +10,11 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DispatchContextScopeRepository } from "../src/coordinator/dispatchContextScope.js";
+import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
 import {
   DEFAULT_PHASE_LAUNCH_POLICY,
   PhaseLaunchService,
 } from "../src/coordinator/phaseLaunchService.js";
-import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
 import { RelationalTaskContextAssembler, TaskContextStore } from "../src/execution/index.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
@@ -98,17 +98,10 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
          ) VALUES ($1,$2,'github',$3,$4,NULL,'repository-e2','Norns Demo','install-e2',
            'norns','demo','{}'::jsonb,'main','commit-e2','verification/strict','healthy',
            'human',$5,$6)`,
-        [
-          BINDING,
-          PROJECT,
-          bindingStatus,
-          RUNNER,
-          USER,
-          options.installationReady ?? true,
-        ],
+        [BINDING, PROJECT, bindingStatus, RUNNER, USER, options.installationReady ?? true],
       );
     }
-    await pg.query(`UPDATE projects SET primary_repository_binding_id = $1 WHERE id = $2`, [
+    await pg.query("UPDATE projects SET primary_repository_binding_id = $1 WHERE id = $2", [
       BINDING,
       PROJECT,
     ]);
@@ -125,10 +118,10 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
       [STRATEGY, PROJECT, PHASE, HASH_64],
     );
     if (["approved", "active"].includes(phaseStatus)) {
-      await pg.query(
-        `UPDATE phases SET approved_strategy_version_id = $2 WHERE id = $1`,
-        [PHASE, STRATEGY],
-      );
+      await pg.query("UPDATE phases SET approved_strategy_version_id = $2 WHERE id = $1", [
+        PHASE,
+        STRATEGY,
+      ]);
     }
     await pg.query(
       `INSERT INTO objectives (id, project_id, phase_id, outcome, success_measures, status, "order")
@@ -151,7 +144,7 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
        ) VALUES ($1,$2,1,'Monorepo','pnpm workspace.','artifact-${PROJECT}','abc123','human',$3)`,
       [ARCHITECTURE, PROJECT, USER],
     );
-    await pg.query(`UPDATE projects SET current_architecture_revision_id = $1 WHERE id = $2`, [
+    await pg.query("UPDATE projects SET current_architecture_revision_id = $1 WHERE id = $2", [
       ARCHITECTURE,
       PROJECT,
     ]);
@@ -184,7 +177,7 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
                  '{}'::jsonb,$6,'allocation/default')`,
       [ASSIGNMENT, PROJECT, PHASE, TASK, PROFILE, taskBudgetLimitUsd],
     );
-    await pg.query(`UPDATE tasks SET designated_assignment_id = $2 WHERE id = $1`, [
+    await pg.query("UPDATE tasks SET designated_assignment_id = $2 WHERE id = $1", [
       TASK,
       ASSIGNMENT,
     ]);
@@ -211,7 +204,11 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
   }
 
   function service(
-    options: { resolveLocalRunner?: (runnerId: string) => { runner_id: string; runner_generation: number } | null } = {},
+    options: {
+      resolveLocalRunner?: (
+        runnerId: string,
+      ) => { runner_id: string; runner_generation: number } | null;
+    } = {},
   ): PhaseLaunchService {
     return new PhaseLaunchService(
       transactions,
@@ -235,9 +232,13 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
     await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
     transactions = new PGliteTransactionRunner(pg);
     coordinator = new Phase4Coordinator(transactions);
-    taskContext = new RelationalTaskContextAssembler(transactions, new TaskContextStore(transactions), {
-      baseUrl: "https://norns.example.com",
-    });
+    taskContext = new RelationalTaskContextAssembler(
+      transactions,
+      new TaskContextStore(transactions),
+      {
+        baseUrl: "https://norns.example.com",
+      },
+    );
     dispatchScope = new DispatchContextScopeRepository(transactions);
   }, 60_000);
 
@@ -484,10 +485,7 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
     // A later strategy version is approved for the phase (e.g. rework), but
     // this task was materialized from the original version and never
     // re-staffed under the new one.
-    await pg.query(
-      "UPDATE strategy_versions SET status = 'superseded' WHERE id = $1",
-      [STRATEGY],
-    );
+    await pg.query("UPDATE strategy_versions SET status = 'superseded' WHERE id = $1", [STRATEGY]);
     await pg.query(
       "INSERT INTO strategy_versions (id, project_id, phase_id, version, status, objective, content, convergence, content_hash) VALUES ($1,$2,$3,2,'approved','v2','{}'::jsonb,'converged',$4)",
       [`${STRATEGY}-v2`, PROJECT, PHASE, "b".repeat(64)],

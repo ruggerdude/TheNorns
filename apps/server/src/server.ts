@@ -60,14 +60,14 @@ import {
   ActionsExecutionError,
   type ActionsExecutionRepository,
 } from "./coordinator/actionsExecution.js";
+// EXECUTION E2: turns an approved strategy into scheduled work.
+import { DispatchContextScopeRepository } from "./coordinator/dispatchContextScope.js";
 import type { Phase4CompletionService } from "./coordinator/phase4Completion.js";
 import type { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
 import { type Phase4DispatchRepository, Phase4Dispatcher } from "./coordinator/phase4Dispatcher.js";
 import type { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
 import type { Phase4RecoveryMonitor } from "./coordinator/phase4RecoveryMonitor.js";
 import type { Phase6CoordinationService } from "./coordinator/phase6Coordination.js";
-// EXECUTION E2: turns an approved strategy into scheduled work.
-import { DispatchContextScopeRepository } from "./coordinator/dispatchContextScope.js";
 import { PhaseLaunchError, PhaseLaunchService } from "./coordinator/phaseLaunchService.js";
 import { DebateConflictError, type DebateService } from "./debates/service.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
@@ -4060,7 +4060,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       dispatchContextScope,
       (runnerId) => {
         const runner = stores.runner(runnerId);
-        return runner ? { runner_id: runner.runner_id, runner_generation: runner.generation } : null;
+        return runner
+          ? { runner_id: runner.runner_id, runner_generation: runner.generation }
+          : null;
       },
       options.actionsExecution
         ? {
