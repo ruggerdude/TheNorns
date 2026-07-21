@@ -19,6 +19,7 @@ import {
   NORNS_WORKFLOW_VERSION,
   type NornsWorkflowTemplateOptions,
   inspectCommittedWorkflow,
+  nornsRunName,
   renderNornsAgentWorkflow,
 } from "./actionsWorkflowTemplate.js";
 import {
@@ -305,8 +306,11 @@ export class GitHubActionsService {
       `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/actions/workflows/${encodeURIComponent(workflowFile)}/runs?event=workflow_dispatch&per_page=50`,
       token,
     );
+    // Exact equality on the shared delimited marker — never a substring, which
+    // would match `job-1` against `job-10` and be spoofable by a crafted id.
+    const expected = nornsRunName(jobId);
     const match = (response.body.workflow_runs ?? []).find((run) =>
-      [run.display_title, run.name].some((title) => title?.includes(jobId)),
+      [run.display_title, run.name].some((title) => title === expected),
     );
     if (!match) return null;
     return {

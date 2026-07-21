@@ -39,7 +39,12 @@
  * repository should receive. `installNornsAgentWorkflow` upgrades in place when
  * the committed file declares a lower version.
  */
-export const NORNS_WORKFLOW_VERSION = 1;
+// v2: env-indirection for every workflow_dispatch input (a dispatcher could
+// previously inject shell through `${{ inputs.* }}` inside `run:` and
+// exfiltrate the enrollment secret), an explicit approved-roots allowlist
+// without which the runner could not execute at all, and an exact delimited
+// run-name marker. Every already-installed v1 file is upgraded in place.
+export const NORNS_WORKFLOW_VERSION = 2;
 
 /** Canonical path. Committing here requires the App's `workflows` permission. */
 export const NORNS_WORKFLOW_PATH = ".github/workflows/norns-agent.yml";
@@ -49,6 +54,20 @@ export const NORNS_ENROLLMENT_SECRET_NAME = "NORNS_RUNNER_ENROLLMENT_TOKEN";
 
 const VERSION_MARKER = /^#\s*norns:workflow-version=(\d+)\s*$/m;
 const MANAGED_MARKER = /^#\s*norns:managed=true\s*$/m;
+
+/**
+ * The exact `run-name` a Norns-dispatched workflow run carries.
+ *
+ * `workflow_dispatch` answers 204 with no run id, so the run must be located
+ * afterwards. Correlating on a *substring* of the title would both collide
+ * (`job-1` matches `job-10`) and be spoofable by anyone able to dispatch with a
+ * crafted job id. This is a delimited marker compared for exact equality, and
+ * both the template and the matcher call this one function so they cannot
+ * drift apart.
+ */
+export function nornsRunName(jobId: string): string {
+  return `Norns [norns-job:${jobId}]`;
+}
 
 export interface NornsWorkflowTemplateOptions {
   /**
@@ -118,7 +137,7 @@ export function renderNornsAgentWorkflow(options: NornsWorkflowTemplateOptions):
 # executes the one job it was dispatched for, and the whole machine is
 # destroyed when the job ends. Nothing is installed on anyone's computer.
 name: Norns Agent
-run-name: "Norns \${{ inputs.norns_job_id }}"
+run-name: "${nornsRunName("${{ inputs.norns_job_id }}")}"
 
 on:
   workflow_dispatch:
@@ -177,20 +196,38 @@ jobs:
 
       - name: Run the dispatched Norns job
         env:
-          # Enrollment credential. Scoped to this repository, single-use
-          # against the one dispatch job named below, and rotatable from Norns.
+          # Enrollment credential. Scoped to this repository, rotated on every
+          # dispatch, and single-use against the one dispatch job below.
           # Never echoed: the runner reads it from the environment and the step
           # prints no command line containing it.
           NORNS_RUNNER_ENROLLMENT_TOKEN: \${{ secrets.${NORNS_ENROLLMENT_SECRET_NAME} }}
           # Repository-scoped, job-lifetime token supplied by GitHub itself.
           GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
           NORNS_SERVER: "${origin}"
+          # SECURITY — env indirection, NOT \\\${{ }} interpolation inside run:.
+          # workflow_dispatch inputs are supplied at RUN time by anyone with
+          # repository write access (which does not require the ability to edit
+          # a protected .github/workflows/ file). Interpolating them into the
+          # shell script would let a dispatcher inject arbitrary commands and
+          # exfiltrate NORNS_RUNNER_ENROLLMENT_TOKEN. Bound to variables here,
+          # they are inert data the shell never parses as syntax.
+          NORNS_RUNNER_ID: \${{ inputs.norns_runner_id }}
+          NORNS_JOB_ID: \${{ inputs.norns_job_id }}
+          NORNS_RUN_ID: \${{ inputs.norns_run_id }}
         run: |
+          # The checked-out repository is the only tree this ephemeral runner
+          # may touch. ApprovedRepositoryRegistry fails closed on an empty
+          # allowlist, so the root must be set explicitly — the job's workspace
+          # is the sanctioned root precisely because the job is disposable.
+          # Built with node rather than string interpolation so a workspace
+          # path containing quotes or backslashes still yields valid JSON.
+          NORNS_APPROVED_ROOTS_JSON="$(node -e 'process.stdout.write(JSON.stringify([process.env.GITHUB_WORKSPACE]))')"
+          export NORNS_APPROVED_ROOTS_JSON
           norns-runner start \\
             --ephemeral \\
-            --id "\${{ inputs.norns_runner_id }}" \\
-            --job "\${{ inputs.norns_job_id }}" \\
-            --run "\${{ inputs.norns_run_id }}"
+            --id "$NORNS_RUNNER_ID" \\
+            --job "$NORNS_JOB_ID" \\
+            --run "$NORNS_RUN_ID"
 `;
 }
 

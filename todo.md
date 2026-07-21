@@ -328,14 +328,32 @@
 - [ ] O4-6 — **HUMAN**: add `workflows: write`, `actions: write`,
   `secrets: write` to the GitHub App manifest and re-authorize every existing
   installation (deliberately not changed by the agent)
-- [ ] O4-7 — **PM**: assign the migration number for
-  `drizzle/NNNN_actions_execution.sql` and update the four references in
-  `persistence/v2/migrate.ts`
+- [x] O4-7 — migration numbered 0017 at integration; stale unassigned-number
+  headers removed from 0016 and 0017
 - [ ] O4-8 — publish `@norns/runner` to a registry the Actions job can install
   from (the workflow's install step assumes an installable spec)
 - [ ] O4-9 — GitHub projects never reach `repository_bindings.status =
   'connected'` (project creation writes only an unverified candidate; nothing
   calls `POST /api/v2/projects/:id/source-bindings/github`), so the Phase 4
   gate refuses every GitHub project. Found, not owned by O4; blocks end-to-end
+
+### Adversarial review remediation (all closed)
+
+- [x] O4-R1 — BLOCKER: `${{ inputs.* }}` interpolated inside the workflow's
+  `run:` block allowed shell injection and enrollment-secret exfiltration by
+  anyone with repository write. Fixed with env indirection
+- [x] O4-R2 — BLOCKER: the template set no `NORNS_APPROVED_ROOTS_JSON`, so the
+  ephemeral runner's approved-root allowlist was empty and it could never
+  execute anything. Fixed, with real-runner-path regression coverage
+- [x] O4-R3 — BLOCKER: nothing in production created a
+  `github_actions_execution_bindings` row. Now self-provisioned from the
+  project's own primary GitHub binding
+- [x] O4-R4 — org `administration: write` token is no longer cached
+- [x] O4-R5 — enrollment TOCTOU: `markDispatched` commits before correlation
+- [x] O4-R6 — enrollment secret rotates on every launch; timing-safe compare
+- [x] O4-R7 — run correlation uses an exact delimited marker
+- [x] O4-R8 — global `afterEach` closes every PGlite the harness opens
+- [x] O4-R9 — migration 0017 grants `norns_app` SELECT/INSERT/UPDATE on both
+  new tables (production-only failure; now covered by a `SET ROLE` test)
 - [ ] O4-10 — pin `actions/checkout` and `actions/setup-node` by commit SHA in
   the workflow template (currently floating major tags)

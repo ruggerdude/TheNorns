@@ -182,6 +182,18 @@ export interface GitHubInstallationTokenScope {
   repository_ids?: readonly number[];
   /** Least-privilege permission subset for this one operation. */
   permissions: Readonly<Record<string, "read" | "write">>;
+  /**
+   * Opt out of the token cache.
+   *
+   * Caching trades a mint per call for a credential resident in server memory
+   * until near GitHub's one-hour expiry. That is a good trade for a
+   * repository-scoped, low-privilege token used repeatedly. It is a bad trade
+   * for a broad one: an installation-wide `administration: write` token is the
+   * most dangerous credential Norns ever holds, and one repository-creation
+   * click must not leave it resident for the next 58 minutes. Scopes that are
+   * both installation-wide and high-privilege set this.
+   */
+  no_cache?: boolean;
 }
 
 interface CachedInstallationToken {
@@ -208,8 +220,16 @@ export const GITHUB_TOKEN_SCOPES = {
   }),
   /** Probe whether a repository is inside the installation at all. */
   installationProbe: { permissions: { metadata: "read" } },
-  /** Create a repository under an organization (opt-in capability). */
-  createOrganizationRepository: { permissions: { administration: "write" } },
+  /**
+   * Create a repository under an organization (opt-in capability, ADR-006
+   * amendment). GitHub has no way to scope this to a repository that does not
+   * exist yet, so it is unavoidably installation-wide — which is exactly why
+   * it is never cached and is discarded the moment the call returns.
+   */
+  createOrganizationRepository: {
+    permissions: { administration: "write" },
+    no_cache: true,
+  },
   /**
    * Read one repository's git contents — used by ONBOARDING O6 to observe the
    * default branch's head revision, which is the evidence a repository binding
@@ -1333,10 +1353,13 @@ export class GitHubIntegrationService {
     installationId: string,
     scope: GitHubInstallationTokenScope,
   ): Promise<string> {
+    const cacheable = scope.no_cache !== true;
     const key = tokenCacheKey(installationId, scope);
-    const cached = this.installationTokens.get(key);
-    if (cached && cached.expires_at_ms - INSTALLATION_TOKEN_REFRESH_MARGIN_MS > Date.now()) {
-      return cached.token;
+    if (cacheable) {
+      const cached = this.installationTokens.get(key);
+      if (cached && cached.expires_at_ms - INSTALLATION_TOKEN_REFRESH_MARGIN_MS > Date.now()) {
+        return cached.token;
+      }
     }
     const body: Record<string, unknown> = { permissions: scope.permissions };
     if (scope.repository_ids !== undefined) body.repository_ids = [...scope.repository_ids];
@@ -1345,13 +1368,15 @@ export class GitHubIntegrationService {
       this.appJwt(),
       { method: "POST", body: JSON.stringify(body) },
     );
-    const expiresAtMs = Date.parse(response.expires_at);
-    this.installationTokens.set(key, {
-      token: response.token,
-      // A malformed/absent expiry must not become an immortal cache entry:
-      // fall back to GitHub's documented one-hour installation-token lifetime.
-      expires_at_ms: Number.isNaN(expiresAtMs) ? Date.now() + 3_600_000 : expiresAtMs,
-    });
+    if (cacheable) {
+      const expiresAtMs = Date.parse(response.expires_at);
+      this.installationTokens.set(key, {
+        token: response.token,
+        // A malformed/absent expiry must not become an immortal cache entry:
+        // fall back to GitHub's documented one-hour installation-token lifetime.
+        expires_at_ms: Number.isNaN(expiresAtMs) ? Date.now() + 3_600_000 : expiresAtMs,
+      });
+    }
     return response.token;
   }
 

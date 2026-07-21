@@ -24,10 +24,6 @@
 --
 -- Additive and forward-only: every existing row defaults to 'workspace',
 -- which is exactly what it already meant.
---
--- MIGRATION NUMBER IS DELIBERATELY UNASSIGNED (`NNNN_`). The integrating PM
--- assigns the number; parallel agents collided on numbers in the previous
--- program.
 
 -- ---------------------------------------------------------------------------
 -- 1. The role itself

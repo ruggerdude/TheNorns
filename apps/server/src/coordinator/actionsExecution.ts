@@ -2,6 +2,7 @@
  * ONBOARDING O4 — Actions-hosted execution, as a strict EXTENSION of the
  * Phase 4 coordinator. See the design and blast-radius notes below the imports.
  */
+import { timingSafeEqual } from "node:crypto";
 import { NORNS_WORKFLOW_VERSION } from "../integrations/actionsWorkflowTemplate.js";
 import {
   type ActionsRepositoryRef,
@@ -10,7 +11,7 @@ import {
   enrollmentTokenHash,
   generateEnrollmentToken,
 } from "../integrations/githubActions.js";
-import type { V2TransactionRunner } from "../persistence/v2/database.js";
+import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   type Phase4Coordinator,
   Phase4CoordinatorConflictError,
@@ -74,10 +75,14 @@ import {
 //      scopes to this repository and expires with the job (ONBOARDING O4
 //      item 4: no Norns token broker for pushing).
 //
-//   5. ROTATION AND REVOCATION. `rotateEnrollmentSecret()` mints a new token,
-//      seals it to the repository public key, and overwrites the secret; the
-//      old value stops working the moment the new hash is stored, because only
-//      the hash is compared and only one hash is kept. Revocation without
+//   5. ROTATION ON EVERY LAUNCH. `prepare()` calls `rotateEnrollmentSecret()`
+//      on every launch, not merely the first: a new token is minted, sealed to
+//      the repository public key, and written over the secret, and the old
+//      value dies the moment the new hash is stored (only one hash is kept).
+//      This is what stops a single successful read from being permanent — a
+//      token observed during run N is already dead by run N+1, so an attacker
+//      must re-read the secret for every run they want to intercept rather
+//      than reading once and winning every future dispatch. Revocation without
 //      rotation is `enabled = false` on the binding, which refuses every
 //      enrollment. The existing `runner_revocations` table remains the
 //      coordinator-level kill switch for the runner identity itself.
@@ -89,12 +94,23 @@ import {
 //      event, artifact, or pull request, and never echoed by the workflow —
 //      the run step passes it through `env:`, not through a command line.
 //
-// The residual risk is honest and worth stating plainly: an attacker with
-// repository write access can already run arbitrary code in that repository's
-// CI and can already push to it. Norns' presence adds the ability to intercept
-// one already-scheduled Norns run for that one project. It does not add access
-// to other projects, to other repositories, to the relay at large, or to the
-// GitHub App's private key, which never leaves the server (ADR-006).
+// The residual risk, stated without flattery:
+//
+//   * An attacker with repository write access can already run arbitrary code
+//     in that repository's CI and can already push to it. What Norns adds is
+//     the ability to intercept Norns runs for that one project.
+//   * Rotation bounds that to runs whose secret they actually read. It does
+//     NOT reduce it to a single run: someone holding persistent write access
+//     can re-read the rotated secret before each dispatch. Rotation removes
+//     the "read once, own every future run" property; it does not remove
+//     "retain access, keep reading". Only revoking their repository access,
+//     or disabling the binding, does that.
+//   * Interception is also not silent. Enrollment is single-use, so a stolen
+//     redemption makes the legitimate job's own enrollment fail, and both
+//     outcomes are audited (`actions.enrollment.completed` / `.rejected`).
+//   * It does not add access to other projects, to other repositories, to the
+//     relay at large, or to the GitHub App's private key, which never leaves
+//     the server (ADR-006).
 
 export class ActionsExecutionError extends Error {
   constructor(
@@ -179,6 +195,79 @@ export class ActionsExecutionRepository {
       );
       return result.rows[0] ?? null;
     });
+  }
+
+  /**
+   * Derive (and keep fresh) the Actions execution binding from the project's
+   * own primary GitHub repository binding.
+   *
+   * This is what makes the Actions path self-provisioning. Previously the only
+   * caller of `upsertBinding` was the test suite, so in production every
+   * schedule request returned `actions_execution_not_configured` forever.
+   * Rather than requiring the projects module to call into this seam — a
+   * cross-module coupling that would have to be negotiated between two agents
+   * working in parallel — the binding is projected here, read-only, from the
+   * row the projects module already writes.
+   *
+   * Returns null when the project has no primary GitHub binding, or when its
+   * `repository_id` is not the numeric GitHub id that installation-token
+   * scoping requires. Both are "not configured", never a silent half-state.
+   */
+  ensureBindingForProject(projectId: string): Promise<ActionsExecutionBindingRow | null> {
+    return this.transactions.transaction(async (sql) => {
+      const result = await sql.query<ActionsExecutionBindingRow>(
+        `INSERT INTO github_actions_execution_bindings (
+           repository_binding_id, project_id, connection_id, installation_id,
+           repository_github_id, owner, name, default_branch, runner_id
+         )
+         SELECT binding.id,
+                binding.project_id,
+                'github:' || binding.github_installation_id,
+                binding.github_installation_id,
+                binding.repository_id::BIGINT,
+                binding.github_owner,
+                binding.github_name,
+                binding.default_branch,
+                $2
+         FROM repository_bindings binding
+         JOIN projects project
+           ON project.id = binding.project_id
+          AND project.primary_repository_binding_id = binding.id
+         WHERE binding.project_id = $1
+           AND binding.binding_type = 'github'
+           AND binding.github_installation_id IS NOT NULL
+           AND binding.github_owner IS NOT NULL
+           AND binding.github_name IS NOT NULL
+           -- repository_id is TEXT; only the numeric GitHub id can scope a token.
+           AND binding.repository_id ~ '^[0-9]+$'
+         ON CONFLICT (repository_binding_id) DO UPDATE SET
+           connection_id = EXCLUDED.connection_id,
+           installation_id = EXCLUDED.installation_id,
+           repository_github_id = EXCLUDED.repository_github_id,
+           owner = EXCLUDED.owner,
+           name = EXCLUDED.name,
+           default_branch = EXCLUDED.default_branch,
+           updated_at = now()
+         RETURNING ${BINDING_COLUMNS}`,
+        [projectId, actionsRunnerId(projectId)],
+      );
+      // No row inserted/updated means no eligible GitHub binding exists. An
+      // existing row may still be present from an earlier projection, so fall
+      // back to reading it rather than reporting "not configured" wrongly.
+      return result.rows[0] ?? (await this.readBinding(sql, "project_id", projectId));
+    });
+  }
+
+  private async readBinding(
+    sql: V2SqlExecutor,
+    column: "project_id" | "runner_id",
+    value: string,
+  ): Promise<ActionsExecutionBindingRow | null> {
+    const result = await sql.query<ActionsExecutionBindingRow>(
+      `SELECT ${BINDING_COLUMNS} FROM github_actions_execution_bindings WHERE ${column} = $1`,
+      [value],
+    );
+    return result.rows[0] ?? null;
   }
 
   upsertBinding(input: ActionsExecutionBindingInput): Promise<ActionsExecutionBindingRow> {
@@ -292,6 +381,24 @@ export class ActionsExecutionRepository {
     });
   }
 
+  /**
+   * Attach GitHub run correlation after the fact.
+   *
+   * Deliberately does NOT touch `status`: by the time correlation resolves the
+   * job may already have enrolled, and moving it backwards would invalidate a
+   * live runner.
+   */
+  attachGitHubRun(dispatchJobId: string, run: { id: number; url: string }): Promise<void> {
+    return this.transactions.transaction(async (sql) => {
+      await sql.query(
+        `UPDATE github_actions_runs
+         SET github_run_id = $2, github_run_url = $3, updated_at = now()
+         WHERE dispatch_job_id = $1 AND github_run_id IS NULL`,
+        [dispatchJobId, run.id, run.url],
+      );
+    });
+  }
+
   markFailed(dispatchJobId: string, error: string): Promise<void> {
     return this.transactions.transaction(async (sql) => {
       await sql.query(
@@ -383,7 +490,12 @@ export class ActionsExecutionCoordinator {
       timeoutMinutes: this.options.timeoutMinutes,
     });
     await this.repository.recordWorkflowInstall(binding.repository_binding_id, workflow);
-    if (workflow.blocked_reason === null && binding.enrollment_secret_hash === null) {
+    // Rotate on EVERY launch, not only when no secret exists yet. A secret read
+    // once would otherwise stay valid for every future dispatch, so an attacker
+    // who read it would not have to race a scheduled run — they would win every
+    // subsequent one. Rotating here means a value observed during run N is
+    // already dead by run N+1.
+    if (workflow.blocked_reason === null) {
       await this.rotateEnrollmentSecret(binding);
     }
     return workflow;
@@ -413,7 +525,9 @@ export class ActionsExecutionCoordinator {
   async schedule(
     input: Omit<Phase4ScheduleInput, "runner_id" | "runner_generation">,
   ): Promise<Phase4ScheduledRun & { actions: ActionsLaunch }> {
-    const binding = await this.repository.bindingForProject(input.project_id);
+    // Self-provisioning: project the Actions binding from the project's own
+    // primary GitHub repository binding, creating or refreshing it as needed.
+    const binding = await this.repository.ensureBindingForProject(input.project_id);
     if (!binding) {
       throw new ActionsExecutionError(
         "actions_execution_not_configured",
@@ -475,6 +589,12 @@ export class ActionsExecutionCoordinator {
         norns_runner_id: prepared.runner_id,
         norns_run_id: scheduled.run_id,
       });
+      // Commit `dispatched` IMMEDIATELY after the 204, before any further
+      // network call. `redeemEnrollment` requires status='dispatched', and a
+      // fast job can enroll while a run-correlation round-trip is still in
+      // flight — which used to produce an opaque 403 and a dead job holding a
+      // queued dispatch. Run correlation is attached afterwards as an update.
+      await this.repository.markDispatched(scheduled.dispatch_job_id, null);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       await this.repository.markFailed(scheduled.dispatch_job_id, detail);
@@ -489,9 +609,9 @@ export class ActionsExecutionCoordinator {
     }
 
     // workflow_dispatch answers 204 with no body, so correlate afterwards
-    // through the run name the template sets. A miss is not fatal: the job may
-    // simply not be queued yet, and the runner's own enrollment is what proves
-    // it started.
+    // through the run name the template sets. A miss is not fatal and must not
+    // affect enrollment: the job may simply not be queued yet, and the runner's
+    // own enrollment is what proves it started.
     let located: { id: number; url: string } | null = null;
     try {
       const run = await this.actions.findRunForJob(reference, scheduled.dispatch_job_id);
@@ -499,7 +619,7 @@ export class ActionsExecutionCoordinator {
     } catch {
       located = null;
     }
-    await this.repository.markDispatched(scheduled.dispatch_job_id, located);
+    if (located) await this.repository.attachGitHubRun(scheduled.dispatch_job_id, located);
 
     return {
       ...scheduled,
@@ -573,8 +693,12 @@ export class ActionsEnrollmentService {
     );
     const binding = await this.repository.bindingForRunner(input.runner_id);
     if (!binding || !binding.enabled || !binding.enrollment_secret_hash) throw rejected;
-    // Compare hashes, never the token. Both operands are fixed-length hex.
-    if (enrollmentTokenHash(input.enrollment_token) !== binding.enrollment_secret_hash) {
+    // Compare hashes, never the token, and compare them in constant time.
+    // Both operands are fixed-length hex, so a length mismatch means a
+    // corrupt stored hash rather than an attacker-chosen length.
+    const supplied = Buffer.from(enrollmentTokenHash(input.enrollment_token), "utf8");
+    const expected = Buffer.from(binding.enrollment_secret_hash, "utf8");
+    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
       throw rejected;
     }
     // Single-use, and only against a job Norns itself dispatched.
