@@ -167,6 +167,10 @@ export interface AttachmentRow {
 
 const VERIFIED_STATUSES = new Set(["connected", "promoted"]);
 
+const NAME_TAKEN_HINT =
+  "Norns will not take over a repository it did not create -- choose a " +
+  "different name, or start the project from that existing repository instead.";
+
 const INSTALLATION_HINT =
   "Norns cannot commit the workflow file, start an Actions run, or read run " +
   "status until the installation is granted access to this repository";
@@ -448,24 +452,44 @@ export class ProjectOnboardingService {
   }
 
   /**
-   * Creates the repository without ever creating it twice.
+   * Creates the repository without ever creating it twice -- and without ever
+   * silently adopting one Norns did not create.
    *
-   * GitHub repository creation is not idempotent -- a retry returns 422 "name
-   * already exists", which GitHubIntegrationService surfaces as a generic
-   * github_api_error. The replay short-circuit above covers the ordinary
-   * double submit; this look-before-create covers the harder case, a crash
-   * between GitHub creating the repository and Norns committing the row.
+   * Two rules pull against each other here. GitHub repository creation is not
+   * idempotent (a retry answers 422), so a genuine retry of the same submission
+   * must be able to reuse a repository that is already there. But a first-time
+   * submission must NEVER quietly take over a same-named repository that
+   * already existed -- a user typing "website" into the *create a new
+   * repository* form must not have their production `website` repo adopted,
+   * labelled `created`, and later committed into.
+   *
+   * A bare name lookup cannot tell those apart: a same-named repository carries
+   * no marker saying who made it. So the INTENT is recorded durably before
+   * GitHub is called. A pre-existing intent for this exact (actor, idempotency
+   * key, connection, name) is proof Norns already reached the creation step for
+   * THIS submission, which makes a same-named repository its own earlier
+   * attempt. No such intent means the collision is somebody else's repository,
+   * and it is surfaced for the human to resolve rather than absorbed.
    */
   private async provisionNewRepo(command: NewRepoCommand): Promise<{
     descriptor: RemoteRepositoryDescriptor;
     provisioning: "created";
   }> {
+    const reservation = await this.reserveRepositoryIntent(command);
     const existing = await this.remotes.findByName({
       actor_id: command.actor.actor_id,
       connection_id: command.connection_id,
       name: command.repository_name,
     });
-    if (existing) return { descriptor: existing, provisioning: "created" };
+    if (existing) {
+      if (!reservation.retry_of_this_submission) {
+        throw new OnboardingValidationError(
+          "repository_name_taken",
+          `A repository named "${command.repository_name}" already exists on this GitHub connection. ${NAME_TAKEN_HINT}`,
+        );
+      }
+      return { descriptor: existing, provisioning: "created" };
+    }
     const descriptor = await this.remotes.create({
       actor_id: command.actor.actor_id,
       connection_id: command.connection_id,
@@ -474,6 +498,51 @@ export class ProjectOnboardingService {
       private: command.private,
     });
     return { descriptor, provisioning: "created" };
+  }
+
+  /**
+   * Durably claims "this submission is about to create this repository".
+   *
+   * `retry_of_this_submission` is true only when an intent row was already
+   * present AND names the same connection and repository -- so reusing an
+   * idempotency key with a different repository name cannot license adopting
+   * something else.
+   */
+  private reserveRepositoryIntent(
+    command: NewRepoCommand,
+  ): Promise<{ retry_of_this_submission: boolean }> {
+    const idempotencyId = submissionId(command.actor, command.idempotency_key);
+    return this.transactions.transaction(async (tx) => {
+      const existing = await tx.query<{ connection_id: string; repository_name: string }>(
+        `SELECT connection_id, repository_name
+         FROM project_onboarding_repository_intents
+         WHERE idempotency_id = $1
+         FOR UPDATE`,
+        [idempotencyId],
+      );
+      const intent = existing.rows[0];
+      if (intent) {
+        return {
+          retry_of_this_submission:
+            intent.connection_id === command.connection_id &&
+            intent.repository_name === command.repository_name,
+        };
+      }
+      await tx.query(
+        `INSERT INTO project_onboarding_repository_intents (
+           idempotency_id, actor_type, actor_id, connection_id, repository_name
+         ) VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (idempotency_id) DO NOTHING`,
+        [
+          idempotencyId,
+          command.actor.actor_type,
+          command.actor.actor_id,
+          command.connection_id,
+          command.repository_name,
+        ],
+      );
+      return { retry_of_this_submission: false };
+    });
   }
 }
 

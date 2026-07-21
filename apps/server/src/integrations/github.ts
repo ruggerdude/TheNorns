@@ -210,6 +210,15 @@ export const GITHUB_TOKEN_SCOPES = {
   installationProbe: { permissions: { metadata: "read" } },
   /** Create a repository under an organization (opt-in capability). */
   createOrganizationRepository: { permissions: { administration: "write" } },
+  /**
+   * Read one repository's git contents — used by ONBOARDING O6 to observe the
+   * default branch's head revision, which is the evidence a repository binding
+   * needs before it may claim `connected`.
+   */
+  readRepositoryContents: (repositoryId: number) => ({
+    repository_ids: [repositoryId],
+    permissions: { contents: "read" },
+  }),
   /** Commit `.github/workflows/norns-agent.yml` into one repository. */
   writeWorkflowFile: (repositoryId: number) => ({
     repository_ids: [repositoryId],
@@ -1424,6 +1433,50 @@ export class GitHubIntegrationService {
       action_required: `The Norns GitHub App is installed on ${connection.owner_login}, but ${owner}/${name} is not one of the repositories it can access, so Norns cannot run work there yet. Open the installation settings, add this repository under “Repository access”, and save.`,
       manage_installation_url: manageUrl,
     };
+  }
+
+  /**
+   * ONBOARDING O6 — the current head revision of a repository's default branch.
+   *
+   * This is the one fact a GitHub-backed repository binding cannot be promoted
+   * to `connected` without: the Phase 4 dispatch gate requires a verified
+   * revision, and for a repository Norns never clones, GitHub is the only
+   * truthful source of one. Reading it also *proves* `contents: read` works
+   * through this installation for this repository, which is why the caller
+   * treats the result as evidence rather than as metadata.
+   *
+   * Lives here beside `resolveRepository` and `installationReadiness` — the
+   * other "facts about one repository, read through its installation" calls —
+   * rather than in the Actions module, which owns execution, not identity.
+   */
+  async repositoryHead(input: {
+    connectionId: string;
+    owner: string;
+    name: string;
+    repositoryId: number;
+  }): Promise<string> {
+    const connection = await this.connection(input.connectionId);
+    const token = await this.installationToken(
+      connection.installation_id,
+      GITHUB_TOKEN_SCOPES.readRepositoryContents(input.repositoryId),
+    );
+    const repository = await this.github<GitHubRepository>(
+      `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.name)}`,
+      token,
+    );
+    const branch = await this.github<{ commit?: { sha?: string } }>(
+      `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.name)}/branches/${encodeURIComponent(repository.default_branch ?? "main")}`,
+      token,
+    );
+    const sha = branch.commit?.sha;
+    if (typeof sha !== "string" || sha.length === 0) {
+      throw new GitHubIntegrationError(
+        "repository_head_unavailable",
+        `${input.owner}/${input.name} has no commits on ${repository.default_branch ?? "its default branch"} yet, so Norns has no revision to verify against.`,
+        409,
+      );
+    }
+    return sha;
   }
 
   private async oauthToken(body: Record<string, string>): Promise<OAuthTokenResponse> {

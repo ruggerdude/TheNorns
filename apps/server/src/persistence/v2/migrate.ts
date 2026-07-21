@@ -97,6 +97,17 @@ export const ACTIONS_EXECUTION_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+// ONBOARDING O6: repository-creation intents, so an idempotent retry can be
+// told apart from silently adopting a user's existing repository.
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED. 0016 and 0017 are taken; the PM
+// assigns this one and renames the file at integration.
+export const ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME = "NNNN_onboarding_repository_intents";
+export const ONBOARDING_REPOSITORY_INTENTS_MIGRATION_URL = new URL(
+  "../../../drizzle/NNNN_onboarding_repository_intents.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -195,6 +206,10 @@ export async function loadOnboardingBindingsMigrationSql(): Promise<string> {
 
 export async function loadActionsExecutionMigrationSql(): Promise<string> {
   return readFile(ACTIONS_EXECUTION_MIGRATION_URL, "utf8");
+}
+
+export async function loadOnboardingRepositoryIntentsMigrationSql(): Promise<string> {
+  return readFile(ONBOARDING_REPOSITORY_INTENTS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -372,6 +387,10 @@ export async function runCurrentV2Migrations(
     {
       name: ACTIONS_EXECUTION_MIGRATION_NAME,
       sql: await loadActionsExecutionMigrationSql(),
+    },
+    {
+      name: ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME,
+      sql: await loadOnboardingRepositoryIntentsMigrationSql(),
     },
   ]);
 }
