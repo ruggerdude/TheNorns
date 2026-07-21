@@ -51,7 +51,23 @@ Minimum permissions for repository selection and normal Norns work:
 - Contents: read/write
 - Pull requests: read/write
 - Checks: none (or read only when verification requires it)
-- Actions: none (or read only when verification requires it)
+
+Required for Actions-hosted execution (E14 — the runtime that runs Norns'
+work by committing a workflow file and dispatching GitHub Actions runs; see
+`GITHUB_TOKEN_SCOPES` in `apps/server/src/integrations/github.ts`):
+
+- Workflows: write — commits `.github/workflows/norns-agent.yml`. GitHub
+  rejects any Contents write under `.github/workflows/` without this.
+- Actions: read/write — dispatches a workflow run and reads its status,
+  conclusion, and job logs.
+- Secrets: write — reads the repository public key and writes the runner's
+  enrollment secret.
+
+Without these three, Actions-hosted execution fails closed with a
+`github_app_permission_missing` error (see "Upgrading an existing App" below)
+rather than silently doing nothing; all other connection features (browsing
+repositories, connecting a repository, the guided setup flow itself) work
+without them.
 
 Optional permission for **Create on GitHub**:
 
@@ -94,3 +110,55 @@ Rotate the client secret, private key, state secret, or token-encryption key
 through the normal credential incident process. Rotating the encryption key
 without reauthorizing stored users makes existing encrypted authorizations
 unreadable; reconnect GitHub immediately after such a rotation.
+
+## Upgrading an existing App to add a permission (e.g. Actions-hosted execution)
+
+Changing the manifest (or the environment-managed permission list above) only
+changes what a **newly created** App requests. GitHub does **not**
+retroactively change an already-created App's permissions — an App created
+before `workflows`, `actions`, or `secrets` were added to `default_permissions`
+keeps its old permission set indefinitely, and every installation of it keeps
+that old set too, until a human does both of the following on GitHub:
+
+1. **Update the App's permissions.** GitHub → **Settings → Developer
+   settings → GitHub Apps** → the app → **Permissions & events**. Add or
+   raise the permissions (Workflows: write, Actions: read/write, Secrets:
+   write — see the minimum-permissions list above), then **Save changes**.
+2. **Accept the pending permission update on each installation.** Editing the
+   App's permissions does not push the change to installations automatically
+   — GitHub queues it and requires the account that installed the App to
+   approve it. Go to **Settings → Applications → Installed GitHub Apps** →
+   find the app → **Configure**, and accept the permission update GitHub
+   prompts for there. Do this once per installation (once per personal
+   account or organization that has installed the App).
+
+Until step 2 is done for a given installation, that installation's tokens are
+still minted against its old grant. Norns detects this at the moment it tries
+to mint a token needing the new permission and fails the operation with a
+`github_app_permission_missing` error naming the missing permission(s) and
+these same two steps, rather than a generic GitHub failure — see
+`GitHubIntegrationService.installationToken` in
+`apps/server/src/integrations/github.ts`. This is not something Norns can
+detect or fix in advance; it is only discovered when the operation that needs
+the new permission is attempted.
+
+## The "Only select repositories" trap
+
+An installation can be scoped to "All repositories" or "Only select
+repositories" for its owner account. If it is scoped to "Only select
+repositories," a repository Norns creates through **Create on GitHub** — or
+any repository added to GitHub after the installation was configured — is
+**not** automatically part of that installation. Nothing Norns dispatches to
+that repository can succeed (no token can be scoped to it, so no workflow
+commit, secret write, or dispatch will work) until a human adds it explicitly:
+**Settings → Applications → Installed GitHub Apps** → the app → **Configure**
+→ under "Repository access," add the repository → **Save**.
+
+Norns already surfaces this rather than failing silently: a project whose
+repository is not in its installation reports the onboarding blocker
+`installation_not_ready` (backed by `GitHubIntegrationService
+.installationReadiness()`'s `reason: "repository_not_in_installation"`), with
+an `action_required` message and a direct link to the installation's
+configuration page. If a newly created or newly connected repository will not
+proceed past this state, check the installation's repository-access setting
+first.

@@ -2,6 +2,8 @@ import { generateKeyPairSync } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  GITHUB_APP_PERMISSION_MISSING,
+  GITHUB_TOKEN_SCOPES,
   GitHubIntegrationService,
   githubIntegrationConfigFromEnvironment,
 } from "../src/integrations/github.js";
@@ -240,11 +242,32 @@ describe.sequential("workspace GitHub integration", () => {
       redirect_url: "https://norns.example/api/integrations/github/manifest/callback",
       callback_urls: ["https://norns.example/api/integrations/github/callback"],
       setup_url: "https://norns.example/api/integrations/github/setup",
+      // E14: all seven permissions the execution path mints scoped tokens
+      // for — see GITHUB_TOKEN_SCOPES. `workflows`, `actions`, and `secrets`
+      // were previously deliberately withheld pending human approval.
       default_permissions: {
+        metadata: "read",
         contents: "write",
         pull_requests: "write",
+        administration: "write",
+        workflows: "write",
+        actions: "write",
+        secrets: "write",
       },
     });
+    // Exact match, not just a subset: an extra or missing permission here is
+    // the whole point of this test.
+    expect(Object.keys(JSON.parse(registration.manifest).default_permissions).sort()).toEqual(
+      [
+        "actions",
+        "administration",
+        "contents",
+        "metadata",
+        "pull_requests",
+        "secrets",
+        "workflows",
+      ].sort(),
+    );
 
     await guided.completeManifest("manifest-admin", "manifest-code", registration.state);
     const stored = await pg.query<{
@@ -282,6 +305,104 @@ describe.sequential("workspace GitHub integration", () => {
     expect(new URL(reloaded.authorizationUrl("manifest-admin")).searchParams.get("client_id")).toBe(
       "Iv1.guided",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// E14: a missing GitHub App permission must be identifiable and actionable,
+// not a generic GitHub failure indistinguishable from any other (E10-3 /
+// audit defect #3). GitHub answers 422 to the token-mint endpoint when the
+// requested `permissions` exceed what the installation's current grant
+// allows — the exact situation an App created before this change, or an
+// installation that has not yet accepted the upgraded permissions, is in.
+describe("insufficient GitHub App permission at token mint (E14)", () => {
+  async function serviceWithMintResponse(mint: () => Response) {
+    const pg = new PGlite();
+    await pg.exec(`
+      CREATE ROLE norns_app NOLOGIN;
+      CREATE TABLE norns_state (
+        key TEXT PRIMARY KEY,
+        snapshot JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const config = githubIntegrationConfigFromEnvironment(
+      {
+        NORNS_GITHUB_APP_ID: "1234",
+        NORNS_GITHUB_CLIENT_ID: "Iv1.test",
+        NORNS_GITHUB_CLIENT_SECRET: "client-secret",
+        NORNS_GITHUB_APP_SLUG: "the-norns-test",
+        NORNS_GITHUB_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+        NORNS_GITHUB_STATE_SECRET: "state-secret-that-is-at-least-thirty-two-bytes",
+        NORNS_GITHUB_TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+      },
+      "https://norns.example",
+    );
+    if (!config) throw new Error("expected GitHub test configuration");
+    const http = vi.fn(async (input: string | URL | Request) => {
+      if (String(input).endsWith("/access_tokens")) return mint();
+      return json({ message: `unexpected ${String(input)}` }, 500);
+    });
+    const service = new GitHubIntegrationService(
+      new PGliteTransactionRunner(pg as never),
+      config,
+      http as typeof fetch,
+    );
+    return { pg, service };
+  }
+
+  it("names the missing permission and the exact GitHub upgrade steps", async () => {
+    const { pg, service } = await serviceWithMintResponse(() =>
+      json({ message: "Validation Failed", documentation_url: "https://docs.github.com" }, 422),
+    );
+    try {
+      await expect(
+        service.installationToken("42", GITHUB_TOKEN_SCOPES.dispatchWorkflow(90210)),
+      ).rejects.toMatchObject({
+        code: GITHUB_APP_PERMISSION_MISSING,
+        status: 409,
+        message: expect.stringMatching(/actions: write/),
+      });
+      // The click-path a human needs, spelled out — not just a code.
+      await expect(
+        service.installationToken("42", GITHUB_TOKEN_SCOPES.writeWorkflowFile(90210)),
+      ).rejects.toMatchObject({
+        message: expect.stringMatching(/Permissions & events/),
+      });
+      await expect(
+        service.installationToken("42", GITHUB_TOKEN_SCOPES.writeRepositorySecret(90210)),
+      ).rejects.toMatchObject({
+        message: expect.stringMatching(/Installed GitHub Apps/),
+      });
+    } finally {
+      await pg.close();
+    }
+  });
+
+  it("stays on the generic code for a GitHub failure that is not a permission grant problem", async () => {
+    const { pg, service } = await serviceWithMintResponse(() => json({ message: "boom" }, 500));
+    try {
+      await expect(
+        service.installationToken("42", GITHUB_TOKEN_SCOPES.dispatchWorkflow(90210)),
+      ).rejects.toMatchObject({ code: "github_api_error" });
+    } finally {
+      await pg.close();
+    }
+  });
+
+  it("does not mistake a suspended-installation 403 for a missing permission", async () => {
+    const { pg, service } = await serviceWithMintResponse(() =>
+      json({ message: "This installation has been suspended" }, 403),
+    );
+    try {
+      await expect(
+        service.installationToken("42", GITHUB_TOKEN_SCOPES.dispatchWorkflow(90210)),
+      ).rejects.toMatchObject({ code: "github_api_error" });
+    } finally {
+      await pg.close();
+    }
   });
 });
 
