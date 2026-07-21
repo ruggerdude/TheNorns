@@ -1,8 +1,19 @@
 // Codex runtime via the official @openai/codex-sdk (NORN-012 verified:
 // run(input, {signal}) cancels the turn, resumeThread() resumes sessions,
-// workingDirectory + sandboxMode are thread options). Requires OpenAI
-// credentials at run time (NORN-027).
+// workingDirectory + sandboxMode are thread options).
+//
+// EXECUTION E9 — credential-free when a gateway is supplied. The SDK does not
+// speak HTTP itself: it spawns the bundled `codex` binary with
+// `--config openai_base_url=<baseUrl>` and `CODEX_API_KEY=<apiKey>` in the
+// environment (verified in @openai/codex-sdk 0.144.3 dist/index.js,
+// `CodexExec.run`). The binary then issues `POST <base_url>/responses`. So
+// pointing Codex at Norns is exactly: pass the gateway's `/v1` base URL and
+// the per-run credential, and let it speak the ordinary Responses API.
+//
+// WITHOUT a gateway it behaves exactly as before (NORN-027), so a laptop
+// runner with its own key is unaffected.
 import { Codex } from "@openai/codex-sdk";
+import { type GatewayCredentialProvider, gatewayEnvironment } from "../modelGateway.js";
 import type { CodingRuntime, RuntimeRunRequest, RuntimeRunResult, RuntimeUsage } from "./types.js";
 
 export class CodexRuntime implements CodingRuntime {
@@ -15,7 +26,16 @@ export class CodexRuntime implements CodingRuntime {
     stop_after_current: false,
   };
 
-  constructor(private readonly options: { model?: string; resumeThreadId?: string } = {}) {}
+  constructor(
+    private readonly options: {
+      model?: string;
+      resumeThreadId?: string;
+      /** EXECUTION E9 — resolves the per-run gateway credential, lazily. */
+      gateway?: GatewayCredentialProvider;
+      /** Injectable for tests. Defaults to `process.env`. */
+      baseEnv?: NodeJS.ProcessEnv;
+    } = {},
+  ) {}
 
   async run(request: RuntimeRunRequest): Promise<RuntimeRunResult> {
     const usage: RuntimeUsage = {
@@ -24,7 +44,19 @@ export class CodexRuntime implements CodingRuntime {
       usage_source: "runtime_report",
     };
     try {
-      const codex = new Codex();
+      // EXECUTION E9 — minted immediately before the turn, never held.
+      const credential = this.options.gateway ? await this.options.gateway() : null;
+      const codex = credential
+        ? new Codex({
+            baseUrl: credential.openai_base_url,
+            apiKey: credential.token,
+            // `env` REPLACES the child environment in this SDK, so the real
+            // provider keys are stripped rather than merely shadowed: a
+            // surviving OPENAI_API_KEY would be spent outside every budget and
+            // meter Norns has.
+            env: gatewayEnvironment(this.options.baseEnv ?? process.env, {}),
+          })
+        : new Codex();
       const threadOptions = {
         workingDirectory: request.worktreePath,
         skipGitRepoCheck: false,
