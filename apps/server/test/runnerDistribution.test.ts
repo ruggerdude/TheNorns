@@ -132,7 +132,7 @@ describe("integrity: the server refuses to serve bytes that do not match its man
     };
     // A swapped artifact: same name, same declared digest, different bytes.
     const tampered = Buffer.from(readFileSync(join(dir, manifest.filename)));
-    tampered[tampered.length - 1] ^= 0xff;
+    tampered[tampered.length - 1] = (tampered.at(-1) ?? 0) ^ 0xff;
     writeFileSync(join(dir, manifest.filename), tampered);
     expect(() => loadRunnerTarball(dir)).toThrow(RunnerTarballUnavailableError);
     expect(() => loadRunnerTarball(dir)).toThrow(/does not match its manifest/);
