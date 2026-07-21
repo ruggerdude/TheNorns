@@ -133,6 +133,8 @@ let debateWorkerTimer: NodeJS.Timeout | undefined;
 let integrationServices: { github: GitHubIntegrationService | null } | undefined;
 // FRONT DOOR P2 §D1: observable planning runs need the relational runtime.
 let planningRunsOptions: { transactions: V2TransactionRunner } | undefined;
+// FRONT DOOR P4 (D3): image attachments need the same relational runtime.
+let attachmentsOptions: { transactions: V2TransactionRunner } | undefined;
 
 const publicOrigin =
   process.env.NORNS_PUBLIC_ORIGIN ??
@@ -333,6 +335,7 @@ if (databaseUrl) {
     // FRONT DOOR P2 §D1: expose observable planning runs over the same
     // relational runtime the debate workflow uses.
     planningRunsOptions = { transactions: runtimeTransactions };
+    attachmentsOptions = { transactions: runtimeTransactions };
     identityRuntime = createIdentityRuntime({
       users,
       route: identityRoute,
@@ -571,6 +574,7 @@ const server = await buildServer({
   ...(phase7Services !== undefined ? { phase7: phase7Services } : {}),
   ...(debateService !== undefined ? { debates: debateService } : {}),
   ...(planningRunsOptions !== undefined ? { planningRuns: planningRunsOptions } : {}),
+  ...(attachmentsOptions !== undefined ? { attachments: attachmentsOptions } : {}),
   ...(integrationServices !== undefined ? { integrations: integrationServices } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),
