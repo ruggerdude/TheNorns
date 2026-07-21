@@ -301,6 +301,22 @@ export interface ServerOptions {
    */
   planningRuns?: { transactions: V2TransactionRunner };
   /**
+   * EXECUTION E10 (E9-10, = E3-10) — the relational runtime behind BOTH the E3
+   * completion proxy and the E9 provider-native gateway.
+   *
+   * Before this option existed, each of them reached for
+   * `planningRuns?.transactions ?? onboarding?.transactions ??
+   * attachments?.transactions` — whichever unrelated feature happened to be
+   * configured. That worked only because production wires all three from the
+   * same runner, and would have silently disabled runner inference the day
+   * someone turned planning runs off. Naming it makes the dependency explicit
+   * and makes `main.ts` the single place that decides it exists.
+   *
+   * The fallback chain is retained below purely so existing tests that
+   * construct `buildServer` with only `planningRuns` keep working.
+   */
+  runnerInference?: { transactions: V2TransactionRunner };
+  /**
    * FRONT DOOR P4 (D3): image attachments (content-addressed Postgres store).
    * Unavailable without its database runtime, same as `planningRuns`. When
    * both are present, objective attachments are injected into planning round 1.
@@ -437,11 +453,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // A deployment with no relational runtime gets no proxy, and every request
   // is answered `unsupported` — never silently executed without metering.
   //
-  // FOLLOW-UP FOR THE PM: a dedicated `ServerOptions.runnerInference:
-  // { transactions }` passed from main.ts would be cleaner than reaching for
-  // whichever relational option happens to be present. Reported, not done,
-  // because main.ts is E2's this phase.
+  // EXECUTION E10 (E9-10, = E3-10) — DONE. `runnerInference` is now a named
+  // option, wired from main.ts alongside the other relational features, so the
+  // dependency is stated rather than inferred from whichever unrelated feature
+  // happens to be configured. The remaining fallbacks are compatibility only:
+  // they keep every existing test (and any deployment not yet passing the new
+  // option) behaving exactly as before. Production always supplies the named
+  // one, and a boot-shape test asserts it.
   const runtimeTransactionsForInference =
+    options.runnerInference?.transactions ??
     options.planningRuns?.transactions ??
     options.onboarding?.transactions ??
     options.attachments?.transactions;
@@ -499,10 +519,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // notions of "this runner owns this run" is how a bypass gets built; there
   // is only one.
   //
-  // SAME PM FOLLOW-UP AS E3 (E3-10): a dedicated
-  // `ServerOptions.runnerInference: { transactions }` from main.ts would beat
-  // reaching for whichever relational option happens to be present. Not done
-  // here because main.ts is E2's file this phase.
+  // E3-10 / E9-10 CLOSED BY E10: `runtimeTransactionsForInference` above now
+  // prefers the named `ServerOptions.runnerInference`, wired from main.ts. The
+  // gateway and the E3 proxy therefore share one explicitly-supplied runtime
+  // rather than each inferring one.
   const gatewayOrigin = configuredOrigin ?? "http://127.0.0.1";
   // The mint route and the gateway MUST agree about run ownership, so they are
   // handed the same lookup rather than each constructing one.

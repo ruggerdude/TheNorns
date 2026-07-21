@@ -168,6 +168,12 @@ let onboardingOptions: { transactions: V2TransactionRunner } | undefined;
 // constructor throws on anything other than HTTPS (or http on localhost),
 // so a misconfiguration fails at boot, not silently at runner-fetch time.
 let executionOptions: { transactions: V2TransactionRunner; baseUrl?: string } | undefined;
+// EXECUTION E10 (E9-10, = E3-10): the relational runtime behind BOTH the E3
+// completion proxy and E9's provider-native model gateway. Both previously
+// reached for `planningRuns ?? onboarding ?? attachments` inside buildServer --
+// working only by the accident that production wires all three from this same
+// runner, and one config change away from silently disabling runner inference.
+let runnerInferenceOptions: { transactions: V2TransactionRunner } | undefined;
 
 const publicOrigin =
   process.env.NORNS_PUBLIC_ORIGIN ??
@@ -417,6 +423,9 @@ if (databaseUrl) {
     // undefined -- exactly the dead-on-arrival state the EXECUTION audit
     // found.
     executionOptions = { transactions: runtimeTransactions, baseUrl: publicOrigin };
+    // EXECUTION E10 (E9-10, = E3-10): state the dependency instead of letting
+    // buildServer infer it from an unrelated feature's option.
+    runnerInferenceOptions = { transactions: runtimeTransactions };
     identityRuntime = createIdentityRuntime({
       users,
       route: identityRoute,
@@ -660,6 +669,8 @@ const server = await buildServer({
   ...(attachmentsOptions !== undefined ? { attachments: attachmentsOptions } : {}),
   ...(onboardingOptions !== undefined ? { onboarding: onboardingOptions } : {}),
   ...(executionOptions !== undefined ? { execution: executionOptions } : {}),
+  // EXECUTION E10 (E9-10, = E3-10): the E3 proxy and the E9 gateway.
+  ...(runnerInferenceOptions !== undefined ? { runnerInference: runnerInferenceOptions } : {}),
   ...(integrationServices !== undefined ? { integrations: integrationServices } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),

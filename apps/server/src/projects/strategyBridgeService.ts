@@ -32,6 +32,7 @@ import {
   fingerprintV2StrategyImmutableContent,
   validatePlan,
 } from "@norns/contracts";
+import { agenticRuntimeForProvider } from "../coordinator/agenticRuntime.js";
 import { newId } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import type { PhaseWorkflowService } from "./phaseWorkflowService.js";
@@ -892,7 +893,15 @@ export class StrategyBridgeService {
           [
             id,
             pair.provider,
-            pair.provider,
+            // EXECUTION E10 (E9-9). This was `pair.provider` — so every profile
+            // the planning bridge created carried runtime `anthropic` or
+            // `openai`, neither of which is a key in the runner's runtime map.
+            // A task staffed through the normal path dispatched a runtime no
+            // runner could construct and died with "runtime anthropic is
+            // unavailable" before doing any work. Since E9's gateway, the
+            // agentic runtimes are credential-free and are the right answer in
+            // an Actions job as well as on a laptop.
+            agenticRuntimeForProvider(pair.provider) ?? pair.provider,
             pair.model,
             JSON.stringify(["implementation", "review"]),
             DEFAULT_CONTEXT_LIMIT_TOKENS,

@@ -23,6 +23,11 @@ import {
   runnerVerificationPolicies,
 } from "@norns/runner";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  RUNNER_RUNTIMES,
+  agenticRuntimeForProvider,
+  resolveDispatchRuntime,
+} from "../src/coordinator/agenticRuntime.js";
 import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
 import { Phase4DispatchRepository } from "../src/coordinator/phase4Dispatcher.js";
 import { Phase4EventProcessor } from "../src/coordinator/phase4EventProcessor.js";
@@ -32,9 +37,13 @@ import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persist
 import { AttentionService } from "../src/projects/attentionService.js";
 import { PhaseWorkflowService } from "../src/projects/phaseWorkflowService.js";
 import { ProjectResumeService } from "../src/projects/projectResumeService.js";
+import { ProjectStore } from "../src/projects/store.js";
 import { StrategyBridgeService } from "../src/projects/strategyBridgeService.js";
 import { StrategyWorkflowService } from "../src/projects/strategyWorkflowService.js";
+import { buildServer } from "../src/server.js";
+import { RelayStores } from "../src/stores.js";
 import { hashCurrentPassword } from "../src/users/passwords.js";
+import { UserStore } from "../src/users/store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -386,6 +395,82 @@ describe.sequential("EXECUTION E10 — the runner's fallback chain is real", () 
   });
 });
 
+/**
+ * A converged planning run whose result the real StrategyBridgeService will
+ * materialize. Written once and reused, so the "normal path" the tests claim
+ * to exercise really is one path.
+ */
+async function seedConvergedPlanningRun(pg: PGlite, runId: string): Promise<void> {
+  await pg.query(
+    `INSERT INTO planning_runs (
+         id, project_id, status, round, max_rounds, objective, transcript, result, total_cost_usd
+       ) VALUES ($3,'project-1','converged',1,3,'Ship it',$1::jsonb,$2::jsonb,0.5)`,
+    [
+      JSON.stringify([
+        {
+          round: 1,
+          role: "pm",
+          provider: "anthropic",
+          model: "claude-sonnet-x",
+          summary: "Drafted the plan.",
+          finding_counts: null,
+        },
+        {
+          round: 1,
+          role: "reviewer",
+          provider: "openai",
+          model: "gpt-review-x",
+          summary: "Reviewed the plan.",
+          finding_counts: { must_fix: 0, should_fix: 0, suggestion: 0 },
+        },
+      ]),
+      JSON.stringify({
+        plan: {
+          objective: "Ship the vertical slice",
+          assumptions: ["The relational runtime is available"],
+          modules: [
+            {
+              id: "mod-a",
+              title: "Module mod-a",
+              description: "Do the work of module mod-a.",
+              deliverables: ["Deliverable for mod-a"],
+              acceptance: [
+                {
+                  id: "mod-a-ac-1",
+                  statement: "Module mod-a passes its verification",
+                  verification_type: "test",
+                  verification: "pnpm test mod-a",
+                },
+              ],
+              estimated_complexity: "M",
+              risk: "medium",
+            },
+          ],
+          risks: [{ description: "Scope creep", mitigation: "Freeze the plan" }],
+          out_of_scope: ["Full reskin"],
+        },
+        content_hash: "a".repeat(64),
+        total_cost_usd: 0.5,
+        staffing_proposal: {
+          summary: "Single-module staffing.",
+          recommendations: [
+            {
+              node_id: "mod-a",
+              provider: "anthropic",
+              model: "claude-sonnet-x",
+              worker_count: 1,
+              reviewer_model: "gpt-review-x",
+              budget_usd: 12,
+              rationale: "Medium complexity; Claude implements, GPT reviews.",
+            },
+          ],
+        },
+      }),
+      runId,
+    ],
+  );
+}
+
 // ---------------------------------------------------------------------------
 // SEAM 2 — the policy-ref vocabulary, and the default that could not resolve.
 // ---------------------------------------------------------------------------
@@ -420,73 +505,7 @@ describe.sequential("EXECUTION E10 — the default policy ref actually resolves"
       strategies: new StrategyWorkflowService(transactions),
       now: () => new Date("2026-07-21T12:00:00.000Z"),
     });
-    await pg.query(
-      `INSERT INTO planning_runs (
-         id, project_id, status, round, max_rounds, objective, transcript, result, total_cost_usd
-       ) VALUES ('run-e10','project-1','converged',1,3,'Ship it',$1::jsonb,$2::jsonb,0.5)`,
-      [
-        JSON.stringify([
-          {
-            round: 1,
-            role: "pm",
-            provider: "anthropic",
-            model: "claude-sonnet-x",
-            summary: "Drafted the plan.",
-            finding_counts: null,
-          },
-          {
-            round: 1,
-            role: "reviewer",
-            provider: "openai",
-            model: "gpt-review-x",
-            summary: "Reviewed the plan.",
-            finding_counts: { must_fix: 0, should_fix: 0, suggestion: 0 },
-          },
-        ]),
-        JSON.stringify({
-          plan: {
-            objective: "Ship the vertical slice",
-            assumptions: ["The relational runtime is available"],
-            modules: [
-              {
-                id: "mod-a",
-                title: "Module mod-a",
-                description: "Do the work of module mod-a.",
-                deliverables: ["Deliverable for mod-a"],
-                acceptance: [
-                  {
-                    id: "mod-a-ac-1",
-                    statement: "Module mod-a passes its verification",
-                    verification_type: "test",
-                    verification: "pnpm test mod-a",
-                  },
-                ],
-                estimated_complexity: "M",
-                risk: "medium",
-              },
-            ],
-            risks: [{ description: "Scope creep", mitigation: "Freeze the plan" }],
-            out_of_scope: ["Full reskin"],
-          },
-          content_hash: "a".repeat(64),
-          total_cost_usd: 0.5,
-          staffing_proposal: {
-            summary: "Single-module staffing.",
-            recommendations: [
-              {
-                node_id: "mod-a",
-                provider: "anthropic",
-                model: "claude-sonnet-x",
-                worker_count: 1,
-                reviewer_model: "gpt-review-x",
-                budget_usd: 12,
-                rationale: "Medium complexity; Claude implements, GPT reviews.",
-              },
-            ],
-          },
-        }),
-      ],
-    );
+    await seedConvergedPlanningRun(pg, "run-e10");
 
     const review = await bridge.createPhaseFromPlanningRun({
       projectId: "project-1",
@@ -764,5 +783,148 @@ describe.sequential("EXECUTION E10 — results and publication reach the read mo
       pull_request_url: null,
       publication_note: "no GitHub token is configured on this runner",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// E9-9 (supersedes E3-11) — dispatch a runtime the runner can actually build.
+// ---------------------------------------------------------------------------
+
+describe.sequential("EXECUTION E10 — the dispatched runtime is a real one", () => {
+  let pg: PGlite;
+  let coordinator: Phase4Coordinator;
+
+  beforeEach(async () => {
+    pg = new PGlite();
+    await seedExecutableProject(pg);
+    coordinator = new Phase4Coordinator(new PGliteTransactionRunner(pg));
+  });
+
+  afterEach(async () => {
+    await pg.close();
+  });
+
+  it("maps a provider-named runtime to the agentic runtime that provider speaks", () => {
+    expect(agenticRuntimeForProvider("anthropic")).toBe("claude-code");
+    expect(agenticRuntimeForProvider("openai")).toBe("codex");
+    expect(agenticRuntimeForProvider("nobody")).toBeNull();
+    // A real runtime name is authoritative: an operator who deliberately chose
+    // the one-shot completion runtime keeps it.
+    expect(resolveDispatchRuntime("proxied-completion", "anthropic")).toBe("proxied-completion");
+    expect(resolveDispatchRuntime("codex", "anthropic")).toBe("codex");
+    // Unknown runtime AND unknown provider: passed through unchanged so the
+    // runner refuses it by the name it was actually given, rather than
+    // silently running an agent nobody asked for.
+    expect(resolveDispatchRuntime("something-else", "nobody")).toBe("something-else");
+  });
+
+  it("does not dispatch a provider name as a runtime the runner has never registered", async () => {
+    // Exactly what StrategyBridgeService used to write: runtime = provider.
+    await pg.query("UPDATE agent_profiles SET provider='anthropic', runtime='anthropic'");
+
+    const result = await coordinator.schedule(scheduleInput());
+
+    expect(result.command.runtime).toBe("claude-code");
+    expect(RUNNER_RUNTIMES).toContain(result.command.runtime);
+    const stored = await pg.query<{ envelope: { runtime: string } }>(
+      "SELECT envelope FROM commands WHERE command_id = $1",
+      [result.command_id],
+    );
+    expect(stored.rows[0]?.envelope.runtime).toBe("claude-code");
+  });
+
+  it("the planning bridge now creates profiles the runner can construct", async () => {
+    const transactions = new PGliteTransactionRunner(pg);
+    const bridge = new StrategyBridgeService({
+      transactions,
+      phases: new PhaseWorkflowService(transactions),
+      strategies: new StrategyWorkflowService(transactions),
+      now: () => new Date("2026-07-21T12:00:00.000Z"),
+    });
+    await seedConvergedPlanningRun(pg, "run-runtime");
+
+    const review = await bridge.createPhaseFromPlanningRun({
+      projectId: "project-1",
+      planningRunId: "run-runtime",
+      actor: { actor_id: "admin-1" },
+    });
+    await bridge.approve({
+      projectId: "project-1",
+      phaseId: review.phase.id,
+      actor: { actor_id: "admin-1" },
+    });
+
+    const profiles = await pg.query<{ id: string; provider: string; runtime: string }>(
+      "SELECT id, provider, runtime FROM agent_profiles WHERE id <> 'agent-1' ORDER BY id",
+    );
+    expect(profiles.rows.length).toBeGreaterThan(0);
+    for (const profile of profiles.rows) {
+      // The bug: this column held the PROVIDER, which is not a runtime key.
+      expect(RUNNER_RUNTIMES, `${profile.id} (${profile.provider})`).toContain(profile.runtime);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// E9-10 (= E3-10) — `runnerInference` is a NAMED option, wired from main.ts.
+// ---------------------------------------------------------------------------
+
+describe.sequential("EXECUTION E10 — runnerInference boot wiring", () => {
+  let pg: PGlite;
+  let transactions: PGliteTransactionRunner;
+
+  beforeEach(async () => {
+    pg = new PGlite();
+    await pg.exec("CREATE ROLE norns_app NOLOGIN");
+    await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
+    transactions = new PGliteTransactionRunner(pg);
+  }, 60_000);
+
+  afterEach(async () => {
+    await new Promise((settle) => setTimeout(settle, 50));
+    if (!pg.closed) await pg.close();
+  });
+
+  it("mounts the E9 gateway credential route from `runnerInference` ALONE", async () => {
+    // Deliberately no planningRuns / onboarding / attachments: this is the
+    // configuration that previously left runner inference silently dead, and
+    // it is the whole point of naming the option.
+    const users = new UserStore();
+    const server = await buildServer({
+      stores: new RelayStores(),
+      users,
+      projects: new ProjectStore(),
+      runnerInference: { transactions },
+    });
+    try {
+      const response = await server.app.inject({
+        method: "POST",
+        url: "/api/execution/gateway/credentials",
+        payload: { run_id: "run:task-1:1" },
+      });
+      // 401, not 404: the route is mounted and runner signature auth refuses.
+      expect(response.statusCode).toBe(401);
+    } finally {
+      await server.app.close();
+    }
+  });
+
+  it("mounts nothing when no relational runtime is supplied at all", async () => {
+    const users = new UserStore();
+    const server = await buildServer({
+      stores: new RelayStores(),
+      users,
+      projects: new ProjectStore(),
+    });
+    try {
+      const response = await server.app.inject({
+        method: "POST",
+        url: "/api/execution/gateway/credentials",
+        payload: { run_id: "run:task-1:1" },
+      });
+      expect(response.statusCode).toBe(404);
+    } finally {
+      await server.app.close();
+    }
   });
 });

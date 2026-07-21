@@ -9,6 +9,7 @@ import {
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import { transitionV2TaskLifecycle } from "../persistence/v2/lifecycleMutation.js";
 import { SqlV2ApplicationTransaction } from "../persistence/v2/sqlRepositories.js";
+import { resolveDispatchRuntime } from "./agenticRuntime.js";
 import { resolveProjectVerificationCommands } from "./verificationCommandSource.js";
 
 export class Phase4CoordinatorConflictError extends Error {
@@ -395,7 +396,12 @@ export class Phase4Coordinator {
         expected_revision: row.expected_revision,
         target_branch: input.target_branch,
         worktree_policy_ref: input.worktree_policy_ref,
-        runtime: row.runtime,
+        // EXECUTION E10 (E9-9) — dispatch a runtime the runner can construct.
+        // `agent_profiles.runtime` has historically been written as the
+        // PROVIDER name by the planning bridge, which is not a key in the
+        // runner's runtime map; such a run failed before doing any work. Real
+        // runtime names pass through untouched.
+        runtime: resolveDispatchRuntime(row.runtime, row.provider),
         provider: row.provider,
         model: row.model,
         context_refs: contextRefs,
