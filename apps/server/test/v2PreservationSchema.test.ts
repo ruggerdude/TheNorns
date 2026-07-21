@@ -3,10 +3,10 @@ import { getTableName } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  ACTIONS_EXECUTION_MIGRATION_NAME,
   ATTACHMENTS_MIGRATION_NAME,
   DEBATE_WORKFLOW_MIGRATION_NAME,
   FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
-  ACTIONS_EXECUTION_MIGRATION_NAME,
   FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
   GITHUB_APP_MANIFEST_MIGRATION_NAME,
   PHASE1_V2_MIGRATION_NAME,
