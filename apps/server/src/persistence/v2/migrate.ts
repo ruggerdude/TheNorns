@@ -102,9 +102,9 @@ export const ACTIONS_EXECUTION_MIGRATION_URL = new URL(
 //
 // THE NUMBER IS DELIBERATELY UNASSIGNED. 0016 and 0017 are taken; the PM
 // assigns this one and renames the file at integration.
-export const ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME = "NNNN_onboarding_repository_intents";
+export const ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME = "0018_onboarding_repository_intents";
 export const ONBOARDING_REPOSITORY_INTENTS_MIGRATION_URL = new URL(
-  "../../../drizzle/NNNN_onboarding_repository_intents.sql",
+  "../../../drizzle/0018_onboarding_repository_intents.sql",
   import.meta.url,
 );
 
