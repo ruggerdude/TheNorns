@@ -178,6 +178,16 @@ export const ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+// EXECUTION E12 — conflict safety for concurrent tasks inside one phase. The
+// number is unassigned for the same reason as every entry above it: parallel
+// phases each pick the next free number and the PM renames the file and this
+// string at integration.
+export const PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME = "0024_phase_concurrency_conflicts";
+export const PHASE_CONCURRENCY_CONFLICTS_MIGRATION_URL = new URL(
+  "../../../drizzle/0024_phase_concurrency_conflicts.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -300,6 +310,10 @@ export async function loadRunPublicationMigrationSql(): Promise<string> {
 
 export async function loadActionsDispatchRunnerIdentityMigrationSql(): Promise<string> {
   return readFile(ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_URL, "utf8");
+}
+
+export async function loadPhaseConcurrencyConflictsMigrationSql(): Promise<string> {
+  return readFile(PHASE_CONCURRENCY_CONFLICTS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -501,6 +515,10 @@ export async function runCurrentV2Migrations(
     {
       name: ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
       sql: await loadActionsDispatchRunnerIdentityMigrationSql(),
+    },
+    {
+      name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
+      sql: await loadPhaseConcurrencyConflictsMigrationSql(),
     },
   ]);
 }
