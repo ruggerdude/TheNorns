@@ -244,8 +244,14 @@ describe("the canonical payload", () => {
         runnerId: "runner-a",
         issuedAt: "2026-07-21T00:00:00.000Z",
       }),
+      // EXECUTION E9 — NEWLINE, not "|". This assertion previously pinned the
+      // runner's own spelling, which the server has never accepted: its
+      // verifier joins with "\n" and reads `x-norns-runner-timestamp`, so
+      // every real context fetch 401'd. The two halves now share one canonical
+      // form, asserted directly against the server's function in
+      // gatewayCredentialAuth.test.ts.
     ).toBe(
-      "norns:runner-context-fetch:v1|GET|/api/v2/runs/run-1/context/a|runner-a|2026-07-21T00:00:00.000Z",
+      "norns:runner-context-fetch:v1\nGET\n/api/v2/runs/run-1/context/a\nrunner-a\n2026-07-21T00:00:00.000Z",
     );
   });
 });
