@@ -23,7 +23,15 @@
 // NORNS_SKIP_TARBALL_INSTALL_TEST=1 to opt out while working offline; CI does
 // not set it, so CI always runs it.
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import {
+  type Dirent,
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,7 +65,7 @@ function zodCopies(root: string): { path: string; populated: boolean; version: s
   const found: { path: string; populated: boolean; version: string | null }[] = [];
   const walk = (dir: string, depth: number): void => {
     if (depth > 8) return;
-    let entries: ReturnType<typeof readdirSync>;
+    let entries: Dirent[];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
     } catch {
