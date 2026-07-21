@@ -178,8 +178,14 @@ function scheduleInputFor(taskIndex: number) {
     max_input_tokens: 10_000,
     max_output_tokens: 4_000,
     max_duration_seconds: 900,
-    issued_at: "2026-07-21T20:00:00.000Z",
-    expires_at: "2026-07-21T20:15:00.000Z",
+    // TIME-RELATIVE ON PURPOSE. These were hardcoded wall-clock instants, and
+    // when that quarter-hour passed the runner's expiry check
+    // (apps/runner/src/daemon.ts) started acking every dispatch `expired`: the
+    // E5 "two concurrent dispatches both run to completion" assertion stopped
+    // testing anything and CI went permanently red. Anchoring to the real clock
+    // keeps the same 15-minute window valid at any wall-clock time.
+    issued_at: new Date(Date.now() - 60_000).toISOString(),
+    expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
   };
 }
 
