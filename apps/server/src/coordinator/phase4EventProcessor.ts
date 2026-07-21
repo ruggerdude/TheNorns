@@ -12,6 +12,7 @@ import {
   SqlV2ApplicationTransaction,
   SqlV2BudgetTransaction,
 } from "../persistence/v2/sqlRepositories.js";
+import { RunIntegrationConflictService } from "./runIntegrationConflicts.js";
 
 /**
  * Per-command output kept on the verification row. Generous enough to hold a
@@ -367,6 +368,16 @@ export class Phase4EventProcessor {
             event.occurred_at,
           ],
         );
+        // EXECUTION E12 — detect an in-phase integration conflict IN THE SAME
+        // TRANSACTION as the publication that creates it.
+        //
+        // Atomicity is the point, not tidiness: if detection ran afterwards
+        // and the process died in between, the branch would exist and nothing
+        // would have warned anybody. Committing them together makes "a second
+        // branch was published" and "a human has been told about it"
+        // inseparable facts. Detection never merges, never mutates a run, and
+        // never blocks the publication -- it only writes a row a human reads.
+        await RunIntegrationConflictService.detect(sql, scope.id);
       } else if (event.payload.kind === "run_status") {
         const currentRun = await lifecycle.lockAgentRunLifecycle(scope.id);
         const currentTask = await lifecycle.lockTaskLifecycle(scope.task_id);

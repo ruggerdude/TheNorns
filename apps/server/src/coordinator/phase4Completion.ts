@@ -69,6 +69,36 @@ export class Phase4CompletionService {
       if (current.task_state !== "in_review") {
         throw new Phase4CompletionConflictError("task is not awaiting review");
       }
+      // EXECUTION E12 — the confirmation gate.
+      //
+      // Completing a task asserts that its work has been INTEGRATED (the
+      // caller must supply integration evidence, above). When a sibling run in
+      // the same phase published unintegrated work off the same base that
+      // Norns cannot prove is disjoint, that assertion cannot be made honestly
+      // until a human has looked. This is where the refoundation's "explicit
+      // human confirmation before integrating a conflict" rule lands in V2 --
+      // and, since nothing here ever merges, it is the ONLY place it can land.
+      //
+      // The gate is a refusal, never a resolution: it does not merge, choose a
+      // winner, or mark anything resolved. It stops, names the conflict, and
+      // says what the human must do. Resolving (or dismissing) the row is the
+      // human's act, recorded with their identity by
+      // `RunIntegrationConflictService.resolve()`, and completion succeeds
+      // immediately afterwards.
+      const openConflicts = await sql.query<{ id: string; counterpart_branch: string }>(
+        `SELECT id, counterpart_branch FROM run_integration_conflicts
+          WHERE status = 'awaiting_human' AND (task_id = $1 OR counterpart_task_id = $1)
+          ORDER BY detected_at ASC`,
+        [input.task_id],
+      );
+      if (openConflicts.rows.length > 0) {
+        const ids = openConflicts.rows.map((conflict) => conflict.id).join(", ");
+        throw new Phase4CompletionConflictError(
+          `task has ${openConflicts.rows.length} unresolved integration conflict(s) (${ids}) ` +
+            "with a sibling run's published branch; a human must reconcile the branches and " +
+            "record the resolution before this task can be completed",
+        );
+      }
       await sql.query(
         `UPDATE tasks SET review_evidence=$2::jsonb, completion_evidence=$3::jsonb,
                           completed_at=$4 WHERE id=$1`,
