@@ -521,18 +521,38 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     phase4DispatchTimer = setInterval(() => {
       if (ticking) return;
       ticking = true;
-      void dispatcher.tick().finally(() => {
-        ticking = false;
-      });
+      // EXECUTION E2: a rejection here (a transient DB error, or the pool
+      // closing during shutdown) was previously unhandled — `.finally()`
+      // does not catch, and nothing else held the promise. Node treats an
+      // unhandled rejection as fatal by default, so a single failed tick
+      // could crash the whole server. Caught and logged the same way the
+      // debate worker's own tick already is in main.ts.
+      void dispatcher
+        .tick()
+        .catch((error) =>
+          console.error(
+            `phase 4 dispatch tick failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        )
+        .finally(() => {
+          ticking = false;
+        });
     }, 500);
     phase4DispatchTimer.unref();
     let scanning = false;
     phase4RecoveryTimer = setInterval(() => {
       if (scanning) return;
       scanning = true;
-      void options.phase4?.recovery.scan().finally(() => {
-        scanning = false;
-      });
+      void options.phase4?.recovery
+        .scan()
+        .catch((error) =>
+          console.error(
+            `phase 4 recovery scan failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        )
+        .finally(() => {
+          scanning = false;
+        });
     }, 60_000);
     phase4RecoveryTimer.unref();
   }
