@@ -38,6 +38,11 @@ import {
 } from "./integrations/github.js";
 // ONBOARDING O4: Actions-hosted execution.
 import { GitHubActionsService } from "./integrations/githubActions.js";
+import {
+  defaultRunnerTarballDir,
+  formatRunnerTarballSpec,
+  loadRunnerTarball,
+} from "./integrations/runnerDistribution.js";
 import { Phase7OperationsService } from "./operations/phase7Operations.js";
 import {
   Phase2ApplicationPersistenceLease,
@@ -253,7 +258,16 @@ if (databaseUrl) {
           actionsService,
           {
             serverOrigin: publicOrigin,
-            runnerPackage: process.env.NORNS_RUNNER_PACKAGE ?? "@norns/runner",
+            // EXECUTION E3 — the pinned tarball this server is actually able
+            // to serve, `<version>@sha256:<hex>`. Resolved here (inside the
+            // `if (github)` branch) so that a deployment which never uses
+            // Actions execution is not required to stage a runner artifact.
+            // Loading fails loudly: a missing or hash-mismatched tarball must
+            // stop startup rather than commit a workflow into a user's
+            // repository that is guaranteed to fail at the install step.
+            runnerPackage:
+              process.env.NORNS_RUNNER_PACKAGE ??
+              formatRunnerTarballSpec(loadRunnerTarball(defaultRunnerTarballDir())),
             ...(process.env.NORNS_ACTIONS_NODE_VERSION
               ? { nodeVersion: process.env.NORNS_ACTIONS_NODE_VERSION }
               : {}),

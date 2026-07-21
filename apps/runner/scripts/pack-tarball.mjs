@@ -89,7 +89,10 @@ writeFileSync(
 // and every workspace: specifier. An exact-version dependency on the bundled
 // contracts package keeps npm's integrity check meaningful without letting it
 // reach a registry for a package that has never been published there.
-const dependencies = { "@norns/contracts": contractsPkg.version, zod: contractsPkg.dependencies.zod };
+const dependencies = {
+  "@norns/contracts": contractsPkg.version,
+  zod: contractsPkg.dependencies.zod,
+};
 for (const name of EXTERNAL_DEPENDENCY_NAMES) {
   const range = runnerPkg.dependencies[name];
   if (!range) throw new Error(`apps/runner/package.json no longer declares ${name}`);

@@ -76,6 +76,13 @@ import {
   type GitHubIntegrationService,
   disabledGitHubStatus,
 } from "./integrations/github.js";
+// EXECUTION E3: serving the runner tarball the Actions workflow installs.
+import {
+  type RunnerTarball,
+  defaultRunnerTarballDir,
+  loadRunnerTarball,
+  runnerTarballPath,
+} from "./integrations/runnerDistribution.js";
 import type { Phase7OperationsService } from "./operations/phase7Operations.js";
 import type { V2TransactionRunner } from "./persistence/v2/database.js";
 import {
@@ -1291,6 +1298,68 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   app.get("/health", (_req, reply) => {
     reply.send({ ok: true, contracts: "1.2.0" });
   });
+
+  // === EXECUTION E3 =======================================================
+  // Runner distribution. The GitHub Actions workflow installs the runner from
+  // here instead of npm (apps/runner is private and unpublished, so the old
+  // `npm install --global @norns/runner` step could never succeed).
+  //
+  // DELIBERATELY UNAUTHENTICATED. The workflow fetches this before it holds
+  // any Norns identity — enrollment happens after the runner is installed, so
+  // there is nothing to authenticate with. That is acceptable because the
+  // response is the same public build for everyone and contains no secret,
+  // and because confidentiality is not what protects the job: integrity is.
+  // The dispatch pins a sha256 into the committed workflow and the job refuses
+  // any other bytes, so serving this openly does not let anyone substitute
+  // code into a run.
+  //
+  // The artifact is loaded and re-hashed once, lazily, and cached: the server
+  // will not advertise a digest it is not serving.
+  let runnerTarballCache: RunnerTarball | null = null;
+  const currentRunnerTarball = (): RunnerTarball | null => {
+    if (runnerTarballCache) return runnerTarballCache;
+    try {
+      runnerTarballCache = loadRunnerTarball(defaultRunnerTarballDir());
+      return runnerTarballCache;
+    } catch {
+      return null;
+    }
+  };
+
+  app.get("/install/runner/manifest.json", (_req, reply) => {
+    const tarball = currentRunnerTarball();
+    if (!tarball) return reply.code(503).send({ error: "runner_tarball_unavailable" });
+    return reply.send({
+      version: tarball.version,
+      sha256: tarball.sha256,
+      byte_size: tarball.byte_size,
+      url: runnerTarballPath(tarball.version),
+    });
+  });
+
+  app.get<{ Params: { version: string } }>(
+    "/install/runner/:version/norns-runner.tgz",
+    (req, reply) => {
+      const tarball = currentRunnerTarball();
+      if (!tarball) return reply.code(503).send({ error: "runner_tarball_unavailable" });
+      // Version-scoped and exact-matched. A job pinned to a version this
+      // server no longer has must fail rather than silently receive a
+      // different build than the digest in its workflow file expects.
+      if (req.params.version !== tarball.version) {
+        return reply.code(404).send({ error: "runner_version_unavailable" });
+      }
+      return (
+        reply
+          .header("content-type", "application/gzip")
+          .header("content-length", String(tarball.byte_size))
+          // The bytes for a given version never change, so this is immutable.
+          .header("cache-control", "public, max-age=31536000, immutable")
+          .header("x-norns-runner-sha256", tarball.sha256)
+          .send(tarball.bytes)
+      );
+    },
+  );
+  // === end EXECUTION E3 (runner distribution) ============================
 
   // The legacy Phase 1A page asked operators to paste a raw session token.
   // Account auth in the React app supersedes it; keep old bookmarks safe by
