@@ -82,11 +82,21 @@ export const FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+<<<<<<< HEAD
 // ONBOARDING O2: binding roles (workspace vs remote), the push-credential
 // strategy seam, and actor-scoped onboarding idempotency.
 export const ONBOARDING_BINDINGS_MIGRATION_NAME = "0016_onboarding_bindings";
 export const ONBOARDING_BINDINGS_MIGRATION_URL = new URL(
   "../../../drizzle/0016_onboarding_bindings.sql",
+=======
+// ONBOARDING O4: GitHub Actions execution path. The number is UNASSIGNED on
+// purpose — the PM assigns it at integration, because this list is maintained
+// by hand and parallel agents have collided on numbers twice already. Rename
+// `drizzle/NNNN_actions_execution.sql` and this constant together.
+export const ACTIONS_EXECUTION_MIGRATION_NAME = "NNNN_actions_execution";
+export const ACTIONS_EXECUTION_MIGRATION_URL = new URL(
+  "../../../drizzle/NNNN_actions_execution.sql",
+>>>>>>> worktree-agent-a07ea2b5db1fdf2d9
   import.meta.url,
 );
 
@@ -182,8 +192,13 @@ export async function loadFrontDoorProgressTrackingMigrationSql(): Promise<strin
   return readFile(FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL, "utf8");
 }
 
+<<<<<<< HEAD
 export async function loadOnboardingBindingsMigrationSql(): Promise<string> {
   return readFile(ONBOARDING_BINDINGS_MIGRATION_URL, "utf8");
+=======
+export async function loadActionsExecutionMigrationSql(): Promise<string> {
+  return readFile(ACTIONS_EXECUTION_MIGRATION_URL, "utf8");
+>>>>>>> worktree-agent-a07ea2b5db1fdf2d9
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -355,8 +370,13 @@ export async function runCurrentV2Migrations(
       sql: await loadFrontDoorProgressTrackingMigrationSql(),
     },
     {
+<<<<<<< HEAD
       name: ONBOARDING_BINDINGS_MIGRATION_NAME,
       sql: await loadOnboardingBindingsMigrationSql(),
+=======
+      name: ACTIONS_EXECUTION_MIGRATION_NAME,
+      sql: await loadActionsExecutionMigrationSql(),
+>>>>>>> worktree-agent-a07ea2b5db1fdf2d9
     },
   ]);
 }

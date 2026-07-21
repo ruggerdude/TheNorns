@@ -14,6 +14,12 @@ import {
   quoteConservativeMaxCharge,
 } from "@norns/adapters";
 import { UsageEvent } from "@norns/contracts";
+// ONBOARDING O4: Actions-hosted execution.
+import {
+  ActionsEnrollmentService,
+  ActionsExecutionCoordinator,
+  ActionsExecutionRepository,
+} from "./coordinator/actionsExecution.js";
 import { Phase4CompletionService } from "./coordinator/phase4Completion.js";
 import { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
 import { Phase4DispatchRepository } from "./coordinator/phase4Dispatcher.js";
@@ -30,6 +36,8 @@ import {
   GitHubIntegrationService,
   githubIntegrationConfigFromEnvironment,
 } from "./integrations/github.js";
+// ONBOARDING O4: Actions-hosted execution.
+import { GitHubActionsService } from "./integrations/githubActions.js";
 import { Phase7OperationsService } from "./operations/phase7Operations.js";
 import {
   Phase2ApplicationPersistenceLease,
@@ -123,6 +131,14 @@ let phase4Services:
       dispatch: Phase4DispatchRepository;
       events: Phase4EventProcessor;
       recovery: Phase4RecoveryMonitor;
+    }
+  | undefined;
+// ONBOARDING O4: Actions-hosted execution services.
+let actionsExecutionServices:
+  | {
+      coordinator: ActionsExecutionCoordinator;
+      enrollment: ActionsEnrollmentService;
+      repository: ActionsExecutionRepository;
     }
   | undefined;
 let phase5Services: { attention: AttentionService } | undefined;
@@ -223,6 +239,34 @@ if (databaseUrl) {
       events: new Phase4EventProcessor(runtimeTransactions),
       recovery: new Phase4RecoveryMonitor(runtimeTransactions),
     };
+    // ONBOARDING O4: Actions-hosted execution. Only constructible when GitHub
+    // is configured — without it the whole path is absent and laptop runners
+    // remain the only execution host.
+    if (github) {
+      const actionsRepository = new ActionsExecutionRepository(runtimeTransactions);
+      const actionsService = new GitHubActionsService(github, fetch);
+      actionsExecutionServices = {
+        repository: actionsRepository,
+        coordinator: new ActionsExecutionCoordinator(
+          phase4Services.coordinator,
+          actionsRepository,
+          actionsService,
+          {
+            serverOrigin: publicOrigin,
+            runnerPackage: process.env.NORNS_RUNNER_PACKAGE ?? "@norns/runner",
+            ...(process.env.NORNS_ACTIONS_NODE_VERSION
+              ? { nodeVersion: process.env.NORNS_ACTIONS_NODE_VERSION }
+              : {}),
+            reserveGeneration: (runnerId: string) => stores.reserveRunnerGeneration(runnerId),
+          },
+        ),
+        enrollment: new ActionsEnrollmentService(
+          actionsRepository,
+          (runnerId, publicKeyPem, generation) =>
+            stores.enrollRunnerAtGeneration(runnerId, publicKeyPem, generation),
+        ),
+      };
+    }
     phase5Services = { attention: new AttentionService(runtimeTransactions) };
     phase6Services = { coordination: new Phase6CoordinationService(runtimeTransactions) };
     phase7Services = { operations: new Phase7OperationsService(runtimeTransactions) };
@@ -577,6 +621,8 @@ const server = await buildServer({
   ...(phase3Services !== undefined ? { phase3: phase3Services } : {}),
   localProjectOnboardingReady,
   ...(phase4Services !== undefined ? { phase4: phase4Services } : {}),
+  // ONBOARDING O4: Actions-hosted execution.
+  ...(actionsExecutionServices !== undefined ? { actionsExecution: actionsExecutionServices } : {}),
   ...(phase5Services !== undefined ? { phase5: phase5Services } : {}),
   ...(phase6Services !== undefined ? { phase6: phase6Services } : {}),
   ...(phase7Services !== undefined ? { phase7: phase7Services } : {}),

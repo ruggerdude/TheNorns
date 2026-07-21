@@ -105,6 +105,12 @@ describe.sequential("workspace GitHub integration", () => {
           201,
         );
       }
+      // ONBOARDING O4: createRepository now asks GitHub whether the new
+      // repository is actually reachable through the installation, instead of
+      // inferring it from repository_selection and then ignoring the answer.
+      if (url === "https://api.github.com/repos/octocat/created") {
+        return json({ ...repository(), id: 9002, name: "created", full_name: "octocat/created" });
+      }
       return json({ message: `unhandled ${url}` }, 500);
     });
     service = new GitHubIntegrationService(
@@ -191,6 +197,13 @@ describe.sequential("workspace GitHub integration", () => {
       id: "9002",
       full_name: "octocat/created",
       binding_ready: true,
+      // ONBOARDING O4: the readiness state that replaced the inert flag.
+      installation: {
+        ready: true,
+        reason: "ready",
+        installation_id: "42",
+        action_required: null,
+      },
     });
   });
 

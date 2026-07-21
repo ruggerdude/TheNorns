@@ -53,6 +53,13 @@ import {
   AttachmentValidationError,
 } from "./attachments/index.js";
 import { bearerToken, verifyRunnerSignature } from "./auth.js";
+// ONBOARDING O4: Actions-hosted execution.
+import {
+  type ActionsEnrollmentService,
+  type ActionsExecutionCoordinator,
+  ActionsExecutionError,
+  type ActionsExecutionRepository,
+} from "./coordinator/actionsExecution.js";
 import type { Phase4CompletionService } from "./coordinator/phase4Completion.js";
 import type { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
 import { type Phase4DispatchRepository, Phase4Dispatcher } from "./coordinator/phase4Dispatcher.js";
@@ -227,6 +234,15 @@ export interface ServerOptions {
     dispatch: Phase4DispatchRepository;
     events: Phase4EventProcessor;
     recovery: Phase4RecoveryMonitor;
+  };
+  /**
+   * ONBOARDING O4: Actions-hosted execution. Present only when GitHub is
+   * configured; its absence leaves every laptop-runner path untouched.
+   */
+  actionsExecution?: {
+    coordinator: ActionsExecutionCoordinator;
+    enrollment: ActionsEnrollmentService;
+    repository: ActionsExecutionRepository;
   };
   phase5?: { attention: AttentionService };
   phase6?: { coordination: Phase6CoordinationService };
@@ -1040,6 +1056,135 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     );
     return reply.send({ runner_id, generation: record.generation });
   });
+
+  // ---- ONBOARDING O4: GitHub Actions-hosted execution ------------------------
+  //
+  // The human will not install or run Norns software on their machine, so
+  // execution moves into GitHub Actions. The *existing* runner is what runs
+  // there — ephemerally, inside a job, dialling this relay outbound exactly as
+  // a laptop runner does, and evaporating when the job ends. These three
+  // routes are the whole server-side surface of that path.
+
+  // Identical to ScheduleTaskBody except that `runner_id` is absent: the
+  // ephemeral runner identity belongs to the repository binding and is never
+  // client-supplied, and its generation is reserved server-side per launch.
+  const ScheduleActionsTaskBody = z.object({
+    assignment_id: z.string().min(1),
+    context_refs: z.array(V2ContentAddressedReference).min(1),
+    target_branch: z.string().min(1),
+    worktree_policy_ref: z.string().min(1),
+    sandbox_policy_ref: z.string().min(1),
+    max_input_tokens: z.number().int().positive(),
+    max_output_tokens: z.number().int().positive(),
+    max_duration_seconds: z.number().int().positive(),
+  });
+
+  if (options.actionsExecution) {
+    const actions = options.actionsExecution;
+
+    const ActionsEnroll = z.object({
+      enrollment_token: z.string().min(1),
+      runner_id: z.string().min(1),
+      dispatch_job_id: z.string().min(1),
+      public_key_pem: z.string().min(1),
+    });
+
+    // Deliberately NOT session-authenticated: the caller is an ephemeral runner
+    // in a CI job, and the repository-scoped enrollment token is its
+    // credential. Every rejection returns the same opaque 403 so the endpoint
+    // cannot be used to probe which projects or jobs exist.
+    app.post("/api/actions/enroll", async (req, reply) => {
+      const parsed = ActionsEnroll.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: "bad_request" });
+      const body = parsed.data;
+      try {
+        const enrolled = await actions.enrollment.redeem(body);
+        stores.audit(
+          `runner:${body.runner_id}`,
+          "actions.enrollment.completed",
+          `job=${body.dispatch_job_id} generation=${enrolled.generation}`,
+          now(),
+        );
+        return reply.send({ runner_id: enrolled.runner_id, generation: enrolled.generation });
+      } catch (error) {
+        stores.audit(
+          `runner:${body.runner_id}`,
+          "actions.enrollment.rejected",
+          `job=${body.dispatch_job_id} ${error instanceof ActionsExecutionError ? error.code : "error"}`,
+          now(),
+        );
+        return reply.code(403).send({ error: "invalid_enrollment" });
+      }
+    });
+
+    // Schedule a task and launch an Actions-hosted runner for it. This does not
+    // weaken the Phase 4 dispatch gate — ActionsExecutionCoordinator calls
+    // Phase4Coordinator.schedule() unchanged and only adds preconditions.
+    app.post(
+      "/api/v2/projects/:id/phases/:phaseId/tasks/:taskId/schedule-actions",
+      async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const { id, phaseId, taskId } = req.params as {
+          id: string;
+          phaseId: string;
+          taskId: string;
+        };
+        const body = ScheduleActionsTaskBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const issuedAt = now();
+        try {
+          const scheduled = await actions.coordinator.schedule({
+            ...body.data,
+            project_id: id,
+            phase_id: phaseId,
+            task_id: taskId,
+            authorized_by: { actor_type: "human", actor_id: user.id },
+            authorized_by_session_id: `authenticated-request:${req.id}`,
+            correlation_id: newId("correlation"),
+            causation_id: null,
+            issued_at: issuedAt.toISOString(),
+            expires_at: new Date(issuedAt.getTime() + DEFAULT_COMMAND_TTL_MS).toISOString(),
+          });
+          stores.audit(
+            user.email,
+            "actions.run.dispatched",
+            `${scheduled.run_id} -> ${scheduled.actions.github_run_url ?? "queued"}`,
+            issuedAt,
+          );
+          return reply.code(202).send(scheduled);
+        } catch (error) {
+          if (error instanceof ActionsExecutionError) {
+            return reply.code(409).send({
+              error: error.code,
+              detail: error.message,
+              action_required: error.action_required,
+            });
+          }
+          return reply.code(409).send({ error: "schedule_conflict", detail: String(error) });
+        }
+      },
+    );
+
+    // Status of the Actions job backing a run, for the UI to show a live link.
+    app.get("/api/v2/projects/:id/actions/runs/:githubRunId", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const { id, githubRunId } = req.params as { id: string; githubRunId: string };
+      const numeric = Number(githubRunId);
+      if (!Number.isInteger(numeric) || numeric <= 0) {
+        return reply.code(400).send({ error: "bad_request" });
+      }
+      try {
+        return reply.send(await actions.coordinator.runStatus(id, numeric));
+      } catch (error) {
+        if (error instanceof ActionsExecutionError) {
+          return reply.code(409).send({ error: error.code, detail: error.message });
+        }
+        return reply.code(409).send({ error: "actions_status_unavailable", detail: String(error) });
+      }
+    });
+  }
 
   // ---- command issuance --------------------------------------------------------
 

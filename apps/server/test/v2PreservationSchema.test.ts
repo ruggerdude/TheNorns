@@ -3,6 +3,7 @@ import { getTableName } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  ACTIONS_EXECUTION_MIGRATION_NAME,
   ATTACHMENTS_MIGRATION_NAME,
   DEBATE_WORKFLOW_MIGRATION_NAME,
   FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
@@ -199,9 +200,14 @@ describe.sequential("Phase 2 preservation schema", () => {
       { name: FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME, applied: false },
       { name: ATTACHMENTS_MIGRATION_NAME, applied: false },
       { name: FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME, applied: false },
+<<<<<<< HEAD
       // ONBOARDING O2. Name is still `NNNN_`; the PM assigns the number at
       // integration, which is also when this entry's position changes.
       { name: ONBOARDING_BINDINGS_MIGRATION_NAME, applied: false },
+=======
+      // ONBOARDING O4 (migration number assigned by the PM at integration).
+      { name: ACTIONS_EXECUTION_MIGRATION_NAME, applied: false },
+>>>>>>> worktree-agent-a07ea2b5db1fdf2d9
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -222,7 +228,11 @@ describe.sequential("Phase 2 preservation schema", () => {
       FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
       ATTACHMENTS_MIGRATION_NAME,
       FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
+<<<<<<< HEAD
       ONBOARDING_BINDINGS_MIGRATION_NAME,
+=======
+      ACTIONS_EXECUTION_MIGRATION_NAME,
+>>>>>>> worktree-agent-a07ea2b5db1fdf2d9
     ]);
   });
 

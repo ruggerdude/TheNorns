@@ -79,6 +79,12 @@ function createV2Executor(
   generation: number,
   dataDir: string,
   workspaces: WorkspaceRegistry,
+  /**
+   * ONBOARDING O4: receives the repository registry so the ephemeral CI mode
+   * can bind the checked-out workspace to whatever repository binding the
+   * dispatch command names. Optional — laptop runners ignore it entirely.
+   */
+  onRegistry?: (repositories: ApprovedRepositoryRegistry) => void,
 ): V2RunnerExecutor {
   const bindingConfig = jsonObject("NORNS_REPOSITORY_BINDINGS_JSON", false);
   const approvedRoots = JSON.parse(process.env.NORNS_APPROVED_ROOTS_JSON ?? "[]") as unknown;
@@ -92,6 +98,7 @@ function createV2Executor(
     }
     repositories.register({ repository_binding_id, repository_path });
   }
+  onRegistry?.(repositories);
   const policies = runnerVerificationPolicies(process.env.NORNS_VERIFICATION_POLICIES_JSON);
   return new V2RunnerExecutor(
     { id: runnerId, generation, scratch_root: join(dataDir, "scratch") },
@@ -112,6 +119,7 @@ const USAGE = `norns-runner — TheNorns Local Runner
 Usage:
   norns-runner pair <code> --server <url> [--id <runnerId>] [--data <dir>]
   norns-runner start --server <url> [--id <runnerId>] [--data <dir>]
+  norns-runner start --ephemeral --id <runnerId> --job <dispatchJobId>
   norns-runner workspace add <folder> [--label <name>] [--data <dir>]
   norns-runner workspace list [--data <dir>]
   norns-runner workspace remove <workspaceId> [--data <dir>]
@@ -120,6 +128,14 @@ Flags:
   --server  Relay URL (e.g. https://your-app.up.railway.app). Or set NORNS_SERVER.
   --id      Runner id (default: runner-1)
   --data    State directory (default: ~/.norns/<runnerId>)
+
+Ephemeral (GitHub Actions) mode:
+  --ephemeral  Enroll for one dispatched job, run it, then exit. Reads the
+               enrollment credential from NORNS_RUNNER_ENROLLMENT_TOKEN and
+               the relay origin from NORNS_SERVER; binds GITHUB_WORKSPACE as
+               the repository. Nothing is installed on anyone's machine — the
+               whole runner is destroyed with the job.
+  --job        The Norns dispatch job this ephemeral runner exists to execute.
 `;
 
 async function main(): Promise<void> {
@@ -175,28 +191,76 @@ async function main(): Promise<void> {
   }
 
   if (args.command === "start") {
-    const execution: { executor?: V2RunnerExecutor } = {};
+    // ONBOARDING O4 — ephemeral (GitHub Actions) mode. Purely additive: without
+    // --ephemeral every line below behaves exactly as it did for laptop
+    // runners. With it, the runner enrolls instead of loading paired state,
+    // binds the checked-out CI workspace, and exits when its one job is done.
+    const ephemeral = args.flags.ephemeral === "true";
+    const execution: { executor?: V2RunnerExecutor; repositories?: ApprovedRepositoryRegistry } =
+      {};
     const workspaces = new WorkspaceRegistry(dataDir);
+    const settled: { state?: string } = {};
     const daemon = new RunnerDaemon({
       serverUrl: server,
       runnerId,
       dataDir,
       workspaces,
+      ...(ephemeral
+        ? {
+            onRunSettled: (event: { state: string }) => {
+              settled.state = event.state;
+            },
+          }
+        : {}),
       executeV2: async (command, emit) => {
         if (!execution.executor) throw new Error("Phase 4 executor is not initialized");
+        // In CI the repository binding is only knowable from the command, and
+        // the one checked-out tree is the only thing that could satisfy it.
+        // register() still enforces the approved-root check, so this cannot
+        // reach outside GITHUB_WORKSPACE.
+        if (ephemeral && execution.repositories) {
+          const workspace = process.env.GITHUB_WORKSPACE;
+          if (!workspace) throw new Error("GITHUB_WORKSPACE is not set in this job");
+          execution.repositories.register({
+            repository_binding_id: command.repository_binding_id,
+            repository_path: workspace,
+          });
+        }
         return (await execution.executor.execute(command, emit)).outcome;
       },
     });
-    try {
-      daemon.loadState();
-    } catch {
-      process.stderr.write(`error: runner "${runnerId}" is not paired — run \`pair\` first\n`);
-      process.exit(2);
+    if (ephemeral) {
+      const enrollmentToken = process.env.NORNS_RUNNER_ENROLLMENT_TOKEN;
+      const dispatchJobId = args.flags.job;
+      if (!enrollmentToken) {
+        process.stderr.write("error: NORNS_RUNNER_ENROLLMENT_TOKEN is required in --ephemeral\n");
+        process.exit(2);
+      }
+      if (!dispatchJobId) {
+        process.stderr.write("error: --job <dispatchJobId> is required in --ephemeral\n");
+        process.exit(2);
+      }
+      await daemon.enroll({ enrollmentToken, dispatchJobId });
+    } else {
+      try {
+        daemon.loadState();
+      } catch {
+        process.stderr.write(`error: runner "${runnerId}" is not paired — run \`pair\` first\n`);
+        process.exit(2);
+      }
     }
     // Folder onboarding binds this named policy. A conservative Git commit
     // check is available by default; deployments may replace it with an
     // explicit approved command map through NORNS_VERIFICATION_POLICIES_JSON.
-    execution.executor = createV2Executor(runnerId, daemon.generation, dataDir, workspaces);
+    execution.executor = createV2Executor(
+      runnerId,
+      daemon.generation,
+      dataDir,
+      workspaces,
+      (repositories) => {
+        execution.repositories = repositories;
+      },
+    );
     daemon.connect();
     process.stdout.write(`runner "${runnerId}" connecting to ${server} — Ctrl-C to stop\n`);
     for (const signal of ["SIGINT", "SIGTERM"] as const) {
@@ -205,6 +269,20 @@ async function main(): Promise<void> {
         process.stdout.write("\nrunner stopped\n");
         process.exit(0);
       });
+    }
+    if (ephemeral) {
+      // Wait for the one dispatched job to reach a terminal state, then stop.
+      // The job's own `timeout-minutes` is the outer ceiling; this loop simply
+      // means the machine is not held open for a second longer than the work.
+      while (settled.state === undefined) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      // Let the terminal ack drain to the relay before tearing down the socket.
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      daemon.stop();
+      const outcome = settled.state;
+      process.stdout.write(`norns run ${outcome}\n`);
+      process.exit(outcome === "succeeded" ? 0 : 1);
     }
     // keep the process alive; the daemon's socket + timers drive the loop
     await new Promise<never>(() => {});
