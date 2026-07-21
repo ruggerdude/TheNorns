@@ -725,3 +725,12 @@ Closes E3-9 with the human's decision: a forwarder, not a reimplementation.
   pglite Postgres, real GitHub-Actions-secret sealing/unsealing) — no mocked
   fencing logic. Suites green: server 797 (+7 over the 790-test integration
   baseline), biome/tsc --noEmit/build all clean.
+
+## EXECUTION E12 — concurrent tasks within one phase (fan-out + conflict safety)
+
+- [ ] 🔄 Make `projects.max_concurrent_tasks > 1` genuinely work: dependency-
+  ready tasks dispatch in parallel up to the cap, each with its own run
+  identity, context and budget reservation; over-cap work QUEUES rather than
+  failing; conflicts between two branches touching one repository surface to a
+  human and are never silently resolved; one run failing/cancelled/exhausting
+  its budget cannot corrupt or abort a sibling. Shipped default cap stays 1.
