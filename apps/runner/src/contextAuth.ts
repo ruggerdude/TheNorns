@@ -30,7 +30,28 @@ export const RUNNER_CONTEXT_FETCH_DOMAIN = "norns:runner-context-fetch:v1";
 
 export const RUNNER_AUTHORIZATION_SCHEME = "Norns-Runner";
 export const RUNNER_ID_HEADER = "x-norns-runner-id";
-export const RUNNER_TIMESTAMP_HEADER = "x-norns-timestamp";
+/**
+ * EXECUTION E9 — BUG FIX, and the reason this constant has a comment.
+ *
+ * This was `x-norns-timestamp`. The server's verifier
+ * (`apps/server/src/execution/runnerContextAuth.ts`) has always read
+ * `x-norns-runner-timestamp`, and it has always joined the signed payload with
+ * `\n` while this file joined it with `|`. Two independent disagreements, so
+ * EVERY real context fetch answered 401 and every dispatched run started with
+ * an empty prompt — the exact failure E3 believed it had fixed.
+ *
+ * NOTHING CAUGHT IT because the only test of this path
+ * (`apps/server/test/runnerContextFetch.test.ts`) drives a hand-rolled fake
+ * server that implements the RUNNER's spelling on both sides, so the two
+ * halves agreed with each other and neither agreed with production. That is
+ * the repo's own "mocks have concealed a dead path" warning, for the fourth
+ * time. `gatewayCredentialAuth.test.ts` drives the real `buildServer` against
+ * the real client instead.
+ *
+ * The SERVER's spelling wins: it is the verifier, it is deployed, and it is
+ * outside this phase's ownership.
+ */
+export const RUNNER_TIMESTAMP_HEADER = "x-norns-runner-timestamp";
 
 /**
  * The exact bytes signed and verified.
@@ -51,7 +72,11 @@ export function runnerContextFetchPayload(input: {
     input.path,
     input.runnerId,
     input.issuedAt,
-  ].join("|");
+    // EXECUTION E9 — newline, not "|". The server's `runnerContextSigningPayload`
+    // has always joined with a newline; signing over a different string here
+    // produced a valid signature over the wrong bytes, which verifies as a bad
+    // signature. See RUNNER_TIMESTAMP_HEADER above.
+  ].join("\n");
 }
 
 export interface RunnerContextIdentity {
