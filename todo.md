@@ -217,6 +217,37 @@
   findings and rounds banner for a `cap_reached` run. Verification: biome clean, `tsc --noEmit`
   clean, full `@norns/web` suite green (99 passed — same count, two files rewritten in place, zero
   regressions), `pnpm run build` clean.
+- [x] FD-P1d — ✅ **Workspace shell layout — closed a second live-browser-verification gap**:
+  live screenshot evidence showed the workspace still rendered the React Flow canvas as the
+  dominant panel with everything else crammed into a narrow right sidebar (the human's original
+  #1 complaint) — the tab reorg from the approved mockup had never actually been built, only
+  deferred with a note in FD-P1's report. Restructured the shell only, per the constraint "move
+  JSX, don't rewrite logic": no state, effect, or handler changed — every section is the exact
+  same component/JSX it was, regrouped under `workspaceTab` (`"overview" | "plan" | "graph"`,
+  default `"overview"`) instead of always-visible-in-a-sidebar. New top-width page: a header
+  (project name, status badge, coordinator/reviewer chips — small presentation upgrade from the
+  old "Claude Sonnet 5 PM · anthropic · openai REVIEW" text line, matching the mockup's explicit
+  "coordinator/reviewer chips" ask) and an **Overview | Plan | Graph | Debates | Settings** tab
+  bar. Overview (default): Project Resume (stat-strip, architecture, mini-Gantt, phase rows,
+  monitored-phase live view, needs-you panel) + Tracking (full Gantt, interval control) — plus a
+  new small honest-empty-state pointer ("No plan yet — Draft the plan →") for a phases.length===0
+  project, linking to the Plan tab. Plan: the "Draft the plan"/"Draft the next phase" form
+  (objective + AttachmentInput + rounds stepper + planning-run-status/transcript card) and
+  StrategyReview when a strategy exists. Graph: the React Flow canvas verbatim (same props/
+  handlers) plus Allocate/Approve/node-inspector, gated on `graph` exactly as before. Debates and
+  Settings keep their exact pre-existing behavior (a full-page swap / the Account modal) —
+  reachable from the tab row now, nothing about them changed. Also fixed three hardcoded dark
+  hexes in the touched CSS (`.graph-canvas`, `.project-tabs`, `.project-tab` backgrounds) that
+  never worked correctly in light mode, and removed the light-theme/mobile overrides for the
+  now-deleted `.graph-shell`/`.sidebar` classes. Tests: updated 9 existing test files to click the
+  now-relevant tab before reaching graph/plan content they already covered (a pure test-harness
+  change, no coverage lost), plus one label-text update (the new chip wording); added
+  `App.workspace-tabs.test.tsx` (4 new tests: Overview-is-default with no graph canvas mounted,
+  Graph tab reveals the canvas with full functionality, the empty-state pointer navigates to Plan,
+  Debates' full-page swap still works from the tab row). Verification: biome clean, `tsc --noEmit`
+  clean, full `@norns/web` suite green (103 passed, up from 99, zero regressions), `pnpm run build`
+  clean. Not independently visually verified in a browser (same sandboxed-preview-tool cwd
+  constraint noted in FD-P1b); the RTL suite is the verification basis instead.
 - [x] FD-P3 — ✅ **Strategy bridge (planning run → relational phase/strategy)** built + verified on `frontdoor/integration`+P3. New `apps/server/src/projects/strategyBridgeService.ts` consumes a converged/cap_reached planning run and, through the EXISTING phase-3 workflow services (no parallel lifecycle), creates a phase + proposed StrategyVersion (objectives/tasks/assignment-proposals mapped from plan modules + staffing_proposal), resolves/creates AgentProfiles per provider/model pair, edits staffing (superseding version, staleness-respecting), and approves via the existing materialization path. Routes in server.ts "FRONT DOOR P3" section: `POST .../phases` ({planning_run_id}), `GET/PATCH .../phases/:phaseId/strategy[/staffing]`, `POST .../strategy/approve`. Idempotent per run via a new `phases.planning_run_id` link (migration 0013, partial unique index). Zero contract changes. Fixed a latent bug in `strategyWorkflowService.approve` (task_dependencies INSERT referenced non-existent predecessor/successor_phase_id columns; never hit because no prior test materialized task deps). Tests: `apps/server/test/frontDoorStrategyBridge.test.ts` (9 — full lifecycle, idempotency, cap_reached findings, post-approval staleness, authz). Full server suite green (474 passed).
 - [x] FD-P5 — ✅ **Tracking read models (per-phase progress, ETA, burn rate, project aggregate, update-interval setting)** built + verified on the P5 worktree. `ProjectResumeService.open` (resume payload) and `AttentionService.phase` (phase-scoped execution read model) now compute, per phase: `percent_complete`/`tasks_completed`/`tasks_total` (task-weighted, 0 on the empty-phase division-by-zero guard), `eta_at` (linear projection from a 5-sample rolling window of recent task completions — null whenever there's no signal: phase not executing, <2 completions, or a degenerate zero time span, never fabricated), and `burn_rate_usd_per_hour` (cost/hour over recently finished runs, null with no signal or non-positive elapsed time). Resume payload also carries a project-level `progress` aggregate (`overall_percent_complete` task-weighted across non-cancelled phases, `blended_eta_at` = latest executing-phase ETA, `agents_active`/`decisions_waiting` reusing the existing attention/active-run queries — no parallel system) and `update_interval_seconds` (60|300|900, default 300, migration `0014_frontdoor_progress_tracking`), settable via new session-authed `PATCH /api/v2/projects/:id/settings` in server.ts's "FRONT DOOR P5" section, with a server-side floor independent of the allowed-value check. The new fields are additive to `@norns/contracts`' `.strict()` V2ProjectResume/V2PhaseExecution (owned by P3) — validated locally in `projectResumeService.ts` and merged onto the contract-validated base object rather than widening `packages/contracts`, which is outside this phase's ownership (flagged as a deviation for the integration owner). Tests: new `apps/server/test/frontDoorProgressTracking.test.ts` (33 — pure percent/ETA/burn-rate math incl. every no-signal/division-by-zero guard, mixed-phase-state aggregate, settings validation + persistence round-trip, resume/phase-execution payload shape, PATCH route authz/validation/persistence); `v2PreservationSchema.test.ts` updated for the new migration. Full server suite green (507 passed, 8 skipped).
 

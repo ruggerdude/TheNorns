@@ -41,6 +41,9 @@ describe("project-manager staffing", () => {
     mock.install();
 
     const { user } = await renderAppAndOpenProject(projectAlpha.name);
+    // FRONT DOOR P1d: Allocate/Approve/node inspector live under the "Graph"
+    // tab now.
+    await user.click(screen.getByRole("button", { name: "Graph" }));
     await user.selectOptions(await screen.findByLabelText(/allocation strategy/i), "pm");
     await user.click(screen.getByRole("button", { name: /ask pm to recommend team/i }));
 

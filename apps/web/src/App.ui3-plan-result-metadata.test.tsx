@@ -128,6 +128,9 @@ describe("UI-3 (rewritten for P1c): plan metadata reaches the human, via the dur
     await user.click(
       await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
     );
+    // FRONT DOOR P1d: the planning-run status / StrategyReview live under
+    // the "Plan" tab now.
+    await user.click(await screen.findByRole("button", { name: "Plan" }));
     return { user };
   }
 
