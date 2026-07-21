@@ -14,7 +14,18 @@ export type {
   RuntimeUsage,
 } from "./runtimes/types.js";
 export { ProcessRuntime } from "./runtimes/process.js";
+export {
+  PROXIED_COMPLETION_OUTPUT,
+  ProxiedCompletionRuntime,
+  type ProxiedCompletionRuntimeOptions,
+} from "./runtimes/proxiedCompletion.js";
 export { REDACTED, Redactor } from "./redact.js";
+export {
+  InferenceProxyError,
+  RelayInferenceClient,
+  type InferenceCompletion,
+  type InferenceTransport,
+} from "./inferenceClient.js";
 export {
   RUNNER_AUTHORIZATION_SCHEME,
   RUNNER_CONTEXT_FETCH_DOMAIN,

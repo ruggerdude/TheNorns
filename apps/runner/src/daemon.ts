@@ -16,6 +16,7 @@ import {
 } from "@norns/contracts";
 import WebSocket from "ws";
 import { FixtureExecutor } from "./fixture.js";
+import { RelayInferenceClient } from "./inferenceClient.js";
 import { Redactor } from "./redact.js";
 import { RunnerStateFile } from "./state.js";
 import type { WorkspaceRegistry } from "./workspaceRegistry.js";
@@ -59,6 +60,13 @@ export class RunnerDaemon {
   private readonly executor: FixtureExecutor;
   private serverAckSeq = 0;
   readonly redactor = new Redactor();
+  /**
+   * EXECUTION E3 — proxied model inference. Always constructed (it is inert
+   * until something calls it) so the runtimes can be handed a client without
+   * the daemon needing to know whether this deployment enables the proxy; the
+   * server refuses with `unsupported` if it does not.
+   */
+  readonly inference: RelayInferenceClient;
 
   constructor(options: DaemonOptions) {
     this.opts = {
@@ -68,6 +76,21 @@ export class RunnerDaemon {
       ...options,
     };
     this.executor = new FixtureExecutor((payload, meta) => this.emit(payload, meta));
+    this.inference = new RelayInferenceClient({
+      send: (request) => {
+        // The generation travels with every frame, so a fenced runner's
+        // request is refused server-side rather than silently spending.
+        if (!this.connected || this.fenced || !this.stateFile) return false;
+        this.socket?.send(
+          JSON.stringify({
+            type: "inference_request",
+            generation: this.requireState().state.generation,
+            request,
+          }),
+        );
+        return true;
+      },
+    });
   }
 
   get isFenced(): boolean {
@@ -207,7 +230,9 @@ export class RunnerDaemon {
                 protocol: PROTOCOL_VERSION,
                 runner_id: this.opts.runnerId,
                 generation: state.state.generation,
-                capabilities: ["workspace_picker"],
+                // EXECUTION E3 adds model_proxy. Advertised unconditionally:
+                // it costs nothing if the server does not offer it.
+                capabilities: ["workspace_picker", "model_proxy"],
                 last_event_seq_sent: state.state.seq,
                 recently_executed_command_ids: state.executedIds(),
               },
@@ -244,9 +269,18 @@ export class RunnerDaemon {
         case "fenced": {
           // A newer pairing owns this runner id. Stop acting entirely.
           this.fenced = true;
+          this.inference.abortAll("runner generation fenced");
           this.executor.cancelAll();
           this.stopHeartbeat();
           socket.close();
+          break;
+        }
+        case "inference_response": {
+          // EXECUTION E3. Generation-checked like every other frame: a
+          // response minted for a superseded generation is not ours.
+          if (frame.generation === state.state.generation) {
+            this.inference.receive(frame.response);
+          }
           break;
         }
         case "workspace_request": {
@@ -298,6 +332,9 @@ export class RunnerDaemon {
     });
 
     socket.on("close", () => {
+      // EXECUTION E3 — never leave a runtime awaiting a completion that can no
+      // longer arrive; it would burn the job's whole timeout doing nothing.
+      this.inference.abortAll();
       this.stopHeartbeat();
       if (this.socket === socket) this.socket = null;
       this.scheduleReconnect();
@@ -316,6 +353,7 @@ export class RunnerDaemon {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.stopHeartbeat();
+    this.inference.abortAll("runner stopped");
     this.executor.cancelAll();
     this.socket?.close();
   }
@@ -356,6 +394,7 @@ export class RunnerDaemon {
     const state = this.requireState();
     if (command.runner_id !== this.opts.runnerId || command.generation !== state.state.generation) {
       this.fenced = true;
+      this.inference.abortAll("runner generation fenced");
       this.executor.cancelAll();
       this.stopHeartbeat();
       this.socket?.close(1008, "runner generation fenced");
