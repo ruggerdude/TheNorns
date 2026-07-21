@@ -680,3 +680,55 @@ Closes E3-9 with the human's decision: a forwarder, not a reimplementation.
   refuses shell metacharacters — but it IS a widening of what the server can
   cause a runner to execute, and the PM should confirm it
 
+## EXECUTION E13 — live cost + live activity while a run is executing
+
+- [x] ✅ E13-1 — live cost. `AttentionService.phase()` and
+  `ProjectResumeService.open()` now surface real spend from `usage_events`
+  (E9's gateway / E3's proxy — the only writers that table has ever had),
+  scoped per task (via the task's designated run) and per phase (summed
+  across the phase), alongside the real budget: `budget_reservations.amount_usd`
+  for a task's run, `phases.approved_budget_usd` for the phase. Honesty rule
+  enforced structurally: a run/phase with zero matching `usage_events` rows
+  reports `spend_usd: null` (Postgres's own `SUM` of an empty set), never a
+  coalesced `0` that would read as "confirmed free"; a task's `budget_usd` is
+  `null` when no reservation exists yet (not scheduled), distinct from a real
+  $0 reservation. `V2PhaseProgress` (owned by `projectResumeService.ts`) grew
+  the two fields so both read models share one shape.
+- [x] ✅ E13-2 — live activity. New `AttentionService.runLog()` tails
+  `run_log` events out of `runner_events` (previously write-only — recorded
+  by `Phase4EventProcessor` since day one, never read back anywhere a human
+  could see them) for a task's designated run, in two modes: an initial TAIL
+  (most recent `RUN_LOG_PAGE_LIMIT`=200 entries) and an `after`-cursor mode
+  for incremental polling. Bounded server-side (page limit + 20k-char/entry
+  cap) and again client-side (`RunLog.tsx`: 500 entries / 100k chars kept in
+  the DOM), with `truncated`/a client-side "older output not shown" note
+  whenever either bound drops something — never silently.
+- [x] ✅ E13-3 — polling cadence decision: phase-execution polling (which was
+  hardcoded to 5s unconditionally, silently ignoring the human's configured
+  `update_interval_seconds` even when idle) now polls fast (5s, fixed) ONLY
+  while some task in the monitored phase has an active run, and otherwise
+  honors the configured interval. `RunLog.tsx`'s own polling follows the same
+  rule at the single-task level: fast (3s) while its run is active, one final
+  fetch then stops the moment it isn't.
+- [x] ✅ E13-4 — one dismissible honesty note (`ui.tsx`'s new
+  `DismissibleNote`, localStorage-persisted) next to the phase's cost line,
+  stating the honesty rule in plain language; no other UI chrome added.
+- [ ] 🟡 E13-5 — **KNOWN GAP, out of this phase's ownership**:
+  `Phase4EventProcessor.apply` inserts every `runner_events` row with
+  `run_id = NULL` hardcoded, even though the column exists (FK to
+  `agent_runs`) and every event's payload carries the real run id. `runLog()`
+  works around this by scoping on `(runner_id, runner_generation)` instead
+  (the same durable dispatch fence `SqlProxiedRunLookup` already authorizes
+  against) plus a `payload->>'run_id'` filter, which is correct but not
+  index-backed. Populating the column would let a future read fetch a run's
+  events with a real index instead of a filtered scan over one runner
+  generation's events. Lives in `apps/server/src/coordinator/**`, which this
+  phase does not own (E5 was active there).
+- [ ] 🟡 E13-6 — not yet surfaced: the gateway's cache-token split
+  (`GatewayUsageTap`'s `cache_read_input_tokens`/`cache_creation_input_tokens`)
+  is billed into `usage_events.cost_usd` but the split itself is discarded
+  before the row is written — a human cannot see how much of a run's spend
+  was cache reads vs. fresh tokens. Additive if ever wanted: widen
+  `usage_events` (out of this phase's ownership) or carry the split on the
+  in-memory `UsageEventT` the gateway already computes.
+
