@@ -514,3 +514,17 @@ Closes E3-9 with the human's decision: a forwarder, not a reimplementation.
   measurable; closing it needs a provider-side usage signal we do not have
 - [ ] E9-13 — no purge job calls `GatewayCredentialService.purgeExpired()`.
   Expired rows are inert (every request re-checks expiry) but accumulate
+- [ ] E9-14 — **DESIGN WEAKENING WORTH A DECISION**. E3's
+  `SqlRunReservationBudget` keeps in-flight holds in process MEMORY, and E3
+  argued that is sound because a runner's frames arrive on exactly one relay
+  socket on exactly one process. The gateway breaks that premise: it is plain
+  HTTP, so behind a load balancer one run's concurrent model calls can land on
+  different server instances, and those instances will not see each other's
+  holds. Only the DURABLE settled figure (`usage_events`) bounds them, and that
+  figure lags by one call. Single-instance deployments (the current shape) are
+  unaffected. Fixing it means a durable hold row, not a memory map
+- [ ] E9-15 — an OpenAI Responses request that declares no `max_output_tokens`
+  is held against the proxy's 32k ceiling but forwarded verbatim, so the
+  provider is free to exceed it. The overshoot is bounded by the model's own
+  output cap, not by ours. Requiring the field would stop being a forwarder;
+  the alternative is a per-model output cap in the registry
