@@ -36,6 +36,23 @@
 - [x] Re-foundation Phase 7 — security hardening, existing-project pilot,
   progressive cutover controls, and separately gated legacy-retirement authorization.
 
+## ONBOARDING program
+
+- [x] O2 Bindings — durable model and commands for GitHub-backed project
+  setup. Adds a `role` column (`workspace` | `remote`) to both binding tiers
+  (`repository_bindings`, `repository_binding_candidates`), leaving
+  `projects.primary_repository_binding_id` and the Phase 4 dispatch gate
+  untouched. Two atomic, actor-scoped-idempotent creation commands
+  (`new_repo`, `existing_repo`) in `ProjectOnboardingService`, each attaching
+  one repository under both roles; `POST /api/v2/projects/onboarding`. Push
+  credential collapses to `actions_github_token` (GitHub provides
+  `GITHUB_TOKEN` inside the Actions job; Norns issues nothing). Migration
+  written as `NNNN_onboarding_bindings.sql` with the number unassigned — the
+  PM assigns it at integration. Suites green: server 547 (+12, 8 skip).
+- [ ] O2 follow-up — production wiring: `buildServer({ onboarding })` is
+  optional and `main.ts` does not pass it yet, so the route is inert outside
+  tests. One line, owned by whoever integrates.
+
 ## FRONT DOOR program
 
 - [x] P4 Attachments — image attachments end-to-end: content-addressed Postgres
