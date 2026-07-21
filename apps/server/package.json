@@ -20,8 +20,10 @@
     "@fastify/websocket": "^11.0.0",
     "@norns/adapters": "workspace:*",
     "@norns/contracts": "workspace:*",
+    "@types/libsodium-wrappers": "^0.8.2",
     "drizzle-orm": "^0.45.2",
     "fastify": "^5.0.0",
+    "libsodium-wrappers": "^0.8.4",
     "pg": "^8.22.0",
     "zod": "^3.23.8"
   },

@@ -360,7 +360,10 @@ describe.sequential("Phase 2 relational project read projection", () => {
     expect(returned.source_location).toBe("Local repository");
     expect(sink.comparisons[0]).toMatchObject({
       matched: false,
-      differences: ["/source_location"],
+      // ONBOARDING O2: `workspace_location` mirrors `source_location` for a
+      // project with no separate push target, so a real divergence in one is
+      // necessarily a divergence in both. Two paths, one underlying mismatch.
+      differences: ["/source_location", "/workspace_location"],
     });
     expect(JSON.stringify(sink.comparisons)).not.toContain(source.sourceLocation);
     expect(JSON.stringify(sink.comparisons)).not.toContain("customer-repository");

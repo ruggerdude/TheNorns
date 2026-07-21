@@ -36,6 +36,35 @@
 - [x] Re-foundation Phase 7 — security hardening, existing-project pilot,
   progressive cutover controls, and separately gated legacy-retirement authorization.
 
+## ONBOARDING program
+
+- [x] O6 Binding promotion — closes the blocker that made every GitHub project
+  undispatchable. A candidate now becomes a `connected` binding through
+  `ProjectActivationService`, on evidence Norns actually observed: a live
+  installation probe, a resolve through that installation, and a real head
+  revision read back (which becomes `observed_head`). Runs inline as part of
+  `POST /api/v2/projects/onboarding`, with `POST /api/v2/projects/:id/activate`
+  as the retry path once a human grants installation access. The laptop-runner
+  promotion path is untouched. Also fixes silent adoption of a pre-existing
+  repository in `new_repo` (durable creation intents) and the
+  `blockers`-shape mismatch with the wizard. Migration written as
+  `NNNN_onboarding_repository_intents.sql`, number unassigned. Suites green:
+  server 599 (+26 over O2, 8 skip).
+
+- [x] O2 Bindings — durable model and commands for GitHub-backed project
+  setup. Adds a `role` column (`workspace` | `remote`) to both binding tiers
+  (`repository_bindings`, `repository_binding_candidates`), leaving
+  `projects.primary_repository_binding_id` and the Phase 4 dispatch gate
+  untouched. Two atomic, actor-scoped-idempotent creation commands
+  (`new_repo`, `existing_repo`) in `ProjectOnboardingService`, each attaching
+  one repository under both roles; `POST /api/v2/projects/onboarding`. Push
+  credential collapses to `actions_github_token` (GitHub provides
+  `GITHUB_TOKEN` inside the Actions job; Norns issues nothing). Migration
+  written as `NNNN_onboarding_bindings.sql` with the number unassigned — the
+  PM assigns it at integration. Wired into `main.ts` alongside
+  `planningRuns`/`attachments`, with a route-wiring test asserting the exact
+  option shape production supplies. Suites green: server 550 (+15, 8 skip).
+
 ## FRONT DOOR program
 
 - [x] P4 Attachments — image attachments end-to-end: content-addressed Postgres
@@ -282,3 +311,49 @@
 - [ ] NORN-016 — Prompt library (REVIEW-002 P2-6)
 - [ ] NORN-017 — Transcript search across all agents (P2-7)
 - [ ] NORN-018 — Automatic Project Memory extraction from transcripts
+
+## ONBOARDING O4 — Actions-hosted execution (risk centre)
+
+- [x] O4-1 — `.github/workflows/norns-agent.yml` template asset + idempotent
+  install/upgrade via the Contents API (never clobbers unmanaged files)
+- [x] O4-2 — workflow_dispatch, run status/conclusion, and job-log reads; the
+  Phase 4 coordinator can launch an Actions-hosted runner (gate extended, not
+  weakened)
+- [x] O4-3 — runner enrollment credential as a repository Actions secret
+  (libsodium sealed box), single-use per dispatched job, rotatable, hash-only
+  at rest; blast radius documented
+- [x] O4-4 — pushes use the job's own `GITHUB_TOKEN`; no Norns token broker
+- [x] O4-5 — remediated `installationToken()` scoping, expiry caching, and the
+  inert `binding_ready` flag in `apps/server/src/integrations/github.ts`
+- [ ] O4-6 — **HUMAN**: add `workflows: write`, `actions: write`,
+  `secrets: write` to the GitHub App manifest and re-authorize every existing
+  installation (deliberately not changed by the agent)
+- [x] O4-7 — migration numbered 0017 at integration; stale unassigned-number
+  headers removed from 0016 and 0017
+- [ ] O4-8 — publish `@norns/runner` to a registry the Actions job can install
+  from (the workflow's install step assumes an installable spec)
+- [ ] O4-9 — GitHub projects never reach `repository_bindings.status =
+  'connected'` (project creation writes only an unverified candidate; nothing
+  calls `POST /api/v2/projects/:id/source-bindings/github`), so the Phase 4
+  gate refuses every GitHub project. Found, not owned by O4; blocks end-to-end
+
+### Adversarial review remediation (all closed)
+
+- [x] O4-R1 — BLOCKER: `${{ inputs.* }}` interpolated inside the workflow's
+  `run:` block allowed shell injection and enrollment-secret exfiltration by
+  anyone with repository write. Fixed with env indirection
+- [x] O4-R2 — BLOCKER: the template set no `NORNS_APPROVED_ROOTS_JSON`, so the
+  ephemeral runner's approved-root allowlist was empty and it could never
+  execute anything. Fixed, with real-runner-path regression coverage
+- [x] O4-R3 — BLOCKER: nothing in production created a
+  `github_actions_execution_bindings` row. Now self-provisioned from the
+  project's own primary GitHub binding
+- [x] O4-R4 — org `administration: write` token is no longer cached
+- [x] O4-R5 — enrollment TOCTOU: `markDispatched` commits before correlation
+- [x] O4-R6 — enrollment secret rotates on every launch; timing-safe compare
+- [x] O4-R7 — run correlation uses an exact delimited marker
+- [x] O4-R8 — global `afterEach` closes every PGlite the harness opens
+- [x] O4-R9 — migration 0017 grants `norns_app` SELECT/INSERT/UPDATE on both
+  new tables (production-only failure; now covered by a `SET ROLE` test)
+- [ ] O4-10 — pin `actions/checkout` and `actions/setup-node` by commit SHA in
+  the workflow template (currently floating major tags)

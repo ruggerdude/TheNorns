@@ -14,6 +14,12 @@ import {
   quoteConservativeMaxCharge,
 } from "@norns/adapters";
 import { UsageEvent } from "@norns/contracts";
+// ONBOARDING O4: Actions-hosted execution.
+import {
+  ActionsEnrollmentService,
+  ActionsExecutionCoordinator,
+  ActionsExecutionRepository,
+} from "./coordinator/actionsExecution.js";
 import { Phase4CompletionService } from "./coordinator/phase4Completion.js";
 import { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
 import { Phase4DispatchRepository } from "./coordinator/phase4Dispatcher.js";
@@ -30,6 +36,8 @@ import {
   GitHubIntegrationService,
   githubIntegrationConfigFromEnvironment,
 } from "./integrations/github.js";
+// ONBOARDING O4: Actions-hosted execution.
+import { GitHubActionsService } from "./integrations/githubActions.js";
 import { Phase7OperationsService } from "./operations/phase7Operations.js";
 import {
   Phase2ApplicationPersistenceLease,
@@ -125,6 +133,14 @@ let phase4Services:
       recovery: Phase4RecoveryMonitor;
     }
   | undefined;
+// ONBOARDING O4: Actions-hosted execution services.
+let actionsExecutionServices:
+  | {
+      coordinator: ActionsExecutionCoordinator;
+      enrollment: ActionsEnrollmentService;
+      repository: ActionsExecutionRepository;
+    }
+  | undefined;
 let phase5Services: { attention: AttentionService } | undefined;
 let phase6Services: { coordination: Phase6CoordinationService } | undefined;
 let phase7Services: { operations: Phase7OperationsService } | undefined;
@@ -135,6 +151,9 @@ let integrationServices: { github: GitHubIntegrationService | null } | undefined
 let planningRunsOptions: { transactions: V2TransactionRunner } | undefined;
 // FRONT DOOR P4 (D3): image attachments need the same relational runtime.
 let attachmentsOptions: { transactions: V2TransactionRunner } | undefined;
+// ONBOARDING O2: the two GitHub-backed project-creation scenarios, over the
+// same relational runtime.
+let onboardingOptions: { transactions: V2TransactionRunner } | undefined;
 
 const publicOrigin =
   process.env.NORNS_PUBLIC_ORIGIN ??
@@ -220,6 +239,34 @@ if (databaseUrl) {
       events: new Phase4EventProcessor(runtimeTransactions),
       recovery: new Phase4RecoveryMonitor(runtimeTransactions),
     };
+    // ONBOARDING O4: Actions-hosted execution. Only constructible when GitHub
+    // is configured — without it the whole path is absent and laptop runners
+    // remain the only execution host.
+    if (github) {
+      const actionsRepository = new ActionsExecutionRepository(runtimeTransactions);
+      const actionsService = new GitHubActionsService(github, fetch);
+      actionsExecutionServices = {
+        repository: actionsRepository,
+        coordinator: new ActionsExecutionCoordinator(
+          phase4Services.coordinator,
+          actionsRepository,
+          actionsService,
+          {
+            serverOrigin: publicOrigin,
+            runnerPackage: process.env.NORNS_RUNNER_PACKAGE ?? "@norns/runner",
+            ...(process.env.NORNS_ACTIONS_NODE_VERSION
+              ? { nodeVersion: process.env.NORNS_ACTIONS_NODE_VERSION }
+              : {}),
+            reserveGeneration: (runnerId: string) => stores.reserveRunnerGeneration(runnerId),
+          },
+        ),
+        enrollment: new ActionsEnrollmentService(
+          actionsRepository,
+          (runnerId, publicKeyPem, generation) =>
+            stores.enrollRunnerAtGeneration(runnerId, publicKeyPem, generation),
+        ),
+      };
+    }
     phase5Services = { attention: new AttentionService(runtimeTransactions) };
     phase6Services = { coordination: new Phase6CoordinationService(runtimeTransactions) };
     phase7Services = { operations: new Phase7OperationsService(runtimeTransactions) };
@@ -336,6 +383,11 @@ if (databaseUrl) {
     // relational runtime the debate workflow uses.
     planningRunsOptions = { transactions: runtimeTransactions };
     attachmentsOptions = { transactions: runtimeTransactions };
+    // ONBOARDING O2: POST /api/v2/projects/onboarding. The route also needs
+    // `integrations.github` (set just above) to reach GitHub; without it the
+    // service still mounts and refuses honestly with github_not_configured
+    // rather than mounting a route that silently does nothing.
+    onboardingOptions = { transactions: runtimeTransactions };
     identityRuntime = createIdentityRuntime({
       users,
       route: identityRoute,
@@ -569,12 +621,15 @@ const server = await buildServer({
   ...(phase3Services !== undefined ? { phase3: phase3Services } : {}),
   localProjectOnboardingReady,
   ...(phase4Services !== undefined ? { phase4: phase4Services } : {}),
+  // ONBOARDING O4: Actions-hosted execution.
+  ...(actionsExecutionServices !== undefined ? { actionsExecution: actionsExecutionServices } : {}),
   ...(phase5Services !== undefined ? { phase5: phase5Services } : {}),
   ...(phase6Services !== undefined ? { phase6: phase6Services } : {}),
   ...(phase7Services !== undefined ? { phase7: phase7Services } : {}),
   ...(debateService !== undefined ? { debates: debateService } : {}),
   ...(planningRunsOptions !== undefined ? { planningRuns: planningRunsOptions } : {}),
   ...(attachmentsOptions !== undefined ? { attachments: attachmentsOptions } : {}),
+  ...(onboardingOptions !== undefined ? { onboarding: onboardingOptions } : {}),
   ...(integrationServices !== undefined ? { integrations: integrationServices } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),

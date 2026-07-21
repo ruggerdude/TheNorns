@@ -9,6 +9,7 @@ import {
   type EventEnvelopeT,
   type EventPayloadT,
   PROTOCOL_VERSION,
+  TERMINAL_COMMAND_STATES,
   type V2DispatchCommandT,
   isCommandExpired,
   parseServerFrame,
@@ -32,11 +33,23 @@ export interface DaemonOptions {
   ) => Promise<"succeeded" | "failed" | "cancelled">;
   /** Optional runner-local folder registry.  Paths never enter relay frames. */
   workspaces?: WorkspaceRegistry;
+  /**
+   * ONBOARDING O4 — fires once when a `launch_run` command reaches a terminal
+   * state. Additive: laptop runners simply do not supply it and behave exactly
+   * as before. The ephemeral GitHub Actions runner uses it to exit as soon as
+   * the one job it was created for is finished.
+   */
+  onRunSettled?: (settled: { command_id: string; state: CommandStateT }) => void;
 }
 
 export class RunnerDaemon {
-  private readonly opts: Required<Omit<DaemonOptions, "executeV2" | "workspaces">> &
-    Pick<DaemonOptions, "executeV2" | "workspaces">;
+  private readonly opts: Required<
+    Omit<DaemonOptions, "executeV2" | "workspaces" | "onRunSettled">
+  > &
+    Pick<DaemonOptions, "executeV2" | "workspaces" | "onRunSettled">;
+  /** ONBOARDING O4: launch_run commands awaiting a terminal ack. */
+  private readonly launchCommands = new Set<string>();
+  private settledReported = false;
   private stateFile: RunnerStateFile | null = null;
   private socket: WebSocket | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -80,6 +93,48 @@ export class RunnerDaemon {
       body: JSON.stringify({ code, runner_id: this.opts.runnerId, public_key_pem: publicPem }),
     });
     if (!res.ok) throw new Error(`pairing failed: ${res.status}`);
+    const body = (await res.json()) as { generation: number };
+    this.stateFile = new RunnerStateFile(this.opts.dataDir, {
+      runner_id: this.opts.runnerId,
+      private_key_pem: privatePem,
+      generation: body.generation,
+    });
+  }
+
+  /**
+   * ONBOARDING O4 — one-shot enrollment for an ephemeral runner hosted in a
+   * GitHub Actions job.
+   *
+   * This is `pair()` for a machine that will not exist in ten minutes. It is
+   * deliberately the same shape: generate a fresh Ed25519 keypair here, send
+   * only the public half, and receive the generation the relay expects. The
+   * difference is the credential presented — a repository-scoped enrollment
+   * token instead of a human-typed pairing code — and that the enrollment is
+   * bound to one dispatch job the server already decided to run, so it is
+   * single-use rather than an open invitation to join the relay.
+   *
+   * The token is read from the caller's argument and never persisted, logged,
+   * or emitted; only the private key reaches the (job-lifetime) state dir.
+   */
+  async enroll(input: { enrollmentToken: string; dispatchJobId: string }): Promise<void> {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const publicPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const res = await fetch(`${this.opts.serverUrl}/api/actions/enroll`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        enrollment_token: input.enrollmentToken,
+        runner_id: this.opts.runnerId,
+        dispatch_job_id: input.dispatchJobId,
+        public_key_pem: publicPem,
+      }),
+    });
+    if (!res.ok) {
+      // Deliberately does not echo the response body: an enrollment failure
+      // must not become a channel for leaking why it failed into a CI log.
+      throw new Error(`enrollment rejected (${res.status})`);
+    }
     const body = (await res.json()) as { generation: number };
     this.stateFile = new RunnerStateFile(this.opts.dataDir, {
       runner_id: this.opts.runnerId,
@@ -285,6 +340,10 @@ export class RunnerDaemon {
       this.socket?.close(1008, "runner generation fenced");
       return;
     }
+    // ONBOARDING O4: registered before any ack so that a replayed, already
+    // terminal launch_run still settles an ephemeral host rather than leaving
+    // it connected until its job times out.
+    if (command.payload.kind === "launch_run") this.launchCommands.add(command.command_id);
     const recorded = state.executionState(command.command_id);
     const meta = { correlation: command.correlation_id, causation: command.command_id };
     if (recorded) {
@@ -361,6 +420,18 @@ export class RunnerDaemon {
     meta: { correlation?: string; causation?: string },
   ): void {
     this.emit({ kind: "command_ack", command_id: commandId, state: ackState, detail: "" }, meta);
+    // ONBOARDING O4: report the first terminal outcome of a launch_run so an
+    // ephemeral host can shut down. Reported at most once, and only when a
+    // caller asked for it.
+    if (
+      this.opts.onRunSettled &&
+      !this.settledReported &&
+      this.launchCommands.has(commandId) &&
+      TERMINAL_COMMAND_STATES.has(ackState)
+    ) {
+      this.settledReported = true;
+      this.opts.onRunSettled({ command_id: commandId, state: ackState });
+    }
   }
 
   /** Buffer durably, then send if connected. Replay covers the rest. */

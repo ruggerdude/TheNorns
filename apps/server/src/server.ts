@@ -53,6 +53,13 @@ import {
   AttachmentValidationError,
 } from "./attachments/index.js";
 import { bearerToken, verifyRunnerSignature } from "./auth.js";
+// ONBOARDING O4: Actions-hosted execution.
+import {
+  type ActionsEnrollmentService,
+  type ActionsExecutionCoordinator,
+  ActionsExecutionError,
+  type ActionsExecutionRepository,
+} from "./coordinator/actionsExecution.js";
 import type { Phase4CompletionService } from "./coordinator/phase4Completion.js";
 import type { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
 import { type Phase4DispatchRepository, Phase4Dispatcher } from "./coordinator/phase4Dispatcher.js";
@@ -87,16 +94,33 @@ import {
 import { PlanningRunWorker } from "./planning/runWorker.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
 import { type AttentionService, DecisionResolutionError } from "./projects/attentionService.js";
+// ONBOARDING O2 imports: githubRemoteRepositoryPort, projectOnboardingService,
+// remoteRepositoryPort.
+import { GitHubActivationPort } from "./projects/githubActivationPort.js";
+import { GitHubRemoteRepositoryPort } from "./projects/githubRemoteRepositoryPort.js";
 import {
   PhaseWorkflowConflictError,
   type PhaseWorkflowService,
 } from "./projects/phaseWorkflowService.js";
+import {
+  ProjectActivationError,
+  ProjectActivationService,
+} from "./projects/projectActivationService.js";
+import {
+  OnboardingValidationError,
+  ProjectOnboardingService,
+  blockerPayload,
+} from "./projects/projectOnboardingService.js";
 import {
   ProjectResumeNotFoundError,
   type ProjectResumeService,
   ProjectSettingsValidationError,
 } from "./projects/projectResumeService.js";
 import { Phase3RequiredError } from "./projects/relationalReadRepository.js";
+import {
+  RemoteRepositoryVerificationError,
+  UnconfiguredRemoteRepositoryPort,
+} from "./projects/remoteRepositoryPort.js";
 import {
   type ProjectGraphView,
   type ProjectRepository,
@@ -217,6 +241,15 @@ export interface ServerOptions {
     events: Phase4EventProcessor;
     recovery: Phase4RecoveryMonitor;
   };
+  /**
+   * ONBOARDING O4: Actions-hosted execution. Present only when GitHub is
+   * configured; its absence leaves every laptop-runner path untouched.
+   */
+  actionsExecution?: {
+    coordinator: ActionsExecutionCoordinator;
+    enrollment: ActionsEnrollmentService;
+    repository: ActionsExecutionRepository;
+  };
   phase5?: { attention: AttentionService };
   phase6?: { coordination: Phase6CoordinationService };
   phase7?: { operations: Phase7OperationsService };
@@ -234,6 +267,12 @@ export interface ServerOptions {
    * both are present, objective attachments are injected into planning round 1.
    */
   attachments?: { transactions: V2TransactionRunner };
+  /**
+   * ONBOARDING O2: the two project-creation scenarios (new_repo,
+   * existing_repo). Every project is GitHub-backed and executes in a GitHub
+   * Actions job. Needs the relational runtime, same as `planningRuns`.
+   */
+  onboarding?: { transactions: V2TransactionRunner };
   integrations?: { github: GitHubIntegrationService | null };
   /**
    * Deployment configuration inspected by safe integration-status routes.
@@ -1023,6 +1062,135 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     );
     return reply.send({ runner_id, generation: record.generation });
   });
+
+  // ---- ONBOARDING O4: GitHub Actions-hosted execution ------------------------
+  //
+  // The human will not install or run Norns software on their machine, so
+  // execution moves into GitHub Actions. The *existing* runner is what runs
+  // there — ephemerally, inside a job, dialling this relay outbound exactly as
+  // a laptop runner does, and evaporating when the job ends. These three
+  // routes are the whole server-side surface of that path.
+
+  // Identical to ScheduleTaskBody except that `runner_id` is absent: the
+  // ephemeral runner identity belongs to the repository binding and is never
+  // client-supplied, and its generation is reserved server-side per launch.
+  const ScheduleActionsTaskBody = z.object({
+    assignment_id: z.string().min(1),
+    context_refs: z.array(V2ContentAddressedReference).min(1),
+    target_branch: z.string().min(1),
+    worktree_policy_ref: z.string().min(1),
+    sandbox_policy_ref: z.string().min(1),
+    max_input_tokens: z.number().int().positive(),
+    max_output_tokens: z.number().int().positive(),
+    max_duration_seconds: z.number().int().positive(),
+  });
+
+  if (options.actionsExecution) {
+    const actions = options.actionsExecution;
+
+    const ActionsEnroll = z.object({
+      enrollment_token: z.string().min(1),
+      runner_id: z.string().min(1),
+      dispatch_job_id: z.string().min(1),
+      public_key_pem: z.string().min(1),
+    });
+
+    // Deliberately NOT session-authenticated: the caller is an ephemeral runner
+    // in a CI job, and the repository-scoped enrollment token is its
+    // credential. Every rejection returns the same opaque 403 so the endpoint
+    // cannot be used to probe which projects or jobs exist.
+    app.post("/api/actions/enroll", async (req, reply) => {
+      const parsed = ActionsEnroll.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: "bad_request" });
+      const body = parsed.data;
+      try {
+        const enrolled = await actions.enrollment.redeem(body);
+        stores.audit(
+          `runner:${body.runner_id}`,
+          "actions.enrollment.completed",
+          `job=${body.dispatch_job_id} generation=${enrolled.generation}`,
+          now(),
+        );
+        return reply.send({ runner_id: enrolled.runner_id, generation: enrolled.generation });
+      } catch (error) {
+        stores.audit(
+          `runner:${body.runner_id}`,
+          "actions.enrollment.rejected",
+          `job=${body.dispatch_job_id} ${error instanceof ActionsExecutionError ? error.code : "error"}`,
+          now(),
+        );
+        return reply.code(403).send({ error: "invalid_enrollment" });
+      }
+    });
+
+    // Schedule a task and launch an Actions-hosted runner for it. This does not
+    // weaken the Phase 4 dispatch gate — ActionsExecutionCoordinator calls
+    // Phase4Coordinator.schedule() unchanged and only adds preconditions.
+    app.post(
+      "/api/v2/projects/:id/phases/:phaseId/tasks/:taskId/schedule-actions",
+      async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const { id, phaseId, taskId } = req.params as {
+          id: string;
+          phaseId: string;
+          taskId: string;
+        };
+        const body = ScheduleActionsTaskBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const issuedAt = now();
+        try {
+          const scheduled = await actions.coordinator.schedule({
+            ...body.data,
+            project_id: id,
+            phase_id: phaseId,
+            task_id: taskId,
+            authorized_by: { actor_type: "human", actor_id: user.id },
+            authorized_by_session_id: `authenticated-request:${req.id}`,
+            correlation_id: newId("correlation"),
+            causation_id: null,
+            issued_at: issuedAt.toISOString(),
+            expires_at: new Date(issuedAt.getTime() + DEFAULT_COMMAND_TTL_MS).toISOString(),
+          });
+          stores.audit(
+            user.email,
+            "actions.run.dispatched",
+            `${scheduled.run_id} -> ${scheduled.actions.github_run_url ?? "queued"}`,
+            issuedAt,
+          );
+          return reply.code(202).send(scheduled);
+        } catch (error) {
+          if (error instanceof ActionsExecutionError) {
+            return reply.code(409).send({
+              error: error.code,
+              detail: error.message,
+              action_required: error.action_required,
+            });
+          }
+          return reply.code(409).send({ error: "schedule_conflict", detail: String(error) });
+        }
+      },
+    );
+
+    // Status of the Actions job backing a run, for the UI to show a live link.
+    app.get("/api/v2/projects/:id/actions/runs/:githubRunId", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const { id, githubRunId } = req.params as { id: string; githubRunId: string };
+      const numeric = Number(githubRunId);
+      if (!Number.isInteger(numeric) || numeric <= 0) {
+        return reply.code(400).send({ error: "bad_request" });
+      }
+      try {
+        return reply.send(await actions.coordinator.runStatus(id, numeric));
+      } catch (error) {
+        if (error instanceof ActionsExecutionError) {
+          return reply.code(409).send({ error: error.code, detail: error.message });
+        }
+        return reply.code(409).send({ error: "actions_status_unavailable", detail: String(error) });
+      }
+    });
+  }
 
   // ---- command issuance --------------------------------------------------------
 
@@ -2071,6 +2239,229 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         projectError(reply, error);
       }
     });
+
+    // =====================================================================
+    // ONBOARDING O2 -- project setup. Two scenarios, both GitHub-backed.
+    //
+    // Nothing is installed on the operator's machine. The runner runs
+    // ephemerally inside a GitHub Actions job in the project's own repository
+    // and connects back to the relay over the existing protocol. So setup is:
+    //
+    //   new_repo       Norns creates the GitHub repository.
+    //   existing_repo  The operator selects one the installation can see.
+    //
+    // Each creates TWO attachments naming the same repository:
+    //   * WORKSPACE (role 'workspace') -- where execution happens: an Actions
+    //     job in that repo. This is what the Phase 4 dispatch gate resolves;
+    //     nothing here weakens it.
+    //   * REMOTE    (role 'remote')    -- where the work is pushed.
+    // The roles stay distinct because they are expected to diverge later
+    // (fork-and-PR: execute in a fork, push to upstream).
+    //
+    // Pushes need no brokered credential: inside an Actions job GitHub
+    // provides GITHUB_TOKEN, already scoped to that repository. Norns's own
+    // App token is still used, but only for control-plane calls.
+    //
+    // The legacy `POST /api/projects` route is untouched and still serves the
+    // pre-existing GitHub-only and local paths.
+    // =====================================================================
+    /**
+     * ONBOARDING O6 — run activation without letting its failure destroy a
+     * successful creation.
+     *
+     * A blocked activation is a normal, reportable outcome and is returned. An
+     * unexpected failure (GitHub down mid-request) is swallowed to null: the
+     * project genuinely exists, so answering 500 would tell the user creation
+     * failed when it did not, and would strand the repository they can see on
+     * GitHub. The retry endpoint is the recovery path either way.
+     */
+    const activateQuietly = async (
+      service: ProjectActivationService | null,
+      projectId: string,
+      actorId: string,
+    ): Promise<Awaited<ReturnType<ProjectActivationService["activate"]>> | null> => {
+      if (!service) return null;
+      try {
+        return await service.activate({ project_id: projectId, actor_id: actorId });
+      } catch {
+        return null;
+      }
+    };
+
+    if (options.onboarding) {
+      // ONBOARDING O6: promotes a candidate to a `connected` binding on
+      // GitHub-observed evidence. Constructed unconditionally so the failure
+      // mode when GitHub is unconfigured is an honest refusal, not a missing
+      // route.
+      const activation = github
+        ? new ProjectActivationService(
+            options.onboarding.transactions,
+            new GitHubActivationPort(github),
+          )
+        : null;
+      const onboarding = new ProjectOnboardingService({
+        transactions: options.onboarding.transactions,
+        remotes: github
+          ? new GitHubRemoteRepositoryPort(github)
+          : new UnconfiguredRemoteRepositoryPort(),
+      });
+
+      const OnboardingFields = {
+        name: z.string().trim().min(1),
+        description: z.string().trim().min(1),
+        connection_id: z.string().min(1),
+        idempotency_key: z.string().trim().min(1).max(200),
+      };
+      // The scenario is the discriminator: `new_repo` names a repository to
+      // create, `existing_repo` names one to select. Separate shapes mean a
+      // body can never half-say both.
+      const ScenarioBody = z.discriminatedUnion("scenario", [
+        z.object({
+          ...OnboardingFields,
+          scenario: z.literal("new_repo"),
+          repository_name: z
+            .string()
+            .trim()
+            .min(1)
+            .max(100)
+            .regex(/^[A-Za-z0-9._-]+$/, "repository name must be a valid GitHub repository name"),
+          private: z.boolean().default(true),
+        }),
+        z.object({
+          ...OnboardingFields,
+          scenario: z.literal("existing_repo"),
+          repository_id: z.string().min(1),
+        }),
+      ]);
+      const PmBody = z.discriminatedUnion("pm_provider", [
+        z.object({
+          pm_provider: z.literal("anthropic"),
+          pm_model: AnthropicPmModel.default(DEFAULT_PM_MODEL.anthropic),
+        }),
+        z.object({
+          pm_provider: z.literal("openai"),
+          pm_model: OpenAiPmModel.default(DEFAULT_PM_MODEL.openai),
+        }),
+      ]);
+
+      app.post("/api/v2/projects/onboarding", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const scenario = ScenarioBody.safeParse(req.body);
+        const pm = PmBody.safeParse(req.body);
+        if (!scenario.success || !pm.success) {
+          const issue = scenario.success ? pm.error?.issues[0] : scenario.error?.issues[0];
+          return reply
+            .code(400)
+            .send({ error: "bad_request", detail: issue?.message ?? "invalid body" });
+        }
+        const base = {
+          name: scenario.data.name,
+          description: scenario.data.description,
+          pm_provider: pm.data.pm_provider,
+          pm_model: pm.data.pm_model,
+          connection_id: scenario.data.connection_id,
+          actor: { actor_type: "human" as const, actor_id: user.id },
+          idempotency_key: scenario.data.idempotency_key,
+        };
+        try {
+          const result =
+            scenario.data.scenario === "new_repo"
+              ? await onboarding.createNewRepo({
+                  ...base,
+                  repository_name: scenario.data.repository_name,
+                  private: scenario.data.private,
+                })
+              : await onboarding.createFromExistingRepo({
+                  ...base,
+                  repository_id: scenario.data.repository_id,
+                });
+          stores.audit(
+            user.email,
+            "project.onboarded",
+            `${result.project_id} ${scenario.data.scenario}`,
+            now(),
+          );
+          // ---- ONBOARDING O6 -------------------------------------------
+          // Activate inline, as part of creation. This is deliberate: the
+          // reason GitHub projects could never run was an endpoint
+          // (`source-bindings/github`) that existed but nothing ever called.
+          // Putting activation behind a second call the client must remember
+          // to make would rebuild exactly that failure. A project is created
+          // AND made runnable in one request, or it reports why not.
+          //
+          // Activation failure is never fatal to creation: the project and its
+          // repository exist and are recorded, so the human can fix the
+          // installation and retry via POST /api/v2/projects/:id/activate
+          // rather than being stranded with an orphaned repository.
+          const activated = await activateQuietly(activation, result.project_id, user.id);
+          return reply.code(result.replayed ? 200 : 201).send({
+            ...result,
+            ...(activated
+              ? {
+                  activation: {
+                    activated: activated.activated,
+                    observed_head: activated.observed_head,
+                    workspace_binding_id: activated.workspace_binding_id,
+                  },
+                  ...blockerPayload([
+                    ...result.blocker_details,
+                    ...activated.blockers.map((blocker) => ({
+                      code: blocker.code,
+                      role: "workspace" as const,
+                      message: blocker.message,
+                    })),
+                  ]),
+                }
+              : {}),
+          });
+        } catch (error) {
+          // Honest errors: a repository GitHub would not confirm, or a reused
+          // idempotency key. Neither is silently downgraded.
+          if (error instanceof RemoteRepositoryVerificationError) {
+            return reply.code(error.status).send({ error: error.code, message: error.message });
+          }
+          if (error instanceof OnboardingValidationError) {
+            return reply.code(409).send({ error: error.code, message: error.message });
+          }
+          return reply.code(500).send({ error: "onboarding_failed", detail: String(error) });
+        }
+      });
+
+      // ONBOARDING O6 — retry activation after a human clears a blocker.
+      // This is the recovery path for `installation_not_ready`: the project
+      // and its repository already exist, so granting the installation access
+      // and calling this makes the project runnable without re-creating
+      // anything.
+      app.post("/api/v2/projects/:id/activate", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        if (!activation) {
+          return reply
+            .code(503)
+            .send({ error: "github_not_configured", message: "GitHub App is not configured" });
+        }
+        const { id } = req.params as { id: string };
+        try {
+          const result = await activation.activate({ project_id: id, actor_id: user.id });
+          stores.audit(
+            user.email,
+            result.activated ? "project.activated" : "project.activation_blocked",
+            `${id} ${result.blockers.map((blocker) => blocker.code).join(",")}`.trim(),
+            now(),
+          );
+          return reply.send(result);
+        } catch (error) {
+          if (error instanceof ProjectActivationError) {
+            return reply.code(error.status).send({ error: error.code, message: error.message });
+          }
+          return reply.code(500).send({ error: "activation_failed", detail: String(error) });
+        }
+      });
+    }
+    // ===================== end ONBOARDING O2 =============================
 
     if (options.phase3) {
       const LocalBindingBody = z.object({

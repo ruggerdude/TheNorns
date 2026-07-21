@@ -252,7 +252,12 @@ describe.sequential("Phase 2 project runtime routing", () => {
        WHERE scope_type = 'project' AND scope_key = $1 AND operation = 'summary'`,
       [source.id],
     );
-    expect(evidence.rows).toEqual([{ matched: false, differences: ["/source_location"] }]);
+    // ONBOARDING O2: `workspace_location` mirrors `source_location` for a
+    // project with no separate push target, so a real divergence in one is
+    // necessarily a divergence in both. Two paths, one underlying mismatch.
+    expect(evidence.rows).toEqual([
+      { matched: false, differences: ["/source_location", "/workspace_location"] },
+    ]);
     expect(JSON.stringify(evidence.rows)).not.toContain("runtime-project");
 
     await setRoute("project", source.id, "relational");

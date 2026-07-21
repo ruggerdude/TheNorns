@@ -82,6 +82,32 @@ export const FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+// ONBOARDING O2: binding roles (workspace vs remote), the push-credential
+// strategy seam, and actor-scoped onboarding idempotency.
+export const ONBOARDING_BINDINGS_MIGRATION_NAME = "0016_onboarding_bindings";
+export const ONBOARDING_BINDINGS_MIGRATION_URL = new URL(
+  "../../../drizzle/0016_onboarding_bindings.sql",
+  import.meta.url,
+);
+
+// ONBOARDING O4: GitHub Actions execution path.
+export const ACTIONS_EXECUTION_MIGRATION_NAME = "0017_actions_execution";
+export const ACTIONS_EXECUTION_MIGRATION_URL = new URL(
+  "../../../drizzle/0017_actions_execution.sql",
+  import.meta.url,
+);
+
+// ONBOARDING O6: repository-creation intents, so an idempotent retry can be
+// told apart from silently adopting a user's existing repository.
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED. 0016 and 0017 are taken; the PM
+// assigns this one and renames the file at integration.
+export const ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME = "0018_onboarding_repository_intents";
+export const ONBOARDING_REPOSITORY_INTENTS_MIGRATION_URL = new URL(
+  "../../../drizzle/0018_onboarding_repository_intents.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -172,6 +198,18 @@ export async function loadAttachmentsMigrationSql(): Promise<string> {
 
 export async function loadFrontDoorProgressTrackingMigrationSql(): Promise<string> {
   return readFile(FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL, "utf8");
+}
+
+export async function loadOnboardingBindingsMigrationSql(): Promise<string> {
+  return readFile(ONBOARDING_BINDINGS_MIGRATION_URL, "utf8");
+}
+
+export async function loadActionsExecutionMigrationSql(): Promise<string> {
+  return readFile(ACTIONS_EXECUTION_MIGRATION_URL, "utf8");
+}
+
+export async function loadOnboardingRepositoryIntentsMigrationSql(): Promise<string> {
+  return readFile(ONBOARDING_REPOSITORY_INTENTS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -341,6 +379,18 @@ export async function runCurrentV2Migrations(
     {
       name: FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
       sql: await loadFrontDoorProgressTrackingMigrationSql(),
+    },
+    {
+      name: ONBOARDING_BINDINGS_MIGRATION_NAME,
+      sql: await loadOnboardingBindingsMigrationSql(),
+    },
+    {
+      name: ACTIONS_EXECUTION_MIGRATION_NAME,
+      sql: await loadActionsExecutionMigrationSql(),
+    },
+    {
+      name: ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME,
+      sql: await loadOnboardingRepositoryIntentsMigrationSql(),
     },
   ]);
 }
