@@ -336,7 +336,13 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
       authorized_by_session_id: "session-e2",
       issued_at: issuedAt(),
     });
-    expect(result).toEqual({ phase_id: PHASE, scheduled: [], blocked: [] });
+    // EXECUTION E12 added two additive fields to `PhaseLaunchResult`
+    // (`deferred`, `concurrency`), so this assertion is now on the shape it
+    // was actually testing -- that a no-op launch schedules nothing and blocks
+    // nothing -- rather than on the exact field set of the result object.
+    expect(result).toMatchObject({ phase_id: PHASE, scheduled: [], blocked: [] });
+    expect(result.deferred).toEqual([]);
+    expect(result.concurrency).toMatchObject({ running: 0, queued: 0 });
   });
 
   // ---- whole-phase blocking preconditions ---------------------------------

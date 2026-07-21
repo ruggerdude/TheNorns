@@ -21,6 +21,7 @@ import {
   PHASE6_COORDINATION_MIGRATION_NAME,
   PHASE7_HARDENING_MIGRATION_NAME,
   PHASE8_CUTOVER_COMPLETION_MIGRATION_NAME,
+  PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
   PLANNING_RUNS_MIGRATION_NAME,
   QC_COMMUNICATION_MIGRATION_NAME,
   RUN_PUBLICATION_MIGRATION_NAME,
@@ -228,6 +229,9 @@ describe.sequential("Phase 2 preservation schema", () => {
       // EXECUTION E5. Name is still `NNNN_`; the PM assigns the number at
       // integration, which is also when this entry's position changes.
       { name: ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME, applied: false },
+      // EXECUTION E12. Name is still `NNNN_`; the PM assigns the number at
+      // integration, which is also when this entry's position changes.
+      { name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -260,6 +264,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       GATEWAY_CREDENTIALS_MIGRATION_NAME,
       RUN_PUBLICATION_MIGRATION_NAME,
       ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
+      PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
     ]);
   });
 

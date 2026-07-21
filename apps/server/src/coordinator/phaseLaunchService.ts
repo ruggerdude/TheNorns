@@ -29,9 +29,15 @@ import { DispatchContextScopeRepository } from "./dispatchContextScope.js";
 import {
   Phase4Coordinator,
   Phase4CoordinatorConflictError,
+  Phase4CoordinatorDeferredError,
   type Phase4ScheduleInput,
   type Phase4ScheduledRun,
 } from "./phase4Coordinator.js";
+import {
+  type PhaseConcurrencySnapshot,
+  SCHEDULABLE_TASKS_SQL,
+  describePhaseConcurrency,
+} from "./phaseConcurrency.js";
 
 /** Everything the caller must show the human when a phase cannot be started
  *  at all -- as opposed to one task within it being individually blocked. */
@@ -58,7 +64,21 @@ export class PhaseLaunchError extends Error {
 export interface PhaseLaunchTaskOutcome {
   task_id: string;
   task_title: string;
-  outcome: "scheduled" | "blocked";
+  /**
+   * EXECUTION E12 added `deferred`, and the distinction from `blocked` is the
+   * whole of this phase's fan-out control.
+   *
+   * `blocked` means a human must change something (no verified binding, no
+   * context, insufficient budget, unmet dependencies). Nothing will retry it.
+   * `deferred` means nothing is wrong: the task is ready and would have been
+   * dispatched, but the concurrency cap or an active repository-scope conflict
+   * says not yet. It is QUEUED, and `PhaseQueueDrainer` dispatches it when a
+   * slot frees.
+   *
+   * Before E12 both were `blocked`, so a phase with a cap of 2 and three ready
+   * tasks reported the third as a failure and then silently forgot it.
+   */
+  outcome: "scheduled" | "deferred" | "blocked";
   run_id?: string;
   dispatch_job_id?: string;
   /**
@@ -74,7 +94,12 @@ export interface PhaseLaunchTaskOutcome {
 export interface PhaseLaunchResult {
   phase_id: string;
   scheduled: PhaseLaunchTaskOutcome[];
+  /** EXECUTION E12 — ready work waiting on a free slot. Not a failure. */
+  deferred: PhaseLaunchTaskOutcome[];
   blocked: PhaseLaunchTaskOutcome[];
+  /** EXECUTION E12 — running vs queued, as the human sees it. Taken AFTER
+   *  dispatch so it reflects what this call actually did. */
+  concurrency: PhaseConcurrencySnapshot;
 }
 
 export interface PhaseLaunchReadiness {
@@ -233,26 +258,22 @@ export class PhaseLaunchService {
     projectId: string,
     phaseId: string,
   ): Promise<SchedulableTaskRow[]> {
+    // EXECUTION E12 — one definition of "dispatchable", shared with the
+    // concurrency read model, so the number a human sees under "queued" is
+    // computed by the same predicate that decides what actually dispatches.
     return this.transactions.transaction(async (tx) => {
-      const result = await tx.query<SchedulableTaskRow>(
-        `SELECT t.id AS task_id, t.title AS task_title,
-                t.designated_assignment_id AS assignment_id,
-                a.budget_limit_usd AS budget_limit_usd
-           FROM tasks t
-           JOIN agent_assignments a ON a.id = t.designated_assignment_id
-          WHERE t.project_id = $1 AND t.phase_id = $2
-            AND t.state IN ('pending', 'ready')
-            AND t.designated_assignment_id IS NOT NULL
-            AND NOT EXISTS (
-              SELECT 1 FROM task_dependencies d
-              JOIN tasks pred ON pred.id = d.predecessor_task_id
-             WHERE d.successor_task_id = t.id AND pred.state <> 'completed'
-            )
-          ORDER BY t.created_at ASC, t.id ASC`,
-        [projectId, phaseId],
-      );
+      const result = await tx.query<SchedulableTaskRow>(SCHEDULABLE_TASKS_SQL, [
+        projectId,
+        phaseId,
+      ]);
       return result.rows;
     });
+  }
+
+  private async concurrency(projectId: string, phaseId: string): Promise<PhaseConcurrencySnapshot> {
+    return this.transactions.transaction(async (tx) =>
+      describePhaseConcurrency(tx, projectId, phaseId),
+    );
   }
 
   private async budgetHeadroomUsd(phaseId: string): Promise<number> {
@@ -342,11 +363,33 @@ export class PhaseLaunchService {
   }
 
   /**
-   * Schedule every currently dependency-ready task in this phase. Idempotent
-   * to call repeatedly (e.g. after each task completion unblocks its
-   * successors): tasks already assigned/in-progress/completed are simply not
+   * Schedule every currently dependency-ready task in this phase, up to the
+   * project's concurrency cap. Idempotent to call repeatedly (e.g. after each
+   * task completion unblocks its successors, or from `PhaseQueueDrainer` when
+   * a slot frees): tasks already assigned/in-progress/completed are simply not
    * in the candidate set, and calling this with nothing schedulable is a
    * no-op that returns an empty result, not an error.
+   *
+   * EXECUTION E12 — FAN-OUT CONTROL. A phase with twenty ready tasks must not
+   * spawn twenty jobs and twenty model conversations. Three things enforce
+   * that, and it is worth being precise about which one is load-bearing:
+   *
+   *   1. `Phase4Coordinator.schedule()` counts live runs inside the same
+   *      transaction that creates one, under `FOR UPDATE`. That is the ONLY
+   *      real gate. Two servers, two humans, or a human racing the drainer
+   *      cannot exceed the cap, because the losers' transactions re-count
+   *      after the winner commits.
+   *   2. The `remaining` budget below stops this loop early. This is an
+   *      OPTIMISATION, not a gate: assembling context for a task that cannot
+   *      run costs real work (E1 hashes and stores documents) and there is no
+   *      reason to pay it nineteen times. If it were wrong in the permissive
+   *      direction, (1) still refuses; if it were wrong in the restrictive
+   *      direction, the task is deferred and the drainer picks it up.
+   *   3. Over-cap tasks are reported `deferred`, not `blocked`, so the drainer
+   *      knows to come back for them. Nothing is dropped and nothing errors.
+   *
+   * Dispatch order is the launcher's stable `created_at, id` ordering, so the
+   * queue is FIFO by task creation rather than arbitrary.
    */
   async startPhase(input: {
     project_id: string;
@@ -360,12 +403,26 @@ export class PhaseLaunchService {
 
     const tasks = await this.schedulableTasks(input.project_id, input.phase_id);
     const scheduled: PhaseLaunchTaskOutcome[] = [];
+    const deferred: PhaseLaunchTaskOutcome[] = [];
     const blocked: PhaseLaunchTaskOutcome[] = [];
     const expiresAt = new Date(
       Date.parse(input.issued_at) + this.policy.commandTtlMs,
     ).toISOString();
 
+    const opening = await this.concurrency(input.project_id, input.phase_id);
+    let remaining = opening.available;
+
     for (const task of tasks) {
+      if (remaining <= 0) {
+        deferred.push({
+          task_id: task.task_id,
+          task_title: task.task_title,
+          outcome: "deferred",
+          blocked_code: "concurrency_capacity_reached",
+          blocked_reason: `queued: the project's concurrency cap (${opening.max_concurrent_tasks}) is fully used. This task will be dispatched automatically when a running task finishes.`,
+        });
+        continue;
+      }
       let contextRefs: V2ContentAddressedReferenceT[];
       try {
         contextRefs = await this.taskContext.assembleForTask(task.task_id);
@@ -437,6 +494,7 @@ export class PhaseLaunchService {
           contextRefs,
         );
 
+        remaining -= 1;
         scheduled.push({
           task_id: task.task_id,
           task_title: task.task_title,
@@ -445,6 +503,28 @@ export class PhaseLaunchService {
           dispatch_job_id: result.dispatch_job_id,
         });
       } catch (error) {
+        // EXECUTION E12 — this clause MUST precede the
+        // `Phase4CoordinatorConflictError` clause below: the deferred error is
+        // a subclass, and `instanceof` on the parent matches it too. Ordering
+        // is what keeps queued work out of the blocked bucket.
+        if (error instanceof Phase4CoordinatorDeferredError) {
+          // The gate refused on capacity or scope, not on anything a human
+          // must fix. Whatever this loop believed about free slots, the gate's
+          // count inside its own transaction is the truth -- so stop trying to
+          // dispatch more of this phase and let the drainer resume later.
+          if (error.deferral_reason !== "repository_scope_conflict") remaining = 0;
+          deferred.push({
+            task_id: task.task_id,
+            task_title: task.task_title,
+            outcome: "deferred",
+            blocked_code: error.deferral_reason,
+            blocked_reason:
+              error.deferral_reason === "repository_scope_conflict"
+                ? `queued: ${error.message}. A sibling task declared overlapping file scope and is still active; running both at once is exactly the collision this defers. It will be dispatched when that task finishes.`
+                : `queued: ${error.message}. It will be dispatched automatically when a slot frees.`,
+          });
+          continue;
+        }
         if (error instanceof Phase4CoordinatorConflictError) {
           blocked.push({
             task_id: task.task_id,
@@ -471,7 +551,13 @@ export class PhaseLaunchService {
       }
     }
 
-    return { phase_id: input.phase_id, scheduled, blocked };
+    return {
+      phase_id: input.phase_id,
+      scheduled,
+      deferred,
+      blocked,
+      concurrency: await this.concurrency(input.project_id, input.phase_id),
+    };
   }
 
   private mustActionsExecution(): PhaseLaunchActionsDeps {
@@ -500,4 +586,10 @@ function classifyConflict(message: string): string {
   return "schedule_conflict";
 }
 
-export { Phase4Coordinator, Phase4CoordinatorConflictError, DispatchContextScopeRepository };
+export {
+  Phase4Coordinator,
+  Phase4CoordinatorConflictError,
+  Phase4CoordinatorDeferredError,
+  DispatchContextScopeRepository,
+};
+export { describePhaseConcurrency, type PhaseConcurrencySnapshot };

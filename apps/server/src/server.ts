@@ -70,7 +70,24 @@ import { type Phase4DispatchRepository, Phase4Dispatcher } from "./coordinator/p
 import type { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
 import type { Phase4RecoveryMonitor } from "./coordinator/phase4RecoveryMonitor.js";
 import type { Phase6CoordinationService } from "./coordinator/phase6Coordination.js";
+import { describePhaseConcurrency } from "./coordinator/phaseConcurrency.js";
 import { PhaseLaunchError, PhaseLaunchService } from "./coordinator/phaseLaunchService.js";
+import { PhaseQueueDrainer } from "./coordinator/phaseQueueDrainer.js";
+import {
+  RunConflictResolutionRequest,
+  RunIntegrationConflictError,
+  RunIntegrationConflictService,
+} from "./coordinator/runIntegrationConflicts.js";
+
+/**
+ * EXECUTION E12 — how long a queued task can sit after a slot frees.
+ *
+ * Five seconds, matching the order of magnitude of the dispatch loop (500ms)
+ * without adding a per-second query for every active phase. The cost of the
+ * interval is latency on an operation that already takes minutes; the benefit
+ * of not going lower is that this poll touches several tables per active phase.
+ */
+const PHASE_QUEUE_DRAIN_INTERVAL_MS = 5_000;
 import { DebateConflictError, type DebateService } from "./debates/service.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 // EXECUTION E1: task-context assembly + the runner-facing context fetch route.
@@ -697,6 +714,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
   let phase4DispatchTimer: ReturnType<typeof setInterval> | undefined;
   let phase4RecoveryTimer: ReturnType<typeof setInterval> | undefined;
+  // EXECUTION E12 — declared here, assigned far below where PhaseLaunchService
+  // is constructed, so the onClose hook can clear it alongside its siblings.
+  let phaseQueueDrainTimer: ReturnType<typeof setInterval> | undefined;
   if (options.phase4) {
     const dispatcher = new Phase4Dispatcher(
       options.phase4.dispatch,
@@ -752,6 +772,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   app.addHook("onClose", async () => {
     if (phase4DispatchTimer) clearInterval(phase4DispatchTimer);
     if (phase4RecoveryTimer) clearInterval(phase4RecoveryTimer);
+    if (phaseQueueDrainTimer) clearInterval(phaseQueueDrainTimer);
     workspaceBroker.close();
   });
 
@@ -4357,6 +4378,117 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           }
         : undefined,
     );
+
+    // ---- EXECUTION E12: drain the queue when a slot frees -------------------
+    //
+    // `startPhase` was always idempotent and always meant to be called again
+    // after a task finishes. Nothing ever called it, so over-cap work was
+    // dropped rather than queued. This timer is that caller; see
+    // coordinator/phaseQueueDrainer.ts for why it is a poll rather than an
+    // event hook, and for how it derives its authorization from the human who
+    // started the phase.
+    // Narrowed once here: the enclosing `if` already established it, but the
+    // route closures below outlive that narrowing.
+    const executionTransactions = options.execution.transactions;
+    const phaseQueueDrainer = new PhaseQueueDrainer(executionTransactions, phaseLaunch, {
+      now,
+      onError: (projectId, phaseId, error) => {
+        app.log.error(
+          { projectId, phaseId, err: error },
+          "phase queue drain failed; queued tasks in this phase are not being dispatched",
+        );
+      },
+    });
+    let draining = false;
+    phaseQueueDrainTimer = setInterval(() => {
+      // Non-overlapping: a slow drain must never stack up parallel drains,
+      // which would race each other for the same free slot. Losing a tick is
+      // harmless -- the next one re-derives the queue from scratch.
+      if (draining) return;
+      draining = true;
+      void phaseQueueDrainer
+        .drain()
+        .catch((error) => app.log.error({ err: error }, "phase queue drain tick failed"))
+        .finally(() => {
+          draining = false;
+        });
+    }, PHASE_QUEUE_DRAIN_INTERVAL_MS);
+    phaseQueueDrainTimer.unref();
+
+    // ---- EXECUTION E12: fan-out visibility ---------------------------------
+    //
+    // "How many are running, how many are queued, and is anything waiting on
+    // me?" -- the three numbers a human needs before they trust a cap above 1.
+    app.get("/api/v2/projects/:id/phases/:phaseId/concurrency", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const { id, phaseId } = req.params as { id: string; phaseId: string };
+      try {
+        const snapshot = await executionTransactions.transaction((tx) =>
+          describePhaseConcurrency(tx, id, phaseId),
+        );
+        reply.send(snapshot);
+      } catch (error) {
+        reply.code(409).send({ error: "concurrency_unavailable", detail: String(error) });
+      }
+    });
+
+    // ---- EXECUTION E12: integration conflicts a human must resolve ---------
+    //
+    // Norns never merges and never resolves. These two routes are the entire
+    // human interface to a conflict: read what was observed, and record what
+    // you did about it. Completion of either task stays refused until then.
+    const runConflicts = new RunIntegrationConflictService(executionTransactions);
+
+    app.get("/api/v2/projects/:id/phases/:phaseId/conflicts", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const { phaseId } = req.params as { id: string; phaseId: string };
+      const query = req.query as { open_only?: string };
+      try {
+        reply.send({
+          conflicts: await runConflicts.listForPhase(phaseId, {
+            open_only: query.open_only === "true",
+          }),
+        });
+      } catch (error) {
+        reply.code(409).send({ error: "conflicts_unavailable", detail: String(error) });
+      }
+    });
+
+    app.post("/api/v2/run-conflicts/:conflictId/resolve", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const user = await resolveUser(req);
+      if (!user) return;
+      const { conflictId } = req.params as { conflictId: string };
+      const parsed = RunConflictResolutionRequest.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: "invalid_resolution", detail: parsed.error.message });
+      }
+      const resolvedAt = now();
+      try {
+        const conflict = await runConflicts.resolve({
+          conflict_id: conflictId,
+          resolution: parsed.data.resolution,
+          note: parsed.data.note ?? null,
+          // A human, named. The database CHECK constraint refuses a resolved
+          // row without an actor, so there is no path on which this becomes
+          // an anonymous or automatic resolution.
+          actor: { actor_type: "human", actor_id: user.id },
+          resolved_at: resolvedAt.toISOString(),
+        });
+        stores.audit(
+          user.email,
+          "execution.conflict.resolve",
+          `${conflictId} -> ${parsed.data.resolution}`,
+          resolvedAt,
+        );
+        reply.send(conflict);
+      } catch (error) {
+        if (error instanceof RunIntegrationConflictError) {
+          return reply.code(409).send({ error: error.code, detail: error.message });
+        }
+        reply.code(409).send({ error: "conflict_resolution_failed", detail: String(error) });
+      }
+    });
 
     // Read-only preflight so the UI can show a truthful disabled reason
     // without side effects a human didn't ask for -- never schedules
