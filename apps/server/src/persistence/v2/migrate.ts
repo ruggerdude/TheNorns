@@ -84,14 +84,9 @@ export const FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL = new URL(
 
 // ONBOARDING O2: binding roles (workspace vs remote), the push-credential
 // strategy seam, and actor-scoped onboarding idempotency.
-//
-// THE NUMBER IS DELIBERATELY UNASSIGNED. The file is named
-// `NNNN_onboarding_bindings.sql`; the integrating PM renames it and updates
-// the two constants below. Parallel agents collided on migration numbers in
-// the previous program, so this phase does not pick one.
-export const ONBOARDING_BINDINGS_MIGRATION_NAME = "NNNN_onboarding_bindings";
+export const ONBOARDING_BINDINGS_MIGRATION_NAME = "0016_onboarding_bindings";
 export const ONBOARDING_BINDINGS_MIGRATION_URL = new URL(
-  "../../../drizzle/NNNN_onboarding_bindings.sql",
+  "../../../drizzle/0016_onboarding_bindings.sql",
   import.meta.url,
 );
 
