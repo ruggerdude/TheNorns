@@ -135,7 +135,8 @@ function contractsSpecifierFrom(file) {
 // Rewrite every `@norns/contracts` module specifier in the runner's compiled
 // output to the inlined copy. Only specifier positions are touched: a `from`
 // clause, a dynamic `import(...)`, or a `require(...)`.
-const CONTRACTS_SPECIFIER = /(\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)(["'])@norns\/contracts\2/g;
+const CONTRACTS_SPECIFIER =
+  /(\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)(["'])@norns\/contracts\2/g;
 let rewrittenFiles = 0;
 for (const file of walkFiles(stageDistDir)) {
   if (file.startsWith(stageContractsDir + sep)) continue;
