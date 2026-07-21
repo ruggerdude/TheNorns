@@ -460,3 +460,27 @@
   dispatching a runtime the job has no credentials for
 - [ ] E3-12 — proxied inference is complete-response only; streaming needs a
   streaming method on `LlmAdapter` first (additive on both sides when wanted)
+
+## EXECUTION E9 — provider-native streaming gateway
+
+Closes E3-9 with the human's decision: a forwarder, not a reimplementation.
+
+- [ ] 🔄 E9-1 — Anthropic-compatible endpoint (`/v1/messages`, streaming and
+  non-streaming) that forwards the request body VERBATIM upstream and streams
+  the response bytes back verbatim
+- [ ] 🔄 E9-2 — OpenAI-compatible endpoint (`/v1/responses`, the surface the
+  installed `@openai/codex-sdk` 0.144.3 actually calls) with the same
+  verbatim-forwarding contract
+- [ ] 🔄 E9-3 — per-run, short-lived, revocable, generation-fenced gateway
+  credential resolving server-side to run/task/project/budget; the provider key
+  never leaves the server and a client-supplied model key is never accepted
+- [ ] 🔄 E9-4 — usage metered out of the SSE stream for both providers, written
+  through E3's `SqlInferenceMeter`; a stream that dies mid-flight still meters
+- [ ] 🔄 E9-5 — budget refused before forwarding via E3's
+  `SqlRunReservationBudget`, with honest post-hoc reconciliation
+- [ ] 🔄 E9-6 — runner points Claude Code / Codex at the gateway
+- [ ] 🔄 E9-7 — **BUG FOUND**: E1's server verifier and E3's runner client
+  disagree on the context-fetch signing scheme (`x-norns-runner-timestamp` vs
+  `x-norns-timestamp`; `\n`-joined vs `|`-joined payload). Every real context
+  fetch 401s. No test caught it because the E3 test drives a hand-rolled fake
+  server implementing the runner's spelling. Runner side fixed here.
