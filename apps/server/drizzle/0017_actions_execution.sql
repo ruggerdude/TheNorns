@@ -80,3 +80,32 @@ CREATE INDEX IF NOT EXISTS github_actions_runs_binding_idx
   ON github_actions_runs (repository_binding_id, status);
 CREATE INDEX IF NOT EXISTS github_actions_runs_runner_idx
   ON github_actions_runs (runner_id, status);
+
+-- ---------------------------------------------------------------------------
+-- Runtime role privileges.
+--
+-- Production runs under the restricted `norns_app` role — that is why
+-- applyMigrations needs privileged credentials, since the app role
+-- deliberately cannot alter schema. A new table therefore reaches the runtime
+-- with NO privileges unless they are granted here. Omitting this is invisible
+-- in tests (pglite has no meaningful role separation) and then fails in
+-- production with `permission denied for table` on the first Actions query.
+--
+-- Least privilege: SELECT, INSERT, UPDATE only. Nothing in the Actions
+-- execution path deletes a row — the binding is removed by the ON DELETE
+-- CASCADE from repository_bindings, which runs with the referencing table's
+-- owner privileges rather than the caller's, and the run ledger is append-only
+-- history that must survive for audit.
+--
+-- Guarded so the migration still applies on a database without the role
+-- (developer machines, pglite), matching the idiom in 0016.
+DO $actions_execution$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'norns_app') THEN
+    EXECUTE 'REVOKE ALL PRIVILEGES ON github_actions_execution_bindings, github_actions_runs FROM PUBLIC';
+    EXECUTE 'REVOKE ALL PRIVILEGES ON github_actions_execution_bindings, github_actions_runs FROM norns_app';
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON github_actions_execution_bindings TO norns_app';
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON github_actions_runs TO norns_app';
+  END IF;
+END;
+$actions_execution$;

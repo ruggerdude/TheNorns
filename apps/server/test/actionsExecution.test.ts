@@ -1105,3 +1105,72 @@ describe("review follow-ups: tokens, ordering, rotation, correlation", () => {
     expect((await actions.findRunForJob(REPOSITORY, "job-10"))?.github_run_id).toBe(10);
   });
 });
+
+describe("migration 0017 grants the runtime role what it needs", () => {
+  /**
+   * Production runs as the restricted `norns_app` role, so a table created
+   * without an explicit GRANT is unreachable at runtime even though every
+   * migration applied cleanly and every test passed. pglite does enforce
+   * privileges under SET ROLE, so this catches the omission that would
+   * otherwise only appear in production as `permission denied for table`.
+   */
+  async function asRuntimeRole(pg: PGlite, sql: string): Promise<void> {
+    await pg.exec("SET ROLE norns_app;");
+    try {
+      await pg.exec(sql);
+    } finally {
+      await pg.exec("RESET ROLE;");
+    }
+  }
+
+  it("lets norns_app read, insert, and update both Actions tables", async () => {
+    const { pg } = await harness(() => undefined);
+    await pg.exec(`
+      INSERT INTO projects (
+        id, name, description, status, assignment_policy_ref,
+        verification_policy_ref, budget_policy_ref
+      ) VALUES ('project-1','P','','active','a','v','b');
+      INSERT INTO repository_bindings (
+        id, project_id, binding_type, status, runner_id, repository_id,
+        repository_display_name, github_installation_id, github_owner, github_name,
+        granted_permissions, default_branch, verification_policy_ref,
+        repository_health, created_by_actor_type, created_by_actor_id
+      ) VALUES ('binding-1','project-1','github','connected','actions:project-1','90210',
+        'octo/widgets','5001','octo','widgets','{}'::jsonb,'main','v','healthy','human','admin-1');
+    `);
+
+    await expect(
+      asRuntimeRole(
+        pg,
+        `INSERT INTO github_actions_execution_bindings (
+           repository_binding_id, project_id, connection_id, installation_id,
+           repository_github_id, owner, name, default_branch, runner_id
+         ) VALUES ('binding-1','project-1','github:5001','5001',90210,'octo','widgets',
+           'main','actions:project-1');
+         UPDATE github_actions_execution_bindings SET enabled = false
+           WHERE repository_binding_id = 'binding-1';
+         SELECT 1 FROM github_actions_execution_bindings;`,
+      ),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      asRuntimeRole(
+        pg,
+        `INSERT INTO github_actions_runs (
+           id, project_id, repository_binding_id, dispatch_job_id, run_id, runner_id
+         ) VALUES ('actions-run:j','project-1','binding-1','j','run:1','actions:project-1');
+         UPDATE github_actions_runs SET status = 'dispatched' WHERE dispatch_job_id = 'j';
+         SELECT 1 FROM github_actions_runs;`,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not grant the runtime role DELETE on the append-only run ledger", async () => {
+    const { pg } = await harness(() => undefined);
+    // The run ledger is audit history. Least privilege means the runtime can
+    // append and advance it, but never erase it.
+    await expect(asRuntimeRole(pg, "DELETE FROM github_actions_runs;")).rejects.toThrow(
+      /permission denied/i,
+    );
+  });
+});
