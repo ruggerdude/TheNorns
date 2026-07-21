@@ -13,7 +13,7 @@
 // multi-instance or rolling deploy would need lease-expiry-based recovery
 // instead of the blanket "reconcile at boot" sweep used here.
 import { randomUUID } from "node:crypto";
-import type { LlmAdapter, ProviderName } from "@norns/adapters";
+import type { ImagePart, LlmAdapter, ProviderName } from "@norns/adapters";
 import type { PlanContractT, ReviewFindingT, UsageEventT } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import type {
@@ -53,6 +53,15 @@ export interface PlanningRunWorkerOptions {
   ) => Promise<PlanningStaffingProposalDto | null>;
   /** Mirrors the existing live-planning route's cost-ledger append. */
   recordUsage?: (events: UsageEventT[]) => void;
+  /**
+   * FRONT DOOR P4: resolves a run's objective attachment ids to provider-neutral
+   * image parts for round-1 injection. Best-effort — a failure or an empty
+   * result simply means the run proceeds text-only; images never fail a run.
+   */
+  loadRoundOneImages?: (
+    projectId: string,
+    attachmentIds: readonly string[],
+  ) => Promise<readonly ImagePart[]>;
 }
 
 interface ClaimedPlanningRunRow {
@@ -61,6 +70,8 @@ interface ClaimedPlanningRunRow {
   objective: string;
   max_rounds: number;
   lease_token: string;
+  /** FRONT DOOR P4: objective attachment ids to inject in round 1. */
+  attachment_ids: string[] | string;
 }
 
 function tally(findings: readonly ReviewFindingT[]) {
@@ -117,6 +128,22 @@ function intermediateStatusFor(event: PlanningRoundEvent): {
 function errorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.slice(0, 4_000);
+}
+
+/** FRONT DOOR P4: JSONB comes back parsed (node-pg/PGlite) or, defensively, as
+ *  a JSON string; either way yield an array of non-empty string ids. */
+function parseAttachmentIds(value: string[] | string | null | undefined): string[] {
+  const raw = typeof value === "string" ? safeJsonArray(value) : (value ?? []);
+  return raw.filter((id): id is string => typeof id === "string" && id.length > 0);
+}
+
+function safeJsonArray(value: string): unknown[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 export class PlanningRunWorker {
@@ -180,7 +207,7 @@ export class PlanningRunWorker {
            UPDATE planning_runs SET status = 'drafting', lease_token = $1, leased_until = $2, updated_at = $3
            FROM next_run WHERE planning_runs.id = next_run.id
            RETURNING planning_runs.id, planning_runs.project_id, planning_runs.objective,
-             planning_runs.max_rounds, planning_runs.lease_token`
+             planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids`
         : `WITH next_run AS (
              SELECT id FROM planning_runs WHERE status = 'queued'
              ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1
@@ -188,7 +215,7 @@ export class PlanningRunWorker {
            UPDATE planning_runs SET status = 'drafting', lease_token = $1, leased_until = $2, updated_at = $3
            FROM next_run WHERE planning_runs.id = next_run.id
            RETURNING planning_runs.id, planning_runs.project_id, planning_runs.objective,
-             planning_runs.max_rounds, planning_runs.lease_token`;
+             planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids`;
       const params = runId
         ? [leaseToken, leasedUntil, now.toISOString(), runId]
         : [leaseToken, leasedUntil, now.toISOString()];
@@ -216,6 +243,11 @@ export class PlanningRunWorker {
       await this.persistProgress(claim, status, round, transcript);
     };
 
+    // FRONT DOOR P4: resolve objective attachments to image parts for round-1
+    // injection. Best-effort — a load failure degrades to a text-only run
+    // rather than failing an otherwise-valid planning run.
+    const roundOneImages = await this.loadRoundOneImages(claim);
+
     try {
       const result = await runPlanning({
         pm,
@@ -224,6 +256,7 @@ export class PlanningRunWorker {
         projectId: claim.project_id,
         maxRounds: claim.max_rounds,
         onRound,
+        ...(roundOneImages.length > 0 ? { roundOneImages } : {}),
       });
       this.options.recordUsage?.(result.usage);
       const totalCostUsd = result.usage.reduce((sum, usage) => sum + usage.estimated_cost_usd, 0);
@@ -256,6 +289,20 @@ export class PlanningRunWorker {
       );
     } catch (error) {
       await this.fail(claim, error);
+    }
+  }
+
+  /** FRONT DOOR P4: parse the claimed row's attachment ids and resolve them to
+   *  image parts via the injected loader. Never throws — an empty list means
+   *  the run proceeds text-only. */
+  private async loadRoundOneImages(claim: ClaimedPlanningRunRow): Promise<readonly ImagePart[]> {
+    if (!this.options.loadRoundOneImages) return [];
+    const ids = parseAttachmentIds(claim.attachment_ids);
+    if (ids.length === 0) return [];
+    try {
+      return await this.options.loadRoundOneImages(claim.project_id, ids);
+    } catch {
+      return [];
     }
   }
 

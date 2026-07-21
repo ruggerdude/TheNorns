@@ -7,6 +7,7 @@ import { DEFAULT_MODEL_REGISTRY, makeUsageEvent } from "./registry.js";
 import type {
   CompletionRequest,
   CompletionResult,
+  ImagePart,
   LlmAdapter,
   ProviderName,
   StructuredResult,
@@ -16,6 +17,8 @@ export interface RecordedRequest {
   system: string | undefined;
   prompt: string;
   schemaName: string | null;
+  /** FRONT DOOR P4: image parts carried by this request (undefined when none). */
+  images: readonly ImagePart[] | undefined;
 }
 
 export class FakeAdapter implements LlmAdapter {
@@ -54,7 +57,12 @@ export class FakeAdapter implements LlmAdapter {
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResult> {
-    this.requests.push({ system: request.system, prompt: request.prompt, schemaName: null });
+    this.requests.push({
+      system: request.system,
+      prompt: request.prompt,
+      schemaName: null,
+      images: request.images,
+    });
     return { text: String(this.next()), usage: this.usage(request) };
   }
 
@@ -63,7 +71,12 @@ export class FakeAdapter implements LlmAdapter {
     schema: z.ZodType<T>,
     schemaName: string,
   ): Promise<StructuredResult<T>> {
-    this.requests.push({ system: request.system, prompt: request.prompt, schemaName });
+    this.requests.push({
+      system: request.system,
+      prompt: request.prompt,
+      schemaName,
+      images: request.images,
+    });
     // canned data must satisfy the real contracts schema — keeps fakes honest
     return { value: schema.parse(this.next()), usage: this.usage(request) };
   }
