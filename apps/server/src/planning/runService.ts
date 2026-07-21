@@ -191,6 +191,37 @@ export class PlanningRunService {
     });
   }
 
+  // ---------------------------------------------------------------------
+  // FRONT DOOR P2b: write path for the reviewer override. P2 built the
+  // storage (planning_reviewer_settings) and the read/resolution above; this
+  // is the missing write. `selection: null` clears the override back to the
+  // automatic opposite-provider default — resolvePlanningParticipants() picks
+  // either state up unchanged on the next planning run, since it only reads
+  // reviewerSelectionOf().
+  // ---------------------------------------------------------------------
+  async setReviewerSelection(
+    projectId: string,
+    selection: PersistedReviewerSelection | null,
+  ): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      const project = await tx.query<{ id: string }>("SELECT id FROM projects WHERE id = $1", [
+        projectId,
+      ]);
+      if (!project.rows[0]) {
+        throw new PlanningRunConflictError("project_not_found", `unknown project "${projectId}"`);
+      }
+      await tx.query(
+        `INSERT INTO planning_reviewer_settings (project_id, reviewer_provider, reviewer_model)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (project_id) DO UPDATE
+           SET reviewer_provider = EXCLUDED.reviewer_provider,
+               reviewer_model = EXCLUDED.reviewer_model,
+               updated_at = now()`,
+        [projectId, selection?.provider ?? null, selection?.model ?? null],
+      );
+    });
+  }
+
   private async defaultMaxRoundsFor(tx: V2SqlExecutor, projectId: string): Promise<number> {
     const result = await tx.query<{ default_max_rounds: number }>(
       "SELECT default_max_rounds FROM planning_reviewer_settings WHERE project_id = $1",

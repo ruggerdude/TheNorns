@@ -62,10 +62,18 @@ interface SchedulingRow {
   provider: string;
   runtime: string;
   model: string;
-  repository_binding_id: string;
+  repository_binding_id: string | null;
   runner_repository_id: string | null;
-  repository_binding_type: "local_runner" | "github";
-  repository_runner_id: string;
+  repository_binding_type: "local_runner" | "github" | null;
+  repository_runner_id: string | null;
+  /**
+   * FRONT DOOR P2b (D2): null when the project has no repository binding at
+   * all (e.g. a folder-first local project that only has an unverified
+   * repository_binding_candidates row); otherwise the binding's actual
+   * status ('unverified_candidate' | 'validating' | 'connected' | ...).
+   * Only 'connected' clears the execution-dispatch gate below.
+   */
+  repository_binding_status: string | null;
   expected_revision: string | null;
   max_concurrent_tasks: number;
   max_concurrent_runs: number;
@@ -99,21 +107,38 @@ export class Phase4Coordinator {
                 binding.observed_head AS expected_revision,
                 binding.repository_id AS runner_repository_id,
                 binding.binding_type AS repository_binding_type,
-                binding.runner_id AS repository_runner_id
+                binding.runner_id AS repository_runner_id,
+                binding.status AS repository_binding_status
          FROM tasks t
          JOIN phases p ON p.id = t.phase_id AND p.project_id = t.project_id
          JOIN projects project ON project.id = t.project_id
          JOIN agent_assignments a ON a.id = $4 AND a.task_id = t.id
          JOIN agent_profiles profile ON profile.id = a.agent_profile_id
-         JOIN repository_bindings binding
+         -- FRONT DOOR P2b (D2): deliberately a LEFT JOIN (not the prior
+         -- inner join requiring status = 'connected'). Planning, staffing,
+         -- and approval must all work with no repository binding at all —
+         -- a folder-first local project created with no runner online has
+         -- only an unverified repository_binding_candidates row until a
+         -- runner verifies it. Execution dispatch is the one place that
+         -- gate belongs; it is enforced explicitly below, with a message
+         -- that says exactly what's missing, instead of silently vanishing
+         -- into the generic "scheduling scope is unavailable" conflict.
+         LEFT JOIN repository_bindings binding
            ON binding.id = project.primary_repository_binding_id
-          AND binding.project_id = project.id AND binding.status = 'connected'
+          AND binding.project_id = project.id
          WHERE t.project_id = $1 AND t.phase_id = $2 AND t.id = $3
          FOR UPDATE OF t, p, a`,
         [input.project_id, input.phase_id, input.task_id, input.assignment_id],
       );
       const row = rows.rows[0];
       if (!row) throw new Phase4CoordinatorConflictError("task scheduling scope is unavailable");
+      if (row.repository_binding_status !== "connected") {
+        throw new Phase4CoordinatorConflictError(
+          "execution requires a verified repository binding and an online runner; " +
+            "connect and verify a runner workspace (or GitHub repository) for this " +
+            "project before dispatching this task",
+        );
+      }
       const revocation = await sql.query<{ revoked_through_generation: number }>(
         "SELECT revoked_through_generation FROM runner_revocations WHERE runner_id=$1",
         [input.runner_id],

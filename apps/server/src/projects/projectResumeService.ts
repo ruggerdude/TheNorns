@@ -264,6 +264,29 @@ export class ProjectResumeService {
                WHERE binding.project_id = candidate.project_id
                  AND binding.repository_id = candidate.external_repository_id
              )
+           -- FRONT DOOR P2b (D2): a folder-first local project created with
+           -- no runner online has only this candidate row (no real
+           -- repository_bindings row exists yet) until a paired runner
+           -- verifies the workspace via the existing
+           -- source-bindings/local flow, at which point
+           -- SourceBindingService.createLocal marks the candidate
+           -- 'promoted' and the NOT EXISTS below stops surfacing it (the
+           -- real connected binding above takes its place).
+           UNION ALL
+           SELECT candidate.id, 'local_runner'::text AS binding_type,
+                  candidate.display_name AS repository_display_name,
+                  'unverified_candidate'::text AS status,
+                  'unknown'::text AS repository_health,
+                  NULL::text AS observed_head, candidate.created_at
+           FROM repository_binding_candidates candidate
+           WHERE candidate.project_id = $1
+             AND candidate.source_type = 'local'
+             AND candidate.status <> 'dismissed'
+             AND NOT EXISTS (
+               SELECT 1 FROM repository_bindings binding
+               WHERE binding.project_id = candidate.project_id
+                 AND binding.binding_type = 'local_runner'
+             )
          ) repository
          ORDER BY created_at, id`,
         [projectId],

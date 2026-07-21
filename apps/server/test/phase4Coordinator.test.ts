@@ -149,6 +149,27 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     });
   });
 
+  // FRONT DOOR P2b (D2): planning/staffing/approval work with no repository
+  // binding at all (a folder-first local project may only have an unverified
+  // repository_binding_candidates row) — but execution dispatch is the one
+  // place that must still gate on a verified binding + online runner, with a
+  // clear, specific error instead of the generic scheduling-conflict message.
+  it("blocks execution dispatch with a clear error when the project has no verified repository binding", async () => {
+    await pg.exec(
+      "UPDATE projects SET primary_repository_binding_id = NULL WHERE id = 'project-1'",
+    );
+
+    await expect(schedule()).rejects.toThrow(/verified repository binding/i);
+  });
+
+  it("blocks execution dispatch when the binding exists but is not yet verified", async () => {
+    await pg.exec(
+      `UPDATE repository_bindings SET status = 'unverified_candidate' WHERE id = 'binding-1'`,
+    );
+
+    await expect(schedule()).rejects.toThrow(/verified repository binding/i);
+  });
+
   it("does not send a runner-local repository identity for GitHub bindings", async () => {
     await pg.exec(
       `INSERT INTO repository_bindings (

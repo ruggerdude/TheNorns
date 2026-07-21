@@ -131,17 +131,24 @@ describe.sequential("runner-owned local folder API", () => {
   });
 
   it("selects, creates, binds, and reopens a local project without exposing its path", async () => {
+    // FRONT DOOR P2b (D2): a raw local path is now accepted at creation time
+    // with no runner online (it was previously a hard 400 here) — it creates
+    // an unverified repository-binding candidate. See
+    // frontDoorLocalProjectCreation.test.ts for full coverage of that path;
+    // this file keeps only the "never leaks the raw path" assertion, since
+    // that guarantee matters regardless of which creation path is used, and
+    // continues on to exercise the real runner-verified flow below.
     const rawPathAttempt = await api("/api/projects", {
       method: "POST",
       body: JSON.stringify({
-        name: "Unsafe local project",
-        description: "Must use runner selection",
+        name: "Unverified local project",
+        description: "No runner required at creation",
         pm_provider: "anthropic",
         source_type: "local",
         source_location: root,
       }),
     });
-    expect(rawPathAttempt.status).toBe(400);
+    expect(rawPathAttempt.status).toBe(201);
     expect(JSON.stringify(await rawPathAttempt.json())).not.toContain(root);
 
     const workspaces = await api("/api/runners/runner-local/workspaces");

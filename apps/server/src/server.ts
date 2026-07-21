@@ -75,7 +75,10 @@ import {
   AllocationRecommendationError,
   recommendProjectAllocation,
 } from "./planning/allocationRecommendation.js";
-import { resolvePlanningParticipants } from "./planning/reviewerSelection.js";
+import {
+  defaultReviewerProviderFor,
+  resolvePlanningParticipants,
+} from "./planning/reviewerSelection.js";
 import {
   PlanningRunConflictError,
   PlanningRunService,
@@ -1935,7 +1938,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       name: z.string().min(1),
       description: z.string().min(1),
       source_type: z.enum(["local", "github"]).optional(),
-      source_location: z.string().trim().min(1).optional(),
+      // FRONT DOOR P2b (D2): a raw local path is now accepted at creation
+      // time with no runner online. It is used only to derive an opaque
+      // sha256 fingerprint and a sanitized last-path-segment display name
+      // (see RelationalProjectReadRepository.create) — never persisted
+      // verbatim, executed, or sent anywhere. The length cap is defense in
+      // depth against a pathological request body, not a path-shape check.
+      source_location: z.string().trim().min(1).max(4096).optional(),
       github_connection_id: z.string().min(1).optional(),
       github_repository_id: z.string().min(1).optional(),
     };
@@ -1953,12 +1962,24 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }),
       ])
       .superRefine((value, context) => {
-        if (value.source_type === "local" || value.source_location) {
+        // FRONT DOOR P2b (D2): folder-first local creation, no runner
+        // required. `source_type: "local"` + `source_location` creates the
+        // project immediately with an unverified repository-binding
+        // candidate; only execution dispatch later requires a verified
+        // binding + online runner (see Phase4Coordinator.schedule). This
+        // replaces the prior hard rejection of local source_type.
+        if (value.source_type === "local" && !value.source_location) {
           context.addIssue({
             code: z.ZodIssueCode.custom,
-            path: value.source_location ? ["source_location"] : ["source_type"],
-            message:
-              "raw local paths are not accepted; create the project and bind a runner selection token",
+            path: ["source_location"],
+            message: "select a local folder path",
+          });
+        }
+        if (value.source_type !== "local" && value.source_location) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["source_type"],
+            message: "a local folder path requires source_type=local",
           });
         }
         if (value.source_type === "github" && !value.github_connection_id) {
@@ -2024,6 +2045,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               sourceRepositoryId: resolvedGitHubRepository.id,
               sourceDefaultBranch: resolvedGitHubRepository.default_branch,
             }
+          : {}),
+        // FRONT DOOR P2b (D2): the raw local path, used only transiently by
+        // ProjectRepository.create() to derive an unverified binding
+        // candidate's fingerprint + display name. Never stored verbatim.
+        ...(body.data.source_type === "local" && body.data.source_location
+          ? { sourceLocation: body.data.source_location }
           : {}),
       });
       stores.audit(
@@ -3326,6 +3353,83 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           reply.header("Cache-Control", "no-store").send(await planningRunService.get(id, runId));
         } catch (error) {
           planningRunError(reply, error);
+        }
+      });
+
+      // ---------------------------------------------------------------
+      // FRONT DOOR P2b: reviewer-selection write path. P2 built the storage
+      // (planning_reviewer_settings) and the read/resolution in
+      // planning/reviewerSelection.ts, but shipped no route to set it. GET
+      // reports the effective reviewer (an explicit override, or the
+      // automatic opposite-provider default); PATCH sets an explicit
+      // override; DELETE clears it back to automatic. resolvePlanningParticipants()
+      // — and therefore every future planning run — picks up either state
+      // unchanged, since it only ever reads reviewerSelectionOf().
+      //
+      // Model validity: there is no static catalog that legitimately governs
+      // reviewer models the way NORNS_DEBATE_ALLOWED_MODELS governs debate
+      // models — that catalog is for implementation-worker/debate models, a
+      // different model space, and resolvePlanningParticipants() itself
+      // already accepts any non-empty persisted model string (see
+      // planningReviewerSelection.test.ts). So this route validates only
+      // provider enum + non-empty model; an unusable model surfaces as a
+      // truthful planning-run failure at run time, same as today.
+      // ---------------------------------------------------------------
+      const PlanningReviewerBody = z
+        .object({
+          provider: z.enum(["anthropic", "openai"]),
+          model: z.string().trim().min(1).max(200),
+        })
+        .strict();
+
+      app.get("/api/v2/projects/:id/planning-reviewer", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        try {
+          const [pmSelection, persisted] = await Promise.all([
+            projects.pmSelectionOf(id),
+            planningRunService.reviewerSelectionOf(id),
+          ]);
+          reply.send(
+            persisted
+              ? { provider: persisted.provider, model: persisted.model, mode: "explicit" as const }
+              : {
+                  provider: defaultReviewerProviderFor(pmSelection.provider),
+                  model: null,
+                  mode: "automatic" as const,
+                },
+          );
+        } catch (error) {
+          projectError(reply, error);
+        }
+      });
+
+      app.patch("/api/v2/projects/:id/planning-reviewer", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        const body = PlanningReviewerBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        try {
+          await projects.pmSelectionOf(id); // project-existence check with the shared 404 mapping
+          await planningRunService.setReviewerSelection(id, {
+            provider: body.data.provider,
+            model: body.data.model,
+          });
+          reply.code(204).send();
+        } catch (error) {
+          projectError(reply, error);
+        }
+      });
+
+      app.delete("/api/v2/projects/:id/planning-reviewer", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        try {
+          await projects.pmSelectionOf(id);
+          await planningRunService.setReviewerSelection(id, null);
+          reply.code(204).send();
+        } catch (error) {
+          projectError(reply, error);
         }
       });
     }
