@@ -419,9 +419,7 @@ export class PhaseLaunchService {
           task_title: task.task_title,
           outcome: "deferred",
           blocked_code: "concurrency_capacity_reached",
-          blocked_reason:
-            `queued: the project's concurrency cap (${opening.max_concurrent_tasks}) is fully ` +
-            "used. This task will be dispatched automatically when a running task finishes.",
+          blocked_reason: `queued: the project's concurrency cap (${opening.max_concurrent_tasks}) is fully used. This task will be dispatched automatically when a running task finishes.`,
         });
         continue;
       }

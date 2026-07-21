@@ -94,9 +94,7 @@ export class Phase4CompletionService {
       if (openConflicts.rows.length > 0) {
         const ids = openConflicts.rows.map((conflict) => conflict.id).join(", ");
         throw new Phase4CompletionConflictError(
-          `task has ${openConflicts.rows.length} unresolved integration conflict(s) (${ids}) ` +
-            "with a sibling run's published branch; a human must reconcile the branches and " +
-            "record the resolution before this task can be completed",
+          `task has ${openConflicts.rows.length} unresolved integration conflict(s) (${ids}) with a sibling run's published branch; a human must reconcile the branches and record the resolution before this task can be completed`,
         );
       }
       await sql.query(
