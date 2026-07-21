@@ -3,6 +3,7 @@
  * Phase 4 coordinator. See the design and blast-radius notes below the imports.
  */
 import { timingSafeEqual } from "node:crypto";
+import { nonce } from "../ids.js";
 import { NORNS_WORKFLOW_VERSION } from "../integrations/actionsWorkflowTemplate.js";
 import {
   type ActionsRepositoryRef,
@@ -11,7 +12,6 @@ import {
   enrollmentTokenHash,
   generateEnrollmentToken,
 } from "../integrations/githubActions.js";
-import { nonce } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   type Phase4Coordinator,
