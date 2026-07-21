@@ -10,3 +10,5 @@ test-results/
 playwright-report/
 blob-report/
 dist-pack/
+.claude/worktrees/
+.claude/snapshots/
