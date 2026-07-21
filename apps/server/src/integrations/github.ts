@@ -75,6 +75,21 @@ export interface GitHubRepositorySummary {
   updated_at: string;
 }
 
+/**
+ * ONBOARDING O4 — the actionable replacement for the inert `binding_ready`
+ * boolean. `ready: false` is a user-facing, fixable condition, not a detail.
+ */
+export interface GitHubInstallationReadiness {
+  ready: boolean;
+  reason: "ready" | "repository_not_in_installation";
+  repository_selection: "all" | "selected";
+  installation_id: string;
+  /** Human-readable instruction. Non-null exactly when `ready` is false. */
+  action_required: string | null;
+  /** Deep link to the installation's "Repository access" settings. */
+  manage_installation_url: string;
+}
+
 export interface GitHubIntegrationStatus {
   configured: boolean;
   setup_available: boolean;
@@ -146,6 +161,82 @@ interface OAuthTokenResponse {
 interface InstallationTokenResponse {
   token: string;
   expires_at: string;
+}
+
+/**
+ * ONBOARDING O4 — installation-token scoping (ADR-006 §"GitHub credential
+ * broker": "restricted to that repository and the minimum permission subset").
+ *
+ * Previously every installation token was minted with an empty request body,
+ * which GitHub interprets as "grant the installation's FULL permission set
+ * across EVERY repository it can reach". Callers now declare a scope and the
+ * mint request carries `repository_ids` + a narrowed `permissions` map.
+ *
+ * `repository_ids` is intentionally optional: three GitHub endpoints
+ * (`/installation/repositories`, org repository creation, and the
+ * installation-membership probe) are installation-wide by definition and 422
+ * if a repository scope is attached. Those scopes still narrow `permissions`.
+ */
+export interface GitHubInstallationTokenScope {
+  /** Numeric GitHub repository ids. Omitted only for installation-wide calls. */
+  repository_ids?: readonly number[];
+  /** Least-privilege permission subset for this one operation. */
+  permissions: Readonly<Record<string, "read" | "write">>;
+}
+
+interface CachedInstallationToken {
+  token: string;
+  /** Epoch millis of GitHub's own `expires_at` — retained, no longer discarded. */
+  expires_at_ms: number;
+}
+
+/** Re-mint this far ahead of GitHub's expiry so an in-flight call cannot race it. */
+const INSTALLATION_TOKEN_REFRESH_MARGIN_MS = 120_000;
+
+/**
+ * Least-privilege scopes used by Norns. Each is the minimum GitHub will accept
+ * for the operation it names; nothing here grants `administration` except the
+ * explicitly human-confirmed repository-creation path (ADR-006 amendment).
+ */
+export const GITHUB_TOKEN_SCOPES = {
+  /** Enumerate the installation's repositories. Installation-wide by API design. */
+  listRepositories: { permissions: { metadata: "read" } },
+  /** Read one repository's metadata. */
+  readRepository: (repositoryId: number) => ({
+    repository_ids: [repositoryId],
+    permissions: { metadata: "read" },
+  }),
+  /** Probe whether a repository is inside the installation at all. */
+  installationProbe: { permissions: { metadata: "read" } },
+  /** Create a repository under an organization (opt-in capability). */
+  createOrganizationRepository: { permissions: { administration: "write" } },
+  /** Commit `.github/workflows/norns-agent.yml` into one repository. */
+  writeWorkflowFile: (repositoryId: number) => ({
+    repository_ids: [repositoryId],
+    permissions: { contents: "write", workflows: "write" },
+  }),
+  /** Trigger a workflow and read run status / job logs for one repository. */
+  dispatchWorkflow: (repositoryId: number) => ({
+    repository_ids: [repositoryId],
+    permissions: { actions: "write" },
+  }),
+  /** Write the ephemeral runner's enrollment secret into one repository. */
+  writeRepositorySecret: (repositoryId: number) => ({
+    repository_ids: [repositoryId],
+    permissions: { secrets: "write" },
+  }),
+} as const satisfies Record<
+  string,
+  GitHubInstallationTokenScope | ((repositoryId: number) => GitHubInstallationTokenScope)
+>;
+
+function tokenCacheKey(installationId: string, scope: GitHubInstallationTokenScope): string {
+  const repositories = [...(scope.repository_ids ?? [])].sort((a, b) => a - b).join(",");
+  const permissions = Object.entries(scope.permissions)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, level]) => `${name}=${level}`)
+    .join(",");
+  return `${installationId}|repos:${repositories}|perms:${permissions}`;
 }
 
 interface StoredAppConfigurationRow {
@@ -438,6 +529,8 @@ export class GitHubIntegrationService {
   private config: GitHubIntegrationConfig | null;
   private cipher: TokenCipher | null;
   private configurationSource: "environment" | "manifest" | null;
+  /** ONBOARDING O4: scope-keyed installation-token cache honouring `expires_at`. */
+  private readonly installationTokens = new Map<string, CachedInstallationToken>();
 
   constructor(
     private readonly transactions: V2TransactionRunner,
@@ -795,7 +888,11 @@ export class GitHubIntegrationService {
     query = "",
   ): Promise<GitHubRepositorySummary[]> {
     const connection = await this.connection(connectionId);
-    const token = await this.installationToken(connection.installation_id);
+    // Installation-wide by API design; narrowed to metadata:read.
+    const token = await this.installationToken(
+      connection.installation_id,
+      GITHUB_TOKEN_SCOPES.listRepositories,
+    );
     const repositories: GitHubRepository[] = [];
     for (let page = 1; page <= 10; page += 1) {
       const response = await this.github<{ repositories: GitHubRepository[] }>(
@@ -820,7 +917,18 @@ export class GitHubIntegrationService {
     repositoryId: string,
   ): Promise<GitHubRepositorySummary> {
     const connection = await this.connection(connectionId);
-    const token = await this.installationToken(connection.installation_id);
+    const numericRepositoryId = Number(repositoryId);
+    if (!Number.isInteger(numericRepositoryId) || numericRepositoryId <= 0) {
+      throw new GitHubIntegrationError(
+        "invalid_repository_id",
+        "The selected GitHub repository identifier is invalid",
+        400,
+      );
+    }
+    const token = await this.installationToken(
+      connection.installation_id,
+      GITHUB_TOKEN_SCOPES.readRepository(numericRepositoryId),
+    );
     const repository = await this.github<GitHubRepository>(
       `/repositories/${encodeURIComponent(repositoryId)}`,
       token,
@@ -844,11 +952,19 @@ export class GitHubIntegrationService {
       private: boolean;
       auto_init: boolean;
     },
-  ): Promise<GitHubRepositorySummary & { binding_ready: boolean }> {
+  ): Promise<
+    GitHubRepositorySummary & {
+      binding_ready: boolean;
+      installation: GitHubInstallationReadiness;
+    }
+  > {
     const connection = await this.connection(input.connection_id);
     let repository: GitHubRepository;
     if (connection.owner_type === "organization") {
-      const token = await this.installationToken(connection.installation_id);
+      const token = await this.installationToken(
+        connection.installation_id,
+        GITHUB_TOKEN_SCOPES.createOrganizationRepository,
+      );
       repository = await this.github<GitHubRepository>(
         `/orgs/${encodeURIComponent(connection.owner_login)}/repos`,
         token,
@@ -881,9 +997,21 @@ export class GitHubIntegrationService {
         }),
       });
     }
+    // ONBOARDING O4 — the old code inferred `binding_ready` from
+    // `repository_selection === "all"` and then nothing read it. A repository
+    // created under a "selected repositories" installation is NOT in that
+    // installation, so every later dispatch would silently never work. Ask
+    // GitHub directly and return an actionable state the caller must surface.
+    const installation = await this.installationReadiness(
+      input.connection_id,
+      repository.owner.login,
+      repository.name,
+    );
     return {
       ...repositorySummary(input.connection_id, repository),
-      binding_ready: connection.repository_selection === "all",
+      /** @deprecated Retained for wire compatibility; read `installation.ready`. */
+      binding_ready: installation.ready,
+      installation,
     };
   }
 
@@ -1163,13 +1291,126 @@ export class GitHubIntegrationService {
     return `${unsigned}.${signer.sign(config.privateKey, "base64url")}`;
   }
 
-  private async installationToken(installationId: string): Promise<string> {
+  /**
+   * ONBOARDING O4 — mint (or reuse) a scoped installation token.
+   *
+   * Remediates two confirmed defects:
+   *  1. the request body was `{}`, so the token carried the installation's full
+   *     permission set across every repository. It now carries the caller's
+   *     `repository_ids` + narrowed `permissions` (ADR-006 §credential broker).
+   *  2. GitHub's `expires_at` was discarded and every call minted a fresh
+   *     token. It is now retained and the token reused until near-expiry.
+   *
+   * Public because the Actions execution path (a separate module) legitimately
+   * needs repository-scoped tokens; it was previously `private` and unreachable.
+   */
+  async installationToken(
+    installationId: string,
+    scope: GitHubInstallationTokenScope,
+  ): Promise<string> {
+    const key = tokenCacheKey(installationId, scope);
+    const cached = this.installationTokens.get(key);
+    if (cached && cached.expires_at_ms - INSTALLATION_TOKEN_REFRESH_MARGIN_MS > Date.now()) {
+      return cached.token;
+    }
+    const body: Record<string, unknown> = { permissions: scope.permissions };
+    if (scope.repository_ids !== undefined) body.repository_ids = [...scope.repository_ids];
     const response = await this.github<InstallationTokenResponse>(
       `/app/installations/${encodeURIComponent(installationId)}/access_tokens`,
       this.appJwt(),
-      { method: "POST", body: JSON.stringify({}) },
+      { method: "POST", body: JSON.stringify(body) },
     );
+    const expiresAtMs = Date.parse(response.expires_at);
+    this.installationTokens.set(key, {
+      token: response.token,
+      // A malformed/absent expiry must not become an immortal cache entry:
+      // fall back to GitHub's documented one-hour installation-token lifetime.
+      expires_at_ms: Number.isNaN(expiresAtMs) ? Date.now() + 3_600_000 : expiresAtMs,
+    });
     return response.token;
+  }
+
+  /** Drop every cached installation token (revocation / re-installation path). */
+  forgetInstallationTokens(installationId?: string): void {
+    if (installationId === undefined) {
+      this.installationTokens.clear();
+      return;
+    }
+    for (const key of this.installationTokens.keys()) {
+      if (key.startsWith(`${installationId}|`)) this.installationTokens.delete(key);
+    }
+  }
+
+  /**
+   * Probe, without throwing, whether a repository is reachable through this
+   * installation. A "selected repositories" installation that does not include
+   * the repository answers 404 here — which is the difference between dispatch
+   * working and dispatch silently never working.
+   */
+  private async repositoryInInstallation(
+    installationId: string,
+    owner: string,
+    name: string,
+  ): Promise<boolean> {
+    const token = await this.installationToken(
+      installationId,
+      GITHUB_TOKEN_SCOPES.installationProbe,
+    );
+    const response = await this.http(
+      `${API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "X-GitHub-Api-Version": GITHUB_API_VERSION,
+          "User-Agent": "TheNorns",
+        },
+      },
+    );
+    return response.ok;
+  }
+
+  /**
+   * First-class, surfaced, actionable installation-readiness state.
+   *
+   * Replaces the old inert `binding_ready` boolean (which was computed and then
+   * read by nothing). When this reports `ready: false` the caller MUST show
+   * `action_required` and `manage_installation_url` to the human — otherwise a
+   * repository created under a "selected repositories" installation looks fine
+   * and every later dispatch fails for reasons the user cannot see.
+   */
+  async installationReadiness(
+    connectionId: string,
+    owner: string,
+    name: string,
+  ): Promise<GitHubInstallationReadiness> {
+    const connection = await this.connection(connectionId);
+    const manageUrl =
+      connection.owner_type === "organization"
+        ? `https://github.com/organizations/${encodeURIComponent(connection.owner_login)}/settings/installations/${encodeURIComponent(connection.installation_id)}`
+        : `https://github.com/settings/installations/${encodeURIComponent(connection.installation_id)}`;
+    const accessible = await this.repositoryInInstallation(connection.installation_id, owner, name);
+    if (accessible) {
+      return {
+        ready: true,
+        reason: "ready",
+        repository_selection: connection.repository_selection,
+        installation_id: connection.installation_id,
+        action_required: null,
+        manage_installation_url: manageUrl,
+      };
+    }
+    return {
+      ready: false,
+      reason: "repository_not_in_installation",
+      repository_selection: connection.repository_selection,
+      installation_id: connection.installation_id,
+      action_required:
+        `The Norns GitHub App is installed on ${connection.owner_login}, but ${owner}/${name} ` +
+        "is not one of the repositories it can access, so Norns cannot run work there yet. " +
+        "Open the installation settings, add this repository under “Repository access”, and save.",
+      manage_installation_url: manageUrl,
+    };
   }
 
   private async oauthToken(body: Record<string, string>): Promise<OAuthTokenResponse> {
