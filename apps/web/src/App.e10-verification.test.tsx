@@ -191,9 +191,15 @@ describe("EXECUTION E10 workspace surfaces", () => {
       },
       [],
     );
-    // The pre-E10 wire shape: no `failed_verification_commands` key at all.
-    delete (payload.tasks as Record<string, unknown>[])[0].failed_verification_commands;
-    mock.get(`/api/v2/projects/${projectAlpha.id}/phases/phase-1/execution`, { body: payload });
+    // The pre-E10 wire shape: no `failed_verification_commands` key, no
+    // publication fields. Rebuilt without them rather than deleted, so the
+    // fixture really is the old payload rather than the new one with holes.
+    const tasks = (payload.tasks as Record<string, unknown>[]).map(
+      ({ failed_verification_commands: _omitted, ...task }) => task,
+    );
+    mock.get(`/api/v2/projects/${projectAlpha.id}/phases/phase-1/execution`, {
+      body: { ...payload, tasks },
+    });
     mock.install();
 
     await renderAppAndOpenProject(projectAlpha.name);

@@ -150,10 +150,16 @@ export const EventPayload = z.discriminatedUnion("kind", [
     commit_sha: nonEmpty,
     passed: z.boolean(),
     output_digest: nonEmpty,
-    // ADDITIVE: defaults to empty, so an event emitted by a runner that
-    // predates E10 parses exactly as it did before and records no results —
-    // which is the truth about that runner, not a silent zero.
-    command_results: z.array(VerificationCommandOutcome).default([]),
+    // ADDITIVE, and deliberately `.optional()` rather than `.default([])`.
+    //
+    // A default would make the field REQUIRED on the parsed output type, and
+    // the runner emits that type — so every existing emit site would stop
+    // compiling and a legacy runner build would be unable to construct a valid
+    // payload at all. Optional keeps the field absent-able in both directions:
+    // a runner that predates E10 emits exactly what it emitted before, and the
+    // server records no results, which is the truth about that runner rather
+    // than a fabricated empty pass.
+    command_results: z.array(VerificationCommandOutcome).optional(),
   }),
   /**
    * EXECUTION E10 — where the run's work went.
@@ -195,6 +201,15 @@ export const EventEnvelope = z.object({
   payload: EventPayload,
 });
 export type EventEnvelopeT = z.infer<typeof EventEnvelope>;
+/**
+ * The PRE-parse shape. EXECUTION E10 gave `verification_result` a defaulted
+ * `command_results`, which makes the field required on the OUTPUT type and
+ * still optional on the input — exactly the additive property we want, since a
+ * runner that predates E10 emits an envelope without it. Anything that accepts
+ * an envelope and parses it should take this type, not the output type, or the
+ * compiler would demand a field the wire is allowed to omit.
+ */
+export type EventEnvelopeInputT = z.input<typeof EventEnvelope>;
 
 // ---------------------------------------------------------------------------
 // Reconciliation handshake (every reconnect: exchange watermarks, replay both

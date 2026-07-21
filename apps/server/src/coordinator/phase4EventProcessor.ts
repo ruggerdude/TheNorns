@@ -1,4 +1,8 @@
-import { EventEnvelope, type EventEnvelopeT, resolveV2BudgetReservation } from "@norns/contracts";
+import {
+  EventEnvelope,
+  type EventEnvelopeInputT,
+  resolveV2BudgetReservation,
+} from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   transitionV2AgentRunLifecycle,
@@ -40,7 +44,7 @@ interface RunScope {
 export class Phase4EventProcessor {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
-  apply(input: EventEnvelopeT): Promise<{ duplicate: boolean; ignored?: boolean }> {
+  apply(input: EventEnvelopeInputT): Promise<{ duplicate: boolean; ignored?: boolean }> {
     const event = EventEnvelope.parse(input);
     return this.transactions.transaction(async (sql) => {
       const revocation = await sql.query<{ revoked_through_generation: number }>(
@@ -301,7 +305,7 @@ export class Phase4EventProcessor {
         // artifact ref that points at nothing would be worse than storing the
         // output inline. Output is truncated on the way in so one pathological
         // test suite cannot bloat the row unboundedly.
-        const commandResults = event.payload.command_results.map((result) => ({
+        const commandResults = (event.payload.command_results ?? []).map((result) => ({
           name: result.name,
           command: result.command,
           exit_code: result.exit_code,
