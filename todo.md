@@ -189,6 +189,34 @@
     Reported rather than presented as verified; the RTL suite (real fetch mocking, exact DOM/CSS
     assertions incl. computed `--today` custom-property values and bar-fill widths) is the
     verification basis instead.
+- [x] FD-P1c — ✅ **One canonical planning path — closed a live-browser-verification gap**: a
+  freshly created draft project's workspace still showed the *legacy* "01 · Live planning" box
+  (`runPlanning` → `POST ${base}/plan` → `commitPlan` → `POST ${base}/plan/load`), meaning a
+  project's very first plan bypassed everything FD-P1/P1b built (per-project reviewer, rounds,
+  attachments, an observable transcript, the strategy bridge) — found via live browser
+  verification, not the test suite. Deleted the legacy box's JSX and its backing state/functions
+  (`runPlanning`, `commitPlan`, `retryCommit`, `planObjective`/`planLoading`/`planResult`/
+  `planError`/`committing`/`commitError`, `committingRef`, `lastCommitPlanRef`, App.tsx's own
+  `PlanReviewResult` type, the `PlanReview`/`PlanLike` import) — zero remaining UI caller of
+  `${base}/plan`. The existing next-phase durable-planning-run form (built in P1b to replace the
+  *other* legacy "Create the next phase" text box) is now the sole entry point for planning a
+  project's first phase too — it doesn't care whether `resume.phases.length` is 0 or N, so no new
+  branch was needed, just upgraded it to parity with the wizard's attach-and-launch step
+  (added a rounds stepper and the real `AttachmentInput`, neither of which the P1b version had),
+  and labeled it "Draft the plan" vs. "Draft the next phase" depending on phase count. Also added
+  a planning-cost display to the planning-run-status card (`result.total_cost_usd` — computed by
+  P2 but never rendered anywhere until now). `PlanReview.tsx` is kept (not deleted) — its 3
+  component tests (`PlanReview.accordion/acceptance/status.test.tsx`) still exercise it directly;
+  it has no remaining caller from `App.tsx` and is noted as dead code there. Rewrote the two tests
+  that exercised the deleted box (`App.ui2-failed-load-loses-edits`, `App.ui3-plan-result-metadata`)
+  to verify the same properties against the new flow instead of deleting them: UI-2's "a rejected
+  mutation must not discard the human's edits" now covers a rejected `strategy/approve` leaving
+  the staffing edit and the StrategyReview screen in place; UI-3's "convergence/rounds/cost/
+  outstanding-findings must reach the human" now covers the planning-run-status card (status,
+  rounds, the newly-added cost line) plus the materialized StrategyReview screen's outstanding
+  findings and rounds banner for a `cap_reached` run. Verification: biome clean, `tsc --noEmit`
+  clean, full `@norns/web` suite green (99 passed — same count, two files rewritten in place, zero
+  regressions), `pnpm run build` clean.
 - [x] FD-P3 — ✅ **Strategy bridge (planning run → relational phase/strategy)** built + verified on `frontdoor/integration`+P3. New `apps/server/src/projects/strategyBridgeService.ts` consumes a converged/cap_reached planning run and, through the EXISTING phase-3 workflow services (no parallel lifecycle), creates a phase + proposed StrategyVersion (objectives/tasks/assignment-proposals mapped from plan modules + staffing_proposal), resolves/creates AgentProfiles per provider/model pair, edits staffing (superseding version, staleness-respecting), and approves via the existing materialization path. Routes in server.ts "FRONT DOOR P3" section: `POST .../phases` ({planning_run_id}), `GET/PATCH .../phases/:phaseId/strategy[/staffing]`, `POST .../strategy/approve`. Idempotent per run via a new `phases.planning_run_id` link (migration 0013, partial unique index). Zero contract changes. Fixed a latent bug in `strategyWorkflowService.approve` (task_dependencies INSERT referenced non-existent predecessor/successor_phase_id columns; never hit because no prior test materialized task deps). Tests: `apps/server/test/frontDoorStrategyBridge.test.ts` (9 — full lifecycle, idempotency, cap_reached findings, post-approval staleness, authz). Full server suite green (474 passed).
 - [x] FD-P5 — ✅ **Tracking read models (per-phase progress, ETA, burn rate, project aggregate, update-interval setting)** built + verified on the P5 worktree. `ProjectResumeService.open` (resume payload) and `AttentionService.phase` (phase-scoped execution read model) now compute, per phase: `percent_complete`/`tasks_completed`/`tasks_total` (task-weighted, 0 on the empty-phase division-by-zero guard), `eta_at` (linear projection from a 5-sample rolling window of recent task completions — null whenever there's no signal: phase not executing, <2 completions, or a degenerate zero time span, never fabricated), and `burn_rate_usd_per_hour` (cost/hour over recently finished runs, null with no signal or non-positive elapsed time). Resume payload also carries a project-level `progress` aggregate (`overall_percent_complete` task-weighted across non-cancelled phases, `blended_eta_at` = latest executing-phase ETA, `agents_active`/`decisions_waiting` reusing the existing attention/active-run queries — no parallel system) and `update_interval_seconds` (60|300|900, default 300, migration `0014_frontdoor_progress_tracking`), settable via new session-authed `PATCH /api/v2/projects/:id/settings` in server.ts's "FRONT DOOR P5" section, with a server-side floor independent of the allowed-value check. The new fields are additive to `@norns/contracts`' `.strict()` V2ProjectResume/V2PhaseExecution (owned by P3) — validated locally in `projectResumeService.ts` and merged onto the contract-validated base object rather than widening `packages/contracts`, which is outside this phase's ownership (flagged as a deviation for the integration owner). Tests: new `apps/server/test/frontDoorProgressTracking.test.ts` (33 — pure percent/ETA/burn-rate math incl. every no-signal/division-by-zero guard, mixed-phase-state aggregate, settings validation + persistence round-trip, resume/phase-execution payload shape, PATCH route authz/validation/persistence); `v2PreservationSchema.test.ts` updated for the new migration. Full server suite green (507 passed, 8 skipped).
 

@@ -1,55 +1,162 @@
-// UI-3 regression: convergence status, round count, cost, and outstanding
-// findings are captured in App.tsx's PlanResult type but never passed as
-// props to PlanReview — only `.plan` is forwarded
-// (`<PlanReview plan={planResult.plan} .../>`), and PlanReview.tsx has no
-// props for any of this. A human reviewing a plan that hit the round cap
-// with the reviewer still unhappy has no way to see that from the QC screen.
+// UI-3 regression, updated for FRONT DOOR P1c: this used to verify that
+// convergence status, round count, cost, and outstanding findings reached
+// the legacy PlanReview QC screen (the "01 · Live planning" box's
+// runPlanning -> planResult path). That path has no remaining UI caller —
+// one canonical planning path now: a durable planning run, materialized
+// into a phase, reviewed in StrategyReview.tsx. This rewrite verifies the
+// same property (a plan that hit the round cap with the reviewer still
+// unhappy must not hide that from the human) against the new flow: status
+// and round count surface on the planning-run-status card before
+// materializing, cost surfaces there too (previously computed but never
+// rendered — added alongside this rewrite), and outstanding findings
+// surface on the materialized StrategyReview screen.
 import { screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, test } from "vitest";
-import { renderAppAndOpenProject, seedAuth } from "./test/appHarness";
-import { capReachedPlanResult, fullyAllocatedGraph, projectAlpha } from "./test/fixtures";
+import { render } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it } from "vitest";
+import { App } from "./App";
+import { setToken } from "./auth";
+import { projectAlpha } from "./test/fixtures";
 import { MockFetch } from "./test/mockFetch";
 
-describe("UI-3: plan metadata (status/rounds/cost/outstanding) must reach the QC screen", () => {
+describe("UI-3 (rewritten for P1c): plan metadata reaches the human, via the durable planning-run flow", () => {
   let mock: MockFetch;
 
-  beforeEach(async () => {
-    seedAuth();
+  afterEach(() => mock.restore());
+
+  async function setupAndMaterialize() {
     mock = new MockFetch();
-    mock.get("/api/projects", { body: [projectAlpha] });
-    mock.get(`/api/projects/${projectAlpha.id}/graph`, { body: fullyAllocatedGraph });
-    mock.post(`/api/projects/${projectAlpha.id}/plan`, { body: capReachedPlanResult });
+    setToken("present");
+    mock.get("/api/projects", { body: [{ ...projectAlpha, focus_planning_run_id: "run-1" }] });
+    mock.get("/api/integrations/github/status", { status: 404, body: {} });
+    mock.get("/api/v2/attention", { status: 404, body: {} });
+    mock.get(`/api/projects/${projectAlpha.id}/graph`, {
+      status: 409,
+      body: { error: "not_planned" },
+    });
+    mock.get(`/api/v2/projects/${projectAlpha.id}/resume`, {
+      body: {
+        project: {
+          id: projectAlpha.id,
+          name: projectAlpha.name,
+          status: "active",
+          aggregate_version: 1,
+        },
+        architecture: null,
+        repositories: [],
+        phases: [],
+        attention: { open_decisions: 0, active_runs: 0, blocked_tasks: 0 },
+        next_recommended_action: "Review open decision points",
+      },
+    });
+    mock.get(`/api/v2/projects/${projectAlpha.id}/planning-runs/run-1`, {
+      body: {
+        id: "run-1",
+        status: "cap_reached",
+        round: 5,
+        max_rounds: 5,
+        transcript: [],
+        result: { plan: {}, content_hash: "a".repeat(64), total_cost_usd: 118.2 },
+        error: null,
+      },
+    });
+    mock.post(`/api/v2/projects/${projectAlpha.id}/phases`, {
+      status: 201,
+      body: {
+        phase: {
+          id: "phase-new",
+          status: "awaiting_approval",
+          objective_summary: "Web UI",
+          approved_strategy_version_id: null,
+          approved_budget_usd: 0,
+          aggregate_version: 1,
+        },
+        rounds: {
+          planning_run_id: "run-1",
+          status: "cap_reached",
+          round: 5,
+          max_rounds: 5,
+          transcript: [],
+        },
+        strategy: {
+          id: "strategy-1",
+          version: 1,
+          status: "proposed",
+          aggregate_version: 1,
+          content_hash: "a".repeat(64),
+          objective: "Ship the v1 notifications service",
+          assumptions: [],
+          risks: [],
+          scope_in: [],
+          scope_out: [],
+          architecture_impact: "none",
+          convergence: "cap_reached",
+          review_rounds: 5,
+          proposed_concurrency: 1,
+          proposed_budget_usd: 40,
+          objectives: [],
+          tasks: [],
+          staffing: [],
+          findings: [],
+        },
+        outstanding_findings: [
+          {
+            severity: "must_fix",
+            finding:
+              "Reviewer flagged: web-ui module has no rollback plan for a failed notification-preferences migration.",
+            recommendation: "Add a rollback drill and name the evidence required before release.",
+          },
+        ],
+      },
+    });
+    mock.get(`/api/v2/projects/${projectAlpha.id}/phases/phase-new/execution`, {
+      body: {
+        phase: {
+          id: "phase-new",
+          objective_summary: "Web UI",
+          status: "awaiting_approval",
+          completed_tasks: 0,
+          total_tasks: 0,
+        },
+        tasks: [],
+      },
+    });
     mock.install();
 
-    const { user } = await renderAppAndOpenProject(projectAlpha.name);
-    await screen.findByTestId("graph-version");
-    await user.type(screen.getByTestId("plan-objective"), capReachedPlanResult.plan.objective);
-    await user.click(screen.getByRole("button", { name: /run live planning/i }));
-    await screen.findByTestId("plan-review");
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
+    );
+    return { user };
+  }
+
+  it("shows the cap_reached status and round count on the planning-run card before materializing", async () => {
+    await setupAndMaterialize();
+    const card = await screen.findByTestId("planning-run-status");
+    expect(within(card).getByText(/cap_reached/i)).toBeInTheDocument();
+    expect(within(card).getByText(/round 5 of 5/i)).toBeInTheDocument();
   });
 
-  // Scope assertions to the plan-review QC region. UI-3 is specifically about
-  // this metadata *reaching the QC screen*, and scoping keeps the round count
-  // ("5") from colliding with an incidental "5" the React Flow canvas renders
-  // in a node's model label (e.g. "claude-sonnet-5"). This strengthens the
-  // assertion (the value must be in the QC review, not merely anywhere).
-  const qc = () => within(screen.getByTestId("plan-review"));
-
-  test("shows the plan did not converge (cap_reached) after 5 rounds", () => {
-    expect(qc().getByText(/cap_reached/i)).toBeInTheDocument();
-    expect(qc().getByText(/^5$/)).toBeInTheDocument();
+  it("shows the total planning cost before materializing", async () => {
+    await setupAndMaterialize();
+    const card = await screen.findByTestId("planning-run-status");
+    expect(within(card).getByTestId("planning-run-cost")).toHaveTextContent(/118\.20/);
   });
 
-  test("shows the total planning cost", () => {
-    // capReachedPlanResult.total_cost_usd is 118.2 — assert the figure is
-    // rendered somewhere on the QC screen, however it ends up formatted.
-    expect(qc().getByText(/118\.2/)).toBeInTheDocument();
-  });
+  it("shows the reviewer's outstanding finding on the materialized StrategyReview screen — cap_reached never hides it", async () => {
+    const { user } = await setupAndMaterialize();
+    await screen.findByTestId("planning-run-status");
+    await user.click(screen.getByRole("button", { name: /create phase from this run/i }));
 
-  test("shows the reviewer's outstanding finding", () => {
-    const [finding] = capReachedPlanResult.outstanding;
-    expect(finding).toBeDefined();
-    const snippet = finding?.finding.slice(0, 30) ?? "";
-    expect(qc().getByText(new RegExp(snippet))).toBeInTheDocument();
+    const strategySection = await screen.findByTestId("strategy-review-section");
+    expect(within(strategySection).getByTestId("strategy-outstanding-findings")).toHaveTextContent(
+      /rollback plan for a failed notification-preferences migration/i,
+    );
+    // The rounds banner also carries the cap_reached status through — the
+    // human isn't left thinking this converged cleanly.
+    expect(within(strategySection).getByTestId("strategy-rounds-banner")).toHaveTextContent(
+      /round cap reached/i,
+    );
   });
 });

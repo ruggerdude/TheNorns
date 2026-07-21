@@ -1,11 +1,22 @@
 import { pmModelOption } from "@norns/contracts";
 // TheNorns web app: sole point of entry. Login gates everything; Projects is
-// the landing view (list/create); opening a project shows its graph editor —
-// React Flow rendering with editing (edges with cycle rejection, node
-// deletion with re-parent/cascade confirmation), live cross-provider
-// planning with a QC/acceptance-criteria review step before committing, Auto
-// Allocate, per-node overrides, cost preview, and allocation approval — all
-// through the project-scoped server API.
+// the landing view (list/create); opening a project shows its workspace.
+//
+// FRONT DOOR P1c: planning (first phase and every subsequent one) goes
+// through exactly one canonical path — a durable, observable planning run
+// (POST .../planning-runs, polled), materialized into a phase + proposed
+// strategy (POST .../phases {planning_run_id}), reviewed/staffed/approved in
+// StrategyReview.tsx. The old synchronous `${base}/plan` + `/plan/load` +
+// PlanReview.tsx flow (this file's former "01 · Live planning" box) has no
+// remaining caller here per the design freeze; PlanReview.tsx itself is kept
+// only because its own component tests still exercise it directly.
+//
+// The graph editor below (React Flow rendering with editing — edges with
+// cycle rejection, node deletion with re-parent/cascade confirmation, Auto
+// Allocate, per-node overrides, cost preview, allocation approval) is the
+// pre-existing execution path for a project whose graph was already loaded
+// before this change; it renders once `graph` exists and is otherwise
+// dormant behind the "No plan yet" hint.
 import {
   Background,
   type Connection,
@@ -18,10 +29,10 @@ import "@xyflow/react/dist/style.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Account } from "./Account";
 import { Admin } from "./Admin";
+import { AttachmentInput } from "./AttachmentInput";
 import { Debates } from "./Debates";
 import { Gantt, type GanttPhase } from "./Gantt";
 import { Login, type LoginMode } from "./Login";
-import { type PlanLike, PlanReview } from "./PlanReview";
 import {
   AttentionDecisionForm,
   type AttentionItemDto,
@@ -108,47 +119,6 @@ async function api(path: string, method = "GET", body?: unknown): Promise<GraphD
   const json = (await res.json()) as GraphDto & { message?: string };
   if (!res.ok) throw new ApiError(json.message ?? `request failed: ${res.status}`, res.status);
   return json;
-}
-
-/**
- * Frozen contract between App.tsx (orchestration) and PlanReview.tsx
- * (presentation): the *whole* planning result the QC screen needs, not just
- * the plan. Agent B builds PlanReview to accept exactly this as `result`.
- * `outstanding` is already pre-filtered to must-fix findings by the server.
- */
-export interface PlanReviewResult {
-  status: "converged" | "cap_reached";
-  rounds: number;
-  plan: PlanLike;
-  content_hash: string;
-  total_cost_usd: number;
-  outstanding: Array<{
-    finding?: string;
-    statement?: string;
-    recommendation?: string;
-    module_id?: string | null;
-    severity?: "must_fix" | "should_fix" | "suggestion";
-  }>;
-  policy?: {
-    pm_provider: string;
-    pm_model?: string;
-    reviewer_provider: string;
-    reviewer_model?: string;
-  };
-  versions?: Array<{
-    version: number;
-    findings: Array<{
-      severity: "must_fix" | "should_fix" | "suggestion";
-      module_id: string | null;
-      finding: string;
-      recommendation: string;
-    }> | null;
-    responses: Array<{
-      finding_index: number;
-      disposition: "accept" | "rebut";
-      rationale: string;
-    }> | null;
-  }>;
 }
 
 interface ProjectResumeDto {
@@ -600,12 +570,6 @@ function ProjectGraph({
     Record<string, { model: string; budget: string }>
   >({});
   const [overrideError, setOverrideError] = useState<string | null>(null);
-  const [planObjective, setPlanObjective] = useState("");
-  const [planLoading, setPlanLoading] = useState(false);
-  const [planResult, setPlanResult] = useState<PlanReviewResult | null>(null);
-  const [planError, setPlanError] = useState<string | null>(null);
-  const [committing, setCommitting] = useState(false);
-  const [commitError, setCommitError] = useState<string | null>(null);
   const [resume, setResume] = useState<ProjectResumeDto | null>(null);
   const [monitoredPhaseId, setMonitoredPhaseId] = useState<string | null>(null);
   const [phaseExecution, setPhaseExecution] = useState<PhaseExecutionDto | null>(null);
@@ -622,6 +586,7 @@ function ProjectGraph({
   // ------------------------------------------------------------------
   const [nextPhaseObjective, setNextPhaseObjective] = useState("");
   const [nextPhaseRounds, setNextPhaseRounds] = useState(3);
+  const [nextPhaseAttachmentIds, setNextPhaseAttachmentIds] = useState<string[]>([]);
   const [activePlanningRunId, setActivePlanningRunId] = useState<string | null>(
     project.focus_planning_run_id ?? null,
   );
@@ -643,11 +608,6 @@ function ProjectGraph({
   // Last-known-*good* approval state (never "pending"): what we revert to when
   // an in-flight mutation fails, so the banner is never left stuck at pending.
   const lastGoodApprovalRef = useRef<ApprovalState>({ kind: "never" });
-  // Guards against double-submit of a plan/load while one is already in flight.
-  const committingRef = useRef(false);
-  // The exact (still-edited) plan last handed to commitPlan, so Retry resubmits
-  // it rather than a stale copy.
-  const lastCommitPlanRef = useRef<PlanLike | null>(null);
 
   const applyApproval = useCallback((next: ApprovalState) => {
     lastGoodApprovalRef.current = next;
@@ -802,17 +762,22 @@ function ProjectGraph({
     try {
       const run = await postJson<{ planning_run_id: string }>(
         `/api/v2/projects/${project.id}/planning-runs`,
-        { objective: nextPhaseObjective.trim(), max_rounds: nextPhaseRounds },
+        {
+          objective: nextPhaseObjective.trim(),
+          max_rounds: nextPhaseRounds,
+          attachment_ids: nextPhaseAttachmentIds,
+        },
       );
       setActivePlanningRunId(run.planning_run_id);
       setNextPhaseObjective("");
+      setNextPhaseAttachmentIds([]);
     } catch (err) {
       if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
       else setPlanningRunError(err instanceof Error ? err.message : String(err));
     } finally {
       setPlanningRunStarting(false);
     }
-  }, [nextPhaseObjective, nextPhaseRounds, project.id, onLogout]);
+  }, [nextPhaseObjective, nextPhaseRounds, nextPhaseAttachmentIds, project.id, onLogout]);
 
   const pollPlanningRun = useCallback(async () => {
     if (!activePlanningRunId) return;
@@ -1049,64 +1014,6 @@ function ProjectGraph({
     },
     [project.id, onLogout, loadResume],
   );
-
-  const runPlanning = useCallback(async () => {
-    setPlanLoading(true);
-    setPlanError(null);
-    setCommitError(null);
-    setPlanResult(null);
-    try {
-      const result = await postJson<PlanReviewResult>(`${base}/plan`, { objective: planObjective });
-      setPlanResult(result);
-    } catch (err) {
-      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
-      else setPlanError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setPlanLoading(false);
-    }
-  }, [planObjective, base, onLogout]);
-
-  // UI-2: commit is error-aware — it does NOT go through call() (which swallows
-  // errors). QC review state (planResult/planObjective) is cleared only after a
-  // confirmed-successful load; a failure keeps everything the human edited.
-  const commitPlan = useCallback(
-    async (plan: PlanLike) => {
-      if (committingRef.current) return; // no double-submit while in flight
-      committingRef.current = true;
-      lastCommitPlanRef.current = plan;
-      setCommitting(true);
-      setCommitError(null);
-      const prevApproval = lastGoodApprovalRef.current;
-      setApproval({ kind: "pending" });
-      try {
-        const next = await api(`${base}/plan/load`, "POST", { plan });
-        setGraph(next);
-        setDraftOnly(false);
-        setError(null);
-        reconcileApproval(next);
-        setPlanResult(null); // success only: safe to leave the QC screen
-        setPlanObjective("");
-        setCommitError(null);
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          onLogout("Session expired. Sign in again."); // 401 still signs out
-          return;
-        }
-        setCommitError(err instanceof Error ? err.message : String(err));
-        setApproval(prevApproval);
-        // planResult / planObjective deliberately untouched -> edits survive
-      } finally {
-        committingRef.current = false;
-        setCommitting(false);
-      }
-    },
-    [base, onLogout, reconcileApproval],
-  );
-
-  const retryCommit = useCallback(async () => {
-    const plan = lastCommitPlanRef.current;
-    if (plan) await commitPlan(plan); // committingRef guard blocks concurrent retries
-  }, [commitPlan]);
 
   // ADR-1: approval is a POST that persists server-side; on success the server
   // reports it as current, so we show the hash as evidence.
@@ -1573,6 +1480,11 @@ function ProjectGraph({
                   <p className="muted" style={{ fontSize: 12 }}>
                     Round {planningRun?.round ?? 0} of {planningRun?.max_rounds ?? nextPhaseRounds}
                   </p>
+                  {planningRun?.result ? (
+                    <p className="meta mono" data-testid="planning-run-cost">
+                      Planning cost so far: ${planningRun.result.total_cost_usd.toFixed(2)}
+                    </p>
+                  ) : null}
                   {planningRun?.transcript.length ? (
                     <ul className="planning-transcript" data-testid="planning-transcript">
                       {planningRun.transcript.map((entry, index) => (
@@ -1597,7 +1509,14 @@ function ProjectGraph({
                 </section>
               ) : (
                 <>
-                  <Field label="Draft the next phase">
+                  {/* FRONT DOOR P1c: this is the ONE canonical planning
+                   *  entry point — a brand-new draft project's very first
+                   *  plan goes through exactly the same durable planning-run
+                   *  flow as every subsequent phase (no separate legacy
+                   *  "01 · Live planning" box anymore). */}
+                  <Field
+                    label={resume.phases.length === 0 ? "Draft the plan" : "Draft the next phase"}
+                  >
                     <TextArea
                       data-testid="next-phase-objective"
                       placeholder="What should this phase deliver?"
@@ -1605,12 +1524,48 @@ function ProjectGraph({
                       onChange={(event) => setNextPhaseObjective(event.target.value)}
                     />
                   </Field>
+                  <Field label="Attach screenshots">
+                    <AttachmentInput
+                      projectId={project.id}
+                      value={nextPhaseAttachmentIds}
+                      onChange={setNextPhaseAttachmentIds}
+                      purpose="objective"
+                      disabled={planningRunStarting}
+                    />
+                  </Field>
+                  <Field label="Plan review rounds">
+                    <div className="rounds-stepper" data-testid="next-phase-rounds-stepper">
+                      <Button
+                        type="button"
+                        className="btn-small"
+                        disabled={nextPhaseRounds <= 1}
+                        onClick={() => setNextPhaseRounds((n) => Math.max(1, n - 1))}
+                        aria-label="Fewer rounds"
+                      >
+                        −
+                      </Button>
+                      <span className="rounds-value mono">{nextPhaseRounds}</span>
+                      <Button
+                        type="button"
+                        className="btn-small"
+                        disabled={nextPhaseRounds >= 5}
+                        onClick={() => setNextPhaseRounds((n) => Math.min(5, n + 1))}
+                        aria-label="More rounds"
+                      >
+                        +
+                      </Button>
+                    </div>
+                  </Field>
                   <Button
                     variant="primary"
                     disabled={planningRunStarting || !nextPhaseObjective.trim()}
                     onClick={() => void startNextPhasePlanningRun()}
                   >
-                    {planningRunStarting ? "Starting planning run…" : "Draft next phase →"}
+                    {planningRunStarting
+                      ? "Starting planning run…"
+                      : resume.phases.length === 0
+                        ? "Draft plan →"
+                        : "Draft next phase →"}
                   </Button>
                 </>
               )}
@@ -1667,59 +1622,6 @@ function ProjectGraph({
             </div>
           </details>
         ) : null}
-
-        <details className="card side-section" open>
-          <summary>01 · Live planning</summary>
-          <div className="side-body">
-            {planResult ? (
-              <>
-                <PlanReview
-                  result={planResult}
-                  committing={committing}
-                  onCancel={() => {
-                    setPlanResult(null);
-                    setCommitError(null);
-                  }}
-                  onCommit={(plan) => void commitPlan(plan)}
-                />
-                {commitError ? (
-                  <Alert testId="commit-error">
-                    <div>Couldn’t load the plan: {commitError}</div>
-                    <Button
-                      className="btn-small"
-                      data-testid="commit-retry"
-                      disabled={committing}
-                      onClick={() => void retryCommit()}
-                    >
-                      {committing ? "Retrying…" : "Retry load"}
-                    </Button>
-                  </Alert>
-                ) : null}
-              </>
-            ) : (
-              <div className="form-stack">
-                <Field label="What should this program deliver?">
-                  <TextArea
-                    data-testid="plan-objective"
-                    placeholder="Describe the outcome, constraints, and success conditions…"
-                    value={planObjective}
-                    onChange={(e) => setPlanObjective(e.target.value)}
-                  />
-                </Field>
-                <Button
-                  variant="primary"
-                  className="btn-block"
-                  disabled={planLoading || !planObjective.trim()}
-                  onClick={() => void runPlanning()}
-                >
-                  {planLoading ? "Planning with both providers…" : "Run live planning →"}
-                </Button>
-                {planLoading ? <Spinner label="Usually takes 30–90 seconds" /> : null}
-                {planError ? <Alert testId="plan-error">{planError}</Alert> : null}
-              </div>
-            )}
-          </div>
-        </details>
 
         {graph ? (
           <>
