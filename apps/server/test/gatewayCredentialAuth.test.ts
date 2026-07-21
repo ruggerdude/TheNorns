@@ -213,8 +213,10 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
     max_input_tokens: 10_000,
     max_output_tokens: 8_000,
     max_duration_seconds: 900,
-    issued_at: "2026-07-16T20:00:00.000Z",
-    expires_at: "2026-07-16T20:15:00.000Z",
+    // Time-relative: a hardcoded window silently expires and the dispatch
+    // stops being a live command (see actionsDispatchConcurrency.test.ts).
+    issued_at: new Date(Date.now() - 60_000).toISOString(),
+    expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
   });
 
   return {
