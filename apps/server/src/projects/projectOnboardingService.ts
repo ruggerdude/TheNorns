@@ -33,10 +33,12 @@ import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/datab
 import {
   ACTIONS_GITHUB_TOKEN,
   type PushCredentialDescription,
+  type PushCredentialStrategy,
   describePushCredential,
 } from "./pushCredentialProvider.js";
 import { insertProjectCore } from "./relationalReadRepository.js";
 import type { RemoteRepositoryDescriptor, RemoteRepositoryPort } from "./remoteRepositoryPort.js";
+import { safeLocalRepositoryDisplayName } from "./repositoryDisplayName.js";
 import { reviewerFor } from "./store.js";
 
 export const ONBOARDING_SCENARIOS = ["new_repo", "existing_repo"] as const;
@@ -101,6 +103,12 @@ export interface OnboardingAttachmentView {
   readonly workflow_installed: boolean;
   readonly github: { owner: string; name: string; url: string } | null;
   readonly observed_head: string | null;
+  /**
+   * Non-null only for attachments this phase created, i.e. ones that actually
+   * execute in a GitHub Actions job. Pre-O2 attachments leave it null and are
+   * never told about a workflow file they never needed.
+   */
+  readonly push_credential_strategy: PushCredentialStrategy | null;
 }
 
 /** Something concrete the operator must do before the project can execute. */
@@ -159,13 +167,24 @@ export interface AttachmentRow {
 
 const VERIFIED_STATUSES = new Set(["connected", "promoted"]);
 
+const INSTALLATION_HINT =
+  "Norns cannot commit the workflow file, start an Actions run, or read run " +
+  "status until the installation is granted access to this repository";
+
 export function attachmentView(row: AttachmentRow): OnboardingAttachmentView {
   return {
     id: row.id,
     tier: row.tier,
     role: row.role,
     kind: row.kind,
-    display_name: row.display_name,
+    // A local_runner display name can be a raw filesystem path from a
+    // pre-Actions binding. It is sanitized to its last segment before it can
+    // reach any response body -- the same rule the resume view already
+    // applies. GitHub display names are already `owner/name`.
+    display_name:
+      row.kind === "local_runner"
+        ? (safeLocalRepositoryDisplayName(row.display_name) ?? "Local repository")
+        : row.display_name,
     status: row.status,
     verified: row.tier === "binding" && VERIFIED_STATUSES.has(row.status),
     default_branch: row.default_branch,
@@ -180,6 +199,10 @@ export function attachmentView(row: AttachmentRow): OnboardingAttachmentView {
           }
         : null,
     observed_head: row.observed_head,
+    // Narrowed at the boundary: the column is a free-text CHECK in the
+    // database, but only this phase's own value means "Actions-managed".
+    push_credential_strategy:
+      row.push_credential_strategy === ACTIONS_GITHUB_TOKEN ? ACTIONS_GITHUB_TOKEN : null,
   };
 }
 
@@ -198,15 +221,18 @@ export function collectBlockers(
       blockers.push({
         code: "installation_not_ready",
         role: attachment.role,
-        message:
-          `the GitHub App installation does not include ${where} yet. Norns cannot ` +
-          "commit the workflow file, start an Actions run, or read run status until " +
-          "the installation is granted access to this repository",
+        message: `the GitHub App installation does not include ${where} yet. ${INSTALLATION_HINT}`,
       });
     }
-    // Only the workspace needs a workflow file: it is the attachment that
-    // execution actually runs in.
-    if (attachment.role === "workspace" && !attachment.workflow_installed) {
+    // Only an Actions-managed workspace needs a workflow file: it is the
+    // attachment execution actually runs in. A pre-O2 project (no push
+    // strategy recorded) predates Actions execution and must not be told to
+    // install a workflow it was never going to use.
+    if (
+      attachment.role === "workspace" &&
+      attachment.push_credential_strategy === ACTIONS_GITHUB_TOKEN &&
+      !attachment.workflow_installed
+    ) {
       blockers.push({
         code: "workflow_not_installed",
         role: attachment.role,

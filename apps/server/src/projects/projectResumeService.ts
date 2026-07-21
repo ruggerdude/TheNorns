@@ -87,6 +87,8 @@ export const V2OnboardingAttachment = z
     workflow_installed: z.boolean(),
     observed_head: z.string().nullable(),
     github: z.object({ owner: z.string(), name: z.string(), url: z.string() }).strict().nullable(),
+    /** Null for attachments that predate GitHub Actions execution. */
+    push_credential_strategy: z.literal("actions_github_token").nullable(),
   })
   .strict();
 export type V2OnboardingAttachmentT = z.infer<typeof V2OnboardingAttachment>;

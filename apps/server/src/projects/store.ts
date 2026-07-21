@@ -37,10 +37,11 @@ export interface ProjectSummary {
   // A project may hold BOTH a local workspace (where execution happens) and a
   // GitHub remote (the push target), so the UI can say
   // "Files at <workspace_location> - Pushes to <remote_location>".
-  // Optional so the in-memory ProjectStore and older snapshots stay valid.
-  workspace_location?: string | null;
-  remote_location?: string | null;
-  onboarding_scenario?: string | null;
+  // Required, not optional: every ProjectSummary producer must answer, so the
+  // legacy/relational shadow-read parity check cannot drift.
+  workspace_location: string | null;
+  remote_location: string | null;
+  onboarding_scenario: string | null;
 }
 
 export class ProjectNotFoundError extends Error {
@@ -243,6 +244,10 @@ export class ProjectStore {
   }
 
   private summarize(record: ProjectRecord): ProjectSummary {
+    const location =
+      record.sourceType === "local"
+        ? safeLocalRepositoryDisplayName(record.sourceLocation)
+        : record.sourceLocation;
     return {
       id: record.id,
       name: record.name,
@@ -254,10 +259,17 @@ export class ProjectStore {
       created_at: record.createdAt,
       plan_objective: record.session?.plan.objective ?? null,
       source_type: record.sourceType,
-      source_location:
-        record.sourceType === "local"
-          ? safeLocalRepositoryDisplayName(record.sourceLocation)
-          : record.sourceLocation,
+      source_location: location,
+      // ONBOARDING O2: emitted here too, with the same values the relational
+      // repository produces for a project of this shape. The shadow-read
+      // parity check (shadowProjectRepository.ts) compares legacy against
+      // relational field by field, so a field present on only one side would
+      // register as a spurious mismatch on every project. Parity is real
+      // here, not papered over: an in-memory project has no O2 onboarding and
+      // no separate push target, so both are genuinely null.
+      workspace_location: location,
+      remote_location: null,
+      onboarding_scenario: null,
     };
   }
 }

@@ -8,6 +8,7 @@ import {
   FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
   FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
   GITHUB_APP_MANIFEST_MIGRATION_NAME,
+  ONBOARDING_BINDINGS_MIGRATION_NAME,
   PHASE1_V2_MIGRATION_NAME,
   PHASE2_PRESERVATION_MIGRATION_NAME,
   PHASE3_SOURCE_BINDINGS_MIGRATION_NAME,
@@ -198,6 +199,9 @@ describe.sequential("Phase 2 preservation schema", () => {
       { name: FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME, applied: false },
       { name: ATTACHMENTS_MIGRATION_NAME, applied: false },
       { name: FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME, applied: false },
+      // ONBOARDING O2. Name is still `NNNN_`; the PM assigns the number at
+      // integration, which is also when this entry's position changes.
+      { name: ONBOARDING_BINDINGS_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -218,6 +222,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
       ATTACHMENTS_MIGRATION_NAME,
       FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
+      ONBOARDING_BINDINGS_MIGRATION_NAME,
     ]);
   });
 
