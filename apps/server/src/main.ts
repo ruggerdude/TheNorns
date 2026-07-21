@@ -154,6 +154,15 @@ let attachmentsOptions: { transactions: V2TransactionRunner } | undefined;
 // ONBOARDING O2: the two GitHub-backed project-creation scenarios, over the
 // same relational runtime.
 let onboardingOptions: { transactions: V2TransactionRunner } | undefined;
+// EXECUTION E1/E2: task-context assembly, its fetch route, and the
+// start-phase trigger all need the relational runtime. `buildServer` shipped
+// this option in EXECUTION E1 but nothing here ever passed it, leaving the
+// assembler permanently inert in production -- the same failure mode that
+// shipped an unwired attachments service and a dead onboarding route in
+// earlier programs. `baseUrl` must be the deployment's public origin: the
+// constructor throws on anything other than HTTPS (or http on localhost),
+// so a misconfiguration fails at boot, not silently at runner-fetch time.
+let executionOptions: { transactions: V2TransactionRunner; baseUrl?: string } | undefined;
 
 const publicOrigin =
   process.env.NORNS_PUBLIC_ORIGIN ??
@@ -388,6 +397,12 @@ if (databaseUrl) {
     // service still mounts and refuses honestly with github_not_configured
     // rather than mounting a route that silently does nothing.
     onboardingOptions = { transactions: runtimeTransactions };
+    // EXECUTION E1/E2: wire the assembler + start-phase trigger in. Without
+    // this, `buildServer` never receives `options.execution`, the fetch route
+    // and start-phase routes never mount, and `server.taskContext` stays
+    // undefined -- exactly the dead-on-arrival state the EXECUTION audit
+    // found.
+    executionOptions = { transactions: runtimeTransactions, baseUrl: publicOrigin };
     identityRuntime = createIdentityRuntime({
       users,
       route: identityRoute,
@@ -630,6 +645,7 @@ const server = await buildServer({
   ...(planningRunsOptions !== undefined ? { planningRuns: planningRunsOptions } : {}),
   ...(attachmentsOptions !== undefined ? { attachments: attachmentsOptions } : {}),
   ...(onboardingOptions !== undefined ? { onboarding: onboardingOptions } : {}),
+  ...(executionOptions !== undefined ? { execution: executionOptions } : {}),
   ...(integrationServices !== undefined ? { integrations: integrationServices } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),

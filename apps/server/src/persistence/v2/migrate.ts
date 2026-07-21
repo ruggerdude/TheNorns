@@ -120,6 +120,19 @@ export const TASK_CONTEXT_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+// EXECUTION E2: binds an assembled task-context document to the runner that
+// was actually dispatched to read it (the fetch route's missing
+// authorization check, on top of E1's authentication).
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED. 0019 is the highest number merged
+// when E2 was written; the PM assigns the real number and renames the file at
+// integration.
+export const DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME = "0020_dispatch_context_scope";
+export const DISPATCH_CONTEXT_SCOPE_MIGRATION_URL = new URL(
+  "../../../drizzle/0020_dispatch_context_scope.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -226,6 +239,10 @@ export async function loadOnboardingRepositoryIntentsMigrationSql(): Promise<str
 
 export async function loadTaskContextMigrationSql(): Promise<string> {
   return readFile(TASK_CONTEXT_MIGRATION_URL, "utf8");
+}
+
+export async function loadDispatchContextScopeMigrationSql(): Promise<string> {
+  return readFile(DISPATCH_CONTEXT_SCOPE_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -411,6 +428,10 @@ export async function runCurrentV2Migrations(
     {
       name: TASK_CONTEXT_MIGRATION_NAME,
       sql: await loadTaskContextMigrationSql(),
+    },
+    {
+      name: DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
+      sql: await loadDispatchContextScopeMigrationSql(),
     },
   ]);
 }

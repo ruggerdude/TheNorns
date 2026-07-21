@@ -66,6 +66,9 @@ import { type Phase4DispatchRepository, Phase4Dispatcher } from "./coordinator/p
 import type { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
 import type { Phase4RecoveryMonitor } from "./coordinator/phase4RecoveryMonitor.js";
 import type { Phase6CoordinationService } from "./coordinator/phase6Coordination.js";
+// EXECUTION E2: turns an approved strategy into scheduled work.
+import { DispatchContextScopeRepository } from "./coordinator/dispatchContextScope.js";
+import { PhaseLaunchError, PhaseLaunchService } from "./coordinator/phaseLaunchService.js";
 import { DebateConflictError, type DebateService } from "./debates/service.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 // EXECUTION E1: task-context assembly + the runner-facing context fetch route.
@@ -340,6 +343,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // relational runtime is present, and handed back on NornsServer so E2's
   // trigger can assemble refs without reaching into route internals.
   let taskContextAssembler: TaskContextAssembler | undefined;
+  // EXECUTION E2: authorizes the fetch route above (not merely authenticates
+  // it) and is shared with the start-phase section below.
+  let dispatchContextScope: DispatchContextScopeRepository | undefined;
 
   const runnerSockets = new Map<string, WsLike>();
   const reconciledWorkspaceRunners = new Map<
@@ -3970,6 +3976,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       taskContextStore,
       { baseUrl: options.execution.baseUrl ?? options.publicOrigin ?? "http://127.0.0.1" },
     );
+    // EXECUTION E2: the fetch route below authenticates identity; this is
+    // what additionally authorizes a specific document to a specific runner.
+    dispatchContextScope = new DispatchContextScopeRepository(options.execution.transactions);
 
     app.get(`${TASK_CONTEXT_ROUTE_PREFIX}/:documentId`, async (req, reply) => {
       const auth = authenticateRunnerContextRequest(
@@ -3993,12 +4002,98 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         return reply.code(401).send({ error: "unauthorized" });
       }
       const { documentId } = req.params as { documentId: string };
+      // EXECUTION E2: a valid signature proves WHO is asking, not WHAT they
+      // are entitled to read. Without this, any paired runner could fetch any
+      // project's assembled context by document id. Checked before the
+      // existence lookup below so an unscoped caller learns nothing about
+      // whether the id is real.
+      if (!(await dispatchContextScope?.isAuthorized(auth.runner_id, documentId))) {
+        stores.audit(
+          `runner:${auth.runner_id}`,
+          "execution.context.auth_failed",
+          "not_scoped_to_runner",
+          now(),
+        );
+        return reply.code(403).send({ error: "forbidden" });
+      }
       const document = await taskContextStore.content(documentId);
       if (!document) return reply.code(404).send({ error: "not_found" });
       return reply
         .header("content-type", document.media_type)
         .header("cache-control", "private, max-age=0, no-store")
         .send(document.bytes);
+    });
+  }
+
+  // ---- EXECUTION E2: start a phase ------------------------------------------
+  //
+  // The caller `Phase4Coordinator.schedule()` never had. Given an approved (or
+  // already active) phase, finds its dependency-ready tasks, assembles each
+  // one's context through EXECUTION E1's assembler, and schedules it through
+  // the EXISTING coordinator gate -- unchanged, unweakened. See
+  // coordinator/phaseLaunchService.ts for the full design note.
+  if (options.phase4 && options.execution && taskContextAssembler && dispatchContextScope) {
+    const phaseLaunch = new PhaseLaunchService(
+      options.execution.transactions,
+      options.phase4.coordinator,
+      taskContextAssembler,
+      dispatchContextScope,
+      (runnerId) => {
+        const runner = stores.runner(runnerId);
+        return runner ? { runner_id: runner.runner_id, runner_generation: runner.generation } : null;
+      },
+      options.actionsExecution
+        ? {
+            coordinator: options.actionsExecution.coordinator,
+            repository: options.actionsExecution.repository,
+          }
+        : undefined,
+    );
+
+    // Read-only preflight so the UI can show a truthful disabled reason
+    // without side effects a human didn't ask for -- never schedules
+    // anything and never spends budget.
+    app.get("/api/v2/projects/:id/phases/:phaseId/start-readiness", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const { id, phaseId } = req.params as { id: string; phaseId: string };
+      try {
+        reply.send(await phaseLaunch.readiness({ project_id: id, phase_id: phaseId }));
+      } catch (error) {
+        reply.code(409).send({ error: "start_readiness_unavailable", detail: String(error) });
+      }
+    });
+
+    app.post("/api/v2/projects/:id/phases/:phaseId/start", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const user = await resolveUser(req);
+      if (!user) return;
+      const { id, phaseId } = req.params as { id: string; phaseId: string };
+      const issuedAt = now();
+      try {
+        const result = await phaseLaunch.startPhase({
+          project_id: id,
+          phase_id: phaseId,
+          authorized_by: { actor_type: "human", actor_id: user.id },
+          authorized_by_session_id: `authenticated-request:${req.id}`,
+          issued_at: issuedAt.toISOString(),
+        });
+        stores.audit(
+          user.email,
+          "execution.phase.start",
+          `${result.scheduled.length} scheduled, ${result.blocked.length} blocked`,
+          issuedAt,
+        );
+        reply.code(202).send(result);
+      } catch (error) {
+        if (error instanceof PhaseLaunchError) {
+          return reply.code(409).send({
+            error: error.code,
+            detail: error.message,
+            action_required: error.action_required,
+          });
+        }
+        reply.code(409).send({ error: "phase_start_conflict", detail: String(error) });
+      }
     });
   }
 
