@@ -15,6 +15,7 @@
 // the coordinator would have "proved" that gate worked. These tests instead
 // assert on rows the real code actually wrote.
 import { PGlite } from "@electric-sql/pglite";
+import type { EventEnvelopeInputT } from "@norns/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DispatchContextScopeRepository } from "../src/coordinator/dispatchContextScope.js";
 import { Phase4CompletionService } from "../src/coordinator/phase4Completion.js";
@@ -215,7 +216,7 @@ describe.sequential("EXECUTION E12 — concurrent tasks within one phase", () =>
         `INSERT INTO task_dependencies (id, project_id, phase_id, predecessor_task_id,
                                         successor_task_id)
          VALUES ($1,$2,$3,$4,$5)`,
-        [`dep-e12-1`, PROJECT, PHASE, taskId(1), taskId(2)],
+        ["dep-e12-1", PROJECT, PHASE, taskId(1), taskId(2)],
       );
     }
 
@@ -263,7 +264,7 @@ describe.sequential("EXECUTION E12 — concurrent tasks within one phase", () =>
 
   /** Drive a dispatched run through the REAL event processor to `running`. */
   let eventSeq = 0;
-  async function runnerEvent(payload: Record<string, unknown>): Promise<void> {
+  async function runnerEvent(payload: EventEnvelopeInputT["payload"]): Promise<void> {
     eventSeq += 1;
     await events.apply({
       protocol: 1,
@@ -295,7 +296,7 @@ describe.sequential("EXECUTION E12 — concurrent tasks within one phase", () =>
 
   async function markRunning(runId: string): Promise<void> {
     await deliverAll();
-    await runnerEvent({ kind: "run_status", run_id: runId, status: "started", detail: null });
+    await runnerEvent({ kind: "run_status", run_id: runId, status: "started" });
   }
 
   /** `verification_result` is addressed by TASK id (it resolves through
@@ -421,7 +422,7 @@ describe.sequential("EXECUTION E12 — concurrent tasks within one phase", () =>
 
     for (const [index, run] of [first.run_id, second.run_id].entries()) {
       await verifyGreen(taskId(index + 1));
-      await runnerEvent({ kind: "run_status", run_id: run, status: "completed", detail: null });
+      await runnerEvent({ kind: "run_status", run_id: run, status: "completed" });
     }
 
     expect(await runStates()).toMatchObject({
@@ -509,7 +510,6 @@ describe.sequential("EXECUTION E12 — concurrent tasks within one phase", () =>
       kind: "run_status",
       run_id: firstRun,
       status: "failed",
-      detail: "tests went red",
     });
     expect((await runStates())[firstRun]).toBe("failed");
 
@@ -634,7 +634,7 @@ describe.sequential("EXECUTION E12 — concurrent tasks within one phase", () =>
     await publish(first.run_id, "norns/task-a");
     await publish(second.run_id, "norns/task-b");
     for (const run of [first.run_id, second.run_id]) {
-      await runnerEvent({ kind: "run_status", run_id: run, status: "completed", detail: null });
+      await runnerEvent({ kind: "run_status", run_id: run, status: "completed" });
     }
 
     const complete = () =>
@@ -823,7 +823,6 @@ describe.sequential("EXECUTION E12 — concurrent tasks within one phase", () =>
       kind: "run_status",
       run_id: first.run_id,
       status: "failed",
-      detail: "build broke",
     });
 
     const states = await runStates();
@@ -851,7 +850,6 @@ describe.sequential("EXECUTION E12 — concurrent tasks within one phase", () =>
       kind: "run_status",
       run_id: second.run_id,
       status: "completed",
-      detail: null,
     });
     expect((await runStates())[second.run_id]).toBe("succeeded");
   }, 60_000);
@@ -868,7 +866,6 @@ describe.sequential("EXECUTION E12 — concurrent tasks within one phase", () =>
       kind: "run_status",
       run_id: first.run_id,
       status: "cancelled",
-      detail: "operator cancelled",
     });
 
     const states = await runStates();
@@ -907,7 +904,6 @@ describe.sequential("EXECUTION E12 — concurrent tasks within one phase", () =>
       kind: "run_status",
       run_id: first.run_id,
       status: "failed",
-      detail: "budget exhausted",
     });
 
     const states = await runStates();
