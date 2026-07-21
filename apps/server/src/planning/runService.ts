@@ -118,6 +118,12 @@ function rowToDto(row: PlanningRunRow): PlanningRunDto {
 export interface CreatePlanningRunInput {
   objective: string;
   maxRounds?: number;
+  /**
+   * FRONT DOOR P4: objective image attachment ids to inject into this run's
+   * round-1 PM and reviewer messages. Persisted on the run row so the worker
+   * (which executes off a bare claim) can resolve them later. Order preserved.
+   */
+  attachmentIds?: readonly string[];
 }
 
 export interface PlanningRunServiceOptions {
@@ -148,12 +154,15 @@ export class PlanningRunService {
       const maxRounds = input.maxRounds ?? (await this.defaultMaxRoundsFor(tx, projectId));
       const id = newId("planning_run");
       const createdAt = this.now().toISOString();
+      // FRONT DOOR P4: attachment_ids default to '[]' via the column default;
+      // pass them through when the caller supplied objective attachments.
+      const attachmentIds = JSON.stringify(input.attachmentIds ?? []);
       await tx.query(
         `INSERT INTO planning_runs (
            id, project_id, status, round, max_rounds, objective, transcript,
-           result, total_cost_usd, error, created_at, updated_at
-         ) VALUES ($1,$2,'queued',0,$3,$4,'[]'::jsonb,NULL,0,NULL,$5,$5)`,
-        [id, projectId, maxRounds, input.objective, createdAt],
+           result, total_cost_usd, error, created_at, updated_at, attachment_ids
+         ) VALUES ($1,$2,'queued',0,$3,$4,'[]'::jsonb,NULL,0,NULL,$5,$5,$6::jsonb)`,
+        [id, projectId, maxRounds, input.objective, createdAt, attachmentIds],
       );
       const row = await this.loadRow(tx, projectId, id);
       return rowToDto(row);

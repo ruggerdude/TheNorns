@@ -4,7 +4,7 @@
 // Everything is orchestrated programmatically — zero copy/paste. Plans that
 // fail engine validation round-trip back to the PM and never reach the human.
 import { createHash } from "node:crypto";
-import type { LlmAdapter } from "@norns/adapters";
+import type { ImagePart, LlmAdapter } from "@norns/adapters";
 import {
   type ApprovalT,
   FindingResponse,
@@ -93,6 +93,14 @@ export interface PlanningOptions {
   reviewException?: { reason: string; approvedBy: string };
   /** Optional per-round progress observer. See PlanningRoundEvent. */
   onRound?: PlanningRoundHook;
+  /**
+   * FRONT DOOR P4: image parts (objective attachments) injected into the PM's
+   * round-1 draft and the reviewer's round-1 review only. Later rounds carry
+   * text alone — the plan itself already encodes what the images established —
+   * so image tokens are paid once per provider, not per round. Already capped
+   * upstream; the adapters also enforce the per-request image cap.
+   */
+  roundOneImages?: readonly ImagePart[];
 }
 
 export async function runPlanning(options: PlanningOptions): Promise<PlanningResult> {
@@ -120,13 +128,20 @@ export async function runPlanning(options: PlanningOptions): Promise<PlanningRes
 
   const meter = { projectId: options.projectId };
   const system = pmSystem(memory);
+  const roundOneImages = options.roundOneImages ?? [];
 
   // engine-validated structured plan generation with error round-trips
-  const generateValidPlan = async (initialPrompt: string): Promise<PlanContractT> => {
+  const generateValidPlan = async (
+    initialPrompt: string,
+    // FRONT DOOR P4: only the first attempt of the true round-1 draft carries
+    // the objective images; validation-retry attempts are structural fixups
+    // and re-sending the images would just repay their token cost.
+    images: readonly ImagePart[] = [],
+  ): Promise<PlanContractT> => {
     let prompt = initialPrompt;
     for (let attempt = 0; attempt <= maxValidationRetries; attempt += 1) {
       const draft = await options.pm.completeStructured(
-        { system, prompt, ...meter },
+        { system, prompt, ...meter, ...(attempt === 0 && images.length > 0 ? { images } : {}) },
         PlanContract,
         "plan_contract",
       );
@@ -139,13 +154,19 @@ export async function runPlanning(options: PlanningOptions): Promise<PlanningRes
   };
 
   const versions: PlanVersionRecord[] = [];
-  let plan = await generateValidPlan(draftPlanPrompt(options.objective));
+  let plan = await generateValidPlan(draftPlanPrompt(options.objective), roundOneImages);
   versions.push({ version: 1, plan, findings: null, responses: null });
   await options.onRound?.({ round: 1, phase: "draft", plan });
 
   for (let round = 1; round <= maxRounds; round += 1) {
     const review = await options.reviewer.completeStructured(
-      { system: reviewerSystem(memory), prompt: reviewPrompt(plan), ...meter },
+      {
+        system: reviewerSystem(memory),
+        prompt: reviewPrompt(plan),
+        ...meter,
+        // FRONT DOOR P4: the reviewer sees the objective images in round 1 only.
+        ...(round === 1 && roundOneImages.length > 0 ? { images: roundOneImages } : {}),
+      },
       ReviewFindings,
       "review_findings",
     );

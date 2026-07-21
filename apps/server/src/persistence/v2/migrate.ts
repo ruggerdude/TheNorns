@@ -66,6 +66,14 @@ export const FRONTDOOR_PHASE_BRIDGE_MIGRATION_URL = new URL(
   "../../../drizzle/0013_frontdoor_phase_bridge.sql",
   import.meta.url,
 );
+// FRONT DOOR P4 (D3): image attachments + planning_runs.attachment_ids.
+// Renumbered 0013 -> 0014 at integration: P3 and P4 ran in parallel and both
+// claimed 0013; the bridge migration merged first.
+export const ATTACHMENTS_MIGRATION_NAME = "0014_attachments";
+export const ATTACHMENTS_MIGRATION_URL = new URL(
+  "../../../drizzle/0014_attachments.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -149,6 +157,10 @@ export async function loadPlanningRunsMigrationSql(): Promise<string> {
 
 export async function loadFrontDoorPhaseBridgeMigrationSql(): Promise<string> {
   return readFile(FRONTDOOR_PHASE_BRIDGE_MIGRATION_URL, "utf8");
+}
+
+export async function loadAttachmentsMigrationSql(): Promise<string> {
+  return readFile(ATTACHMENTS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -310,6 +322,10 @@ export async function runCurrentV2Migrations(
     {
       name: FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
       sql: await loadFrontDoorPhaseBridgeMigrationSql(),
+    },
+    {
+      name: ATTACHMENTS_MIGRATION_NAME,
+      sql: await loadAttachmentsMigrationSql(),
     },
   ]);
 }

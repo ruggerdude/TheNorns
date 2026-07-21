@@ -47,6 +47,11 @@ import {
 } from "@norns/contracts";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
+import {
+  AttachmentLookupError,
+  AttachmentService,
+  AttachmentValidationError,
+} from "./attachments/index.js";
 import { bearerToken, verifyRunnerSignature } from "./auth.js";
 import type { Phase4CompletionService } from "./coordinator/phase4Completion.js";
 import type { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
@@ -216,6 +221,12 @@ export interface ServerOptions {
    * database runtime, same as `debates`.
    */
   planningRuns?: { transactions: V2TransactionRunner };
+  /**
+   * FRONT DOOR P4 (D3): image attachments (content-addressed Postgres store).
+   * Unavailable without its database runtime, same as `planningRuns`. When
+   * both are present, objective attachments are injected into planning round 1.
+   */
+  attachments?: { transactions: V2TransactionRunner };
   integrations?: { github: GitHubIntegrationService | null };
   /**
    * Deployment configuration inspected by safe integration-status routes.
@@ -3124,6 +3135,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       }
     });
 
+    // FRONT DOOR P4 (D3): the attachments service, constructed once here so it
+    // is shared by both the planning round-1 image injection (below) and the
+    // attachment routes (further down). Null when the deployment lacks the
+    // attachments database runtime.
+    const attachmentService = options.attachments
+      ? new AttachmentService(options.attachments.transactions)
+      : null;
+
     // ---- durable planning runs (FRONT DOOR P2 §D1) --------------------------
     // A user-configurable, observable wrapper around the runPlanning() loop
     // above: rounds, reviewer selection, and the terminal result/failure are
@@ -3151,6 +3170,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       const planningWorker = new PlanningRunWorker(planningTransactions, buildPlanningAdapter, {
         resolveModels: resolvePlanningModels,
         ...(options.recordUsage ? { recordUsage: options.recordUsage } : {}),
+        // FRONT DOOR P4: resolve a run's objective attachment ids to image parts
+        // for round-1 injection. Only wired when the attachments runtime exists.
+        ...(attachmentService
+          ? {
+              loadRoundOneImages: (projectId: string, attachmentIds: readonly string[]) =>
+                attachmentService.imagePartsFor(projectId, attachmentIds),
+            }
+          : {}),
         buildStaffingProposal: async ({
           projectId,
           objective,
@@ -3218,7 +3245,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         .object({
           objective: z.string().trim().min(1).max(100_000),
           max_rounds: z.number().int().min(1).max(5).optional(),
-          // Accepted for forward-compatibility; wired to the run in Phase 4.
+          // FRONT DOOR P4: objective attachment ids, persisted on the run and
+          // injected into the PM's and reviewer's round-1 messages.
           attachment_ids: z.array(z.string().trim().min(1)).max(50).optional(),
         })
         .strict();
@@ -3232,6 +3260,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           const run = await planningRunService.create(id, {
             objective: body.data.objective,
             ...(body.data.max_rounds !== undefined ? { maxRounds: body.data.max_rounds } : {}),
+            // FRONT DOOR P4: persist objective attachments so the worker injects
+            // them into round 1. Previously validated-but-ignored input.
+            ...(body.data.attachment_ids !== undefined
+              ? { attachmentIds: body.data.attachment_ids }
+              : {}),
           });
           stores.audit("operator", "planning_run.created", `${id}:${run.id}`, now());
           reply.code(202).send({ planning_run_id: run.id });
@@ -3255,6 +3288,98 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           reply.header("Cache-Control", "no-store").send(await planningRunService.get(id, runId));
         } catch (error) {
           planningRunError(reply, error);
+        }
+      });
+    }
+
+    // ---- FRONT DOOR P4 (D3): image attachments ------------------------------
+    // Content-addressed image storage for project objectives. Base64 JSON in,
+    // metadata JSON out; the GET serves the raw bytes. Session auth + project
+    // authorization mirror the neighboring v2 project routes (the service 404s
+    // an unknown project). Caps, mime allow-list, dedupe, and quotas live in the
+    // AttachmentService. Fully additive — its own tables (drizzle/0013) and its
+    // own route surface. `attachmentService` is constructed above and shared
+    // with the planning round-1 image injection.
+    if (attachmentService) {
+      const attachmentError = (reply: FastifyReply, error: unknown): void => {
+        if (error instanceof AttachmentLookupError) {
+          reply.code(404).send({ error: error.code, message: error.message });
+          return;
+        }
+        if (error instanceof AttachmentValidationError) {
+          const status =
+            error.code === "unsupported_media_type"
+              ? 415
+              : error.code === "payload_too_large"
+                ? 413
+                : error.code === "invalid_image"
+                  ? 400
+                  : 409; // objective_limit | project_quota
+          reply.code(status).send({ error: error.code, message: error.message });
+          return;
+        }
+        throw error;
+      };
+
+      const CreateAttachmentBody = z
+        .object({
+          mime: z.string().trim().min(1).max(100),
+          base64: z.string().min(1),
+          purpose: z.string().trim().min(1).max(200).optional(),
+        })
+        .strict();
+
+      // A 3 MB image is ~4 MB base64; raise this route's body limit above the
+      // 1 MB Fastify default (with headroom for the JSON envelope). The real
+      // per-image byte cap is still enforced on the decoded bytes.
+      app.post(
+        "/api/v2/projects/:id/attachments",
+        { bodyLimit: 8 * 1024 * 1024 },
+        async (req, reply) => {
+          const user = await resolveUser(req);
+          if (!user) return reply.code(401).send({ error: "unauthorized" });
+          const body = CreateAttachmentBody.safeParse(req.body);
+          if (!body.success) return reply.code(400).send({ error: "bad_request" });
+          const { id } = req.params as { id: string };
+          try {
+            const attachment = await attachmentService.create(id, {
+              mime: body.data.mime,
+              base64: body.data.base64,
+              ...(body.data.purpose !== undefined ? { purpose: body.data.purpose } : {}),
+              createdBy: user.id,
+            });
+            stores.audit(user.email, "attachment.created", `${id}:${attachment.id}`, now());
+            reply.code(201).send(attachment);
+          } catch (error) {
+            attachmentError(reply, error);
+          }
+        },
+      );
+
+      app.get("/api/v2/projects/:id/attachments/:attachmentId", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id, attachmentId } = req.params as { id: string; attachmentId: string };
+        try {
+          const { mime, bytes } = await attachmentService.content(id, attachmentId);
+          reply
+            .header("Content-Type", mime)
+            .header("Cache-Control", "private, max-age=300")
+            .send(bytes);
+        } catch (error) {
+          attachmentError(reply, error);
+        }
+      });
+
+      app.delete("/api/v2/projects/:id/attachments/:attachmentId", async (req, reply) => {
+        const user = await resolveUser(req);
+        if (!user) return reply.code(401).send({ error: "unauthorized" });
+        const { id, attachmentId } = req.params as { id: string; attachmentId: string };
+        try {
+          await attachmentService.delete(id, attachmentId);
+          stores.audit(user.email, "attachment.deleted", `${id}:${attachmentId}`, now());
+          reply.code(204).send();
+        } catch (error) {
+          attachmentError(reply, error);
         }
       });
     }

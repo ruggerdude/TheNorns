@@ -36,6 +36,18 @@
 - [x] Re-foundation Phase 7 — security hardening, existing-project pilot,
   progressive cutover controls, and separately gated legacy-retirement authorization.
 
+## FRONT DOOR program
+
+- [x] P4 Attachments — image attachments end-to-end: content-addressed Postgres
+  store (migration `0013_attachments`: `attachments` + `attachment_blobs`,
+  plus `planning_runs.attachment_ids`), a capped/deduped `AttachmentService`
+  and `POST/GET/DELETE /api/v2/projects/:id/attachments`, provider-neutral
+  multi-part adapter message content (Anthropic base64 image blocks / OpenAI
+  data-URI `input_image`, per-request cap 8, string-content callers unchanged),
+  planning round-1-only image injection, and the isolated
+  `apps/web/src/AttachmentInput.tsx` component (not mounted — Phase 1 mounts it).
+  Suites green: adapters 25 (+2 live-skip), web 77, server 480 (+8 skip).
+
 ## Done
 - [x] NORN-001 — Review original MVP PRD; produce corrected R2 (`TheNorns_MVP_PRD.md`)
 - [x] NORN-002 — Choose tech stack → [ADR-001](docs/adr/ADR-001-tech-stack.md)
