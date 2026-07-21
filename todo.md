@@ -48,10 +48,9 @@
   credential collapses to `actions_github_token` (GitHub provides
   `GITHUB_TOKEN` inside the Actions job; Norns issues nothing). Migration
   written as `NNNN_onboarding_bindings.sql` with the number unassigned — the
-  PM assigns it at integration. Suites green: server 547 (+12, 8 skip).
-- [ ] O2 follow-up — production wiring: `buildServer({ onboarding })` is
-  optional and `main.ts` does not pass it yet, so the route is inert outside
-  tests. One line, owned by whoever integrates.
+  PM assigns it at integration. Wired into `main.ts` alongside
+  `planningRuns`/`attachments`, with a route-wiring test asserting the exact
+  option shape production supplies. Suites green: server 550 (+15, 8 skip).
 
 ## FRONT DOOR program
 

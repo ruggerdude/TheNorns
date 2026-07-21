@@ -135,6 +135,9 @@ let integrationServices: { github: GitHubIntegrationService | null } | undefined
 let planningRunsOptions: { transactions: V2TransactionRunner } | undefined;
 // FRONT DOOR P4 (D3): image attachments need the same relational runtime.
 let attachmentsOptions: { transactions: V2TransactionRunner } | undefined;
+// ONBOARDING O2: the two GitHub-backed project-creation scenarios, over the
+// same relational runtime.
+let onboardingOptions: { transactions: V2TransactionRunner } | undefined;
 
 const publicOrigin =
   process.env.NORNS_PUBLIC_ORIGIN ??
@@ -336,6 +339,11 @@ if (databaseUrl) {
     // relational runtime the debate workflow uses.
     planningRunsOptions = { transactions: runtimeTransactions };
     attachmentsOptions = { transactions: runtimeTransactions };
+    // ONBOARDING O2: POST /api/v2/projects/onboarding. The route also needs
+    // `integrations.github` (set just above) to reach GitHub; without it the
+    // service still mounts and refuses honestly with github_not_configured
+    // rather than mounting a route that silently does nothing.
+    onboardingOptions = { transactions: runtimeTransactions };
     identityRuntime = createIdentityRuntime({
       users,
       route: identityRoute,
@@ -575,6 +583,7 @@ const server = await buildServer({
   ...(debateService !== undefined ? { debates: debateService } : {}),
   ...(planningRunsOptions !== undefined ? { planningRuns: planningRunsOptions } : {}),
   ...(attachmentsOptions !== undefined ? { attachments: attachmentsOptions } : {}),
+  ...(onboardingOptions !== undefined ? { onboarding: onboardingOptions } : {}),
   ...(integrationServices !== undefined ? { integrations: integrationServices } : {}),
   recordUsage: (events) => ledger.push(...events),
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),

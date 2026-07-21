@@ -24,6 +24,11 @@ import type {
   RemoteRepositoryPort,
 } from "../src/projects/remoteRepositoryPort.js";
 import { RemoteRepositoryVerificationError } from "../src/projects/remoteRepositoryPort.js";
+import { ProjectStore } from "../src/projects/store.js";
+import { type NornsServer, buildServer } from "../src/server.js";
+import { RelayStores } from "../src/stores.js";
+import { UserStore } from "../src/users/store.js";
+import { testAdminToken } from "./helpers.js";
 
 interface FakeRepo {
   repository_id: string;
@@ -380,7 +385,9 @@ describe.sequential("ONBOARDING O2: GitHub-backed project setup", () => {
       name: "GitHub-only legacy project",
       description: "Created through the pre-existing route",
       pmProvider: "anthropic",
-      pmModel: null,
+      // CreateProjectInput.pmModel is optional, not nullable: "no model
+      // supplied" is the field's absence, and the store resolves the
+      // provider's default. Omitted rather than nulled.
       sourceType: "github",
       sourceLocation: "https://github.com/acme/legacy.git",
     });
@@ -494,6 +501,80 @@ describe.sequential("ONBOARDING O2: GitHub-backed project setup", () => {
     // A local_runner workspace needs no Actions workflow, so it must not be
     // reported as blocked by one.
     expect(view.onboarding.blockers).toEqual([]);
+  });
+});
+
+/**
+ * The route mounts under the exact option shape `main.ts` passes, so a
+ * production-wiring mismatch fails here.
+ *
+ * There is no existing pattern in this repo for asserting `main.ts` boot
+ * wiring directly, and one was not invented for this: what is asserted is
+ * that `buildServer({ onboarding: { transactions } })` -- character for
+ * character what main.ts now supplies -- produces a live route.
+ */
+describe.sequential("ONBOARDING O2: route wiring", () => {
+  let pg: PGlite;
+  let server: NornsServer;
+  let token: string;
+
+  beforeEach(async () => {
+    pg = new PGlite();
+    await pg.exec("CREATE ROLE norns_app NOLOGIN");
+    await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
+    const users = new UserStore();
+    token = testAdminToken(users);
+    server = await buildServer({
+      stores: new RelayStores(),
+      users,
+      // `projects` is what main.ts supplies unconditionally, and the O2
+      // section lives inside the project-routes block, so it is part of the
+      // shape being asserted.
+      projects: new ProjectStore(),
+      onboarding: { transactions: new PGliteTransactionRunner(pg) },
+    });
+  }, 30_000);
+
+  afterEach(async () => {
+    await server?.app.close();
+    if (!pg.closed) await pg.close();
+  });
+
+  const post = (payload: unknown, authenticated = true) =>
+    server.app.inject({
+      method: "POST",
+      url: "/api/v2/projects/onboarding",
+      headers: authenticated ? { authorization: `Bearer ${token}` } : {},
+      payload: payload as Record<string, unknown>,
+    });
+
+  it("mounts the route and requires a session", async () => {
+    const response = await post({}, false);
+    // 401, not 404: the route exists and the auth gate is what refuses.
+    expect(response.statusCode).toBe(401);
+  });
+
+  it("validates the body before touching GitHub", async () => {
+    const response = await post({ scenario: "new_repo", name: "x" });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: "bad_request" });
+  });
+
+  it("refuses honestly when no GitHub App is configured", async () => {
+    // No `integrations.github`, so the service holds an
+    // UnconfiguredRemoteRepositoryPort. It must say so rather than mount a
+    // route that silently does nothing.
+    const response = await post({
+      scenario: "new_repo",
+      name: "Wired project",
+      description: "Proves the route is reachable end to end",
+      pm_provider: "anthropic",
+      connection_id: "connection-1",
+      idempotency_key: "wiring-1",
+      repository_name: "wired-project",
+    });
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ error: "github_not_configured" });
   });
 });
 
