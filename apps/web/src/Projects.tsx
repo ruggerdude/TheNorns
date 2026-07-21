@@ -9,6 +9,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GitHubConnection, GitHubIntegrationStatus } from "./Account";
 import { AttachmentInput } from "./AttachmentInput";
 import { ApiError, type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
+import {
+  chooseLocalFolder,
+  getLocalHelperStatus,
+  type LocalFolderSelection,
+  type LocalHelperPairing,
+  type LocalHelperStatus,
+  startLocalHelperPairing,
+  watchForLocalHelper,
+} from "./localHelper";
+import {
+  buildSourceFields,
+  describeSetup,
+  parseGitHubRepoRef,
+  type ProjectSourceScenario,
+  type ResolvedGitHubRepository,
+  type ResolvedLocalFolder,
+} from "./projectSourceRequest";
 import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 
 export interface ProjectSummary {
@@ -157,51 +174,6 @@ interface GitHubRepository {
   archived: boolean;
   updated_at: string;
   binding_ready?: boolean;
-}
-
-/**
- * A paired runner is the only party that knows a filesystem path.  The web
- * client receives stable opaque identifiers and presentation-safe names only.
- */
-interface LocalRunner {
-  runner_id: string;
-  generation: number;
-  connected: boolean;
-  last_seen_at: string | null;
-  workspace_picker_ready?: boolean;
-  local_project_onboarding_ready?: boolean;
-  capabilities?: string[];
-}
-
-interface LocalWorkspace {
-  workspace_id: string;
-  label: string;
-}
-
-interface LocalWorkspaceEntry {
-  entry_id: string;
-  label: string;
-  kind: "folder" | "repository";
-  can_browse: boolean;
-}
-
-interface LocalWorkspaceBrowser {
-  workspace_id: string;
-  breadcrumb?: string[];
-  entries: LocalWorkspaceEntry[];
-}
-
-interface LocalSelection {
-  selection_token: string;
-  expires_at: string;
-  repository: {
-    runner_id: string;
-    workspace_id: string;
-    repository_id: string;
-    repository_display_name: string;
-    default_branch: string | null;
-    observed_head: string | null;
-  };
 }
 
 interface LocalBindingResult {
@@ -400,8 +372,15 @@ export function Projects({
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [dialog, setDialog] = useState(false);
+  // O1: the wizard's two questions.
+  //   Q1 (always): "Is this new, or existing work?"
+  //   Q2 (new):      "Where should it live?"      -> local | local_github
+  //   Q2 (existing): "Where is it now?"            -> github | local
+  // Together they resolve to exactly one of the four onboarding scenarios
+  // (see projectSourceRequest.ts's ProjectSourceScenario).
   const [startingPoint, setStartingPoint] = useState<"new" | "existing">("new");
-  const [newRepository, setNewRepository] = useState<"none" | "github">("none");
+  const [newDestination, setNewDestination] = useState<"local" | "local_github">("local");
+  const [existingSource, setExistingSource] = useState<"github" | "local">("github");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [pmModel, setPmModel] = useState<PmModelT>(DEFAULT_PM_MODEL.anthropic);
@@ -411,40 +390,38 @@ export function Projects({
   const reviewerPreviewLabel =
     pmModelOption(DEFAULT_PM_MODEL[reviewerProviderPreview])?.label ?? reviewerProviderPreview;
   const [githubStatus, setGitHubStatus] = useState<GitHubIntegrationStatus | null>(null);
+  const [githubConnectBusy, setGitHubConnectBusy] = useState(false);
   const [selectedConnectionId, setSelectedConnectionId] = useState("");
   const [repositories, setRepositories] = useState<GitHubRepository[]>([]);
   const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
   const [repositoryQuery, setRepositoryQuery] = useState("");
   const [repositoryLoading, setRepositoryLoading] = useState(false);
   const repositoryRequestEpoch = useRef(0);
+  // Whether the GitHub section is picking one of the connection's existing
+  // repositories, or creating a fresh one (a real, working server capability
+  // — GitHubIntegrationService.createRepository — reused unchanged here).
+  const [githubMode, setGitHubMode] = useState<"pick" | "create">("pick");
   const [repositoryName, setRepositoryName] = useState("");
   const [repositoryPrivate, setRepositoryPrivate] = useState(true);
-  const [existingSource, setExistingSource] = useState<"github" | "local">("github");
-  const [localRunners, setLocalRunners] = useState<LocalRunner[]>([]);
-  const [localRunnersLoading, setLocalRunnersLoading] = useState(false);
-  const [selectedLocalRunnerId, setSelectedLocalRunnerId] = useState("");
-  const [localWorkspaces, setLocalWorkspaces] = useState<LocalWorkspace[]>([]);
-  const [localWorkspacesLoading, setLocalWorkspacesLoading] = useState(false);
-  const [selectedLocalWorkspaceId, setSelectedLocalWorkspaceId] = useState("");
-  const [localBrowser, setLocalBrowser] = useState<LocalWorkspaceBrowser | null>(null);
-  const [localNavigation, setLocalNavigation] = useState<string[]>([]);
-  const [selectedLocalEntryId, setSelectedLocalEntryId] = useState<string | null>(null);
-  const [localBrowserLoading, setLocalBrowserLoading] = useState(false);
-  const [localSelection, setLocalSelection] = useState<LocalSelection | null>(null);
-  const [localChooserLoading, setLocalChooserLoading] = useState(false);
-  const [localValidationLoading, setLocalValidationLoading] = useState(false);
+  // O1: local-helper folder picking. `helperStatus` is null while the first
+  // check is in flight; thereafter it is one of localHelper.ts's two states
+  // ("connected" | "not_installed") — never a dead end either way.
+  const [helperStatus, setHelperStatus] = useState<LocalHelperStatus | null>(null);
+  const [helperPairing, setHelperPairing] = useState<LocalHelperPairing | null>(null);
+  const [helperPairingCopied, setHelperPairingCopied] = useState(false);
+  const [helperChooserLoading, setHelperChooserLoading] = useState(false);
+  const [folderSelection, setFolderSelection] = useState<LocalFolderSelection | null>(null);
+  const pairingRequestedRef = useRef(false);
   const [pendingLocalProject, setPendingLocalProject] = useState<ProjectSummary | null>(null);
-  const localWorkspaceRequestEpoch = useRef(0);
-  const localBrowseRequestEpoch = useRef(0);
-  const localValidationRequestEpoch = useRef(0);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
   const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
   const [roundsCount, setRoundsCount] = useState(3);
-  // FRONT DOOR P2b (D2): folder-first local path — the primary local-folder
-  // flow now; the runner-based browse/validate flow (below) is kept as an
-  // online-only enhancement, not a gate.
+  // FRONT DOOR P2b (D2)/O1: the typed-path fallback. Always available, but
+  // de-emphasized beneath the native "Choose folder…" button — FRONT DOOR
+  // shipped it as the primary local-folder flow; O1 keeps it working, just
+  // no longer as the headline control.
   const [localPath, setLocalPath] = useState("");
   // FRONT DOOR P2b: reviewer selector. "auto" means no explicit override
   // (the server's automatic opposite-provider default); any other value is
@@ -467,6 +444,26 @@ export function Projects({
   // resume call fails (404 for a brand-new draft, network error, etc.)
   // simply renders without phase lines rather than blocking the dashboard.
   const [resumeById, setResumeById] = useState<Record<string, DashboardResumeSummary>>({});
+
+  // O1: the two answers resolve to exactly one of the four onboarding
+  // scenarios. Every scenario needs a local folder; three of the four also
+  // need a connected GitHub repository (only "new + local only" doesn't —
+  // the human chose Norns-brokered GitHub App tokens for pushing, so there
+  // is no "use your own git credentials" path once a remote is involved).
+  const scenario: ProjectSourceScenario =
+    startingPoint === "new"
+      ? newDestination === "local"
+        ? "new_local"
+        : "new_local_github"
+      : existingSource === "github"
+        ? "existing_github"
+        : "existing_local";
+  const needsGitHub = scenario !== "new_local";
+  // Scenario (c) (existing code already on GitHub) is inherently "pick the
+  // repository that already holds the code" — offering to create a fresh,
+  // empty one alongside it doesn't make sense, so that scenario never shows
+  // the create-a-new-repo toggle.
+  const canCreateNewRepo = needsGitHub && scenario !== "existing_github";
 
   const refresh = useCallback(async () => {
     try {
@@ -595,222 +592,120 @@ export function Projects({
   }, [onUnauthorized, selectedConnectionId]);
 
   useEffect(() => {
-    if (
-      dialog &&
-      startingPoint === "existing" &&
-      existingSource === "github" &&
-      selectedConnectionId
-    ) {
+    if (dialog && needsGitHub && githubMode === "pick" && selectedConnectionId) {
       void loadRepositories();
     }
-  }, [dialog, existingSource, loadRepositories, selectedConnectionId, startingPoint]);
+  }, [dialog, githubMode, loadRepositories, needsGitHub, selectedConnectionId]);
 
-  const loadLocalRunners = useCallback(async () => {
-    setLocalRunnersLoading(true);
+  /** Run the existing GitHub authorize/install flow inline, right from the
+   *  wizard — "never make the user hunt through settings mid-setup". Mirrors
+   *  Account.tsx's openGitHubFlow exactly (same endpoints, same redirect),
+   *  just triggered from here instead of the Settings modal. */
+  const connectGitHubInline = useCallback(async () => {
+    setGitHubConnectBusy(true);
     setSourceError(null);
     try {
-      const runners = await request<LocalRunner[]>("/api/runners");
-      const connected = runners.filter((runner) => runner.connected);
-      const eligible = connected.filter(
-        (runner) =>
-          runner.workspace_picker_ready === true && runner.local_project_onboarding_ready === true,
+      const kind = githubStatus?.user_authorization.connected ? "install" : "authorize";
+      const response = await request<{ authorization_url: string } | { installation_url: string }>(
+        `/api/integrations/github/${kind}`,
       );
-      setLocalRunners(connected);
-      setSelectedLocalRunnerId((current) =>
-        eligible.some((runner) => runner.runner_id === current)
-          ? current
-          : (eligible[0]?.runner_id ?? ""),
-      );
+      const url =
+        "authorization_url" in response ? response.authorization_url : response.installation_url;
+      window.location.assign(url);
     } catch (error) {
       if (error instanceof UnauthorizedError) onUnauthorized();
       else setSourceError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setLocalRunnersLoading(false);
+      setGitHubConnectBusy(false);
     }
-  }, [onUnauthorized]);
+  }, [githubStatus, onUnauthorized]);
 
-  const loadLocalWorkspaces = useCallback(async () => {
-    if (!selectedLocalRunnerId) {
-      setLocalWorkspaces([]);
-      return;
-    }
-    const runnerId = selectedLocalRunnerId;
-    const requestEpoch = ++localWorkspaceRequestEpoch.current;
-    localBrowseRequestEpoch.current += 1;
-    localValidationRequestEpoch.current += 1;
-    setLocalWorkspacesLoading(true);
-    setSourceError(null);
-    try {
-      const response = await request<{ workspaces: LocalWorkspace[] }>(
-        `/api/runners/${encodeURIComponent(runnerId)}/workspaces`,
-      );
-      if (localWorkspaceRequestEpoch.current !== requestEpoch) return;
-      const workspaces = response.workspaces;
-      setLocalWorkspaces(workspaces);
-      setSelectedLocalWorkspaceId((current) =>
-        workspaces.some((workspace) => workspace.workspace_id === current) ? current : "",
-      );
-    } catch (error) {
-      if (localWorkspaceRequestEpoch.current !== requestEpoch) return;
-      if (error instanceof UnauthorizedError) onUnauthorized();
-      else setSourceError(error instanceof Error ? error.message : String(error));
-    } finally {
-      if (localWorkspaceRequestEpoch.current === requestEpoch) setLocalWorkspacesLoading(false);
-    }
-  }, [onUnauthorized, selectedLocalRunnerId]);
-
-  const browseLocalWorkspace = useCallback(
-    async (workspaceId: string, entryId: string | undefined, navigation: string[]) => {
-      if (!selectedLocalRunnerId) return;
-      const runnerId = selectedLocalRunnerId;
-      const requestEpoch = ++localBrowseRequestEpoch.current;
-      localValidationRequestEpoch.current += 1;
-      setLocalBrowserLoading(true);
-      setSourceError(null);
+  // O1: local-helper status. Checked once the wizard opens; re-checked
+  // whenever the human switches scenario (every scenario needs a folder, so
+  // this only needs to run once dialog is open, not per-scenario, but is
+  // cheap to repeat and keeps a stale "not_installed" from lingering after a
+  // helper connects mid-session).
+  useEffect(() => {
+    if (!dialog) return;
+    let cancelled = false;
+    (async () => {
       try {
-        const browser = await request<LocalWorkspaceBrowser>(
-          `/api/runners/${encodeURIComponent(runnerId)}/workspaces/browse`,
-          entryId
-            ? { workspace_id: workspaceId, entry_id: entryId }
-            : { workspace_id: workspaceId },
-        );
-        if (localBrowseRequestEpoch.current !== requestEpoch) return;
-        setSelectedLocalWorkspaceId(workspaceId);
-        setLocalBrowser({
-          ...browser,
-          breadcrumb: Array.isArray(browser.breadcrumb) ? browser.breadcrumb : [],
-          entries: Array.isArray(browser.entries) ? browser.entries : [],
-        });
-        setLocalNavigation(navigation);
-        setLocalSelection(null);
-        setSelectedLocalEntryId(null);
-      } catch (error) {
-        if (localBrowseRequestEpoch.current !== requestEpoch) return;
-        if (error instanceof UnauthorizedError) onUnauthorized();
-        else setSourceError(error instanceof Error ? error.message : String(error));
-      } finally {
-        if (localBrowseRequestEpoch.current === requestEpoch) setLocalBrowserLoading(false);
+        const status = await getLocalHelperStatus();
+        if (!cancelled) setHelperStatus(status);
+      } catch {
+        // Never a dead end: treat an unreachable /api/runners the same as
+        // "not installed" — the typed-path fallback still works either way.
+        if (!cancelled) setHelperStatus({ state: "not_installed" });
       }
-    },
-    [onUnauthorized, selectedLocalRunnerId],
-  );
-
-  const validateLocalRepository = useCallback(
-    async (entryId: string) => {
-      if (!selectedLocalRunnerId || !selectedLocalWorkspaceId) return;
-      const runnerId = selectedLocalRunnerId;
-      const workspaceId = selectedLocalWorkspaceId;
-      const requestEpoch = ++localValidationRequestEpoch.current;
-      setLocalValidationLoading(true);
-      setSourceError(null);
-      try {
-        const selection = await request<LocalSelection>(
-          `/api/runners/${encodeURIComponent(runnerId)}/workspaces/validate`,
-          { workspace_id: workspaceId, entry_id: entryId },
-        );
-        if (
-          localValidationRequestEpoch.current !== requestEpoch ||
-          selection.repository.runner_id !== runnerId ||
-          selection.repository.workspace_id !== workspaceId
-        ) {
-          return;
-        }
-        setLocalSelection(selection);
-        setSelectedLocalEntryId(entryId);
-        setName((current) => current || selection.repository.repository_display_name);
-        setDescription(
-          (current) =>
-            current ||
-            `Analyze and continue development of ${selection.repository.repository_display_name}`,
-        );
-      } catch (error) {
-        if (localValidationRequestEpoch.current !== requestEpoch) return;
-        if (error instanceof UnauthorizedError) onUnauthorized();
-        else setSourceError(error instanceof Error ? error.message : String(error));
-      } finally {
-        if (localValidationRequestEpoch.current === requestEpoch) setLocalValidationLoading(false);
-      }
-    },
-    [onUnauthorized, selectedLocalRunnerId, selectedLocalWorkspaceId],
-  );
-
-  const chooseLocalRepository = useCallback(async () => {
-    if (!selectedLocalRunnerId) return;
-    const runnerId = selectedLocalRunnerId;
-    const requestEpoch = ++localValidationRequestEpoch.current;
-    setLocalChooserLoading(true);
-    setSourceError(null);
-    try {
-      const result = await request<LocalSelection | { cancelled: true }>(
-        `/api/runners/${encodeURIComponent(runnerId)}/workspaces/choose`,
-        {},
-      );
-      if (
-        localValidationRequestEpoch.current !== requestEpoch ||
-        selectedLocalRunnerId !== runnerId ||
-        "cancelled" in result
-      ) {
-        return;
-      }
-      setSelectedLocalWorkspaceId(result.repository.workspace_id);
-      setLocalSelection(result);
-      setSelectedLocalEntryId(null);
-      setLocalBrowser(null);
-      setLocalNavigation([]);
-      setLocalWorkspaces((current) =>
-        current.some((workspace) => workspace.workspace_id === result.repository.workspace_id)
-          ? current
-          : [
-              ...current,
-              {
-                workspace_id: result.repository.workspace_id,
-                label: result.repository.repository_display_name,
-              },
-            ],
-      );
-      setName((current) => current || result.repository.repository_display_name);
-      setDescription(
-        (current) =>
-          current ||
-          `Analyze and continue development of ${result.repository.repository_display_name}`,
-      );
-    } catch (error) {
-      if (localValidationRequestEpoch.current !== requestEpoch) return;
-      if (error instanceof UnauthorizedError) onUnauthorized();
-      else setSourceError(error instanceof Error ? error.message : String(error));
-    } finally {
-      if (localValidationRequestEpoch.current === requestEpoch) setLocalChooserLoading(false);
-    }
-  }, [onUnauthorized, selectedLocalRunnerId]);
-
-  useEffect(() => {
-    if (dialog && startingPoint === "existing" && existingSource === "local") {
-      void loadLocalRunners();
-    }
-  }, [dialog, existingSource, loadLocalRunners, startingPoint]);
-
-  useEffect(() => {
-    if (dialog && startingPoint === "existing" && existingSource === "local") {
-      void loadLocalWorkspaces();
-    }
-  }, [dialog, existingSource, loadLocalWorkspaces, startingPoint]);
-
-  useEffect(() => {
-    if (!localSelection) return;
-    const expireSelection = () => {
-      localValidationRequestEpoch.current += 1;
-      setLocalSelection(null);
-      setSelectedLocalEntryId(null);
-      setSourceError("Folder selection expired. Select the repository again to continue.");
+    })();
+    return () => {
+      cancelled = true;
     };
-    const remaining = Date.parse(localSelection.expires_at) - Date.now();
+  }, [dialog]);
+
+  // Once we know the helper isn't installed, start a single pairing session
+  // so the wizard can show one calm install step immediately, rather than
+  // requiring an extra "Pair" click before the command appears.
+  useEffect(() => {
+    if (helperStatus?.state !== "not_installed" || pairingRequestedRef.current) return;
+    pairingRequestedRef.current = true;
+    (async () => {
+      try {
+        setHelperPairing(await startLocalHelperPairing());
+      } catch {
+        // Best-effort — the typed-path fallback remains available even if
+        // pairing itself couldn't be started (e.g. offline).
+      }
+    })();
+  }, [helperStatus]);
+
+  // Poll until the helper connects, then continue automatically — never
+  // requires the human to come back and re-check manually.
+  useEffect(() => {
+    if (helperStatus?.state !== "not_installed") return;
+    const stop = watchForLocalHelper((runnerId) => {
+      setHelperStatus({ state: "connected", runnerId });
+      pairingRequestedRef.current = false;
+      setHelperPairing(null);
+    });
+    return stop;
+  }, [helperStatus]);
+
+  const chooseFolder = useCallback(async () => {
+    if (helperStatus?.state !== "connected") return;
+    const runnerId = helperStatus.runnerId;
+    setHelperChooserLoading(true);
+    setSourceError(null);
+    try {
+      const result = await chooseLocalFolder(runnerId);
+      if ("cancelled" in result) return;
+      setFolderSelection(result);
+      setLocalPath("");
+      setName((current) => current || result.displayName);
+      setDescription(
+        (current) => current || `Analyze and continue development of ${result.displayName}`,
+      );
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setSourceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setHelperChooserLoading(false);
+    }
+  }, [helperStatus, onUnauthorized]);
+
+  useEffect(() => {
+    if (!folderSelection) return;
+    const expireSelection = () => {
+      setFolderSelection(null);
+      setSourceError("Folder selection expired. Choose the folder again to continue.");
+    };
+    const remaining = Date.parse(folderSelection.expiresAt) - Date.now();
     if (remaining <= 0) {
       expireSelection();
       return;
     }
     const timer = window.setTimeout(expireSelection, Math.min(remaining, 2_147_483_647));
     return () => window.clearTimeout(timer);
-  }, [localSelection]);
+  }, [folderSelection]);
 
   const refreshAttention = useCallback(async () => {
     try {
@@ -915,7 +810,11 @@ export function Projects({
     setSourceError(null);
     try {
       let repository = repositories.find((candidate) => candidate.id === selectedRepositoryId);
-      if (startingPoint === "new" && newRepository === "github") {
+      if (needsGitHub && githubMode === "create") {
+        if (!selectedConnectionId) {
+          setSourceError("Choose a GitHub account or organization to create the repository under.");
+          return;
+        }
         repository = await request<GitHubRepository>("/api/integrations/github/repositories", {
           connection_id: selectedConnectionId,
           name: repositoryName.trim(),
@@ -925,121 +824,88 @@ export function Projects({
         });
         if (repository.binding_ready === false) {
           setSourceError(
-            `${repository.full_name} was created, but this GitHub installation only has selected-repository access. Add the repository to The Norns in GitHub, refresh connections, and then import it as existing code.`,
+            `${repository.full_name} was created, but this GitHub installation only has selected-repository access. Add the repository to The Norns in GitHub, refresh connections, and then choose it from the list.`,
           );
           return;
         }
       }
-      if (startingPoint === "existing" && existingSource === "github" && !repository) {
+      if (needsGitHub && githubMode === "pick" && !repository) {
         setSourceError("Select a GitHub repository to continue.");
         return;
       }
       const trimmedLocalPath = localPath.trim();
-      if (
-        startingPoint === "existing" &&
-        existingSource === "local" &&
-        !localSelection &&
-        !trimmedLocalPath
-      ) {
-        setSourceError(
-          "Enter a local folder path, or select and validate a folder with a paired runner.",
-        );
+      const activeFolderSelection =
+        folderSelection && Date.parse(folderSelection.expiresAt) > Date.now() ? folderSelection : null;
+      if (!activeFolderSelection && !trimmedLocalPath) {
+        setSourceError("Choose a folder, or type a path, to continue.");
         return;
       }
-      const selectedLocalRepository =
-        startingPoint === "existing" &&
-        existingSource === "local" &&
-        localSelection?.repository.runner_id === selectedLocalRunnerId &&
-        localSelection.repository.workspace_id === selectedLocalWorkspaceId &&
-        Date.parse(localSelection.expires_at) > Date.now()
-          ? localSelection
+      const local: ResolvedLocalFolder = activeFolderSelection
+        ? {
+            kind: "runner",
+            selectionToken: activeFolderSelection.selectionToken,
+            displayName: activeFolderSelection.displayName,
+          }
+        : { kind: "path", path: trimmedLocalPath };
+      const githubResolved: ResolvedGitHubRepository | null =
+        needsGitHub && repository
+          ? {
+              connectionId: repository.connection_id,
+              repositoryId: repository.id,
+              fullName: repository.full_name,
+            }
           : null;
-      // FRONT DOOR P2b (D2): folder-first — a plain path with no runner
-      // verification is a fully valid, primary way to create a local
-      // project. Only block when the human was mid-way through the
-      // runner-verified flow (a selection existed) and it's gone stale,
-      // *and* they have no path fallback typed.
-      if (
-        startingPoint === "existing" &&
-        existingSource === "local" &&
-        localSelection &&
-        !selectedLocalRepository &&
-        !trimmedLocalPath
-      ) {
-        setSourceError("Select and validate the local Git repository again to continue.");
-        return;
-      }
-      const usingLocalPath =
-        startingPoint === "existing" &&
-        existingSource === "local" &&
-        !selectedLocalRepository &&
-        trimmedLocalPath.length > 0;
-      const localPathDisplayName = trimmedLocalPath.split(/[/\\]/).filter(Boolean).pop() ?? "";
-      const projectName =
-        name.trim() ||
-        repository?.name ||
-        selectedLocalRepository?.repository.repository_display_name ||
-        (usingLocalPath ? localPathDisplayName : "") ||
-        "Untitled project";
+      const { fields: sourceFields } = buildSourceFields({ scenario, local, github: githubResolved });
+      const localDisplayName =
+        local.kind === "path"
+          ? (local.path.split(/[/\\]/).filter(Boolean).pop() ?? "")
+          : local.displayName;
+      const projectName = name.trim() || repository?.name || localDisplayName || "Untitled project";
       const projectDescription =
         description.trim() ||
         repository?.description ||
         (repository
           ? `Analyze and continue development of ${repository.full_name}`
-          : selectedLocalRepository
-            ? `Analyze and continue development of ${selectedLocalRepository.repository.repository_display_name}`
-            : usingLocalPath
-              ? `Analyze and continue development of ${localPathDisplayName || "this local folder"}`
-              : "New project");
+          : `Analyze and continue development of ${localDisplayName || "this local folder"}`);
       const project =
-        selectedLocalRepository && pendingLocalProject
+        local.kind === "runner" && pendingLocalProject
           ? pendingLocalProject
           : await request<ProjectSummary>("/api/projects", {
               name: projectName,
               description: projectDescription,
               pm_provider: pmProvider,
               pm_model: pmModel,
-              ...(repository
-                ? {
-                    source_type: "github",
-                    github_connection_id: repository.connection_id,
-                    github_repository_id: repository.id,
-                  }
-                : {}),
-              ...(usingLocalPath
-                ? { source_type: "local" as const, source_location: trimmedLocalPath }
-                : {}),
+              ...sourceFields,
             });
-      const completedProject = selectedLocalRepository
-        ? await (async () => {
-            try {
-              await request<LocalBindingResult>(
-                `/api/v2/projects/${project.id}/source-bindings/local`,
-                {
-                  selection_token: selectedLocalRepository.selection_token,
-                  verification_policy_ref: "verification-policy:default-v1",
-                },
-              );
-              return {
-                ...project,
-                source_type: "local" as const,
-                source_location: selectedLocalRepository.repository.repository_display_name,
-              };
-            } catch (bindingError) {
-              setPendingLocalProject(project);
-              localValidationRequestEpoch.current += 1;
-              setLocalSelection(null);
-              setSelectedLocalEntryId(null);
-              await refresh();
-              setSourceError(
-                `Project created, but local repository binding failed: ${
-                  bindingError instanceof Error ? bindingError.message : String(bindingError)
-                }. Correct or reselect the folder, then click Retry repository binding. The existing project will be reused.`,
-              );
-              return null;
-            }
-          })()
-        : project;
+      const completedProject =
+        local.kind === "runner"
+          ? await (async () => {
+              try {
+                await request<LocalBindingResult>(
+                  `/api/v2/projects/${project.id}/source-bindings/local`,
+                  {
+                    selection_token: local.selectionToken,
+                    verification_policy_ref: "verification-policy:default-v1",
+                  },
+                );
+                return {
+                  ...project,
+                  source_type: "local" as const,
+                  source_location: local.displayName,
+                };
+              } catch (bindingError) {
+                setPendingLocalProject(project);
+                setFolderSelection(null);
+                await refresh();
+                setSourceError(
+                  `Project created, but local folder binding failed: ${
+                    bindingError instanceof Error ? bindingError.message : String(bindingError)
+                  }. Choose the folder again, then click Retry folder binding. The existing project will be reused.`,
+                );
+                return null;
+              }
+            })()
+          : project;
       if (!completedProject) return;
       // FRONT DOOR P2b: apply the reviewer selection right after creation,
       // before starting any planning run — resolvePlanningParticipants()
@@ -1079,14 +945,14 @@ export function Projects({
       setName("");
       setDescription("");
       setStartingPoint("new");
-      setNewRepository("none");
+      setNewDestination("local");
       setSelectedRepositoryId("");
       setRepositoryName("");
       setRepositoryQuery("");
+      setGitHubMode("pick");
       setExistingSource("github");
-      setSelectedLocalWorkspaceId("");
-      setLocalBrowser(null);
-      setLocalSelection(null);
+      setFolderSelection(null);
+      setLocalPath("");
       onOpenProject(completedProject);
     } catch (e) {
       e instanceof UnauthorizedError
@@ -1103,16 +969,15 @@ export function Projects({
     repositories,
     selectedRepositoryId,
     startingPoint,
-    newRepository,
+    scenario,
+    needsGitHub,
+    githubMode,
     selectedConnectionId,
     repositoryName,
     repositoryPrivate,
-    existingSource,
-    localSelection,
+    folderSelection,
     localPath,
     reviewerSelection,
-    selectedLocalRunnerId,
-    selectedLocalWorkspaceId,
     pendingLocalProject,
     refresh,
     onOpenProject,

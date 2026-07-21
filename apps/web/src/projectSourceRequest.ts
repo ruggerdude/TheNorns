@@ -18,6 +18,20 @@
 // shape in one place — see buildSourceFields' TODO(O2) below — so the PM can
 // rewire just this file at integration instead of hunting through the
 // wizard's JSX.
+//
+// Confirmed against today's server (apps/server/src/server.ts): the
+// CreateProjectBody schema's superRefine actively REJECTS a request that
+// sets both a local `source_location` and the `github_*` fields — they're
+// mutually exclusive today, by design. buildSourceFields' dual-binding
+// branch below will therefore be rejected by the real server until O2
+// lands; that's expected for this phase (see this file's report to the
+// PM). Also worth O2 knowing: a sibling endpoint,
+// POST /api/v2/projects/:id/source-bindings/github, already exists
+// server-side (schema + service method), but its body needs
+// runner-reported fields no web-only wizard can honestly supply yet
+// (github_installation_id, observed_head, granted_permissions) — it isn't
+// a drop-in fix, just a lead for whoever designs the real dual-binding
+// contract.
 // ---------------------------------------------------------------------------
 
 export type ProjectSourceScenario =
