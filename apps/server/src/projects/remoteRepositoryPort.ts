@@ -1,5 +1,9 @@
 // ONBOARDING O2: the seam onto the EXISTING GitHub integration.
 //
+// Every project is GitHub-backed, and execution happens in a GitHub Actions
+// job inside the project's repository, so this port is the control-plane
+// surface onboarding needs: find a repository, or create one.
+//
 // Deliberately thin. Every method here maps 1:1 onto a method that already
 // exists on GitHubIntegrationService (apps/server/src/integrations/github.ts);
 // nothing about connections, installations, OAuth, tokens, or repository
@@ -26,13 +30,15 @@ export interface RemoteRepositoryDescriptor {
   readonly clone_url: string;
   readonly html_url: string;
   /**
+   * Whether the GitHub App installation actually contains this repository.
+   *
    * From GitHubIntegrationService.createRepository: false when the
    * installation is scoped to "selected repositories", which means a freshly
-   * created repository is NOT yet inside the installation and no brokered
-   * installation token will be able to push to it until the operator grants
-   * it. Recorded, not silently ignored.
+   * created repository is NOT yet inside the installation. Norns then cannot
+   * commit the workflow file, cannot dispatch an Actions run, and cannot read
+   * run status -- so this is first-class blocking state, not a footnote.
    */
-  readonly binding_ready: boolean;
+  readonly installation_ready: boolean;
 }
 
 export interface RemoteRepositoryPort {

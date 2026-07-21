@@ -3,10 +3,12 @@ import { z } from "zod";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   type AttachmentRow,
-  ONBOARDING_ATTACHMENTS_SQL,
+  ONBOARDING_ATTACHMENTS_QUERY,
   attachmentView,
-  describePush,
+  collectBlockers,
+  resolveAttachments,
 } from "./projectOnboardingService.js";
+import { describePushCredential } from "./pushCredentialProvider.js";
 import { safeLocalRepositoryDisplayName } from "./repositoryDisplayName.js";
 
 export class ProjectResumeNotFoundError extends Error {
@@ -55,11 +57,14 @@ export const V2ProjectProgress = z
 export type V2ProjectProgressT = z.infer<typeof V2ProjectProgress>;
 
 // ---------------------------------------------------------------------------
-// ONBOARDING O2 (read model): a project may hold BOTH a local WORKSPACE (where
-// execution happens) and a GitHub REMOTE (the push / PR target). The resume
-// payload exposes both, additively, so the UI can say
-//   "Files at my-app - Pushes to github.com/acme/my-app"
-// without inferring the project's shape from which rows happen to exist.
+// ONBOARDING O2 (read model): every project is GitHub-backed and executes in
+// a GitHub Actions job. A project holds two attachments -- a WORKSPACE (where
+// execution happens) and a REMOTE (where it pushes) -- which today name the
+// same repository but stay distinct in the model.
+//
+// The payload exposes both, plus anything BLOCKING execution, so the UI can
+// say "Runs in github.com/acme/app - Pushes to github.com/acme/app" and, when
+// it is not ready, say exactly why instead of failing later at dispatch.
 //
 // Additive to the `.strict()` V2ProjectResume contract, merged on locally --
 // the same pattern FRONT DOOR P5 established above, for the same reason
@@ -68,13 +73,18 @@ export type V2ProjectProgressT = z.infer<typeof V2ProjectProgress>;
 export const V2OnboardingAttachment = z
   .object({
     id: z.string().min(1),
-    /** 'binding' = runner/GitHub verified; 'candidate' = unverified tier. */
+    /** 'binding' = confirmed; 'candidate' = recorded but not yet confirmed. */
     tier: z.enum(["binding", "candidate"]),
     role: z.enum(["workspace", "remote"]),
     kind: z.enum(["local_runner", "github"]),
     display_name: z.string().min(1),
     status: z.string().min(1),
     verified: z.boolean(),
+    default_branch: z.string().nullable(),
+    /** Whether the GitHub App installation contains this repository. */
+    installation_ready: z.boolean().nullable(),
+    /** Whether the Norns Actions workflow file is committed to it. */
+    workflow_installed: z.boolean(),
     observed_head: z.string().nullable(),
     github: z.object({ owner: z.string(), name: z.string(), url: z.string() }).strict().nullable(),
   })
@@ -88,14 +98,26 @@ export const V2ProjectOnboardingView = z
     remote: V2OnboardingAttachment.nullable(),
     push: z
       .object({
-        strategy: z.enum(["norns_github_app_token", "local_git_remote"]),
-        implemented: z.boolean(),
+        strategy: z.literal("actions_github_token"),
+        norns_issues_credential: z.literal(false),
         rationale: z.string(),
-        needs_operator_action: z.boolean(),
       })
-      .strict()
-      .nullable(),
-    /** Ready-to-render one-liner, e.g. "Files at my-app - Pushes to github.com/acme/my-app". */
+      .strict(),
+    /**
+     * Everything standing between this project and a dispatchable Actions
+     * run. Empty when it is ready. Surfaced here rather than discovered at
+     * dispatch time.
+     */
+    blockers: z.array(
+      z
+        .object({
+          code: z.enum(["installation_not_ready", "workflow_not_installed"]),
+          role: z.enum(["workspace", "remote"]),
+          message: z.string(),
+        })
+        .strict(),
+    ),
+    /** Ready-to-render one-liner, e.g. "Runs in github.com/acme/app - Pushes to github.com/acme/app". */
     summary_line: z.string(),
   })
   .strict();
@@ -113,17 +135,11 @@ export function onboardingSummaryLine(input: {
   workspace: V2OnboardingAttachmentT | null;
   remote: V2OnboardingAttachmentT | null;
 }): string {
-  const parts: string[] = [];
-  if (input.workspace) {
-    const where =
-      input.workspace.kind === "github" && input.workspace.github
-        ? input.workspace.github.url
-        : input.workspace.display_name;
-    parts.push(`Files at ${where}${input.workspace.verified ? "" : " (unverified)"}`);
-  } else {
-    parts.push("No workspace connected");
-  }
-  if (input.remote?.github) parts.push(`Pushes to ${input.remote.github.url}`);
+  const where = (attachment: V2OnboardingAttachmentT): string =>
+    attachment.github ? attachment.github.url : attachment.display_name;
+  if (!input.workspace) return "No repository connected";
+  const parts = [`Runs in ${where(input.workspace)}`];
+  if (input.remote) parts.push(`Pushes to ${where(input.remote)}`);
   return parts.join(" · ");
 }
 
@@ -253,6 +269,13 @@ function assertValidUpdateIntervalSeconds(value: number): void {
 
 function nextAction(input: {
   repositories: number;
+  /**
+   * ONBOARDING O2: anything blocking a dispatchable Actions run -- most
+   * importantly a repository the GitHub App installation does not contain.
+   * Ranked just below open decisions and blocked work, because until it is
+   * resolved nothing can execute at all.
+   */
+  onboardingBlockers: ReadonlyArray<{ message: string }>;
   architecture: boolean;
   phases: Array<{ status: string }>;
   openDecisions: number;
@@ -262,6 +285,8 @@ function nextAction(input: {
   if (input.openDecisions > 0) return "Review open decision points";
   if (input.blockedTasks > 0) return "Resolve blocked project work";
   if (input.repositories === 0) return "Connect a project repository";
+  const blocker = input.onboardingBlockers[0];
+  if (blocker) return `Resolve a setup blocker: ${blocker.message}`;
   if (!input.architecture) return "Analyze the repository and record its architecture";
   if (input.phases.length === 0) return "Create the project's next phase";
   if (input.phases.some((phase) => phase.status === "awaiting_approval")) {
@@ -454,16 +479,11 @@ export class ProjectResumeService {
         [projectId, PROGRESS_WINDOW_SIZE],
       );
       // ONBOARDING O2: both attachments, resolved by role across both tiers.
-      const attachments = await tx.query<AttachmentRow>(
-        `SELECT id, tier, role, kind, display_name, status, github_owner,
-                github_name, observed_head, push_credential_strategy,
-                remote_provisioning, remote_installation_ready
-         FROM (${ONBOARDING_ATTACHMENTS_SQL}) attachment
-         ORDER BY CASE tier WHEN 'binding' THEN 0 ELSE 1 END, created_at, id`,
-        [projectId],
-      );
-      const workspaceRow = attachments.rows.find((row) => row.role === "workspace") ?? null;
-      const remoteRow = attachments.rows.find((row) => row.role === "remote") ?? null;
+      const attachments = await tx.query<AttachmentRow>(ONBOARDING_ATTACHMENTS_QUERY, [projectId]);
+      const resolved = resolveAttachments(attachments.rows);
+      const workspaceView = resolved.workspace ? attachmentView(resolved.workspace) : null;
+      const remoteView = resolved.remote ? attachmentView(resolved.remote) : null;
+      const onboardingBlockers = collectBlockers([workspaceView, remoteView]);
 
       const metrics = attention.rows[0] ?? {
         open_decisions: 0,
@@ -520,6 +540,7 @@ export class ProjectResumeService {
         })),
         next_recommended_action: nextAction({
           repositories: repositories.rows.length,
+          onboardingBlockers,
           architecture: architectures.rows.length > 0,
           phases: phases.rows,
           openDecisions: metrics.open_decisions,
@@ -561,13 +582,12 @@ export class ProjectResumeService {
         decisions_waiting: metrics.open_decisions,
       });
 
-      const workspaceView = workspaceRow ? attachmentView(workspaceRow) : null;
-      const remoteView = remoteRow ? attachmentView(remoteRow) : null;
       const onboarding = V2ProjectOnboardingView.parse({
         scenario: project.onboarding_scenario,
         workspace: workspaceView,
         remote: remoteView,
-        push: describePush(remoteRow),
+        push: describePushCredential(),
+        blockers: onboardingBlockers,
         summary_line: onboardingSummaryLine({
           workspace: workspaceView,
           remote: remoteView,

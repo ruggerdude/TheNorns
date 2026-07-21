@@ -87,7 +87,8 @@ import {
 import { PlanningRunWorker } from "./planning/runWorker.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
 import { type AttentionService, DecisionResolutionError } from "./projects/attentionService.js";
-// ---- ONBOARDING O2 ---------------------------------------------------------
+// ONBOARDING O2 imports: githubRemoteRepositoryPort, projectOnboardingService,
+// remoteRepositoryPort.
 import { GitHubRemoteRepositoryPort } from "./projects/githubRemoteRepositoryPort.js";
 import {
   PhaseWorkflowConflictError,
@@ -96,7 +97,6 @@ import {
 import {
   OnboardingValidationError,
   ProjectOnboardingService,
-  type RemoteSelection,
 } from "./projects/projectOnboardingService.js";
 import {
   ProjectResumeNotFoundError,
@@ -108,7 +108,6 @@ import {
   RemoteRepositoryVerificationError,
   UnconfiguredRemoteRepositoryPort,
 } from "./projects/remoteRepositoryPort.js";
-// ---- end ONBOARDING O2 imports ---------------------------------------------
 import {
   type ProjectGraphView,
   type ProjectRepository,
@@ -131,8 +130,6 @@ import {
   StrategyWorkflowConflictError,
   type StrategyWorkflowService,
 } from "./projects/strategyWorkflowService.js";
-import type { WorkspaceVerificationPort } from "./projects/workspaceVerification.js";
-import { WorkspaceVerificationFailedError } from "./projects/workspaceVerification.js";
 import {
   RunnerWorkspaceBroker,
   WorkspaceBrokerError,
@@ -249,16 +246,11 @@ export interface ServerOptions {
    */
   attachments?: { transactions: V2TransactionRunner };
   /**
-   * ONBOARDING O2: the four project-creation scenarios (new-local,
-   * new-local+GitHub, existing-GitHub, existing-local). Needs the relational
-   * runtime, same as `planningRuns`. `workspaces` is the runner-backed folder
-   * verification port; when absent every folder-first creation takes the
-   * FRONT DOOR D2 unverified path.
+   * ONBOARDING O2: the two project-creation scenarios (new_repo,
+   * existing_repo). Every project is GitHub-backed and executes in a GitHub
+   * Actions job. Needs the relational runtime, same as `planningRuns`.
    */
-  onboarding?: {
-    transactions: V2TransactionRunner;
-    workspaces?: WorkspaceVerificationPort;
-  };
+  onboarding?: { transactions: V2TransactionRunner };
   integrations?: { github: GitHubIntegrationService | null };
   /**
    * Deployment configuration inspected by safe integration-status routes.
@@ -2098,27 +2090,29 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
 
     // =====================================================================
-    // ONBOARDING O2 -- project setup, all four scenarios.
+    // ONBOARDING O2 -- project setup. Two scenarios, both GitHub-backed.
     //
-    // A project may involve BOTH a local folder and a GitHub repository:
-    // build locally, push remotely. The command creates up to two
-    // attachments in one atomic, idempotent step:
-    //   * WORKSPACE (role 'workspace') -- where execution happens. This is
-    //     what the Phase 4 dispatch gate resolves; nothing here weakens it.
-    //   * REMOTE    (role 'remote')    -- the GitHub push / PR target.
+    // Nothing is installed on the operator's machine. The runner runs
+    // ephemerally inside a GitHub Actions job in the project's own repository
+    // and connects back to the relay over the existing protocol. So setup is:
     //
-    //   new_local        1. NEW, local only.
-    //   new_local_github 2. NEW, local folder + GitHub push target.
-    //   existing_github  3. EXISTING on GitHub, staged into a local folder.
-    //   existing_local   4. EXISTING local folder, connected to GitHub.
+    //   new_repo       Norns creates the GitHub repository.
+    //   existing_repo  The operator selects one the installation can see.
     //
-    // A GitHub-only project (no local folder) is deliberately NOT here: it
-    // remains `POST /api/projects` with source_type 'github', unchanged.
+    // Each creates TWO attachments naming the same repository:
+    //   * WORKSPACE (role 'workspace') -- where execution happens: an Actions
+    //     job in that repo. This is what the Phase 4 dispatch gate resolves;
+    //     nothing here weakens it.
+    //   * REMOTE    (role 'remote')    -- where the work is pushed.
+    // The roles stay distinct because they are expected to diverge later
+    // (fork-and-PR: execute in a fork, push to upstream).
     //
-    // The server executes no repository commands (ADR-006). Folder checks are
-    // a contract a runner satisfies; when no runner can answer, creation
-    // still succeeds with an unverified attachment (FRONT DOOR D2) and the
-    // response says so in `warnings`.
+    // Pushes need no brokered credential: inside an Actions job GitHub
+    // provides GITHUB_TOKEN, already scoped to that repository. Norns's own
+    // App token is still used, but only for control-plane calls.
+    //
+    // The legacy `POST /api/projects` route is untouched and still serves the
+    // pre-existing GitHub-only and local paths.
     // =====================================================================
     if (options.onboarding) {
       const onboarding = new ProjectOnboardingService({
@@ -2126,137 +2120,92 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         remotes: github
           ? new GitHubRemoteRepositoryPort(github)
           : new UnconfiguredRemoteRepositoryPort(),
-        ...(options.onboarding.workspaces ? { workspaces: options.onboarding.workspaces } : {}),
       });
 
-      const RemoteSelectionBody = z.discriminatedUnion("mode", [
-        z
-          .object({
-            mode: z.literal("existing"),
-            connection_id: z.string().min(1),
-            repository_id: z.string().min(1),
-          })
-          .strict(),
-        z
-          .object({
-            mode: z.literal("create"),
-            connection_id: z.string().min(1),
-            name: z
-              .string()
-              .trim()
-              .min(1)
-              .max(100)
-              .regex(/^[A-Za-z0-9._-]+$/, "repository name must be a valid GitHub repository name"),
-            private: z.boolean().default(true),
-          })
-          .strict(),
-      ]);
       const OnboardingFields = {
-        scenario: z.enum(["new_local", "new_local_github", "existing_github", "existing_local"]),
         name: z.string().trim().min(1),
         description: z.string().trim().min(1),
-        // The raw folder path is held transiently: it is handed to the
-        // verification port and reduced to an opaque sha256 fingerprint plus a
-        // sanitized last-segment display name. Never stored verbatim, never
-        // echoed back. The cap is defense in depth, not a path-shape check.
-        local_path: z.string().trim().min(1).max(4096),
-        remote: RemoteSelectionBody.optional(),
+        connection_id: z.string().min(1),
         idempotency_key: z.string().trim().min(1).max(200),
       };
-      const OnboardingBody = z
-        .discriminatedUnion("pm_provider", [
-          z.object({
-            ...OnboardingFields,
-            pm_provider: z.literal("anthropic"),
-            pm_model: AnthropicPmModel.default(DEFAULT_PM_MODEL.anthropic),
-          }),
-          z.object({
-            ...OnboardingFields,
-            pm_provider: z.literal("openai"),
-            pm_model: OpenAiPmModel.default(DEFAULT_PM_MODEL.openai),
-          }),
-        ])
-        .superRefine((value, context) => {
-          const needsRemote = value.scenario !== "new_local";
-          if (needsRemote && !value.remote) {
-            context.addIssue({
-              code: z.ZodIssueCode.custom,
-              path: ["remote"],
-              message: "choose or create the GitHub repository this project pushes to",
-            });
-          }
-          if (!needsRemote && value.remote) {
-            context.addIssue({
-              code: z.ZodIssueCode.custom,
-              path: ["scenario"],
-              message: "a local-only project has no push target",
-            });
-          }
-          // Scenario 3 starts FROM an existing GitHub repository, so there is
-          // nothing to create -- creating one would silently change what the
-          // operator asked for.
-          if (value.scenario === "existing_github" && value.remote?.mode === "create") {
-            context.addIssue({
-              code: z.ZodIssueCode.custom,
-              path: ["remote", "mode"],
-              message: "an existing-GitHub project must select an existing repository",
-            });
-          }
-        });
+      // The scenario is the discriminator: `new_repo` names a repository to
+      // create, `existing_repo` names one to select. Separate shapes mean a
+      // body can never half-say both.
+      const ScenarioBody = z.discriminatedUnion("scenario", [
+        z.object({
+          ...OnboardingFields,
+          scenario: z.literal("new_repo"),
+          repository_name: z
+            .string()
+            .trim()
+            .min(1)
+            .max(100)
+            .regex(/^[A-Za-z0-9._-]+$/, "repository name must be a valid GitHub repository name"),
+          private: z.boolean().default(true),
+        }),
+        z.object({
+          ...OnboardingFields,
+          scenario: z.literal("existing_repo"),
+          repository_id: z.string().min(1),
+        }),
+      ]);
+      const PmBody = z.discriminatedUnion("pm_provider", [
+        z.object({
+          pm_provider: z.literal("anthropic"),
+          pm_model: AnthropicPmModel.default(DEFAULT_PM_MODEL.anthropic),
+        }),
+        z.object({
+          pm_provider: z.literal("openai"),
+          pm_model: OpenAiPmModel.default(DEFAULT_PM_MODEL.openai),
+        }),
+      ]);
 
       app.post("/api/v2/projects/onboarding", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
         const user = await resolveUser(req);
         if (!user) return;
-        const body = OnboardingBody.safeParse(req.body);
-        if (!body.success) {
-          return reply.code(400).send({
-            error: "bad_request",
-            detail: body.error.issues[0]?.message ?? "invalid body",
-          });
+        const scenario = ScenarioBody.safeParse(req.body);
+        const pm = PmBody.safeParse(req.body);
+        if (!scenario.success || !pm.success) {
+          const issue = scenario.success ? pm.error?.issues[0] : scenario.error?.issues[0];
+          return reply
+            .code(400)
+            .send({ error: "bad_request", detail: issue?.message ?? "invalid body" });
         }
-        const command = {
-          name: body.data.name,
-          description: body.data.description,
-          pm_provider: body.data.pm_provider,
-          pm_model: body.data.pm_model,
-          local_path: body.data.local_path,
+        const base = {
+          name: scenario.data.name,
+          description: scenario.data.description,
+          pm_provider: pm.data.pm_provider,
+          pm_model: pm.data.pm_model,
+          connection_id: scenario.data.connection_id,
           actor: { actor_type: "human" as const, actor_id: user.id },
-          idempotency_key: body.data.idempotency_key,
+          idempotency_key: scenario.data.idempotency_key,
         };
-        const remote = body.data.remote as RemoteSelection | undefined;
         try {
-          const result = await (body.data.scenario === "new_local"
-            ? onboarding.createNewLocal(command)
-            : body.data.scenario === "new_local_github"
-              ? onboarding.createNewLocalWithGitHub({
-                  ...command,
-                  remote: remote as RemoteSelection,
+          const result =
+            scenario.data.scenario === "new_repo"
+              ? await onboarding.createNewRepo({
+                  ...base,
+                  repository_name: scenario.data.repository_name,
+                  private: scenario.data.private,
                 })
-              : body.data.scenario === "existing_github"
-                ? onboarding.createFromGitHub({
-                    ...command,
-                    remote: remote as Extract<RemoteSelection, { mode: "existing" }>,
-                  })
-                : onboarding.createFromExistingLocal({
-                    ...command,
-                    remote: remote as RemoteSelection,
-                  }));
+              : await onboarding.createFromExistingRepo({
+                  ...base,
+                  repository_id: scenario.data.repository_id,
+                });
           stores.audit(
             user.email,
             "project.onboarded",
-            `${result.project_id} ${body.data.scenario}`,
+            `${result.project_id} ${scenario.data.scenario}`,
             now(),
           );
-          // 200 on an idempotent replay, 201 the first time.
+          // 200 on an idempotent replay, 201 the first time. The response
+          // carries `blockers`, so a caller learns about a repository the
+          // installation cannot reach here rather than later at dispatch.
           return reply.code(result.replayed ? 200 : 201).send(result);
         } catch (error) {
-          // Honest errors: a folder a runner actually looked at and
-          // disqualified, a GitHub repository the installation cannot see, or
-          // a reused idempotency key. None of these are silently downgraded.
-          if (error instanceof WorkspaceVerificationFailedError) {
-            return reply.code(409).send({ error: error.code, message: error.message });
-          }
+          // Honest errors: a repository GitHub would not confirm, or a reused
+          // idempotency key. Neither is silently downgraded.
           if (error instanceof RemoteRepositoryVerificationError) {
             return reply.code(error.status).send({ error: error.code, message: error.message });
           }

@@ -13,7 +13,7 @@ import {
 
 function descriptor(
   summary: GitHubRepositorySummary,
-  bindingReady: boolean,
+  installationReady: boolean,
 ): RemoteRepositoryDescriptor {
   return {
     connection_id: summary.connection_id,
@@ -24,7 +24,7 @@ function descriptor(
     default_branch: summary.default_branch,
     clone_url: summary.clone_url,
     html_url: summary.html_url,
-    binding_ready: bindingReady,
+    installation_ready: installationReady,
   };
 }
 
@@ -57,8 +57,8 @@ export class GitHubRemoteRepositoryPort implements RemoteRepositoryPort {
         input.repository_id,
       );
       // Reaching a repository through `resolveRepository` means the
-      // installation token could read it, which is exactly the "can the
-      // installation see this repo?" check this scenario needs.
+      // installation token could read it, which is exactly the "is this repo
+      // inside the installation?" question that gates Actions dispatch.
       return descriptor(summary, true);
     } catch (error) {
       return rethrow(error);
@@ -97,14 +97,16 @@ export class GitHubRemoteRepositoryPort implements RemoteRepositoryPort {
         name: input.name,
         description: input.description,
         private: input.private,
-        // A brand-new push target must not be pre-seeded with a README: the
-        // local workspace is the source of truth and an auto-initialized
-        // remote guarantees a diverged first push.
-        auto_init: false,
+        // A repository with no commits has no default branch and no ref for
+        // Actions to check out, so the workflow file could not be committed
+        // and no run could be dispatched. Initializing gives the first run
+        // something to stand on.
+        auto_init: true,
       });
       // `binding_ready` is false when the installation is scoped to selected
-      // repositories -- the new repository is not in it yet, so no brokered
-      // installation token can reach it. Carried through, not swallowed.
+      // repositories: the new repository is not in it yet, so Norns cannot
+      // commit a workflow file or dispatch an Actions run there. Carried
+      // through as first-class state, not swallowed.
       return descriptor(created, created.binding_ready);
     } catch (error) {
       return rethrow(error);
