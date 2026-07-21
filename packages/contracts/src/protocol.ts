@@ -163,7 +163,12 @@ export const ReconcileRequest = z.object({
   generation: z.number().int().nonnegative(),
   // Additive capability negotiation. Legacy runners omit this field and are
   // treated as supporting no optional side channels.
-  capabilities: z.array(z.enum(["workspace_picker"])).default([]),
+  // EXECUTION E3 adds "model_proxy": the runner is able to obtain model
+  // completions through the relay instead of from its own environment. Adding
+  // an enum member here is backwards compatible in the direction that matters
+  // — a legacy runner simply never sends it and the server never offers the
+  // side channel — and the server must not assume the capability's presence.
+  capabilities: z.array(z.enum(["workspace_picker", "model_proxy"])).default([]),
   last_event_seq_sent: z.number().int().nonnegative(),
   recently_executed_command_ids: z.array(nonEmpty),
 });

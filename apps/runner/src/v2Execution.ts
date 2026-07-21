@@ -108,6 +108,13 @@ export interface RunnerContentFetcher {
   fetch(reference: V2ContentAddressedReferenceT): Promise<Uint8Array>;
 }
 
+/**
+ * @deprecated EXECUTION E3 — sends NO credentials. Against an authenticated
+ * context route every fetch returns 401 and the coding agent runs with an empty
+ * prompt, which is exactly the failure E3 fixed. Use
+ * `RunnerSignedContextFetcher` (contextAuth.ts) instead. Retained only so a
+ * caller pinned to the old export keeps compiling; nothing in the CLI uses it.
+ */
 export class SignedUrlContentFetcher implements RunnerContentFetcher {
   async fetch(reference: V2ContentAddressedReferenceT): Promise<Uint8Array> {
     const url = new URL(reference.storage_ref);
@@ -255,7 +262,24 @@ export class CommandPolicyVerifier implements RunnerVerifier {
   }
 }
 
-export type RunnerRuntimeProvider = CodingRuntime | ((model: string) => CodingRuntime);
+/**
+ * EXECUTION E3 — the factory now also receives the run it is building for.
+ *
+ * Additive and source-compatible: a `(model) => runtime` lambda still satisfies
+ * this type, because TypeScript permits a function that ignores trailing
+ * parameters. It exists because a credential-free runtime obtains its model
+ * access from the relay, and the server authorizes that access against the run
+ * and task — so the runtime has to know which run it is.
+ */
+export interface RunnerRuntimeContext {
+  runId: string;
+  taskId: string;
+  maxOutputTokens: number;
+}
+
+export type RunnerRuntimeProvider =
+  | CodingRuntime
+  | ((model: string, context: RunnerRuntimeContext) => CodingRuntime);
 
 export interface V2RunnerExecutionResult {
   outcome: "succeeded" | "failed" | "cancelled";
@@ -305,7 +329,13 @@ export class V2RunnerExecutor {
     const runtimeProvider = this.runtimes.get(command.runtime);
     if (!runtimeProvider) throw new Error(`runtime ${command.runtime} is unavailable`);
     const runtime =
-      typeof runtimeProvider === "function" ? runtimeProvider(command.model) : runtimeProvider;
+      typeof runtimeProvider === "function"
+        ? runtimeProvider(command.model, {
+            runId: command.run_id,
+            taskId: command.task_id,
+            maxOutputTokens: command.max_output_tokens,
+          })
+        : runtimeProvider;
     let scratch: string | undefined;
     let worktree: PreparedWorktree | undefined;
     try {

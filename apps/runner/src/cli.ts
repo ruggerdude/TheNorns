@@ -11,16 +11,18 @@
 //     handling commands until Ctrl-C.
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { type RunnerContextIdentity, RunnerSignedContextFetcher } from "./contextAuth.js";
 import { RunnerDaemon } from "./daemon.js";
+import type { RelayInferenceClient } from "./inferenceClient.js";
 import { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
 import { CodexRuntime } from "./runtimes/codex.js";
+import { ProxiedCompletionRuntime } from "./runtimes/proxiedCompletion.js";
 import {
   ApprovedRepositoryRegistry,
   CommandPolicyVerifier,
   GitWorktreeManager,
   HashVerifiedContextLoader,
   type RunnerRuntimeProvider,
-  SignedUrlContentFetcher,
   V2RunnerExecutor,
 } from "./v2Execution.js";
 import { runnerVerificationPolicies } from "./verificationPolicies.js";
@@ -80,6 +82,20 @@ function createV2Executor(
   dataDir: string,
   workspaces: WorkspaceRegistry,
   /**
+   * EXECUTION E3 — how this runner proves who it is when fetching its own
+   * context document over HTTP. Required: an unauthenticated fetch gets a 401
+   * and the agent runs with no prompt at all, so there is no sensible default.
+   */
+  identity: RunnerContextIdentity,
+  /**
+   * EXECUTION E3 — the relay's model-proxy client. Registers the
+   * `proxied-completion` runtime, which is the ONLY runtime that works when
+   * the process holds no provider credentials — which is exactly the situation
+   * in an ephemeral GitHub Actions job. See the E3 report: `claude-code` and
+   * `codex` cannot be served by this proxy, and remain credential-dependent.
+   */
+  inference: RelayInferenceClient,
+  /**
    * ONBOARDING O4: receives the repository registry so the ephemeral CI mode
    * can bind the checked-out workspace to whatever repository binding the
    * dispatch command names. Optional — laptop runners ignore it entirely.
@@ -103,11 +119,29 @@ function createV2Executor(
   return new V2RunnerExecutor(
     { id: runnerId, generation, scratch_root: join(dataDir, "scratch") },
     repositories,
-    new HashVerifiedContextLoader(new SignedUrlContentFetcher()),
+    // EXECUTION E3 — signed, not anonymous. This single construction site is
+    // shared by BOTH the laptop path and the ephemeral GitHub Actions path
+    // (createV2Executor is called once, after the pair/enroll branch has
+    // rejoined), so the CI runner authenticates its context fetches too.
+    new HashVerifiedContextLoader(new RunnerSignedContextFetcher(identity)),
     new GitWorktreeManager(join(dataDir, "worktrees")),
     new Map<string, RunnerRuntimeProvider>([
       ["codex", (model: string) => new CodexRuntime({ model })],
       ["claude-code", (model: string) => new ClaudeCodeRuntime({ model })],
+      // EXECUTION E3 — credential-free. Gets its model access from the relay,
+      // where the call is authorized against the run and charged to the
+      // project's budget before it is made.
+      [
+        "proxied-completion",
+        (model: string, context) =>
+          new ProxiedCompletionRuntime(inference, {
+            provider: model.startsWith("gpt") || model.startsWith("o") ? "openai" : "anthropic",
+            model,
+            runId: context.runId,
+            taskId: context.taskId,
+            maxTokens: context.maxOutputTokens,
+          }),
+      ],
     ]),
     new CommandPolicyVerifier(policies),
     workspaces,
@@ -257,6 +291,9 @@ async function main(): Promise<void> {
       daemon.generation,
       dataDir,
       workspaces,
+      // The key stays inside the daemon; only a signing capability is handed out.
+      { runnerId, sign: (payload) => daemon.sign(payload) },
+      daemon.inference,
       (repositories) => {
         execution.repositories = repositories;
       },

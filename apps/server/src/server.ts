@@ -30,6 +30,8 @@ import {
   PROTOCOL_VERSION,
   PlanContract,
   ReconcileRequest,
+  // EXECUTION E3 — the proxied-inference response frame body.
+  type RunnerInferenceResponseT,
   type ServerFrameT,
   type UsageEventT,
   V2ContentAddressedReference,
@@ -88,6 +90,13 @@ import {
   type GitHubIntegrationService,
   disabledGitHubStatus,
 } from "./integrations/github.js";
+// EXECUTION E3: serving the runner tarball the Actions workflow installs.
+import {
+  type RunnerTarball,
+  defaultRunnerTarballDir,
+  loadRunnerTarball,
+  runnerTarballPath,
+} from "./integrations/runnerDistribution.js";
 import type { Phase7OperationsService } from "./operations/phase7Operations.js";
 import type { V2TransactionRunner } from "./persistence/v2/database.js";
 import {
@@ -155,6 +164,15 @@ import {
   StrategyWorkflowConflictError,
   type StrategyWorkflowService,
 } from "./projects/strategyWorkflowService.js";
+// EXECUTION E3: proxied model inference for credential-free runners.
+import {
+  InferenceProxy,
+  RUNNER_ALLOWED_MODELS_ENV,
+  SqlInferenceMeter,
+  SqlProxiedRunLookup,
+  SqlRunReservationBudget,
+  parseRunnerAllowedModels,
+} from "./runners/inferenceProxy.js";
 import {
   RunnerWorkspaceBroker,
   WorkspaceBrokerError,
@@ -313,6 +331,13 @@ export interface ServerOptions {
   recordUsage?: (events: UsageEventT[]) => void;
   /** Test/deployment seam for constructing an adapter for an exact provider model. */
   createPlanningAdapter?: (provider: ProviderName, model: string, apiKey: string) => LlmAdapter;
+  /**
+   * EXECUTION E3 — proxied model inference for runners that hold no provider
+   * credentials. Supplying one overrides the default composition below; the
+   * default is used whenever a relational runtime is available, so a normal
+   * deployment gets the proxy without extra wiring.
+   */
+  inferenceProxy?: InferenceProxy;
   /** Force Secure browser cookies in production and production-shaped tests. */
   secureCookies?: boolean;
   /** Canonical browser origin used in emailed links. */
@@ -378,6 +403,53 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       ? new AnthropicAdapter({ apiKey, model })
       : new OpenAiAdapter({ apiKey, model });
   };
+
+  // === EXECUTION E3 (proxied model inference) ==============================
+  // Composed here rather than in main.ts because main.ts belongs to another
+  // phase in flight. Every input already exists on ServerOptions: the runtime
+  // transaction runner (the same instance behind planningRuns/onboarding/
+  // attachments in production), the provider credentials, and the usage sink.
+  // A deployment with no relational runtime gets no proxy, and every request
+  // is answered `unsupported` — never silently executed without metering.
+  //
+  // FOLLOW-UP FOR THE PM: a dedicated `ServerOptions.runnerInference:
+  // { transactions }` passed from main.ts would be cleaner than reaching for
+  // whichever relational option happens to be present. Reported, not done,
+  // because main.ts is E2's this phase.
+  const runtimeTransactionsForInference =
+    options.planningRuns?.transactions ??
+    options.onboarding?.transactions ??
+    options.attachments?.transactions;
+  const inferenceProxy: InferenceProxy | null =
+    options.inferenceProxy ??
+    (runtimeTransactionsForInference
+      ? new InferenceProxy({
+          runs: new SqlProxiedRunLookup(runtimeTransactionsForInference),
+          budget: new SqlRunReservationBudget(runtimeTransactionsForInference),
+          meter: new SqlInferenceMeter(runtimeTransactionsForInference, options.recordUsage),
+          allowedModels: parseRunnerAllowedModels(
+            integrationEnvironment[RUNNER_ALLOWED_MODELS_ENV],
+          ),
+          createAdapter: (provider, model) => {
+            // The raw key never leaves this closure: the adapter holds it, the
+            // proxy holds the adapter, and nothing that touches a runner frame
+            // can read it back out.
+            const apiKey =
+              provider === "anthropic"
+                ? integrationEnvironment.ANTHROPIC_API_KEY
+                : integrationEnvironment.OPENAI_API_KEY;
+            if (!apiKey?.trim()) return null;
+            if (options.createPlanningAdapter) {
+              return options.createPlanningAdapter(provider, model, apiKey);
+            }
+            return provider === "anthropic"
+              ? new AnthropicAdapter({ apiKey, model })
+              : new OpenAiAdapter({ apiKey, model });
+          },
+          audit: (actor, action, detail) => stores.audit(actor, action, detail, now()),
+        })
+      : null);
+  // === end EXECUTION E3 (proxied model inference) ==========================
   const configuredOrigin =
     options.publicOrigin ??
     process.env.NORNS_PUBLIC_ORIGIN ??
@@ -1344,6 +1416,68 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   app.get("/health", (_req, reply) => {
     reply.send({ ok: true, contracts: "1.2.0" });
   });
+
+  // === EXECUTION E3 =======================================================
+  // Runner distribution. The GitHub Actions workflow installs the runner from
+  // here instead of npm (apps/runner is private and unpublished, so the old
+  // `npm install --global @norns/runner` step could never succeed).
+  //
+  // DELIBERATELY UNAUTHENTICATED. The workflow fetches this before it holds
+  // any Norns identity — enrollment happens after the runner is installed, so
+  // there is nothing to authenticate with. That is acceptable because the
+  // response is the same public build for everyone and contains no secret,
+  // and because confidentiality is not what protects the job: integrity is.
+  // The dispatch pins a sha256 into the committed workflow and the job refuses
+  // any other bytes, so serving this openly does not let anyone substitute
+  // code into a run.
+  //
+  // The artifact is loaded and re-hashed once, lazily, and cached: the server
+  // will not advertise a digest it is not serving.
+  let runnerTarballCache: RunnerTarball | null = null;
+  const currentRunnerTarball = (): RunnerTarball | null => {
+    if (runnerTarballCache) return runnerTarballCache;
+    try {
+      runnerTarballCache = loadRunnerTarball(defaultRunnerTarballDir());
+      return runnerTarballCache;
+    } catch {
+      return null;
+    }
+  };
+
+  app.get("/install/runner/manifest.json", (_req, reply) => {
+    const tarball = currentRunnerTarball();
+    if (!tarball) return reply.code(503).send({ error: "runner_tarball_unavailable" });
+    return reply.send({
+      version: tarball.version,
+      sha256: tarball.sha256,
+      byte_size: tarball.byte_size,
+      url: runnerTarballPath(tarball.version),
+    });
+  });
+
+  app.get<{ Params: { version: string } }>(
+    "/install/runner/:version/norns-runner.tgz",
+    (req, reply) => {
+      const tarball = currentRunnerTarball();
+      if (!tarball) return reply.code(503).send({ error: "runner_tarball_unavailable" });
+      // Version-scoped and exact-matched. A job pinned to a version this
+      // server no longer has must fail rather than silently receive a
+      // different build than the digest in its workflow file expects.
+      if (req.params.version !== tarball.version) {
+        return reply.code(404).send({ error: "runner_version_unavailable" });
+      }
+      return (
+        reply
+          .header("content-type", "application/gzip")
+          .header("content-length", String(tarball.byte_size))
+          // The bytes for a given version never change, so this is immutable.
+          .header("cache-control", "public, max-age=31536000, immutable")
+          .header("x-norns-runner-sha256", tarball.sha256)
+          .send(tarball.bytes)
+      );
+    },
+  );
+  // === end EXECUTION E3 (runner distribution) ============================
 
   // The legacy Phase 1A page asked operators to paste a raw session token.
   // Account auth in the React app supersedes it; keep old bookmarks safe by
@@ -4234,6 +4368,62 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         ) {
           workspaceBroker.receive(authedRunnerId, frame.generation, frame.response);
         }
+        return;
+      }
+
+      // EXECUTION E3 — proxied model inference. The socket has already proved
+      // this runner's identity; `authedRunnerId` is that proof and is the only
+      // identity passed on. The frame's own fields are treated as claims.
+      //
+      // Answered inline and asynchronously: unlike events there is no ordering
+      // requirement between calls, and serialising them behind the event chain
+      // would make one slow provider call stall the run's event stream.
+      if (frame.type === "inference_request") {
+        const requestingRunnerId = authedRunnerId;
+        const reconciled = reconciledWorkspaceRunners.get(requestingRunnerId);
+        const respond = (response: RunnerInferenceResponseT): void => {
+          // Only answer on the socket that asked, and only while it is still
+          // the current one — a superseded connection must not receive a
+          // completion the project paid for.
+          if (runnerSockets.get(requestingRunnerId) === socket) {
+            sendFrame(socket, {
+              type: "inference_response",
+              generation: frame.generation,
+              response,
+            });
+          }
+        };
+        if (!inferenceProxy) {
+          respond({
+            request_id: frame.request.request_id,
+            status: "error",
+            code: "unsupported",
+            message: "model proxying is not enabled on this deployment",
+          });
+          return;
+        }
+        if (runnerSockets.get(requestingRunnerId) !== socket || reconciled?.socket !== socket) {
+          respond({
+            request_id: frame.request.request_id,
+            status: "error",
+            code: "unauthorized",
+            message: "not authorized for this run",
+          });
+          return;
+        }
+        void inferenceProxy
+          .handle(frame.request, requestingRunnerId, frame.generation, runner.generation)
+          .then(respond)
+          .catch(() => {
+            // The proxy is written not to throw; if it ever does, the runner
+            // still gets an answer rather than blocking until its timeout.
+            respond({
+              request_id: frame.request.request_id,
+              status: "error",
+              code: "provider_error",
+              message: "inference failed",
+            });
+          });
         return;
       }
 

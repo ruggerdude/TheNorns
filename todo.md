@@ -422,3 +422,41 @@
   new tables (production-only failure; now covered by a `SET ROLE` test)
 - [ ] O4-10 — pin `actions/checkout` and `actions/setup-node` by commit SHA in
   the workflow template (currently floating major tags)
+
+## EXECUTION E3 — runner distribution, model credentials, context auth
+
+- [x] E3-1 — the runner is installed from a version-pinned, sha256-verified
+  tarball served by the Norns server (`/install/runner/:version/…`), not from
+  npm; workflow template v2 → v3 so every already-broken installed file is
+  upgraded in place. Closes O4-8 with the decided design (do NOT publish)
+- [x] E3-2 — `assertSafeToken` grammar for the runner spec is NARROWER than the
+  npm-spec pattern it replaced: `<semver>@sha256:<64 lower hex>` only
+- [x] E3-3 — additive relay contract for proxied model inference
+  (`inference_request` / `inference_response` frames, `model_proxy` capability,
+  contracts 1.3.0 → 1.4.0); no existing frame changes meaning
+- [x] E3-4 — server-side inference proxy: authorizes against
+  `agent_runs.runner_id`, the dispatched `commands.runner_generation`, and
+  `runner_revocations`; calls providers through the EXISTING
+  `AnthropicAdapter`/`OpenAiAdapter`; deployment allowlist fails closed
+- [x] E3-5 — hard budget enforcement before the provider call, against the
+  run's own `budget_reservations` row; typed `budget_exhausted` refusal
+- [x] E3-6 — real metering: first-ever writer of the `usage_events` table, and
+  the same rows are read back as the run's settled spend
+- [x] E3-7 — `SignedUrlContentFetcher` replaced by `RunnerSignedContextFetcher`
+  at the single construction site shared by the laptop AND ephemeral paths
+  (E1 handoff — every task-context fetch previously 401'd)
+- [x] E3-8 — `proxied-completion` runtime registered in the runner CLI: the
+  only runtime that works with no provider credentials in the process env
+- [ ] E3-9 — **HUMAN/PM**: `claude-code` and `codex` CANNOT be served by this
+  proxy. Both SDKs accept a base-URL override, but only to an endpoint speaking
+  the provider's own HTTP API (Anthropic Messages / OpenAI Responses, both
+  streaming), which `LlmAdapter` cannot serve. Decide: repo secrets for those
+  runtimes, a provider-native gateway, or agentic runtimes stay laptop-only
+- [ ] E3-10 — **PM ROUTING**: pass `runnerInference: { transactions }` from
+  `main.ts` (E2's file this phase) instead of the proxy reaching for whichever
+  relational option happens to be present in `buildServer`
+- [ ] E3-11 — **PM ROUTING**: `agent_profiles.runtime` must be able to name
+  `proxied-completion` for Actions-hosted work, or the coordinator will keep
+  dispatching a runtime the job has no credentials for
+- [ ] E3-12 — proxied inference is complete-response only; streaming needs a
+  streaming method on `LlmAdapter` first (additive on both sides when wanted)
