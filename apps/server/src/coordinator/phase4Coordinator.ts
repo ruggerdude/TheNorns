@@ -9,6 +9,7 @@ import {
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import { transitionV2TaskLifecycle } from "../persistence/v2/lifecycleMutation.js";
 import { SqlV2ApplicationTransaction } from "../persistence/v2/sqlRepositories.js";
+import { resolveProjectVerificationCommands } from "./verificationCommandSource.js";
 
 export class Phase4CoordinatorConflictError extends Error {
   constructor(message: string) {
@@ -47,6 +48,13 @@ export interface Phase4ScheduledRun {
   command_id: string;
   budget_reservation_id: string;
   command: V2DispatchCommandT;
+  /**
+   * EXECUTION E10 — ingested verification facts that could not be turned into
+   * an argv vector and were therefore NOT sent. Reported rather than swallowed:
+   * a dropped test command is exactly the kind of silent degradation that made
+   * a green verification badge meaningless before E4.
+   */
+  rejected_verification_commands: { name: string; value: string }[];
 }
 
 interface SchedulingRow {
@@ -355,6 +363,14 @@ export class Phase4Coordinator {
           input.expires_at,
         ],
       );
+      // EXECUTION E10 — carry the project's real build/test/lint commands.
+      //
+      // Absent facts produce an absent field, which lands the runner on its
+      // committed-manifest fallback and, failing that, on its fail-closed
+      // refusal. Dispatch is never blocked on this, and this never makes a run
+      // green: the only thing it can do is give the runner something real to
+      // execute where previously it had only an unresolvable policy ref.
+      const verification = await resolveProjectVerificationCommands(sql, input.project_id);
       const command = V2DispatchCommand.parse({
         schema_version: 2,
         protocol_version: 2,
@@ -389,6 +405,9 @@ export class Phase4Coordinator {
         max_output_tokens: input.max_output_tokens,
         max_duration_seconds: input.max_duration_seconds,
         verification_policy_ref: row.verification_policy_ref,
+        ...(verification.commands.length > 0
+          ? { verification_commands: verification.commands }
+          : {}),
         sandbox_policy_ref: input.sandbox_policy_ref,
         authorized_by: input.authorized_by,
         authorized_by_session_id: input.authorized_by_session_id,
@@ -441,6 +460,7 @@ export class Phase4Coordinator {
         command_id: commandId,
         budget_reservation_id: reservationId,
         command,
+        rejected_verification_commands: verification.rejected,
       };
     });
   }
