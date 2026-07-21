@@ -10,6 +10,24 @@ import { type ProjectSummary, Projects } from "./Projects";
 import { makeProject } from "./test/fixtures";
 import { MockFetch } from "./test/mockFetch";
 
+const githubStatus = {
+  configured: true,
+  user_authorization: { connected: true, login: "octocat" },
+  connections: [
+    {
+      id: "github:42",
+      provider: "github",
+      display_name: "octocat on GitHub",
+      owner_type: "user",
+      owner_login: "octocat",
+      installation_id: "42",
+      repository_selection: "all",
+      status: "connected",
+      last_validated_at: "2026-07-16T20:00:00Z",
+    },
+  ],
+};
+
 describe("FRONT DOOR P2b: reviewer selector", () => {
   let mock: MockFetch;
   const onOpenProject = vi.fn<(project: ProjectSummary) => void>();
@@ -21,10 +39,29 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
     mock = new MockFetch();
     mock.get("/api/projects", { body: [] });
     mock.get("/api/v2/attention", { status: 404, body: {} });
-    mock.post("/api/projects", (_url, init) => {
-      const body = JSON.parse(String(init?.body)) as { name: string; description: string };
+    mock.get("/api/integrations/github/status", { body: githubStatus });
+    // O1: onboarding always creates/binds a GitHub repository now — POST
+    // /api/v2/projects/onboarding is the single creation endpoint, returning
+    // a lean { project_id, scenario, replayed, ... } summary rather than the
+    // full project record (fetched separately via GET /api/projects/:id).
+    mock.post("/api/v2/projects/onboarding", {
+      status: 201,
+      body: {
+        project_id: "project-created",
+        scenario: "new_repo",
+        replayed: false,
+        workspace: null,
+        remote: null,
+        push: null,
+        blockers: [],
+      },
+    });
+    mock.get("/api/projects/project-created", (_url, _init) => {
+      const onboardingCall = mock.calls.find(
+        (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
+      );
+      const body = (onboardingCall?.body ?? {}) as { name: string; description: string };
       return {
-        status: 201,
         body: makeProject({
           id: "project-created",
           name: body.name,
@@ -34,6 +71,12 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
         }),
       };
     });
+    // Installed here, before render — the dashboard's mount-time effects
+    // (refresh/refreshGitHub) fetch immediately, so the mock must be live
+    // before render(), not after. Routes registered later by individual
+    // tests (mock.patch/del) still take effect: MockFetch reads its routes
+    // list live on every call, it doesn't snapshot at install() time.
+    mock.install();
     render(
       <Projects
         onOpenProject={onOpenProject}
@@ -61,6 +104,7 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
       "Stand up a hybrid vector + keyword index.",
     );
     await user.selectOptions(screen.getByTestId("reviewer-model"), "openai:gpt-5.6-sol");
+    await user.type(await screen.findByTestId("github-new-repository-name"), "ravel-search-index");
     await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
 
     // The wizard's attach-and-launch step confirms creation succeeded; the
@@ -96,6 +140,10 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
     await user.type(screen.getByTestId("project-name"), "Helm mobile onboarding");
     await user.type(screen.getByTestId("project-description"), "Rebuild the first-run flow.");
     // Reviewer left at its default "Automatic" value — no selectOptions call.
+    await user.type(
+      await screen.findByTestId("github-new-repository-name"),
+      "helm-mobile-onboarding",
+    );
     await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
 
     await screen.findByTestId("wizard-attach-step");
@@ -131,6 +179,7 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
     await user.type(screen.getByTestId("project-name"), "Nimbus API gateway");
     await user.type(screen.getByTestId("project-description"), "Consolidate the edge gateways.");
     await user.selectOptions(screen.getByTestId("reviewer-model"), "anthropic:claude-opus-4-8");
+    await user.type(await screen.findByTestId("github-new-repository-name"), "nimbus-api-gateway");
     await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
 
     expect(await screen.findByTestId("wizard-attach-step")).toBeInTheDocument();
