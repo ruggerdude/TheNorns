@@ -828,3 +828,44 @@ Closes E3-9 with the human's decision: a forwarder, not a reimplementation.
   phase `/conflicts`, `POST /api/v2/run-conflicts/:id/resolve`. Suites green:
   server 832 (+17 over the 815 integration baseline), contracts 122,
   biome / `tsc --noEmit` / `pnpm run build` all clean.
+
+## EXECUTION pre-deploy remediation (docs/reviews/EXECUTION-PREDEPLOY.md)
+
+Scope: exactly two items from that review. Everything else in it is a PM
+decision and is deliberately untouched.
+
+- [x] **B1 (blocker) — the packed runner tarball installed but could not
+  execute.** `bundledDependencies: ["@norns/contracts"]` forced npm to nest a
+  `zod@3` under `@norns/runner` (the agent SDK's `zod@4` wins the top-level
+  hoist), and npm's reifier will not write inside a bundled package: it created
+  `node_modules/@norns/runner/node_modules/zod` as an EMPTY DIRECTORY, so the
+  CLI died on `ERR_MODULE_NOT_FOUND` before printing its own help text and every
+  Actions-hosted run failed at its first command. Fixed by removing the nested
+  package entirely: `pack-tarball.mjs` now inlines the compiled contracts output
+  into the runner's own `dist/_contracts/` and rewrites every
+  `@norns/contracts` specifier, so the tarball ships no `node_modules/` and no
+  `bundledDependencies`, and `zod` is an ordinary dependency npm nests normally.
+  The script fails the build if any specifier is left unrewritten.
+- [x] **B1 regression guard.** New `apps/server/test/runnerTarballInstall.test.ts`
+  really runs `npm install --global --prefix …` on the built tarball and
+  executes the installed `norns-runner` binary — the mode
+  `actionsWorkflowTemplate.ts` actually uses. Verified it FAILS on the old pack
+  script ("npm left an empty zod directory at …"). Not skipped by default;
+  `NORNS_SKIP_TARBALL_INSTALL_TEST=1` is an explicit offline opt-out CI does not
+  set.
+- [x] **W1 (CI red) — hardcoded wall-clock dispatch window.**
+  `actionsDispatchConcurrency.test.ts` pinned `expires_at` to
+  `2026-07-21T20:15Z`; once that passed, every dispatch acked `expired` and the
+  E5 regression assertion timed out. Now time-relative. Swept the suite: two
+  more dispatch fixtures (`gatewayCredentialAuth`, `runnerInferenceProxy`) had
+  already-lapsed windows and were made relative too.
+- [ ] 🟡 Six test fixtures still carry the literal `2026-07-21T20:15:00.000Z`
+  (`executionE10`, `executionE13`, `actionsExecution`, `onboardingO2`,
+  `onboardingO6` ×2). Proven inert — nothing compares them to the real clock,
+  and all pass with the window lapsed — so they were left alone, but they read
+  as live windows and will become bombs if a live daemon is ever wired into
+  those paths.
+- [ ] 🟡 `norns-runner --help` previously fell through to "`--server` is
+  required" because the first argv token is parsed as the command. Fixed
+  minimally (`--help`/`-h`/`help` in the command position). The wider CLI arg
+  parser is still hand-rolled and positional-fragile.
