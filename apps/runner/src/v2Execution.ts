@@ -204,7 +204,15 @@ export class GitWorktreeManager implements RunnerWorktreeManager {
       path,
       resolved,
     ]);
-    await execFileAsync("git", ["-C", path, "switch", "-c", input.target_branch]);
+    // `-C`, not `-c`. The relay delivers at least once, and `git worktree
+    // remove` deletes the working directory but NOT the branch ref it created,
+    // so a redelivered command finds its own branch already present and `-c`
+    // fails outright — which is exactly how a redelivery used to turn into an
+    // opaque failed run. `-C` resets this task's own branch to the base
+    // revision for a fresh attempt; the previous attempt's commits are already
+    // on the remote, and the publisher converges the remote branch and the
+    // pull request onto the new attempt rather than opening a second one.
+    await execFileAsync("git", ["-C", path, "switch", "-C", input.target_branch]);
     return {
       path,
       base_revision: resolved,

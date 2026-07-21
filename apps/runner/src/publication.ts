@@ -68,6 +68,13 @@ export type PublicationOutcome =
   /** Already on the remote at this exact commit — a redelivery converged. */
   | "already_published"
   /**
+   * The remote branch held a previous attempt at THIS task and was moved to
+   * this attempt under a lease. Also a converged redelivery, but one whose
+   * commits differ from last time, so it is named separately rather than
+   * folded into `pushed`.
+   */
+  | "republished"
+  /**
    * The repository has no remote to push to, so the branch ref in the local
    * repository IS the durable artifact. Only ever true for a laptop runner
    * working in a folder the human owns; an ephemeral CI checkout always has an
@@ -201,12 +208,21 @@ export class GitPublisher implements RunnerPublisher {
   }
 
   /**
-   * Push the exact commit to the exact branch.
+   * Push the exact commit to the exact branch, converging under redelivery.
    *
-   * Deliberately NOT a force push. The branch belongs to this run, so the only
-   * way the remote can already hold a different commit is a genuine collision
-   * that a human needs to see — quietly overwriting it would destroy work,
-   * which is the entire class of bug this module exists to end.
+   * The fast path is an ordinary, non-forced push. It is only when that is
+   * rejected that this has a decision to make, and it makes it by asking the
+   * remote what it actually holds rather than by assuming:
+   *
+   *   * the remote is already at our commit -> a redelivery got there first,
+   *     which is success, not failure;
+   *   * the remote holds some other commit -> this branch belongs to this one
+   *     task, so that other commit is this task's previous attempt, and the
+   *     branch is moved onto the new attempt with `--force-with-lease` PINNED
+   *     to the tip we just observed. The lease is the whole point: if anything
+   *     moved the branch between our read and our write, the push fails and the
+   *     run fails with a reason. We never blind-force, so we can never
+   *     overwrite work we did not see.
    */
   private async push(
     worktreePath: string,
@@ -214,21 +230,32 @@ export class GitPublisher implements RunnerPublisher {
     branch: string,
     commit: string,
   ): Promise<PublicationOutcome> {
+    const ref = `refs/heads/${branch}`;
     try {
-      await execFileAsync("git", [
-        "-C",
-        worktreePath,
-        "push",
-        remote,
-        `${commit}:refs/heads/${branch}`,
-      ]);
+      await execFileAsync("git", ["-C", worktreePath, "push", remote, `${commit}:${ref}`]);
       return "pushed";
     } catch (error) {
-      // A rejected push may simply mean a redelivery already published this
-      // exact commit. Ask the remote what it holds before calling it a failure.
-      const published = await this.remoteHasCommit(worktreePath, remote, branch, commit);
-      if (published) return "already_published";
       const detail = error instanceof Error ? error.message : String(error);
+      const tip = await this.remoteTip(worktreePath, remote, ref);
+      if (tip === commit) return "already_published";
+      if (tip) {
+        try {
+          await execFileAsync("git", [
+            "-C",
+            worktreePath,
+            "push",
+            `--force-with-lease=${ref}:${tip}`,
+            remote,
+            `${commit}:${ref}`,
+          ]);
+          return "republished";
+        } catch (leaseError) {
+          throw new PublicationError(
+            `could not update branch ${branch} on ${remote}`,
+            leaseError instanceof Error ? leaseError.message : String(leaseError),
+          );
+        }
+      }
       throw new PublicationError(
         `could not push branch ${branch} to ${remote}`,
         // The message may name the physical worktree; the caller redacts it
@@ -238,23 +265,24 @@ export class GitPublisher implements RunnerPublisher {
     }
   }
 
-  private async remoteHasCommit(
+  /** The commit the remote currently has at `ref`, or null if it has none. */
+  private async remoteTip(
     worktreePath: string,
     remote: string,
-    branch: string,
-    commit: string,
-  ): Promise<boolean> {
+    ref: string,
+  ): Promise<string | null> {
     try {
       const { stdout } = await execFileAsync("git", [
         "-C",
         worktreePath,
         "ls-remote",
         remote,
-        `refs/heads/${branch}`,
+        ref,
       ]);
-      return stdout.split("\n").some((line) => line.trim().split(/\s+/)[0] === commit);
+      const sha = stdout.split("\n")[0]?.trim().split(/\s+/)[0];
+      return sha ? sha : null;
     } catch {
-      return false;
+      return null;
     }
   }
 
