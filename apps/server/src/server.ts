@@ -87,16 +87,28 @@ import {
 import { PlanningRunWorker } from "./planning/runWorker.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
 import { type AttentionService, DecisionResolutionError } from "./projects/attentionService.js";
+// ---- ONBOARDING O2 ---------------------------------------------------------
+import { GitHubRemoteRepositoryPort } from "./projects/githubRemoteRepositoryPort.js";
 import {
   PhaseWorkflowConflictError,
   type PhaseWorkflowService,
 } from "./projects/phaseWorkflowService.js";
+import {
+  OnboardingValidationError,
+  ProjectOnboardingService,
+  type RemoteSelection,
+} from "./projects/projectOnboardingService.js";
 import {
   ProjectResumeNotFoundError,
   type ProjectResumeService,
   ProjectSettingsValidationError,
 } from "./projects/projectResumeService.js";
 import { Phase3RequiredError } from "./projects/relationalReadRepository.js";
+import {
+  RemoteRepositoryVerificationError,
+  UnconfiguredRemoteRepositoryPort,
+} from "./projects/remoteRepositoryPort.js";
+// ---- end ONBOARDING O2 imports ---------------------------------------------
 import {
   type ProjectGraphView,
   type ProjectRepository,
@@ -119,6 +131,8 @@ import {
   StrategyWorkflowConflictError,
   type StrategyWorkflowService,
 } from "./projects/strategyWorkflowService.js";
+import type { WorkspaceVerificationPort } from "./projects/workspaceVerification.js";
+import { WorkspaceVerificationFailedError } from "./projects/workspaceVerification.js";
 import {
   RunnerWorkspaceBroker,
   WorkspaceBrokerError,
@@ -234,6 +248,17 @@ export interface ServerOptions {
    * both are present, objective attachments are injected into planning round 1.
    */
   attachments?: { transactions: V2TransactionRunner };
+  /**
+   * ONBOARDING O2: the four project-creation scenarios (new-local,
+   * new-local+GitHub, existing-GitHub, existing-local). Needs the relational
+   * runtime, same as `planningRuns`. `workspaces` is the runner-backed folder
+   * verification port; when absent every folder-first creation takes the
+   * FRONT DOOR D2 unverified path.
+   */
+  onboarding?: {
+    transactions: V2TransactionRunner;
+    workspaces?: WorkspaceVerificationPort;
+  };
   integrations?: { github: GitHubIntegrationService | null };
   /**
    * Deployment configuration inspected by safe integration-status routes.
@@ -2071,6 +2096,178 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         projectError(reply, error);
       }
     });
+
+    // =====================================================================
+    // ONBOARDING O2 -- project setup, all four scenarios.
+    //
+    // A project may involve BOTH a local folder and a GitHub repository:
+    // build locally, push remotely. The command creates up to two
+    // attachments in one atomic, idempotent step:
+    //   * WORKSPACE (role 'workspace') -- where execution happens. This is
+    //     what the Phase 4 dispatch gate resolves; nothing here weakens it.
+    //   * REMOTE    (role 'remote')    -- the GitHub push / PR target.
+    //
+    //   new_local        1. NEW, local only.
+    //   new_local_github 2. NEW, local folder + GitHub push target.
+    //   existing_github  3. EXISTING on GitHub, staged into a local folder.
+    //   existing_local   4. EXISTING local folder, connected to GitHub.
+    //
+    // A GitHub-only project (no local folder) is deliberately NOT here: it
+    // remains `POST /api/projects` with source_type 'github', unchanged.
+    //
+    // The server executes no repository commands (ADR-006). Folder checks are
+    // a contract a runner satisfies; when no runner can answer, creation
+    // still succeeds with an unverified attachment (FRONT DOOR D2) and the
+    // response says so in `warnings`.
+    // =====================================================================
+    if (options.onboarding) {
+      const onboarding = new ProjectOnboardingService({
+        transactions: options.onboarding.transactions,
+        remotes: github
+          ? new GitHubRemoteRepositoryPort(github)
+          : new UnconfiguredRemoteRepositoryPort(),
+        ...(options.onboarding.workspaces ? { workspaces: options.onboarding.workspaces } : {}),
+      });
+
+      const RemoteSelectionBody = z.discriminatedUnion("mode", [
+        z
+          .object({
+            mode: z.literal("existing"),
+            connection_id: z.string().min(1),
+            repository_id: z.string().min(1),
+          })
+          .strict(),
+        z
+          .object({
+            mode: z.literal("create"),
+            connection_id: z.string().min(1),
+            name: z
+              .string()
+              .trim()
+              .min(1)
+              .max(100)
+              .regex(/^[A-Za-z0-9._-]+$/, "repository name must be a valid GitHub repository name"),
+            private: z.boolean().default(true),
+          })
+          .strict(),
+      ]);
+      const OnboardingFields = {
+        scenario: z.enum(["new_local", "new_local_github", "existing_github", "existing_local"]),
+        name: z.string().trim().min(1),
+        description: z.string().trim().min(1),
+        // The raw folder path is held transiently: it is handed to the
+        // verification port and reduced to an opaque sha256 fingerprint plus a
+        // sanitized last-segment display name. Never stored verbatim, never
+        // echoed back. The cap is defense in depth, not a path-shape check.
+        local_path: z.string().trim().min(1).max(4096),
+        remote: RemoteSelectionBody.optional(),
+        idempotency_key: z.string().trim().min(1).max(200),
+      };
+      const OnboardingBody = z
+        .discriminatedUnion("pm_provider", [
+          z.object({
+            ...OnboardingFields,
+            pm_provider: z.literal("anthropic"),
+            pm_model: AnthropicPmModel.default(DEFAULT_PM_MODEL.anthropic),
+          }),
+          z.object({
+            ...OnboardingFields,
+            pm_provider: z.literal("openai"),
+            pm_model: OpenAiPmModel.default(DEFAULT_PM_MODEL.openai),
+          }),
+        ])
+        .superRefine((value, context) => {
+          const needsRemote = value.scenario !== "new_local";
+          if (needsRemote && !value.remote) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["remote"],
+              message: "choose or create the GitHub repository this project pushes to",
+            });
+          }
+          if (!needsRemote && value.remote) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["scenario"],
+              message: "a local-only project has no push target",
+            });
+          }
+          // Scenario 3 starts FROM an existing GitHub repository, so there is
+          // nothing to create -- creating one would silently change what the
+          // operator asked for.
+          if (value.scenario === "existing_github" && value.remote?.mode === "create") {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["remote", "mode"],
+              message: "an existing-GitHub project must select an existing repository",
+            });
+          }
+        });
+
+      app.post("/api/v2/projects/onboarding", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const body = OnboardingBody.safeParse(req.body);
+        if (!body.success) {
+          return reply.code(400).send({
+            error: "bad_request",
+            detail: body.error.issues[0]?.message ?? "invalid body",
+          });
+        }
+        const command = {
+          name: body.data.name,
+          description: body.data.description,
+          pm_provider: body.data.pm_provider,
+          pm_model: body.data.pm_model,
+          local_path: body.data.local_path,
+          actor: { actor_type: "human" as const, actor_id: user.id },
+          idempotency_key: body.data.idempotency_key,
+        };
+        const remote = body.data.remote as RemoteSelection | undefined;
+        try {
+          const result = await (body.data.scenario === "new_local"
+            ? onboarding.createNewLocal(command)
+            : body.data.scenario === "new_local_github"
+              ? onboarding.createNewLocalWithGitHub({
+                  ...command,
+                  remote: remote as RemoteSelection,
+                })
+              : body.data.scenario === "existing_github"
+                ? onboarding.createFromGitHub({
+                    ...command,
+                    remote: remote as Extract<RemoteSelection, { mode: "existing" }>,
+                  })
+                : onboarding.createFromExistingLocal({
+                    ...command,
+                    remote: remote as RemoteSelection,
+                  }));
+          stores.audit(
+            user.email,
+            "project.onboarded",
+            `${result.project_id} ${body.data.scenario}`,
+            now(),
+          );
+          // 200 on an idempotent replay, 201 the first time.
+          return reply.code(result.replayed ? 200 : 201).send(result);
+        } catch (error) {
+          // Honest errors: a folder a runner actually looked at and
+          // disqualified, a GitHub repository the installation cannot see, or
+          // a reused idempotency key. None of these are silently downgraded.
+          if (error instanceof WorkspaceVerificationFailedError) {
+            return reply.code(409).send({ error: error.code, message: error.message });
+          }
+          if (error instanceof RemoteRepositoryVerificationError) {
+            return reply.code(error.status).send({ error: error.code, message: error.message });
+          }
+          if (error instanceof OnboardingValidationError) {
+            return reply.code(409).send({ error: error.code, message: error.message });
+          }
+          return reply.code(500).send({ error: "onboarding_failed", detail: String(error) });
+        }
+      });
+    }
+    // ===================== end ONBOARDING O2 =============================
 
     if (options.phase3) {
       const LocalBindingBody = z.object({

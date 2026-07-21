@@ -136,6 +136,15 @@ ALTER TABLE repository_bindings
     OR remote_provisioning IN ('selected_existing', 'created')
   );
 
+-- Whether the GitHub App installation actually contains this repository. A
+-- 'selected repositories' installation does not automatically include a
+-- newly created repository, so a brokered installation token cannot reach it
+-- until the operator grants access. NULL = not a GitHub remote / not known.
+ALTER TABLE repository_binding_candidates
+  ADD COLUMN IF NOT EXISTS remote_installation_ready BOOLEAN;
+ALTER TABLE repository_bindings
+  ADD COLUMN IF NOT EXISTS remote_installation_ready BOOLEAN;
+
 -- Which of the four onboarding scenarios produced this project. Recorded so
 -- the resume read model can explain the project's shape honestly instead of
 -- inferring it from which rows happen to exist.

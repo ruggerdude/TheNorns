@@ -33,6 +33,14 @@ export interface ProjectSummary {
   plan_objective: string | null;
   source_type: ProjectSourceType | null;
   source_location: string | null;
+  // ---- ONBOARDING O2 (additive) -------------------------------------------
+  // A project may hold BOTH a local workspace (where execution happens) and a
+  // GitHub remote (the push target), so the UI can say
+  // "Files at <workspace_location> - Pushes to <remote_location>".
+  // Optional so the in-memory ProjectStore and older snapshots stay valid.
+  workspace_location?: string | null;
+  remote_location?: string | null;
+  onboarding_scenario?: string | null;
 }
 
 export class ProjectNotFoundError extends Error {

@@ -1,6 +1,12 @@
 import { V2ProjectResume, type V2ProjectResumeT } from "@norns/contracts";
 import { z } from "zod";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
+import {
+  type AttachmentRow,
+  ONBOARDING_ATTACHMENTS_SQL,
+  attachmentView,
+  describePush,
+} from "./projectOnboardingService.js";
 import { safeLocalRepositoryDisplayName } from "./repositoryDisplayName.js";
 
 export class ProjectResumeNotFoundError extends Error {
@@ -48,11 +54,78 @@ export const V2ProjectProgress = z
   .strict();
 export type V2ProjectProgressT = z.infer<typeof V2ProjectProgress>;
 
+// ---------------------------------------------------------------------------
+// ONBOARDING O2 (read model): a project may hold BOTH a local WORKSPACE (where
+// execution happens) and a GitHub REMOTE (the push / PR target). The resume
+// payload exposes both, additively, so the UI can say
+//   "Files at my-app - Pushes to github.com/acme/my-app"
+// without inferring the project's shape from which rows happen to exist.
+//
+// Additive to the `.strict()` V2ProjectResume contract, merged on locally --
+// the same pattern FRONT DOOR P5 established above, for the same reason
+// (packages/contracts is outside this phase's ownership).
+// ---------------------------------------------------------------------------
+export const V2OnboardingAttachment = z
+  .object({
+    id: z.string().min(1),
+    /** 'binding' = runner/GitHub verified; 'candidate' = unverified tier. */
+    tier: z.enum(["binding", "candidate"]),
+    role: z.enum(["workspace", "remote"]),
+    kind: z.enum(["local_runner", "github"]),
+    display_name: z.string().min(1),
+    status: z.string().min(1),
+    verified: z.boolean(),
+    observed_head: z.string().nullable(),
+    github: z.object({ owner: z.string(), name: z.string(), url: z.string() }).strict().nullable(),
+  })
+  .strict();
+export type V2OnboardingAttachmentT = z.infer<typeof V2OnboardingAttachment>;
+
+export const V2ProjectOnboardingView = z
+  .object({
+    scenario: z.string().nullable(),
+    workspace: V2OnboardingAttachment.nullable(),
+    remote: V2OnboardingAttachment.nullable(),
+    push: z
+      .object({
+        strategy: z.enum(["norns_github_app_token", "local_git_remote"]),
+        implemented: z.boolean(),
+        rationale: z.string(),
+        needs_operator_action: z.boolean(),
+      })
+      .strict()
+      .nullable(),
+    /** Ready-to-render one-liner, e.g. "Files at my-app - Pushes to github.com/acme/my-app". */
+    summary_line: z.string(),
+  })
+  .strict();
+export type V2ProjectOnboardingViewT = z.infer<typeof V2ProjectOnboardingView>;
+
 export type V2ProjectResumeWithTrackingT = Omit<V2ProjectResumeT, "phases"> & {
   phases: Array<V2ProjectResumeT["phases"][number] & V2PhaseProgressT>;
   progress: V2ProjectProgressT;
   update_interval_seconds: number;
+  onboarding: V2ProjectOnboardingViewT;
 };
+
+/** The human-readable one-liner. Says only what is actually known. */
+export function onboardingSummaryLine(input: {
+  workspace: V2OnboardingAttachmentT | null;
+  remote: V2OnboardingAttachmentT | null;
+}): string {
+  const parts: string[] = [];
+  if (input.workspace) {
+    const where =
+      input.workspace.kind === "github" && input.workspace.github
+        ? input.workspace.github.url
+        : input.workspace.display_name;
+    parts.push(`Files at ${where}${input.workspace.verified ? "" : " (unverified)"}`);
+  } else {
+    parts.push("No workspace connected");
+  }
+  if (input.remote?.github) parts.push(`Pushes to ${input.remote.github.url}`);
+  return parts.join(" · ");
+}
 
 /** Task-weighted percent complete, guarded against the empty-phase / no-task
  * division by zero (an empty phase is defined as 0% complete, not NaN). */
@@ -214,9 +287,11 @@ export class ProjectResumeService {
         aggregate_version: number;
         current_architecture_revision_id: string | null;
         update_interval_seconds: number;
+        onboarding_scenario: string | null;
       }>(
         `SELECT id, name, description, status, aggregate_version,
-                current_architecture_revision_id, update_interval_seconds
+                current_architecture_revision_id, update_interval_seconds,
+                onboarding_scenario
          FROM projects WHERE id = $1`,
         [projectId],
       );
@@ -378,6 +453,18 @@ export class ProjectResumeService {
          WHERE rn <= $2`,
         [projectId, PROGRESS_WINDOW_SIZE],
       );
+      // ONBOARDING O2: both attachments, resolved by role across both tiers.
+      const attachments = await tx.query<AttachmentRow>(
+        `SELECT id, tier, role, kind, display_name, status, github_owner,
+                github_name, observed_head, push_credential_strategy,
+                remote_provisioning, remote_installation_ready
+         FROM (${ONBOARDING_ATTACHMENTS_SQL}) attachment
+         ORDER BY CASE tier WHEN 'binding' THEN 0 ELSE 1 END, created_at, id`,
+        [projectId],
+      );
+      const workspaceRow = attachments.rows.find((row) => row.role === "workspace") ?? null;
+      const remoteRow = attachments.rows.find((row) => row.role === "remote") ?? null;
+
       const metrics = attention.rows[0] ?? {
         open_decisions: 0,
         active_runs: 0,
@@ -474,11 +561,25 @@ export class ProjectResumeService {
         decisions_waiting: metrics.open_decisions,
       });
 
+      const workspaceView = workspaceRow ? attachmentView(workspaceRow) : null;
+      const remoteView = remoteRow ? attachmentView(remoteRow) : null;
+      const onboarding = V2ProjectOnboardingView.parse({
+        scenario: project.onboarding_scenario,
+        workspace: workspaceView,
+        remote: remoteView,
+        push: describePush(remoteRow),
+        summary_line: onboardingSummaryLine({
+          workspace: workspaceView,
+          remote: remoteView,
+        }),
+      });
+
       return {
         ...baseResume,
         phases: phasesWithProgress,
         progress,
         update_interval_seconds: project.update_interval_seconds,
+        onboarding,
       };
     });
   }

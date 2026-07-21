@@ -87,10 +87,8 @@ export class PushCredentialNotImplementedError extends Error {
   readonly code = "push_credential_not_implemented" as const;
 
   constructor(readonly strategy: PushCredentialStrategy) {
-    super(
-      `the "${strategy}" push-credential broker is defined but not implemented; ` +
-        "phase O4 owns the runner-facing broker and the git operations",
-    );
+    const detail = "phase O4 owns the runner-facing broker and the git operations";
+    super(`the "${strategy}" push-credential broker is defined but not implemented; ${detail}`);
     this.name = "PushCredentialNotImplementedError";
   }
 }

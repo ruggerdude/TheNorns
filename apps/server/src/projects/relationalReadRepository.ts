@@ -29,6 +29,12 @@ interface ProjectReadRow {
   github_owner: string | null;
   github_name: string | null;
   local_repository_display_name: string | null;
+  // ONBOARDING O2 (additive): the REMOTE attachment -- the push / PR target --
+  // resolved across both binding tiers. Null for a project with no remote
+  // (scenario 1, and every pre-O2 project).
+  remote_github_owner: string | null;
+  remote_github_name: string | null;
+  onboarding_scenario: string | null;
 }
 
 interface ProjectGraphHeaderRow {
@@ -116,6 +122,13 @@ function summaryFromRow(row: ProjectReadRow): ProjectSummary {
     plan_objective: row.plan_hash === null ? null : row.plan_objective,
     source_type: row.source_type,
     source_location: sourceLocation(row),
+    // ONBOARDING O2 (additive): "Files at <workspace> - Pushes to <remote>".
+    workspace_location: sourceLocation(row),
+    remote_location:
+      row.remote_github_owner !== null && row.remote_github_name !== null
+        ? `github.com/${row.remote_github_owner}/${row.remote_github_name}`
+        : null,
+    onboarding_scenario: row.onboarding_scenario,
   };
 }
 
@@ -204,7 +217,10 @@ async function projectRows(
             )::text AS source_type,
             COALESCE(candidate.github_owner, binding.github_owner) AS github_owner,
             COALESCE(candidate.github_name, binding.github_name) AS github_name,
-            CASE WHEN binding.binding_type = 'local_runner' THEN binding.repository_display_name ELSE NULL END AS local_repository_display_name
+            CASE WHEN binding.binding_type = 'local_runner' THEN binding.repository_display_name ELSE NULL END AS local_repository_display_name,
+            remote.github_owner AS remote_github_owner,
+            remote.github_name AS remote_github_name,
+            project.onboarding_scenario
      FROM projects project
      LEFT JOIN legacy_project_imports imported
        ON imported.project_id = project.id
@@ -220,14 +236,37 @@ async function projectRows(
        ON phase.project_id = project.id
       AND phase.id = phase_mapping.v2_id
      LEFT JOIN LATERAL (
+       -- ONBOARDING O2: scoped to role='workspace'. A project may now also
+       -- hold a role='remote' candidate, which must never be mistaken for the
+       -- project's own source. Pre-O2 rows default to 'workspace'.
        SELECT source_type, github_owner, github_name
        FROM repository_binding_candidates binding
        WHERE binding.project_id = project.id
          AND binding.status <> 'dismissed'
+         AND binding.role = 'workspace'
        ORDER BY CASE binding.status WHEN 'promoted' THEN 0 ELSE 1 END,
                 binding.created_at, binding.id
        LIMIT 1
      ) candidate ON true
+     -- ONBOARDING O2 (additive): the remote push target, verified tier first.
+     LEFT JOIN LATERAL (
+       SELECT github_owner, github_name
+       FROM (
+         SELECT github_owner, github_name, 0 AS tier, created_at, id
+         FROM repository_bindings remote_binding
+         WHERE remote_binding.project_id = project.id
+           AND remote_binding.role = 'remote'
+           AND remote_binding.status NOT IN ('revoked', 'disconnected')
+         UNION ALL
+         SELECT github_owner, github_name, 1 AS tier, created_at, id
+         FROM repository_binding_candidates remote_candidate
+         WHERE remote_candidate.project_id = project.id
+           AND remote_candidate.role = 'remote'
+           AND remote_candidate.status <> 'dismissed'
+       ) remote_any
+       ORDER BY tier, created_at, id
+       LIMIT 1
+     ) remote ON true
      LEFT JOIN repository_bindings binding
        ON binding.id = project.primary_repository_binding_id
       AND binding.project_id = project.id
@@ -237,6 +276,83 @@ async function projectRows(
     params,
   );
   return result.rows;
+}
+
+/**
+ * ONBOARDING O2: the project row + planning preferences + `project.created`
+ * event, shared by the legacy `POST /api/projects` path below and the four
+ * onboarding commands in projectOnboardingService.ts, so a project is born
+ * exactly one way regardless of which door it came through.
+ *
+ * `ON CONFLICT DO NOTHING` on the project row is what makes the onboarding
+ * commands' deterministic (actor, idempotency_key)-derived project id safe
+ * under a concurrent double submit.
+ */
+export async function insertProjectCore(
+  sql: V2SqlExecutor,
+  input: {
+    projectId: string;
+    name: string;
+    description: string;
+    pmProvider: ProviderName;
+    pmModel: PmModelT | null;
+    reviewerProvider: ProviderName;
+    createdAt: string;
+    onboardingScenario?: string | null;
+  },
+): Promise<void> {
+  await sql.query(
+    `INSERT INTO projects (
+       id, name, description, status, assignment_policy_ref,
+       verification_policy_ref, budget_policy_ref, onboarding_scenario,
+       created_at, updated_at
+     ) VALUES ($1,$2,$3,'initializing',$4,$5,$6,$7,$8,$8)
+     ON CONFLICT (id) DO NOTHING`,
+    [
+      input.projectId,
+      input.name,
+      input.description,
+      "assignment-policy:default-v1",
+      "verification-policy:default-v1",
+      "budget-policy:default-v1",
+      input.onboardingScenario ?? null,
+      input.createdAt,
+    ],
+  );
+  await sql.query(
+    `INSERT INTO project_planning_preferences (
+       project_id, pm_provider, pm_model, reviewer_provider, source,
+       created_at, updated_at
+     ) VALUES ($1,$2,$3,$4,'native',$5,$5)
+     ON CONFLICT (project_id) DO NOTHING`,
+    [
+      input.projectId,
+      input.pmProvider,
+      input.pmModel ?? null,
+      input.reviewerProvider,
+      input.createdAt,
+    ],
+  );
+  await sql.query(
+    `INSERT INTO domain_events (
+       event_id, stream_type, stream_id, stream_version, event_type,
+       project_id, actor_type, actor_id, correlation_id, occurred_at, payload
+     ) VALUES ($1,'project',$2,1,'project.created',$2,'system',NULL,$3,$4,$5::jsonb)
+     ON CONFLICT DO NOTHING`,
+    [
+      `event:project-created:${createHash("sha256").update(input.projectId).digest("hex").slice(0, 32)}`,
+      input.projectId,
+      newId("correlation"),
+      input.createdAt,
+      JSON.stringify({
+        name: input.name,
+        pm_provider: input.pmProvider,
+        pm_model: input.pmModel ?? null,
+        reviewer_provider: input.reviewerProvider,
+        ...(input.onboardingScenario ? { onboarding_scenario: input.onboardingScenario } : {}),
+      }),
+    ],
+  );
 }
 
 /** Legacy graph mutations require normalized Phase 3 commands after write cutover. */
@@ -455,28 +571,15 @@ export class RelationalProjectReadRepository implements ProjectRepository {
     const createdAt = new Date().toISOString();
     const reviewerProvider = reviewerFor(input.pmProvider);
     return this.transactions.transaction(async (sql) => {
-      await sql.query(
-        `INSERT INTO projects (
-           id, name, description, status, assignment_policy_ref,
-           verification_policy_ref, budget_policy_ref, created_at, updated_at
-         ) VALUES ($1,$2,$3,'initializing',$4,$5,$6,$7,$7)`,
-        [
-          projectId,
-          input.name,
-          input.description,
-          "assignment-policy:default-v1",
-          "verification-policy:default-v1",
-          "budget-policy:default-v1",
-          createdAt,
-        ],
-      );
-      await sql.query(
-        `INSERT INTO project_planning_preferences (
-           project_id, pm_provider, pm_model, reviewer_provider, source,
-           created_at, updated_at
-         ) VALUES ($1,$2,$3,$4,'native',$5,$5)`,
-        [projectId, input.pmProvider, input.pmModel ?? null, reviewerProvider, createdAt],
-      );
+      await insertProjectCore(sql, {
+        projectId,
+        name: input.name,
+        description: input.description,
+        pmProvider: input.pmProvider,
+        pmModel: input.pmModel ?? null,
+        reviewerProvider,
+        createdAt,
+      });
 
       if (input.sourceType && input.sourceLocation) {
         const sourceFingerprint = createHash("sha256").update(input.sourceLocation).digest("hex");
@@ -512,24 +615,6 @@ export class RelationalProjectReadRepository implements ProjectRepository {
         );
       }
 
-      await sql.query(
-        `INSERT INTO domain_events (
-           event_id, stream_type, stream_id, stream_version, event_type,
-           project_id, actor_type, actor_id, correlation_id, occurred_at, payload
-         ) VALUES ($1,'project',$2,1,'project.created',$2,'system',NULL,$3,$4,$5::jsonb)`,
-        [
-          newId("event"),
-          projectId,
-          newId("correlation"),
-          createdAt,
-          JSON.stringify({
-            name: input.name,
-            pm_provider: input.pmProvider,
-            pm_model: input.pmModel ?? null,
-            reviewer_provider: reviewerProvider,
-          }),
-        ],
-      );
       const row = (await projectRows(sql, this.migrationRunId, projectId))[0];
       if (!row) throw new Error(`project ${projectId} disappeared after creation`);
       return summaryFromRow(row);

@@ -82,6 +82,19 @@ export const FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+// ONBOARDING O2: binding roles (workspace vs remote), the push-credential
+// strategy seam, and actor-scoped onboarding idempotency.
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED. The file is named
+// `NNNN_onboarding_bindings.sql`; the integrating PM renames it and updates
+// the two constants below. Parallel agents collided on migration numbers in
+// the previous program, so this phase does not pick one.
+export const ONBOARDING_BINDINGS_MIGRATION_NAME = "NNNN_onboarding_bindings";
+export const ONBOARDING_BINDINGS_MIGRATION_URL = new URL(
+  "../../../drizzle/NNNN_onboarding_bindings.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -172,6 +185,10 @@ export async function loadAttachmentsMigrationSql(): Promise<string> {
 
 export async function loadFrontDoorProgressTrackingMigrationSql(): Promise<string> {
   return readFile(FRONTDOOR_PROGRESS_TRACKING_MIGRATION_URL, "utf8");
+}
+
+export async function loadOnboardingBindingsMigrationSql(): Promise<string> {
+  return readFile(ONBOARDING_BINDINGS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -341,6 +358,10 @@ export async function runCurrentV2Migrations(
     {
       name: FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
       sql: await loadFrontDoorProgressTrackingMigrationSql(),
+    },
+    {
+      name: ONBOARDING_BINDINGS_MIGRATION_NAME,
+      sql: await loadOnboardingBindingsMigrationSql(),
     },
   ]);
 }

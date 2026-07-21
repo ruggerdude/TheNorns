@@ -77,10 +77,7 @@ export class WorkspaceVerificationUnavailableError extends Error {
 /** A runner answered, and the answer disqualifies the folder. */
 export class WorkspaceVerificationFailedError extends Error {
   constructor(
-    readonly code:
-      | "workspace_not_empty"
-      | "workspace_missing"
-      | "workspace_not_a_git_repository",
+    readonly code: "workspace_not_empty" | "workspace_missing" | "workspace_not_a_git_repository",
     message: string,
   ) {
     super(message);
