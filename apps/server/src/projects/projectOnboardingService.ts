@@ -113,7 +113,7 @@ export interface OnboardingAttachmentView {
 
 /** Something concrete the operator must do before the project can execute. */
 export interface OnboardingBlocker {
-  readonly code: "installation_not_ready" | "workflow_not_installed";
+  readonly code: "installation_not_ready";
   readonly role: OnboardingRole;
   readonly message: string;
 }
@@ -125,8 +125,18 @@ export interface OnboardingResult {
   readonly workspace: OnboardingAttachmentView | null;
   readonly remote: OnboardingAttachmentView | null;
   readonly push: PushCredentialDescription;
-  /** Empty when the project is ready to execute. Never a buried warning. */
-  readonly blockers: readonly OnboardingBlocker[];
+  /**
+   * Distinct blocker CODES, empty when the project is ready to execute.
+   *
+   * ONBOARDING O6 — this is a list of strings, not of objects, because the web
+   * wizard consumes it as `string[]` and renders each entry through its own
+   * `describeBlocker(code)`. It previously returned objects, which would have
+   * rendered as `[object Object]` in the blocker step. `blocker_details`
+   * carries the structured form for any caller that wants the live,
+   * repository-specific message instead of the static copy.
+   */
+  readonly blockers: readonly string[];
+  readonly blocker_details: readonly OnboardingBlocker[];
 }
 
 function sha256(value: string): string {
@@ -213,6 +223,23 @@ export function attachmentView(row: AttachmentRow): OnboardingAttachmentView {
 /**
  * Everything standing between this project and a dispatchable Actions run,
  * derived from durable state rather than remembered from creation time.
+ *
+ * ONBOARDING O6 — deliberately ONE blocker code, not two.
+ *
+ * `workflow_not_installed` used to be reported here and has been removed. It
+ * was both misleading and wrong:
+ *
+ *   * wrong, because nothing ever wrote `workflow_installed` back onto the
+ *     verified binding tier, so a project whose workflow WAS installed kept
+ *     reporting the blocker forever; and
+ *   * misleading, because it is not a thing the human can act on. Norns
+ *     installs the workflow itself, and the Actions execution module already
+ *     refuses dispatch with `actions_workflow_blocked` when it genuinely
+ *     cannot. Showing it as a setup blocker would put a permanent, unfixable
+ *     warning on every healthy new project.
+ *
+ * `installation_not_ready` stays, because it is the opposite on every count:
+ * durable, accurate, and fixable only by the human.
  */
 export function collectBlockers(
   attachments: ReadonlyArray<OnboardingAttachmentView | null>,
@@ -220,29 +247,13 @@ export function collectBlockers(
   const blockers: OnboardingBlocker[] = [];
   for (const attachment of attachments) {
     if (!attachment || attachment.kind !== "github") continue;
+    if (attachment.installation_ready !== false) continue;
     const where = attachment.github?.url ?? attachment.display_name;
-    if (attachment.installation_ready === false) {
-      blockers.push({
-        code: "installation_not_ready",
-        role: attachment.role,
-        message: `the GitHub App installation does not include ${where} yet. ${INSTALLATION_HINT}`,
-      });
-    }
-    // Only an Actions-managed workspace needs a workflow file: it is the
-    // attachment execution actually runs in. A pre-O2 project (no push
-    // strategy recorded) predates Actions execution and must not be told to
-    // install a workflow it was never going to use.
-    if (
-      attachment.role === "workspace" &&
-      attachment.push_credential_strategy === ACTIONS_GITHUB_TOKEN &&
-      !attachment.workflow_installed
-    ) {
-      blockers.push({
-        code: "workflow_not_installed",
-        role: attachment.role,
-        message: `the Norns workflow file is not committed to ${where} yet, so there is no Actions job to execute in`,
-      });
-    }
+    blockers.push({
+      code: "installation_not_ready",
+      role: attachment.role,
+      message: `the GitHub App installation does not include ${where} yet. ${INSTALLATION_HINT}`,
+    });
   }
   return blockers;
 }
@@ -263,7 +274,19 @@ export const ONBOARDING_ATTACHMENTS_SQL = `
          binding.observed_head,
          binding.default_branch,
          binding.installation_ready,
-         binding.workflow_installed,
+         -- ONBOARDING O6: the truthful value lives in the Actions execution
+         -- module's own record, which is the only thing that actually installs
+         -- the workflow. The repository_bindings.workflow_installed column is
+         -- never written by anything, so reading it directly reported false
+         -- forever, even for a project whose workflow was installed.
+         -- Read-only join; this module writes nothing in that table.
+         COALESCE(
+           (SELECT actions.workflow_installed_at IS NOT NULL
+                   AND actions.workflow_blocked_reason IS NULL
+            FROM github_actions_execution_bindings actions
+            WHERE actions.repository_binding_id = binding.id),
+           false
+         ) AS workflow_installed,
          binding.push_credential_strategy,
          binding.remote_provisioning,
          binding.created_at
@@ -633,6 +656,22 @@ function assemble(
     workspace,
     remote,
     push: describePushCredential(),
-    blockers: collectBlockers([workspace, remote]),
+    ...blockerPayload(collectBlockers([workspace, remote])),
   };
+}
+
+/**
+ * Both attachments name the same repository today, so an installation problem
+ * would otherwise be reported twice. De-duplicated by code: the human has one
+ * problem to fix, not two.
+ */
+export function blockerPayload(details: readonly OnboardingBlocker[]): {
+  blockers: string[];
+  blocker_details: OnboardingBlocker[];
+} {
+  const seen = new Map<string, OnboardingBlocker>();
+  for (const detail of details) {
+    if (!seen.has(detail.code)) seen.set(detail.code, detail);
+  }
+  return { blockers: [...seen.keys()], blocker_details: [...seen.values()] };
 }

@@ -38,6 +38,19 @@
 
 ## ONBOARDING program
 
+- [x] O6 Binding promotion — closes the blocker that made every GitHub project
+  undispatchable. A candidate now becomes a `connected` binding through
+  `ProjectActivationService`, on evidence Norns actually observed: a live
+  installation probe, a resolve through that installation, and a real head
+  revision read back (which becomes `observed_head`). Runs inline as part of
+  `POST /api/v2/projects/onboarding`, with `POST /api/v2/projects/:id/activate`
+  as the retry path once a human grants installation access. The laptop-runner
+  promotion path is untouched. Also fixes silent adoption of a pre-existing
+  repository in `new_repo` (durable creation intents) and the
+  `blockers`-shape mismatch with the wizard. Migration written as
+  `NNNN_onboarding_repository_intents.sql`, number unassigned. Suites green:
+  server 599 (+26 over O2, 8 skip).
+
 - [x] O2 Bindings — durable model and commands for GitHub-backed project
   setup. Adds a `role` column (`workspace` | `remote`) to both binding tiers
   (`repository_bindings`, `repository_binding_candidates`), leaving

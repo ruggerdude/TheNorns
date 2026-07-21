@@ -96,14 +96,20 @@ import { PlanningError, planContentHash, runPlanning } from "./planning/session.
 import { type AttentionService, DecisionResolutionError } from "./projects/attentionService.js";
 // ONBOARDING O2 imports: githubRemoteRepositoryPort, projectOnboardingService,
 // remoteRepositoryPort.
+import { GitHubActivationPort } from "./projects/githubActivationPort.js";
 import { GitHubRemoteRepositoryPort } from "./projects/githubRemoteRepositoryPort.js";
 import {
   PhaseWorkflowConflictError,
   type PhaseWorkflowService,
 } from "./projects/phaseWorkflowService.js";
 import {
+  ProjectActivationError,
+  ProjectActivationService,
+} from "./projects/projectActivationService.js";
+import {
   OnboardingValidationError,
   ProjectOnboardingService,
+  blockerPayload,
 } from "./projects/projectOnboardingService.js";
 import {
   ProjectResumeNotFoundError,
@@ -2259,7 +2265,40 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     // The legacy `POST /api/projects` route is untouched and still serves the
     // pre-existing GitHub-only and local paths.
     // =====================================================================
+    /**
+     * ONBOARDING O6 — run activation without letting its failure destroy a
+     * successful creation.
+     *
+     * A blocked activation is a normal, reportable outcome and is returned. An
+     * unexpected failure (GitHub down mid-request) is swallowed to null: the
+     * project genuinely exists, so answering 500 would tell the user creation
+     * failed when it did not, and would strand the repository they can see on
+     * GitHub. The retry endpoint is the recovery path either way.
+     */
+    const activateQuietly = async (
+      service: ProjectActivationService | null,
+      projectId: string,
+      actorId: string,
+    ): Promise<Awaited<ReturnType<ProjectActivationService["activate"]>> | null> => {
+      if (!service) return null;
+      try {
+        return await service.activate({ project_id: projectId, actor_id: actorId });
+      } catch {
+        return null;
+      }
+    };
+
     if (options.onboarding) {
+      // ONBOARDING O6: promotes a candidate to a `connected` binding on
+      // GitHub-observed evidence. Constructed unconditionally so the failure
+      // mode when GitHub is unconfigured is an honest refusal, not a missing
+      // route.
+      const activation = github
+        ? new ProjectActivationService(
+            options.onboarding.transactions,
+            new GitHubActivationPort(github),
+          )
+        : null;
       const onboarding = new ProjectOnboardingService({
         transactions: options.onboarding.transactions,
         remotes: github
@@ -2344,10 +2383,39 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             `${result.project_id} ${scenario.data.scenario}`,
             now(),
           );
-          // 200 on an idempotent replay, 201 the first time. The response
-          // carries `blockers`, so a caller learns about a repository the
-          // installation cannot reach here rather than later at dispatch.
-          return reply.code(result.replayed ? 200 : 201).send(result);
+          // ---- ONBOARDING O6 -------------------------------------------
+          // Activate inline, as part of creation. This is deliberate: the
+          // reason GitHub projects could never run was an endpoint
+          // (`source-bindings/github`) that existed but nothing ever called.
+          // Putting activation behind a second call the client must remember
+          // to make would rebuild exactly that failure. A project is created
+          // AND made runnable in one request, or it reports why not.
+          //
+          // Activation failure is never fatal to creation: the project and its
+          // repository exist and are recorded, so the human can fix the
+          // installation and retry via POST /api/v2/projects/:id/activate
+          // rather than being stranded with an orphaned repository.
+          const activated = await activateQuietly(activation, result.project_id, user.id);
+          return reply.code(result.replayed ? 200 : 201).send({
+            ...result,
+            ...(activated
+              ? {
+                  activation: {
+                    activated: activated.activated,
+                    observed_head: activated.observed_head,
+                    workspace_binding_id: activated.workspace_binding_id,
+                  },
+                  ...blockerPayload([
+                    ...result.blocker_details,
+                    ...activated.blockers.map((blocker) => ({
+                      code: blocker.code,
+                      role: "workspace" as const,
+                      message: blocker.message,
+                    })),
+                  ]),
+                }
+              : {}),
+          });
         } catch (error) {
           // Honest errors: a repository GitHub would not confirm, or a reused
           // idempotency key. Neither is silently downgraded.
@@ -2358,6 +2426,38 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             return reply.code(409).send({ error: error.code, message: error.message });
           }
           return reply.code(500).send({ error: "onboarding_failed", detail: String(error) });
+        }
+      });
+
+      // ONBOARDING O6 — retry activation after a human clears a blocker.
+      // This is the recovery path for `installation_not_ready`: the project
+      // and its repository already exist, so granting the installation access
+      // and calling this makes the project runnable without re-creating
+      // anything.
+      app.post("/api/v2/projects/:id/activate", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        if (!activation) {
+          return reply
+            .code(503)
+            .send({ error: "github_not_configured", message: "GitHub App is not configured" });
+        }
+        const { id } = req.params as { id: string };
+        try {
+          const result = await activation.activate({ project_id: id, actor_id: user.id });
+          stores.audit(
+            user.email,
+            result.activated ? "project.activated" : "project.activation_blocked",
+            `${id} ${result.blockers.map((blocker) => blocker.code).join(",")}`.trim(),
+            now(),
+          );
+          return reply.send(result);
+        } catch (error) {
+          if (error instanceof ProjectActivationError) {
+            return reply.code(error.status).send({ error: error.code, message: error.message });
+          }
+          return reply.code(500).send({ error: "activation_failed", detail: String(error) });
         }
       });
     }

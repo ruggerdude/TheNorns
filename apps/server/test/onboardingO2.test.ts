@@ -50,6 +50,8 @@ class FakeRemoteRepositoryPort implements RemoteRepositoryPort {
   /** installation_ready applied to repositories this port creates. */
   createInstallationReady = true;
   resolveFailure: RemoteRepositoryVerificationError | null = null;
+  /** Models GitHub creating the repository and the call then failing. */
+  failAfterCreate = false;
 
   private descriptor(repo: FakeRepo): RemoteRepositoryDescriptor {
     return {
@@ -94,6 +96,9 @@ class FakeRemoteRepositoryPort implements RemoteRepositoryPort {
       installation_ready: this.createInstallationReady,
     };
     this.existing.set(input.name, repo);
+    if (this.failAfterCreate) {
+      return Promise.reject(new Error("network died after GitHub created the repository"));
+    }
     return Promise.resolve(this.descriptor(repo));
   }
 }
@@ -259,7 +264,10 @@ describe.sequential("ONBOARDING O2: GitHub-backed project setup", () => {
       github: { url: "github.com/acme/adopted" },
     });
     expect(result.remote?.github?.url).toBe("github.com/acme/adopted");
-    expect(result.blockers.map((blocker) => blocker.code)).toEqual(["workflow_not_installed"]);
+    // O6: a reachable repository has no setup blocker. Whether the Actions
+    // workflow is committed is the execution module's concern and its own
+    // refusal, not a permanent warning on a healthy project.
+    expect(result.blockers).toEqual([]);
 
     const provisioning = await pg.query<{ remote_provisioning: string }>(
       "SELECT DISTINCT remote_provisioning FROM repository_binding_candidates WHERE project_id = $1",
@@ -305,19 +313,72 @@ describe.sequential("ONBOARDING O2: GitHub-backed project setup", () => {
     ).rejects.toMatchObject({ code: "idempotency_key_reused" });
   });
 
-  it("does not re-create a repository that GitHub already has under that name", async () => {
-    // Models a crash between GitHub creating the repository and Norns
-    // committing the row: a retry with a NEW key must still not double-create.
+  // ONBOARDING O6: a same-named repository is either our own crashed attempt
+  // (adopt it) or somebody else's repository (never touch it). The two are
+  // told apart by the durable creation intent, not by the name.
+
+  it("refuses to adopt a pre-existing repository on a first-time submission", async () => {
+    // The user types a name into the *create new repository* form that happens
+    // to match a repository they already own. Silently attaching it -- and
+    // later committing a workflow file into it -- would be data loss.
     remotes.existing.set("fresh-project", {
-      repository_id: "repo-preexisting",
+      repository_id: "repo-theirs",
       owner: "acme",
       name: "fresh-project",
       default_branch: "main",
       installation_ready: true,
     });
-    const result = await onboarding.createNewRepo(newRepoCommand({ idempotency_key: "retry-key" }));
+
+    await expect(
+      onboarding.createNewRepo(newRepoCommand({ idempotency_key: "first-time" })),
+    ).rejects.toMatchObject({ code: "repository_name_taken" });
+
     expect(remotes.created).toEqual([]);
-    expect(result.workspace?.github?.url).toBe("github.com/acme/fresh-project");
+    const projects = await pg.query("SELECT id FROM projects");
+    expect(projects.rows).toHaveLength(0);
+  });
+
+  it("adopts its own repository when a crashed attempt already created it", async () => {
+    // Models the hard case: GitHub created the repository, then the call
+    // failed before Norns could commit anything. The intent recorded before
+    // that call is what proves the repository is ours on the retry.
+    remotes.failAfterCreate = true;
+    await expect(
+      onboarding.createNewRepo(newRepoCommand({ idempotency_key: "crash-key" })),
+    ).rejects.toThrow("network died after GitHub created the repository");
+    expect(remotes.created).toEqual(["fresh-project"]);
+
+    remotes.failAfterCreate = false;
+    const retried = await onboarding.createNewRepo(
+      newRepoCommand({ idempotency_key: "crash-key" }),
+    );
+
+    // Adopted, not re-created.
+    expect(remotes.created).toEqual(["fresh-project"]);
+    expect(retried.workspace?.github?.url).toBe("github.com/acme/fresh-project");
+  });
+
+  it("will not let a reused key license adopting a differently-named repository", async () => {
+    remotes.failAfterCreate = true;
+    await expect(
+      onboarding.createNewRepo(newRepoCommand({ idempotency_key: "shifty" })),
+    ).rejects.toThrow();
+    remotes.failAfterCreate = false;
+    // Somebody else's repository, and the intent on this key names a different
+    // one -- so the collision must still be refused.
+    remotes.existing.set("other-repo", {
+      repository_id: "repo-other",
+      owner: "acme",
+      name: "other-repo",
+      default_branch: "main",
+      installation_ready: true,
+    });
+    await expect(
+      onboarding.createNewRepo({
+        ...newRepoCommand({ idempotency_key: "shifty" }),
+        repository_name: "other-repo",
+      }),
+    ).rejects.toMatchObject({ code: "repository_name_taken" });
   });
 
   // -----------------------------------------------------------------------
@@ -329,12 +390,11 @@ describe.sequential("ONBOARDING O2: GitHub-backed project setup", () => {
     const result = await onboarding.createNewRepo(newRepoCommand());
 
     // Both attachments are blocked; only the workspace needs a workflow file.
-    expect(result.blockers.map((blocker) => `${blocker.role}:${blocker.code}`).sort()).toEqual([
-      "remote:installation_not_ready",
-      "workspace:installation_not_ready",
-      "workspace:workflow_not_installed",
-    ]);
-    for (const blocker of result.blockers) {
+    // ONBOARDING O6: distinct CODES, de-duplicated across the two attachments
+    // (one repository, one problem to fix), and shaped as strings because the
+    // wizard renders them through its own describeBlocker(code).
+    expect(result.blockers).toEqual(["installation_not_ready"]);
+    for (const blocker of result.blocker_details) {
       expect(blocker.message).toContain("github.com/acme/fresh-project");
     }
 
@@ -347,9 +407,7 @@ describe.sequential("ONBOARDING O2: GitHub-backed project setup", () => {
     // It survives into the read model and drives the recommended action --
     // it is not a creation-time warning that evaporates.
     const view = await resume.open(result.project_id);
-    expect(view.onboarding.blockers.map((blocker) => blocker.code)).toContain(
-      "installation_not_ready",
-    );
+    expect(view.onboarding.blockers).toContain("installation_not_ready");
     expect(view.next_recommended_action).toContain("Resolve a setup blocker");
   });
 

@@ -5,6 +5,7 @@ import {
   type AttachmentRow,
   ONBOARDING_ATTACHMENTS_QUERY,
   attachmentView,
+  blockerPayload,
   collectBlockers,
   resolveAttachments,
 } from "./projectOnboardingService.js";
@@ -110,10 +111,12 @@ export const V2ProjectOnboardingView = z
      * run. Empty when it is ready. Surfaced here rather than discovered at
      * dispatch time.
      */
-    blockers: z.array(
+    /** Distinct blocker codes. See OnboardingResult.blockers for why strings. */
+    blockers: z.array(z.string()),
+    blocker_details: z.array(
       z
         .object({
-          code: z.enum(["installation_not_ready", "workflow_not_installed"]),
+          code: z.literal("installation_not_ready"),
           role: z.enum(["workspace", "remote"]),
           message: z.string(),
         })
@@ -589,7 +592,7 @@ export class ProjectResumeService {
         workspace: workspaceView,
         remote: remoteView,
         push: describePushCredential(),
-        blockers: onboardingBlockers,
+        ...blockerPayload(onboardingBlockers),
         summary_line: onboardingSummaryLine({
           workspace: workspaceView,
           remote: remoteView,
