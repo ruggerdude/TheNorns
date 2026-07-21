@@ -801,6 +801,51 @@ button:disabled {
 .run-line code {
   color: var(--text);
 }
+/* EXECUTION E10 — the run's published branch / pull request, and the failing
+   verification command's real output. */
+.run-pull-request {
+  color: #6d8cff;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.run-pull-request:hover {
+  text-decoration: underline;
+}
+.verification-failures {
+  border: 1px solid color-mix(in srgb, #ff6b6b 45%, var(--line));
+  border-radius: 9px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, #ff6b6b 7%, transparent);
+  font-size: 11px;
+}
+.verification-failures > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.verification-failure {
+  margin-top: 8px;
+  display: grid;
+  gap: 4px;
+}
+.verification-failure-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.verification-output {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .agent-identity-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
