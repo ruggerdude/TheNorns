@@ -13,6 +13,14 @@ export class CodexRuntime implements CodingRuntime {
     resume_session: true, // codex.resumeThread(threadId)
     cancel: true,
     stop_after_current: false,
+    // EXECUTION E11 — VERIFIED AGAINST @openai/codex-sdk 0.144.3, NOT ASSUMED.
+    // `Thread` exposes exactly `run(input, {signal})` and
+    // `runStreamed(input, {signal})`; there is no method that injects input
+    // into a turn already in flight, and `TurnOptions` carries only
+    // `outputSchema` and `signal`. Multi-turn means CONSECUTIVE turns: the next
+    // turn can carry a human's answer, but the running one cannot receive it.
+    // Declaring `true` here would put a control in the UI that does nothing.
+    send_message: false,
   };
 
   constructor(private readonly options: { model?: string; resumeThreadId?: string } = {}) {}

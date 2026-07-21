@@ -492,3 +492,17 @@
 - [ ] 🟡 E4-8 — **PM ROUTING**: no event, column, or contract field carries the
   published branch or pull-request URL, so the UI cannot link a run to its PR.
   E4 streams it as `run_log` text; a durable field belongs on `agent_runs`
+
+## EXECUTION E11 — real control over a live coding run
+
+- [ ] 🔄 E11-1 — route `cancel`/`interrupt`/`suspend`/`resume_session` to the
+  in-flight V2 execution instead of the Phase 1A fixture. `daemon.ts` held one
+  `FixtureExecutor` and every control reached it, so a live run could not be
+  stopped by any means; `V2RunnerExecutor` never even passed the `AbortSignal`
+  its adapters all accept
+- [ ] 🔄 E11-2 — `send_message` delivery to a live run, with an honest
+  per-runtime capability matrix and an honest answer when the run has ended
+- [ ] 🔄 E11-3 — publish-on-cancel: commits made before a human cancelled must
+  survive
+- [ ] 🔄 E11-4 — resumability design note (ask-then-end-the-job), plus only the
+  self-contained runner-side foundation

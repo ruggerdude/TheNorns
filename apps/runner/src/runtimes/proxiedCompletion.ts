@@ -45,6 +45,8 @@ export class ProxiedCompletionRuntime implements CodingRuntime {
     resume_session: false,
     cancel: true,
     stop_after_current: false,
+    // One prompt in, one finished text out. There is no turn to speak into.
+    send_message: false,
   };
 
   constructor(
