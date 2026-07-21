@@ -9,6 +9,7 @@ import {
   GitWorktreeManager,
   HashVerifiedContextLoader,
   RunnerStateFile,
+  type RunnerPublisher,
   type RunnerVerifier,
   type RunnerWorktreeManager,
   V2RunnerExecutor,
@@ -16,6 +17,11 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 
 const COMMIT = "a".repeat(40);
+// EXECUTION E4 — distinct from COMMIT. A worktree whose HEAD still equals the
+// revision it started from is an EMPTY run, and the executor now refuses to
+// call that a success, so a base revision equal to COMMIT would no longer
+// model a run that did any work.
+const BASE = "b".repeat(40);
 
 describe("Phase 4 runner-owned execution", () => {
   const cleanup: string[] = [];
@@ -43,7 +49,7 @@ describe("Phase 4 runner-owned execution", () => {
         expect(input.expected_revision).toBe(COMMIT);
         return {
           path: resolve(root, "worktree"),
-          base_revision: COMMIT,
+          base_revision: BASE,
           head: async () => COMMIT,
           cleanup: async () => {
             worktreeCleaned = true;
@@ -86,8 +92,29 @@ describe("Phase 4 runner-owned execution", () => {
     const verifier: RunnerVerifier = {
       verify: async (input) => {
         expect(input.expected_commit).toBe(COMMIT);
-        return { passed: true, output: "all checks passed" };
+        expect(input.base_revision).toBe(BASE);
+        return {
+          passed: true,
+          output: "all checks passed",
+          command_results: [
+            { name: "test", command: ["pnpm", "test"], exit_code: 0, passed: true, output: "ok" },
+          ],
+          reason: null,
+          hygiene_only: false,
+        };
       },
+    };
+    // EXECUTION E4 — the worktree may not be destroyed until the work is
+    // durably published, so an executor without a publisher now fails the run.
+    const publisher: RunnerPublisher = {
+      publish: async (input) => ({
+        outcome: "pushed",
+        branch: input.branch,
+        commit: input.commit,
+        remote: "origin",
+        pull_request_url: "https://github.test/pull/1",
+        pull_request_note: null,
+      }),
     };
     const executor = new V2RunnerExecutor(
       { id: "runner-1", generation: 3, scratch_root: root },
@@ -96,6 +123,8 @@ describe("Phase 4 runner-owned execution", () => {
       worktrees,
       new Map([["codex", runtime]]),
       verifier,
+      undefined,
+      publisher,
     );
     const command = V2DispatchCommand.parse({
       schema_version: 2,
@@ -216,6 +245,8 @@ describe("Phase 4 runner-owned execution", () => {
       new GitWorktreeManager(resolve(root, "worktrees")),
       new Map([["codex", runtime]]),
       verifier,
+      undefined,
+      publisher,
     );
     const failingGitCommand = V2DispatchCommand.parse({
       ...command,
