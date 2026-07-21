@@ -29,8 +29,8 @@ import {
   GitWorktreeManager,
   HashVerifiedContextLoader,
   type RunnerPublisher,
-  type VerificationCommand,
   V2RunnerExecutor,
+  type VerificationCommand,
 } from "@norns/runner";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -327,9 +327,7 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
       () => undefined,
     );
     expect(second.outcome).toBe("succeeded");
-    expect(["pushed", "already_published", "republished"]).toContain(
-      second.publication?.outcome,
-    );
+    expect(["pushed", "already_published", "republished"]).toContain(second.publication?.outcome);
 
     // ONE pull request, still. A second would mean a human reviewing the same
     // task twice and an integration stage with two candidate branches.
@@ -394,7 +392,11 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
       h,
       committingRuntime(),
       PASSING,
-      new GitPublisher({ repositorySlug: "acme/widgets", token: "t", fetchImpl: githubApi().fetchImpl }),
+      new GitPublisher({
+        repositorySlug: "acme/widgets",
+        token: "t",
+        fetchImpl: githubApi().fetchImpl,
+      }),
     ).execute(dispatchCommand({ expected_revision: h.base }), (event) => events.push(event));
 
     expect(result.outcome).toBe("failed");
@@ -494,7 +496,10 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
 
     expect(result.verification_passed).toBe(true);
     const observed = (
-      await execFileAsync("node", ["-e", `process.stdout.write(require('fs').readFileSync(${JSON.stringify(witness)},'utf8'))`])
+      await execFileAsync("node", [
+        "-e",
+        `process.stdout.write(require('fs').readFileSync(${JSON.stringify(witness)},'utf8'))`,
+      ])
     ).stdout.trim();
     // The command ran at the agent's commit — not the base revision, and not
     // some later state.

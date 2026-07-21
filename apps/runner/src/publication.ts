@@ -272,13 +272,7 @@ export class GitPublisher implements RunnerPublisher {
     ref: string,
   ): Promise<string | null> {
     try {
-      const { stdout } = await execFileAsync("git", [
-        "-C",
-        worktreePath,
-        "ls-remote",
-        remote,
-        ref,
-      ]);
+      const { stdout } = await execFileAsync("git", ["-C", worktreePath, "ls-remote", remote, ref]);
       const sha = stdout.split("\n")[0]?.trim().split(/\s+/)[0];
       return sha ? sha : null;
     } catch {

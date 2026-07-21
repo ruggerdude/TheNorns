@@ -463,10 +463,32 @@
 
 ## EXECUTION E4 — runner publication + honest verification
 
-- [ ] 🔄 E4-1 — publish the run's work before cleanup: push `target_branch` to
-  `origin` and open/reuse a pull request, so an ephemeral Actions checkout no
-  longer takes the agent's only copy of the commits to the grave
-- [ ] 🔄 E4-2 — replace the tautological verification comparison
-  (`expected_commit` read from the same worktree) with real execution of the
-  repository's ingested build/test/lint commands at the exact commit
-- [ ] 🟡 E4-3 — regression test that the old tautology cannot return
+- [x] ✅ E4-1 — publish the run's work before cleanup: `GitPublisher` pushes
+  `target_branch` to `origin` and opens/reuses its pull request, using the
+  ambient Actions `GITHUB_TOKEN` exactly as `pushCredentialProvider.ts` says
+- [x] ✅ E4-2 — tautological verification replaced: `CommandPolicyVerifier` now
+  runs real commands and reports their true exit status, and enforces the
+  exact commit against the repository instead of against a copy of itself
+- [x] ✅ E4-3 — regression test that the old tautology cannot return
+- [x] ✅ E4-4 — redelivery bug found by the new real-git test: `git switch -c`
+  failed on a redelivered command because `worktree remove` leaves the branch
+  ref behind; now `-C`, with a leased force-update converging the remote
+- [ ] 🟡 E4-5 — **PM ROUTING**: the runner still cannot see the project's REAL
+  build/test/lint commands. They live server-side as `project_memory_entries`
+  prose and E1 renders them into the PROMPT only; the dispatch command carries
+  just `verification_policy_ref`. The runner therefore reads a committed
+  `.norns/verification.json` at the exact commit, or fails closed. The clean
+  fix is a structured `verification_commands` field on `V2DispatchCommand`
+  populated by `phase4Coordinator` (E2's file) — routing needed
+- [ ] 🟡 E4-6 — **PM ROUTING**: `strategyBridgeService.ts:853` hardcodes
+  `verification_policy_ref: "verification"`, which is not a key in the runner's
+  default policy map (`verification-policy:default-v1`). Three vocabularies are
+  in use across the codebase; they need reconciling
+- [ ] 🟡 E4-7 — **PM ROUTING**: `phase4EventProcessor.ts:284` still writes
+  `command_results` as a hardcoded `'[]'::jsonb`. The runner now produces real
+  per-command results; the event contract has nowhere to carry them
+  (`verification_result` has only `output_digest`). Needs an additive contract
+  field plus ingestion in `coordinator/**` — both outside E4's lane
+- [ ] 🟡 E4-8 — **PM ROUTING**: no event, column, or contract field carries the
+  published branch or pull-request URL, so the UI cannot link a run to its PR.
+  E4 streams it as `run_log` text; a durable field belongs on `agent_runs`

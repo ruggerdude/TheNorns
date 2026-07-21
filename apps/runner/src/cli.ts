@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { type RunnerContextIdentity, RunnerSignedContextFetcher } from "./contextAuth.js";
 import { RunnerDaemon } from "./daemon.js";
 import type { RelayInferenceClient } from "./inferenceClient.js";
+import { GitPublisher } from "./publication.js";
 import { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
 import { CodexRuntime } from "./runtimes/codex.js";
 import { ProxiedCompletionRuntime } from "./runtimes/proxiedCompletion.js";
@@ -25,7 +26,6 @@ import {
   type RunnerRuntimeProvider,
   V2RunnerExecutor,
 } from "./v2Execution.js";
-import { GitPublisher } from "./publication.js";
 import { runnerVerificationPolicies } from "./verificationPolicies.js";
 import { WorkspaceRegistry } from "./workspaceRegistry.js";
 

@@ -11,7 +11,7 @@ import {
   V2DispatchCommand,
   type V2DispatchCommandT,
 } from "@norns/contracts";
-import { type PublicationResult, PublicationError, type RunnerPublisher } from "./publication.js";
+import { PublicationError, type PublicationResult, type RunnerPublisher } from "./publication.js";
 import type { CodingRuntime, RuntimeRunResult } from "./runtimes/types.js";
 import {
   REPOSITORY_VERIFICATION_MANIFEST,

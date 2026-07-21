@@ -24,9 +24,7 @@ describe("runner verification policy startup", () => {
       runnerVerificationPolicies(
         JSON.stringify({ [DEFAULT_VERIFICATION_POLICY_REF]: ["pnpm", "test"] }),
       ).get(DEFAULT_VERIFICATION_POLICY_REF),
-    ).toEqual([
-      { name: DEFAULT_VERIFICATION_POLICY_REF, command: ["pnpm", "test"] },
-    ]);
+    ).toEqual([{ name: DEFAULT_VERIFICATION_POLICY_REF, command: ["pnpm", "test"] }]);
     expect(() =>
       runnerVerificationPolicies(JSON.stringify({ [DEFAULT_VERIFICATION_POLICY_REF]: [] })),
     ).toThrow(/non-empty string array/);
