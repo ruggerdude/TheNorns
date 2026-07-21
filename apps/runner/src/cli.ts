@@ -25,6 +25,7 @@ import {
   type RunnerRuntimeProvider,
   V2RunnerExecutor,
 } from "./v2Execution.js";
+import { GitPublisher } from "./publication.js";
 import { runnerVerificationPolicies } from "./verificationPolicies.js";
 import { WorkspaceRegistry } from "./workspaceRegistry.js";
 
@@ -145,6 +146,12 @@ function createV2Executor(
     ]),
     new CommandPolicyVerifier(policies),
     workspaces,
+    // EXECUTION E4 — the run's work is pushed and opened as a pull request
+    // before the worktree is removed. Credential-free by construction: in an
+    // Actions job `actions/checkout` has already configured GITHUB_TOKEN as the
+    // git credential and GitHub exports GITHUB_REPOSITORY/GITHUB_TOKEN, so this
+    // asks Norns for no secret and stores none (see pushCredentialProvider.ts).
+    new GitPublisher(),
   );
 }
 

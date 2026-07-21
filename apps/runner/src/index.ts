@@ -4,8 +4,21 @@ export { RunnerStateFile } from "./state.js";
 export { WorkspaceRegistry } from "./workspaceRegistry.js";
 export {
   DEFAULT_VERIFICATION_POLICY_REF,
+  REPOSITORY_VERIFICATION_MANIFEST,
+  isHygieneOnly,
+  readRepositoryVerificationManifest,
   runnerVerificationPolicies,
+  type VerificationCommand,
+  type VerificationPolicyMap,
 } from "./verificationPolicies.js";
+export {
+  GitPublisher,
+  PublicationError,
+  type GitPublisherOptions,
+  type PublicationOutcome,
+  type PublicationResult,
+  type RunnerPublisher,
+} from "./publication.js";
 export type {
   CodingRuntime,
   RuntimeCapabilities,
@@ -51,6 +64,7 @@ export {
   type RunnerRuntimeProvider,
   type RunnerVerificationResult,
   type RunnerVerifier,
+  type VerificationCommandResult,
   type RunnerWorktreeManager,
   type V2RunnerExecutionResult,
 } from "./v2Execution.js";

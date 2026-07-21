@@ -11,7 +11,15 @@ import {
   V2DispatchCommand,
   type V2DispatchCommandT,
 } from "@norns/contracts";
+import { type PublicationResult, PublicationError, type RunnerPublisher } from "./publication.js";
 import type { CodingRuntime, RuntimeRunResult } from "./runtimes/types.js";
+import {
+  REPOSITORY_VERIFICATION_MANIFEST,
+  type VerificationCommand,
+  type VerificationPolicyMap,
+  isHygieneOnly,
+  readRepositoryVerificationManifest,
+} from "./verificationPolicies.js";
 import type { WorkspaceRegistry } from "./workspaceRegistry.js";
 
 const execFileAsync = promisify(execFile);
@@ -224,9 +232,31 @@ export class GitWorktreeManager implements RunnerWorktreeManager {
   }
 }
 
+export interface VerificationCommandResult {
+  name: string;
+  command: readonly string[];
+  exit_code: number;
+  passed: boolean;
+  output: string;
+}
+
 export interface RunnerVerificationResult {
   passed: boolean;
   output: string;
+  /** One entry per command actually executed, in execution order. */
+  command_results: readonly VerificationCommandResult[];
+  /**
+   * Why verification failed before (or independently of) any command — an
+   * unconfigured policy, an empty run, a moved HEAD. Null when the commands
+   * themselves decided the outcome.
+   */
+  reason: string | null;
+  /**
+   * True when the only thing that ran was the built-in Git hygiene check. A
+   * green badge on such a run means "the commit has no whitespace errors" and
+   * nothing more, and the caller says so out loud.
+   */
+  hygiene_only: boolean;
 }
 
 export interface RunnerVerifier {
@@ -234,31 +264,209 @@ export interface RunnerVerifier {
     worktree_path: string;
     policy_ref: string;
     expected_commit: string;
+    /** The commit the worktree started at, so an empty run cannot pass. */
+    base_revision: string;
   }): Promise<RunnerVerificationResult>;
 }
 
+/** Per-command wall clock. A hung test suite must not hang the runner. */
+const VERIFICATION_COMMAND_TIMEOUT_MS = 30 * 60 * 1000;
+const VERIFICATION_OUTPUT_LIMIT = 100_000;
+
+/**
+ * EXECUTION E4 — verification that can actually fail.
+ *
+ * WHAT WAS WRONG
+ * --------------
+ * The previous implementation ran one command and then computed
+ * `passed: actual === input.expected_commit`, where `expected_commit` had been
+ * read from `worktree.head()` moments earlier in the same worktree. The
+ * comparison was a tautology: it asked whether HEAD equalled HEAD. The
+ * command's own exit status was never consulted for the verdict at all — a
+ * non-zero exit rejected the promise and was swallowed by the executor's outer
+ * `catch`, producing an opaque failure with no output. And the default policy
+ * was `git diff-tree --check --root HEAD`, a whitespace lint, so an agent that
+ * committed nothing of value "passed verification" and the UI showed a green
+ * badge that meant nothing.
+ *
+ * WHAT IT DOES NOW
+ * ----------------
+ * The verdict is the conjunction of facts that can each independently be false:
+ *
+ *   * the run produced a commit at all (`expected_commit !== base_revision`);
+ *   * the worktree is AT that commit with a clean tree before anything runs;
+ *   * every resolved verification command exited zero;
+ *   * HEAD is STILL at that commit afterwards, so the commands verified the
+ *     work under test rather than something they rewrote underneath it.
+ *
+ * That last pair is what honestly preserves the exact-commit guarantee the
+ * original design intended. `expected_commit` is now an assertion the verifier
+ * ENFORCES against the repository, not a value it compares to a copy of itself.
+ */
 export class CommandPolicyVerifier implements RunnerVerifier {
-  constructor(private readonly policies: ReadonlyMap<string, readonly [string, ...string[]]>) {}
+  constructor(private readonly policies: VerificationPolicyMap) {}
 
   async verify(input: {
     worktree_path: string;
     policy_ref: string;
     expected_commit: string;
+    base_revision: string;
   }): Promise<RunnerVerificationResult> {
-    const command = this.policies.get(input.policy_ref);
-    if (!command) throw new Error(`verification policy ${input.policy_ref} is not approved`);
-    const [file, ...args] = command;
-    const result = await execFileAsync(file, args, {
-      cwd: input.worktree_path,
-      maxBuffer: 10 * 1024 * 1024,
+    const refuse = (reason: string): RunnerVerificationResult => ({
+      passed: false,
+      output: reason,
+      command_results: [],
+      reason,
+      hygiene_only: false,
     });
-    const actual = (
-      await execFileAsync("git", ["-C", input.worktree_path, "rev-parse", "HEAD"])
-    ).stdout.trim();
+
+    // An agent that committed nothing has produced nothing to verify. This is
+    // checked FIRST so that no policy, however permissive, can green-light it.
+    if (input.expected_commit === input.base_revision) {
+      return refuse("the run produced no commit, so there is nothing to verify");
+    }
+    const headBefore = await this.head(input.worktree_path);
+    if (headBefore !== input.expected_commit) {
+      return refuse(
+        `worktree HEAD is ${headBefore} but the commit under test is ${input.expected_commit}`,
+      );
+    }
+    const dirty = await this.dirtyPaths(input.worktree_path);
+    if (dirty.length > 0) {
+      return refuse(
+        `worktree has uncommitted changes, so the commit under test is not what would be published: ${dirty.join(", ")}`,
+      );
+    }
+
+    let commands = this.policies.get(input.policy_ref);
+    let source = `policy ${input.policy_ref}`;
+    if (!commands) {
+      try {
+        const manifest = await readRepositoryVerificationManifest(
+          input.worktree_path,
+          input.expected_commit,
+        );
+        if (manifest) {
+          commands = manifest;
+          source = `${REPOSITORY_VERIFICATION_MANIFEST} at ${input.expected_commit}`;
+        }
+      } catch (error) {
+        return refuse(error instanceof Error ? error.message : String(error));
+      }
+    }
+    if (!commands) {
+      // FAIL CLOSED. The old code threw here, which the executor turned into an
+      // opaque failure; and where it did not throw it returned a meaningless
+      // pass. Neither told anyone what to fix.
+      return refuse(
+        `verification policy ${input.policy_ref} is not approved on this runner and the repository has no ${REPOSITORY_VERIFICATION_MANIFEST}; set NORNS_VERIFICATION_POLICIES_JSON or commit a verification manifest`,
+      );
+    }
+
+    const results: VerificationCommandResult[] = [];
+    for (const entry of commands) {
+      results.push(await this.runCommand(entry, input.worktree_path));
+    }
+
+    const headAfter = await this.head(input.worktree_path);
+    if (headAfter !== input.expected_commit) {
+      return {
+        passed: false,
+        output: this.render(source, results),
+        command_results: results,
+        reason: `verification commands moved HEAD from ${input.expected_commit} to ${headAfter}; the result does not describe the commit under test`,
+        hygiene_only: false,
+      };
+    }
+
+    const passed = results.every((result) => result.passed);
     return {
-      passed: actual === input.expected_commit,
-      output: `${result.stdout}\n${result.stderr}`.slice(0, 100_000),
+      passed,
+      output: this.render(source, results),
+      command_results: results,
+      reason: null,
+      hygiene_only: isHygieneOnly(commands),
     };
+  }
+
+  /**
+   * Run one command and report its true result.
+   *
+   * A non-zero exit is DATA, not an exception: it is the single most important
+   * thing verification can discover, and the previous implementation lost it by
+   * letting the rejected promise escape.
+   */
+  private async runCommand(
+    entry: VerificationCommand,
+    worktreePath: string,
+  ): Promise<VerificationCommandResult> {
+    const [file, ...args] = entry.command;
+    try {
+      const result = await execFileAsync(file, args, {
+        cwd: worktreePath,
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: VERIFICATION_COMMAND_TIMEOUT_MS,
+        // No shell, ever. `entry.command` is an argv vector and stays one.
+        shell: false,
+      });
+      return {
+        name: entry.name,
+        command: entry.command,
+        exit_code: 0,
+        passed: true,
+        output: `${result.stdout}\n${result.stderr}`.slice(0, VERIFICATION_OUTPUT_LIMIT),
+      };
+    } catch (error) {
+      const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown };
+      const stdout = typeof failure.stdout === "string" ? failure.stdout : "";
+      const stderr = typeof failure.stderr === "string" ? failure.stderr : "";
+      const detail = `${stdout}\n${stderr}`.trim();
+      return {
+        name: entry.name,
+        command: entry.command,
+        // A command killed by signal, or one that could not be spawned at all,
+        // has no numeric exit code. -1 records "did not exit cleanly".
+        exit_code: typeof failure.code === "number" ? failure.code : -1,
+        passed: false,
+        output: (detail || (error instanceof Error ? error.message : String(error))).slice(
+          0,
+          VERIFICATION_OUTPUT_LIMIT,
+        ),
+      };
+    }
+  }
+
+  private async head(worktreePath: string): Promise<string> {
+    return (await execFileAsync("git", ["-C", worktreePath, "rev-parse", "HEAD"])).stdout.trim();
+  }
+
+  private async dirtyPaths(worktreePath: string): Promise<string[]> {
+    const { stdout } = await execFileAsync("git", [
+      "-C",
+      worktreePath,
+      "status",
+      "--porcelain",
+      "--untracked-files=no",
+    ]);
+    return stdout
+      .split("\n")
+      .map((line) => line.slice(3).trim())
+      .filter(Boolean);
+  }
+
+  /** Human-readable transcript. Its sha256 becomes the event's output digest. */
+  private render(source: string, results: readonly VerificationCommandResult[]): string {
+    const lines = [`verification source: ${source}`];
+    for (const result of results) {
+      lines.push(
+        "",
+        `--- ${result.name} (${result.command.join(" ")}) -> ${
+          result.passed ? "PASSED" : `FAILED (exit ${result.exit_code})`
+        }`,
+        result.output.trim(),
+      );
+    }
+    return lines.join("\n").slice(0, VERIFICATION_OUTPUT_LIMIT);
   }
 }
 
@@ -282,10 +490,21 @@ export type RunnerRuntimeProvider =
   | ((model: string, context: RunnerRuntimeContext) => CodingRuntime);
 
 export interface V2RunnerExecutionResult {
+  /**
+   * Stays within `CommandState` because the daemon records it directly as the
+   * command's terminal state. An empty run is a `failed` outcome carrying
+   * `empty: true` — it is not, and must never be, a success.
+   */
   outcome: "succeeded" | "failed" | "cancelled";
   commit_sha: string | null;
   verification_passed: boolean;
   usage: RuntimeRunResult["usage"];
+  /** True when the coding agent finished without producing a commit. */
+  empty: boolean;
+  /** Where the work went. Null when there was nothing to publish. */
+  publication: PublicationResult | null;
+  /** Why the run ended as it did, in words a human can act on. */
+  reason: string | null;
 }
 
 export class V2RunnerExecutor {
@@ -297,6 +516,12 @@ export class V2RunnerExecutor {
     private readonly runtimes: ReadonlyMap<string, RunnerRuntimeProvider>,
     private readonly verifier: RunnerVerifier,
     private readonly workspaces?: WorkspaceRegistry,
+    /**
+     * EXECUTION E4. Optional only so the many existing construction sites keep
+     * compiling; when it is absent the executor refuses to destroy a worktree
+     * that holds unpublished commits rather than silently losing them.
+     */
+    private readonly publisher?: RunnerPublisher,
   ) {}
 
   async execute(
@@ -390,14 +615,65 @@ export class V2RunnerExecutor {
           commit_sha: null,
           verification_passed: false,
           usage: runtimeResult.usage,
+          empty: false,
+          publication: null,
+          reason: `the coding runtime ${runtimeResult.outcome}`,
         };
       }
       const commit = await worktree.head();
+
+      // EXECUTION E4 — an empty run, reported as empty.
+      //
+      // The runtime saying "completed" only means the agent's process exited
+      // cleanly; it says nothing about whether the agent did any work. When the
+      // worktree is still sitting on the revision it started from, the agent
+      // produced no commit. There is nothing to publish and nothing to verify,
+      // and calling that a success is the exact dishonesty this phase exists to
+      // remove.
+      if (commit === worktree.base_revision) {
+        const reason = "the coding agent produced no commit; the run is empty";
+        emit({ kind: "run_log", run_id: command.run_id, chunk: reason });
+        emit({ kind: "run_status", run_id: command.run_id, status: "failed" });
+        return {
+          outcome: "failed",
+          commit_sha: null,
+          verification_passed: false,
+          usage: runtimeResult.usage,
+          empty: true,
+          publication: null,
+          reason,
+        };
+      }
+
       const verification = await this.verifier.verify({
         worktree_path: worktree.path,
         policy_ref: command.verification_policy_ref,
         expected_commit: commit,
+        base_revision: worktree.base_revision,
       });
+      // The failing output is the single most useful thing a human can be
+      // handed, and the event contract carries only a digest of it. Stream the
+      // real text as run logs so the failure is diagnosable from the UI.
+      if (!verification.passed) {
+        emit({
+          kind: "run_log",
+          run_id: command.run_id,
+          chunk: redactExactLocalPaths(`verification failed:\n${verification.output}`, [
+            ...registeredSensitivePaths,
+            repositoryPath,
+            worktree?.path,
+            scratch,
+            this.runner.scratch_root,
+          ]),
+        });
+      } else if (verification.hygiene_only) {
+        // Never let a green badge overstate itself.
+        emit({
+          kind: "run_log",
+          run_id: command.run_id,
+          chunk: `verification passed, but only the built-in Git hygiene check ran — this project has no verification commands configured. Set NORNS_VERIFICATION_POLICIES_JSON or commit ${REPOSITORY_VERIFICATION_MANIFEST}.`,
+        });
+      }
       emit({
         kind: "verification_result",
         node_id: command.task_id,
@@ -405,6 +681,74 @@ export class V2RunnerExecutor {
         passed: verification.passed,
         output_digest: createHash("sha256").update(verification.output).digest("hex"),
       });
+
+      // EXECUTION E4 — publish BEFORE the `finally` removes the worktree.
+      //
+      // Publication is attempted whether or not verification passed. Failed
+      // work is still work: a human reviewing why the tests went red needs the
+      // branch, and destroying it would leave them with a digest of an error
+      // message. The only run whose commits are not published is the one that
+      // has none.
+      let publication: PublicationResult | null = null;
+      try {
+        if (!this.publisher) {
+          throw new PublicationError(
+            "this runner has no publisher configured, so the run's commits cannot be made durable",
+            "construct V2RunnerExecutor with a RunnerPublisher",
+          );
+        }
+        publication = await this.publisher.publish({
+          worktree_path: worktree.path,
+          branch: command.target_branch,
+          commit,
+          run_id: command.run_id,
+          task_id: command.task_id,
+          verification_passed: verification.passed,
+          verification_summary: verification.reason ?? verification.output.slice(0, 4_000),
+        });
+        emit({
+          kind: "run_log",
+          run_id: command.run_id,
+          chunk: redactExactLocalPaths(
+            [
+              `published ${publication.outcome}: branch ${publication.branch} at ${publication.commit}`,
+              publication.remote ? `remote: ${publication.remote}` : null,
+              publication.pull_request_url
+                ? `pull request: ${publication.pull_request_url}`
+                : publication.pull_request_note,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+            [
+              ...registeredSensitivePaths,
+              repositoryPath,
+              worktree?.path,
+              scratch,
+              this.runner.scratch_root,
+            ],
+          ),
+        });
+      } catch (error) {
+        // A push that did not happen is a FAILED run with a reason, never a
+        // success and never a silent loss. Saying "succeeded" here would be
+        // claiming durability for commits that are about to be deleted.
+        const reason =
+          error instanceof PublicationError
+            ? `the run's work could not be published: ${error.reason}`
+            : "the run's work could not be published";
+        emit({ kind: "run_log", run_id: command.run_id, chunk: reason });
+        emit({ kind: "run_status", run_id: command.run_id, status: "failed" });
+        return {
+          outcome: "failed",
+          commit_sha: commit,
+          verification_passed: verification.passed,
+          usage: runtimeResult.usage,
+          empty: false,
+          publication: null,
+          reason,
+        };
+      }
+
       emit({
         kind: "run_status",
         run_id: command.run_id,
@@ -415,6 +759,9 @@ export class V2RunnerExecutor {
         commit_sha: commit,
         verification_passed: verification.passed,
         usage: runtimeResult.usage,
+        empty: false,
+        publication,
+        reason: verification.passed ? null : (verification.reason ?? "verification failed"),
       };
     } catch {
       emit({ kind: "run_status", run_id: command.run_id, status: "failed" });
@@ -434,6 +781,9 @@ export class V2RunnerExecutor {
           output_tokens: 0,
           usage_source: "unavailable",
         },
+        empty: false,
+        publication: null,
+        reason: "runner execution failed; inspect the local runner diagnostics",
       };
     } finally {
       await worktree?.cleanup().catch(() => undefined);
