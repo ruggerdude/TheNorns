@@ -724,7 +724,8 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
       built.actions,
       {
         serverOrigin: "https://norns.example",
-        runnerPackage: "0.1.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        runnerPackage:
+          "0.1.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         reserveGeneration: (runnerId) => stores.reserveRunnerGeneration(runnerId),
       },
     );
