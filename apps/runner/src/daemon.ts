@@ -433,19 +433,35 @@ export class RunnerDaemon {
     }
     state.recordExecution(command.command_id, "executing");
     this.ack(command.command_id, "accepted", meta);
-    this.ack(command.command_id, "executing", meta);
+    // EXECUTION E11 — `executing` is deliberately NOT acked yet.
+    //
+    // `COMMAND_TRANSITIONS` has no `executing -> rejected` edge, so the eager
+    // ack made every rejection unrepresentable: the server dropped the frame
+    // and the command sat in `executing` until it aged out. That is why the old
+    // `default:` branch's rejection of `send_message` was invisible even to
+    // someone reading the code and expecting it to work. `accepted -> rejected`
+    // IS legal, so a refusal is acked from `accepted` and `executing` is acked
+    // only on the paths that genuinely go on to execute.
+    const executing = (): void => this.ack(command.command_id, "executing", meta);
 
     const payload = command.payload;
     switch (payload.kind) {
       case "launch_fixture":
+        executing();
         this.executor.launch(`run_${command.command_id}`, payload.fixture, meta);
         break;
       case "launch_run":
         if (!payload.dispatch || !this.opts.executeV2) {
           state.recordExecution(command.command_id, "rejected");
-          this.ack(command.command_id, "rejected", meta);
+          this.ack(
+            command.command_id,
+            "rejected",
+            meta,
+            "this runner cannot execute a V2 dispatch",
+          );
           return;
         }
+        executing();
         void this.opts
           .executeV2(payload.dispatch, (event) => this.emit(event, meta))
           .then((outcome) => {
@@ -478,6 +494,7 @@ export class RunnerDaemon {
           payload.kind === "send_message" ? payload.message : undefined,
           command.command_id,
           meta,
+          executing,
         );
         return;
       default:
@@ -510,10 +527,15 @@ export class RunnerDaemon {
     message: string | undefined,
     commandId: string,
     meta: { correlation?: string; causation?: string },
+    executing: () => void,
   ): Promise<void> {
     const state = this.requireState();
     const settle = (ackState: CommandStateT, detail: string, visible: boolean): void => {
       if (visible) this.emit({ kind: "run_log", run_id: runId, chunk: detail }, meta);
+      // Only a control that is actually being applied passes through
+      // `executing`; a refusal goes straight from `accepted` to `rejected`,
+      // which is the only legal way for a refusal to reach the server.
+      if (ackState !== "rejected") executing();
       state.recordExecution(commandId, ackState);
       this.ack(commandId, ackState, meta, detail);
     };

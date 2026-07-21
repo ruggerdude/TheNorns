@@ -100,6 +100,7 @@ function committingRuntime(file = "agent.txt", body = "work\n"): CodingRuntime {
       resume_session: true,
       cancel: true,
       stop_after_current: true,
+      send_message: false,
     },
     run: async (request) => {
       await execFileAsync(
@@ -127,6 +128,7 @@ const idleRuntime: CodingRuntime = {
     resume_session: true,
     cancel: true,
     stop_after_current: true,
+    send_message: false,
   },
   run: async () => ({
     outcome: "completed",

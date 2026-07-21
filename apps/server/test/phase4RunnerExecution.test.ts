@@ -66,6 +66,7 @@ describe("Phase 4 runner-owned execution", () => {
         resume_session: true,
         cancel: true,
         stop_after_current: true,
+        send_message: false,
       },
       run: async (request) => {
         receivedPrompt = request.prompt;
