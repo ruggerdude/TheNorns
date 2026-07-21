@@ -616,6 +616,22 @@ export class GitHubIntegrationService {
       public: false,
       request_oauth_on_install: false,
       setup_on_update: true,
+      // ONBOARDING O4 — DELIBERATELY UNCHANGED. Actions-hosted execution needs
+      // three permissions this manifest does not request:
+      //
+      //   workflows: "write"  -> commit .github/workflows/norns-agent.yml.
+      //                          GitHub rejects any Contents write that touches
+      //                          a path under .github/workflows/ without it.
+      //   actions:   "write"  -> POST .../actions/workflows/{id}/dispatches,
+      //                          and read run status / conclusion / job logs.
+      //   secrets:   "write"  -> read the repository public key and PUT the
+      //                          runner's enrollment secret.
+      //
+      // Adding them here is a HUMAN decision, not an agent one, because it is
+      // a real privilege increase and because GitHub requires every EXISTING
+      // installation to be re-authorized before a new permission takes effect —
+      // until each owner accepts, those installations keep the old set and the
+      // Actions path fails closed. See the O4 report for the exact steps.
       default_permissions: {
         metadata: "read",
         contents: "write",

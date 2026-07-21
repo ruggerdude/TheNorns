@@ -282,3 +282,31 @@
 - [ ] NORN-016 — Prompt library (REVIEW-002 P2-6)
 - [ ] NORN-017 — Transcript search across all agents (P2-7)
 - [ ] NORN-018 — Automatic Project Memory extraction from transcripts
+
+## ONBOARDING O4 — Actions-hosted execution (risk centre)
+
+- [x] O4-1 — `.github/workflows/norns-agent.yml` template asset + idempotent
+  install/upgrade via the Contents API (never clobbers unmanaged files)
+- [x] O4-2 — workflow_dispatch, run status/conclusion, and job-log reads; the
+  Phase 4 coordinator can launch an Actions-hosted runner (gate extended, not
+  weakened)
+- [x] O4-3 — runner enrollment credential as a repository Actions secret
+  (libsodium sealed box), single-use per dispatched job, rotatable, hash-only
+  at rest; blast radius documented
+- [x] O4-4 — pushes use the job's own `GITHUB_TOKEN`; no Norns token broker
+- [x] O4-5 — remediated `installationToken()` scoping, expiry caching, and the
+  inert `binding_ready` flag in `apps/server/src/integrations/github.ts`
+- [ ] O4-6 — **HUMAN**: add `workflows: write`, `actions: write`,
+  `secrets: write` to the GitHub App manifest and re-authorize every existing
+  installation (deliberately not changed by the agent)
+- [ ] O4-7 — **PM**: assign the migration number for
+  `drizzle/NNNN_actions_execution.sql` and update the four references in
+  `persistence/v2/migrate.ts`
+- [ ] O4-8 — publish `@norns/runner` to a registry the Actions job can install
+  from (the workflow's install step assumes an installable spec)
+- [ ] O4-9 — GitHub projects never reach `repository_bindings.status =
+  'connected'` (project creation writes only an unverified candidate; nothing
+  calls `POST /api/v2/projects/:id/source-bindings/github`), so the Phase 4
+  gate refuses every GitHub project. Found, not owned by O4; blocks end-to-end
+- [ ] O4-10 — pin `actions/checkout` and `actions/setup-node` by commit SHA in
+  the workflow template (currently floating major tags)
