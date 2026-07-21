@@ -36,6 +36,28 @@
 - [x] Re-foundation Phase 7 — security hardening, existing-project pilot,
   progressive cutover controls, and separately gated legacy-retirement authorization.
 
+## EXECUTION program
+
+- [x] E1 Task context assembly — the missing producer. Nothing in TheNorns ever
+  assembled a task prompt: both schedule routes require caller-supplied
+  `context_refs` and the only `storage_ref` producer was repository ingestion,
+  so even a hand-crafted request could not start work. New
+  `apps/server/src/execution/**` delivers the frozen `TaskContextAssembler`
+  interface (`assembleForTask(taskId) => V2ContextRefT[]`), a content-addressed
+  store reusing the FRONT DOOR P4 attachments pattern, and a runner-facing
+  fetch route authenticated with the runner's EXISTING relay Ed25519 identity
+  (no new credential, nothing secret in the URL). Deterministic hashing,
+  specific missing-input refusals, and a 256 KiB cap that trims memory before
+  acceptance criteria. Migration written as `NNNN_task_context.sql`, number
+  unassigned. Suites green: server 639 (+40 over O4, 8 skip).
+- [ ] E1 follow-up — the runner still constructs `SignedUrlContentFetcher`,
+  which sends no credentials, so it cannot yet read an assembled context.
+  Swap it for the signing fetcher (`RunnerSignedContextFetcher`) in
+  `apps/runner/**`. Owned by the phase that may touch the runner (E2/E4).
+- [ ] E1 follow-up — context-fetch authorization is authentication-only: any
+  paired runner may fetch any context document. Bind documents to a dispatch
+  job (or the run's runner id) once E2 creates the dispatch record.
+
 ## ONBOARDING program
 
 - [x] O6 Binding promotion — closes the blocker that made every GitHub project

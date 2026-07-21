@@ -66,6 +66,8 @@ export {
   integrationHeadHash,
   mergeIntegrationToMain,
 } from "./engine/release.js";
+// EXECUTION E1: task-context assembly.
+export * from "./execution/index.js";
 export { PgPersistence, SnapshotFlusher, type PgClient } from "./persistence/pg.js";
 export * from "./persistence/v2/application.js";
 export * from "./persistence/v2/budget.js";

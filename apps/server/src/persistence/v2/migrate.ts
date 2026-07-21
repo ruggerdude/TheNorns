@@ -108,6 +108,18 @@ export const ONBOARDING_REPOSITORY_INTENTS_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+// EXECUTION E1: content-addressed assembled task context (task_context_blobs +
+// task_context_documents), the payload every dispatched run fetches.
+//
+// THE NUMBER IS DELIBERATELY UNASSIGNED. 0018 is the highest number merged when
+// E1 was written; the PM assigns the real number and renames the file at
+// integration.
+export const TASK_CONTEXT_MIGRATION_NAME = "0019_task_context";
+export const TASK_CONTEXT_MIGRATION_URL = new URL(
+  "../../../drizzle/0019_task_context.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -210,6 +222,10 @@ export async function loadActionsExecutionMigrationSql(): Promise<string> {
 
 export async function loadOnboardingRepositoryIntentsMigrationSql(): Promise<string> {
   return readFile(ONBOARDING_REPOSITORY_INTENTS_MIGRATION_URL, "utf8");
+}
+
+export async function loadTaskContextMigrationSql(): Promise<string> {
+  return readFile(TASK_CONTEXT_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -391,6 +407,10 @@ export async function runCurrentV2Migrations(
     {
       name: ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME,
       sql: await loadOnboardingRepositoryIntentsMigrationSql(),
+    },
+    {
+      name: TASK_CONTEXT_MIGRATION_NAME,
+      sql: await loadTaskContextMigrationSql(),
     },
   ]);
 }

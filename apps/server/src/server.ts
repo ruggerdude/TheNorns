@@ -68,6 +68,15 @@ import type { Phase4RecoveryMonitor } from "./coordinator/phase4RecoveryMonitor.
 import type { Phase6CoordinationService } from "./coordinator/phase6Coordination.js";
 import { DebateConflictError, type DebateService } from "./debates/service.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
+// EXECUTION E1: task-context assembly + the runner-facing context fetch route.
+import {
+  RUNNER_CONTEXT_RUNNER_ID_HEADER,
+  RelationalTaskContextAssembler,
+  TASK_CONTEXT_ROUTE_PREFIX,
+  type TaskContextAssembler,
+  TaskContextStore,
+  authenticateRunnerContextRequest,
+} from "./execution/index.js";
 import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
 import { GraphEditError, WorkflowGraph } from "./graph/graph.js";
 import { newId, nonce, pairingCode } from "./ids.js";
@@ -268,6 +277,14 @@ export interface ServerOptions {
    */
   attachments?: { transactions: V2TransactionRunner };
   /**
+   * EXECUTION E1: task-context assembly + the runner-facing fetch route.
+   * Needs the relational runtime, same as `attachments`. `baseUrl` is the
+   * origin a runner resolves this deployment at and must be HTTPS (or http on
+   * localhost, matching the runner's own check); it defaults to
+   * `publicOrigin`.
+   */
+  execution?: { transactions: V2TransactionRunner; baseUrl?: string };
+  /**
    * ONBOARDING O2: the two project-creation scenarios (new_repo,
    * existing_repo). Every project is GitHub-backed and executes in a GitHub
    * Actions job. Needs the relational runtime, same as `planningRuns`.
@@ -304,6 +321,11 @@ export interface NornsServer {
   stores: RelayStores;
   /** runner_ids with a live authenticated socket */
   connectedRunners(): string[];
+  /**
+   * EXECUTION E1: assembles a task's agent context into content-addressed refs.
+   * Present only when `options.execution` supplied the relational runtime.
+   */
+  taskContext?: TaskContextAssembler;
 }
 
 export async function buildServer(options: ServerOptions): Promise<NornsServer> {
@@ -313,6 +335,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const now = options.clock ?? (() => new Date());
   const app = Fastify({ logger: false });
   await app.register(websocket);
+
+  // EXECUTION E1: assigned in the task-context section below when the
+  // relational runtime is present, and handed back on NornsServer so E2's
+  // trigger can assemble refs without reaching into route internals.
+  let taskContextAssembler: TaskContextAssembler | undefined;
 
   const runnerSockets = new Map<string, WsLike>();
   const reconciledWorkspaceRunners = new Map<
@@ -3918,6 +3945,63 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     }
   }
 
+  // ---- EXECUTION E1: assembled task context --------------------------------
+  //
+  // The one route a dispatched runner uses to read the prompt Norns assembled
+  // for its task. Everything else about assembly lives in src/execution/.
+  //
+  // AUTH: this route is NOT session-authenticated — the caller is a runner, not
+  // a browser. It reuses the runner's EXISTING relay identity: the Ed25519
+  // keypair registered at pairing, the same key /ws/runner challenges. The
+  // runner signs the method, path, its runner id, and a timestamp; the server
+  // verifies with the registered public key inside a 5-minute skew window. No
+  // new credential is minted and nothing secret appears in the URL, so a
+  // `storage_ref` is safe to persist in a dispatch command, a log, or an audit
+  // record.
+  //
+  // INTEGRITY: the bytes are content-addressed. The runner's
+  // HashVerifiedContextLoader recomputes the sha256 and the byte size and
+  // refuses anything that does not match the ref it was dispatched with, so a
+  // tampered response is caught at the runner regardless of transport.
+  if (options.execution) {
+    const taskContextStore = new TaskContextStore(options.execution.transactions);
+    taskContextAssembler = new RelationalTaskContextAssembler(
+      options.execution.transactions,
+      taskContextStore,
+      { baseUrl: options.execution.baseUrl ?? options.publicOrigin ?? "http://127.0.0.1" },
+    );
+
+    app.get(`${TASK_CONTEXT_ROUTE_PREFIX}/:documentId`, async (req, reply) => {
+      const auth = authenticateRunnerContextRequest(
+        {
+          method: req.method,
+          // Sign the path only: the origin is not the runner's to assert, and a
+          // query string is not part of this route's identity.
+          path: new URL(req.url, "http://placeholder.invalid").pathname,
+          headers: req.headers as Record<string, string | string[] | undefined>,
+        },
+        (runnerId) => stores.runner(runnerId)?.public_key_pem ?? null,
+        now().getTime(),
+      );
+      if (!auth.ok) {
+        stores.audit(
+          `runner:${req.headers[RUNNER_CONTEXT_RUNNER_ID_HEADER] ?? "unknown"}`,
+          "execution.context.auth_failed",
+          auth.reason,
+          now(),
+        );
+        return reply.code(401).send({ error: "unauthorized" });
+      }
+      const { documentId } = req.params as { documentId: string };
+      const document = await taskContextStore.content(documentId);
+      if (!document) return reply.code(404).send({ error: "not_found" });
+      return reply
+        .header("content-type", document.media_type)
+        .header("cache-control", "private, max-age=0, no-store")
+        .send(document.bytes);
+    });
+  }
+
   // ---- runner websocket ----------------------------------------------------------
 
   app.get("/ws/runner", { websocket: true }, (conn) => {
@@ -4226,5 +4310,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     app,
     stores,
     connectedRunners: () => [...runnerSockets.keys()],
+    ...(taskContextAssembler ? { taskContext: taskContextAssembler } : {}),
   };
 }
