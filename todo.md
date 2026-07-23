@@ -872,12 +872,50 @@ decision and is deliberately untouched.
 
 ## POLISH program (dispatched 2026-07-22)
 
-- [ ] 🔄 P1 — Remove the local-runner install surface (Settings "Local runners"
+- [x] ✅ P1 — Remove the local-runner install surface (Settings "Local runners"
   panel, install-runner.sh, orphaned pairing/runner routes). The user rejected
   the runner-install design outright; the panel survived the front-door rework.
+- [x] ✅ P2 — Safari cache hardening: index.html must never be reused without a
+  re-check; hashed /assets/* become immutable. Implemented via
+  `@fastify/static`'s `setHeaders` in `apps/server/src/server.ts`'s `webDist`
+  block: `index.html` (both `/` and the SPA fallback) → `cache-control:
+  no-cache`; `/assets/*` (Vite content-hashed) → `public, max-age=31536000,
+  immutable`; everything else static → `public, max-age=3600`. Regression
+  test: `apps/server/test/webDistCacheHeaders.test.ts`. Verified against a
+  real `pnpm run build` + real `apps/web/dist` with curl.
+  Done: the Settings panel, install-runner.sh, `/api/pairing/*`, `GET
+  /api/runners`, the workspace-picker routes, `source-bindings/local`, and
+  `workspaceBroker.ts` are gone. The relay core (Actions enrollment, signed
+  websocket, context fetch, inference proxy) is untouched; tests now mint
+  runner identities by direct key registration. `norns-runner pair` still
+  exists in the CLI but its server endpoint is gone (404) — dead front door,
+  kept because the package IS what Actions installs.
 - [ ] 🔄 P2 — Safari cache hardening: index.html must never be reused without a
   re-check; hashed /assets/* become immutable.
 - [ ] 🔄 P3 — "Analyze the repository" made real: neutral next-step styling
   (not an error banner), plus a button that has an AI actually analyze the
   connected repo and record its architecture via the existing ingest route,
   which today has zero web callers.
+- [ ] 🔄 P2 — Safari cache hardening: index.html must never be reused without a
+  re-check; hashed /assets/* become immutable.
+- [x] ✅ P3 — "Analyze the repository" made real. (a) `next_recommended_action`
+  no longer renders in the red `<Alert>`: new neutral `NextStep` label/chip in
+  `ui.tsx`/`styles.css` (theme vars only, both themes); `<Alert>` stays for the
+  overview's real `error` state and analyze failures — the only other renderer
+  of `next_recommended_action` was `phase8Pilot.ts` (server-side text report,
+  unstyled). (b) New `RepositoryAnalysisService` +
+  `POST /api/v2/projects/:id/analyze-repository` (beside the ingest route):
+  fetches a bounded sample of the connected GitHub repository (≤400 tree
+  paths, ≤12 key files, ≤16k chars/file, ≤120k chars total) via the existing
+  installation-token broker (`contents: read`, repository-scoped), has the
+  deployment's Anthropic adapter (`NORNS_REPOSITORY_ANALYSIS_MODEL`, default
+  claude-sonnet-5) produce a structured summary, and records it through the
+  EXISTING `RepositoryIngestionService.ingest()` seed — model output adapted
+  to the contract, `directives` deliberately empty (a model inference never
+  enters memory auto-approved). Honest refusals: `github_not_configured`,
+  `model_not_configured`, `no_repository`, `no_github_repository`,
+  `project_not_found`, `analysis_unavailable`. Wired in `main.ts` with a
+  buildServer suite using the production option shape. (c) Web
+  `AnalyzeRepositoryControl` in the overview NextStep row: in-progress state,
+  server's own error on failure, resume reload shows the recorded
+  architecture.

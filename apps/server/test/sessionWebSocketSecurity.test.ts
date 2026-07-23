@@ -1,8 +1,9 @@
+import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
-import { RunnerDaemon } from "@norns/runner";
+import { RunnerDaemon, RunnerStateFile } from "@norns/runner";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import {
@@ -202,25 +203,34 @@ describe.sequential("browser session WebSocket security", () => {
     const expiringToken = (await identity.login("admin@example.com", "admin-password")).token;
     const revokedToken = (await identity.login("admin@example.com", "admin-password")).token;
 
+    const relayStores = new RelayStores();
     relationalServer = await buildServer({
-      stores: new RelayStores(),
+      stores: relayStores,
       users: new UserStore(),
       identity,
     });
     const url = await listen(relationalServer);
-    const pairingResponse = await fetch(`${url}/api/pairing/start`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${expiringToken}` },
+    // POLISH P1: the pairing HTTP front door is gone; mint the runner identity
+    // by registering its public key directly and seeding the daemon's state.
+    const dataDir = mkdtempSync(join(tmpdir(), "norns-ws-session-"));
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const record = relayStores.registerRunner(
+      "relational-runner",
+      publicKey.export({ type: "spki", format: "pem" }).toString(),
+    );
+    new RunnerStateFile(dataDir, {
+      runner_id: "relational-runner",
+      private_key_pem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      generation: record.generation,
     });
-    const pairing = (await pairingResponse.json()) as { code: string };
     relationalRunner = new RunnerDaemon({
       serverUrl: url,
       runnerId: "relational-runner",
-      dataDir: mkdtempSync(join(tmpdir(), "norns-ws-session-")),
+      dataDir,
       heartbeatMs: 500,
       reconnectDelayMs: 100,
     });
-    await relationalRunner.pair(pairing.code);
+    relationalRunner.loadState();
     relationalRunner.connect();
     await waitFor(
       () => relationalServer?.connectedRunners().includes("relational-runner") === true,

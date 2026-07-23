@@ -1,13 +1,13 @@
 // The relay/API server (ADR-002: the backend IS the relay). Exposes:
-//   POST /api/pairing/start | /api/pairing/complete
 //   POST /api/commands, GET /api/commands/:id
-//   GET  /api/runners, /api/audit, /api/events/:runnerId
+//   GET  /api/audit, /api/events/:runnerId
 //   POST /api/kill-switch
 //   WS   /ws/runner  (challenge -> auth -> reconcile -> commands/events)
 //   WS   /ws/session (live observation for the browser)
 //   GET  /          (React app in production; API notice in server-only dev)
 // Connection state is never trusted solely in process memory: every decision
 // reads/writes RelayStores, which snapshots to durable storage.
+import { sep } from "node:path";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import {
@@ -109,7 +109,7 @@ import {
 } from "./gateway/index.js";
 import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
 import { GraphEditError, WorkflowGraph } from "./graph/graph.js";
-import { newId, nonce, pairingCode } from "./ids.js";
+import { newId, nonce } from "./ids.js";
 import {
   GitHubIntegrationError,
   type GitHubIntegrationService,
@@ -172,7 +172,16 @@ import {
   type ProjectRepository,
   projectRepository,
 } from "./projects/repository.js";
-import type { RepositoryIngestionService } from "./projects/repositoryIngestionService.js";
+// POLISH P3 — the server-side "Analyze the repository" step behind the
+// resume payload's recommendation.
+import {
+  RepositoryAnalysisError,
+  type RepositoryAnalysisService,
+} from "./projects/repositoryAnalysisService.js";
+import {
+  RepositoryIngestionConflictError,
+  type RepositoryIngestionService,
+} from "./projects/repositoryIngestionService.js";
 import type { SourceBindingService } from "./projects/sourceBindingService.js";
 import {
   ProjectNotFoundError,
@@ -199,11 +208,6 @@ import {
   SqlRunReservationBudget,
   parseRunnerAllowedModels,
 } from "./runners/inferenceProxy.js";
-import {
-  RunnerWorkspaceBroker,
-  WorkspaceBrokerError,
-  WorkspaceSelectionTokens,
-} from "./runners/workspaceBroker.js";
 import type { RelayStores } from "./stores.js";
 import type {
   IdentityService,
@@ -215,7 +219,6 @@ import { LegacyIdentityService } from "./users/legacyIdentityService.js";
 import { LoginAttemptThrottle } from "./users/loginThrottle.js";
 import { LastActiveAdminError, type UserStore } from "./users/store.js";
 
-const PAIRING_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_COMMAND_TTL_MS = 5 * 60 * 1000;
 
 interface WsLike {
@@ -288,8 +291,15 @@ export interface ServerOptions {
     bridge: StrategyBridgeService;
     resume: ProjectResumeService;
   };
-  /** New-project local onboarding is safe only after durable relational writes are active. */
-  localProjectOnboardingReady?: boolean;
+  /**
+   * POLISH P3 — POST /api/v2/projects/:id/analyze-repository: fetch a bounded
+   * sample of the project's connected GitHub repository, have a model produce
+   * a structured architecture summary, and record it through phase3's
+   * `ingestion` service. Optional the same way `phase3` is: without it the
+   * route refuses honestly (503 analysis_unavailable) instead of mounting a
+   * button that silently does nothing.
+   */
+  repositoryAnalysis?: RepositoryAnalysisService;
   phase4?: {
     coordinator: Phase4Coordinator;
     completion: Phase4CompletionService;
@@ -431,10 +441,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   let dispatchContextScope: DispatchContextScopeRepository | undefined;
 
   const runnerSockets = new Map<string, WsLike>();
-  const reconciledWorkspaceRunners = new Map<
-    string,
-    { socket: WsLike; generation: number; workspacePicker: boolean }
-  >();
+  // The socket+generation a runner most recently reconciled at. Event and
+  // inference frames are only honored when they arrive on this exact socket
+  // at this exact generation (see /ws/runner below).
+  const reconciledRunners = new Map<string, { socket: WsLike; generation: number }>();
   const sessionSockets = new Map<WsLike, SessionSocketBinding>();
   const loginThrottle = new LoginAttemptThrottle();
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
@@ -671,26 +681,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const sendFrame = (socket: WsLike, frame: ServerFrameT): void => {
     socket.send(JSON.stringify(frame));
   };
-  const workspaceBroker = new RunnerWorkspaceBroker((runnerId, generation, request) => {
-    const socket = runnerSockets.get(runnerId);
-    const reconciled = reconciledWorkspaceRunners.get(runnerId);
-    if (
-      !socket ||
-      !reconciled ||
-      reconciled.socket !== socket ||
-      reconciled.generation !== generation ||
-      !reconciled.workspacePicker
-    )
-      return false;
-    try {
-      sendFrame(socket, { type: "workspace_request", generation, request });
-      return true;
-    } catch {
-      return false;
-    }
-  });
-  const workspaceSelections = new WorkspaceSelectionTokens();
-
   const v2WireCommand = (command: V2DispatchCommandT): CommandEnvelopeT => ({
     protocol: 1,
     command_id: command.command_id,
@@ -773,7 +763,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (phase4DispatchTimer) clearInterval(phase4DispatchTimer);
     if (phase4RecoveryTimer) clearInterval(phase4RecoveryTimer);
     if (phaseQueueDrainTimer) clearInterval(phaseQueueDrainTimer);
-    workspaceBroker.close();
   });
 
   const closeSessionSocket = (binding: SessionSocketBinding, reason: string): void => {
@@ -1206,8 +1195,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         revoked_at: now().toISOString(),
       });
       stores.revokeRunnerSessions(runnerId);
-      reconciledWorkspaceRunners.delete(runnerId);
-      workspaceBroker.disconnect(runnerId);
+      reconciledRunners.delete(runnerId);
       const socket = runnerSockets.get(runnerId);
       if (socket) {
         runnerSockets.delete(runnerId);
@@ -1286,49 +1274,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
   }
 
-  // ---- pairing ---------------------------------------------------------------
-
-  app.post("/api/pairing/start", async (req, reply) => {
-    if (!(await requireSession(req, reply))) return;
-    const code = pairingCode();
-    const expiresAt = new Date(now().getTime() + PAIRING_TTL_MS);
-    stores.createPairing(code, expiresAt);
-    stores.audit("operator", "pairing.started", code, now());
-    reply.send({ code, expires_at: expiresAt.toISOString() });
-  });
-
-  const PairingComplete = z.object({
-    code: z.string().min(1),
-    runner_id: z.string().min(1),
-    public_key_pem: z.string().min(1),
-  });
-
-  app.post("/api/pairing/complete", (req, reply) => {
-    const parsed = PairingComplete.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: "bad_request" });
-    const { code, runner_id, public_key_pem } = parsed.data;
-    if (!stores.consumePairing(code, now())) {
-      stores.audit(`runner:${runner_id}`, "pairing.rejected", "invalid or expired code", now());
-      return reply.code(403).send({ error: "invalid_pairing_code" });
-    }
-    const record = stores.registerRunner(runner_id, public_key_pem);
-    reconciledWorkspaceRunners.delete(runner_id);
-    workspaceBroker.disconnect(runner_id);
-    const priorSocket = runnerSockets.get(runner_id);
-    if (priorSocket) {
-      runnerSockets.delete(runner_id);
-      sendFrame(priorSocket, { type: "fenced", current_generation: record.generation });
-      priorSocket.close(1008, "runner re-paired");
-      broadcast({ type: "runner_status", runner_id, connected: false });
-    }
-    stores.audit(
-      `runner:${runner_id}`,
-      "pairing.completed",
-      `generation=${record.generation}`,
-      now(),
-    );
-    return reply.send({ runner_id, generation: record.generation });
-  });
+  // POLISH P1: the local-runner pairing front door (`/api/pairing/start`,
+  // `/api/pairing/complete`) is gone. The product owner rejected any design
+  // where a user installs and pairs a local runner; the only way a runner
+  // identity is minted now is the Actions enrollment exchange below, against
+  // a dispatch the server itself created.
 
   // ---- ONBOARDING O4: GitHub Actions-hosted execution ------------------------
   //
@@ -1519,22 +1469,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
   // ---- observation -------------------------------------------------------------
 
-  app.get("/api/runners", async (req, reply) => {
-    if (!(await requireSession(req, reply))) return;
-    reply.send(
-      stores.runners().map((r) => ({
-        runner_id: r.runner_id,
-        generation: r.generation,
-        connected: runnerSockets.has(r.runner_id),
-        workspace_picker_ready:
-          reconciledWorkspaceRunners.get(r.runner_id)?.generation === r.generation &&
-          reconciledWorkspaceRunners.get(r.runner_id)?.workspacePicker === true,
-        local_project_onboarding_ready: options.localProjectOnboardingReady === true,
-        last_seen_at: r.last_seen_at,
-      })),
-    );
-  });
-
   app.get("/api/audit", async (req, reply) => {
     if (!(await requireSession(req, reply))) return;
     reply.send(stores.auditEntries());
@@ -1632,7 +1566,27 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     // Single-service deploy: serve the built React app + SPA fallback.
     // Static assets are public; the page authenticates with an account-backed
     // browser session issued after email/password login.
-    await app.register(fastifyStatic, { root: options.webDist, wildcard: false });
+    //
+    // POLISH P2 (Safari stale-content fix): index.html is the one file whose
+    // content changes on every deploy without its URL changing, so it must
+    // always be revalidated — `no-cache` (not max-age=0) so Safari's
+    // heuristic bfcache/memory-cache reuse can't serve a stale shell.
+    // Vite content-hashes everything under /assets/*, so those responses are
+    // immutable by construction and safe to cache for a year. Everything else
+    // static (favicon, manifest, etc.) gets a short, conservative max-age.
+    await app.register(fastifyStatic, {
+      root: options.webDist,
+      wildcard: false,
+      setHeaders(reply, path) {
+        if (path.endsWith(`${sep}index.html`) || path === "index.html") {
+          reply.header("cache-control", "no-cache");
+        } else if (path.includes(`${sep}assets${sep}`)) {
+          reply.header("cache-control", "public, max-age=31536000, immutable");
+        } else {
+          reply.header("cache-control", "public, max-age=3600");
+        }
+      },
+    });
     app.setNotFoundHandler((req, reply) => {
       if (req.raw.method === "GET" && !req.url.startsWith("/api") && !req.url.startsWith("/ws")) {
         return reply.sendFile("index.html");
@@ -2793,10 +2747,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     // ===================== end ONBOARDING O2 =============================
 
     if (options.phase3) {
-      const LocalBindingBody = z.object({
-        selection_token: z.string().min(1),
-        verification_policy_ref: z.string().min(1),
-      });
       const GitHubBindingBody = z.object({
         runner_id: z.string().min(1),
         github_installation_id: z.string().min(1),
@@ -2888,164 +2838,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         throw error;
       };
 
-      const workspaceRequest = async (
-        runnerId: string,
-        input: {
-          operation: "list" | "browse" | "validate" | "choose";
-          workspace_id?: string;
-          entry_id?: string;
-        },
-      ) => {
-        const runner = stores.runner(runnerId);
-        const reconciled = reconciledWorkspaceRunners.get(runnerId);
-        if (
-          !runner ||
-          !reconciled ||
-          reconciled.socket !== runnerSockets.get(runnerId) ||
-          reconciled.generation !== runner.generation
-        )
-          throw new WorkspaceBrokerError("runner_unavailable");
-        if (!reconciled.workspacePicker) throw new WorkspaceBrokerError("runner_upgrade_required");
-        const generation = runner.generation;
-        const response = await workspaceBroker.request(runnerId, generation, input);
-        return { response, generation };
-      };
-      const workspaceFailure = (reply: FastifyReply, error: unknown): FastifyReply => {
-        // Stable public codes only: never serialize runner/OS failure messages.
-        const code = error instanceof WorkspaceBrokerError ? error.code : "runner_unavailable";
-        return reply.code(code === "request_limit" ? 429 : code === "timeout" ? 504 : 409).send({
-          error: code,
-          ...(code === "runner_upgrade_required"
-            ? { message: "Update this local runner to use folder selection." }
-            : {}),
-        });
-      };
-
-      app.get("/api/runners/:runnerId/workspaces", async (req, reply) => {
-        if (!(await requireSession(req, reply))) return;
-        const { runnerId } = req.params as { runnerId: string };
-        try {
-          const { response } = await workspaceRequest(runnerId, { operation: "list" });
-          if (response.status !== "ok") return reply.code(409).send({ error: response.status });
-          const runner = stores.runner(runnerId);
-          reply.send({
-            runner_id: runnerId,
-            generation: runner?.generation ?? 0,
-            workspaces: response.workspaces ?? [],
-          });
-        } catch (error) {
-          return workspaceFailure(reply, error);
-        }
-      });
-
-      app.post("/api/runners/:runnerId/workspaces/choose", async (req, reply) => {
-        if (!(await requireSession(req, reply))) return;
-        const user = await resolveUser(req);
-        if (!user) return;
-        const { runnerId } = req.params as { runnerId: string };
-        try {
-          const { response, generation } = await workspaceRequest(runnerId, {
-            operation: "choose",
-          });
-          if (response.status === "cancelled") return reply.send({ cancelled: true });
-          if (response.status !== "ok" || !response.repository) {
-            return reply.code(response.status === "invalid_request" ? 422 : 409).send({
-              error: response.status,
-              message:
-                response.status === "invalid_request"
-                  ? "Choose the root folder of a Git repository with at least one commit."
-                  : "The local folder chooser is unavailable.",
-            });
-          }
-          const runner = stores.runner(runnerId);
-          const reconciled = reconciledWorkspaceRunners.get(runnerId);
-          if (
-            !runner ||
-            !reconciled ||
-            reconciled.socket !== runnerSockets.get(runnerId) ||
-            reconciled.generation !== generation ||
-            runner.generation !== generation ||
-            !reconciled.workspacePicker
-          ) {
-            return reply.code(409).send({ error: "runner_unavailable" });
-          }
-          const grant = workspaceSelections.issue(
-            user.id,
-            runnerId,
-            generation,
-            response.repository,
-          );
-          reply.send({
-            ...grant,
-            repository: { runner_id: runnerId, ...response.repository },
-          });
-        } catch (error) {
-          return workspaceFailure(reply, error);
-        }
-      });
-
-      app.post("/api/runners/:runnerId/workspaces/browse", async (req, reply) => {
-        if (!(await requireSession(req, reply))) return;
-        const body = z
-          .object({ workspace_id: z.string().min(1), entry_id: z.string().min(1).optional() })
-          .safeParse(req.body);
-        if (!body.success) return reply.code(400).send({ error: "bad_request" });
-        const { runnerId } = req.params as { runnerId: string };
-        try {
-          const { response } = await workspaceRequest(runnerId, {
-            operation: "browse",
-            workspace_id: body.data.workspace_id,
-            ...(body.data.entry_id ? { entry_id: body.data.entry_id } : {}),
-          });
-          if (response.status !== "ok") return reply.code(409).send({ error: response.status });
-          reply.send({
-            runner_id: runnerId,
-            workspace_id: body.data.workspace_id,
-            entries: response.entries ?? [],
-          });
-        } catch (error) {
-          return workspaceFailure(reply, error);
-        }
-      });
-
-      app.post("/api/runners/:runnerId/workspaces/validate", async (req, reply) => {
-        if (!(await requireSession(req, reply))) return;
-        const user = await resolveUser(req);
-        if (!user) return;
-        const body = z
-          .object({ workspace_id: z.string().min(1), entry_id: z.string().min(1) })
-          .safeParse(req.body);
-        if (!body.success) return reply.code(400).send({ error: "bad_request" });
-        const { runnerId } = req.params as { runnerId: string };
-        try {
-          const { response, generation } = await workspaceRequest(runnerId, {
-            operation: "validate",
-            ...body.data,
-          });
-          if (response.status !== "ok" || !response.repository)
-            return reply.code(409).send({ error: response.status });
-          const runner = stores.runner(runnerId);
-          const reconciled = reconciledWorkspaceRunners.get(runnerId);
-          if (
-            !runner ||
-            !reconciled ||
-            reconciled.socket !== runnerSockets.get(runnerId) ||
-            reconciled.generation !== generation ||
-            runner.generation !== generation ||
-            !reconciled.workspacePicker
-          )
-            return reply.code(409).send({ error: "runner_unavailable" });
-          const grant = workspaceSelections.issue(
-            user.id,
-            runnerId,
-            generation,
-            response.repository,
-          );
-          reply.send({ ...grant, repository: { runner_id: runnerId, ...response.repository } });
-        } catch (error) {
-          return workspaceFailure(reply, error);
-        }
-      });
+      // POLISH P1: the local-runner workspace picker routes
+      // (`/api/runners/:runnerId/workspaces` list/choose/browse/validate) were
+      // removed with the pairing front door. Local folder selection only ever
+      // worked against a paired local runner, which can no longer exist.
 
       app.get("/api/v2/projects/:id/resume", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
@@ -3091,49 +2887,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
       });
 
-      app.post("/api/v2/projects/:id/source-bindings/local", async (req, reply) => {
-        if (!(await requireSession(req, reply))) return;
-        const user = await resolveUser(req);
-        if (!user) return;
-        const body = LocalBindingBody.safeParse(req.body);
-        if (!body.success) return reply.code(400).send({ error: "bad_request" });
-        const { id } = req.params as { id: string };
-        const reserved = workspaceSelections.reserve(user.id, body.data.selection_token);
-        if (!reserved) return reply.code(409).send({ error: "local_selection_invalid" });
-        const selection = reserved.selection;
-        const currentRunner = stores.runner(selection.runner_id);
-        if (
-          !currentRunner ||
-          reconciledWorkspaceRunners.get(selection.runner_id)?.socket !==
-            runnerSockets.get(selection.runner_id) ||
-          reconciledWorkspaceRunners.get(selection.runner_id)?.generation !==
-            selection.runner_generation ||
-          reconciledWorkspaceRunners.get(selection.runner_id)?.workspacePicker !== true ||
-          currentRunner.generation !== selection.runner_generation
-        ) {
-          workspaceSelections.release(body.data.selection_token, reserved.reservation_id);
-          return reply.code(409).send({ error: "local_selection_invalid" });
-        }
-        try {
-          const binding = await options.phase3?.sourceBindings.createLocal({
-            project_id: id,
-            runner_id: selection.runner_id,
-            workspace_id: selection.workspace_id,
-            repository_id: selection.repository_id,
-            repository_display_name: selection.repository_display_name,
-            default_branch: selection.default_branch,
-            observed_head: selection.observed_head,
-            verification_policy_ref: body.data.verification_policy_ref,
-            created_by: { actor_type: "human", actor_id: user.id },
-          });
-          workspaceSelections.commit(body.data.selection_token, reserved.reservation_id);
-          reply.code(201).send(binding);
-        } catch (error) {
-          workspaceSelections.release(body.data.selection_token, reserved.reservation_id);
-          reply.code(409).send({ error: "source_binding_conflict" });
-        }
-      });
-
+      // POLISH P1: `POST /api/v2/projects/:id/source-bindings/local` was
+      // removed with the workspace picker above. Its only input, a selection
+      // token, could only be minted by the removed choose/validate routes, so
+      // the route could never again succeed. The SourceBindings.createLocal
+      // service and existing local-binding rows are untouched.
       app.post("/api/v2/projects/:id/source-bindings/github", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
         const user = await resolveUser(req);
@@ -3169,6 +2927,43 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           reply.send(await options.phase3?.ingestion.ingest(body.data));
         } catch (error) {
           reply.code(409).send({ error: "ingestion_conflict", detail: String(error) });
+        }
+      });
+
+      // POLISH P3 — the producer for the ingest seed above. The resume payload
+      // has recommended "Analyze the repository and record its architecture"
+      // since Phase 3 while nothing in the web app could perform it; this route
+      // is that step. Synchronous by design: the analysis input is bounded (see
+      // RepositoryAnalysisService's stated caps), so one request/response
+      // round-trip stays well inside interactive limits.
+      app.post("/api/v2/projects/:id/analyze-repository", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const analysis = options.repositoryAnalysis;
+        if (!analysis) {
+          return reply.code(503).send({
+            error: "analysis_unavailable",
+            message: "Repository analysis requires the relational runtime and is not configured.",
+          });
+        }
+        const { id } = req.params as { id: string };
+        try {
+          reply.send(await analysis.analyze(id, { actor_id: user.id }));
+        } catch (error) {
+          if (error instanceof RepositoryAnalysisError || error instanceof GitHubIntegrationError) {
+            return reply.code(error.status).send({ error: error.code, message: error.message });
+          }
+          if (error instanceof AdapterError) {
+            return reply.code(502).send({
+              error: "model_call_failed",
+              message: `The analysis model call failed (${error.kind}): ${error.message}`,
+            });
+          }
+          if (error instanceof RepositoryIngestionConflictError) {
+            return reply.code(409).send({ error: "ingestion_conflict", detail: String(error) });
+          }
+          throw error;
         }
       });
 
@@ -4592,15 +4387,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
         const priorSocket = runnerSockets.get(authedRunnerId);
         if (priorSocket && priorSocket !== socket) {
-          workspaceBroker.disconnect(authedRunnerId);
-          reconciledWorkspaceRunners.delete(authedRunnerId);
+          reconciledRunners.delete(authedRunnerId);
           priorSocket.close(1008, "superseded runner connection");
         }
         runnerSockets.set(authedRunnerId, socket);
-        reconciledWorkspaceRunners.set(authedRunnerId, {
+        reconciledRunners.set(authedRunnerId, {
           socket,
           generation: runner.generation,
-          workspacePicker: body.capabilities.includes("workspace_picker"),
         });
         stores.markSeen(authedRunnerId, now());
         stores.audit(`runner:${authedRunnerId}`, "runner.connected", "", now());
@@ -4640,20 +4433,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         return;
       }
 
-      if (frame.type === "workspace_response") {
-        // The broker verifies runner identity and generation before resolving
-        // the HTTP request.  Workspace frames are transient and bypass the
-        // durable event log by design: they contain no project mutation.
-        const reconciled = reconciledWorkspaceRunners.get(authedRunnerId);
-        if (
-          runnerSockets.get(authedRunnerId) === socket &&
-          reconciled?.socket === socket &&
-          reconciled.generation === frame.generation
-        ) {
-          workspaceBroker.receive(authedRunnerId, frame.generation, frame.response);
-        }
-        return;
-      }
+      // POLISH P1: `workspace_response` frames (the local folder picker's
+      // reply channel) are no longer acted on — the workspace broker went
+      // with the pairing front door. A legacy paired runner that still sends
+      // one is simply ignored.
 
       // EXECUTION E3 — proxied model inference. The socket has already proved
       // this runner's identity; `authedRunnerId` is that proof and is the only
@@ -4664,7 +4447,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       // would make one slow provider call stall the run's event stream.
       if (frame.type === "inference_request") {
         const requestingRunnerId = authedRunnerId;
-        const reconciled = reconciledWorkspaceRunners.get(requestingRunnerId);
+        const reconciled = reconciledRunners.get(requestingRunnerId);
         const respond = (response: RunnerInferenceResponseT): void => {
           // Only answer on the socket that asked, and only while it is still
           // the current one — a superseded connection must not receive a
@@ -4717,7 +4500,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         runnerEventDelivery = runnerEventDelivery
           .then(async () => {
             const currentRunner = stores.runner(authenticatedRunnerId);
-            const reconciled = reconciledWorkspaceRunners.get(authenticatedRunnerId);
+            const reconciled = reconciledRunners.get(authenticatedRunnerId);
             if (
               runnerSockets.get(authenticatedRunnerId) !== socket ||
               reconciled?.socket !== socket ||
@@ -4763,8 +4546,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     socket.on("close", () => {
       if (authedRunnerId && runnerSockets.get(authedRunnerId) === socket) {
         runnerSockets.delete(authedRunnerId);
-        reconciledWorkspaceRunners.delete(authedRunnerId);
-        workspaceBroker.disconnect(authedRunnerId);
+        reconciledRunners.delete(authedRunnerId);
         stores.audit(`runner:${authedRunnerId}`, "runner.disconnected", "", now());
         broadcast({ type: "runner_status", runner_id: authedRunnerId, connected: false });
       }

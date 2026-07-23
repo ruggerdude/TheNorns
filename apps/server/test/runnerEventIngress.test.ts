@@ -8,6 +8,7 @@ import { listen, testAdminToken, waitFor } from "./helpers.js";
 
 describe.sequential("runner event ingress fencing", () => {
   let server: NornsServer;
+  let stores: RelayStores;
   let url: string;
   let token: string;
   const sockets = new Set<WebSocket>();
@@ -15,7 +16,8 @@ describe.sequential("runner event ingress fencing", () => {
   beforeEach(async () => {
     const users = new UserStore();
     token = testAdminToken(users);
-    server = await buildServer({ stores: new RelayStores(), users });
+    stores = new RelayStores();
+    server = await buildServer({ stores, users });
     url = await listen(server);
   });
 
@@ -34,22 +36,16 @@ describe.sequential("runner event ingress fencing", () => {
       },
     });
 
-  async function pair(runnerId: string): Promise<{ generation: number; privateKey: KeyObject }> {
-    const started = (await (await api("/api/pairing/start", { method: "POST" })).json()) as {
-      code: string;
-    };
+  // POLISH P1: the pairing HTTP front door is gone; a runner identity is
+  // minted by registering its public key directly, exactly the primitive the
+  // Actions enrollment route calls after validating its token.
+  function pair(runnerId: string): { generation: number; privateKey: KeyObject } {
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-    const response = await fetch(`${url}/api/pairing/complete`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        code: started.code,
-        runner_id: runnerId,
-        public_key_pem: publicKey.export({ type: "spki", format: "pem" }).toString(),
-      }),
-    });
-    const body = (await response.json()) as { generation: number };
-    return { generation: body.generation, privateKey };
+    const record = stores.registerRunner(
+      runnerId,
+      publicKey.export({ type: "spki", format: "pem" }).toString(),
+    );
+    return { generation: record.generation, privateKey };
   }
 
   async function connect(
@@ -124,7 +120,7 @@ describe.sequential("runner event ingress fencing", () => {
   }
 
   it("rejects an event from an authenticated socket that skipped reconciliation", async () => {
-    const identity = await pair("runner-auth-only");
+    const identity = pair("runner-auth-only");
     const socket = await connect(
       "runner-auth-only",
       identity.privateKey,
@@ -137,8 +133,8 @@ describe.sequential("runner event ingress fencing", () => {
   });
 
   it("rejects a reconciled runner that submits another runner's event", async () => {
-    const first = await pair("runner-first");
-    const second = await pair("runner-second");
+    const first = pair("runner-first");
+    const second = pair("runner-second");
     const socket = await connect("runner-first", first.privateKey, first.generation, true);
     const rejected = expectRejected(socket, "runner-second");
     socket.send(JSON.stringify(heartbeat("runner-second", second.generation)));
@@ -146,7 +142,7 @@ describe.sequential("runner event ingress fencing", () => {
   });
 
   it("rejects a revoked key that learns the new generation but skips reconciliation", async () => {
-    const identity = await pair("runner-revoked");
+    const identity = pair("runner-revoked");
     const currentGeneration = server.stores.revokeRunnerSessions("runner-revoked");
     const socket = await connect("runner-revoked", identity.privateKey, currentGeneration, false);
     const rejected = expectRejected(socket, "runner-revoked");

@@ -58,6 +58,9 @@ import { NodePgTransactionRunner, type V2TransactionRunner } from "./persistence
 import { AttentionService } from "./projects/attentionService.js";
 import { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
 import { ProjectResumeService } from "./projects/projectResumeService.js";
+// POLISH P3 — the "Analyze the repository" producer behind the resume
+// payload's next-step recommendation.
+import { RepositoryAnalysisService } from "./projects/repositoryAnalysisService.js";
 import { RepositoryIngestionService } from "./projects/repositoryIngestionService.js";
 import { SourceBindingService } from "./projects/sourceBindingService.js";
 import { ProjectStore } from "./projects/store.js";
@@ -103,8 +106,6 @@ let projectRuntime = createProjectRuntime({
   projects,
   routes: { new_projects: null, projects: new Map() },
 });
-let localProjectOnboardingReady = false;
-
 const isProd = process.env.NODE_ENV === "production";
 
 // Tier-2 persistence: when DATABASE_URL is set (Railway Postgres plugin),
@@ -146,6 +147,9 @@ let actionsExecutionServices:
       repository: ActionsExecutionRepository;
     }
   | undefined;
+// POLISH P3 — the analyze-repository step. Absent without the relational
+// runtime, exactly like phase3Services; the route then refuses honestly.
+let repositoryAnalysisService: RepositoryAnalysisService | undefined;
 let phase5Services: { attention: AttentionService } | undefined;
 let phase6Services: { coordination: Phase6CoordinationService } | undefined;
 let phase7Services: { operations: Phase7OperationsService } | undefined;
@@ -252,6 +256,24 @@ if (databaseUrl) {
       }),
       resume: new ProjectResumeService(runtimeTransactions),
     };
+    // POLISH P3 — the analyze-repository step. `github` may be null (the
+    // service then refuses with github_not_configured rather than leaving the
+    // route unmounted), and the adapter factory mirrors the debate worker's:
+    // Anthropic by default, resolved lazily so a deployment without a key
+    // still boots and refuses honestly per request.
+    repositoryAnalysisService = new RepositoryAnalysisService({
+      transactions: runtimeTransactions,
+      github,
+      ingestion: phase3Services.ingestion,
+      createAdapter: () => {
+        const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+        if (!apiKey) throw new Error("Anthropic is not configured for repository analysis");
+        return new AnthropicAdapter({
+          apiKey,
+          model: process.env.NORNS_REPOSITORY_ANALYSIS_MODEL?.trim() || "claude-sonnet-5",
+        });
+      },
+    });
     phase4Services = {
       coordinator: new Phase4Coordinator(runtimeTransactions),
       completion: new Phase4CompletionService(runtimeTransactions),
@@ -451,8 +473,6 @@ if (databaseUrl) {
       routes: projectRoutes,
       transactions: runtimeTransactions,
     });
-    localProjectOnboardingReady = projectRoutes.new_projects?.write_mode === "relational";
-
     // Legacy accounts remain snapshot-backed until the durable route records
     // relational/relational cutover. After cutover, raw legacy users/sessions
     // are neither loaded nor flushed by the application.
@@ -535,7 +555,6 @@ if (databaseUrl) {
       projects,
       routes: { new_projects: null, projects: new Map() },
     });
-    localProjectOnboardingReady = false;
   }
 }
 
@@ -657,7 +676,13 @@ const server = await buildServer({
   ...(identityRuntime.mode === "relational" ? { identity: identityRuntime.identity } : {}),
   projects: projectRuntime.repository,
   ...(phase3Services !== undefined ? { phase3: phase3Services } : {}),
-  localProjectOnboardingReady,
+  // POLISH P3: the analyze-repository step. A service that is not passed here
+  // is dead in production while CI stays green — this line IS the feature.
+  // (POLISH P1 removed localProjectOnboardingReady along with the local-runner
+  // onboarding surface it fed.)
+  ...(repositoryAnalysisService !== undefined
+    ? { repositoryAnalysis: repositoryAnalysisService }
+    : {}),
   ...(phase4Services !== undefined ? { phase4: phase4Services } : {}),
   // ONBOARDING O4: Actions-hosted execution.
   ...(actionsExecutionServices !== undefined ? { actionsExecution: actionsExecutionServices } : {}),

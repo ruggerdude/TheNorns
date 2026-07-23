@@ -30,18 +30,6 @@ export interface GitHubIntegrationStatus {
   connections: GitHubConnection[];
 }
 
-interface RunnerSummary {
-  runner_id: string;
-  generation: number;
-  connected: boolean;
-  last_seen_at: string | null;
-}
-
-interface PairingSession {
-  code: string;
-  expires_at: string;
-}
-
 interface AiIntegrationStatus {
   cross_provider_ready: boolean;
   providers: Array<{
@@ -53,7 +41,7 @@ interface AiIntegrationStatus {
   }>;
 }
 
-type ConnectionPanel = "github" | "runners" | "ai";
+type ConnectionPanel = "github" | "ai";
 
 type SettingsTab = "profile" | "connections" | "security";
 
@@ -119,9 +107,6 @@ export function Account({
   const [openConnection, setOpenConnection] = useState<ConnectionPanel | null>(
     githubCallback ? "github" : null,
   );
-  const [runners, setRunners] = useState<RunnerSummary[] | null>(null);
-  const [pairing, setPairing] = useState<PairingSession | null>(null);
-  const [pairingCopied, setPairingCopied] = useState(false);
   const [aiStatus, setAiStatus] = useState<AiIntegrationStatus | null>(null);
   const [githubOwnerType, setGitHubOwnerType] = useState<"personal" | "organization">("personal");
   const [githubOrganization, setGitHubOrganization] = useState("");
@@ -229,46 +214,10 @@ export function Account({
     setOpenConnection(panel);
     setConnectionError(null);
     try {
-      if (panel === "runners" && runners === null) {
-        setConnectionBusy("runners");
-        setRunners(await integrationRequest<RunnerSummary[]>("/api/runners"));
-      }
       if (panel === "ai" && aiStatus === null) {
         setConnectionBusy("ai");
         setAiStatus(await integrationRequest<AiIntegrationStatus>("/api/integrations/ai/status"));
       }
-    } catch (error) {
-      if (error instanceof UnauthorizedError) onUnauthorized();
-      else setConnectionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setConnectionBusy(null);
-    }
-  };
-
-  const refreshRunners = async (): Promise<void> => {
-    setConnectionBusy("runners");
-    setConnectionError(null);
-    try {
-      setRunners(await integrationRequest<RunnerSummary[]>("/api/runners"));
-    } catch (error) {
-      if (error instanceof UnauthorizedError) onUnauthorized();
-      else setConnectionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setConnectionBusy(null);
-    }
-  };
-
-  const startPairing = async (): Promise<void> => {
-    setConnectionBusy("pairing");
-    setConnectionError(null);
-    setPairingCopied(false);
-    try {
-      setPairing(
-        await integrationRequest<PairingSession>("/api/pairing/start", {
-          method: "POST",
-          body: JSON.stringify({}),
-        }),
-      );
     } catch (error) {
       if (error instanceof UnauthorizedError) onUnauthorized();
       else setConnectionError(error instanceof Error ? error.message : String(error));
@@ -287,22 +236,6 @@ export function Account({
       else setConnectionError(error instanceof Error ? error.message : String(error));
     } finally {
       setConnectionBusy(null);
-    }
-  };
-
-  const pairingCommand = pairing
-    ? `curl -fsSL ${window.location.origin}/install-runner.sh | sh -s -- ${pairing.code} ${window.location.origin}`
-    : null;
-
-  const copyPairingCommand = async (): Promise<void> => {
-    if (!pairingCommand) return;
-    try {
-      await navigator.clipboard.writeText(pairingCommand);
-      setPairingCopied(true);
-    } catch {
-      setConnectionError(
-        "Could not copy the command. Select the command text and copy it manually.",
-      );
     }
   };
 
@@ -592,114 +525,6 @@ export function Account({
                     ) : null}
                   </article>
                 )}
-
-                <article
-                  className={`connection-card is-secondary ${openConnection === "runners" ? "is-open" : ""}`}
-                >
-                  <div className="connection-card-head">
-                    <div className="connection-brand">
-                      <span className="connection-icon">LR</span>
-                      <div>
-                        <h4>Local runners</h4>
-                        <p>Approved folders and local execution environments</p>
-                      </div>
-                    </div>
-                    <div className="connection-card-controls">
-                      <Badge
-                        tone={runners?.some((runner) => runner.connected) ? "success" : "default"}
-                      >
-                        {runners === null
-                          ? "Runner managed"
-                          : `${runners.filter((runner) => runner.connected).length} connected`}
-                      </Badge>
-                      <Button
-                        variant="ghost"
-                        className="btn-small"
-                        aria-expanded={openConnection === "runners"}
-                        aria-controls="runner-connection-details"
-                        onClick={() => void toggleConnection("runners")}
-                      >
-                        {openConnection === "runners" ? "Hide" : "Manage runners"}
-                      </Button>
-                    </div>
-                  </div>
-                  {openConnection === "runners" ? (
-                    <div className="connection-details" id="runner-connection-details">
-                      <p className="muted">
-                        Install the companion once on the computer that owns your local folders. It
-                        keeps raw paths and execution credentials off the web service. After
-                        pairing, project creation opens the computer's native folder selector.
-                      </p>
-                      <div className="connection-actions">
-                        <Button
-                          variant="primary"
-                          className="btn-small"
-                          disabled={connectionBusy !== null}
-                          onClick={() => void startPairing()}
-                        >
-                          Pair new runner
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          className="btn-small"
-                          disabled={connectionBusy !== null}
-                          onClick={() => void refreshRunners()}
-                        >
-                          Refresh
-                        </Button>
-                      </div>
-                      {pairing && pairingCommand ? (
-                        <output className="pairing-panel">
-                          <div className="pairing-command-block">
-                            <span className="field-label">Pairing code</span>
-                            <strong className="pairing-code mono">{pairing.code}</strong>
-                            <span className="muted">
-                              Expires{" "}
-                              {new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(
-                                new Date(pairing.expires_at),
-                              )}
-                            </span>
-                          </div>
-                          <div>
-                            <span className="field-label">Install and pair on this Mac</span>
-                            <code>{pairingCommand}</code>
-                            <span className="muted">
-                              Paste this one command into Terminal. It installs, pairs, and starts
-                              the companion; you will not enter folder paths in Terminal.
-                            </span>
-                          </div>
-                          <Button className="btn-small" onClick={() => void copyPairingCommand()}>
-                            {pairingCopied ? "Copied" : "Copy install command"}
-                          </Button>
-                        </output>
-                      ) : null}
-                      {runners === null || connectionBusy === "runners" ? (
-                        <Spinner label="Loading runners…" />
-                      ) : runners.length ? (
-                        <div className="connection-list">
-                          {runners.map((runner) => (
-                            <div className="connection-row" key={runner.runner_id}>
-                              <div>
-                                <strong>{runner.runner_id}</strong>
-                                <span>
-                                  Generation {runner.generation} ·{" "}
-                                  {runner.last_seen_at
-                                    ? `last seen ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(runner.last_seen_at))}`
-                                    : "not seen yet"}
-                                </span>
-                              </div>
-                              <Badge tone={runner.connected ? "success" : "default"}>
-                                {runner.connected ? "Connected" : "Offline"}
-                              </Badge>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="muted">No runners are paired with this workspace yet.</p>
-                      )}
-                    </div>
-                  ) : null}
-                </article>
 
                 <article
                   className={`connection-card is-secondary ${openConnection === "ai" ? "is-open" : ""}`}
