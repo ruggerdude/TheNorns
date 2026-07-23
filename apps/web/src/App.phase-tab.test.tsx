@@ -281,6 +281,46 @@ describe("PHASE TAB (P2)", () => {
     expect(screen.queryByTestId("phase-execution-error")).not.toBeInTheDocument();
   });
 
+  it("approve with execution.started renders the kickoff's success detail (PHASE TAB P4)", async () => {
+    setToken("present");
+    mock = workspaceMocks();
+    mock.post(runsUrl, { body: { planning_run_id: "run-1" } });
+    mock.get(runUrl, { body: convergedRun });
+    // PHASE TAB P4: the real kickoff auto-starts execution on approve and
+    // reports what it did.
+    mock.post(`${runUrl}/decision`, {
+      body: {
+        ...convergedRun,
+        status: "approved",
+        decision: {
+          decision: "approve",
+          direction: null,
+          staffing: null,
+          decided_at: "2026-07-22T22:00:00Z",
+        },
+        execution: {
+          started: true,
+          detail: 'Started phase "Core API" (phase-p1): 1 task(s) dispatched.',
+        },
+      },
+    });
+    mock.get(`/api/v2/projects/${projectId}/execution-status`, { body: executionStatus });
+    mock.install();
+
+    const user = await openPhaseTab();
+    await user.type(screen.getByTestId("phase-goal"), "Ship it");
+    await user.click(screen.getByTestId("phase-start"));
+    await screen.findByTestId("phase-decision-panel");
+    await user.click(screen.getByTestId("phase-approve"));
+
+    await screen.findByTestId("phase-execution-table");
+    const note = screen.getByTestId("phase-execution-kickoff-note");
+    expect(note).toHaveTextContent("Execution started automatically");
+    expect(note).toHaveTextContent('Started phase "Core API" (phase-p1): 1 task(s) dispatched.');
+    expect(note).not.toHaveTextContent("Execution has not auto-started");
+    expect(screen.queryByTestId("phase-execution-error")).not.toBeInTheDocument();
+  });
+
   it("modify requires direction, sends it, and returns the panel to live progress", async () => {
     setToken("present");
     mock = workspaceMocks();

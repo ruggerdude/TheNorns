@@ -503,7 +503,12 @@ export function PhaseTab({
               </div>
               <Badge tone="success">approved</Badge>
             </div>
-            {executionKickoff === null || executionKickoff?.started === false ? (
+            {executionKickoff?.started ? (
+              <p className="muted" data-testid="phase-execution-kickoff-note">
+                Execution started automatically from this approval.
+                {executionKickoff.detail ? ` ${executionKickoff.detail}` : ""}
+              </p>
+            ) : (
               <p className="muted" data-testid="phase-execution-kickoff-note">
                 Plan approved and recorded. Execution has not auto-started — it begins through the
                 existing strategy and phase start flow.
@@ -511,7 +516,7 @@ export function PhaseTab({
                   ? ` (${executionKickoff.detail})`
                   : ""}
               </p>
-            ) : null}
+            )}
             {executionError ? <Alert testId="phase-execution-error">{executionError}</Alert> : null}
             {executionRows ? (
               <div className="phase-execution-table-wrap">
