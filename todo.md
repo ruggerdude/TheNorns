@@ -877,7 +877,24 @@ decision and is deliberately untouched.
   the runner-install design outright; the panel survived the front-door rework.
 - [ ] 🔄 P2 — Safari cache hardening: index.html must never be reused without a
   re-check; hashed /assets/* become immutable.
-- [ ] 🔄 P3 — "Analyze the repository" made real: neutral next-step styling
-  (not an error banner), plus a button that has an AI actually analyze the
-  connected repo and record its architecture via the existing ingest route,
-  which today has zero web callers.
+- [x] ✅ P3 — "Analyze the repository" made real. (a) `next_recommended_action`
+  no longer renders in the red `<Alert>`: new neutral `NextStep` label/chip in
+  `ui.tsx`/`styles.css` (theme vars only, both themes); `<Alert>` stays for the
+  overview's real `error` state and analyze failures — the only other renderer
+  of `next_recommended_action` was `phase8Pilot.ts` (server-side text report,
+  unstyled). (b) New `RepositoryAnalysisService` +
+  `POST /api/v2/projects/:id/analyze-repository` (beside the ingest route):
+  fetches a bounded sample of the connected GitHub repository (≤400 tree
+  paths, ≤12 key files, ≤16k chars/file, ≤120k chars total) via the existing
+  installation-token broker (`contents: read`, repository-scoped), has the
+  deployment's Anthropic adapter (`NORNS_REPOSITORY_ANALYSIS_MODEL`, default
+  claude-sonnet-5) produce a structured summary, and records it through the
+  EXISTING `RepositoryIngestionService.ingest()` seed — model output adapted
+  to the contract, `directives` deliberately empty (a model inference never
+  enters memory auto-approved). Honest refusals: `github_not_configured`,
+  `model_not_configured`, `no_repository`, `no_github_repository`,
+  `project_not_found`, `analysis_unavailable`. Wired in `main.ts` with a
+  buildServer suite using the production option shape. (c) Web
+  `AnalyzeRepositoryControl` in the overview NextStep row: in-progress state,
+  server's own error on failure, resume reload shows the recorded
+  architecture.
