@@ -472,7 +472,9 @@ describe.sequential("phase tab: HTTP surface (production option shape)", () => {
     expect(audited).toContainEqual({ actor: adminId, action: "planning_run.decision.approve" });
     expect(audited).toContainEqual({ actor: adminId, action: "planning_run.execution_kickoff" });
     expect(
-      audited.filter((entry) => entry.actor === "operator" && entry.action !== "planning_run.created"),
+      audited.filter(
+        (entry) => entry.actor === "operator" && entry.action !== "planning_run.created",
+      ),
     ).toEqual([]);
   });
 

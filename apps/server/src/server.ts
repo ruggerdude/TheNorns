@@ -4072,12 +4072,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           const run = await planningRunService.decide(id, runId, input);
           // PHASE TAB P5b: the decision is the resolved session user's act, so
           // the audit actor is that user — not the legacy "operator" literal.
-          stores.audit(
-            user.id,
-            `planning_run.decision.${input.decision}`,
-            `${id}:${runId}`,
-            now(),
-          );
+          stores.audit(user.id, `planning_run.decision.${input.decision}`, `${id}:${runId}`, now());
           if (input.decision === "modify") {
             // Same fire-and-forget dispatch as creation: the poller timer is
             // the safety net if this immediate kick is lost.
