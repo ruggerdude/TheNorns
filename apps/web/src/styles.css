@@ -3302,3 +3302,54 @@ button:disabled {
 .gantt-mini .gantt-today::before {
   display: none;
 }
+
+/* ---- PHASE TAB (P2) ------------------------------------------------------ */
+/* Goal -> planning run -> decision -> execution status. Theme variables only
+   so both light and dark render correctly (matches recent ui.tsx work). */
+.phase-identity-line {
+  font-size: .85rem;
+}
+.phase-plan-card {
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  padding: .9rem 1rem;
+  background: var(--raised);
+}
+.phase-plan-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+}
+.phase-findings {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+}
+.phase-execution-table-wrap {
+  overflow-x: auto;
+}
+.phase-execution-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .85rem;
+}
+.phase-execution-table th {
+  text-align: left;
+  font-size: .72rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+  padding: .45rem .6rem;
+  border-bottom: 1px solid var(--line);
+}
+.phase-execution-table td {
+  padding: .5rem .6rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  vertical-align: top;
+}
+.phase-execution-table tr:last-child td {
+  border-bottom: 0;
+}
