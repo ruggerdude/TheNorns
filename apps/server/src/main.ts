@@ -106,8 +106,6 @@ let projectRuntime = createProjectRuntime({
   projects,
   routes: { new_projects: null, projects: new Map() },
 });
-let localProjectOnboardingReady = false;
-
 const isProd = process.env.NODE_ENV === "production";
 
 // Tier-2 persistence: when DATABASE_URL is set (Railway Postgres plugin),
@@ -475,8 +473,6 @@ if (databaseUrl) {
       routes: projectRoutes,
       transactions: runtimeTransactions,
     });
-    localProjectOnboardingReady = projectRoutes.new_projects?.write_mode === "relational";
-
     // Legacy accounts remain snapshot-backed until the durable route records
     // relational/relational cutover. After cutover, raw legacy users/sessions
     // are neither loaded nor flushed by the application.
@@ -559,7 +555,6 @@ if (databaseUrl) {
       projects,
       routes: { new_projects: null, projects: new Map() },
     });
-    localProjectOnboardingReady = false;
   }
 }
 
@@ -683,10 +678,11 @@ const server = await buildServer({
   ...(phase3Services !== undefined ? { phase3: phase3Services } : {}),
   // POLISH P3: the analyze-repository step. A service that is not passed here
   // is dead in production while CI stays green — this line IS the feature.
+  // (POLISH P1 removed localProjectOnboardingReady along with the local-runner
+  // onboarding surface it fed.)
   ...(repositoryAnalysisService !== undefined
     ? { repositoryAnalysis: repositoryAnalysisService }
     : {}),
-  localProjectOnboardingReady,
   ...(phase4Services !== undefined ? { phase4: phase4Services } : {}),
   // ONBOARDING O4: Actions-hosted execution.
   ...(actionsExecutionServices !== undefined ? { actionsExecution: actionsExecutionServices } : {}),

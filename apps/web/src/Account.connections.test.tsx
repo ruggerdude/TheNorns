@@ -119,7 +119,11 @@ describe("workspace connections settings", () => {
     expect(screen.getByText(/Connect GitHub with guided setup/i)).toBeInTheDocument();
   });
 
-  it("pairs and inventories local runners from the settings card", async () => {
+  it("offers no local-runner install or pairing surface", async () => {
+    // POLISH P1: the product owner rejected any design where a user installs a
+    // local runner. Execution is dispatched to ephemeral GitHub Actions
+    // runners by the server; Settings must never surface installing, pairing,
+    // or managing local runners.
     mock = new MockFetch();
     mock.get("/api/auth/sessions", { body: { sessions: [] } });
     mock.get("/api/integrations/github/status", {
@@ -131,31 +135,16 @@ describe("workspace connections settings", () => {
         connections: [],
       },
     });
-    mock.get("/api/runners", {
-      body: [
-        {
-          runner_id: "runner-studio",
-          generation: 2,
-          connected: true,
-          last_seen_at: "2026-07-17T15:00:00.000Z",
-        },
-      ],
-    });
-    mock.post("/api/pairing/start", {
-      body: { code: "ABC-123", expires_at: "2026-07-17T16:30:00.000Z" },
-    });
     mock.install();
 
     render(<Account user={admin} initialTab="connections" onClose={vi.fn()} onSignOut={vi.fn()} />);
 
-    await userEvent.click(screen.getByRole("button", { name: "Manage runners" }));
-    expect(await screen.findByText("runner-studio")).toBeInTheDocument();
-    expect(screen.getByText("1 connected")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Pair new runner" }));
-    expect(await screen.findByText("ABC-123")).toBeInTheDocument();
-    expect(screen.getByText(/install-runner\.sh.*ABC-123/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /copy install command/i })).toBeInTheDocument();
-    expect(screen.queryByText(/norns-runner workspace add/i)).not.toBeInTheDocument();
+    expect(await screen.findByText("Not configured")).toBeInTheDocument();
+    expect(screen.queryByText(/local runner/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /manage runners/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /pair new runner/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/install-runner/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/pairing code/i)).not.toBeInTheDocument();
   });
 
   it("shows provider readiness and the exact missing deployment variables", async () => {

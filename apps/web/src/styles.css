@@ -632,8 +632,7 @@ button:disabled {
   text-decoration: none;
 }
 .connection-details,
-.connection-setup,
-.pairing-panel {
+.connection-setup {
   display: grid;
   gap: 0.8rem;
 }
@@ -650,8 +649,7 @@ button:disabled {
   font-size: 0.8rem;
   line-height: 1.5;
 }
-.connection-setup code,
-.pairing-panel code {
+.connection-setup code {
   overflow-wrap: anywhere;
 }
 .connection-setup details summary {
@@ -680,31 +678,6 @@ button:disabled {
 }
 .github-manifest-form .btn {
   justify-self: start;
-}
-.pairing-panel {
-  padding: 0.85rem;
-  border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--line));
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
-}
-.pairing-panel > div {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 0.65rem;
-}
-.pairing-panel > .pairing-command-block {
-  display: grid;
-  align-items: initial;
-}
-.pairing-command-block code {
-  white-space: pre-wrap;
-  line-height: 1.6;
-}
-.pairing-code {
-  color: var(--accent);
-  font-size: 1.15rem;
-  letter-spacing: 0.12em;
 }
 .provider-row > div,
 .connection-row > div {

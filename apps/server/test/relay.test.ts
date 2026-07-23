@@ -22,21 +22,13 @@ function runStatuses(events: readonly EventEnvelopeT[]): string[] {
 }
 
 describe("phase 1A — remote control", () => {
-  it("pairs, connects, heartbeats, and reports runner status", async () => {
+  it("connects, heartbeats, and reports runner status", async () => {
     stack = await startStack();
-    const runners = (await (await stack.api("/api/runners")).json()) as {
-      runner_id: string;
-      connected: boolean;
-      last_seen_at: string | null;
-    }[];
-    expect(runners).toHaveLength(1);
-    expect(runners[0]?.connected).toBe(true);
-    await waitFor(async () => {
-      const rs = (await (await (stack as Stack).api("/api/runners")).json()) as {
-        last_seen_at: string | null;
-      }[];
-      return rs[0]?.last_seen_at !== null;
-    }, "heartbeat marks last_seen");
+    expect(stack.server.connectedRunners()).toEqual(["runner-1"]);
+    await waitFor(
+      () => (stack as Stack).stores.runner("runner-1")?.last_seen_at != null,
+      "heartbeat marks last_seen",
+    );
   });
 
   it("launches a fixture, streams logs, completes; audit is complete", async () => {
@@ -67,8 +59,6 @@ describe("phase 1A — remote control", () => {
     const audit = (await (await stack.api("/api/audit")).json()) as { action: string }[];
     const actions = audit.map((a) => a.action);
     for (const expected of [
-      "pairing.started",
-      "pairing.completed",
       "runner.connected",
       "command.issued",
       "command.delivered",
@@ -208,7 +198,7 @@ describe("phase 1A — remote control", () => {
 
   it("rejects unauthenticated API access and audits it", async () => {
     stack = await startStack();
-    const res = await fetch(`${stack.url}/api/runners`);
+    const res = await fetch(`${stack.url}/api/audit`);
     expect(res.status).toBe(401);
     const audit = (await (await stack.api("/api/audit")).json()) as { action: string }[];
     expect(audit.map((a) => a.action)).toContain("auth.rejected");

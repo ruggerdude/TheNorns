@@ -64,12 +64,14 @@ describe.sequential("Phase 3 authenticated API", () => {
     await pg.close();
   });
 
-  it("requires a session, rejects forgeable local metadata, and exposes Resume and phase creation", async () => {
+  it("requires a session, keeps the local-binding route removed, and exposes Resume and phase creation", async () => {
     expect(
       (await server.app.inject({ method: "GET", url: "/api/v2/projects/project-1/resume" }))
         .statusCode,
     ).toBe(401);
     const headers = { authorization: `Bearer ${token}` };
+    // POLISH P1: the local source-binding route went with the local-runner
+    // front door. It must stay gone — 404, not a validation answer.
     const forgedBinding = await server.app.inject({
       method: "POST",
       url: "/api/v2/projects/project-1/source-bindings/local",
@@ -84,7 +86,7 @@ describe.sequential("Phase 3 authenticated API", () => {
         verification_policy_ref: "verification",
       },
     });
-    expect(forgedBinding.statusCode).toBe(400);
+    expect(forgedBinding.statusCode).toBe(404);
     const phase = await server.app.inject({
       method: "POST",
       url: "/api/v2/projects/project-1/phases",

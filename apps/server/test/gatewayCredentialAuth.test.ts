@@ -30,6 +30,7 @@ import {
   GatewayCredentialError,
   ModelGatewayClient,
   RunnerDaemon,
+  RunnerStateFile,
   privateKeySigner,
   runnerContextFetchPayload,
 } from "@norns/runner";
@@ -168,15 +169,20 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
   });
   const origin = await listen(server);
 
-  // A REAL pairing: the daemon generates the Ed25519 keypair and the server
-  // records the public half, exactly as a laptop or an Actions job does.
-  const pairing = (await (
-    await fetch(`${origin}/api/pairing/start`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}` },
-    })
-  ).json()) as { code: string };
+  // A REAL registered identity: an Ed25519 keypair whose public half the
+  // server records, exactly what Actions enrollment produces. (POLISH P1
+  // removed the pairing HTTP front door, so the key is registered directly.)
   const dataDir = mkdtempSync(join(tmpdir(), "norns-e9-"));
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const registered = stores.registerRunner(
+    runnerId,
+    publicKey.export({ type: "spki", format: "pem" }).toString(),
+  );
+  new RunnerStateFile(dataDir, {
+    runner_id: runnerId,
+    private_key_pem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    generation: registered.generation,
+  });
   const daemon = new RunnerDaemon({
     serverUrl: origin,
     runnerId,
@@ -184,7 +190,7 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
     heartbeatMs: 500,
     reconnectDelayMs: 100,
   });
-  await daemon.pair(pairing.code);
+  daemon.loadState();
   daemon.connect();
   await waitFor(() => server.connectedRunners().includes(runnerId), "runner connected");
 

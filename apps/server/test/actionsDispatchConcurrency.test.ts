@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import type { EventPayloadT, V2DispatchCommandT } from "@norns/contracts";
-import { RunnerDaemon } from "@norns/runner";
+import { RunnerDaemon, RunnerStateFile } from "@norns/runner";
 import sodium from "libsodium-wrappers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -546,16 +546,23 @@ describe("EXECUTION E5 — per-dispatch runner identity, end to end", () => {
     ).toBe("ok");
   });
 
-  it("a laptop runner's pairing and reconnect keep working, unaffected by Actions-hosted dispatch", async () => {
+  it("a legacy paired runner's connection and reconnect keep working, unaffected by Actions-hosted dispatch", async () => {
     stack = await buildStack(1, 2);
 
-    // Pair a laptop runner exactly as `test/helpers.ts`'s `startStack` does.
-    const pairingRes = await fetch(`${stack.url}/api/pairing/start`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${stack.adminToken}` },
-    });
-    const pairing = (await pairingRes.json()) as { code: string };
+    // A legacy laptop runner (paired before POLISH P1 removed the pairing
+    // front door) still holds a registered key and a state file. Reproduce
+    // that state directly, as `test/helpers.ts`'s `startStack` does.
     const dataDir = mkdtempSync(join(tmpdir(), "norns-laptop-"));
+    const laptopKeys = generateKeyPairSync("ed25519");
+    const laptopRecord = stack.stores.registerRunner(
+      "laptop-1",
+      laptopKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    );
+    new RunnerStateFile(dataDir, {
+      runner_id: "laptop-1",
+      private_key_pem: laptopKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      generation: laptopRecord.generation,
+    });
     const laptop = new RunnerDaemon({
       serverUrl: stack.url,
       runnerId: "laptop-1",
@@ -563,7 +570,7 @@ describe("EXECUTION E5 — per-dispatch runner identity, end to end", () => {
       heartbeatMs: 250,
       reconnectDelayMs: 100,
     });
-    await laptop.pair(pairing.code);
+    laptop.loadState();
     laptop.connect();
     daemons.push(laptop);
     await waitFor(
@@ -584,14 +591,10 @@ describe("EXECUTION E5 — per-dispatch runner identity, end to end", () => {
     // own generation, unaffected by anything Actions-related.
     const generationBefore = laptop.generation;
     laptop.disconnectNow();
-    await waitFor(async () => {
-      const runners = (await (
-        await fetch(`${stack?.url}/api/runners`, {
-          headers: { authorization: `Bearer ${stack?.adminToken}` },
-        })
-      ).json()) as { runner_id: string; connected: boolean }[];
-      return runners.some((r) => r.runner_id === "laptop-1" && r.connected);
-    }, "laptop reconnected");
+    await waitFor(
+      () => stack?.server.connectedRunners().includes("laptop-1") ?? false,
+      "laptop reconnected",
+    );
     expect(laptop.isFenced).toBe(false);
     expect(laptop.generation).toBe(generationBefore);
   }, 20_000);

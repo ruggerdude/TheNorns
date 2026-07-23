@@ -8,6 +8,7 @@
 //   C. one end-to-end pass over a REAL relay socket with a REAL runtime
 //      (ProxiedCompletionRuntime), because mocks in this codebase have
 //      previously hidden paths that were dead in production.
+import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +16,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { FakeAdapter } from "@norns/adapters";
 import { AdapterError, type LlmAdapter } from "@norns/adapters";
 import type { UsageEventT } from "@norns/contracts";
-import { ProxiedCompletionRuntime, RunnerDaemon } from "@norns/runner";
+import { ProxiedCompletionRuntime, RunnerDaemon, RunnerStateFile } from "@norns/runner";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
 import { BudgetLedger } from "../src/engine/budget.js";
@@ -40,6 +41,22 @@ import { listen, testAdminToken, waitFor } from "./helpers.js";
 
 const MODEL = "mock-anthropic";
 const ALLOWED = [`anthropic/${MODEL}`];
+
+// POLISH P1: the pairing HTTP front door is gone. Mint a runner identity the
+// way the server now does at its core — register the public key against the
+// store — and seed the daemon's on-disk state with the private half.
+function seedRunner(stores: RelayStores, runnerId: string, dataDir: string): void {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const record = stores.registerRunner(
+    runnerId,
+    publicKey.export({ type: "spki", format: "pem" }).toString(),
+  );
+  new RunnerStateFile(dataDir, {
+    runner_id: runnerId,
+    private_key_pem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    generation: record.generation,
+  });
+}
 
 function facts(overrides: Partial<ProxiedRunFacts> = {}): ProxiedRunFacts {
   return {
@@ -614,8 +631,8 @@ describe.sequential("EXECUTION E3 proxied inference end to end", () => {
       stores,
       users,
       inferenceProxy: new InferenceProxy({
-        // The run is dispatched to THIS runner at the generation pairing
-        // assigns (1 for a first pairing).
+        // The run is dispatched to THIS runner at the generation its key
+        // registration assigns (1 for a first registration).
         runs: {
           lookup: async (id) =>
             id === "run-1" ? facts({ runner_id: runnerId, runner_generation: 1 }) : null,
@@ -627,20 +644,16 @@ describe.sequential("EXECUTION E3 proxied inference end to end", () => {
       }),
     });
     const url = await listen(server);
-    const started = (await (
-      await fetch(`${url}/api/pairing/start`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}` },
-      })
-    ).json()) as { code: string };
+    const dataDir = mkdtempSync(join(tmpdir(), "norns-e3-"));
+    seedRunner(stores, runnerId, dataDir);
     daemon = new RunnerDaemon({
       serverUrl: url,
       runnerId,
-      dataDir: mkdtempSync(join(tmpdir(), "norns-e3-")),
+      dataDir,
       heartbeatMs: 500,
       reconnectDelayMs: 100,
     });
-    await daemon.pair(started.code);
+    daemon.loadState();
     daemon.connect();
     await waitFor(() => server.connectedRunners().includes(runnerId), "runner connected");
   });
@@ -721,24 +734,20 @@ describe.sequential("EXECUTION E3 proxied inference end to end", () => {
     // A deployment with no relational runtime and no injected proxy must
     // refuse explicitly, not hang and not silently execute unmetered.
     const users = new UserStore();
-    const token = testAdminToken(users);
-    const bare = await buildServer({ stores: new RelayStores(), users });
+    const bareStores = new RelayStores();
+    const bare = await buildServer({ stores: bareStores, users });
     const bareUrl = await listen(bare);
+    const bareDataDir = mkdtempSync(join(tmpdir(), "norns-e3-bare-"));
+    seedRunner(bareStores, "runner-bare", bareDataDir);
     const bareDaemon = new RunnerDaemon({
       serverUrl: bareUrl,
       runnerId: "runner-bare",
-      dataDir: mkdtempSync(join(tmpdir(), "norns-e3-bare-")),
+      dataDir: bareDataDir,
       heartbeatMs: 500,
       reconnectDelayMs: 100,
     });
     try {
-      const started = (await (
-        await fetch(`${bareUrl}/api/pairing/start`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${token}` },
-        })
-      ).json()) as { code: string };
-      await bareDaemon.pair(started.code);
+      bareDaemon.loadState();
       bareDaemon.connect();
       await waitFor(() => bare.connectedRunners().includes("runner-bare"), "bare runner connected");
       const runtime = new ProxiedCompletionRuntime(bareDaemon.inference, {
