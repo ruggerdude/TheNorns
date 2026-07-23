@@ -125,6 +125,11 @@ export interface ApproveStrategyInput {
    *  staleness semantics); when omitted the bridge fills the current hash. */
   expectedContentHash?: string;
   idempotencyKey?: string;
+  /** PHASE TAB P4: the approval command's issued_at (and therefore the
+   *  approval record's approved_at). Lets a kickoff driven by a recorded
+   *  planning-run decision stamp the approval with the decision's decided_at
+   *  instead of "now". Defaults to now(). */
+  issuedAt?: string;
   actor: StrategyBridgeActor;
 }
 
@@ -391,10 +396,15 @@ export class StrategyBridgeService {
     input: CreatePhaseFromPlanningRunInput,
   ): Promise<StrategyReviewDto> {
     const run = await this.loadPlanningRun(input.projectId, input.planningRunId);
-    if (run.status !== "converged" && run.status !== "cap_reached") {
+    // PHASE TAB P4: "approved" joins the materializable statuses — the Phase
+    // tab records the human decision on the run BEFORE the execution kickoff
+    // drives this bridge, so by the time the kickoff runs the run is already
+    // `approved` (and the result-shape constraint guarantees it kept the
+    // result it was decided on).
+    if (run.status !== "converged" && run.status !== "cap_reached" && run.status !== "approved") {
       throw new StrategyBridgeError(
         "planning_run_not_ready",
-        `planning run "${input.planningRunId}" is ${run.status}; only converged or cap_reached runs can be materialized`,
+        `planning run "${input.planningRunId}" is ${run.status}; only converged, cap_reached, or approved runs can be materialized`,
       );
     }
     if (run.result === null || run.result === undefined) {
@@ -503,7 +513,7 @@ export class StrategyBridgeService {
         `phase "${input.phaseId}" has no strategy awaiting approval`,
       );
     }
-    const issuedAt = this.now().toISOString();
+    const issuedAt = input.issuedAt ?? this.now().toISOString();
     const result = await this.strategies.approve({
       schema_version: 2,
       command_id: newId("command"),
