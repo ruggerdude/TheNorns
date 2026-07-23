@@ -22,6 +22,7 @@ import {
 import { z } from "zod";
 import { newId } from "../ids.js";
 import {
+  directionRevisionPrompt,
   draftPlanPrompt,
   pmSystem,
   reviewPrompt,
@@ -101,6 +102,15 @@ export interface PlanningOptions {
    * upstream; the adapters also enforce the per-request image cap.
    */
   roundOneImages?: readonly ImagePart[];
+  /**
+   * PHASE TAB P1: when present, the loop's first PM output is a revision of
+   * this prior plan under the human's direction rather than a from-scratch
+   * draft. Everything after that first output is unchanged: the revised plan
+   * goes through review/revise cycles against maxRounds exactly like a fresh
+   * draft. Round-one images are NOT re-sent for seeded runs — the prior plan
+   * already encodes what they established.
+   */
+  revisionSeed?: { plan: PlanContractT; direction: string };
 }
 
 export async function runPlanning(options: PlanningOptions): Promise<PlanningResult> {
@@ -154,7 +164,11 @@ export async function runPlanning(options: PlanningOptions): Promise<PlanningRes
   };
 
   const versions: PlanVersionRecord[] = [];
-  let plan = await generateValidPlan(draftPlanPrompt(options.objective), roundOneImages);
+  let plan = options.revisionSeed
+    ? await generateValidPlan(
+        directionRevisionPrompt(options.revisionSeed.plan, options.revisionSeed.direction),
+      )
+    : await generateValidPlan(draftPlanPrompt(options.objective), roundOneImages);
   versions.push({ version: 1, plan, findings: null, responses: null });
   await options.onRound?.({ round: 1, phase: "draft", plan });
 
