@@ -398,6 +398,7 @@ export function Projects({
   const [repositoryPrivate, setRepositoryPrivate] = useState(true);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [removingProjectId, setRemovingProjectId] = useState<string | null>(null);
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
   const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
   const [roundsCount, setRoundsCount] = useState(3);
@@ -688,6 +689,38 @@ export function Projects({
       }
     },
     [onUnauthorized, refreshAttention],
+  );
+
+  const removeProject = useCallback(
+    async (project: ProjectSummary) => {
+      const confirmed = window.confirm(
+        `Remove "${project.name}" from the dashboard?\n\nThis archives the project but does not delete its GitHub repository or historical records. Projects with active work cannot be removed.`,
+      );
+      if (!confirmed) return;
+
+      setRemovingProjectId(project.id);
+      setError(null);
+      try {
+        await requestVerb(`/api/projects/${project.id}`, "DELETE");
+        setProjects(
+          (current) => current?.filter((candidate) => candidate.id !== project.id) ?? null,
+        );
+        setResumeById((current) => {
+          const next = { ...current };
+          Reflect.deleteProperty(next, project.id);
+          return next;
+        });
+        onCloseProject(project.id);
+        void refreshAttention();
+      } catch (error) {
+        error instanceof UnauthorizedError
+          ? onUnauthorized()
+          : setError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setRemovingProjectId(null);
+      }
+    },
+    [onCloseProject, onUnauthorized, refreshAttention],
   );
 
   // FRONT DOOR P1: a brand-new project with an objective moves to the
@@ -1241,6 +1274,17 @@ export function Projects({
                   key={project.id}
                   data-testid="proj-row"
                 >
+                  <a
+                    className="pr-row-enter"
+                    href={`#project-${encodeURIComponent(project.id)}`}
+                    aria-label={`Enter ${project.name}`}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      onOpenProject(project);
+                    }}
+                  >
+                    <span className="sr-only">Enter {project.name}</span>
+                  </a>
                   <div className="pr-main">
                     <div className="pr-head">
                       <span className="monogram">{project.name.slice(0, 2).toUpperCase()}</span>
@@ -1384,9 +1428,25 @@ export function Projects({
                         </span>
                       </div>
                     </div>
-                    <button type="button" className="pr-cta" onClick={() => onOpenProject(project)}>
-                      Open workspace →
-                    </button>
+                    <div className="pr-actions">
+                      <button
+                        type="button"
+                        className="pr-cta"
+                        onClick={() => onOpenProject(project)}
+                      >
+                        Enter project →
+                      </button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="btn-small pr-remove"
+                        aria-label={`Remove ${project.name} from dashboard`}
+                        disabled={removingProjectId === project.id}
+                        onClick={() => void removeProject(project)}
+                      >
+                        {removingProjectId === project.id ? "Removing…" : "Remove"}
+                      </Button>
+                    </div>
                   </div>
                 </article>
               );

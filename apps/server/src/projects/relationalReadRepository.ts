@@ -271,7 +271,7 @@ async function projectRows(
        ON binding.id = project.primary_repository_binding_id
       AND binding.project_id = project.id
       AND binding.status = 'connected'
-     WHERE true ${projectPredicate}
+     WHERE project.status <> 'archived' ${projectPredicate}
      ORDER BY project.created_at DESC, imported.imported_at DESC NULLS LAST, project.id DESC`,
     params,
   );
@@ -365,6 +365,21 @@ export class Phase3RequiredError extends Error {
   }
 }
 
+export class ProjectArchiveConflictError extends Error {
+  readonly code = "project_active" as const;
+
+  constructor(
+    readonly activeRuns: number,
+    readonly activePlanningRuns: number,
+    readonly activeDebateRuns: number,
+  ) {
+    super(
+      "This project still has active work. Let its agent, planning, and debate runs finish or cancel them before removing it.",
+    );
+    this.name = "ProjectArchiveConflictError";
+  }
+}
+
 /** Compatibility projection over V2 rows, including relational project creation. */
 export class RelationalProjectReadRepository implements ProjectRepository {
   readonly repositoryKind = "project_repository" as const;
@@ -390,6 +405,72 @@ export class RelationalProjectReadRepository implements ProjectRepository {
       const row = (await projectRows(sql, this.migrationRunId, id))[0];
       if (!row) throw new ProjectNotFoundError(id);
       return summaryFromRow(row);
+    });
+  }
+
+  async archive(id: string, actorId: string): Promise<void> {
+    await this.transactions.transaction(async (sql) => {
+      const result = await sql.query<{
+        status: string;
+        active_runs: number | string;
+        active_planning_runs: number | string;
+        active_debate_runs: number | string;
+      }>(
+        `SELECT project.status,
+                (SELECT count(*) FROM agent_runs
+                  WHERE project_id = project.id
+                    AND state IN ('created','dispatched','running','verifying')) AS active_runs,
+                (SELECT count(*) FROM planning_runs
+                  WHERE project_id = project.id
+                    AND status IN ('queued','drafting','reviewing','revising')) AS active_planning_runs,
+                (SELECT count(*) FROM debate_runs
+                  WHERE project_id = project.id
+                    AND state NOT IN ('completed','cancelled','failed')) AS active_debate_runs
+           FROM projects project
+          WHERE project.id = $1
+          FOR UPDATE`,
+        [id],
+      );
+      const project = result.rows[0];
+      if (!project || project.status === "archived") throw new ProjectNotFoundError(id);
+
+      const activeRuns = Number(project.active_runs);
+      const activePlanningRuns = Number(project.active_planning_runs);
+      const activeDebateRuns = Number(project.active_debate_runs);
+      if (activeRuns > 0 || activePlanningRuns > 0 || activeDebateRuns > 0) {
+        throw new ProjectArchiveConflictError(activeRuns, activePlanningRuns, activeDebateRuns);
+      }
+
+      const archivedAt = new Date().toISOString();
+      await sql.query(
+        `UPDATE projects
+            SET status = 'archived', archived_at = $2, updated_at = $2,
+                aggregate_version = aggregate_version + 1
+          WHERE id = $1`,
+        [id, archivedAt],
+      );
+      const stream = await sql.query<{ next: number }>(
+        `SELECT COALESCE(max(stream_version),0)::int + 1 AS next
+           FROM domain_events
+          WHERE stream_type = 'project' AND stream_id = $1`,
+        [id],
+      );
+      const streamVersion = stream.rows[0]?.next ?? 1;
+      await sql.query(
+        `INSERT INTO domain_events (
+           event_id, stream_type, stream_id, stream_version, event_type,
+           project_id, actor_type, actor_id, correlation_id, occurred_at, payload
+         ) VALUES ($1,'project',$2,$3,'project.archived',$2,'human',$4,$5,$6,$7::jsonb)`,
+        [
+          newId("event"),
+          id,
+          streamVersion,
+          actorId,
+          newId("correlation"),
+          archivedAt,
+          JSON.stringify({ reason: "removed_from_dashboard" }),
+        ],
+      );
     });
   }
 

@@ -119,6 +119,30 @@ describe("ProjectStore", () => {
     expect(() => store.summary("proj-does-not-exist")).toThrow(ProjectNotFoundError);
   });
 
+  it("archives a project out of active reads and preserves that removal in snapshots", () => {
+    const store = new ProjectStore();
+    const retained = store.create({
+      name: "Retained",
+      description: "Still visible",
+      pmProvider: "anthropic",
+    });
+    const removed = store.create({
+      name: "Removed",
+      description: "Archive me",
+      pmProvider: "openai",
+    });
+
+    store.archive(removed.id);
+
+    expect(store.list().map((project) => project.id)).toEqual([retained.id]);
+    expect(() => store.summary(removed.id)).toThrow(ProjectNotFoundError);
+
+    const restored = new ProjectStore();
+    restored.restoreFrom(store.snapshot());
+    expect(restored.list().map((project) => project.id)).toEqual([retained.id]);
+    expect(() => restored.summary(removed.id)).toThrow(ProjectNotFoundError);
+  });
+
   it("loadPlan turns a draft project into a planned one with a real graph", () => {
     const store = new ProjectStore();
     const project = store.create({ name: "P", description: "d", pmProvider: "anthropic" });

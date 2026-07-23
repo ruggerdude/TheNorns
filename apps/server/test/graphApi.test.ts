@@ -139,6 +139,39 @@ describe("projects API", () => {
     const res = await inject(server, "GET", "/api/projects/proj-does-not-exist");
     expect(res.statusCode).toBe(404);
   });
+
+  it("removes a project from the dashboard without deleting another project", async () => {
+    const users = new UserStore();
+    TOKEN = testAdminToken(users);
+    server = await buildServer({
+      stores: new RelayStores(),
+      users,
+      projects: new ProjectStore(),
+    });
+    const removed = await inject(server, "POST", "/api/projects", {
+      name: "Remove me",
+      description: "Old dashboard project",
+      pm_provider: "anthropic",
+    });
+    const retained = await inject(server, "POST", "/api/projects", {
+      name: "Keep me",
+      description: "Current dashboard project",
+      pm_provider: "openai",
+    });
+    const removedId = (removed.json() as { id: string }).id;
+    const retainedId = (retained.json() as { id: string }).id;
+
+    expect((await inject(server, "DELETE", `/api/projects/${removedId}`)).statusCode).toBe(204);
+
+    const list = (await inject(server, "GET", "/api/projects")).json() as Array<{ id: string }>;
+    expect(list.map((project) => project.id)).toEqual([retainedId]);
+    expect((await inject(server, "GET", `/api/projects/${removedId}`)).statusCode).toBe(404);
+    expect(
+      ((await inject(server, "GET", "/api/audit")).json() as Array<{ action: string }>).map(
+        (entry) => entry.action,
+      ),
+    ).toContain("project.archived");
+  });
 });
 
 describe("project graph API", () => {

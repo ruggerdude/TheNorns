@@ -169,7 +169,10 @@ import {
   type ProjectResumeService,
   ProjectSettingsValidationError,
 } from "./projects/projectResumeService.js";
-import { Phase3RequiredError } from "./projects/relationalReadRepository.js";
+import {
+  Phase3RequiredError,
+  ProjectArchiveConflictError,
+} from "./projects/relationalReadRepository.js";
 import {
   RemoteRepositoryVerificationError,
   UnconfiguredRemoteRepositoryPort,
@@ -2379,6 +2382,16 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           .send({ error: error.code, operation: error.operation, message: error.message });
         return;
       }
+      if (error instanceof ProjectArchiveConflictError) {
+        reply.code(409).send({
+          error: error.code,
+          message: error.message,
+          active_runs: error.activeRuns,
+          active_planning_runs: error.activePlanningRuns,
+          active_debate_runs: error.activeDebateRuns,
+        });
+        return;
+      }
       throw error;
     };
 
@@ -2400,6 +2413,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     app.get("/api/projects", async (req, reply) => {
       if (!(await requireSession(req, reply))) return;
       reply.send(await projects.list());
+    });
+
+    app.delete("/api/projects/:id", async (req, reply) => {
+      const user = await resolveUser(req);
+      if (!user) return reply.code(401).send({ error: "unauthorized" });
+      const { id } = req.params as { id: string };
+      try {
+        await projects.archive(id, user.id);
+        stores.audit(user.email, "project.archived", id, now());
+        reply.code(204).send();
+      } catch (error) {
+        projectError(reply, error);
+      }
     });
 
     const CreateProjectFields = {

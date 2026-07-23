@@ -86,6 +86,10 @@ export class ShadowProjectRepository implements ProjectRepository {
     );
   }
 
+  archive(id: string, actorId: string): ReturnType<ProjectRepository["archive"]> {
+    return this.options.legacy.archive(id, actorId);
+  }
+
   pmSelectionOf(id: string): Promise<{ provider: ProviderName; model: PmModelT | null }> {
     return this.read(
       { type: "project", key: id },

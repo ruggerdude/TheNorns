@@ -15,6 +15,7 @@ import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import {
   Phase3RequiredError,
+  ProjectArchiveConflictError,
   RelationalProjectReadRepository,
 } from "../src/projects/relationalReadRepository.js";
 import { LegacyProjectRepository, type ProjectRepository } from "../src/projects/repository.js";
@@ -23,7 +24,11 @@ import {
   ShadowProjectRepository,
 } from "../src/projects/shadowProjectRepository.js";
 import { SourceBindingService } from "../src/projects/sourceBindingService.js";
-import { ProjectStore, type ProjectStoreSnapshot } from "../src/projects/store.js";
+import {
+  ProjectNotFoundError,
+  ProjectStore,
+  type ProjectStoreSnapshot,
+} from "../src/projects/store.js";
 
 const RUN_ID = "migration-shadow-projects";
 const MANIFEST_HASH = "a".repeat(64);
@@ -430,6 +435,61 @@ describe.sequential("Phase 2 relational project read projection", () => {
     );
     expect((await shadowRepository.removeNode(source.id, "b")).removed).toEqual(["b"]);
     expect((await shadowRepository.loadPlan(source.id, plan)).graph.nodes).toHaveLength(1);
+  });
+
+  it("archives an idle relational project and records human evidence", async () => {
+    const repository = relational();
+    const created = await repository.create({
+      name: "Archive me",
+      description: "No longer needed on the dashboard",
+      pmProvider: "anthropic",
+    });
+
+    await repository.archive(created.id, "norns-user-1");
+
+    expect((await repository.list()).some((project) => project.id === created.id)).toBe(false);
+    await expect(repository.summary(created.id)).rejects.toBeInstanceOf(ProjectNotFoundError);
+    const project = await pg.query<{ status: string; archived_at: Date | string | null }>(
+      "SELECT status, archived_at FROM projects WHERE id = $1",
+      [created.id],
+    );
+    expect(project.rows[0]?.status).toBe("archived");
+    expect(project.rows[0]?.archived_at).not.toBeNull();
+    const event = await pg.query<{ event_type: string; actor_id: string; payload: unknown }>(
+      `SELECT event_type, actor_id, payload
+         FROM domain_events
+        WHERE stream_type = 'project' AND stream_id = $1
+        ORDER BY stream_version DESC LIMIT 1`,
+      [created.id],
+    );
+    expect(event.rows[0]).toMatchObject({
+      event_type: "project.archived",
+      actor_id: "norns-user-1",
+      payload: { reason: "removed_from_dashboard" },
+    });
+  });
+
+  it("refuses to archive a project while a planning run is active", async () => {
+    const repository = relational();
+    const created = await repository.create({
+      name: "Planning now",
+      description: "Must remain visible",
+      pmProvider: "openai",
+    });
+    await pg.query(
+      `INSERT INTO planning_runs (id, project_id, max_rounds, objective)
+       VALUES ('planning-run-active',$1,3,'Plan this project')`,
+      [created.id],
+    );
+
+    await expect(repository.archive(created.id, "norns-user-1")).rejects.toMatchObject({
+      code: "project_active",
+      activePlanningRuns: 1,
+    });
+    await expect(repository.archive(created.id, "norns-user-1")).rejects.toBeInstanceOf(
+      ProjectArchiveConflictError,
+    );
+    expect((await repository.list()).some((project) => project.id === created.id)).toBe(true);
   });
 
   it("retains the selected workspace connection and repository identity on native creation", async () => {

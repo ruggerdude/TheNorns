@@ -39,6 +39,7 @@ export interface ProjectRepository {
   create(input: CreateProjectInput): Awaitable<ProjectSummary>;
   list(): Awaitable<ProjectSummary[]>;
   summary(id: string): Awaitable<ProjectSummary>;
+  archive(id: string, actorId: string): Awaitable<void>;
   pmSelectionOf(id: string): Awaitable<ReturnType<ProjectStore["pmSelectionOf"]>>;
   graph(id: string): Awaitable<ProjectGraphView>;
   addEdge(id: string, from: string, to: string): Awaitable<ProjectGraphView>;
@@ -87,6 +88,10 @@ export class LegacyProjectRepository implements ProjectRepository {
 
   summary(id: string): ProjectSummary {
     return this.store.summary(id);
+  }
+
+  archive(id: string, _actorId: string): void {
+    this.store.archive(id);
   }
 
   pmSelectionOf(id: string): ReturnType<ProjectStore["pmSelectionOf"]> {

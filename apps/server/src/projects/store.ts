@@ -70,6 +70,7 @@ interface ProjectRecord {
   sourceRepositoryId: string | null;
   sourceDefaultBranch: string | null;
   createdAt: string;
+  archivedAt: string | null;
   session: GraphSession | null;
 }
 
@@ -87,6 +88,8 @@ export interface ProjectStoreSnapshot {
     sourceConnectionId?: string | null;
     sourceRepositoryId?: string | null;
     sourceDefaultBranch?: string | null;
+    /** Optional so snapshots written before dashboard removal can still be restored. */
+    archivedAt?: string | null;
     createdAt: string;
     plan: PlanContractT | null;
     graph: GraphSnapshot | null;
@@ -133,6 +136,7 @@ export class ProjectStore {
       sourceRepositoryId: input.sourceRepositoryId ?? null,
       sourceDefaultBranch: input.sourceDefaultBranch ?? null,
       createdAt: new Date().toISOString(),
+      archivedAt: null,
       session: null,
     };
     this.projects.set(record.id, record);
@@ -143,11 +147,21 @@ export class ProjectStore {
    *  that doesn't depend on wall-clock resolution (two projects created in
    *  the same millisecond would otherwise tie under a createdAt sort). */
   list(): ProjectSummary[] {
-    return [...this.projects.values()].reverse().map((r) => this.summarize(r));
+    return [...this.projects.values()]
+      .filter((record) => record.archivedAt === null)
+      .reverse()
+      .map((record) => this.summarize(record));
   }
 
   summary(id: string): ProjectSummary {
     return this.summarize(this.record(id));
+  }
+
+  /** Remove a project from active product surfaces without deleting its history. */
+  archive(id: string): void {
+    const record = this.projects.get(id);
+    if (!record || record.archivedAt !== null) throw new ProjectNotFoundError(id);
+    record.archivedAt = new Date().toISOString();
   }
 
   /** The live GraphSession for a project — throws if it hasn't been planned yet. */
@@ -198,6 +212,7 @@ export class ProjectStore {
         sourceConnectionId: r.sourceConnectionId,
         sourceRepositoryId: r.sourceRepositoryId,
         sourceDefaultBranch: r.sourceDefaultBranch,
+        archivedAt: r.archivedAt,
         createdAt: r.createdAt,
         plan: r.session?.plan ?? null,
         graph: r.session?.graph.snapshot() ?? null,
@@ -232,6 +247,7 @@ export class ProjectStore {
         sourceRepositoryId: p.sourceRepositoryId ?? null,
         sourceDefaultBranch: p.sourceDefaultBranch ?? null,
         createdAt: p.createdAt,
+        archivedAt: p.archivedAt ?? null,
         session,
       });
     }
@@ -239,7 +255,7 @@ export class ProjectStore {
 
   private record(id: string): ProjectRecord {
     const record = this.projects.get(id);
-    if (!record) throw new ProjectNotFoundError(id);
+    if (!record || record.archivedAt !== null) throw new ProjectNotFoundError(id);
     return record;
   }
 
