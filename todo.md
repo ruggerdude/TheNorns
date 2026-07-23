@@ -941,14 +941,20 @@ decision and is deliberately untouched.
   one-line way (`authHeaders()`), and its click test now asserts the real
   fetch invocation (no content-type header, no body) via the upgraded
   MockFetch.
-- [ ] 🔴 `Account.tsx:147` (session revoke) — CONFIRMED broken, not fixed
-  here (Account.tsx is owned by another workstream). Evidence: Fastify
-  5.10.0 puts DELETE in its `bodywith` method set (fastify.js:140), and a
-  runtime probe against a real fastify instance returns 400
-  `FST_ERR_CTP_EMPTY_JSON_BODY` for DELETE + `content-type: application/json`
-  + empty body, via both `inject` and a real socket (DELETE without the
-  header → 200). Same one-line fix applies: `authHeaders()` instead of
-  `authHeaders(true)`. PM to route.
+- [x] ✅ `Account.tsx:147` (session revoke) — was CONFIRMED broken (Fastify
+  5.10.0 puts DELETE in its `bodywith` method set, fastify.js:140; runtime
+  probe returned 400 `FST_ERR_CTP_EMPTY_JSON_BODY` for DELETE + JSON
+  content-type + empty body via both `inject` and a real socket). PM lifted
+  the Account.tsx fence; fixed the same one-line way (`authHeaders()`), with
+  a revoke test asserting the real DELETE invocation shape.
+- [x] ✅ Fourth instance found in the final sweep: `Account.tsx:73`
+  (`integrationRequest`) deliberately forced the JSON content-type onto
+  body-less DELETEs (`|| init?.method === "DELETE"`), breaking GitHub
+  connection Disconnect the same way. Fixed in a SEPARABLE commit (5dc9eca)
+  — one step beyond the authorized 147 fix, deliberately kept apart so the
+  integrating PM can drop it — content-type now follows the body, never the
+  method; disconnect test asserts the real invocation; MockFetch learned
+  null-body statuses (204) because the real disconnect route replies 204.
 
 ## Phase tab program (dispatched 2026-07-22)
 
