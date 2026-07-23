@@ -1,113 +1,167 @@
-# FRONT DOOR Program — Design Freeze (Phase 0)
+# FRONT DOOR Program — Revised Delivery Plan
 
-**Status:** Frozen for implementation · **Date:** 2026-07-20
-**PM / integration owner:** Claude Fable 5 (human-directed 2026-07-20)
-**Mandate:** Make TheNorns usable end-to-end as an MVP: one simple path from
-"describe a project (with screenshots)" to "watch a staffed, launched phase."
-**Corrected by external review** (2026-07-20): consolidate existing machinery,
-don't rebuild it; the relational strategy bridge is the risk center.
+**Status:** Core journey landed; local-folder onboarding and production
+hardening remain · **Revised:** 2026-07-23
 
-## Product journey being delivered
+**Mandate:** Give the user one truthful path from the project dashboard to a
+staffed, approved, running project, whether the source is GitHub or a local
+folder.
 
-1. New project (one screen): name → source (GitHub repo | local folder path,
-   no runner required) → Coordinator model → Reviewer model → review rounds →
-   objective with pasted images → Create & draft plan.
-2. Planning runs as an observable background job: Coordinator drafts,
-   Reviewer critiques, revise — N rounds or convergence (existing
-   `runPlanning` loop, exposed).
-3. Plan review: rounds outcome + phases + **staffing table** (per assignment:
-   agent role, provider/model — mixed providers, reviewer, budget), editable,
-   then Approve & launch.
-4. Tracking: per-phase % complete, ETA, configurable update interval,
-   decision inbox with inline answers.
+This revision replaces the 2026-07-20 design freeze. It records what is now
+implemented, corrects the original diagnosis, and limits remaining work to
+gaps that can be verified end to end.
 
-## Decisions (D1–D3)
+## Corrected baseline
 
-### D1 — Canonical planning path: `runPlanning`, made observable
+The following capabilities existed before this program and must be reused:
 
-- The synchronous cross-provider loop in
-  `apps/server/src/planning/session.ts` (`runPlanning`) is the one canonical
-  planning engine. The durable debate engine (ADR-008) remains a
-  general-purpose tool; bridging debates→strategy is deferred post-MVP.
-- Project record gains persisted **reviewer selection** and
-  **default_max_rounds**. Cross-provider default stays enforced;
-  same-provider requires the existing recorded-exception path.
-- New API (v2, relational-first):
-  - `POST /api/v2/projects/:id/planning-runs`
-    `{ objective, max_rounds?, attachment_ids? }` → `202 { planning_run_id }`
-  - `GET  /api/v2/projects/:id/planning-runs/:runId` →
-    `{ status: queued|drafting|reviewing|revising|converged|cap_reached|failed,
-       round, max_rounds,
-       transcript: [{ round, role: pm|reviewer, provider, model, summary,
-                      finding_counts }],
-       result?: { plan, content_hash, total_cost_usd,
-                  staffing_proposal: V2StrategyAssignmentProposal[] } }`
-  - Runs persist to a `planning_runs` table (id, project_id, phase intent,
-    status, round, transcript jsonb, result jsonb, cost, timestamps) so a
-    refresh/reopen never loses a run. Worker executes in-process off a simple
-    claim (single-instance MVP per refoundation control 14).
-- The legacy `POST /api/projects/:id/plan` synchronous route is removed from
-  the UI path (kept server-side until retirement approval; no new callers).
+- `runPlanning` is already the canonical PM/reviewer planning loop. It drafts,
+  critiques, revises, enforces review policy, and stops on convergence or the
+  selected round cap.
+- The durable debate workflow is a separate general-purpose aggregate by
+  design (ADR-008). Debate-to-strategy integration is not required for the
+  front-door MVP.
+- Phase task progress and the attention decision-response UI already existed.
+  The program extends their presentation; it does not replace their domains.
+- The project wizard, GitHub connections, local-runner binding, relational
+  `StrategyVersion`, and PM allocation recommendations already existed in
+  partial form.
+- PM allocation recommendations already choose the implementation provider,
+  model, worker count, cross-provider reviewer, and budget. The product task is
+  to make that recommendation part of an editable relational strategy and
+  approval flow.
 
-### D2 — Local folders: folder-first, runner only at execution
+## Current delivered baseline
 
-- Project creation accepts `{ source: { type: "local", path } }` with **no
-  runner online**. Binding is stored `unverified`; when a paired runner
-  reports the workspace, it flips `verified`.
-- Everything through planning, staffing, and approval works unverified.
-  Execution (dispatching real runs) is the only gate requiring a verified
-  binding + online runner; the UI says exactly that at the moment it matters,
-  not at creation.
-- Browser-filesystem access is rejected as the ongoing-execution mechanism
-  (Safari support inadequate; git operations need a real process). The
-  companion runner remains the execution answer — but it is no longer the
-  front door's bouncer.
+| Capability | Current state |
+|---|---|
+| Light mode | Delivered: light/dark toggle, system preference, and persisted selection |
+| Project dashboard | Delivered: project cards, overall completion, ETA, active agents, decisions, and project opening |
+| GitHub onboarding | Delivered: connection, repository selection/creation, and project creation |
+| Planning | Delivered: persisted asynchronous planning runs backed by `runPlanning`, selectable reviewer, configurable rounds, transcript/status, and refresh recovery |
+| Images | Delivered for the MVP: paste/drop upload, validation and caps, provider-neutral image parts, and Anthropic/OpenAI planning context |
+| Strategy and staffing | Delivered: planning output bridges to relational strategy; the PM recommends workers/models/reviewers/budgets; the user can review before approval |
+| Approval and execution | Delivered: approved strategy materialization and execution kickoff with readiness checks |
+| Tracking | Delivered: explicit percentage, blended ETA, phase progress, and decision handling |
+| Local folder onboarding | **Not delivered in the current wizard.** The UI currently routes project creation through GitHub, while the server has an unverified raw-path creation seam that a normal browser cannot safely supply as a durable execution binding |
 
-### D3 — Attachments: content-addressed Postgres, capped, storage-pluggable
+## Remaining work
 
-- Table `attachments(id, project_id, sha256, mime, bytes, width, height,
-  purpose, created_by, created_at, deleted_at)`; blob in a separate
-  `attachment_blobs(sha256 pk, content bytea)` so metadata and storage
-  decouple — moving blobs to object storage later changes no contract.
-- Caps: image/png|jpeg|webp|gif only; ≤ 3 MB each; ≤ 8 per objective;
-  ≤ 40 MB per project. Dedupe by sha256 within project. Cleanup on project
-  archive; explicit `DELETE` supported.
-- API: `POST /api/v2/projects/:id/attachments` (base64 JSON body),
-  `GET /api/v2/projects/:id/attachments/:attachmentId`, `DELETE` same.
-  Project-member authorization on every route.
-- Adapters (`packages/adapters`): provider-neutral message content becomes
-  `parts: ({ type:"text", text } | { type:"image", mime, base64 })[]`.
-  Anthropic → `image` source blocks; OpenAI → data-URI `image_url`. Images
-  are injected in planning round 1 only (cost control); later rounds carry
-  the PM's textual summary of them. Per-request cap 8 images.
-- Contract change to `packages/adapters` types requires PM sign-off (this
-  document is that sign-off for the shape above).
+### R1 — Local folder: one visible action, secure helper underneath
 
-## Phase → file ownership (collision map)
+The user experience is:
 
-| Phase | Owns (writes) | Must not touch |
-|---|---|---|
-| P1 Front-door + visual refresh (Sonnet) | `apps/web/src/**` (Projects.tsx, App.tsx, styles/theme, new components) | any `apps/server/**`, `packages/**` |
-| P2 Planning consolidation (Sonnet) | `apps/server/src/planning/**`, planning routes section of `server.ts`, project reviewer/rounds fields + migration | `apps/web/**`, `packages/adapters/**` |
-| P3 Strategy bridge (Opus) | `apps/server/src/projects/**` relational repos, coordinator glue, `packages/contracts/src/v2/**` (PM approval required per change), migrations | `apps/web/**` (P1 consumes its DTOs), planning loop internals |
-| P4 Attachments (Opus) | `packages/adapters/**`, new `apps/server/src/attachments/**` + routes, migration, one isolated web component `AttachmentInput.tsx` (P1 mounts it) | Projects.tsx/App.tsx layout, planning loop |
-| P5 Tracking (Sonnet) | resume read-model additions, project `update_interval` setting, small web tracking components | everything else |
-| All | — | `apps/runner/**`, `apps/server/src/runners/workspace*` (active external work) |
+1. Choose **Local folder** beside **GitHub repository**.
+2. Click **Choose project folder…**.
+3. Select the Git repository in the computer's native folder selector.
+4. Return automatically to the completed project form with the selected
+   repository name shown.
 
-`server.ts` is shared: each phase adds routes in its own clearly-marked
-section; the PM performs all merges and resolves overlaps.
+There is no runner ID selector, workspace dropdown, pairing-code workflow, or
+raw-path text field in project creation.
 
-## Sequencing, estimates, reporting
+Ongoing Git access and agent execution require a local process; a hosted web
+page cannot safely retain an executable Safari folder path. The existing local
+runner therefore becomes a user-invisible local helper for this flow:
 
-`P0 (1h, done) → P0b mockup (≤1h, user gate) → [P1 ∥ P2] (3–4h / 2h) →
-P3 (3–4h) → [P4 ∥ P5] (2–3h / 1h) → P6 verify+deploy (1.5–2h)`
-≈ 16h agent runtime → **~2–3.5 focused days** wall-clock. ≤2 implementation
-agents concurrent; every merge preceded by PM diff-read + full CI.
-Status reporting: every 5 minutes to the human — per-phase status,
-% complete (task-weighted), ETA. Blockers and decisions surface immediately.
+- If the helper is installed and running, the folder button opens its native
+  selector immediately.
+- If it is absent, the UI presents one guided install/open action and resumes
+  the same wizard automatically afterward.
+- The helper returns an expiring, single-use selection token plus safe
+  repository metadata. Raw paths never enter browser DTOs or server storage.
+- Project planning may continue when the helper later goes offline. Execution
+  clearly reports that the selected folder's helper must be online.
+- The public raw `source_location` creation seam is retired after existing
+  unverified records are migrated or invalidated.
 
-## Out of scope (explicit)
+Acceptance tests must cover selection-token replay, expiry, wrong-user and
+wrong-workspace use, cancellation, helper disconnect, non-Git folders, and
+successful reopen.
 
-Full reskin of non-journey screens (auth/admin/settings/debates); debate→
-strategy bridging; object storage; multi-instance control plane; legacy
-retirement; runner/workspace-registry changes.
+### R2 — Attachment storage hardening
+
+The current capped, content-addressed PostgreSQL implementation is acceptable
+for a small MVP, but it is not the final storage architecture.
+
+- Put attachment bytes behind a storage interface; keep authorization,
+  metadata, hashes, ownership, and lifecycle in PostgreSQL.
+- Use private object storage in production when available.
+- Replace base64 JSON upload with a binary/multipart path before increasing
+  file limits.
+- Add orphan cleanup, archive/delete retention, cache headers, download
+  authorization tests, and aggregate quota observability.
+- Preserve the existing provider-neutral image-parts contract and both
+  provider conformance suites.
+
+### R3 — Full journey and browser-state verification
+
+Run the following journeys from a clean account and from an account with
+existing cookies/local storage:
+
+1. GitHub authorization → installation → callback → repository selection →
+   project creation.
+2. Local helper discovery/install → native folder selection → project
+   creation.
+3. Objective with pasted images → PM/reviewer rounds → editable staffing →
+   approval → execution kickoff.
+4. Refresh and reopen during planning, approval, and execution.
+5. Open multiple projects, switch between them, close one, and return to the
+   main dashboard without losing the others.
+6. Resolve an attention decision and confirm execution resumes.
+7. Repeat the supported web journeys in normal Safari, Safari Private
+   Browsing, and Chrome.
+
+Failures must render a recoverable explanation rather than a blank workspace,
+false connection state, or successful-looking dead project.
+
+## Product acceptance criteria
+
+- The main dashboard shows every project with source, status, current phase,
+  completion, ETA, active work, and attention count.
+- **New project** visibly offers both GitHub and Local folder.
+- GitHub remains connected after its callback and refresh.
+- Local-folder selection is a native chooser experience; implementation
+  details such as runners and pairing codes are not part of routine project
+  creation.
+- Multiple projects can remain open and retain independent UI state.
+- The project workspace opens on an Overview/Phase surface; the graph is
+  optional, never an empty front door.
+- Light and dark modes remain readable across dashboard, wizard, workspace,
+  settings, planning review, and errors.
+- The PM recommends the best cost/capability mix of workers and models from the
+  approved catalog. Human overrides remain authoritative and are recorded.
+- Reviewer, round cap, staffing, budget, and approval evidence survive refresh
+  and reopen.
+- Progress and ETA are labeled as measured estimates and never fabricated when
+  the underlying data is unavailable.
+
+## Sequence and estimate
+
+`R1 local-folder UX and token flow (1–2 days) → R2 attachment hardening
+(0.5–1.5 days, may be deferred until object storage is selected) → R3 full
+journey verification and deployment (0.5–1 day)`
+
+Expected remaining MVP work: **approximately 2–4 focused engineering days**.
+Production-scale attachment storage is a separate deployment decision, not a
+condition for validating the capped MVP.
+
+## Delivery controls
+
+- Do not create a third planning engine or duplicate the attention/read-model
+  domains.
+- Prefer narrow services and contracts over additional logic in `server.ts`.
+- Preserve relational approval, idempotency, audit, and tenancy boundaries.
+- Verify targeted tests first, then the full server, web, contracts, adapters,
+  typecheck, format, and build suites.
+- Test the deployed callback and cookie behavior in normal Safari before
+  calling the GitHub journey complete.
+- Commit only task-owned changes, push `main`, and confirm local and remote
+  commit SHAs match.
+
+## Explicitly out of scope
+
+Debate-to-strategy integration; a full reskin of auth/admin/settings/debates;
+multi-instance planning control; arbitrary browser-side Git execution; fake
+local execution without a helper; and legacy retirement unrelated to the
+front-door journey.
