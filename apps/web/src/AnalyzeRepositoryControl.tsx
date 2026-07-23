@@ -38,7 +38,13 @@ export function AnalyzeRepositoryControl({
     try {
       const res = await fetch(`/api/v2/projects/${projectId}/analyze-repository`, {
         method: "POST",
-        headers: authHeaders(true),
+        // No body → no content-type. `authHeaders(true)` sets
+        // `content-type: application/json`, and Fastify rejects that header on
+        // an EMPTY body ("Body cannot be empty when content-type is set to
+        // 'application/json'") before the route handler runs — a defect the
+        // product owner hit in production. Same convention as the other
+        // body-less POST in App.tsx (workflow trigger at ~1224).
+        headers: authHeaders(),
       });
       if (res.status === 401) {
         onUnauthorized();

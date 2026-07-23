@@ -18,6 +18,27 @@ export interface RecordedCall {
   method: string;
   url: string;
   body: unknown;
+  /**
+   * Request headers, keys lowercased. Recorded so a test can assert the REAL
+   * invocation shape — e.g. that a body-less POST does NOT carry
+   * `content-type: application/json`, a combination Fastify rejects with 400
+   * before any route handler runs (this exact mismatch between a loose fetch
+   * mock and the real server shipped a broken button once — POLISH P3).
+   */
+  headers: Record<string, string>;
+}
+
+function normalizedHeaders(headers: RequestInit["headers"]): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!headers) return result;
+  const entries =
+    headers instanceof Headers
+      ? [...headers.entries()]
+      : Array.isArray(headers)
+        ? headers
+        : Object.entries(headers);
+  for (const [key, value] of entries) result[key.toLowerCase()] = String(value);
+  return result;
 }
 
 interface Route {
@@ -113,7 +134,7 @@ export class MockFetch {
         body = init.body;
       }
     }
-    this.calls.push({ method, url, body });
+    this.calls.push({ method, url, body, headers: normalizedHeaders(init?.headers) });
 
     const route = this.routes.find((r) => r.method === method && r.pattern.test(url));
     if (!route) {
@@ -121,6 +142,12 @@ export class MockFetch {
     }
     const result = await route.handler(url, init);
     const status = result.status ?? 200;
+    // The Response constructor throws for a null-body status (204/205/304)
+    // with any body — and real routes do reply 204 (e.g. the GitHub
+    // connection disconnect). Mirror that instead of crashing the mock.
+    if (status === 204 || status === 205 || status === 304) {
+      return new Response(null, { status });
+    }
     return new Response(JSON.stringify(result.body ?? {}), {
       status,
       headers: { "content-type": "application/json" },

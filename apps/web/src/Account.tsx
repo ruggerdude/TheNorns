@@ -70,7 +70,15 @@ async function integrationRequest<T>(path: string, init?: RequestInit): Promise<
   const response = await fetch(path, {
     ...init,
     headers: {
-      ...authHeaders(Boolean(init?.body) || init?.method === "DELETE"),
+      // Content-type follows the body, never the method. The old
+      // `|| init?.method === "DELETE"` clause forced
+      // `content-type: application/json` onto body-less DELETEs, and Fastify
+      // runs the JSON body parser for DELETE too (`bodywith` method set) —
+      // rejecting the empty body with 400 FST_ERR_CTP_EMPTY_JSON_BODY before
+      // the route handler runs, so "Disconnect" on a GitHub connection always
+      // failed (POLISH P3 hotfix sweep, same defect as the Analyze /
+      // Start-phase / session-revoke buttons).
+      ...authHeaders(Boolean(init?.body)),
       ...init?.headers,
     },
     credentials: "include",
@@ -144,7 +152,13 @@ export function Account({
   const revoke = async (sessionId: string): Promise<void> => {
     const response = await fetch(`/api/auth/sessions/${encodeURIComponent(sessionId)}`, {
       method: "DELETE",
-      headers: authHeaders(true),
+      // No body → no content-type. `authHeaders(true)` sets
+      // `content-type: application/json`, and Fastify runs the JSON body
+      // parser for DELETE too (it is in the `bodywith` method set), rejecting
+      // an EMPTY body with 400 FST_ERR_CTP_EMPTY_JSON_BODY before the route
+      // handler runs — the same defect the Analyze and Start-phase buttons
+      // shipped (POLISH P3 hotfix).
+      headers: authHeaders(),
       credentials: "include",
     });
     if (response.status === 401) return onUnauthorized();

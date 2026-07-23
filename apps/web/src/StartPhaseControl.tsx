@@ -91,7 +91,12 @@ export function StartPhaseControl({
     try {
       const res = await fetch(`/api/v2/projects/${projectId}/phases/${phaseId}/start`, {
         method: "POST",
-        headers: authHeaders(true),
+        // No body → no content-type. `authHeaders(true)` sets
+        // `content-type: application/json`, and Fastify rejects that header on
+        // an EMPTY body ("Body cannot be empty when content-type is set to
+        // 'application/json'") before the route handler runs — the defect the
+        // product owner hit on the sibling Analyze button (POLISH P3 hotfix).
+        headers: authHeaders(),
       });
       if (res.status === 401) {
         onUnauthorized();

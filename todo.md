@@ -907,14 +907,6 @@ decision and is deliberately untouched.
   runner identities by direct key registration. `norns-runner pair` still
   exists in the CLI but its server endpoint is gone (404) — dead front door,
   kept because the package IS what Actions installs.
-- [ ] 🔄 P2 — Safari cache hardening: index.html must never be reused without a
-  re-check; hashed /assets/* become immutable.
-- [ ] 🔄 P3 — "Analyze the repository" made real: neutral next-step styling
-  (not an error banner), plus a button that has an AI actually analyze the
-  connected repo and record its architecture via the existing ingest route,
-  which today has zero web callers.
-- [ ] 🔄 P2 — Safari cache hardening: index.html must never be reused without a
-  re-check; hashed /assets/* become immutable.
 - [x] ✅ P3 — "Analyze the repository" made real. (a) `next_recommended_action`
   no longer renders in the red `<Alert>`: new neutral `NextStep` label/chip in
   `ui.tsx`/`styles.css` (theme vars only, both themes); `<Alert>` stays for the
@@ -936,6 +928,33 @@ decision and is deliberately untouched.
   `AnalyzeRepositoryControl` in the overview NextStep row: in-progress state,
   server's own error on failure, resume reload shows the recorded
   architecture.
+- [x] ✅ P3 hotfix — production 400 on the Analyze button: the control sent
+  `content-type: application/json` (`authHeaders(true)`) with NO body, which
+  Fastify rejects ("Body cannot be empty…") before the route handler runs.
+  Now `authHeaders()` (the body-less POST convention, App.tsx ~1224).
+  `MockFetch` records request headers so the control test asserts the REAL
+  invocation shape (no content-type, no body) — a loose fetch mock is what
+  let this ship.
+- [x] ✅ P3 hotfix sweep (PM lifted the scope fence) — `StartPhaseControl.tsx`
+  had the IDENTICAL defect shape (POST `.../phases/:id/start` with
+  `authHeaders(true)`, no body → 400 before the handler). Fixed the same
+  one-line way (`authHeaders()`), and its click test now asserts the real
+  fetch invocation (no content-type header, no body) via the upgraded
+  MockFetch.
+- [x] ✅ `Account.tsx:147` (session revoke) — was CONFIRMED broken (Fastify
+  5.10.0 puts DELETE in its `bodywith` method set, fastify.js:140; runtime
+  probe returned 400 `FST_ERR_CTP_EMPTY_JSON_BODY` for DELETE + JSON
+  content-type + empty body via both `inject` and a real socket). PM lifted
+  the Account.tsx fence; fixed the same one-line way (`authHeaders()`), with
+  a revoke test asserting the real DELETE invocation shape.
+- [x] ✅ Fourth instance found in the final sweep: `Account.tsx:73`
+  (`integrationRequest`) deliberately forced the JSON content-type onto
+  body-less DELETEs (`|| init?.method === "DELETE"`), breaking GitHub
+  connection Disconnect the same way. Fixed in a SEPARABLE commit (5dc9eca)
+  — one step beyond the authorized 147 fix, deliberately kept apart so the
+  integrating PM can drop it — content-type now follows the body, never the
+  method; disconnect test asserts the real invocation; MockFetch learned
+  null-body statuses (204) because the real disconnect route replies 204.
 
 ## Phase tab program (dispatched 2026-07-22)
 
