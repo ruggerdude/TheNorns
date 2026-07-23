@@ -61,6 +61,27 @@ describe("AnalyzeRepositoryControl (POLISH P3)", () => {
     expect(screen.queryByTestId("analyze-repository-error")).not.toBeInTheDocument();
   });
 
+  it("sends a body-less POST without a JSON content-type (Fastify 400s that combination)", async () => {
+    // Production regression: the control originally sent
+    // `content-type: application/json` with NO body, and Fastify rejected it
+    // ("Body cannot be empty when content-type is set to 'application/json'")
+    // before the route handler ever ran. Assert on the REAL fetch invocation —
+    // a mock that only checks the URL is exactly what let that slip.
+    mock.post(ANALYZE_URL, { body: SUCCESS_BODY });
+    render(
+      <AnalyzeRepositoryControl projectId="proj-1" onAnalyzed={vi.fn()} onUnauthorized={vi.fn()} />,
+    );
+    await userEvent.click(screen.getByTestId("analyze-repository-button"));
+    await waitFor(() =>
+      expect(mock.calls.some((call) => call.method === "POST" && call.url === ANALYZE_URL)).toBe(
+        true,
+      ),
+    );
+    const call = mock.calls.find((entry) => entry.method === "POST" && entry.url === ANALYZE_URL);
+    expect(call?.body).toBeUndefined();
+    expect(call?.headers["content-type"]).toBeUndefined();
+  });
+
   it("shows the server's own error message on failure, not a generic one", async () => {
     mock.post(ANALYZE_URL, {
       status: 503,

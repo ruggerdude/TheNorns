@@ -907,14 +907,6 @@ decision and is deliberately untouched.
   runner identities by direct key registration. `norns-runner pair` still
   exists in the CLI but its server endpoint is gone (404) — dead front door,
   kept because the package IS what Actions installs.
-- [ ] 🔄 P2 — Safari cache hardening: index.html must never be reused without a
-  re-check; hashed /assets/* become immutable.
-- [ ] 🔄 P3 — "Analyze the repository" made real: neutral next-step styling
-  (not an error banner), plus a button that has an AI actually analyze the
-  connected repo and record its architecture via the existing ingest route,
-  which today has zero web callers.
-- [ ] 🔄 P2 — Safari cache hardening: index.html must never be reused without a
-  re-check; hashed /assets/* become immutable.
 - [x] ✅ P3 — "Analyze the repository" made real. (a) `next_recommended_action`
   no longer renders in the red `<Alert>`: new neutral `NextStep` label/chip in
   `ui.tsx`/`styles.css` (theme vars only, both themes); `<Alert>` stays for the
@@ -936,6 +928,18 @@ decision and is deliberately untouched.
   `AnalyzeRepositoryControl` in the overview NextStep row: in-progress state,
   server's own error on failure, resume reload shows the recorded
   architecture.
+- [x] ✅ P3 hotfix — production 400 on the Analyze button: the control sent
+  `content-type: application/json` (`authHeaders(true)`) with NO body, which
+  Fastify rejects ("Body cannot be empty…") before the route handler runs.
+  Now `authHeaders()` (the body-less POST convention, App.tsx ~1224).
+  `MockFetch` records request headers so the control test asserts the REAL
+  invocation shape (no content-type, no body) — a loose fetch mock is what
+  let this ship.
+- [ ] 🟡 `StartPhaseControl.tsx:94` has the IDENTICAL defect shape (POST
+  `.../phases/:id/start` with `authHeaders(true)`, no body) — the "Start
+  phase" button should 400 in production the same way. `Account.tsx:147`
+  (DELETE + JSON content-type, no body) is suspect too, unverified. Flagged
+  as a spin-off task; not fixed here (out of P3's file scope).
 
 ## Phase tab program (dispatched 2026-07-22)
 

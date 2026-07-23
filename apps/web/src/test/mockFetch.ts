@@ -18,6 +18,27 @@ export interface RecordedCall {
   method: string;
   url: string;
   body: unknown;
+  /**
+   * Request headers, keys lowercased. Recorded so a test can assert the REAL
+   * invocation shape — e.g. that a body-less POST does NOT carry
+   * `content-type: application/json`, a combination Fastify rejects with 400
+   * before any route handler runs (this exact mismatch between a loose fetch
+   * mock and the real server shipped a broken button once — POLISH P3).
+   */
+  headers: Record<string, string>;
+}
+
+function normalizedHeaders(headers: RequestInit["headers"]): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!headers) return result;
+  const entries =
+    headers instanceof Headers
+      ? [...headers.entries()]
+      : Array.isArray(headers)
+        ? headers
+        : Object.entries(headers);
+  for (const [key, value] of entries) result[key.toLowerCase()] = String(value);
+  return result;
 }
 
 interface Route {
@@ -113,7 +134,7 @@ export class MockFetch {
         body = init.body;
       }
     }
-    this.calls.push({ method, url, body });
+    this.calls.push({ method, url, body, headers: normalizedHeaders(init?.headers) });
 
     const route = this.routes.find((r) => r.method === method && r.pattern.test(url));
     if (!route) {
