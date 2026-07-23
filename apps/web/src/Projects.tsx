@@ -179,6 +179,26 @@ interface GitHubRepository {
   binding_ready?: boolean;
 }
 
+interface LocalHelperStatus {
+  state: "connected" | "degraded" | "disconnected" | "not_installed";
+  runner_id: string | null;
+  message: string;
+  install_command: string;
+  install_command_windows: string;
+}
+
+interface LocalFolderSelection {
+  selection_token: string;
+  expires_at: string;
+  repository: {
+    runner_id: string;
+    repository_id: string;
+    repository_display_name: string;
+    default_branch: string;
+    observed_head: string;
+  };
+}
+
 async function request<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method: body ? "POST" : "GET",
@@ -376,6 +396,7 @@ export function Projects({
   // repository; they differ only in whether Norns creates it (new_repo) or
   // the human picks one that already exists (existing_repo).
   const [startingPoint, setStartingPoint] = useState<"new" | "existing">("new");
+  const [existingSource, setExistingSource] = useState<"github" | "local">("github");
   const scenario: ProjectOnboardingScenario =
     startingPoint === "new" ? "new_repo" : "existing_repo";
   const [name, setName] = useState("");
@@ -397,6 +418,10 @@ export function Projects({
   const [repositoryName, setRepositoryName] = useState("");
   const [repositoryPrivate, setRepositoryPrivate] = useState(true);
   const [sourceError, setSourceError] = useState<string | null>(null);
+  const [localHelper, setLocalHelper] = useState<LocalHelperStatus | null>(null);
+  const [localInstallCommand, setLocalInstallCommand] = useState("");
+  const [localSelection, setLocalSelection] = useState<LocalFolderSelection | null>(null);
+  const [localBusy, setLocalBusy] = useState(false);
   const [creating, setCreating] = useState(false);
   const [removingProjectId, setRemovingProjectId] = useState<string | null>(null);
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
@@ -594,6 +619,63 @@ export function Projects({
     }
   }, [githubStatus, onUnauthorized]);
 
+  const refreshLocalHelper = useCallback(async () => {
+    try {
+      const status = await request<LocalHelperStatus>("/api/runners/helper/status");
+      setLocalHelper(status);
+      if (status.state === "connected") setLocalInstallCommand("");
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setSourceError(error instanceof Error ? error.message : String(error));
+    }
+  }, [onUnauthorized]);
+
+  useEffect(() => {
+    if (!dialog || startingPoint !== "existing" || existingSource !== "local") return;
+    void refreshLocalHelper();
+    const timer = window.setInterval(() => void refreshLocalHelper(), 2_000);
+    return () => window.clearInterval(timer);
+  }, [dialog, existingSource, refreshLocalHelper, startingPoint]);
+
+  const prepareLocalHelper = useCallback(async () => {
+    setLocalBusy(true);
+    setSourceError(null);
+    try {
+      const setup = await request<{ install_command: string }>("/api/pairing/start", {});
+      setLocalInstallCommand(setup.install_command);
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setSourceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLocalBusy(false);
+    }
+  }, [onUnauthorized]);
+
+  const chooseLocalFolder = useCallback(async () => {
+    if (!localHelper?.runner_id) return;
+    setLocalBusy(true);
+    setSourceError(null);
+    try {
+      const selection = await request<LocalFolderSelection | { cancelled: true }>(
+        `/api/runners/${encodeURIComponent(localHelper.runner_id)}/workspaces/choose`,
+        {},
+      );
+      if ("cancelled" in selection) return;
+      setLocalSelection(selection);
+      setName((current) => current || selection.repository.repository_display_name);
+      setDescription(
+        (current) =>
+          current ||
+          `Analyze and continue development of ${selection.repository.repository_display_name}`,
+      );
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setSourceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLocalBusy(false);
+    }
+  }, [localHelper, onUnauthorized]);
+
   const refreshAttention = useCallback(async () => {
     try {
       setAttention(await request<PortfolioAttentionDto>("/api/v2/attention"));
@@ -749,9 +831,12 @@ export function Projects({
       setName("");
       setDescription("");
       setStartingPoint("new");
+      setExistingSource("github");
       setSelectedRepositoryId("");
       setRepositoryName("");
       setRepositoryQuery("");
+      setLocalSelection(null);
+      setLocalInstallCommand("");
       setIdempotencyKey(globalThis.crypto.randomUUID());
       onOpenProject(completedProject);
     },
@@ -763,6 +848,44 @@ export function Projects({
     setError(null);
     setSourceError(null);
     try {
+      if (startingPoint === "existing" && existingSource === "local") {
+        if (!localSelection) {
+          setSourceError("Choose a local Git repository first.");
+          return;
+        }
+        const completedProject = await request<ProjectSummary>("/api/v2/projects/local", {
+          name: name.trim() || localSelection.repository.repository_display_name,
+          description:
+            description.trim() ||
+            `Analyze and continue development of ${localSelection.repository.repository_display_name}`,
+          pm_provider: pmProvider,
+          pm_model: pmModel,
+          selection_token: localSelection.selection_token,
+          verification_policy_ref: "verification",
+        });
+        try {
+          if (reviewerSelection !== "auto") {
+            const [reviewerProviderChoice, ...modelParts] = reviewerSelection.split(":");
+            await requestVerb(
+              `/api/v2/projects/${completedProject.id}/planning-reviewer`,
+              "PATCH",
+              {
+                provider: reviewerProviderChoice,
+                model: modelParts.join(":"),
+              },
+            );
+          } else {
+            await requestVerb(
+              `/api/v2/projects/${completedProject.id}/planning-reviewer`,
+              "DELETE",
+            );
+          }
+        } catch {
+          // The automatic opposite-provider reviewer remains active.
+        }
+        proceedAfterCreate(completedProject);
+        return;
+      }
       const repository = repositories.find((candidate) => candidate.id === selectedRepositoryId);
       if (scenario === "new_repo" && !selectedConnectionId) {
         setSourceError("Choose a GitHub account or organization to create the repository under.");
@@ -858,6 +981,9 @@ export function Projects({
     repositories,
     selectedRepositoryId,
     scenario,
+    startingPoint,
+    existingSource,
+    localSelection,
     selectedConnectionId,
     repositoryName,
     repositoryPrivate,
@@ -889,9 +1015,12 @@ export function Projects({
     setName("");
     setDescription("");
     setStartingPoint("new");
+    setExistingSource("github");
     setSelectedRepositoryId("");
     setRepositoryName("");
     setRepositoryQuery("");
+    setLocalSelection(null);
+    setLocalInstallCommand("");
     setReviewerSelection("auto");
     setRoundsCount(3);
     setIdempotencyKey(globalThis.crypto.randomUUID());
@@ -971,29 +1100,34 @@ export function Projects({
   const selectedRepository = repositories.find(
     (repository) => repository.id === selectedRepositoryId,
   );
-  // Both scenarios need a GitHub repository now — a connection is a
-  // universal prerequisite, not something only "existing" needed before.
   const githubConnected = connectedGitHub.length > 0;
-  const sourceReady =
-    scenario === "existing_repo"
+  const isLocalExisting = startingPoint === "existing" && existingSource === "local";
+  const sourceReady = isLocalExisting
+    ? Boolean(localSelection)
+    : scenario === "existing_repo"
       ? Boolean(selectedRepositoryId)
       : Boolean(selectedConnectionId) && Boolean(repositoryName.trim());
   const canCreate =
     !creating &&
-    githubConnected &&
+    (isLocalExisting || githubConnected) &&
     (name.trim().length > 0 || startingPoint === "existing") &&
     (description.trim().length > 0 || startingPoint === "existing") &&
     sourceReady;
   // The confirmation step's one honest passage about where the human's code
   // actually lives (GitHub Actions, not their computer) — null repository
   // name means "not resolved yet", which describeSetup renders as a prompt.
-  const confirmationRepositoryFullName =
-    scenario === "existing_repo"
+  const confirmationRepositoryFullName = isLocalExisting
+    ? null
+    : scenario === "existing_repo"
       ? (selectedRepository?.full_name ?? null)
       : selectedConnection && repositoryName.trim()
         ? `${selectedConnection.owner_login}/${repositoryName.trim()}`
         : null;
-  const confirmationText = describeSetup(confirmationRepositoryFullName);
+  const confirmationText = isLocalExisting
+    ? localSelection
+      ? `The helper will work only inside ${localSelection.repository.repository_display_name}; its filesystem path stays on this computer.`
+      : "Choose a local Git repository with the system folder picker."
+    : describeSetup(confirmationRepositoryFullName);
 
   return (
     <div className="app-shell">
@@ -1292,6 +1426,7 @@ export function Projects({
                         <button
                           type="button"
                           className="pr-title-btn"
+                          id={`project-title-${project.id}`}
                           onClick={() => onOpenProject(project)}
                         >
                           {project.name}
@@ -1440,7 +1575,8 @@ export function Projects({
                         type="button"
                         variant="ghost"
                         className="btn-small pr-remove"
-                        aria-label={`Remove ${project.name} from dashboard`}
+                        aria-label="Remove project from dashboard"
+                        aria-describedby={`project-title-${project.id}`}
                         disabled={removingProjectId === project.id}
                         onClick={() => void removeProject(project)}
                       >
@@ -1580,166 +1716,261 @@ export function Projects({
                       }}
                     >
                       <strong>Existing</strong>
-                      <span>Pick a repository from your connected GitHub account.</span>
+                      <span>Choose a GitHub repository or a local folder.</span>
                     </button>
                   </div>
                 </fieldset>
 
-                {/* O1 REDIRECT: execution runs in a GitHub Actions job inside
-                 *  the chosen repository — nothing is ever installed on the
-                 *  human's machine, so both scenarios need a GitHub
-                 *  connection and this section is always shown, first-class,
-                 *  right here (never "go check Settings"). */}
-                <div className="repository-picker">
-                  {sourceError ? <Alert>{sourceError}</Alert> : null}
-                  {!githubStatus?.configured ? (
-                    <div className="connection-required">
-                      <div>
-                        <strong>GitHub is not configured</strong>
-                        <p>
-                          Configure the Norns GitHub App in workspace Settings before selecting
-                          repositories.
-                        </p>
-                      </div>
-                      <Button
+                {startingPoint === "existing" ? (
+                  <fieldset className="source-picker">
+                    <legend>Where is the existing code?</legend>
+                    <div className="source-options">
+                      <button
                         type="button"
-                        variant="primary"
-                        className="btn-small"
-                        onClick={onOpenAccount}
+                        className={existingSource === "github" ? "is-selected" : ""}
+                        onClick={() => {
+                          setExistingSource("github");
+                          setLocalSelection(null);
+                          setSourceError(null);
+                        }}
                       >
-                        Open Settings
-                      </Button>
-                    </div>
-                  ) : !githubConnected ? (
-                    <div className="connection-required">
-                      <div>
-                        <strong>Connect GitHub to continue</strong>
-                        <p>
-                          {githubStatus.user_authorization.connected
-                            ? "Add a personal account or organization to create or select repositories."
-                            : "Authorize GitHub, then add a personal account or organization."}
-                        </p>
-                      </div>
-                      <Button
+                        <strong>GitHub repository</strong>
+                        <span>Select from a connected account or organization.</span>
+                      </button>
+                      <button
                         type="button"
-                        variant="primary"
-                        className="btn-small"
-                        disabled={githubConnectBusy}
-                        onClick={() => void connectGitHubInline()}
+                        className={existingSource === "local" ? "is-selected" : ""}
+                        onClick={() => {
+                          setExistingSource("local");
+                          setSelectedRepositoryId("");
+                          setSourceError(null);
+                        }}
                       >
-                        {githubConnectBusy ? "Connecting…" : "Connect GitHub"}
-                      </Button>
+                        <strong>Local folder</strong>
+                        <span>Use this computer's secure system folder picker.</span>
+                      </button>
                     </div>
-                  ) : (
-                    <>
-                      <Field label="GitHub account or organization">
-                        <Select
-                          data-testid="github-connection"
-                          value={selectedConnectionId}
-                          onChange={(event) => {
-                            setSelectedConnectionId(event.target.value);
-                            setSelectedRepositoryId("");
-                          }}
+                  </fieldset>
+                ) : null}
+
+                {isLocalExisting ? (
+                  <div className="repository-picker local-folder-picker">
+                    {sourceError ? <Alert>{sourceError}</Alert> : null}
+                    {localHelper?.state === "connected" ? (
+                      <div className="connection-required">
+                        <div>
+                          <strong>Local folder access is ready</strong>
+                          <p>{localHelper.message}</p>
+                          {localSelection ? (
+                            <p data-testid="local-folder-selection">
+                              Selected:{" "}
+                              <strong>{localSelection.repository.repository_display_name}</strong>
+                            </p>
+                          ) : null}
+                        </div>
+                        <Button
+                          type="button"
+                          variant="primary"
+                          disabled={localBusy}
+                          onClick={() => void chooseLocalFolder()}
                         >
-                          {connectedGitHub.map((connection: GitHubConnection) => (
-                            <option key={connection.id} value={connection.id}>
-                              {connection.owner_login} · {connection.owner_type}
-                            </option>
-                          ))}
-                        </Select>
-                      </Field>
-                      {scenario === "new_repo" ? (
-                        <div className="repository-create-fields">
-                          <Field label="Repository name">
-                            <Input
-                              data-testid="github-new-repository-name"
-                              value={repositoryName}
-                              onChange={(event) => setRepositoryName(event.target.value)}
-                              placeholder="notifications-service"
-                            />
-                          </Field>
-                          <Field label="Visibility">
-                            <Select
-                              value={repositoryPrivate ? "private" : "public"}
-                              onChange={(event) =>
-                                setRepositoryPrivate(event.target.value === "private")
-                              }
-                            >
-                              <option value="private">Private</option>
-                              <option value="public">Public</option>
-                            </Select>
-                          </Field>
-                          <p className="field-help">
-                            The selected GitHub installation must allow repository administration to
-                            create a repository.
+                          {localBusy
+                            ? "Waiting for folder…"
+                            : localSelection
+                              ? "Choose a different folder"
+                              : "Choose folder"}
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="connection-required local-helper-setup">
+                        <div>
+                          <strong>One-time local helper setup</strong>
+                          <p>
+                            {localHelper?.message ??
+                              "Checking whether the local folder helper is available…"}
                           </p>
                         </div>
-                      ) : (
-                        <>
-                          <div className="repository-search">
-                            <Input
-                              aria-label="Search connected repositories"
-                              value={repositoryQuery}
-                              onChange={(event) => setRepositoryQuery(event.target.value)}
-                              placeholder={`Search ${selectedConnection?.owner_login ?? "repositories"} or paste a repo URL…`}
-                            />
+                        <Button
+                          type="button"
+                          variant="primary"
+                          disabled={localBusy}
+                          onClick={() => void prepareLocalHelper()}
+                        >
+                          {localBusy ? "Preparing…" : "Set up local folder access"}
+                        </Button>
+                        {localInstallCommand ? (
+                          <div className="local-helper-command">
+                            <code>{localInstallCommand}</code>
                             <Button
                               type="button"
                               className="btn-small"
-                              disabled={repositoryLoading}
-                              onClick={() => void loadRepositories()}
+                              onClick={() =>
+                                void navigator.clipboard.writeText(localInstallCommand)
+                              }
                             >
-                              Refresh
+                              Copy setup command
                             </Button>
+                            <small>
+                              Paste this once in Terminal. This page will detect the helper
+                              automatically; no runner or pairing code needs to be entered here.
+                            </small>
                           </div>
-                          {repositoryLoading ? (
-                            <Spinner label="Loading repositories…" />
-                          ) : visibleRepositories.length ? (
-                            <div className="repository-list" aria-label="GitHub repositories">
-                              {visibleRepositories.map((repository) => (
-                                <button
-                                  type="button"
-                                  aria-pressed={selectedRepositoryId === repository.id}
-                                  disabled={repository.archived}
-                                  className={
-                                    selectedRepositoryId === repository.id ? "is-selected" : ""
-                                  }
-                                  key={repository.id}
-                                  onClick={() => {
-                                    setSelectedRepositoryId(repository.id);
-                                    setName((current) => current || repository.name);
-                                    setDescription(
-                                      (current) =>
-                                        current ||
-                                        repository.description ||
-                                        `Analyze and continue development of ${repository.full_name}`,
-                                    );
-                                  }}
-                                >
-                                  <span>
-                                    <strong>{repository.full_name}</strong>
-                                    <small>
-                                      {repository.description || "No repository description"}
-                                    </small>
-                                  </span>
-                                  <span className="repository-meta">
-                                    {repository.private ? "Private" : "Public"}
-                                    {repository.language ? ` · ${repository.language}` : ""}
-                                    {repository.archived ? " · Archived" : ""}
-                                  </span>
-                                </button>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="muted">
-                              No repositories match this connection and search.
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="repository-picker">
+                    {sourceError ? <Alert>{sourceError}</Alert> : null}
+                    {!githubStatus?.configured ? (
+                      <div className="connection-required">
+                        <div>
+                          <strong>GitHub is not configured</strong>
+                          <p>
+                            Configure the Norns GitHub App in workspace Settings before selecting
+                            repositories.
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="primary"
+                          className="btn-small"
+                          onClick={onOpenAccount}
+                        >
+                          Open Settings
+                        </Button>
+                      </div>
+                    ) : !githubConnected ? (
+                      <div className="connection-required">
+                        <div>
+                          <strong>Connect GitHub to continue</strong>
+                          <p>
+                            {githubStatus.user_authorization.connected
+                              ? "Add a personal account or organization to create or select repositories."
+                              : "Authorize GitHub, then add a personal account or organization."}
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="primary"
+                          className="btn-small"
+                          disabled={githubConnectBusy}
+                          onClick={() => void connectGitHubInline()}
+                        >
+                          {githubConnectBusy ? "Connecting…" : "Connect GitHub"}
+                        </Button>
+                      </div>
+                    ) : (
+                      <>
+                        <Field label="GitHub account or organization">
+                          <Select
+                            data-testid="github-connection"
+                            value={selectedConnectionId}
+                            onChange={(event) => {
+                              setSelectedConnectionId(event.target.value);
+                              setSelectedRepositoryId("");
+                            }}
+                          >
+                            {connectedGitHub.map((connection: GitHubConnection) => (
+                              <option key={connection.id} value={connection.id}>
+                                {connection.owner_login} · {connection.owner_type}
+                              </option>
+                            ))}
+                          </Select>
+                        </Field>
+                        {scenario === "new_repo" ? (
+                          <div className="repository-create-fields">
+                            <Field label="Repository name">
+                              <Input
+                                data-testid="github-new-repository-name"
+                                value={repositoryName}
+                                onChange={(event) => setRepositoryName(event.target.value)}
+                                placeholder="notifications-service"
+                              />
+                            </Field>
+                            <Field label="Visibility">
+                              <Select
+                                value={repositoryPrivate ? "private" : "public"}
+                                onChange={(event) =>
+                                  setRepositoryPrivate(event.target.value === "private")
+                                }
+                              >
+                                <option value="private">Private</option>
+                                <option value="public">Public</option>
+                              </Select>
+                            </Field>
+                            <p className="field-help">
+                              The selected GitHub installation must allow repository administration
+                              to create a repository.
                             </p>
-                          )}
-                        </>
-                      )}
-                    </>
-                  )}
-                </div>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="repository-search">
+                              <Input
+                                aria-label="Search connected repositories"
+                                value={repositoryQuery}
+                                onChange={(event) => setRepositoryQuery(event.target.value)}
+                                placeholder={`Search ${selectedConnection?.owner_login ?? "repositories"} or paste a repo URL…`}
+                              />
+                              <Button
+                                type="button"
+                                className="btn-small"
+                                disabled={repositoryLoading}
+                                onClick={() => void loadRepositories()}
+                              >
+                                Refresh
+                              </Button>
+                            </div>
+                            {repositoryLoading ? (
+                              <Spinner label="Loading repositories…" />
+                            ) : visibleRepositories.length ? (
+                              <div className="repository-list" aria-label="GitHub repositories">
+                                {visibleRepositories.map((repository) => (
+                                  <button
+                                    type="button"
+                                    aria-pressed={selectedRepositoryId === repository.id}
+                                    disabled={repository.archived}
+                                    className={
+                                      selectedRepositoryId === repository.id ? "is-selected" : ""
+                                    }
+                                    key={repository.id}
+                                    onClick={() => {
+                                      setSelectedRepositoryId(repository.id);
+                                      setName((current) => current || repository.name);
+                                      setDescription(
+                                        (current) =>
+                                          current ||
+                                          repository.description ||
+                                          `Analyze and continue development of ${repository.full_name}`,
+                                      );
+                                    }}
+                                  >
+                                    <span>
+                                      <strong>{repository.full_name}</strong>
+                                      <small>
+                                        {repository.description || "No repository description"}
+                                      </small>
+                                    </span>
+                                    <span className="repository-meta">
+                                      {repository.private ? "Private" : "Public"}
+                                      {repository.language ? ` · ${repository.language}` : ""}
+                                      {repository.archived ? " · Archived" : ""}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="muted">
+                                No repositories match this connection and search.
+                              </p>
+                            )}
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
 
                 <div className="project-create-grid">
                   <Field

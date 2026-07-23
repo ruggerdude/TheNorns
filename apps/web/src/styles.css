@@ -1301,6 +1301,31 @@ button:disabled {
   color: var(--muted);
   font-size: 0.75rem;
 }
+.local-helper-setup {
+  align-items: start;
+  flex-wrap: wrap;
+}
+.local-helper-command {
+  flex: 1 0 100%;
+  display: grid;
+  gap: .55rem;
+}
+.local-helper-command code {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: .7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--text);
+  font: 400 .68rem / 1.45 "DM Mono", monospace;
+  white-space: nowrap;
+}
+.local-helper-command small {
+  color: var(--muted);
+  line-height: 1.45;
+}
 .repository-create-fields,
 .project-create-grid {
   display: grid;

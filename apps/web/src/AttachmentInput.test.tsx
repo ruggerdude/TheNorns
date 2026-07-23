@@ -47,16 +47,17 @@ describe("AttachmentInput (FRONT DOOR P4)", () => {
       clipboardData: { files: [pngFile()], items: [] },
     });
 
-    // The upload fired with a base64 image body...
+    // The upload sends the raw File with its real media type — no base64 expansion.
     await waitFor(() => {
       expect(
         fetchMock.calls.some((call) => call.method === "POST" && call.url === UPLOAD_URL),
       ).toBe(true);
     });
     const post = fetchMock.calls.find((call) => call.method === "POST" && call.url === UPLOAD_URL);
-    expect(post?.body).toMatchObject({ mime: "image/png", purpose: "objective" });
-    expect(typeof (post?.body as { base64: string }).base64).toBe("string");
-    expect((post?.body as { base64: string }).base64.length).toBeGreaterThan(0);
+    expect(post?.body).toBeInstanceOf(File);
+    expect((post?.body as File).type).toBe("image/png");
+    expect(post?.headers["content-type"]).toBe("image/png");
+    expect(post?.headers["x-attachment-purpose"]).toBe("objective");
 
     // ...and the returned id is now selected and rendered as a thumbnail.
     await waitFor(() => {

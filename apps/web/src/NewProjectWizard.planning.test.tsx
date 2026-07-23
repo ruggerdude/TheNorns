@@ -141,7 +141,13 @@ describe("new project wizard: create -> attach -> planning run", () => {
       mock.calls.find(
         (call) => call.method === "POST" && call.url === "/api/v2/projects/proj_wizard/attachments",
       ),
-    ).toMatchObject({ body: { mime: "image/png", purpose: "objective" } });
+    ).toMatchObject({
+      body: expect.any(File),
+      headers: {
+        "content-type": "image/png",
+        "x-attachment-purpose": "objective",
+      },
+    });
 
     await user.click(screen.getByRole("button", { name: /start planning run/i }));
 

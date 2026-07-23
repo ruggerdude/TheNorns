@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type ProjectSummary, Projects } from "./Projects";
@@ -70,7 +70,11 @@ describe("project dashboard entry and removal", () => {
     setup();
     await screen.findByRole("link", { name: "Enter Alpha" });
 
-    await userEvent.click(screen.getByRole("button", { name: "Remove Alpha from dashboard" }));
+    const alphaRow = screen.getByRole("link", { name: "Enter Alpha" }).closest("article");
+    if (!alphaRow) throw new Error("Alpha project row is missing");
+    await userEvent.click(
+      within(alphaRow).getByRole("button", { name: "Remove project from dashboard" }),
+    );
 
     await waitFor(() =>
       expect(screen.queryByRole("link", { name: "Enter Alpha" })).not.toBeInTheDocument(),
@@ -90,7 +94,11 @@ describe("project dashboard entry and removal", () => {
     setup();
     await screen.findByRole("link", { name: "Enter Alpha" });
 
-    await userEvent.click(screen.getByRole("button", { name: "Remove Alpha from dashboard" }));
+    const alphaRow = screen.getByRole("link", { name: "Enter Alpha" }).closest("article");
+    if (!alphaRow) throw new Error("Alpha project row is missing");
+    await userEvent.click(
+      within(alphaRow).getByRole("button", { name: "Remove project from dashboard" }),
+    );
 
     expect(screen.getByRole("link", { name: "Enter Alpha" })).toBeVisible();
     expect(mock.calls.some((call) => call.method === "DELETE")).toBe(false);

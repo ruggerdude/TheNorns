@@ -75,9 +75,59 @@ export interface AttachmentContent {
 
 export interface CreateAttachmentInput {
   mime: string;
-  base64: string;
+  /** Preferred transport: raw request bytes, bounded by Fastify before parsing. */
+  content?: Buffer | Uint8Array;
+  /** Backward-compatible JSON transport for older clients. */
+  base64?: string;
   purpose?: string;
   createdBy?: string | null;
+}
+
+/**
+ * Private blob-store seam. The default implementation keeps content in the
+ * capped Postgres store; an object-store adapter can replace it without
+ * changing attachment metadata, authorization, quotas, or planning image parts.
+ */
+export interface AttachmentBlobStore {
+  put(tx: V2SqlExecutor, sha256: string, content: Buffer): Promise<void>;
+  get(tx: V2SqlExecutor, sha256: string): Promise<Buffer | null>;
+  deleteIfUnreferenced(tx: V2SqlExecutor, sha256: string): Promise<void>;
+}
+
+export class PostgresAttachmentBlobStore implements AttachmentBlobStore {
+  async put(tx: V2SqlExecutor, sha256: string, content: Buffer): Promise<void> {
+    await tx.query(
+      `INSERT INTO attachment_blobs (sha256, content) VALUES ($1, $2)
+       ON CONFLICT (sha256) DO NOTHING`,
+      [sha256, content],
+    );
+  }
+
+  async get(tx: V2SqlExecutor, sha256: string): Promise<Buffer | null> {
+    const result = await tx.query<{ content: Buffer | Uint8Array }>(
+      "SELECT content FROM attachment_blobs WHERE sha256 = $1",
+      [sha256],
+    );
+    const content = result.rows[0]?.content;
+    return content ? Buffer.from(content) : null;
+  }
+
+  async deleteIfUnreferenced(tx: V2SqlExecutor, sha256: string): Promise<void> {
+    // Remove tombstoned metadata first so the FK no longer pins orphan bytes.
+    // Live references are retained and continue to protect the shared blob.
+    await tx.query("DELETE FROM attachments WHERE sha256 = $1 AND deleted_at IS NOT NULL", [
+      sha256,
+    ]);
+    await tx.query(
+      `DELETE FROM attachment_blobs
+        WHERE sha256 = $1
+          AND NOT EXISTS (
+            SELECT 1 FROM attachments a
+             WHERE a.sha256 = attachment_blobs.sha256 AND a.deleted_at IS NULL
+          )`,
+      [sha256],
+    );
+  }
 }
 
 interface AttachmentRow {
@@ -114,16 +164,19 @@ function rowToDto(row: AttachmentRow): AttachmentDto {
 
 export interface AttachmentServiceOptions {
   now?: () => Date;
+  blobStore?: AttachmentBlobStore;
 }
 
 export class AttachmentService {
   private readonly now: () => Date;
+  private readonly blobStore: AttachmentBlobStore;
 
   constructor(
     private readonly transactions: V2TransactionRunner,
     options: AttachmentServiceOptions = {},
   ) {
     this.now = options.now ?? (() => new Date());
+    this.blobStore = options.blobStore ?? new PostgresAttachmentBlobStore();
   }
 
   /**
@@ -138,7 +191,11 @@ export class AttachmentService {
         `unsupported media type "${input.mime}"; allowed: image/png, image/jpeg, image/webp, image/gif`,
       );
     }
-    const bytes = decodeBase64(input.base64);
+    const bytes = input.content
+      ? Buffer.from(input.content)
+      : input.base64
+        ? decodeBase64(input.base64)
+        : Buffer.alloc(0);
     if (bytes.length === 0) {
       throw new AttachmentValidationError("invalid_image", "empty attachment payload");
     }
@@ -199,12 +256,7 @@ export class AttachmentService {
         );
       }
 
-      // Content-addressed blob: shared across attachments, written once.
-      await tx.query(
-        `INSERT INTO attachment_blobs (sha256, content) VALUES ($1, $2)
-           ON CONFLICT (sha256) DO NOTHING`,
-        [sha256, bytes],
-      );
+      await this.blobStore.put(tx, sha256, bytes);
 
       const id = newId("attachment");
       const createdAt = this.now().toISOString();
@@ -251,11 +303,10 @@ export class AttachmentService {
   /** The raw bytes + content-type for the image-serving GET route. */
   async content(projectId: string, attachmentId: string): Promise<AttachmentContent> {
     return this.transactions.transaction(async (tx) => {
-      const result = await tx.query<{ mime: AttachmentImageMime; content: Buffer | Uint8Array }>(
-        `SELECT a.mime AS mime, b.content AS content
-           FROM attachments a
-           JOIN attachment_blobs b ON b.sha256 = a.sha256
-          WHERE a.id = $1 AND a.project_id = $2 AND a.deleted_at IS NULL`,
+      const result = await tx.query<{ mime: AttachmentImageMime; sha256: string }>(
+        `SELECT mime, sha256
+           FROM attachments
+          WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL`,
         [attachmentId, projectId],
       );
       const row = result.rows[0];
@@ -265,20 +316,27 @@ export class AttachmentService {
           `unknown attachment "${attachmentId}" for project "${projectId}"`,
         );
       }
-      return { mime: row.mime, bytes: Buffer.from(row.content) };
+      const bytes = await this.blobStore.get(tx, row.sha256);
+      if (!bytes) {
+        throw new AttachmentLookupError(
+          "attachment_not_found",
+          `content unavailable for attachment "${attachmentId}"`,
+        );
+      }
+      return { mime: row.mime, bytes };
     });
   }
 
-  /** Soft-delete one attachment. The blob is content-addressed and may be
-   *  shared, so it is retained; only the metadata row is tombstoned. */
+  /** Tombstone one attachment, then remove metadata/blob content only when no
+   *  live attachment still references the content-addressed bytes. */
   async delete(projectId: string, attachmentId: string): Promise<void> {
     await this.transactions.transaction(async (tx) => {
       // RETURNING (rather than affectedRows) keeps the count identical across
       // the PGlite test runtime and production node-postgres.
-      const result = await tx.query<{ id: string }>(
+      const result = await tx.query<{ id: string; sha256: string }>(
         `UPDATE attachments SET deleted_at = $3
           WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL
-          RETURNING id`,
+          RETURNING id, sha256`,
         [attachmentId, projectId, this.now().toISOString()],
       );
       if (result.rows.length === 0) {
@@ -287,6 +345,8 @@ export class AttachmentService {
           `unknown attachment "${attachmentId}" for project "${projectId}"`,
         );
       }
+      const sha256 = result.rows[0]?.sha256;
+      if (sha256) await this.blobStore.deleteIfUnreferenced(tx, sha256);
     });
   }
 
@@ -294,13 +354,39 @@ export class AttachmentService {
    *  the project. Returns the number tombstoned. */
   async deleteForProject(projectId: string): Promise<number> {
     return this.transactions.transaction(async (tx) => {
-      const result = await tx.query<{ id: string }>(
+      const result = await tx.query<{ id: string; sha256: string }>(
         `UPDATE attachments SET deleted_at = $2
           WHERE project_id = $1 AND deleted_at IS NULL
-          RETURNING id`,
+          RETURNING id, sha256`,
         [projectId, this.now().toISOString()],
       );
+      for (const sha256 of new Set(result.rows.map((row) => row.sha256))) {
+        await this.blobStore.deleteIfUnreferenced(tx, sha256);
+      }
       return result.rows.length;
+    });
+  }
+
+  /** Quota telemetry for UI and operational checks. */
+  async usage(projectId: string): Promise<{
+    live_count: number;
+    bytes_used: number;
+    max_count_per_objective: number;
+    max_bytes_per_project: number;
+  }> {
+    return this.transactions.transaction(async (tx) => {
+      await this.assertProjectExists(tx, projectId);
+      const result = await tx.query<{ live_count: number | string; bytes_used: number | string }>(
+        `SELECT count(*) AS live_count, coalesce(sum(bytes), 0) AS bytes_used
+           FROM attachments WHERE project_id = $1 AND deleted_at IS NULL`,
+        [projectId],
+      );
+      return {
+        live_count: Number(result.rows[0]?.live_count ?? 0),
+        bytes_used: Number(result.rows[0]?.bytes_used ?? 0),
+        max_count_per_objective: ATTACHMENT_CAPS.maxPerObjective,
+        max_bytes_per_project: ATTACHMENT_CAPS.maxBytesPerProject,
+      };
     });
   }
 
@@ -319,11 +405,10 @@ export class AttachmentService {
       const result = await tx.query<{
         id: string;
         mime: AttachmentImageMime;
-        content: Buffer | Uint8Array;
+        sha256: string;
       }>(
-        `SELECT a.id AS id, a.mime AS mime, b.content AS content
+        `SELECT a.id AS id, a.mime AS mime, a.sha256 AS sha256
            FROM attachments a
-           JOIN attachment_blobs b ON b.sha256 = a.sha256
           WHERE a.project_id = $1 AND a.deleted_at IS NULL AND a.id IN (${placeholders})`,
         [projectId, ...attachmentIds],
       );
@@ -333,10 +418,12 @@ export class AttachmentService {
         if (parts.length >= ATTACHMENT_CAPS.maxImagesPerPlanningRound) break;
         const row = byId.get(id);
         if (!row) continue;
+        const bytes = await this.blobStore.get(tx, row.sha256);
+        if (!bytes) continue;
         parts.push({
           type: "image",
           mime: row.mime,
-          base64: Buffer.from(row.content).toString("base64"),
+          base64: bytes.toString("base64"),
         });
       }
       return parts;

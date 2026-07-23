@@ -752,6 +752,9 @@ const server = await buildServer({
   ...(bootstrapDeployToken !== undefined ? { deployToken: bootstrapDeployToken } : {}),
   ...(usersFlusher !== undefined ? { persistUsers: () => usersFlusher.flush() } : {}),
   ...(webDist !== undefined ? { webDist } : {}),
+  ...(process.env.NORNS_INSTALL_SCRIPTS_DIR
+    ? { installScriptsDir: process.env.NORNS_INSTALL_SCRIPTS_DIR }
+    : {}),
   publicOrigin,
   dashboard: () =>
     buildDashboard({

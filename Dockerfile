@@ -35,6 +35,7 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@11.13.0 --activate
 ENV NODE_ENV=production
 ENV NORNS_WEB_DIST=/app/apps/web/dist
+ENV NORNS_INSTALL_SCRIPTS_DIR=/app/scripts
 
 # production dependencies only — all workspace manifests present so the
 # frozen lockfile validates; --filter installs just the server's prod closure
@@ -54,6 +55,7 @@ COPY --from=build /app/packages/adapters/dist packages/adapters/dist
 COPY --from=build /app/apps/server/dist apps/server/dist
 COPY --from=build /app/apps/server/drizzle apps/server/drizzle
 COPY --from=build /app/apps/web/dist apps/web/dist
+COPY --from=build /app/scripts scripts
 # EXECUTION E3 — the served runner artifact. defaultRunnerTarballDir() resolves
 # apps/runner/dist-pack relative to apps/server/dist/integrations/, so this
 # lands exactly where the server looks with no configuration.

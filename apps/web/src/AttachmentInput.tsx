@@ -65,16 +65,6 @@ function isAcceptedImage(file: File): boolean {
   return (ATTACHMENT_ACCEPTED_MIMES as readonly string[]).includes(file.type);
 }
 
-/** File -> base64 (no data-URI prefix). Uses arrayBuffer()+btoa so it behaves
- *  identically in the browser and jsdom (no FileReader/ObjectURL dependence). */
-async function fileToBase64(file: File): Promise<string> {
-  const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i] as number);
-  return btoa(binary);
-}
-
 function imagesFromDataTransfer(data: DataTransfer | null): File[] {
   if (!data) return [];
   const fromFiles = Array.from(data.files ?? []);
@@ -131,12 +121,15 @@ export function AttachmentInput({
   const uploadOne = useCallback(
     async (file: File): Promise<AttachmentDescriptor | null> => {
       try {
-        const base64 = await fileToBase64(file);
         const res = await fetch(`/api/v2/projects/${projectId}/attachments`, {
           method: "POST",
-          headers: authHeaders(true),
+          headers: {
+            ...authHeaders(),
+            "content-type": file.type,
+            "x-attachment-purpose": purpose,
+          },
           credentials: "include",
-          body: JSON.stringify({ mime: file.type, base64, purpose }),
+          body: file,
         });
         if (!res.ok) {
           const detail = (await res.json().catch(() => ({}))) as { message?: string };

@@ -92,7 +92,18 @@ export class RelayStores {
     return this.state.audit;
   }
 
-  // -- runners ---------------------------------------------------------------
+  // -- pairing / runners -----------------------------------------------------
+
+  createPairing(code: string, expiresAt: Date): void {
+    this.state.pairings[code] = { code, expires_at: expiresAt.toISOString() };
+  }
+
+  consumePairing(code: string, now: Date): boolean {
+    const record = this.state.pairings[code];
+    if (!record) return false;
+    delete this.state.pairings[code];
+    return Date.parse(record.expires_at) > now.getTime();
+  }
 
   registerRunner(runnerId: string, publicKeyPem: string): RunnerRecord {
     const existing = this.state.runners[runnerId];

@@ -133,6 +133,8 @@ export class MockFetch {
       } catch {
         body = init.body;
       }
+    } else if (init?.body !== undefined) {
+      body = init.body;
     }
     this.calls.push({ method, url, body, headers: normalizedHeaders(init?.headers) });
 

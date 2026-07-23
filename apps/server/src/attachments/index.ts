@@ -11,6 +11,8 @@ export {
   type AttachmentServiceOptions,
   type AttachmentValidationCode,
   type CreateAttachmentInput,
+  type AttachmentBlobStore,
+  PostgresAttachmentBlobStore,
 } from "./service.js";
 export {
   ALLOWED_IMAGE_MIMES,

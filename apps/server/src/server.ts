@@ -7,7 +7,8 @@
 //   GET  /          (React app in production; API notice in server-only dev)
 // Connection state is never trusted solely in process memory: every decision
 // reads/writes RelayStores, which snapshots to durable storage.
-import { sep } from "node:path";
+import { readFileSync } from "node:fs";
+import { join, sep } from "node:path";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import {
@@ -51,6 +52,7 @@ import {
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
+  ATTACHMENT_CAPS,
   AttachmentLookupError,
   AttachmentService,
   AttachmentValidationError,
@@ -110,7 +112,7 @@ import {
 } from "./gateway/index.js";
 import { AllocationError, AllocationStrategy } from "./graph/allocation.js";
 import { GraphEditError, WorkflowGraph } from "./graph/graph.js";
-import { newId, nonce } from "./ids.js";
+import { newId, nonce, pairingCode } from "./ids.js";
 import {
   GitHubIntegrationError,
   type GitHubIntegrationService,
@@ -208,6 +210,12 @@ import {
   StrategyWorkflowConflictError,
   type StrategyWorkflowService,
 } from "./projects/strategyWorkflowService.js";
+import {
+  type HelperRunnerSnapshot,
+  helperStatus,
+  installCommand,
+  installCommandWindows,
+} from "./runners/helperOnboarding.js";
 // EXECUTION E3: proxied model inference for credential-free runners.
 import {
   InferenceProxy,
@@ -218,6 +226,11 @@ import {
   SqlRunReservationBudget,
   parseRunnerAllowedModels,
 } from "./runners/inferenceProxy.js";
+import {
+  RunnerWorkspaceBroker,
+  WorkspaceBrokerError,
+  WorkspaceSelectionTokens,
+} from "./runners/workspaceBroker.js";
 import type { RelayStores } from "./stores.js";
 import type {
   IdentityService,
@@ -230,6 +243,7 @@ import { LoginAttemptThrottle } from "./users/loginThrottle.js";
 import { LastActiveAdminError, type UserStore } from "./users/store.js";
 
 const DEFAULT_COMMAND_TTL_MS = 5 * 60 * 1000;
+const PAIRING_TTL_MS = 10 * 60 * 1000;
 
 interface WsLike {
   send(data: string): void;
@@ -430,6 +444,8 @@ export interface ServerOptions {
   secureCookies?: boolean;
   /** Canonical browser origin used in emailed links. */
   publicOrigin?: string;
+  /** Absolute repository scripts directory used for the fixed helper installers. */
+  installScriptsDir?: string;
 }
 
 export interface NornsServer {
@@ -451,6 +467,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const now = options.clock ?? (() => new Date());
   const app = Fastify({ logger: false });
   await app.register(websocket);
+  app.addContentTypeParser(
+    ["image/png", "image/jpeg", "image/webp", "image/gif"],
+    { parseAs: "buffer", bodyLimit: ATTACHMENT_CAPS.maxBytesPerImage },
+    (_request, body, done) => done(null, body),
+  );
 
   // EXECUTION E1: assigned in the task-context section below when the
   // relational runtime is present, and handed back on NornsServer so E2's
@@ -464,7 +485,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // The socket+generation a runner most recently reconciled at. Event and
   // inference frames are only honored when they arrive on this exact socket
   // at this exact generation (see /ws/runner below).
-  const reconciledRunners = new Map<string, { socket: WsLike; generation: number }>();
+  const reconciledRunners = new Map<
+    string,
+    { socket: WsLike; generation: number; workspacePicker: boolean }
+  >();
   const sessionSockets = new Map<WsLike, SessionSocketBinding>();
   const loginThrottle = new LoginAttemptThrottle();
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
@@ -701,6 +725,26 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const sendFrame = (socket: WsLike, frame: ServerFrameT): void => {
     socket.send(JSON.stringify(frame));
   };
+  const workspaceBroker = new RunnerWorkspaceBroker((runnerId, generation, request) => {
+    const socket = runnerSockets.get(runnerId);
+    const reconciled = reconciledRunners.get(runnerId);
+    if (
+      !socket ||
+      !reconciled ||
+      reconciled.socket !== socket ||
+      reconciled.generation !== generation ||
+      !reconciled.workspacePicker
+    ) {
+      return false;
+    }
+    try {
+      sendFrame(socket, { type: "workspace_request", generation, request });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const workspaceSelections = new WorkspaceSelectionTokens();
   const v2WireCommand = (command: V2DispatchCommandT): CommandEnvelopeT => ({
     protocol: 1,
     command_id: command.command_id,
@@ -783,6 +827,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (phase4DispatchTimer) clearInterval(phase4DispatchTimer);
     if (phase4RecoveryTimer) clearInterval(phase4RecoveryTimer);
     if (phaseQueueDrainTimer) clearInterval(phaseQueueDrainTimer);
+    workspaceBroker.close();
   });
 
   const closeSessionSocket = (binding: SessionSocketBinding, reason: string): void => {
@@ -1216,6 +1261,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       });
       stores.revokeRunnerSessions(runnerId);
       reconciledRunners.delete(runnerId);
+      workspaceBroker.disconnect(runnerId);
       const socket = runnerSockets.get(runnerId);
       if (socket) {
         runnerSockets.delete(runnerId);
@@ -1294,11 +1340,80 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
   }
 
-  // POLISH P1: the local-runner pairing front door (`/api/pairing/start`,
-  // `/api/pairing/complete`) is gone. The product owner rejected any design
-  // where a user installs and pairs a local runner; the only way a runner
-  // identity is minted now is the Actions enrollment exchange below, against
-  // a dispatch the server itself created.
+  // ---- native local-folder helper -------------------------------------------
+
+  app.post("/api/pairing/start", async (req, reply) => {
+    if (!(await requireSession(req, reply))) return;
+    const code = pairingCode();
+    const expiresAt = new Date(now().getTime() + PAIRING_TTL_MS);
+    stores.createPairing(code, expiresAt);
+    stores.audit("operator", "pairing.started", code, now());
+    const origin = externalOrigin(req);
+    const runnerId = (req.query as { runner_id?: string } | undefined)?.runner_id;
+    if (runnerId !== undefined && !/^[A-Za-z0-9._-]{1,64}$/.test(runnerId)) {
+      return reply.code(400).send({ error: "bad_request" });
+    }
+    const target = { origin, code, ...(runnerId ? { runnerId } : {}) };
+    return reply.send({
+      code,
+      expires_at: expiresAt.toISOString(),
+      runner_id: runnerId ?? "runner-1",
+      install_command: installCommand(target),
+      install_command_windows: installCommandWindows(target),
+    });
+  });
+
+  const PairingComplete = z.object({
+    code: z.string().min(1),
+    runner_id: z.string().min(1),
+    public_key_pem: z.string().min(1),
+  });
+
+  app.post("/api/pairing/complete", (req, reply) => {
+    const parsed = PairingComplete.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "bad_request" });
+    const { code, runner_id, public_key_pem } = parsed.data;
+    if (!stores.consumePairing(code, now())) {
+      stores.audit(`runner:${runner_id}`, "pairing.rejected", "invalid or expired code", now());
+      return reply.code(403).send({ error: "invalid_pairing_code" });
+    }
+    const record = stores.registerRunner(runner_id, public_key_pem);
+    reconciledRunners.delete(runner_id);
+    workspaceBroker.disconnect(runner_id);
+    const priorSocket = runnerSockets.get(runner_id);
+    if (priorSocket) {
+      runnerSockets.delete(runner_id);
+      sendFrame(priorSocket, { type: "fenced", current_generation: record.generation });
+      priorSocket.close(1008, "runner re-paired");
+      broadcast({ type: "runner_status", runner_id, connected: false });
+    }
+    stores.audit(
+      `runner:${runner_id}`,
+      "pairing.completed",
+      `generation=${record.generation}`,
+      now(),
+    );
+    return reply.send({ runner_id, generation: record.generation });
+  });
+
+  if (options.installScriptsDir) {
+    for (const [route, filename] of Object.entries({
+      "/install/runner.sh": "install-runner.sh",
+      "/install/runner.ps1": "install-runner.ps1",
+    })) {
+      app.get(route, (_req, reply) => {
+        try {
+          return reply
+            .type("text/plain; charset=utf-8")
+            .header("cache-control", "no-store")
+            .header("x-content-type-options", "nosniff")
+            .send(readFileSync(join(options.installScriptsDir ?? "", filename), "utf8"));
+        } catch {
+          return reply.code(404).send({ error: "installer_unavailable" });
+        }
+      });
+    }
+  }
 
   // ---- ONBOARDING O4: GitHub Actions-hosted execution ------------------------
   //
@@ -1488,6 +1603,35 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   });
 
   // ---- observation -------------------------------------------------------------
+
+  const helperRunnerSnapshots = (): HelperRunnerSnapshot[] =>
+    stores.runners().map((runner) => {
+      const reconciled = reconciledRunners.get(runner.runner_id);
+      return {
+        runner_id: runner.runner_id,
+        generation: runner.generation,
+        connected:
+          runnerSockets.has(runner.runner_id) && reconciled?.generation === runner.generation,
+        workspace_picker_ready:
+          reconciled?.generation === runner.generation && reconciled.workspacePicker,
+        last_seen_at: runner.last_seen_at,
+      };
+    });
+
+  app.get("/api/runners/helper/status", async (req, reply) => {
+    if (!(await requireSession(req, reply))) return;
+    const origin = externalOrigin(req);
+    return reply.send({
+      ...helperStatus(helperRunnerSnapshots()),
+      install_command: installCommand({ origin }),
+      install_command_windows: installCommandWindows({ origin }),
+    });
+  });
+
+  app.get("/api/runners", async (req, reply) => {
+    if (!(await requireSession(req, reply))) return;
+    return reply.send(helperRunnerSnapshots());
+  });
 
   app.get("/api/audit", async (req, reply) => {
     if (!(await requireSession(req, reply))) return;
@@ -2354,6 +2498,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // ---- allocate each one's own graph ------------------------------------------
 
   const projects = options.projects ? projectRepository(options.projects) : undefined;
+  const attachmentService = options.attachments
+    ? new AttachmentService(options.attachments.transactions)
+    : null;
   if (projects !== undefined) {
     const projectError = (reply: FastifyReply, error: unknown): void => {
       if (error instanceof ProjectNotFoundError) {
@@ -2421,6 +2568,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       const { id } = req.params as { id: string };
       try {
         await projects.archive(id, user.id);
+        await attachmentService?.deleteForProject(id);
         stores.audit(user.email, "project.archived", id, now());
         reply.code(204).send();
       } catch (error) {
@@ -2432,12 +2580,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       name: z.string().min(1),
       description: z.string().min(1),
       source_type: z.enum(["local", "github"]).optional(),
-      // FRONT DOOR P2b (D2): a raw local path is now accepted at creation
-      // time with no runner online. It is used only to derive an opaque
-      // sha256 fingerprint and a sanitized last-path-segment display name
-      // (see RelationalProjectReadRepository.create) — never persisted
-      // verbatim, executed, or sent anywhere. The length cap is defense in
-      // depth against a pathological request body, not a path-shape check.
       source_location: z.string().trim().min(1).max(4096).optional(),
       github_connection_id: z.string().min(1).optional(),
       github_repository_id: z.string().min(1).optional(),
@@ -2456,24 +2598,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }),
       ])
       .superRefine((value, context) => {
-        // FRONT DOOR P2b (D2): folder-first local creation, no runner
-        // required. `source_type: "local"` + `source_location` creates the
-        // project immediately with an unverified repository-binding
-        // candidate; only execution dispatch later requires a verified
-        // binding + online runner (see Phase4Coordinator.schedule). This
-        // replaces the prior hard rejection of local source_type.
-        if (value.source_type === "local" && !value.source_location) {
+        // Raw filesystem paths are never a web API input. Local projects are
+        // created without a source and then bound through a user-bound
+        // selection token minted by the authenticated native folder helper.
+        if (value.source_type === "local" || value.source_location) {
           context.addIssue({
             code: z.ZodIssueCode.custom,
             path: ["source_location"],
-            message: "select a local folder path",
-          });
-        }
-        if (value.source_type !== "local" && value.source_location) {
-          context.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["source_type"],
-            message: "a local folder path requires source_type=local",
+            message: "use the secure local folder chooser",
           });
         }
         if (value.source_type === "github" && !value.github_connection_id) {
@@ -2539,12 +2671,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               sourceRepositoryId: resolvedGitHubRepository.id,
               sourceDefaultBranch: resolvedGitHubRepository.default_branch,
             }
-          : {}),
-        // FRONT DOOR P2b (D2): the raw local path, used only transiently by
-        // ProjectRepository.create() to derive an unverified binding
-        // candidate's fingerprint + display name. Never stored verbatim.
-        ...(body.data.source_type === "local" && body.data.source_location
-          ? { sourceLocation: body.data.source_location }
           : {}),
       });
       stores.audit(
@@ -2790,6 +2916,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     // ===================== end ONBOARDING O2 =============================
 
     if (options.phase3) {
+      const LocalBindingBody = z.object({
+        selection_token: z.string().min(1),
+        verification_policy_ref: z.string().min(1),
+      });
       const GitHubBindingBody = z.object({
         runner_id: z.string().min(1),
         github_installation_id: z.string().min(1),
@@ -2881,10 +3011,148 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         throw error;
       };
 
-      // POLISH P1: the local-runner workspace picker routes
-      // (`/api/runners/:runnerId/workspaces` list/choose/browse/validate) were
-      // removed with the pairing front door. Local folder selection only ever
-      // worked against a paired local runner, which can no longer exist.
+      const workspaceFailure = (reply: FastifyReply, error: unknown): FastifyReply => {
+        const code = error instanceof WorkspaceBrokerError ? error.code : "runner_unavailable";
+        return reply.code(code === "request_limit" ? 429 : code === "timeout" ? 504 : 409).send({
+          error: code,
+          message:
+            code === "runner_upgrade_required"
+              ? "Update the local helper before choosing a folder."
+              : code === "timeout"
+                ? "The folder chooser timed out. Try again."
+                : "The local helper is not available.",
+        });
+      };
+
+      app.post("/api/runners/:runnerId/workspaces/choose", async (req, reply) => {
+        const user = await resolveUser(req);
+        if (!user) return reply.code(401).send({ error: "unauthorized" });
+        const { runnerId } = req.params as { runnerId: string };
+        const runner = stores.runner(runnerId);
+        const reconciled = reconciledRunners.get(runnerId);
+        if (
+          !runner ||
+          !reconciled ||
+          reconciled.socket !== runnerSockets.get(runnerId) ||
+          reconciled.generation !== runner.generation
+        ) {
+          return workspaceFailure(reply, new WorkspaceBrokerError("runner_unavailable"));
+        }
+        if (!reconciled.workspacePicker) {
+          return workspaceFailure(reply, new WorkspaceBrokerError("runner_upgrade_required"));
+        }
+        try {
+          const generation = runner.generation;
+          const response = await workspaceBroker.request(runnerId, generation, {
+            operation: "choose",
+          });
+          if (response.status === "cancelled") return reply.send({ cancelled: true });
+          if (response.status !== "ok" || !response.repository) {
+            return reply.code(response.status === "invalid_request" ? 422 : 409).send({
+              error: response.status,
+              message:
+                response.status === "invalid_request"
+                  ? "Choose the root folder of a Git repository with at least one commit."
+                  : "The system folder chooser is unavailable.",
+            });
+          }
+          const current = reconciledRunners.get(runnerId);
+          if (
+            runnerSockets.get(runnerId) !== reconciled.socket ||
+            current?.socket !== reconciled.socket ||
+            current.generation !== generation
+          ) {
+            return reply.code(409).send({ error: "runner_unavailable" });
+          }
+          const grant = workspaceSelections.issue(
+            user.id,
+            runnerId,
+            generation,
+            response.repository,
+          );
+          return reply.send({
+            ...grant,
+            repository: { runner_id: runnerId, ...response.repository },
+          });
+        } catch (error) {
+          return workspaceFailure(reply, error);
+        }
+      });
+
+      const LocalProjectBody = z.discriminatedUnion("pm_provider", [
+        z.object({
+          name: z.string().trim().min(1),
+          description: z.string().trim().min(1),
+          selection_token: z.string().min(1),
+          verification_policy_ref: z.string().min(1).default("verification"),
+          pm_provider: z.literal("anthropic"),
+          pm_model: AnthropicPmModel.default(DEFAULT_PM_MODEL.anthropic),
+        }),
+        z.object({
+          name: z.string().trim().min(1),
+          description: z.string().trim().min(1),
+          selection_token: z.string().min(1),
+          verification_policy_ref: z.string().min(1).default("verification"),
+          pm_provider: z.literal("openai"),
+          pm_model: OpenAiPmModel.default(DEFAULT_PM_MODEL.openai),
+        }),
+      ]);
+
+      app.post("/api/v2/projects/local", async (req, reply) => {
+        const user = await resolveUser(req);
+        if (!user) return reply.code(401).send({ error: "unauthorized" });
+        const body = LocalProjectBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const reserved = workspaceSelections.reserve(user.id, body.data.selection_token);
+        if (!reserved) return reply.code(409).send({ error: "local_selection_invalid" });
+        const selection = reserved.selection;
+        const currentRunner = stores.runner(selection.runner_id);
+        const reconciled = reconciledRunners.get(selection.runner_id);
+        if (
+          !currentRunner ||
+          !reconciled ||
+          reconciled.socket !== runnerSockets.get(selection.runner_id) ||
+          reconciled.generation !== selection.runner_generation ||
+          !reconciled.workspacePicker ||
+          currentRunner.generation !== selection.runner_generation
+        ) {
+          workspaceSelections.release(body.data.selection_token, reserved.reservation_id);
+          return reply.code(409).send({ error: "local_selection_invalid" });
+        }
+        let project: Awaited<ReturnType<ProjectRepository["create"]>> | undefined;
+        try {
+          project = await projects.create({
+            name: body.data.name,
+            description: body.data.description,
+            pmProvider: body.data.pm_provider,
+            pmModel: body.data.pm_model,
+          });
+          await options.phase3?.sourceBindings.createLocal({
+            project_id: project.id,
+            runner_id: selection.runner_id,
+            workspace_id: selection.workspace_id,
+            repository_id: selection.repository_id,
+            repository_display_name: selection.repository_display_name,
+            default_branch: selection.default_branch,
+            observed_head: selection.observed_head,
+            verification_policy_ref: body.data.verification_policy_ref,
+            created_by: { actor_type: "human", actor_id: user.id },
+          });
+          workspaceSelections.commit(body.data.selection_token, reserved.reservation_id);
+          stores.audit(user.email, "project.created.local", project.id, now());
+          return reply.code(201).send(await projects.summary(project.id));
+        } catch {
+          workspaceSelections.release(body.data.selection_token, reserved.reservation_id);
+          if (project) {
+            try {
+              await projects.archive(project.id, user.id);
+            } catch {
+              // The original create/bind failure remains the public result.
+            }
+          }
+          return reply.code(409).send({ error: "local_project_creation_failed" });
+        }
+      });
 
       app.get("/api/v2/projects/:id/resume", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
@@ -2930,11 +3198,48 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
       });
 
-      // POLISH P1: `POST /api/v2/projects/:id/source-bindings/local` was
-      // removed with the workspace picker above. Its only input, a selection
-      // token, could only be minted by the removed choose/validate routes, so
-      // the route could never again succeed. The SourceBindings.createLocal
-      // service and existing local-binding rows are untouched.
+      app.post("/api/v2/projects/:id/source-bindings/local", async (req, reply) => {
+        const user = await resolveUser(req);
+        if (!user) return reply.code(401).send({ error: "unauthorized" });
+        const body = LocalBindingBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const { id } = req.params as { id: string };
+        const reserved = workspaceSelections.reserve(user.id, body.data.selection_token);
+        if (!reserved) return reply.code(409).send({ error: "local_selection_invalid" });
+        const selection = reserved.selection;
+        const currentRunner = stores.runner(selection.runner_id);
+        const reconciled = reconciledRunners.get(selection.runner_id);
+        if (
+          !currentRunner ||
+          !reconciled ||
+          reconciled.socket !== runnerSockets.get(selection.runner_id) ||
+          reconciled.generation !== selection.runner_generation ||
+          !reconciled.workspacePicker ||
+          currentRunner.generation !== selection.runner_generation
+        ) {
+          workspaceSelections.release(body.data.selection_token, reserved.reservation_id);
+          return reply.code(409).send({ error: "local_selection_invalid" });
+        }
+        try {
+          const binding = await options.phase3?.sourceBindings.createLocal({
+            project_id: id,
+            runner_id: selection.runner_id,
+            workspace_id: selection.workspace_id,
+            repository_id: selection.repository_id,
+            repository_display_name: selection.repository_display_name,
+            default_branch: selection.default_branch,
+            observed_head: selection.observed_head,
+            verification_policy_ref: body.data.verification_policy_ref,
+            created_by: { actor_type: "human", actor_id: user.id },
+          });
+          workspaceSelections.commit(body.data.selection_token, reserved.reservation_id);
+          return reply.code(201).send(binding);
+        } catch {
+          workspaceSelections.release(body.data.selection_token, reserved.reservation_id);
+          return reply.code(409).send({ error: "source_binding_conflict" });
+        }
+      });
+
       app.post("/api/v2/projects/:id/source-bindings/github", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
         const user = await resolveUser(req);
@@ -3807,14 +4112,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       }
     });
 
-    // FRONT DOOR P4 (D3): the attachments service, constructed once here so it
-    // is shared by both the planning round-1 image injection (below) and the
-    // attachment routes (further down). Null when the deployment lacks the
-    // attachments database runtime.
-    const attachmentService = options.attachments
-      ? new AttachmentService(options.attachments.transactions)
-      : null;
-
     // ---- durable planning runs (FRONT DOOR P2 §D1) --------------------------
     // A user-configurable, observable wrapper around the runPlanning() loop
     // above: rounds, reviewer selection, and the terminal result/failure are
@@ -4227,8 +4524,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     }
 
     // ---- FRONT DOOR P4 (D3): image attachments ------------------------------
-    // Content-addressed image storage for project objectives. Base64 JSON in,
-    // metadata JSON out; the GET serves the raw bytes. Session auth + project
+    // Content-addressed image storage for project objectives. Raw image bytes
+    // are the preferred upload transport; legacy base64 JSON remains accepted.
+    // Metadata JSON out; the GET serves the raw bytes. Session auth + project
     // authorization mirror the neighboring v2 project routes (the service 404s
     // an unknown project). Caps, mime allow-list, dedupe, and quotas live in the
     // AttachmentService. Fully additive — its own tables (drizzle/0013) and its
@@ -4272,16 +4570,32 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         async (req, reply) => {
           const user = await resolveUser(req);
           if (!user) return reply.code(401).send({ error: "unauthorized" });
-          const body = CreateAttachmentBody.safeParse(req.body);
-          if (!body.success) return reply.code(400).send({ error: "bad_request" });
           const { id } = req.params as { id: string };
           try {
-            const attachment = await attachmentService.create(id, {
-              mime: body.data.mime,
-              base64: body.data.base64,
-              ...(body.data.purpose !== undefined ? { purpose: body.data.purpose } : {}),
-              createdBy: user.id,
-            });
+            const binary = Buffer.isBuffer(req.body) ? req.body : null;
+            const body = binary ? null : CreateAttachmentBody.safeParse(req.body);
+            if (!binary && !body?.success) {
+              return reply.code(400).send({ error: "bad_request" });
+            }
+            const headerPurpose = req.headers["x-attachment-purpose"];
+            const purpose =
+              typeof headerPurpose === "string" ? headerPurpose.trim().slice(0, 200) : undefined;
+            const attachment = binary
+              ? await attachmentService.create(id, {
+                  mime: String(req.headers["content-type"] ?? "").split(";")[0] ?? "",
+                  content: binary,
+                  ...(purpose ? { purpose } : {}),
+                  createdBy: user.id,
+                })
+              : body?.success
+                ? await attachmentService.create(id, {
+                    mime: body.data.mime,
+                    base64: body.data.base64,
+                    ...(body.data.purpose !== undefined ? { purpose: body.data.purpose } : {}),
+                    createdBy: user.id,
+                  })
+                : undefined;
+            if (!attachment) return reply.code(400).send({ error: "bad_request" });
             stores.audit(user.email, "attachment.created", `${id}:${attachment.id}`, now());
             reply.code(201).send(attachment);
           } catch (error) {
@@ -4290,6 +4604,16 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         },
       );
 
+      app.get("/api/v2/projects/:id/attachments/usage", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        try {
+          reply.header("Cache-Control", "no-store").send(await attachmentService.usage(id));
+        } catch (error) {
+          attachmentError(reply, error);
+        }
+      });
+
       app.get("/api/v2/projects/:id/attachments/:attachmentId", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
         const { id, attachmentId } = req.params as { id: string; attachmentId: string };
@@ -4297,7 +4621,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           const { mime, bytes } = await attachmentService.content(id, attachmentId);
           reply
             .header("Content-Type", mime)
-            .header("Cache-Control", "private, max-age=300")
+            .header("Cache-Control", "private, max-age=300, immutable")
+            .header("Content-Disposition", "inline")
+            .header("X-Content-Type-Options", "nosniff")
+            .header("ETag", `"${attachmentId}"`)
             .send(bytes);
         } catch (error) {
           attachmentError(reply, error);
@@ -4633,6 +4960,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
         const priorSocket = runnerSockets.get(authedRunnerId);
         if (priorSocket && priorSocket !== socket) {
+          workspaceBroker.disconnect(authedRunnerId);
           reconciledRunners.delete(authedRunnerId);
           priorSocket.close(1008, "superseded runner connection");
         }
@@ -4640,6 +4968,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         reconciledRunners.set(authedRunnerId, {
           socket,
           generation: runner.generation,
+          workspacePicker: body.capabilities.includes("workspace_picker"),
         });
         stores.markSeen(authedRunnerId, now());
         stores.audit(`runner:${authedRunnerId}`, "runner.connected", "", now());
@@ -4679,10 +5008,17 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         return;
       }
 
-      // POLISH P1: `workspace_response` frames (the local folder picker's
-      // reply channel) are no longer acted on — the workspace broker went
-      // with the pairing front door. A legacy paired runner that still sends
-      // one is simply ignored.
+      if (frame.type === "workspace_response") {
+        const reconciled = reconciledRunners.get(authedRunnerId);
+        if (
+          runnerSockets.get(authedRunnerId) === socket &&
+          reconciled?.socket === socket &&
+          reconciled.generation === frame.generation
+        ) {
+          workspaceBroker.receive(authedRunnerId, frame.generation, frame.response);
+        }
+        return;
+      }
 
       // EXECUTION E3 — proxied model inference. The socket has already proved
       // this runner's identity; `authedRunnerId` is that proof and is the only
@@ -4793,6 +5129,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       if (authedRunnerId && runnerSockets.get(authedRunnerId) === socket) {
         runnerSockets.delete(authedRunnerId);
         reconciledRunners.delete(authedRunnerId);
+        workspaceBroker.disconnect(authedRunnerId);
         stores.audit(`runner:${authedRunnerId}`, "runner.disconnected", "", now());
         broadcast({ type: "runner_status", runner_id: authedRunnerId, connected: false });
       }

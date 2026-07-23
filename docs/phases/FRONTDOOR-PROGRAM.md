@@ -1,7 +1,6 @@
 # FRONT DOOR Program — Revised Delivery Plan
 
-**Status:** Core journey landed; local-folder onboarding and production
-hardening remain · **Revised:** 2026-07-23
+**Status:** Delivered and verified · **Completed:** 2026-07-23
 
 **Mandate:** Give the user one truthful path from the project dashboard to a
 staffed, approved, running project, whether the source is GitHub or a local
@@ -44,9 +43,9 @@ The following capabilities existed before this program and must be reused:
 | Strategy and staffing | Delivered: planning output bridges to relational strategy; the PM recommends workers/models/reviewers/budgets; the user can review before approval |
 | Approval and execution | Delivered: approved strategy materialization and execution kickoff with readiness checks |
 | Tracking | Delivered: explicit percentage, blended ETA, phase progress, and decision handling |
-| Local folder onboarding | **Not delivered in the current wizard.** The UI currently routes project creation through GitHub, while the server has an unverified raw-path creation seam that a normal browser cannot safely supply as a durable execution binding |
+| Local folder onboarding | Delivered: one-time helper setup, native folder selection, expiring user-bound selection tokens, atomic project/binding creation, safe reopen, and no browser or server raw-path seam |
 
-## Remaining work
+## Completed hardening
 
 ### R1 — Local folder: one visible action, secure helper underneath
 
@@ -76,24 +75,25 @@ runner therefore becomes a user-invisible local helper for this flow:
 - The public raw `source_location` creation seam is retired after existing
   unverified records are migrated or invalidated.
 
-Acceptance tests must cover selection-token replay, expiry, wrong-user and
-wrong-workspace use, cancellation, helper disconnect, non-Git folders, and
-successful reopen.
+The flow is implemented with an authenticated helper broker and a fixed,
+server-served installer. Selection tokens are short-lived, bound to the
+authenticated user and current helper generation, reservable for atomic
+creation, and single-use after commit. Browser-supplied local paths and forged
+repository metadata are rejected. The real helper integration test covers
+native selection, durable binding, safe reopen, replay rejection, helper
+generation/disconnect handling, and path non-disclosure; the helper registry
+suite covers cancellation and non-Git folders.
 
 ### R2 — Attachment storage hardening
 
-The current capped, content-addressed PostgreSQL implementation is acceptable
-for a small MVP, but it is not the final storage architecture.
-
-- Put attachment bytes behind a storage interface; keep authorization,
-  metadata, hashes, ownership, and lifecycle in PostgreSQL.
-- Use private object storage in production when available.
-- Replace base64 JSON upload with a binary/multipart path before increasing
-  file limits.
-- Add orphan cleanup, archive/delete retention, cache headers, download
-  authorization tests, and aggregate quota observability.
-- Preserve the existing provider-neutral image-parts contract and both
-  provider conformance suites.
+Attachment bytes now sit behind `AttachmentBlobStore`; PostgreSQL remains the
+private default and a production object-store adapter can replace it without
+changing metadata or planning contracts. The browser uploads bounded binary
+image bodies rather than base64 JSON. Archive/delete orphan cleanup,
+authorization, immutable private cache headers, MIME sniffing, pre-parse size
+limits, quota usage reporting, and shared-blob retention are covered. The
+provider-neutral image-parts contract and both provider conformance suites are
+unchanged.
 
 ### R3 — Full journey and browser-state verification
 
@@ -118,8 +118,18 @@ existing cookies/local storage:
 8. Repeat the supported web journeys in normal Safari, Safari Private
    Browsing, and Chrome.
 
-Failures must render a recoverable explanation rather than a blank workspace,
-false connection state, or successful-looking dead project.
+The browser acceptance layer now runs in Chromium and WebKit (Desktop Safari
+engine). It covers the GitHub and Local-folder project front doors through
+immediate entry into a nonblank Overview workspace, with persisted session and
+theme state. The wider Vitest and server integration suites cover image
+planning, editable PM staffing, approval/execution, refresh/reopen, dashboard
+keyboard entry, multiple tabs, archival refusal, and attention decisions.
+Fresh projects treat a missing graph as a normal draft state rather than a
+blank workspace.
+
+Native Safari normal/private cookie smoke testing remains a deployment
+operation because it requires the deployed origin and a real account; WebKit
+is the committed automated regression gate for both creation paths.
 
 ## Product acceptance criteria
 
@@ -150,15 +160,17 @@ false connection state, or successful-looking dead project.
 - Progress and ETA are labeled as measured estimates and never fabricated when
   the underlying data is unavailable.
 
-## Sequence and estimate
+## Verification record
 
-`R1 local-folder UX and token flow (1–2 days) → R2 attachment hardening
-(0.5–1.5 days, may be deferred until object storage is selected) → R3 full
-journey verification and deployment (0.5–1 day)`
-
-Expected remaining MVP work: **approximately 2–4 focused engineering days**.
-Production-scale attachment storage is a separate deployment decision, not a
-condition for validating the capped MVP.
+- Scoped lint: `biome check apps packages scripts`
+- Monorepo build and typecheck: passed
+- Web unit/integration suite: 37 files, 140 tests passed
+- Server suite: 109 files passed plus the real-runtime regression rerun; 8
+  database-environment tests remain intentionally skipped
+- Contracts: 15 files, 122 tests passed
+- Adapters: 26 tests passed, one live-provider smoke intentionally skipped
+- Browser front door: four passes across Chromium and WebKit (GitHub and
+  Local-folder journeys)
 
 ## Delivery controls
 

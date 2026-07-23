@@ -1,8 +1,5 @@
-// O1 (ONBOARDING program): the project-creation wizard collapsed to a
-// single question — "Is this new, or existing work?" — because execution
-// moved to GitHub Actions (REDIRECT: nothing is ever installed on the
-// user's machine, so there is no local-folder scenario anymore). Both
-// answers resolve to a GitHub repository:
+// O1 (ONBOARDING program): new work is GitHub-backed; existing work can be
+// selected from GitHub or through the native local-folder helper:
 //   new_repo:      Norns creates a fresh repository.
 //   existing_repo: the human picks one of the connected account's
 //                  repositories (searchable list, or paste a repo URL).
@@ -60,7 +57,7 @@ const repository = {
   updated_at: "2026-07-16T20:00:00Z",
 };
 
-describe("O1: two-question onboarding (GitHub Actions only)", () => {
+describe("O1: GitHub and local-folder onboarding", () => {
   let mock: MockFetch;
   const onOpenProject = vi.fn<(project: ProjectSummary) => void>();
 
@@ -202,6 +199,68 @@ describe("O1: two-question onboarding (GitHub Actions only)", () => {
         scenario: "existing_repo",
         connection_id: "github:42",
         repository_id: "9001",
+      },
+    });
+  });
+
+  it("creates an existing project from the native local folder selection", async () => {
+    mock.get("/api/runners/helper/status", {
+      body: {
+        state: "connected",
+        runner_id: "runner-local",
+        message: "The Norns helper is ready.",
+        install_command: "",
+        install_command_windows: "",
+      },
+    });
+    mock.post("/api/runners/runner-local/workspaces/choose", {
+      body: {
+        selection_token: "selection:one",
+        expires_at: "2026-07-23T12:05:00Z",
+        repository: {
+          runner_id: "runner-local",
+          repository_id: "repo-local",
+          repository_display_name: "local-app",
+          default_branch: "main",
+          observed_head: "abc123",
+        },
+      },
+    });
+    mock.post("/api/v2/projects/local", {
+      status: 201,
+      body: makeProject({
+        id: "project-local",
+        name: "local-app",
+        description: "Analyze and continue development of local-app",
+        source_type: "local",
+        source_location: "local-app",
+      }),
+    });
+
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /^existing/i }));
+    await user.click(screen.getByRole("button", { name: /^local folder/i }));
+    await user.click(await screen.findByRole("button", { name: /^choose folder$/i }));
+    expect(await screen.findByTestId("local-folder-selection")).toHaveTextContent("local-app");
+    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+
+    await waitFor(() =>
+      expect(onOpenProject).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "project-local",
+          source_type: "local",
+        }),
+      ),
+    );
+    expect(
+      mock.calls.find((call) => call.method === "POST" && call.url === "/api/v2/projects/local"),
+    ).toMatchObject({
+      body: {
+        name: "local-app",
+        selection_token: "selection:one",
+        verification_policy_ref: "verification",
       },
     });
   });

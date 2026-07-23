@@ -1,4 +1,4 @@
-import { defineConfig } from "@playwright/test";
+import { defineConfig, devices } from "@playwright/test";
 
 // Real-browser regression layer, for the handful of things jsdom can't tell
 // us (actual layout, actual CSS, actual pointer/drag semantics on the graph
@@ -11,6 +11,10 @@ export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
   reporter: "list",
+  projects: [
+    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    { name: "webkit", use: { ...devices["Desktop Safari"] } },
+  ],
   use: {
     // "localhost" (not 127.0.0.1): vite dev only binds the IPv6 loopback by
     // default in this environment, and 127.0.0.1 (IPv4) doesn't reach it.

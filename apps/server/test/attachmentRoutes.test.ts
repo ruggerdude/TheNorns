@@ -142,6 +142,29 @@ describe.sequential("attachment HTTP API (FRONT DOOR P4)", () => {
     expect(dto.bytes).toBeGreaterThan(0);
   });
 
+  it("accepts bounded raw image bytes without base64 expansion", async () => {
+    const bytes = Buffer.from(pngBase64(5, 4), "base64");
+    const response = await server.app.inject({
+      method: "POST",
+      url: base(),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "image/png",
+        "x-attachment-purpose": "reference",
+      },
+      payload: bytes,
+    });
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({
+      project_id: projectId,
+      mime: "image/png",
+      bytes: bytes.length,
+      width: 5,
+      height: 4,
+      purpose: "reference",
+    });
+  });
+
   it("rejects a disallowed media type with 415", async () => {
     const res = await post(base(), { mime: "image/svg+xml", base64: pngBase64() });
     expect(res.statusCode).toBe(415);
@@ -159,6 +182,16 @@ describe.sequential("attachment HTTP API (FRONT DOOR P4)", () => {
     const res = await post(base(), { mime: "image/png", base64: oversizePngBase64() });
     expect(res.statusCode).toBe(413);
     expect(res.json()).toMatchObject({ error: "payload_too_large" });
+  });
+
+  it("rejects an oversized binary body before attachment parsing", async () => {
+    const response = await server.app.inject({
+      method: "POST",
+      url: base(),
+      headers: { authorization: `Bearer ${token}`, "content-type": "image/png" },
+      payload: Buffer.alloc(3 * 1024 * 1024 + 1, 0x7a),
+    });
+    expect(response.statusCode).toBe(413);
   });
 
   it("404s an upload to an unknown project", async () => {
@@ -187,6 +220,9 @@ describe.sequential("attachment HTTP API (FRONT DOOR P4)", () => {
     const res = await inject("GET", `${base()}/${id}`);
     expect(res.statusCode).toBe(200);
     expect(res.headers["content-type"]).toContain("image/gif");
+    expect(res.headers["cache-control"]).toContain("private");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+    expect(res.headers.etag).toBe(`"${id}"`);
     expect(res.rawPayload.equals(Buffer.from(gifBase64(6, 5), "base64"))).toBe(true);
   });
 
@@ -199,6 +235,20 @@ describe.sequential("attachment HTTP API (FRONT DOOR P4)", () => {
     const repeat = await inject("DELETE", `${base()}/${id}`);
     expect(repeat.statusCode).toBe(404);
     expect(repeat.json()).toMatchObject({ error: "attachment_not_found" });
+    const blobs = await pg.query("SELECT sha256 FROM attachment_blobs");
+    expect(blobs.rows).toEqual([]);
+  });
+
+  it("reports quota usage without exposing content", async () => {
+    await post(base(), { mime: "image/png", base64: pngBase64(2, 2) });
+    const usage = await inject("GET", `${base()}/usage`);
+    expect(usage.statusCode).toBe(200);
+    expect(usage.json()).toMatchObject({
+      live_count: 1,
+      max_count_per_objective: 8,
+      max_bytes_per_project: 40 * 1024 * 1024,
+    });
+    expect((usage.json() as { bytes_used: number }).bytes_used).toBeGreaterThan(0);
   });
 
   it("404s a delete/get of an unknown attachment", async () => {
