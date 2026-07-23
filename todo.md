@@ -869,3 +869,15 @@ decision and is deliberately untouched.
   required" because the first argv token is parsed as the command. Fixed
   minimally (`--help`/`-h`/`help` in the command position). The wider CLI arg
   parser is still hand-rolled and positional-fragile.
+
+## POLISH program (dispatched 2026-07-22)
+
+- [ ] 🔄 P1 — Remove the local-runner install surface (Settings "Local runners"
+  panel, install-runner.sh, orphaned pairing/runner routes). The user rejected
+  the runner-install design outright; the panel survived the front-door rework.
+- [ ] 🔄 P2 — Safari cache hardening: index.html must never be reused without a
+  re-check; hashed /assets/* become immutable.
+- [ ] 🔄 P3 — "Analyze the repository" made real: neutral next-step styling
+  (not an error banner), plus a button that has an AI actually analyze the
+  connected repo and record its architecture via the existing ingest route,
+  which today has zero web callers.
