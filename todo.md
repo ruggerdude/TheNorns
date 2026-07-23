@@ -974,14 +974,24 @@ decision and is deliberately untouched.
   not an error. Execution kickoff seam remains deliberately unwired
   pending a product decision.
 
-- [ ] 🔄 PHTAB-P4 — approve auto-starts execution (this worktree, In
-  Progress): real `ApprovedPlanExecutionKickoff`
+- [x] ✅ PHTAB-P4 — approve auto-starts execution (opened and finished in
+  this worktree): real `ApprovedPlanExecutionKickoff`
   (`apps/server/src/planning/executionKickoff.ts`) driving
-  StrategyBridgeService (materialize, staffing overrides via editStaffing,
-  approve attributed to the deciding user with decided_at + run-id
-  idempotency key) then `PhaseLaunchService.startPhase`; refuses honestly
-  (`{started:false, detail}`) when a phase is already executing or any step
-  fails — the recorded planning-run approval is never rolled back. Wired in
-  `main.ts` (`planningRuns.executionKickoff`); decision route now resolves
-  the session user (`decidedBy`). Tests + frontend success-detail rendering
-  pending.
+  StrategyBridgeService (materialize — the bridge now also accepts
+  `approved` runs since the decision is recorded first; staffing overrides
+  via editStaffing; approve attributed to the deciding user with the
+  decision's decided_at as approved_at and the run id in the idempotency
+  key) then `PhaseLaunchService.startPhase` through the real coordinator
+  gate. Refuses honestly (`{started:false, detail}`) when a phase is
+  already executing (one-executing-phase-per-project default, checked
+  before any mutation), on unknown-node staffing overrides, and on every
+  other failure — the recorded planning-run approval is never rolled back.
+  Wired in `main.ts` (`planningRuns.executionKickoff`, PhaseLaunchService
+  constructed exactly like buildServer's start-phase path); decision route
+  resolves the session user (`decidedBy` — approvals.actor_id is FK-bound
+  to users). Tests: `apps/server/test/planningExecutionKickoff.test.ts`
+  (7: e2e approve→phase active + dispatch, overrides applied, active-phase
+  refusal, unknown-node refusal, production-shape boot ×3);
+  `App.phase-tab.test.tsx` +1 — PhaseTab renders the kickoff success
+  detail when `started: true`. Server 868 passed / 12 skipped; web 133;
+  tsc + biome + build clean.
