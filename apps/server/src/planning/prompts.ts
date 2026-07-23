@@ -49,6 +49,13 @@ export function validationRetryPrompt(errors: readonly PlanValidationError[]): s
   return `Your previous plan failed engine validation:\n${list}\n\nFix every error and return the corrected Plan Contract JSON.`;
 }
 
+// PHASE TAB P1: a "modify" decision re-enters the loop with the prior plan
+// and the human's direction instead of a from-scratch draft. The revised plan
+// then goes through review/revise cycles exactly like a fresh draft.
+export function directionRevisionPrompt(plan: PlanContractT, direction: string): string {
+  return `The human reviewer has asked for changes to your plan.\n\nHUMAN DIRECTION:\n${direction}\n\nRevise the plan to follow this direction while keeping everything that still applies.\n\nCURRENT PLAN:\n${JSON.stringify(plan)}\n\n${PLAN_SHAPE_HINT}\n\nReturn the revised Plan Contract JSON.`;
+}
+
 export function reviewPrompt(plan: PlanContractT): string {
   return `Review this Plan Contract. Return findings as JSON { findings: [{ severity: must_fix|should_fix|suggestion, module_id (or null for plan-level), finding, recommendation }] }.\n\nPLAN:\n${JSON.stringify(plan)}`;
 }

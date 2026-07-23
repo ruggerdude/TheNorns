@@ -1224,6 +1224,99 @@ export class AttentionService {
   }
 
   /**
+   * PHASE TAB P1 — lightweight, pollable per-phase execution progress for a
+   * whole project. Derived from the same tables the per-phase `phase()` view
+   * reads (phases, tasks, agent_runs) with the same shared progress math
+   * (computePercentComplete / computePhaseEta) — additive fields on existing
+   * data, not a parallel status system. `percent_complete` is the honest
+   * completed-tasks/total-tasks ratio; `est_completion` is the rolling-window
+   * linear projection and is null whenever there is no throughput signal.
+   * `name` is the phase's objective_summary (phases have no separate name
+   * column).
+   */
+  projectExecution(projectId: string): Promise<{
+    project_id: string;
+    phases: Array<{
+      phase_id: string;
+      name: string;
+      state: string;
+      percent_complete: number;
+      est_completion: string | null;
+      notes: string;
+    }>;
+  }> {
+    return this.transactions.transaction(async (sql) => {
+      const project = await sql.query<{ id: string }>("SELECT id FROM projects WHERE id = $1", [
+        projectId,
+      ]);
+      if (!project.rows[0]) throw new AttentionConflictError("project not found");
+      const phases = await sql.query<{
+        id: string;
+        objective_summary: string;
+        status: string;
+        total_tasks: number;
+        completed_tasks: number;
+        failed_tasks: number;
+        blocked_tasks: number;
+        active_runs: number;
+      }>(
+        `SELECT p.id, p.objective_summary, p.status,
+           count(t.id)::int AS total_tasks,
+           count(t.id) FILTER (WHERE t.state = 'completed')::int AS completed_tasks,
+           count(t.id) FILTER (WHERE t.state = 'failed')::int AS failed_tasks,
+           count(t.id) FILTER (WHERE t.state = 'blocked')::int AS blocked_tasks,
+           count(run.id) FILTER (
+             WHERE run.state IN ('created','dispatched','running','verifying')
+           )::int AS active_runs
+         FROM phases p
+         LEFT JOIN tasks t ON t.phase_id = p.id
+         LEFT JOIN agent_runs run ON run.id = t.designated_run_id
+         WHERE p.project_id = $1
+         GROUP BY p.id
+         ORDER BY p.priority ASC, p.created_at ASC, p.id ASC`,
+        [projectId],
+      );
+      const result = [];
+      for (const phase of phases.rows) {
+        const isExecuting = phase.status === "active";
+        // ETA needs the phase's recent completion timestamps; only an
+        // executing phase can have one at all, so skip the query otherwise.
+        let etaAt: string | null = null;
+        if (isExecuting) {
+          const recentCompletions = await sql.query<{ completed_at: string | Date }>(
+            `SELECT completed_at FROM tasks
+             WHERE project_id = $1 AND phase_id = $2 AND state = 'completed'
+             ORDER BY completed_at DESC LIMIT $3`,
+            [projectId, phase.id, PROGRESS_WINDOW_SIZE],
+          );
+          etaAt = computePhaseEta({
+            isExecuting,
+            tasksCompleted: phase.completed_tasks,
+            tasksTotal: phase.total_tasks,
+            recentCompletionTimestamps: recentCompletions.rows.map((row) => row.completed_at),
+          });
+        }
+        const noteParts =
+          phase.total_tasks === 0
+            ? ["no tasks yet"]
+            : [`${phase.completed_tasks}/${phase.total_tasks} tasks complete`];
+        if (phase.active_runs > 0) noteParts.push(`${phase.active_runs} run(s) active`);
+        if (phase.failed_tasks > 0) noteParts.push(`${phase.failed_tasks} task(s) failed`);
+        if (phase.blocked_tasks > 0) noteParts.push(`${phase.blocked_tasks} task(s) blocked`);
+        result.push({
+          phase_id: phase.id,
+          name: phase.objective_summary,
+          state: phase.status,
+          percent_complete: computePercentComplete(phase.completed_tasks, phase.total_tasks),
+          est_completion: etaAt,
+          notes: noteParts.join("; "),
+        });
+      }
+      return { project_id: projectId, phases: result };
+    });
+  }
+
+  /**
    * EXECUTION E13 — live activity: the streamed `run_log` output for a
    * task's designated run, tailed from `runner_events` (the durable store
    * every runner event already lands in; `run_log` rows were previously

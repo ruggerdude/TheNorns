@@ -30,7 +30,8 @@ export class AllocationRecommendationError extends Error {
       | "node_coverage"
       | "model_unavailable"
       | "review_policy"
-      | "parallelism",
+      | "parallelism"
+      | "provider_constraint",
     message: string,
   ) {
     super(message);
@@ -55,6 +56,13 @@ export async function recommendProjectAllocation(options: {
   objective: string;
   graph: GraphSnapshot;
   models: readonly SelectableModelCatalogEntry[];
+  /**
+   * PHASE TAB P1: when set, every node's IMPLEMENTATION provider must come
+   * from this list. Reviewers are exempt — the cross-provider review rule
+   * (reviewer from the opposite provider) still applies and would be
+   * unsatisfiable if reviewers were constrained to a single-provider list.
+   */
+  allowedWorkerProviders?: readonly ProviderName[];
 }): Promise<AllocationRecommendationResult> {
   const availableModels = options.models.filter((model) => model.available);
   const providers = new Set(availableModels.map((model) => model.provider));
@@ -64,6 +72,11 @@ export async function recommendProjectAllocation(options: {
       "PM staffing requires at least one approved worker model from each provider for cross-provider review.",
     );
   }
+  const allowedProviders = new Set<ProviderName>(
+    options.allowedWorkerProviders && options.allowedWorkerProviders.length > 0
+      ? options.allowedWorkerProviders
+      : (["anthropic", "openai"] as const),
+  );
 
   const modelByKey = new Map(
     availableModels.map((model) => [providerModelKey(model.provider, model.model), model]),
@@ -85,12 +98,19 @@ export async function recommendProjectAllocation(options: {
     input_usd_per_million_tokens: model.pricing.input_per_mtok,
     output_usd_per_million_tokens: model.pricing.output_per_mtok,
   }));
+  const constraintLine =
+    allowedProviders.size < 2
+      ? [
+          `Implementation-provider constraint: every node's implementation provider MUST be ${[...allowedProviders].join(" or ")}. Reviewers still come from the opposite provider.`,
+        ]
+      : [];
   const prompt = [
     `Staff the project "${options.projectName}" for its current workflow graph.`,
     `Objective: ${options.objective}`,
     "Choose the best implementation provider/model, worker count, cross-provider reviewer, and USD budget for every node.",
     "Use only the approved models listed below. Prefer the least expensive model that can reliably handle the work, but spend for capability where complexity or risk warrants it.",
     "Use more than one worker only when parallel_safe is true and the work is genuinely divisible. Never use the implementation provider as the reviewer provider.",
+    ...constraintLine,
     "Return exactly one recommendation for every graph node. Human overrides are context and will remain authoritative.",
     `Approved models: ${JSON.stringify(modelsForPrompt)}`,
     `Workflow graph: ${JSON.stringify(graphForPrompt)}`,
@@ -126,6 +146,16 @@ export async function recommendProjectAllocation(options: {
       throw new AllocationRecommendationError(
         "node_coverage",
         `The project manager recommended an unknown node "${recommendation.node_id}".`,
+      );
+    }
+    // PHASE TAB P1: enforce the run's implementation-provider constraint —
+    // a model reply that ignores the prompt's constraint line is refused, not
+    // silently accepted.
+    if (!allowedProviders.has(recommendation.provider)) {
+      throw new AllocationRecommendationError(
+        "provider_constraint",
+        `Node "${recommendation.node_id}" uses implementation provider ${recommendation.provider}, ` +
+          `but this run only allows ${[...allowedProviders].join(", ")}.`,
       );
     }
     if (!modelByKey.has(providerModelKey(recommendation.provider, recommendation.model))) {

@@ -14,13 +14,15 @@
 // instead of the blanket "reconcile at boot" sweep used here.
 import { randomUUID } from "node:crypto";
 import type { ImagePart, LlmAdapter, ProviderName } from "@norns/adapters";
-import type { PlanContractT, ReviewFindingT, UsageEventT } from "@norns/contracts";
+import { PlanContract, type PlanContractT } from "@norns/contracts";
+import type { ReviewFindingT, UsageEventT } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import type {
   PlanningRunResultDto,
   PlanningRunStatus,
   PlanningRunTranscriptEntryDto,
   PlanningStaffingProposalDto,
+  WorkerProviderSelection,
 } from "./runService.js";
 import type { PlanningRoundEvent, PlanningRoundHook } from "./session.js";
 import { planContentHash, runPlanning } from "./session.js";
@@ -36,6 +38,8 @@ export interface PlanningStaffingInput {
   projectId: string;
   objective: string;
   plan: PlanContractT;
+  /** PHASE TAB P1: the run's implementation-provider constraint. */
+  workerProviders: WorkerProviderSelection;
 }
 
 export interface PlanningRunWorkerOptions {
@@ -72,6 +76,13 @@ interface ClaimedPlanningRunRow {
   lease_token: string;
   /** FRONT DOOR P4: objective attachment ids to inject in round 1. */
   attachment_ids: string[] | string;
+  /** PHASE TAB P1: implementation-provider constraint for staffing. */
+  worker_providers: WorkerProviderSelection;
+  /** PHASE TAB P1: { plan, direction } from a "modify" decision, or null. */
+  revision_seed: unknown;
+  /** PHASE TAB P1: transcript accumulated before a modify re-entry — the new
+   *  loop's entries append to it rather than erasing the history. */
+  transcript: PlanningRunTranscriptEntryDto[] | string;
 }
 
 function tally(findings: readonly ReviewFindingT[]) {
@@ -80,9 +91,50 @@ function tally(findings: readonly ReviewFindingT[]) {
   return counts;
 }
 
+/** PHASE TAB P1: parse a claimed row's revision_seed (JSONB arrives parsed
+ *  from node-pg/PGlite or, defensively, as a JSON string). Returns null when
+ *  absent or malformed — a bad seed degrades to a from-scratch draft rather
+ *  than failing the run. */
+function parseRevisionSeed(value: unknown): { plan: PlanContractT; direction: string } | null {
+  let raw = value;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (raw === null || typeof raw !== "object") return null;
+  const candidate = raw as { plan?: unknown; direction?: unknown };
+  if (typeof candidate.direction !== "string" || candidate.direction.trim().length === 0) {
+    return null;
+  }
+  const plan = PlanContract.safeParse(candidate.plan);
+  if (!plan.success) return null;
+  return { plan: plan.data, direction: candidate.direction };
+}
+
+/** PHASE TAB P1: transcript accumulated before a modify re-entry. */
+function parsePriorTranscript(
+  value: PlanningRunTranscriptEntryDto[] | string | null | undefined,
+): PlanningRunTranscriptEntryDto[] {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? (parsed as PlanningRunTranscriptEntryDto[]) : [];
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(value) ? [...value] : [];
+}
+
 function transcriptEntryFor(
   event: PlanningRoundEvent,
   models: ResolvedPlanningModels,
+  /** PHASE TAB P1: true when the loop was seeded by a "modify" decision —
+   *  the first PM output is then a human-directed revision, not a draft. */
+  seeded = false,
 ): PlanningRunTranscriptEntryDto {
   if (event.phase === "review") {
     const counts = tally(event.findings ?? []);
@@ -99,7 +151,9 @@ function transcriptEntryFor(
   }
   const summary =
     event.phase === "draft"
-      ? `Drafted the initial plan (${event.plan.modules.length} module(s)).`
+      ? seeded
+        ? `Revised the plan per human direction (${event.plan.modules.length} module(s)).`
+        : `Drafted the initial plan (${event.plan.modules.length} module(s)).`
       : `Revised the plan to address round ${event.round} findings (${event.plan.modules.length} module(s)).`;
   return {
     round: event.round,
@@ -207,7 +261,8 @@ export class PlanningRunWorker {
            UPDATE planning_runs SET status = 'drafting', lease_token = $1, leased_until = $2, updated_at = $3
            FROM next_run WHERE planning_runs.id = next_run.id
            RETURNING planning_runs.id, planning_runs.project_id, planning_runs.objective,
-             planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids`
+             planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids,
+             planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript`
         : `WITH next_run AS (
              SELECT id FROM planning_runs WHERE status = 'queued'
              ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1
@@ -215,7 +270,8 @@ export class PlanningRunWorker {
            UPDATE planning_runs SET status = 'drafting', lease_token = $1, leased_until = $2, updated_at = $3
            FROM next_run WHERE planning_runs.id = next_run.id
            RETURNING planning_runs.id, planning_runs.project_id, planning_runs.objective,
-             planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids`;
+             planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids,
+             planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript`;
       const params = runId
         ? [leaseToken, leasedUntil, now.toISOString(), runId]
         : [leaseToken, leasedUntil, now.toISOString()];
@@ -235,18 +291,25 @@ export class PlanningRunWorker {
 
     const pm = this.createAdapter(models.pm.provider, models.pm.model);
     const reviewer = this.createAdapter(models.reviewer.provider, models.reviewer.model);
-    const transcript: PlanningRunTranscriptEntryDto[] = [];
+    // PHASE TAB P1: a modify re-entry appends to the run's prior transcript
+    // (the earlier rounds are history the human already saw) and seeds the
+    // loop with the prior plan + the human's direction.
+    const revisionSeed = parseRevisionSeed(claim.revision_seed);
+    const transcript: PlanningRunTranscriptEntryDto[] = revisionSeed
+      ? parsePriorTranscript(claim.transcript)
+      : [];
 
     const onRound: PlanningRoundHook = async (event) => {
-      transcript.push(transcriptEntryFor(event, models));
+      transcript.push(transcriptEntryFor(event, models, revisionSeed !== null));
       const { status, round } = intermediateStatusFor(event);
       await this.persistProgress(claim, status, round, transcript);
     };
 
     // FRONT DOOR P4: resolve objective attachments to image parts for round-1
     // injection. Best-effort — a load failure degrades to a text-only run
-    // rather than failing an otherwise-valid planning run.
-    const roundOneImages = await this.loadRoundOneImages(claim);
+    // rather than failing an otherwise-valid planning run. Seeded (modify)
+    // re-entries never re-send images: the plan already encodes them.
+    const roundOneImages = revisionSeed ? [] : await this.loadRoundOneImages(claim);
 
     try {
       const result = await runPlanning({
@@ -257,6 +320,7 @@ export class PlanningRunWorker {
         maxRounds: claim.max_rounds,
         onRound,
         ...(roundOneImages.length > 0 ? { roundOneImages } : {}),
+        ...(revisionSeed ? { revisionSeed } : {}),
       });
       this.options.recordUsage?.(result.usage);
       const totalCostUsd = result.usage.reduce((sum, usage) => sum + usage.estimated_cost_usd, 0);
@@ -267,6 +331,7 @@ export class PlanningRunWorker {
             projectId: claim.project_id,
             objective: claim.objective,
             plan: result.finalPlan,
+            workerProviders: claim.worker_providers ?? "both",
           });
         } catch {
           // Best-effort: staffing never blocks a converged/cap_reached plan.
@@ -340,7 +405,10 @@ export class PlanningRunWorker {
       await tx.query(
         `UPDATE planning_runs
          SET status = $2, round = $3, transcript = $4::jsonb, result = $5::jsonb,
-             total_cost_usd = $6, error = NULL, lease_token = NULL, leased_until = NULL, updated_at = $7
+             -- PHASE TAB P1: accumulate — a modify re-entry's row already
+             -- carries the prior loop's spend (0 for a fresh run).
+             total_cost_usd = total_cost_usd + $6, error = NULL, revision_seed = NULL,
+             lease_token = NULL, leased_until = NULL, updated_at = $7
          WHERE id = $1 AND lease_token = $8`,
         [
           claim.id,
