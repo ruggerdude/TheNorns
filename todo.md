@@ -995,3 +995,17 @@ decision and is deliberately untouched.
   `App.phase-tab.test.tsx` +1 — PhaseTab renders the kickoff success
   detail when `started: true`. Server 868 passed / 12 skipped; web 133;
   tsc + biome + build clean.
+
+- [x] ✅ PHTAB-P5b — review-fix pass on the Phase tab feature (opened and
+  finished in this worktree): (1) decision-route audit entries
+  (`planning_run.decision.*`, `planning_run.execution_kickoff`,
+  `planning_run.dispatch_failed`) attributed to the resolved session user
+  instead of the "operator" literal — sibling routes' legacy actor left
+  alone; (2) approve staffing overrides now enforced against the run's own
+  `worker_providers` constraint (422 `invalid_staffing`, message phrased
+  like allocationRecommendation's `provider_constraint` refusal), with an
+  HTTP test proving the refused run stays decidable; (3) dead
+  `ApprovedPlanExecutionKickoffInput.plan` field removed (the kickoff
+  re-loads the run itself); (4) `assignmentLocalId()` exported from
+  strategyBridgeService and shared by executionKickoff instead of a
+  re-derived `assignment-${node_id}`.

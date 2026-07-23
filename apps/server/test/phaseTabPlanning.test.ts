@@ -272,7 +272,10 @@ interface InjectedResponse {
 describe.sequential("phase tab: HTTP surface (production option shape)", () => {
   let pg: PGlite;
   let server: NornsServer;
+  let stores: RelayStores;
   let token: string;
+  /** The seeded admin's user id — the expected audit actor for decisions. */
+  let adminId: string;
   let projectId: string;
   let pmAdapter: FakeAdapter;
   let reviewerAdapter: FakeAdapter;
@@ -327,11 +330,15 @@ describe.sequential("phase tab: HTTP surface (production option shape)", () => {
     const transactions = new PGliteTransactionRunner(pg);
     const users = new UserStore();
     token = testAdminToken(users);
+    const admin = users.userForToken(token);
+    if (!admin) throw new Error("seeded admin session did not resolve");
+    adminId = admin.id;
     pmAdapter = new FakeAdapter("anthropic");
     reviewerAdapter = new FakeAdapter("openai");
     kickoffCalls = [];
+    stores = new RelayStores();
     server = await buildServer({
-      stores: new RelayStores(),
+      stores,
       users,
       projects,
       // The production option shape from main.ts is planningRuns:
@@ -453,6 +460,54 @@ describe.sequential("phase tab: HTTP surface (production option shape)", () => {
     expect((body.decision as Record<string, unknown>).staffing).toEqual(staffing);
     expect(kickoffCalls).toHaveLength(1);
     expect(kickoffCalls[0]).toMatchObject({ projectId, planningRunId: runId, staffing });
+    // P5b: the kickoff input carries no plan payload — the implementation
+    // re-loads the run itself, so the field would be dead weight.
+    expect(kickoffCalls[0]).not.toHaveProperty("plan");
+    // P5b: the decision and kickoff audit entries are attributed to the
+    // resolved session user, not the legacy "operator" literal.
+    const audited = stores
+      .auditEntries()
+      .filter((entry) => entry.action.startsWith("planning_run."))
+      .map((entry) => ({ actor: entry.actor, action: entry.action }));
+    expect(audited).toContainEqual({ actor: adminId, action: "planning_run.decision.approve" });
+    expect(audited).toContainEqual({ actor: adminId, action: "planning_run.execution_kickoff" });
+    expect(
+      audited.filter((entry) => entry.actor === "operator" && entry.action !== "planning_run.created"),
+    ).toEqual([]);
+  });
+
+  it("rejects approve staffing outside the run's worker_providers constraint, leaving the run decidable", async () => {
+    const runId = await createConvergedRun({ worker_providers: "anthropic" });
+    // A registry-valid openai entry: it passes the model-registry check and
+    // must be refused by the run's own provider constraint instead.
+    const outsideConstraint = await inject(
+      "POST",
+      `/api/v2/projects/${projectId}/planning-runs/${runId}/decision`,
+      {
+        decision: "approve",
+        staffing: [{ node_id: "api", provider: "openai", model: "gpt-5.6-terra" }],
+      },
+    );
+    expect(outsideConstraint.statusCode).toBe(422);
+    const refusal = outsideConstraint.json() as { error: string; message: string };
+    expect(refusal.error).toBe("invalid_staffing");
+    expect(refusal.message).toContain('Node "api" uses implementation provider openai');
+    expect(refusal.message).toContain("only allows anthropic");
+
+    // The refusal recorded nothing: the run is still converged and decidable.
+    const after = await inject("GET", `/api/v2/projects/${projectId}/planning-runs/${runId}`);
+    expect(after.json()).toMatchObject({ status: "converged", decision: null });
+
+    const valid = await inject(
+      "POST",
+      `/api/v2/projects/${projectId}/planning-runs/${runId}/decision`,
+      {
+        decision: "approve",
+        staffing: [{ node_id: "api", provider: "anthropic", model: "claude-sonnet-5" }],
+      },
+    );
+    expect(valid.statusCode).toBe(200);
+    expect(valid.json()).toMatchObject({ status: "approved" });
   });
 
   it("modify re-enters the loop over HTTP and reconverges with the direction", async () => {
