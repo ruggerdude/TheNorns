@@ -8,6 +8,7 @@
 //   GET  /          (React app in production; API notice in server-only dev)
 // Connection state is never trusted solely in process memory: every decision
 // reads/writes RelayStores, which snapshots to durable storage.
+import { sep } from "node:path";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import {
@@ -1632,7 +1633,27 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     // Single-service deploy: serve the built React app + SPA fallback.
     // Static assets are public; the page authenticates with an account-backed
     // browser session issued after email/password login.
-    await app.register(fastifyStatic, { root: options.webDist, wildcard: false });
+    //
+    // POLISH P2 (Safari stale-content fix): index.html is the one file whose
+    // content changes on every deploy without its URL changing, so it must
+    // always be revalidated — `no-cache` (not max-age=0) so Safari's
+    // heuristic bfcache/memory-cache reuse can't serve a stale shell.
+    // Vite content-hashes everything under /assets/*, so those responses are
+    // immutable by construction and safe to cache for a year. Everything else
+    // static (favicon, manifest, etc.) gets a short, conservative max-age.
+    await app.register(fastifyStatic, {
+      root: options.webDist,
+      wildcard: false,
+      setHeaders(reply, path) {
+        if (path.endsWith(`${sep}index.html`) || path === "index.html") {
+          reply.header("cache-control", "no-cache");
+        } else if (path.includes(`${sep}assets${sep}`)) {
+          reply.header("cache-control", "public, max-age=31536000, immutable");
+        } else {
+          reply.header("cache-control", "public, max-age=3600");
+        }
+      },
+    });
     app.setNotFoundHandler((req, reply) => {
       if (req.raw.method === "GET" && !req.url.startsWith("/api") && !req.url.startsWith("/ws")) {
         return reply.sendFile("index.html");
