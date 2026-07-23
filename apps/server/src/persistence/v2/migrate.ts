@@ -188,6 +188,20 @@ export const PHASE_CONCURRENCY_CONFLICTS_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+// PHASE TAB P1: planning-run decision workflow (worker_providers, decision,
+// revision_seed columns; approved/rejected statuses).
+// TODO(integrator): ASSIGN THE NEXT MIGRATION NUMBER — rename
+// drizzle/UNASSIGNED_phase_tab_planning_decisions.sql to NNNN_phase_tab_
+// planning_decisions.sql and update both constants below before deploy.
+// Registered under the UNASSIGNED name so PGlite tests apply it; it must not
+// reach production under this name.
+export const PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME =
+  "UNASSIGNED_phase_tab_planning_decisions";
+export const PHASE_TAB_PLANNING_DECISIONS_MIGRATION_URL = new URL(
+  "../../../drizzle/UNASSIGNED_phase_tab_planning_decisions.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -314,6 +328,10 @@ export async function loadActionsDispatchRunnerIdentityMigrationSql(): Promise<s
 
 export async function loadPhaseConcurrencyConflictsMigrationSql(): Promise<string> {
   return readFile(PHASE_CONCURRENCY_CONFLICTS_MIGRATION_URL, "utf8");
+}
+
+export async function loadPhaseTabPlanningDecisionsMigrationSql(): Promise<string> {
+  return readFile(PHASE_TAB_PLANNING_DECISIONS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -519,6 +537,12 @@ export async function runCurrentV2Migrations(
     {
       name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
       sql: await loadPhaseConcurrencyConflictsMigrationSql(),
+    },
+    // PHASE TAB P1 — TODO(integrator): assign the next migration number (see
+    // the constant's definition above) before this ships to production.
+    {
+      name: PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME,
+      sql: await loadPhaseTabPlanningDecisionsMigrationSql(),
     },
   ]);
 }
