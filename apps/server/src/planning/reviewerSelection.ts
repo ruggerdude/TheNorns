@@ -11,6 +11,18 @@ import { reviewerFor as defaultReviewerProviderFor } from "../projects/store.js"
 
 export { defaultReviewerProviderFor };
 
+// ---------------------------------------------------------------------------
+// PHASE TAB P1: pinned defaults for durable planning runs. The PM defaults to
+// anthropic/claude-fable-5 and the reviewer to openai/gpt-5.6-sol (production
+// allowlist), while every existing override still wins: the project's PM
+// selection, the persisted per-project reviewer settings, and the
+// NORNS_PM_MODEL / NORNS_OPENAI_MODEL / NORNS_REVIEWER_ANTHROPIC_MODEL env
+// vars all take precedence over these constants. Cross-provider review
+// enforcement is unchanged (runPlanning() refuses same-provider pairs).
+// ---------------------------------------------------------------------------
+export const PLANNING_RUN_DEFAULT_PM_MODEL = "claude-fable-5";
+export const PLANNING_RUN_DEFAULT_REVIEWER_MODEL = "gpt-5.6-sol";
+
 export interface PlanningModelEnvironment {
   ANTHROPIC_API_KEY?: string;
   OPENAI_API_KEY?: string;
@@ -49,8 +61,15 @@ export function resolvePlanningParticipants(input: {
   env: PlanningModelEnvironment;
   /** Deployment default PM model per provider (mirrors DEFAULT_PM_MODEL). */
   defaultPmModel: Record<"anthropic" | "openai", string | undefined>;
+  /**
+   * PHASE TAB P1: last-resort reviewer model default per provider, consulted
+   * only after the persisted override and env vars. Callers that omit it keep
+   * the exact pre-existing behavior (missing env surfaces as a
+   * PlanningConfigurationError).
+   */
+  defaultReviewerModel?: Partial<Record<"anthropic" | "openai", string>>;
 }): ResolvedPlanningParticipants {
-  const { pmSelection, persistedReviewer, env, defaultPmModel } = input;
+  const { pmSelection, persistedReviewer, env, defaultPmModel, defaultReviewerModel } = input;
   const reviewerProvider =
     persistedReviewer?.provider ?? defaultReviewerProviderFor(pmSelection.provider);
   const pmModel =
@@ -61,8 +80,11 @@ export function resolvePlanningParticipants(input: {
   const reviewerModel =
     persistedReviewer?.model ??
     (reviewerProvider === "openai"
-      ? env.NORNS_OPENAI_MODEL
-      : (env.NORNS_REVIEWER_ANTHROPIC_MODEL ?? env.NORNS_PM_MODEL ?? defaultPmModel.anthropic));
+      ? (env.NORNS_OPENAI_MODEL ?? defaultReviewerModel?.openai)
+      : (env.NORNS_REVIEWER_ANTHROPIC_MODEL ??
+        env.NORNS_PM_MODEL ??
+        defaultReviewerModel?.anthropic ??
+        defaultPmModel.anthropic));
 
   const missing = [
     !env.ANTHROPIC_API_KEY && "ANTHROPIC_API_KEY",
