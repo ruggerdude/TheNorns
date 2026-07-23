@@ -309,7 +309,11 @@ function taskLocalId(moduleId: string): string {
   return `task-${moduleId}`;
 }
 
-function assignmentLocalId(moduleId: string): string {
+/** Derives the bridge's stable per-node assignment local id. Exported so
+ *  consumers that must address bridge-created assignments by plan node id
+ *  (e.g. the execution kickoff's staffing overrides) share one derivation
+ *  instead of re-deriving the format. */
+export function assignmentLocalId(moduleId: string): string {
   return `assignment-${moduleId}`;
 }
 

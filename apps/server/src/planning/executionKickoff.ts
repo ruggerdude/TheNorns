@@ -38,10 +38,11 @@ import {
 // is already `active`, the kickoff refuses before mutating anything rather
 // than forcing a second executing phase.
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
-import type {
-  StaffingAssignmentEdit,
-  StrategyBridgeService,
-  StrategyReviewDto,
+import {
+  type StaffingAssignmentEdit,
+  type StrategyBridgeService,
+  type StrategyReviewDto,
+  assignmentLocalId,
 } from "../projects/strategyBridgeService.js";
 import type {
   ApprovedPlanExecutionKickoff,
@@ -176,7 +177,9 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
     );
     const edits: StaffingAssignmentEdit[] = [];
     for (const entry of staffing) {
-      const assignmentId = `assignment-${entry.node_id}`;
+      // Shared with the bridge (PHASE TAB P5b): one derivation of the
+      // per-node assignment local id, not a re-derived format.
+      const assignmentId = assignmentLocalId(entry.node_id);
       const current = byAssignment.get(assignmentId);
       if (!current) {
         throw new Error(

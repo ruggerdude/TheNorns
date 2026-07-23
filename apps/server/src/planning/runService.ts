@@ -206,8 +206,9 @@ export interface CreatePlanningRunInput {
 export interface ApprovedPlanExecutionKickoffInput {
   projectId: string;
   planningRunId: string;
-  /** The approved plan (the run result's plan payload). */
-  plan: unknown;
+  // PHASE TAB P5b: no `plan` payload here — the kickoff implementation
+  // deliberately re-loads the run itself (the bridge is the source of truth
+  // for materialization), so passing the plan would be a dead field.
   /** Human staffing overrides recorded with the approval, if any. */
   staffing: readonly ApprovedStaffingEntryDto[] | null;
   /**

@@ -4046,9 +4046,34 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           input = { decision: "reject" };
         }
         try {
+          // PHASE TAB P5b: an approve's staffing overrides must also honor the
+          // run's own worker_providers constraint (set at creation), not just
+          // the model registry — otherwise a human override could staff a
+          // provider the run's allocation was explicitly forbidden to use.
+          // Message phrasing mirrors allocationRecommendation's
+          // provider_constraint refusal. worker_providers is immutable after
+          // creation, so reading it outside decide()'s transaction is safe.
+          if (input.decision === "approve" && input.staffing && input.staffing.length > 0) {
+            const existing = await planningRunService.get(id, runId);
+            if (existing.worker_providers !== "both") {
+              const violation = input.staffing.find(
+                (entry) => entry.provider !== existing.worker_providers,
+              );
+              if (violation) {
+                return reply.code(422).send({
+                  error: "invalid_staffing",
+                  message:
+                    `Node "${violation.node_id}" uses implementation provider ${violation.provider}, ` +
+                    `but this run only allows ${existing.worker_providers}.`,
+                });
+              }
+            }
+          }
           const run = await planningRunService.decide(id, runId, input);
+          // PHASE TAB P5b: the decision is the resolved session user's act, so
+          // the audit actor is that user — not the legacy "operator" literal.
           stores.audit(
-            "operator",
+            user.id,
             `planning_run.decision.${input.decision}`,
             `${id}:${runId}`,
             now(),
@@ -4059,7 +4084,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             reply.code(202).send(run);
             void planningWorker.runNow(runId).catch((error) => {
               stores.audit(
-                "operator",
+                user.id,
                 "planning_run.dispatch_failed",
                 `${id}:${runId}:${error instanceof Error ? error.message : String(error)}`,
                 now(),
@@ -4077,7 +4102,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 execution = await kickoff.kickoff({
                   projectId: id,
                   planningRunId: runId,
-                  plan: run.result?.plan ?? null,
                   staffing: run.decision?.staffing ?? null,
                   decidedBy: user.id,
                 });
@@ -4088,7 +4112,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 };
               }
               stores.audit(
-                "operator",
+                user.id,
                 "planning_run.execution_kickoff",
                 `${id}:${runId}:${execution?.started ? "started" : "not_started"}`,
                 now(),
