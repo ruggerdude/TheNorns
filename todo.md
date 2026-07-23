@@ -872,9 +872,16 @@ decision and is deliberately untouched.
 
 ## POLISH program (dispatched 2026-07-22)
 
-- [ ] 🔄 P1 — Remove the local-runner install surface (Settings "Local runners"
+- [x] ✅ P1 — Remove the local-runner install surface (Settings "Local runners"
   panel, install-runner.sh, orphaned pairing/runner routes). The user rejected
   the runner-install design outright; the panel survived the front-door rework.
+  Done: the Settings panel, install-runner.sh, `/api/pairing/*`, `GET
+  /api/runners`, the workspace-picker routes, `source-bindings/local`, and
+  `workspaceBroker.ts` are gone. The relay core (Actions enrollment, signed
+  websocket, context fetch, inference proxy) is untouched; tests now mint
+  runner identities by direct key registration. `norns-runner pair` still
+  exists in the CLI but its server endpoint is gone (404) — dead front door,
+  kept because the package IS what Actions installs.
 - [ ] 🔄 P2 — Safari cache hardening: index.html must never be reused without a
   re-check; hashed /assets/* become immutable.
 - [ ] 🔄 P3 — "Analyze the repository" made real: neutral next-step styling
