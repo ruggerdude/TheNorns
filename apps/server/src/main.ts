@@ -58,6 +58,9 @@ import { NodePgTransactionRunner, type V2TransactionRunner } from "./persistence
 import { AttentionService } from "./projects/attentionService.js";
 import { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
 import { ProjectResumeService } from "./projects/projectResumeService.js";
+// POLISH P3 — the "Analyze the repository" producer behind the resume
+// payload's next-step recommendation.
+import { RepositoryAnalysisService } from "./projects/repositoryAnalysisService.js";
 import { RepositoryIngestionService } from "./projects/repositoryIngestionService.js";
 import { SourceBindingService } from "./projects/sourceBindingService.js";
 import { ProjectStore } from "./projects/store.js";
@@ -146,6 +149,9 @@ let actionsExecutionServices:
       repository: ActionsExecutionRepository;
     }
   | undefined;
+// POLISH P3 — the analyze-repository step. Absent without the relational
+// runtime, exactly like phase3Services; the route then refuses honestly.
+let repositoryAnalysisService: RepositoryAnalysisService | undefined;
 let phase5Services: { attention: AttentionService } | undefined;
 let phase6Services: { coordination: Phase6CoordinationService } | undefined;
 let phase7Services: { operations: Phase7OperationsService } | undefined;
@@ -252,6 +258,24 @@ if (databaseUrl) {
       }),
       resume: new ProjectResumeService(runtimeTransactions),
     };
+    // POLISH P3 — the analyze-repository step. `github` may be null (the
+    // service then refuses with github_not_configured rather than leaving the
+    // route unmounted), and the adapter factory mirrors the debate worker's:
+    // Anthropic by default, resolved lazily so a deployment without a key
+    // still boots and refuses honestly per request.
+    repositoryAnalysisService = new RepositoryAnalysisService({
+      transactions: runtimeTransactions,
+      github,
+      ingestion: phase3Services.ingestion,
+      createAdapter: () => {
+        const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+        if (!apiKey) throw new Error("Anthropic is not configured for repository analysis");
+        return new AnthropicAdapter({
+          apiKey,
+          model: process.env.NORNS_REPOSITORY_ANALYSIS_MODEL?.trim() || "claude-sonnet-5",
+        });
+      },
+    });
     phase4Services = {
       coordinator: new Phase4Coordinator(runtimeTransactions),
       completion: new Phase4CompletionService(runtimeTransactions),
@@ -657,6 +681,11 @@ const server = await buildServer({
   ...(identityRuntime.mode === "relational" ? { identity: identityRuntime.identity } : {}),
   projects: projectRuntime.repository,
   ...(phase3Services !== undefined ? { phase3: phase3Services } : {}),
+  // POLISH P3: the analyze-repository step. A service that is not passed here
+  // is dead in production while CI stays green — this line IS the feature.
+  ...(repositoryAnalysisService !== undefined
+    ? { repositoryAnalysis: repositoryAnalysisService }
+    : {}),
   localProjectOnboardingReady,
   ...(phase4Services !== undefined ? { phase4: phase4Services } : {}),
   // ONBOARDING O4: Actions-hosted execution.
