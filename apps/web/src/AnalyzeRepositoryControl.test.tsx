@@ -88,9 +88,7 @@ describe("AnalyzeRepositoryControl (POLISH P3)", () => {
   it("signs the user out of the flow on a 401 instead of showing an error", async () => {
     mock.post(ANALYZE_URL, { status: 401, body: { error: "unauthorized" } });
     const onUnauthorized = vi.fn();
-    render(
-      <AnalyzeRepositoryControl projectId="proj-1" onUnauthorized={onUnauthorized} />,
-    );
+    render(<AnalyzeRepositoryControl projectId="proj-1" onUnauthorized={onUnauthorized} />);
     await userEvent.click(screen.getByTestId("analyze-repository-button"));
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalled());
     expect(screen.queryByTestId("analyze-repository-error")).not.toBeInTheDocument();

@@ -175,8 +175,7 @@ export function selectKeyFiles(
         candidate.score !== null && candidate.entry.size <= 512 * 1024,
     )
     .sort(
-      (left, right) =>
-        left.score - right.score || left.entry.path.localeCompare(right.entry.path),
+      (left, right) => left.score - right.score || left.entry.path.localeCompare(right.entry.path),
     )
     .slice(0, MAX_KEY_FILES)
     .map((candidate) => candidate.entry);
@@ -202,10 +201,7 @@ export class RepositoryAnalysisService {
     this.http = deps.http ?? fetch;
   }
 
-  async analyze(
-    projectId: string,
-    actor: { actor_id: string },
-  ): Promise<RepositoryAnalysisResult> {
+  async analyze(projectId: string, actor: { actor_id: string }): Promise<RepositoryAnalysisResult> {
     // 1. Preconditions, cheapest first, each with its own honest refusal.
     const github = this.deps.github;
     if (!github || !github.isConfigured()) {
@@ -236,7 +232,11 @@ export class RepositoryAnalysisService {
       );
       const projectRow = projects.rows[0];
       if (!projectRow) {
-        throw new RepositoryAnalysisError("project_not_found", `project ${projectId} not found`, 404);
+        throw new RepositoryAnalysisError(
+          "project_not_found",
+          `project ${projectId} not found`,
+          404,
+        );
       }
       const bindings = await tx.query<GitHubBindingRow & { binding_type: string }>(
         `SELECT id, binding_type, repository_id, github_installation_id,

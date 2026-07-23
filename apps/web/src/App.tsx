@@ -29,6 +29,7 @@ import "@xyflow/react/dist/style.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Account } from "./Account";
 import { Admin } from "./Admin";
+import { AnalyzeRepositoryControl } from "./AnalyzeRepositoryControl";
 import { AttachmentInput } from "./AttachmentInput";
 import { Debates } from "./Debates";
 import { Gantt, type GanttPhase } from "./Gantt";
@@ -41,7 +42,6 @@ import {
   ProjectTabs,
   Projects,
 } from "./Projects";
-import { AnalyzeRepositoryControl } from "./AnalyzeRepositoryControl";
 import { RunLog } from "./RunLog";
 import { StartPhaseControl } from "./StartPhaseControl";
 import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
