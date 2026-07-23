@@ -935,11 +935,20 @@ decision and is deliberately untouched.
   `MockFetch` records request headers so the control test asserts the REAL
   invocation shape (no content-type, no body) — a loose fetch mock is what
   let this ship.
-- [ ] 🟡 `StartPhaseControl.tsx:94` has the IDENTICAL defect shape (POST
-  `.../phases/:id/start` with `authHeaders(true)`, no body) — the "Start
-  phase" button should 400 in production the same way. `Account.tsx:147`
-  (DELETE + JSON content-type, no body) is suspect too, unverified. Flagged
-  as a spin-off task; not fixed here (out of P3's file scope).
+- [x] ✅ P3 hotfix sweep (PM lifted the scope fence) — `StartPhaseControl.tsx`
+  had the IDENTICAL defect shape (POST `.../phases/:id/start` with
+  `authHeaders(true)`, no body → 400 before the handler). Fixed the same
+  one-line way (`authHeaders()`), and its click test now asserts the real
+  fetch invocation (no content-type header, no body) via the upgraded
+  MockFetch.
+- [ ] 🔴 `Account.tsx:147` (session revoke) — CONFIRMED broken, not fixed
+  here (Account.tsx is owned by another workstream). Evidence: Fastify
+  5.10.0 puts DELETE in its `bodywith` method set (fastify.js:140), and a
+  runtime probe against a real fastify instance returns 400
+  `FST_ERR_CTP_EMPTY_JSON_BODY` for DELETE + `content-type: application/json`
+  + empty body, via both `inject` and a real socket (DELETE without the
+  header → 200). Same one-line fix applies: `authHeaders()` instead of
+  `authHeaders(true)`. PM to route.
 
 ## Phase tab program (dispatched 2026-07-22)
 

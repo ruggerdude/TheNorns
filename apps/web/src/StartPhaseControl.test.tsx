@@ -133,6 +133,17 @@ describe("StartPhaseControl (EXECUTION E2)", () => {
       expect(screen.getByTestId("start-phase-result")).toHaveTextContent("1 scheduled, 0 blocked"),
     );
     expect(mock.calls.some((call) => call.method === "POST" && call.url === START_URL)).toBe(true);
+
+    // POLISH P3 hotfix sweep: this control originally sent
+    // `content-type: application/json` with NO body — a combination Fastify
+    // rejects with 400 ("Body cannot be empty when content-type is set to
+    // 'application/json'") before the route handler runs, exactly the
+    // production defect the sibling Analyze button shipped. Assert the REAL
+    // fetch invocation shape: a body-less POST must carry no JSON
+    // content-type. A mock that only checks the URL is what let this slip.
+    const startCall = mock.calls.find((call) => call.method === "POST" && call.url === START_URL);
+    expect(startCall?.body).toBeUndefined();
+    expect(startCall?.headers["content-type"]).toBeUndefined();
   });
 
   it("calls onStarted after a successful start (so the caller can refresh phase state)", async () => {
