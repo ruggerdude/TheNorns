@@ -36,7 +36,8 @@ The following capabilities existed before this program and must be reused:
 | Capability | Current state |
 |---|---|
 | Light mode | Delivered: light/dark toggle, system preference, and persisted selection |
-| Project dashboard | Delivered: project cards, overall completion, ETA, active agents, decisions, and project opening |
+| Project dashboard | Delivered: project cards, overall completion, ETA, active agents, decisions, row-wide click/keyboard entry, and explicit project entry |
+| Dashboard project removal | Delivered: confirmed removal archives an idle project, closes its open tab, removes it from active reads, preserves repository/history, records human evidence, and refuses while agent/planning/debate work is active |
 | GitHub onboarding | Delivered: connection, repository selection/creation, and project creation |
 | Planning | Delivered: persisted asynchronous planning runs backed by `runPlanning`, selectable reviewer, configurable rounds, transcript/status, and refresh recovery |
 | Images | Delivered for the MVP: paste/drop upload, validation and caps, provider-neutral image parts, and Anthropic/OpenAI planning context |
@@ -106,10 +107,15 @@ existing cookies/local storage:
 3. Objective with pasted images → PM/reviewer rounds → editable staffing →
    approval → execution kickoff.
 4. Refresh and reopen during planning, approval, and execution.
-5. Open multiple projects, switch between them, close one, and return to the
-   main dashboard without losing the others.
-6. Resolve an attention decision and confirm execution resumes.
-7. Repeat the supported web journeys in normal Safari, Safari Private
+5. Enter a project by clicking its dashboard row and by keyboard, then open
+   multiple projects, switch between them, close one, and return to the main
+   dashboard without losing the others.
+6. Remove an idle project and confirm it disappears from the dashboard and
+   open-project tabs without deleting its repository or history. Attempt the
+   same operation on a project with active work and confirm it is refused with
+   a recoverable explanation.
+7. Resolve an attention decision and confirm execution resumes.
+8. Repeat the supported web journeys in normal Safari, Safari Private
    Browsing, and Chrome.
 
 Failures must render a recoverable explanation rather than a blank workspace,
@@ -119,6 +125,14 @@ false connection state, or successful-looking dead project.
 
 - The main dashboard shows every project with source, status, current phase,
   completion, ETA, active work, and attention count.
+- Clicking the non-interactive area of a project row enters that project
+  immediately. The same entry action is keyboard accessible and each row
+  retains an explicit **Enter project** control.
+- Every project row offers **Remove** with confirmation. Removal means archival:
+  the project disappears from the active dashboard and open tabs while its
+  connected repository and historical evidence remain untouched.
+- Removal is rejected while agent, planning, or debate work is active; the
+  dashboard explains what must finish or be cancelled first.
 - **New project** visibly offers both GitHub and Local folder.
 - GitHub remains connected after its callback and refresh.
 - Local-folder selection is a native chooser experience; implementation
