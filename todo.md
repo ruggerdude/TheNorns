@@ -919,3 +919,17 @@ decision and is deliberately untouched.
   `AnalyzeRepositoryControl` in the overview NextStep row: in-progress state,
   server's own error on failure, resume reload shows the recorded
   architecture.
+
+## Phase tab — multi-model PM loop (2026-07-22)
+
+- [ ] 🔄 PHTAB-1 — Backend: per-run `review_rounds`, worker-provider selection
+  (Claude/ChatGPT/both), decision endpoint (approve / modify→re-review /
+  reject), per-phase staffing overrides, PM pinned to claude-fable-5 +
+  reviewer default gpt-5.6-sol, approval→execution kickoff with
+  % complete / ETA in status payload.
+- [ ] 🔄 PHTAB-2 — Web: new "Phase" workspace tab — goal box + attachments,
+  agent + review-rounds selectors, live round-by-round review progress,
+  Approve/Modify/Reject with modify textbox, per-phase agent+model dropdowns,
+  execution status panel (phase, % complete, ETA).
+- [ ] 📋 PHTAB-3 — Integration: merge worktrees, assign migration numbers, full
+  verification bar, independent reviewer sign-off, end-to-end check.

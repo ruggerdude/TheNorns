@@ -129,3 +129,32 @@ product decision, not a bug fix:
 - **Verification results are stored in the runner's inline shape** (E10-10)
   rather than the evidence contract's artifact-backed form. Nothing reads the
   latter today; reconciling needs an artifact store on this path.
+
+## Phase tab build — backlog for the owner (2026-07-22)
+
+Product decisions:
+
+- **Cap-reached approval vs must-fix findings** (PHTAB-B1). If review hits the
+  round cap with unresolved must-fix findings and the owner approves anyway,
+  execution kickoff refuses honestly (approval is recorded; the refusal reason
+  is shown). Decide whether a Phase-tab approval should waive open must-fix
+  findings for cap_reached runs.
+- **Add Kimi as a third provider** (PHTAB-B2). The adapter layer is a clean
+  seam (`packages/adapters`, ProviderName union, model registry, contracts
+  PM_MODEL_OPTIONS); Kimi = one new adapter + registry/options entries +
+  worker_providers extension.
+- **General file attachments** (PHTAB-B3). The goal box accepts images only
+  (server mime allow-list in apps/server/src/attachments/). Extend to
+  PDFs/text/docs if wanted.
+
+Minor debt from the P5 review (all assessed non-blocking):
+
+- Phase-tab caption "PM: Claude Fable · Reviewer: ChatGPT Sol" is static; env/
+  per-project overrides win server-side without changing the caption (PHTAB-B4).
+- Active-phase guard in executionKickoff.ts is check-then-act, not atomic;
+  mitigated by the coordinator's own gate (PHTAB-B5).
+- Execution-status route maps all errors to 404 project_not_found, including
+  genuine DB errors (matches sibling route; tighten someday) (PHTAB-B6).
+- An approve whose staffing names a node the plan lacks refuses after the
+  phase + proposed strategy were created (state consistent and recoverable;
+  route-level 422 catches registry-invalid entries first) (PHTAB-B7).
