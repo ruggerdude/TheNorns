@@ -973,3 +973,15 @@ decision and is deliberately untouched.
   approve's `execution: null` renders a neutral not-auto-started note,
   not an error. Execution kickoff seam remains deliberately unwired
   pending a product decision.
+
+- [ ] 🔄 PHTAB-P4 — approve auto-starts execution (this worktree, In
+  Progress): real `ApprovedPlanExecutionKickoff`
+  (`apps/server/src/planning/executionKickoff.ts`) driving
+  StrategyBridgeService (materialize, staffing overrides via editStaffing,
+  approve attributed to the deciding user with decided_at + run-id
+  idempotency key) then `PhaseLaunchService.startPhase`; refuses honestly
+  (`{started:false, detail}`) when a phase is already executing or any step
+  fails — the recorded planning-run approval is never rolled back. Wired in
+  `main.ts` (`planningRuns.executionKickoff`); decision route now resolves
+  the session user (`decidedBy`). Tests + frontend success-detail rendering
+  pending.

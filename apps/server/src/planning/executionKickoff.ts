@@ -20,8 +20,13 @@ import {
 //      recommendation staffing from step 1.
 //   3. StrategyBridgeService.approve — the canonical, transactional strategy
 //      approval + materialization (tasks, assignments, budget). The approval
-//      is attributed to the planning-run decision: `approved_by` carries the
-//      run id and `approved_at` carries the decision's decided_at.
+//      originates from the planning-run decision and is attributed
+//      accordingly: `approvals.actor_id`/`approved_by` is the deciding human
+//      (FK-bound to users), `approved_at` is the decision's decided_at, and
+//      the run id rides in the approval command's idempotency key
+//      (`planning-run-approve:<runId>`) — on top of the phase's own
+//      planning_run_id binding and the strategy's provenance, which both
+//      already name the run.
 //   4. PhaseLaunchService.startPhase — dispatch through the real coordinator
 //      gate. Nothing here bypasses or weakens that gate.
 //
@@ -106,9 +111,10 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
       };
     }
 
-    // The decision's decided_at is the approval's timestamp of record.
+    // The decision's decided_at is the approval's timestamp of record, and
+    // the deciding human is its actor of record.
     const decidedAt = (await this.loadDecision(input)) ?? this.now().toISOString();
-    const actor = { actor_id: `planning-run-decision:${input.planningRunId}` };
+    const actor = { actor_id: input.decidedBy };
 
     // ---- 1. materialize the plan (idempotent) ------------------------------
     let review = await this.bridge.createPhaseFromPlanningRun({

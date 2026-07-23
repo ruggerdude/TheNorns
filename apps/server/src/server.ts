@@ -4015,6 +4015,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
       app.post("/api/v2/projects/:id/planning-runs/:runId/decision", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
+        // PHASE TAB P4: the kickoff records a strategy approval attributed to
+        // the deciding human (approvals.actor_id is FK-bound to users), so
+        // the route resolves the session user rather than passing "operator".
+        const user = await resolveUser(req);
+        if (!user) return reply.code(401).send({ error: "unauthorized" });
         const { id, runId } = req.params as { id: string; runId: string };
         const body = PlanningRunDecisionBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: "bad_request" });
@@ -4074,6 +4079,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                   planningRunId: runId,
                   plan: run.result?.plan ?? null,
                   staffing: run.decision?.staffing ?? null,
+                  decidedBy: user.id,
                 });
               } catch (error) {
                 execution = {

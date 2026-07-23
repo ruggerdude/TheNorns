@@ -210,6 +210,14 @@ export interface ApprovedPlanExecutionKickoffInput {
   plan: unknown;
   /** Human staffing overrides recorded with the approval, if any. */
   staffing: readonly ApprovedStaffingEntryDto[] | null;
+  /**
+   * PHASE TAB P4: the id of the human whose decision approved the plan — the
+   * session user behind the decision request. A kickoff implementation that
+   * records a strategy approval MUST attribute it to this user:
+   * `approvals.actor_id` carries a foreign key to `users`, so a synthetic
+   * actor id would be refused by the database.
+   */
+  decidedBy: string;
 }
 
 export interface ApprovedPlanExecutionKickoff {
