@@ -89,6 +89,51 @@ describe("workspace connections settings", () => {
     expect(continueButton).toBeEnabled();
   });
 
+  it("disconnects with a body-less DELETE that carries no JSON content-type (POLISH P3 hotfix sweep)", async () => {
+    // Production regression class: integrationRequest's old
+    // `|| init?.method === "DELETE"` clause forced
+    // `content-type: application/json` onto this body-less DELETE, and
+    // Fastify runs the JSON body parser for DELETE too (`bodywith` method
+    // set), 400ing the empty body (FST_ERR_CTP_EMPTY_JSON_BODY) before the
+    // route handler ran — so Disconnect always failed. Assert the REAL fetch
+    // invocation shape; a mock that only checks the URL is what let the
+    // sibling buttons ship broken.
+    mock = new MockFetch();
+    mock.get("/api/auth/sessions", { body: { sessions: [] } });
+    mock.get("/api/integrations/github/status", {
+      body: {
+        configured: true,
+        setup_available: false,
+        configuration_source: "manifest",
+        user_authorization: { connected: true, login: "octocat" },
+        connections: [
+          {
+            id: "github:42",
+            provider: "github",
+            display_name: "octocat on GitHub",
+            owner_type: "user",
+            owner_login: "octocat",
+            installation_id: "42",
+            repository_selection: "all",
+            status: "connected",
+            last_validated_at: "2026-07-16T20:00:00Z",
+          },
+        ],
+      },
+    });
+    mock.del("/api/integrations/github/connections/github%3A42", { status: 204 });
+    mock.install();
+
+    render(<Account user={admin} initialTab="connections" onClose={vi.fn()} onSignOut={vi.fn()} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Manage GitHub" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
+
+    const call = mock.calls.find((entry) => entry.method === "DELETE");
+    expect(call?.url).toBe("/api/integrations/github/connections/github%3A42");
+    expect(call?.body).toBeUndefined();
+    expect(call?.headers["content-type"]).toBeUndefined();
+  });
+
   it("surfaces manifest callback failures and opens the GitHub setup details", async () => {
     mock = new MockFetch();
     mock.get("/api/auth/sessions", { body: { sessions: [] } });

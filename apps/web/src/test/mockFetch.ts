@@ -142,6 +142,12 @@ export class MockFetch {
     }
     const result = await route.handler(url, init);
     const status = result.status ?? 200;
+    // The Response constructor throws for a null-body status (204/205/304)
+    // with any body — and real routes do reply 204 (e.g. the GitHub
+    // connection disconnect). Mirror that instead of crashing the mock.
+    if (status === 204 || status === 205 || status === 304) {
+      return new Response(null, { status });
+    }
     return new Response(JSON.stringify(result.body ?? {}), {
       status,
       headers: { "content-type": "application/json" },

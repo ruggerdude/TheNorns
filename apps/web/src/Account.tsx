@@ -70,7 +70,15 @@ async function integrationRequest<T>(path: string, init?: RequestInit): Promise<
   const response = await fetch(path, {
     ...init,
     headers: {
-      ...authHeaders(Boolean(init?.body) || init?.method === "DELETE"),
+      // Content-type follows the body, never the method. The old
+      // `|| init?.method === "DELETE"` clause forced
+      // `content-type: application/json` onto body-less DELETEs, and Fastify
+      // runs the JSON body parser for DELETE too (`bodywith` method set) —
+      // rejecting the empty body with 400 FST_ERR_CTP_EMPTY_JSON_BODY before
+      // the route handler runs, so "Disconnect" on a GitHub connection always
+      // failed (POLISH P3 hotfix sweep, same defect as the Analyze /
+      // Start-phase / session-revoke buttons).
+      ...authHeaders(Boolean(init?.body)),
       ...init?.headers,
     },
     credentials: "include",
