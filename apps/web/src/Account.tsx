@@ -144,7 +144,13 @@ export function Account({
   const revoke = async (sessionId: string): Promise<void> => {
     const response = await fetch(`/api/auth/sessions/${encodeURIComponent(sessionId)}`, {
       method: "DELETE",
-      headers: authHeaders(true),
+      // No body → no content-type. `authHeaders(true)` sets
+      // `content-type: application/json`, and Fastify runs the JSON body
+      // parser for DELETE too (it is in the `bodywith` method set), rejecting
+      // an EMPTY body with 400 FST_ERR_CTP_EMPTY_JSON_BODY before the route
+      // handler runs — the same defect the Analyze and Start-phase buttons
+      // shipped (POLISH P3 hotfix).
+      headers: authHeaders(),
       credentials: "include",
     });
     if (response.status === 401) return onUnauthorized();
