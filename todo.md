@@ -956,3 +956,20 @@ decision and is deliberately untouched.
   `App.phase-tab.test.tsx` (5). Built against the contract with MockFetch;
   backend built in parallel by another agent — end-to-end against the real
   server NOT exercised here.
+
+- [x] ✅ PHTAB-3 (integration) — merged PT-P1 (backend) + PHASE-TAB P2
+  (frontend) into `phase-tab/integration` (opened and finished in the same
+  push). Migration number **0025** assigned
+  (`0025_phase_tab_planning_decisions.sql`, constants in `migrate.ts`,
+  preservation-schema expectations updated). Frontend reconciled to the
+  backend as built, all in `apps/web/src/phaseTabApi.ts` +
+  `PhaseTab.tsx` + `App.phase-tab.test.tsx`: no `awaiting_decision`
+  status (converged/cap_reached ARE the awaiting states); DTO gains
+  `worker_providers` + `decision`; staffed phases read from
+  `result.staffing_proposal.recommendations` joined to `plan.modules`
+  (the frontend had guessed `result.plan.phases`); execution-status
+  repointed to project-scoped `GET /api/v2/projects/:id/execution-status`;
+  modify's 202 re-queued run returns the UI to live-progress polling;
+  approve's `execution: null` renders a neutral not-auto-started note,
+  not an error. Execution kickoff seam remains deliberately unwired
+  pending a product decision.
