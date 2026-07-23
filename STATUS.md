@@ -11,4 +11,4 @@
 
 **Final branch:** worktree-agent-a7882fb56ab5bf1d0 @ 151d8f3 (contains everything; main untouched).
 **Final verification:** server 869 passed / 12 skipped; web 133 passed; contracts 122; adapters 25/2 skipped; tsc, biome, build all clean.
-**Awaiting owner:** merge/PR decision; production deploy (applies migration 0025). Backlog in BACKLOG.md ("Phase tab build" section).
+**Landed:** merged to main (772bdd8), pushed, Railway deploy SUCCESS, migration 0025 applied and verified live (site/healthz 200, new routes 401-not-404). Backlog in BACKLOG.md ("Phase tab build" section).
