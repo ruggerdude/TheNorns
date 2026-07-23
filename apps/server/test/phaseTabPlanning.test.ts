@@ -155,16 +155,14 @@ describe.sequential("phase tab: planning run decisions (service + worker)", () =
     expect(decided.decision).toMatchObject({ decision: "reject", direction: null, staffing: null });
     expect(decided.result).not.toBeNull();
     // A rejected run takes no further decisions.
-    await expect(
-      service.decide("project-1", runId, { decision: "approve" }),
-    ).rejects.toMatchObject({ code: "invalid_status" });
+    await expect(service.decide("project-1", runId, { decision: "approve" })).rejects.toMatchObject(
+      { code: "invalid_status" },
+    );
   });
 
   it("approve records staffing overrides and marks the run approved", async () => {
     const runId = await convergeRun();
-    const staffing = [
-      { node_id: "api", provider: "anthropic" as const, model: "claude-sonnet-5" },
-    ];
+    const staffing = [{ node_id: "api", provider: "anthropic" as const, model: "claude-sonnet-5" }];
     const decided = await service.decide("project-1", runId, { decision: "approve", staffing });
     expect(decided.status).toBe("approved");
     expect(decided.decision?.decision).toBe("approve");

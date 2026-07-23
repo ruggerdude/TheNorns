@@ -3858,9 +3858,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             models: configuredWorkerModels(),
             // PHASE TAB P1: the run's implementation-provider constraint.
             // Reviewers stay cross-provider (see allocationRecommendation.ts).
-            ...(workerProviders !== "both"
-              ? { allowedWorkerProviders: [workerProviders] }
-              : {}),
+            ...(workerProviders !== "both" ? { allowedWorkerProviders: [workerProviders] } : {}),
           });
           options.recordUsage?.([recommendation.usage]);
           return {

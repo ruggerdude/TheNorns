@@ -213,9 +213,7 @@ export interface ApprovedPlanExecutionKickoffInput {
 }
 
 export interface ApprovedPlanExecutionKickoff {
-  kickoff(
-    input: ApprovedPlanExecutionKickoffInput,
-  ): Promise<{ started: boolean; detail: string }>;
+  kickoff(input: ApprovedPlanExecutionKickoffInput): Promise<{ started: boolean; detail: string }>;
 }
 
 /** PHASE TAB P1: input for a human decision on a terminal-review run. */
@@ -328,9 +326,7 @@ export class PlanningRunService {
         decision: input.decision,
         direction: input.decision === "modify" ? input.direction : null,
         staffing:
-          input.decision === "approve" && input.staffing !== undefined
-            ? [...input.staffing]
-            : null,
+          input.decision === "approve" && input.staffing !== undefined ? [...input.staffing] : null,
         decided_at: decidedAt,
       };
       if (input.decision === "modify") {
