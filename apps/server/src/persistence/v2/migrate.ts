@@ -191,8 +191,7 @@ export const PHASE_CONCURRENCY_CONFLICTS_MIGRATION_URL = new URL(
 // PHASE TAB P1: planning-run decision workflow (worker_providers, decision,
 // revision_seed columns; approved/rejected statuses). Number 0025 assigned at
 // integration (0024 was the highest merged number at the time).
-export const PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME =
-  "0025_phase_tab_planning_decisions";
+export const PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME = "0025_phase_tab_planning_decisions";
 export const PHASE_TAB_PLANNING_DECISIONS_MIGRATION_URL = new URL(
   "../../../drizzle/0025_phase_tab_planning_decisions.sql",
   import.meta.url,

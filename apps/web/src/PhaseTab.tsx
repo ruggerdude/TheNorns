@@ -3,7 +3,7 @@ import { PM_MODEL_OPTIONS } from "@norns/contracts";
 //   a. Goal input (textarea + image attachments)
 //   b. Setup selectors (agents, review rounds) + fixed PM/Reviewer identity
 //   c. Start -> live planning-run progress (fast poll while active)
-//   d. Decision panel at converged/cap_reached/awaiting_decision:
+//   d. Decision panel at converged/cap_reached (the awaiting-decision states):
 //      per-phase staffing dropdowns, Approve / Modify(direction) / Reject
 //   e. Execution status table once approved (fast/idle poll cadence)
 // ALL fetches go through phaseTabApi.ts (single reconciliation point for the
@@ -15,6 +15,7 @@ import {
   PHASE_EXECUTION_ACTIVE_STATES,
   PHASE_RUN_ACTIVE_STATUSES,
   PHASE_RUN_DECISION_STATUSES,
+  type PhaseExecutionKickoffReport,
   type PhaseExecutionStatusRow,
   type PhasePlanStaffedPhase,
   type PhasePlanningRunDto,
@@ -90,6 +91,12 @@ export function PhaseTab({
   // e — execution status
   const [executionRows, setExecutionRows] = useState<PhaseExecutionStatusRow[] | null>(null);
   const [executionError, setExecutionError] = useState<string | null>(null);
+  // The approve response's kickoff report: null means the approval is
+  // recorded but execution did not auto-start (a neutral fact, not an
+  // error); undefined until an approve response has been seen this session.
+  const [executionKickoff, setExecutionKickoff] = useState<
+    PhaseExecutionKickoffReport | null | undefined
+  >(undefined);
 
   const fail = useCallback(
     (err: unknown, sink: (message: string) => void) => {
@@ -119,6 +126,7 @@ export function PhaseTab({
       setConfirmingReject(false);
       setExecutionRows(null);
       setExecutionError(null);
+      setExecutionKickoff(undefined);
     } catch (err) {
       fail(err, setError);
     } finally {
@@ -150,15 +158,15 @@ export function PhaseTab({
     return () => window.clearInterval(timer);
   }, [runId, runStatus, pollRun]);
 
+  // Project-scoped: GET /api/v2/projects/:id/execution-status (no runId).
   const pollExecution = useCallback(async () => {
-    if (!runId) return;
     try {
       setExecutionError(null);
-      setExecutionRows((await getPhaseExecutionStatus(projectId, runId)).phases);
+      setExecutionRows((await getPhaseExecutionStatus(projectId)).phases);
     } catch (err) {
       fail(err, setExecutionError);
     }
-  }, [runId, projectId, fail]);
+  }, [projectId, fail]);
 
   // Poll execution status once approved: fast while any phase is active.
   const executionActive =
@@ -184,7 +192,11 @@ export function PhaseTab({
       setDecisionBusy(true);
       setError(null);
       try {
-        setRun(await postPlanningRunDecision(projectId, runId, body));
+        const decided = await postPlanningRunDecision(projectId, runId, body);
+        setRun(decided);
+        // Approve responses carry `execution` ({started, detail} | null);
+        // modify/reject responses do not — leave the report untouched then.
+        if ("execution" in decided) setExecutionKickoff(decided.execution ?? null);
         setModifyOpen(false);
         setDirection("");
         setConfirmingReject(false);
@@ -221,6 +233,7 @@ export function PhaseTab({
     setConfirmingReject(false);
     setExecutionRows(null);
     setExecutionError(null);
+    setExecutionKickoff(undefined);
   }, []);
 
   const runIsActive = runStatus !== null && PHASE_RUN_ACTIVE_STATUSES.has(runStatus);
@@ -490,6 +503,15 @@ export function PhaseTab({
               </div>
               <Badge tone="success">approved</Badge>
             </div>
+            {executionKickoff === null || executionKickoff?.started === false ? (
+              <p className="muted" data-testid="phase-execution-kickoff-note">
+                Plan approved and recorded. Execution has not auto-started — it begins through the
+                existing strategy and phase start flow.
+                {executionKickoff?.started === false && executionKickoff.detail
+                  ? ` (${executionKickoff.detail})`
+                  : ""}
+              </p>
+            ) : null}
             {executionError ? <Alert testId="phase-execution-error">{executionError}</Alert> : null}
             {executionRows ? (
               <div className="phase-execution-table-wrap">
@@ -522,7 +544,7 @@ export function PhaseTab({
                         </td>
                         <td className="mono">{Math.round(row.percent_complete)}%</td>
                         <td>{row.est_completion ?? "—"}</td>
-                        <td>{row.notes ?? ""}</td>
+                        <td>{row.notes}</td>
                       </tr>
                     ))}
                   </tbody>

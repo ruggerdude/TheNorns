@@ -4,8 +4,13 @@
 // mid-review run; the decision panel renders plan phases whose staffing
 // dropdowns feed the approve payload; modify sends direction and returns to
 // live progress; the execution table renders once approved. Backend is being
-// built in parallel — these run against the CONTRACT via MockFetch; field
-// drift is reconciled in phaseTabApi.ts only.
+// built in parallel — reconciled at P3 integration: fixtures now mirror the
+// REAL backend DTO shapes (apps/server/src/planning/runService.ts /
+// apps/server/test/phaseTabPlanning.test.ts): staffing lives in
+// result.staffing_proposal.recommendations joined to plan.modules; execution
+// status is the project-scoped GET .../execution-status; modify answers 202
+// with the run re-queued (status "queued", rounds_completed 0); approve
+// carries `execution: { started, detail } | null`.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
@@ -27,6 +32,8 @@ function makeRun(overrides: Partial<PhasePlanningRunDto> = {}): PhasePlanningRun
     max_rounds: 4,
     review_rounds_total: 4,
     rounds_completed: 1,
+    worker_providers: "both",
+    decision: null,
     transcript: [
       {
         round: 1,
@@ -51,53 +58,69 @@ function makeRun(overrides: Partial<PhasePlanningRunDto> = {}): PhasePlanningRun
   };
 }
 
+// Mirrors the backend's real PlanningRunResultDto: the plan is a PlanContract
+// (modules with id/title/description), staffing lives beside it in
+// staffing_proposal.recommendations (shape from
+// apps/server/src/planning/allocationRecommendation.ts).
 const convergedRun = makeRun({
   status: "converged",
   rounds_completed: 2,
   review_rounds_total: 2,
   result: {
     plan: {
-      phases: [
-        {
-          node_id: "p1",
-          name: "Core API",
-          description: "REST surface and persistence.",
-          provider: "anthropic",
-          model: "claude-sonnet-5",
-          worker_count: 2,
-        },
-        {
-          node_id: "p2",
-          name: "Web UI",
-          description: "Front-end for the API.",
-          provider: "openai",
-          model: "gpt-5.6-terra",
-          worker_count: 1,
-        },
+      modules: [
+        { id: "p1", title: "Core API", description: "REST surface and persistence." },
+        { id: "p2", title: "Web UI", description: "Front-end for the API." },
       ],
     },
     content_hash: "a".repeat(64),
     total_cost_usd: 1.23,
+    staffing_proposal: {
+      summary: "Staff both modules.",
+      recommendations: [
+        {
+          node_id: "p1",
+          provider: "anthropic",
+          model: "claude-sonnet-5",
+          worker_count: 2,
+          reviewer_model: "gpt-5.6-sol",
+          budget_usd: 25,
+          rationale: "Parallel-safe API work.",
+        },
+        {
+          node_id: "p2",
+          provider: "openai",
+          model: "gpt-5.6-terra",
+          worker_count: 1,
+          reviewer_model: "claude-sonnet-5",
+          budget_usd: 15,
+          rationale: "Single accountable worker.",
+        },
+      ],
+    },
   },
 });
 
+// Mirrors AttentionService.projectExecution: project-scoped, states are
+// phases.status values, notes is always a string.
 const executionStatus = {
+  project_id: projectId,
   phases: [
     {
       phase_id: "p1",
       name: "Core API",
-      state: "running",
+      state: "active",
       percent_complete: 42,
       est_completion: "2026-07-23 10:00 UTC",
-      notes: "On track",
+      notes: "1/3 tasks complete; 1 run(s) active",
     },
     {
       phase_id: "p2",
       name: "Web UI",
-      state: "queued",
+      state: "proposed",
       percent_complete: 0,
       est_completion: null,
-      notes: null,
+      notes: "no tasks yet",
     },
   ],
 };
@@ -195,8 +218,25 @@ describe("PHASE TAB (P2)", () => {
     mock = workspaceMocks();
     mock.post(runsUrl, { body: { planning_run_id: "run-1" } });
     mock.get(runUrl, { body: convergedRun });
-    mock.post(`${runUrl}/decision`, { body: { ...convergedRun, status: "approved" } });
-    mock.get(`${runUrl}/execution`, { body: executionStatus });
+    // Approve answers 200 with the run DTO plus `execution` — null means the
+    // approval is recorded but execution did not auto-start (not an error).
+    mock.post(`${runUrl}/decision`, {
+      body: {
+        ...convergedRun,
+        status: "approved",
+        decision: {
+          decision: "approve",
+          direction: null,
+          staffing: [
+            { node_id: "p1", provider: "openai", model: "gpt-5.6-sol" },
+            { node_id: "p2", provider: "openai", model: "gpt-5.6-terra" },
+          ],
+          decided_at: "2026-07-22T22:00:00Z",
+        },
+        execution: null,
+      },
+    });
+    mock.get(`/api/v2/projects/${projectId}/execution-status`, { body: executionStatus });
     mock.install();
 
     const user = await openPhaseTab();
@@ -229,11 +269,16 @@ describe("PHASE TAB (P2)", () => {
     const table = await screen.findByTestId("phase-execution-table");
     expect(screen.queryByTestId("phase-decision-panel")).not.toBeInTheDocument();
     expect(table).toHaveTextContent("Core API");
-    expect(table).toHaveTextContent("running");
+    expect(table).toHaveTextContent("active");
     expect(table).toHaveTextContent("42%");
-    expect(table).toHaveTextContent("On track");
+    expect(table).toHaveTextContent("1/3 tasks complete");
     expect(table).toHaveTextContent("Web UI");
-    expect(table).toHaveTextContent("queued");
+    expect(table).toHaveTextContent("proposed");
+    // execution:null on the approve response -> neutral note, no error.
+    expect(screen.getByTestId("phase-execution-kickoff-note")).toHaveTextContent(
+      "Execution has not auto-started",
+    );
+    expect(screen.queryByTestId("phase-execution-error")).not.toBeInTheDocument();
   });
 
   it("modify requires direction, sends it, and returns the panel to live progress", async () => {
@@ -241,8 +286,23 @@ describe("PHASE TAB (P2)", () => {
     mock = workspaceMocks();
     mock.post(runsUrl, { body: { planning_run_id: "run-1" } });
     mock.get(runUrl, { body: convergedRun });
+    // Modify answers 202 with the run re-queued: status back to "queued",
+    // rounds_completed reset to 0, result cleared, the modify recorded.
     mock.post(`${runUrl}/decision`, {
-      body: makeRun({ status: "revising", rounds_completed: 2, review_rounds_total: 4 }),
+      status: 202,
+      body: makeRun({
+        status: "queued",
+        rounds_completed: 0,
+        review_rounds_total: 2,
+        result: null,
+        transcript: [],
+        decision: {
+          decision: "modify",
+          direction: "Split phase 1 into two",
+          staffing: null,
+          decided_at: "2026-07-22T22:00:00Z",
+        },
+      }),
     });
     mock.install();
 
