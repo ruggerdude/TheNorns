@@ -936,3 +936,23 @@ decision and is deliberately untouched.
   `AnalyzeRepositoryControl` in the overview NextStep row: in-progress state,
   server's own error on failure, resume reload shows the recorded
   architecture.
+
+## Phase tab program (dispatched 2026-07-22)
+
+- [x] ✅ PHASE-TAB P2 (frontend) — new "Phase" workspace tab (opened and
+  finished in the same push): goal textarea + image `AttachmentInput`;
+  Agents (Claude/ChatGPT/Both → `worker_providers`) and Review rounds (1–5,
+  default 2) selectors with the fixed "PM: Claude Fable · Reviewer: ChatGPT
+  Sol" identity line; Start → `POST .../planning-runs` (now with
+  `review_rounds` + `worker_providers`) → live progress (status/rounds/
+  reviewer findings, 3s active / 15s idle poll); decision panel at
+  converged/cap_reached/awaiting_decision with per-phase provider+model
+  staffing dropdowns (PM_MODEL_OPTIONS filtered to the run's providers) and
+  Approve (staffing payload) / Modify (direction → back through review) /
+  Reject (two-step confirm); execution status table once approved (5s/15s
+  cadence). ALL fetches in `apps/web/src/phaseTabApi.ts` — the integrator's
+  single reconciliation point (execution-status route is a PLACEHOLDER
+  there). Component in `apps/web/src/PhaseTab.tsx`; tests in
+  `App.phase-tab.test.tsx` (5). Built against the contract with MockFetch;
+  backend built in parallel by another agent — end-to-end against the real
+  server NOT exercised here.
