@@ -189,6 +189,35 @@ export interface CreatePlanningRunInput {
   attachmentIds?: readonly string[];
 }
 
+// ---------------------------------------------------------------------------
+// PHASE TAB P1: the execution-kickoff seam for an approved planning run.
+//
+// Starting real execution from an approved plan is NOT a single call today:
+// the plan must first be materialized into a phase + proposed StrategyVersion
+// (StrategyBridgeService), that strategy approved (its own human-approval
+// semantics), tasks and assignments created, and only then can
+// PhaseLaunchService.startPhase dispatch work. Auto-driving that chain from a
+// planning-run approval would silently bypass the strategy-approval gate, so
+// the decision route instead calls this seam when (and only when) a
+// deployment wires an implementation. Until one is wired, an approval is
+// fully recorded (status, decision, staffing) and the response reports
+// `execution: null` — honest, not silently pretending to have started work.
+// ---------------------------------------------------------------------------
+export interface ApprovedPlanExecutionKickoffInput {
+  projectId: string;
+  planningRunId: string;
+  /** The approved plan (the run result's plan payload). */
+  plan: unknown;
+  /** Human staffing overrides recorded with the approval, if any. */
+  staffing: readonly ApprovedStaffingEntryDto[] | null;
+}
+
+export interface ApprovedPlanExecutionKickoff {
+  kickoff(
+    input: ApprovedPlanExecutionKickoffInput,
+  ): Promise<{ started: boolean; detail: string }>;
+}
+
 /** PHASE TAB P1: input for a human decision on a terminal-review run. */
 export type PlanningRunDecisionInput =
   | { decision: "approve"; staffing?: readonly ApprovedStaffingEntryDto[] }

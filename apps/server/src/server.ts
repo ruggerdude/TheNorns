@@ -13,6 +13,7 @@ import websocket from "@fastify/websocket";
 import {
   AdapterError,
   AnthropicAdapter,
+  DEFAULT_MODEL_REGISTRY,
   type LlmAdapter,
   OpenAiAdapter,
   type ProviderName,
@@ -129,11 +130,17 @@ import {
   recommendProjectAllocation,
 } from "./planning/allocationRecommendation.js";
 import {
+  PLANNING_RUN_DEFAULT_PM_MODEL,
+  PLANNING_RUN_DEFAULT_REVIEWER_MODEL,
   defaultReviewerProviderFor,
   resolvePlanningParticipants,
 } from "./planning/reviewerSelection.js";
 import {
+  type ApprovedPlanExecutionKickoff,
+  type ApprovedStaffingEntryDto,
   PlanningRunConflictError,
+  PlanningRunDecisionError,
+  type PlanningRunDecisionInput,
   PlanningRunService,
   type PlanningStaffingProposalDto,
 } from "./planning/runService.js";
@@ -326,7 +333,17 @@ export interface ServerOptions {
    * wraps runPlanning() with a pollable record. Unavailable without its
    * database runtime, same as `debates`.
    */
-  planningRuns?: { transactions: V2TransactionRunner };
+  planningRuns?: {
+    transactions: V2TransactionRunner;
+    /**
+     * PHASE TAB P1: optional execution kickoff for an approved planning run.
+     * Not wired in production yet — see ApprovedPlanExecutionKickoff in
+     * planning/runService.ts for why approval must not silently auto-drive
+     * the strategy-approval chain. When absent, an approval is recorded fully
+     * and the decision response reports `execution: null`.
+     */
+    executionKickoff?: ApprovedPlanExecutionKickoff;
+  };
   /**
    * EXECUTION E10 (E9-10, = E3-10) — the relational runtime behind BOTH the E3
    * completion proxy and the E9 provider-native gateway.
@@ -3384,6 +3401,24 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       });
 
       // -----------------------------------------------------------------
+      // PHASE TAB P1: lightweight per-phase execution progress for a whole
+      // project, poll-friendly. Derived from the same phases/tasks/agent_runs
+      // data the per-phase execution view reads (AttentionService
+      // .projectExecution) — additive fields, not a parallel status system.
+      // -----------------------------------------------------------------
+      app.get("/api/v2/projects/:id/execution-status", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        try {
+          reply
+            .header("Cache-Control", "no-store")
+            .send(await options.phase5?.attention.projectExecution(id));
+        } catch (error) {
+          reply.code(404).send({ error: "project_not_found", detail: String(error) });
+        }
+      });
+
+      // -----------------------------------------------------------------
       // EXECUTION E13 — live run-log tail for a task's designated run. See
       // `AttentionService.runLog` for the two-mode (tail / `after`-cursor)
       // contract. Bounded server-side (RUN_LOG_PAGE_LIMIT), so a chatty agent
@@ -3771,11 +3806,20 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         ]);
         // Throws PlanningConfigurationError when the deployment lacks what's
         // needed; the worker catches it and records a truthful failure.
+        // PHASE TAB P1: durable planning runs pin their last-resort defaults
+        // to claude-fable-5 (PM, anthropic) and gpt-5.6-sol (reviewer,
+        // openai). Project PM selection, persisted reviewer settings, and the
+        // NORNS_* env vars all still win — these apply only when nothing else
+        // resolved a model.
         return resolvePlanningParticipants({
           pmSelection,
           persistedReviewer,
           env: integrationEnvironment,
-          defaultPmModel: DEFAULT_PM_MODEL,
+          defaultPmModel: {
+            anthropic: PLANNING_RUN_DEFAULT_PM_MODEL,
+            openai: DEFAULT_PM_MODEL.openai,
+          },
+          defaultReviewerModel: { openai: PLANNING_RUN_DEFAULT_REVIEWER_MODEL },
         });
       };
       const planningWorker = new PlanningRunWorker(planningTransactions, buildPlanningAdapter, {
@@ -3793,6 +3837,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           projectId,
           objective,
           plan,
+          workerProviders,
         }): Promise<PlanningStaffingProposalDto | null> => {
           const [pmSelection, summary] = await Promise.all([
             projects.pmSelectionOf(projectId),
@@ -3811,6 +3856,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             objective,
             graph: WorkflowGraph.fromPlan(plan).snapshot(),
             models: configuredWorkerModels(),
+            // PHASE TAB P1: the run's implementation-provider constraint.
+            // Reviewers stay cross-provider (see allocationRecommendation.ts).
+            ...(workerProviders !== "both"
+              ? { allowedWorkerProviders: [workerProviders] }
+              : {}),
           });
           options.recordUsage?.([recommendation.usage]);
           return {
@@ -3849,6 +3899,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           reply.code(404).send({ error: error.code, message: error.message });
           return;
         }
+        // PHASE TAB P1: a decision against a run that is not in a
+        // terminal-review state (converged/cap_reached) is a conflict.
+        if (error instanceof PlanningRunDecisionError) {
+          reply.code(409).send({ error: error.code, message: error.message });
+          return;
+        }
         throw error;
       };
 
@@ -3856,6 +3912,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         .object({
           objective: z.string().trim().min(1).max(100_000),
           max_rounds: z.number().int().min(1).max(5).optional(),
+          // PHASE TAB P1: per-run review-round cap. Same semantics as
+          // max_rounds (it IS the round cap); when both are supplied,
+          // review_rounds wins.
+          review_rounds: z.number().int().min(1).max(5).optional(),
+          // PHASE TAB P1: which implementation providers allocation staffing
+          // may use. Default "both".
+          worker_providers: z.enum(["anthropic", "openai", "both"]).optional(),
           // FRONT DOOR P4: objective attachment ids, persisted on the run and
           // injected into the PM's and reviewer's round-1 messages.
           attachment_ids: z.array(z.string().trim().min(1)).max(50).optional(),
@@ -3867,10 +3930,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         const { id } = req.params as { id: string };
         const body = CreatePlanningRunBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const maxRounds = body.data.review_rounds ?? body.data.max_rounds;
         try {
           const run = await planningRunService.create(id, {
             objective: body.data.objective,
-            ...(body.data.max_rounds !== undefined ? { maxRounds: body.data.max_rounds } : {}),
+            ...(maxRounds !== undefined ? { maxRounds } : {}),
+            ...(body.data.worker_providers !== undefined
+              ? { workerProviders: body.data.worker_providers }
+              : {}),
             // FRONT DOOR P4: persist objective attachments so the worker injects
             // them into round 1. Previously validated-but-ignored input.
             ...(body.data.attachment_ids !== undefined
@@ -3897,6 +3964,136 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         const { id, runId } = req.params as { id: string; runId: string };
         try {
           reply.header("Cache-Control", "no-store").send(await planningRunService.get(id, runId));
+        } catch (error) {
+          planningRunError(reply, error);
+        }
+      });
+
+      // -----------------------------------------------------------------
+      // PHASE TAB P1: human decision on a terminal-review planning run.
+      //   approve — optional staffing overrides (validated against the model
+      //             registry), records the approval, then calls the
+      //             execution-kickoff seam when one is wired (see
+      //             ApprovedPlanExecutionKickoff). Response carries the
+      //             updated run plus `execution` ({started, detail} | null).
+      //   modify  — requires `direction`; re-queues the run through
+      //             revise→review cycles against its configured round cap
+      //             with the direction injected into the revision prompt.
+      //   reject  — records the rejection and closes the run.
+      // 409 when the run is not converged/cap_reached.
+      // -----------------------------------------------------------------
+      const PlanningRunDecisionBody = z
+        .object({
+          decision: z.enum(["approve", "modify", "reject"]),
+          direction: z.string().trim().min(1).max(20_000).optional(),
+          staffing: z
+            .array(
+              z
+                .object({
+                  node_id: z.string().trim().min(1),
+                  provider: z.enum(["anthropic", "openai"]),
+                  model: z.string().trim().min(1).max(200),
+                })
+                .strict(),
+            )
+            .max(200)
+            .optional(),
+        })
+        .strict();
+
+      const invalidStaffingEntry = (entry: ApprovedStaffingEntryDto): string | null => {
+        const registered = DEFAULT_MODEL_REGISTRY[entry.model];
+        if (!registered || !registered.selectable) {
+          return `unknown or non-selectable model "${entry.model}" for node "${entry.node_id}"`;
+        }
+        if (registered.provider !== entry.provider) {
+          return (
+            `model "${entry.model}" belongs to provider "${registered.provider}", ` +
+            `not "${entry.provider}" (node "${entry.node_id}")`
+          );
+        }
+        return null;
+      };
+
+      app.post("/api/v2/projects/:id/planning-runs/:runId/decision", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id, runId } = req.params as { id: string; runId: string };
+        const body = PlanningRunDecisionBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        let input: PlanningRunDecisionInput;
+        if (body.data.decision === "modify") {
+          if (!body.data.direction) {
+            return reply
+              .code(400)
+              .send({ error: "bad_request", message: "modify requires a non-empty direction" });
+          }
+          input = { decision: "modify", direction: body.data.direction };
+        } else if (body.data.decision === "approve") {
+          for (const entry of body.data.staffing ?? []) {
+            const problem = invalidStaffingEntry(entry);
+            if (problem) {
+              return reply.code(422).send({ error: "invalid_staffing", message: problem });
+            }
+          }
+          input = {
+            decision: "approve",
+            ...(body.data.staffing !== undefined ? { staffing: body.data.staffing } : {}),
+          };
+        } else {
+          input = { decision: "reject" };
+        }
+        try {
+          const run = await planningRunService.decide(id, runId, input);
+          stores.audit(
+            "operator",
+            `planning_run.decision.${input.decision}`,
+            `${id}:${runId}`,
+            now(),
+          );
+          if (input.decision === "modify") {
+            // Same fire-and-forget dispatch as creation: the poller timer is
+            // the safety net if this immediate kick is lost.
+            reply.code(202).send(run);
+            void planningWorker.runNow(runId).catch((error) => {
+              stores.audit(
+                "operator",
+                "planning_run.dispatch_failed",
+                `${id}:${runId}:${error instanceof Error ? error.message : String(error)}`,
+                now(),
+              );
+            });
+            return;
+          }
+          if (input.decision === "approve") {
+            // Execution kickoff is best-effort and honestly reported: a
+            // recorded approval is never rolled back because kickoff failed.
+            let execution: { started: boolean; detail: string } | null = null;
+            const kickoff = options.planningRuns?.executionKickoff;
+            if (kickoff) {
+              try {
+                execution = await kickoff.kickoff({
+                  projectId: id,
+                  planningRunId: runId,
+                  plan: run.result?.plan ?? null,
+                  staffing: run.decision?.staffing ?? null,
+                });
+              } catch (error) {
+                execution = {
+                  started: false,
+                  detail: error instanceof Error ? error.message : String(error),
+                };
+              }
+              stores.audit(
+                "operator",
+                "planning_run.execution_kickoff",
+                `${id}:${runId}:${execution?.started ? "started" : "not_started"}`,
+                now(),
+              );
+            }
+            reply.send({ ...run, execution });
+            return;
+          }
+          reply.send(run);
         } catch (error) {
           planningRunError(reply, error);
         }
