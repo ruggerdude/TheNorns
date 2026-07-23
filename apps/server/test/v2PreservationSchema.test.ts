@@ -22,6 +22,7 @@ import {
   PHASE7_HARDENING_MIGRATION_NAME,
   PHASE8_CUTOVER_COMPLETION_MIGRATION_NAME,
   PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
+  PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME,
   PLANNING_RUNS_MIGRATION_NAME,
   QC_COMMUNICATION_MIGRATION_NAME,
   RUN_PUBLICATION_MIGRATION_NAME,
@@ -232,6 +233,8 @@ describe.sequential("Phase 2 preservation schema", () => {
       // EXECUTION E12. Name is still `NNNN_`; the PM assigns the number at
       // integration, which is also when this entry's position changes.
       { name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME, applied: false },
+      // PHASE TAB P1 (number 0025 assigned at integration).
+      { name: PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -265,6 +268,9 @@ describe.sequential("Phase 2 preservation schema", () => {
       RUN_PUBLICATION_MIGRATION_NAME,
       ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
       PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
+      // PHASE TAB P1: 0025, the highest number, so it stays last in the
+      // alphabetical tracking query.
+      PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME,
     ]);
   });
 

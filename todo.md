@@ -177,6 +177,23 @@
 ## Done (cont.)
 - [x] NORN-042 — **Real user login system**, replacing the single shared `NORNS_TOKEN` as the day-to-day credential (2026-07-15): `UserStore` (scrypt password hashing + timing-safe compare, opaque session tokens, manual-add and email-invite lifecycles), `/api/auth/*` + `/api/admin/users*` routes, Resend email module (gated behind `RESEND_API_KEY`, degrades to a shareable invite link when unset — the created user record isn't lost if email delivery fails), one-time first-admin bootstrap gated by the existing `NORNS_TOKEN` (structurally one-time: gate checks `users.count === 0`, not just UI-hidden). Web app: rewrote `Login.tsx` into three modes (sign-in / bootstrap / accept-invite) driven by `/api/auth/status` and a `?invite=` URL param; new `Account` and `Admin` (role-gated) modal panels wired into both the Projects topbar and the graph-workspace sidebar. 5 pre-existing test files migrated off the old static `sessionToken`/`TOKEN` pattern onto real seeded sessions (`helpers.ts`'s `testAdminToken()` + per-file `UserStore` instances). Full monorepo CI green (server 134+1skipped incl. 16 new HTTP-route tests + 9 UserStore unit tests; web 31 incl. new Login/Account/Admin/App-auth-wiring suites). Live browser-verified: login, admin add-user, admin invite-by-email (email-not-configured path showing the manual link), role-gated Admin button visibility. Merged to main (`7519ad4`), pushed. **Deploy note**: production has zero accounts under the new system — first visit after deploy shows the bootstrap screen; use the existing `NORNS_TOKEN` Railway env var there once to create the first real admin, after which it's permanently disabled
 
+## PHASE TAB program
+- [x] PT-P1 — ✅ **Phase tab backend** (this worktree): per-run `review_rounds`
+  + `worker_providers` on POST planning-runs (DTO exposes
+  `review_rounds_total`/`rounds_completed`/`worker_providers`/`decision`);
+  pinned defaults claude-fable-5 (PM) / openai gpt-5.6-sol (reviewer), env +
+  per-project overrides still win; allocation recommendation constrained to
+  the run's allowed implementation providers (reviewers stay cross-provider);
+  POST .../planning-runs/:runId/decision (approve with registry-validated
+  staffing / modify with direction-seeded revise→review re-entry / reject;
+  409 outside converged|cap_reached; new terminal statuses approved/rejected);
+  GET /api/v2/projects/:id/execution-status (per-phase percent_complete /
+  est_completion / notes from existing phases+tasks+agent_runs data);
+  migration UNASSIGNED_phase_tab_planning_decisions.sql (integrator assigns
+  the number). Execution kickoff on approve is a named seam
+  (ApprovedPlanExecutionKickoff), deliberately unwired in main.ts — see
+  progress.log entry for why.
+
 ## In Progress
 - [ ] NORN-041 — 🔄 **UI Integrity Remediation Program** (multi-phase, human-directed): resolving 7 accepted UI findings (UI-1 stale approval, UI-2 QC-edit loss on failed commit, UI-3 hidden convergence/cost/findings, UI-4 empty-acceptance-set bypass, UI-5 accordion reset, UI-6 wrong-project dashboard, UI-7 cross-node override drafts) without regressing the plan→graph→allocation→approval product contract. Phase 0 discovery complete: found and merged an out-of-band OpenAI Codex redesign (`codex/ui-design-pass` branch, commit `63d4bfc`, fast-forwarded into `main` 2026-07-14 with human approval) — dark theme now consistent app-wide, responsive layout, risk-colored graph nodes, node-delete confirmations, but fixes 0 of 4 Critical findings and introduces one new bug (UI-4's empty-module check is vacuously-true on an empty array). Live-reproduced all 7 findings in-browser against real endpoints; confirmed UI-5 already resolved by the redesign, UI-6 partially mitigated (disclosure banner only, still fetches/renders the wrong project's data). Root cause for UI-1: `approveAllocation()` computes a hash and returns it but persists nothing server-side; `graph.version` never bumps on allocate/override so it can't alone serve as the staleness fingerprint. Three ADRs decided (human-approved): approval binds to graph version **+ a new separate allocation fingerprint** (not reusing graph.version); non-converged plans **block with no override** (no unaudited exception path); dashboard gets **immediate containment only** (hide the entry for real projects) with durable per-project dashboard deferred as its own follow-on. **Phase 2 complete and merged to main** (2026-07-14): Agent D (sonnet, worktree) added Vitest+RTL+jsdom+Playwright to apps/web (was zero frontend test tooling), a mock-fetch helper, contracts-validated fixtures, and 9 baseline regression tests across all 7 findings — independently re-verified by the program manager (not just trusted): 7 fail for the documented reason, 2 pass (UI-5 already correct; UI-6 intentionally documents today's bug rather than a not-yet-decided fix, will need rewriting not flipping). Merged `worktree-agent-a516b9e1ef7880e3d` → main (`b77d63a`), pushed. **Phase 3/4/5A + Phase 6 (Integration) complete** (2026-07-15): Agent A (opus, App.tsx + server approval persistence), Agent B (sonnet, PlanReview.tsx presentation + UI-4 fix), Agent C (opus, dashboard route separation) all completed in parallel worktrees, each independently re-verified by the program manager by reading the actual diffs and re-running lint/typecheck/tests myself — not trusting summaries. All 7 findings resolved: UI-1 (server-authoritative approval bound to graph.version + a new separate `allocationFingerprint`, persisted through Tier-2), UI-2 (QC edits survive failed commits, with retry), UI-3 (full convergence/rounds/cost/outstanding-findings surfaced, ADR-2's no-override enforced structurally — the load path doesn't render at all when capped), UI-4 (empty-acceptance-set modules correctly block commit), UI-5 (confirmed still correct), UI-6 (Dashboard entry removed entirely for real projects; demo data isolated to `/api/demo/dashboard`, containment proven structural not just naming), UI-7 (override drafts keyed per node, explicit Save/Cancel). Integration required real conflict resolution: Agent A and Agent B each independently touched `PlanReview.tsx` (Agent A's was a minimal contract-only stub without the actual UI-4 fix; Agent B's was the complete, correct implementation) — resolved by taking Agent B's version wholesale. Agent A and Agent C's overlapping `server.ts` edits auto-merged cleanly (no conflict) since both stayed localized to their sections as instructed. Full monorepo CI green (contracts 31, adapters 10+2skipped, server 109+1skipped, web 12 — all 7 findings' regression tests passing). Live browser-verified post-integration: UI-1's staleness banner ("⚠ Approval out of date...") and UI-6's absent Dashboard entry both confirmed in a real running instance, not just component tests. Merged to main (`270a417`). **Phase 7 (Adversarial Review) attempted and killed** (2026-07-15): Agent E (Explore, no edit tools by design) ran ~12 hours and stalled — its last checkpoint matched one from minutes into the run, indicating a loop rather than progress. Killed via `TaskStop` rather than left running indefinitely. Only one finding survived independent verification: UI-7 isolation reconfirmed via direct DOM inspection (a draft on node A did not leak to node B and back). Treated as genuinely incomplete, not padded with unverified claims. **Not yet done**: a proper Phase 7 re-run (smaller scope per agent, or a different reviewer pattern) and Phase 9 (Closure — resolution matrix, human acceptance)
 
@@ -920,16 +937,80 @@ decision and is deliberately untouched.
   server's own error on failure, resume reload shows the recorded
   architecture.
 
-## Phase tab — multi-model PM loop (2026-07-22)
+## Phase tab program (dispatched 2026-07-22)
 
-- [ ] 🔄 PHTAB-1 — Backend: per-run `review_rounds`, worker-provider selection
-  (Claude/ChatGPT/both), decision endpoint (approve / modify→re-review /
-  reject), per-phase staffing overrides, PM pinned to claude-fable-5 +
-  reviewer default gpt-5.6-sol, approval→execution kickoff with
-  % complete / ETA in status payload.
-- [ ] 🔄 PHTAB-2 — Web: new "Phase" workspace tab — goal box + attachments,
-  agent + review-rounds selectors, live round-by-round review progress,
-  Approve/Modify/Reject with modify textbox, per-phase agent+model dropdowns,
-  execution status panel (phase, % complete, ETA).
-- [ ] 📋 PHTAB-3 — Integration: merge worktrees, assign migration numbers, full
-  verification bar, independent reviewer sign-off, end-to-end check.
+- [x] ✅ PHTAB-1/2/3 (PM tracking) — opened at dispatch, all delivered; see
+  PT-P1 (backend, above), PHASE-TAB P2, PHTAB-3, PHTAB-P4, PHTAB-P5b entries
+  in this section. P5 independent review verdict: SHIP, 0 blockers. Backlog
+  items PHTAB-B1..B7 recorded in BACKLOG.md.
+
+- [x] ✅ PHASE-TAB P2 (frontend) — new "Phase" workspace tab (opened and
+  finished in the same push): goal textarea + image `AttachmentInput`;
+  Agents (Claude/ChatGPT/Both → `worker_providers`) and Review rounds (1–5,
+  default 2) selectors with the fixed "PM: Claude Fable · Reviewer: ChatGPT
+  Sol" identity line; Start → `POST .../planning-runs` (now with
+  `review_rounds` + `worker_providers`) → live progress (status/rounds/
+  reviewer findings, 3s active / 15s idle poll); decision panel at
+  converged/cap_reached/awaiting_decision with per-phase provider+model
+  staffing dropdowns (PM_MODEL_OPTIONS filtered to the run's providers) and
+  Approve (staffing payload) / Modify (direction → back through review) /
+  Reject (two-step confirm); execution status table once approved (5s/15s
+  cadence). ALL fetches in `apps/web/src/phaseTabApi.ts` — the integrator's
+  single reconciliation point (execution-status route is a PLACEHOLDER
+  there). Component in `apps/web/src/PhaseTab.tsx`; tests in
+  `App.phase-tab.test.tsx` (5). Built against the contract with MockFetch;
+  backend built in parallel by another agent — end-to-end against the real
+  server NOT exercised here.
+
+- [x] ✅ PHTAB-3 (integration) — merged PT-P1 (backend) + PHASE-TAB P2
+  (frontend) into `phase-tab/integration` (opened and finished in the same
+  push). Migration number **0025** assigned
+  (`0025_phase_tab_planning_decisions.sql`, constants in `migrate.ts`,
+  preservation-schema expectations updated). Frontend reconciled to the
+  backend as built, all in `apps/web/src/phaseTabApi.ts` +
+  `PhaseTab.tsx` + `App.phase-tab.test.tsx`: no `awaiting_decision`
+  status (converged/cap_reached ARE the awaiting states); DTO gains
+  `worker_providers` + `decision`; staffed phases read from
+  `result.staffing_proposal.recommendations` joined to `plan.modules`
+  (the frontend had guessed `result.plan.phases`); execution-status
+  repointed to project-scoped `GET /api/v2/projects/:id/execution-status`;
+  modify's 202 re-queued run returns the UI to live-progress polling;
+  approve's `execution: null` renders a neutral not-auto-started note,
+  not an error. Execution kickoff seam remains deliberately unwired
+  pending a product decision.
+
+- [x] ✅ PHTAB-P4 — approve auto-starts execution (opened and finished in
+  this worktree): real `ApprovedPlanExecutionKickoff`
+  (`apps/server/src/planning/executionKickoff.ts`) driving
+  StrategyBridgeService (materialize — the bridge now also accepts
+  `approved` runs since the decision is recorded first; staffing overrides
+  via editStaffing; approve attributed to the deciding user with the
+  decision's decided_at as approved_at and the run id in the idempotency
+  key) then `PhaseLaunchService.startPhase` through the real coordinator
+  gate. Refuses honestly (`{started:false, detail}`) when a phase is
+  already executing (one-executing-phase-per-project default, checked
+  before any mutation), on unknown-node staffing overrides, and on every
+  other failure — the recorded planning-run approval is never rolled back.
+  Wired in `main.ts` (`planningRuns.executionKickoff`, PhaseLaunchService
+  constructed exactly like buildServer's start-phase path); decision route
+  resolves the session user (`decidedBy` — approvals.actor_id is FK-bound
+  to users). Tests: `apps/server/test/planningExecutionKickoff.test.ts`
+  (7: e2e approve→phase active + dispatch, overrides applied, active-phase
+  refusal, unknown-node refusal, production-shape boot ×3);
+  `App.phase-tab.test.tsx` +1 — PhaseTab renders the kickoff success
+  detail when `started: true`. Server 868 passed / 12 skipped; web 133;
+  tsc + biome + build clean.
+
+- [x] ✅ PHTAB-P5b — review-fix pass on the Phase tab feature (opened and
+  finished in this worktree): (1) decision-route audit entries
+  (`planning_run.decision.*`, `planning_run.execution_kickoff`,
+  `planning_run.dispatch_failed`) attributed to the resolved session user
+  instead of the "operator" literal — sibling routes' legacy actor left
+  alone; (2) approve staffing overrides now enforced against the run's own
+  `worker_providers` constraint (422 `invalid_staffing`, message phrased
+  like allocationRecommendation's `provider_constraint` refusal), with an
+  HTTP test proving the refused run stays decidable; (3) dead
+  `ApprovedPlanExecutionKickoffInput.plan` field removed (the kickoff
+  re-loads the run itself); (4) `assignmentLocalId()` exported from
+  strategyBridgeService and shared by executionKickoff instead of a
+  re-derived `assignment-${node_id}`.

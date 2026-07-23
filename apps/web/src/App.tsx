@@ -34,6 +34,7 @@ import { AttachmentInput } from "./AttachmentInput";
 import { Debates } from "./Debates";
 import { Gantt, type GanttPhase } from "./Gantt";
 import { Login, type LoginMode } from "./Login";
+import { PhaseTab } from "./PhaseTab";
 import {
   AttentionDecisionForm,
   type AttentionItemDto,
@@ -742,7 +743,9 @@ function ProjectGraph({
   // canvas was the dominant panel before this, everything else crammed into
   // a narrow sidebar. Purely a layout change: every section below is the
   // exact same JSX/logic that existed already, just grouped under a tab.
-  const [workspaceTab, setWorkspaceTab] = useState<"overview" | "plan" | "graph">("overview");
+  const [workspaceTab, setWorkspaceTab] = useState<"overview" | "plan" | "phase" | "graph">(
+    "overview",
+  );
   const focusedTaskId = project.focus_task_id ?? null;
 
   // ------------------------------------------------------------------
@@ -1512,6 +1515,13 @@ function ProjectGraph({
           </button>
           <button
             type="button"
+            className={workspaceTab === "phase" ? "on" : ""}
+            onClick={() => setWorkspaceTab("phase")}
+          >
+            Phase
+          </button>
+          <button
+            type="button"
             className={workspaceTab === "graph" ? "on" : ""}
             onClick={() => setWorkspaceTab("graph")}
           >
@@ -1894,6 +1904,19 @@ function ProjectGraph({
                 </div>
               </details>
             ) : null}
+          </div>
+        ) : null}
+
+        {/* PHASE TAB (P2): goal -> planning run with reviewer rounds ->
+         *  human decision (approve/modify/reject with staffing) -> execution
+         *  status. Self-contained in PhaseTab.tsx; all its fetches go through
+         *  phaseTabApi.ts (the integrator's single reconciliation point). */}
+        {workspaceTab === "phase" ? (
+          <div className="workspace-tab-panel" data-testid="workspace-tab-phase">
+            <PhaseTab
+              projectId={project.id}
+              onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+            />
           </div>
         ) : null}
 

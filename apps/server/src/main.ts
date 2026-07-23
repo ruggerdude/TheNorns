@@ -20,17 +20,23 @@ import {
   ActionsExecutionCoordinator,
   ActionsExecutionRepository,
 } from "./coordinator/actionsExecution.js";
+// PHASE TAB P4: the approve-in-Phase-tab execution kickoff drives the real
+// launch chain, so main.ts constructs a PhaseLaunchService the same way the
+// start-phase route path inside buildServer does.
+import { DispatchContextScopeRepository } from "./coordinator/dispatchContextScope.js";
 import { Phase4CompletionService } from "./coordinator/phase4Completion.js";
 import { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
 import { Phase4DispatchRepository } from "./coordinator/phase4Dispatcher.js";
 import { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
 import { Phase4RecoveryMonitor } from "./coordinator/phase4RecoveryMonitor.js";
 import { Phase6CoordinationService } from "./coordinator/phase6Coordination.js";
+import { PhaseLaunchService } from "./coordinator/phaseLaunchService.js";
 import { buildDashboard } from "./dashboard.js";
 import { DebateService } from "./debates/service.js";
 import { DebateWorker } from "./debates/worker.js";
 import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
+import { RelationalTaskContextAssembler, TaskContextStore } from "./execution/index.js";
 import { GraphSession } from "./graph/session.js";
 import {
   GitHubIntegrationService,
@@ -55,6 +61,8 @@ import {
   postgresPoolConfig,
 } from "./persistence/postgresConnection.js";
 import { NodePgTransactionRunner, type V2TransactionRunner } from "./persistence/v2/database.js";
+import { ExecutionKickoffService } from "./planning/executionKickoff.js";
+import type { ApprovedPlanExecutionKickoff } from "./planning/runService.js";
 import { AttentionService } from "./projects/attentionService.js";
 import { PhaseWorkflowService } from "./projects/phaseWorkflowService.js";
 import { ProjectResumeService } from "./projects/projectResumeService.js";
@@ -157,7 +165,12 @@ let debateService: DebateService | undefined;
 let debateWorkerTimer: NodeJS.Timeout | undefined;
 let integrationServices: { github: GitHubIntegrationService | null } | undefined;
 // FRONT DOOR P2 §D1: observable planning runs need the relational runtime.
-let planningRunsOptions: { transactions: V2TransactionRunner } | undefined;
+// PHASE TAB P4: `executionKickoff` is the real approve-auto-starts-execution
+// implementation — without it the decision route records approvals but always
+// reports `execution: null`.
+let planningRunsOptions:
+  | { transactions: V2TransactionRunner; executionKickoff?: ApprovedPlanExecutionKickoff }
+  | undefined;
 // FRONT DOOR P4 (D3): image attachments need the same relational runtime.
 let attachmentsOptions: { transactions: V2TransactionRunner } | undefined;
 // ONBOARDING O2: the two GitHub-backed project-creation scenarios, over the
@@ -432,7 +445,45 @@ if (databaseUrl) {
     }
     // FRONT DOOR P2 §D1: expose observable planning runs over the same
     // relational runtime the debate workflow uses.
-    planningRunsOptions = { transactions: runtimeTransactions };
+    //
+    // PHASE TAB P4: approve in the Phase tab auto-starts execution. The
+    // kickoff drives the existing chain (StrategyBridgeService -> strategy
+    // approval -> PhaseLaunchService.startPhase), so it needs a
+    // PhaseLaunchService constructed EXACTLY the way buildServer's
+    // start-phase route path constructs its own: same assembler, same scope
+    // repository, same runner resolution against the live RelayStores (the
+    // closure reads the `stores` binding, which may be re-assigned by the
+    // relay-snapshot restore below — deliberately late-bound).
+    const kickoffPhaseLaunch = new PhaseLaunchService(
+      runtimeTransactions,
+      phase4Services.coordinator,
+      new RelationalTaskContextAssembler(
+        runtimeTransactions,
+        new TaskContextStore(runtimeTransactions),
+        { baseUrl: publicOrigin },
+      ),
+      new DispatchContextScopeRepository(runtimeTransactions),
+      (runnerId) => {
+        const runner = stores.runner(runnerId);
+        return runner
+          ? { runner_id: runner.runner_id, runner_generation: runner.generation }
+          : null;
+      },
+      actionsExecutionServices
+        ? {
+            coordinator: actionsExecutionServices.coordinator,
+            repository: actionsExecutionServices.repository,
+          }
+        : undefined,
+    );
+    planningRunsOptions = {
+      transactions: runtimeTransactions,
+      executionKickoff: new ExecutionKickoffService({
+        transactions: runtimeTransactions,
+        bridge: phase3Services.bridge,
+        phaseLaunch: kickoffPhaseLaunch,
+      }),
+    };
     attachmentsOptions = { transactions: runtimeTransactions };
     // ONBOARDING O2: POST /api/v2/projects/onboarding. The route also needs
     // `integrations.github` (set just above) to reach GitHub; without it the

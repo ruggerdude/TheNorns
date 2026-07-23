@@ -188,6 +188,15 @@ export const PHASE_CONCURRENCY_CONFLICTS_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+// PHASE TAB P1: planning-run decision workflow (worker_providers, decision,
+// revision_seed columns; approved/rejected statuses). Number 0025 assigned at
+// integration (0024 was the highest merged number at the time).
+export const PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME = "0025_phase_tab_planning_decisions";
+export const PHASE_TAB_PLANNING_DECISIONS_MIGRATION_URL = new URL(
+  "../../../drizzle/0025_phase_tab_planning_decisions.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -314,6 +323,10 @@ export async function loadActionsDispatchRunnerIdentityMigrationSql(): Promise<s
 
 export async function loadPhaseConcurrencyConflictsMigrationSql(): Promise<string> {
   return readFile(PHASE_CONCURRENCY_CONFLICTS_MIGRATION_URL, "utf8");
+}
+
+export async function loadPhaseTabPlanningDecisionsMigrationSql(): Promise<string> {
+  return readFile(PHASE_TAB_PLANNING_DECISIONS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -519,6 +532,10 @@ export async function runCurrentV2Migrations(
     {
       name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
       sql: await loadPhaseConcurrencyConflictsMigrationSql(),
+    },
+    {
+      name: PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME,
+      sql: await loadPhaseTabPlanningDecisionsMigrationSql(),
     },
   ]);
 }
