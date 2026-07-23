@@ -35,6 +35,12 @@ export interface AuditEntry {
   detail: string;
 }
 
+/**
+ * POLISH P1: pairing itself is gone (the local-runner front door was
+ * removed), but the field survives in the state shape so existing durable
+ * snapshots restore unchanged. Codes carried a 10-minute TTL, so any
+ * persisted entries are long dead; nothing reads or writes them.
+ */
 export interface PairingRecord {
   code: string;
   expires_at: string;
@@ -86,18 +92,7 @@ export class RelayStores {
     return this.state.audit;
   }
 
-  // -- pairing / runners ----------------------------------------------------
-
-  createPairing(code: string, expiresAt: Date): void {
-    this.state.pairings[code] = { code, expires_at: expiresAt.toISOString() };
-  }
-
-  consumePairing(code: string, now: Date): boolean {
-    const record = this.state.pairings[code];
-    if (!record) return false;
-    delete this.state.pairings[code];
-    return Date.parse(record.expires_at) > now.getTime();
-  }
+  // -- runners ---------------------------------------------------------------
 
   registerRunner(runnerId: string, publicKeyPem: string): RunnerRecord {
     const existing = this.state.runners[runnerId];

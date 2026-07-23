@@ -88,7 +88,7 @@ describe("phase 8 — audit completeness", () => {
       method: "POST",
       body: JSON.stringify({ engaged: false }),
     });
-    await fetch(`${stack.url}/api/runners`); // unauthenticated probe
+    await fetch(`${stack.url}/api/audit`); // unauthenticated probe
 
     await waitFor(async () => {
       const audit = (await (await (stack as Stack).api("/api/audit")).json()) as {
@@ -100,8 +100,6 @@ describe("phase 8 — audit completeness", () => {
     const audit = (await (await stack.api("/api/audit")).json()) as { action: string }[];
     const actions = new Set(audit.map((a) => a.action));
     for (const required of [
-      "pairing.started",
-      "pairing.completed",
       "runner.connected",
       "command.issued",
       "command.delivered",

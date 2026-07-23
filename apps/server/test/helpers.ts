@@ -1,7 +1,8 @@
+import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RunnerDaemon } from "@norns/runner";
+import { RunnerDaemon, RunnerStateFile } from "@norns/runner";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
 import { UserStore } from "../src/users/store.js";
@@ -35,6 +36,9 @@ export interface Stack {
   url: string;
   daemon: RunnerDaemon;
   dataDir: string;
+  /** The live store the server was built over, for observing runner state
+   *  directly now that the read-only HTTP runner inventory is gone. */
+  stores: RelayStores;
   api: (path: string, init?: RequestInit) => Promise<Response>;
   issue: (payload: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<string>;
   stop: () => Promise<void>;
@@ -70,11 +74,22 @@ export async function startStack(runnerId = "runner-1"): Promise<Stack> {
       },
     });
 
-  const pairing = (await (await api("/api/pairing/start", { method: "POST" })).json()) as {
-    code: string;
-  };
-
+  // POLISH P1: the pairing HTTP front door was removed with the local-runner
+  // install surface. Tests mint a runner identity the same way production now
+  // does at its core — an Ed25519 public key registered against the store —
+  // and seed the daemon's state file with the private half. Everything after
+  // that (challenge, signed auth, reconcile) runs over the real relay.
   const dataDir = mkdtempSync(join(tmpdir(), "norns-runner-"));
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const record = stores.registerRunner(
+    runnerId,
+    publicKey.export({ type: "spki", format: "pem" }).toString(),
+  );
+  new RunnerStateFile(dataDir, {
+    runner_id: runnerId,
+    private_key_pem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    generation: record.generation,
+  });
   const daemon = new RunnerDaemon({
     serverUrl: url,
     runnerId,
@@ -82,7 +97,7 @@ export async function startStack(runnerId = "runner-1"): Promise<Stack> {
     heartbeatMs: 500,
     reconnectDelayMs: 100,
   });
-  await daemon.pair(pairing.code);
+  daemon.loadState();
   daemon.connect();
   await waitFor(() => server.connectedRunners().includes(runnerId), "runner connected");
 
@@ -104,6 +119,7 @@ export async function startStack(runnerId = "runner-1"): Promise<Stack> {
     url,
     daemon,
     dataDir,
+    stores,
     api,
     issue,
     users,
