@@ -41,6 +41,7 @@ import {
   ProjectTabs,
   Projects,
 } from "./Projects";
+import { AnalyzeRepositoryControl } from "./AnalyzeRepositoryControl";
 import { RunLog } from "./RunLog";
 import { StartPhaseControl } from "./StartPhaseControl";
 import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
@@ -67,6 +68,7 @@ import {
   DismissibleNote,
   Field,
   Input,
+  NextStep,
   Select,
   Spinner,
   TextArea,
@@ -1556,14 +1558,34 @@ function ProjectGraph({
                     </div>
                   </div>
                   {resume.architecture ? (
-                    <div>
+                    <div data-testid="resume-architecture">
                       <strong>{resume.architecture.title}</strong>
                       <p className="muted" style={{ fontSize: 12 }}>
                         {resume.architecture.summary}
                       </p>
                     </div>
                   ) : null}
-                  <Alert>{resume.next_recommended_action}</Alert>
+                  {/* POLISH P3: `next_recommended_action` is guidance, not a
+                   *  failure — it rendered in the red `<Alert>` (exclamation
+                   *  icon) and users read "Analyze the repository…" as an
+                   *  error. Neutral NextStep now; `<Alert>` stays for real
+                   *  problems (the `error` state above, analyze failures).
+                   *  When the recommended step is the repository analysis,
+                   *  the button that actually performs it rides along. */}
+                  <NextStep
+                    testId="next-step"
+                    action={
+                      !resume.architecture && resume.repositories.length > 0 ? (
+                        <AnalyzeRepositoryControl
+                          projectId={project.id}
+                          onAnalyzed={() => void loadResume()}
+                          onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+                        />
+                      ) : undefined
+                    }
+                  >
+                    {resume.next_recommended_action}
+                  </NextStep>
                   {/* FRONT DOOR P1b: the mini-Gantt strip on the workspace phase
                    *  board — compact per-phase gates + progress at a glance. */}
                   {ganttPhases.length > 0 ? (

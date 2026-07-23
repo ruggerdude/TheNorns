@@ -276,6 +276,41 @@ button:disabled {
   color: #210c0d;
   font-weight: 800;
 }
+/* POLISH P3 — neutral next-step guidance (see ui.tsx NextStep). Uses theme
+   variables only, so no per-theme override block is needed. */
+.next-step {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .6rem;
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--text);
+  border-radius: 11px;
+  padding: .7rem .85rem;
+  font-size: .82rem;
+  line-height: 1.4;
+  margin: .7rem 0;
+}
+.next-step-label {
+  flex: none;
+  color: var(--accent2);
+  border: 1px solid var(--line2);
+  border-radius: 999px;
+  padding: .1rem .55rem;
+  text-transform: uppercase;
+  letter-spacing: .11em;
+  font-size: .62rem;
+  font-weight: 700;
+}
+.next-step-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.next-step-action {
+  flex: none;
+  margin-left: auto;
+}
 .spinner {
   width: 18px;
   height: 18px;

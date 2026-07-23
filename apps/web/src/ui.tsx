@@ -43,6 +43,31 @@ export function Alert({ children, testId }: { children: ReactNode; testId?: stri
   );
 }
 /**
+ * POLISH P3 — neutral guidance, visually distinct from `Alert`. The resume
+ * payload's `next_recommended_action` is a suggestion ("Analyze the
+ * repository…", "Create the project's next phase"), and rendering it in the
+ * red exclamation-icon alert made routine guidance read as a failure. Real
+ * problems keep using `Alert`; this is for what to do next.
+ */
+export function NextStep({
+  children,
+  action,
+  testId,
+}: {
+  children: ReactNode;
+  /** Optional inline control that performs the step (e.g. an Analyze button). */
+  action?: ReactNode;
+  testId?: string;
+}) {
+  return (
+    <div className="next-step" data-testid={testId}>
+      <span className="next-step-label">Next step</span>
+      <span className="next-step-body">{children}</span>
+      {action ? <div className="next-step-action">{action}</div> : null}
+    </div>
+  );
+}
+/**
  * EXECUTION E13 — a plain, one-time explanation that a human can dismiss for
  * good (persisted in localStorage under `storageKey`), matching the register
  * FRONT DOOR/EXECUTION established elsewhere: honest and factual, no
