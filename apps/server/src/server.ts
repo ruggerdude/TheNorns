@@ -172,7 +172,16 @@ import {
   type ProjectRepository,
   projectRepository,
 } from "./projects/repository.js";
-import type { RepositoryIngestionService } from "./projects/repositoryIngestionService.js";
+// POLISH P3 — the server-side "Analyze the repository" step behind the
+// resume payload's recommendation.
+import {
+  RepositoryAnalysisError,
+  type RepositoryAnalysisService,
+} from "./projects/repositoryAnalysisService.js";
+import {
+  RepositoryIngestionConflictError,
+  type RepositoryIngestionService,
+} from "./projects/repositoryIngestionService.js";
 import type { SourceBindingService } from "./projects/sourceBindingService.js";
 import {
   ProjectNotFoundError,
@@ -288,6 +297,15 @@ export interface ServerOptions {
     bridge: StrategyBridgeService;
     resume: ProjectResumeService;
   };
+  /**
+   * POLISH P3 — POST /api/v2/projects/:id/analyze-repository: fetch a bounded
+   * sample of the project's connected GitHub repository, have a model produce
+   * a structured architecture summary, and record it through phase3's
+   * `ingestion` service. Optional the same way `phase3` is: without it the
+   * route refuses honestly (503 analysis_unavailable) instead of mounting a
+   * button that silently does nothing.
+   */
+  repositoryAnalysis?: RepositoryAnalysisService;
   /** New-project local onboarding is safe only after durable relational writes are active. */
   localProjectOnboardingReady?: boolean;
   phase4?: {
@@ -3169,6 +3187,43 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           reply.send(await options.phase3?.ingestion.ingest(body.data));
         } catch (error) {
           reply.code(409).send({ error: "ingestion_conflict", detail: String(error) });
+        }
+      });
+
+      // POLISH P3 — the producer for the ingest seed above. The resume payload
+      // has recommended "Analyze the repository and record its architecture"
+      // since Phase 3 while nothing in the web app could perform it; this route
+      // is that step. Synchronous by design: the analysis input is bounded (see
+      // RepositoryAnalysisService's stated caps), so one request/response
+      // round-trip stays well inside interactive limits.
+      app.post("/api/v2/projects/:id/analyze-repository", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const analysis = options.repositoryAnalysis;
+        if (!analysis) {
+          return reply.code(503).send({
+            error: "analysis_unavailable",
+            message: "Repository analysis requires the relational runtime and is not configured.",
+          });
+        }
+        const { id } = req.params as { id: string };
+        try {
+          reply.send(await analysis.analyze(id, { actor_id: user.id }));
+        } catch (error) {
+          if (error instanceof RepositoryAnalysisError || error instanceof GitHubIntegrationError) {
+            return reply.code(error.status).send({ error: error.code, message: error.message });
+          }
+          if (error instanceof AdapterError) {
+            return reply.code(502).send({
+              error: "model_call_failed",
+              message: `The analysis model call failed (${error.kind}): ${error.message}`,
+            });
+          }
+          if (error instanceof RepositoryIngestionConflictError) {
+            return reply.code(409).send({ error: "ingestion_conflict", detail: String(error) });
+          }
+          throw error;
         }
       });
 
