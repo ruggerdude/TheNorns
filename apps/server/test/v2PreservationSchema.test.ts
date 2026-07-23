@@ -233,8 +233,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       // EXECUTION E12. Name is still `NNNN_`; the PM assigns the number at
       // integration, which is also when this entry's position changes.
       { name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME, applied: false },
-      // PHASE TAB P1. Name is literally `UNASSIGNED_`; the PM assigns the
-      // number at integration, which is also when this entry's name changes.
+      // PHASE TAB P1 (number 0025 assigned at integration).
       { name: PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
@@ -269,9 +268,8 @@ describe.sequential("Phase 2 preservation schema", () => {
       RUN_PUBLICATION_MIGRATION_NAME,
       ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
       PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
-      // PHASE TAB P1: `UNASSIGNED_...` sorts after every `NNNN_` name in the
-      // alphabetical tracking query; once the PM assigns the number it moves
-      // into numeric position.
+      // PHASE TAB P1: 0025, the highest number, so it stays last in the
+      // alphabetical tracking query.
       PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME,
     ]);
   });

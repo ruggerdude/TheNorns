@@ -189,16 +189,12 @@ export const PHASE_CONCURRENCY_CONFLICTS_MIGRATION_URL = new URL(
 );
 
 // PHASE TAB P1: planning-run decision workflow (worker_providers, decision,
-// revision_seed columns; approved/rejected statuses).
-// TODO(integrator): ASSIGN THE NEXT MIGRATION NUMBER — rename
-// drizzle/UNASSIGNED_phase_tab_planning_decisions.sql to NNNN_phase_tab_
-// planning_decisions.sql and update both constants below before deploy.
-// Registered under the UNASSIGNED name so PGlite tests apply it; it must not
-// reach production under this name.
+// revision_seed columns; approved/rejected statuses). Number 0025 assigned at
+// integration (0024 was the highest merged number at the time).
 export const PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME =
-  "UNASSIGNED_phase_tab_planning_decisions";
+  "0025_phase_tab_planning_decisions";
 export const PHASE_TAB_PLANNING_DECISIONS_MIGRATION_URL = new URL(
-  "../../../drizzle/UNASSIGNED_phase_tab_planning_decisions.sql",
+  "../../../drizzle/0025_phase_tab_planning_decisions.sql",
   import.meta.url,
 );
 
@@ -538,8 +534,6 @@ export async function runCurrentV2Migrations(
       name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
       sql: await loadPhaseConcurrencyConflictsMigrationSql(),
     },
-    // PHASE TAB P1 — TODO(integrator): assign the next migration number (see
-    // the constant's definition above) before this ships to production.
     {
       name: PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME,
       sql: await loadPhaseTabPlanningDecisionsMigrationSql(),
