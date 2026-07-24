@@ -109,24 +109,28 @@ button:disabled {
   margin-right: .35rem;
 }
 .btn {
-  min-height: 40px;
+  min-height: 38px;
   border: 1px solid var(--line2);
-  border-radius: 10px;
-  padding: .55rem .85rem;
+  border-radius: 999px;
+  padding: .5rem .9rem;
   color: var(--text);
-  background: var(--raised);
+  background: color-mix(in srgb, var(--raised) 88%, transparent);
   font-weight: 650;
-  transition: .16s ease;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.08);
+  transition: border-color .16s ease, background .16s ease, box-shadow .16s ease, transform .16s
+    ease;
 }
 .btn:hover:not(:disabled) {
   border-color: #59636e;
   background: #20252b;
   transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.14);
 }
 .btn-primary {
   background: var(--accent);
   color: #17120c;
   border-color: var(--accent);
+  box-shadow: 0 5px 16px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 .btn-primary:hover:not(:disabled) {
   background: #f1ad5d;
@@ -141,6 +145,7 @@ button:disabled {
   background: transparent;
   border-color: transparent;
   color: var(--muted);
+  box-shadow: none;
 }
 .btn-small {
   min-height: 32px;
@@ -1655,7 +1660,8 @@ button:disabled {
   border-bottom: 1px solid var(--line);
 }
 .workspace-page {
-  max-width: 1100px;
+  width: min(1500px, calc(100% - clamp(2rem, 6vw, 6rem)));
+  max-width: none;
 }
 .workspace-header {
   margin: 1.4rem 0 0;
@@ -1668,29 +1674,33 @@ button:disabled {
 }
 .workspace-tabs {
   display: flex;
-  gap: .2rem;
+  gap: 1.35rem;
   margin: 1.2rem 0 1.6rem;
-  padding: .3rem;
-  background: var(--raised);
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  width: fit-content;
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+  width: 100%;
 }
 .workspace-tabs button {
-  padding: .45rem .9rem;
-  border-radius: 8px;
-  font-size: .85rem;
+  position: relative;
+  min-height: 42px;
+  margin: 0 0 -1px;
+  padding: .25rem .1rem .75rem;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  font-size: .82rem;
   font-weight: 600;
   color: var(--muted);
-  transition: .14s ease;
+  letter-spacing: .01em;
+  transition: border-color .14s ease, color .14s ease;
 }
 .workspace-tabs button:hover {
   color: var(--text);
 }
 .workspace-tabs button.on {
-  background: var(--surface);
   color: var(--text);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  border-bottom-color: var(--accent);
 }
 .workspace-tab-panel {
   display: flex;
@@ -2543,7 +2553,7 @@ button:disabled {
     height: 52vh;
   }
   .workspace-tabs {
-    width: 100%;
+    gap: 1rem;
     overflow-x: auto;
   }
   .dashboard-grid {
@@ -2615,8 +2625,8 @@ button:disabled {
   }
 }
 
-/* FRONT DOOR P4 (D3): AttachmentInput — objective image picker. Uses the
-   existing design tokens so it inherits both light and dark themes. */
+/* FRONT DOOR P4: objective attachments and the integrated prompt composer.
+   The textarea, paste/drop target, previews, and + picker are one control. */
 .attachment-input {
   display: flex;
   flex-direction: column;
@@ -2686,6 +2696,97 @@ button:disabled {
 .attachment-chip-remove:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+.attachment-composer-field {
+  gap: .45rem;
+}
+.prompt-composer {
+  display: flex;
+  flex-direction: column;
+  min-height: 174px;
+  overflow: hidden;
+  border: 1px solid var(--line2);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.05);
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.prompt-composer:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.prompt-composer.is-full {
+  border-style: solid;
+}
+.prompt-composer-textarea {
+  width: 100%;
+  min-height: 112px;
+  flex: 1;
+  resize: vertical;
+  border: 0;
+  outline: 0;
+  padding: 1rem 1rem .5rem;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  line-height: 1.5;
+}
+.prompt-composer-textarea::placeholder {
+  color: color-mix(in srgb, var(--muted) 78%, transparent);
+}
+.prompt-composer .attachment-chips {
+  padding: .8rem .9rem 0;
+}
+.prompt-composer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: .65rem;
+  min-height: 52px;
+  padding: .45rem .65rem .6rem;
+}
+.composer-add-button {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line2);
+  border-radius: 50%;
+  color: var(--text);
+  background: var(--raised);
+  font-size: 1.35rem;
+  font-weight: 400;
+  line-height: 1;
+  transition: border-color .14s ease, background .14s ease, transform .14s ease;
+}
+.composer-add-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--raised));
+  transform: translateY(-1px);
+}
+.composer-help {
+  color: var(--muted);
+  font-size: .72rem;
+}
+.prompt-composer-toolbar .loading {
+  margin-left: auto;
+  font-size: .72rem;
+}
+:root[data-theme="light"] .prompt-composer {
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(74, 60, 39, 0.06);
+}
+:root[data-theme="light"] .composer-add-button {
+  background: #f7f5ef;
+}
+@media (max-width: 520px) {
+  .workspace-page {
+    width: min(100% - 1.25rem, 1500px);
+  }
+  .composer-help {
+    font-size: .67rem;
+  }
 }
 
 /* ============================================================

@@ -5,7 +5,7 @@
 // anywhere here. Phase 1 owns the objective form and mounts this, driving it
 // through the documented props below (`value` / `onChange` are the selected
 // attachment-id contract the planning-run request consumes as `attachment_ids`).
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type {
   ChangeEvent as ReactChangeEvent,
   ClipboardEvent as ReactClipboardEvent,
@@ -22,6 +22,39 @@ export const ATTACHMENT_ACCEPTED_MIMES = [
   "image/gif",
 ] as const;
 
+const TEXT_FILE_EXTENSIONS = new Set([
+  "c",
+  "cc",
+  "cpp",
+  "css",
+  "csv",
+  "go",
+  "h",
+  "hpp",
+  "html",
+  "java",
+  "js",
+  "jsx",
+  "json",
+  "log",
+  "md",
+  "py",
+  "rb",
+  "rs",
+  "sh",
+  "sql",
+  "toml",
+  "ts",
+  "tsx",
+  "txt",
+  "xml",
+  "yaml",
+  "yml",
+  "zsh",
+]);
+const TEXT_FILE_ACCEPT = [...TEXT_FILE_EXTENSIONS].map((extension) => `.${extension}`).join(",");
+const MAX_TEXT_FILE_BYTES = 200 * 1024;
+
 /** Metadata for one stored attachment, as returned by the upload route. */
 export interface AttachmentDescriptor {
   id: string;
@@ -30,6 +63,7 @@ export interface AttachmentDescriptor {
   width: number | null;
   height: number | null;
   purpose: string;
+  filename?: string;
 }
 
 export interface AttachmentInputProps {
@@ -56,6 +90,17 @@ export interface AttachmentInputProps {
   onError?: (message: string) => void;
   /** Suppress the built-in inline error <Alert> (use with `onError`). */
   hideInlineError?: boolean;
+  /**
+   * Composer mode integrates the prompt and attachments into one control.
+   * Image files are uploaded; text/code files are read locally and inserted
+   * into the prompt so they are available to the planning agents.
+   */
+  variant?: "dropzone" | "composer";
+  label?: string;
+  textValue?: string;
+  onTextChange?: (value: string) => void;
+  placeholder?: string;
+  textAreaTestId?: string;
 }
 
 const DEFAULT_MAX = 8;
@@ -65,19 +110,43 @@ function isAcceptedImage(file: File): boolean {
   return (ATTACHMENT_ACCEPTED_MIMES as readonly string[]).includes(file.type);
 }
 
-function imagesFromDataTransfer(data: DataTransfer | null): File[] {
+function extensionFor(file: File): string {
+  return file.name.split(".").pop()?.toLowerCase() ?? "";
+}
+
+function isAcceptedTextFile(file: File): boolean {
+  return (
+    file.type.startsWith("text/") ||
+    file.type === "application/json" ||
+    file.type === "application/xml" ||
+    file.type === "application/sql" ||
+    TEXT_FILE_EXTENSIONS.has(extensionFor(file))
+  );
+}
+
+function filesFromDataTransfer(data: DataTransfer | null): File[] {
   if (!data) return [];
   const fromFiles = Array.from(data.files ?? []);
-  if (fromFiles.length > 0) return fromFiles.filter(isAcceptedImage);
-  // Some paste sources expose images only through the items API.
+  if (fromFiles.length > 0) return fromFiles;
+  // Some paste sources expose files only through the items API.
   const fromItems: File[] = [];
   for (const item of Array.from(data.items ?? [])) {
     if (item.kind === "file") {
       const file = item.getAsFile();
-      if (file && isAcceptedImage(file)) fromItems.push(file);
+      if (file) fromItems.push(file);
     }
   }
   return fromItems;
+}
+
+function appendTextFiles(
+  current: string,
+  files: readonly { name: string; text: string }[],
+): string {
+  const blocks = files.map(
+    ({ name, text }) => `Reference file: ${name}\n\`\`\`\n${text.trimEnd()}\n\`\`\``,
+  );
+  return [current.trimEnd(), ...blocks].filter(Boolean).join("\n\n");
 }
 
 export function AttachmentInput({
@@ -89,6 +158,12 @@ export function AttachmentInput({
   disabled = false,
   onError,
   hideInlineError = false,
+  variant = "dropzone",
+  label = "What should this phase deliver?",
+  textValue = "",
+  onTextChange,
+  placeholder = "Describe the goal, paste a screenshot, or add a reference file…",
+  textAreaTestId,
 }: AttachmentInputProps) {
   // Render metadata keyed by id. `value` stays authoritative for selection;
   // this map only supplies each chip's dimensions/label.
@@ -96,6 +171,7 @@ export function AttachmentInput({
   const [uploading, setUploading] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const composerId = useId();
 
   // Prune metadata for ids the parent has dropped from the selection.
   useEffect(() => {
@@ -136,7 +212,10 @@ export function AttachmentInput({
           report(detail.message ?? `Upload failed (${res.status}).`);
           return null;
         }
-        return (await res.json()) as AttachmentDescriptor;
+        return {
+          ...((await res.json()) as AttachmentDescriptor),
+          filename: file.name,
+        };
       } catch {
         report("Upload failed — check your connection and try again.");
         return null;
@@ -150,11 +229,31 @@ export function AttachmentInput({
       if (disabled || files.length === 0) return;
       setError(null);
       const images = files.filter(isAcceptedImage);
-      if (images.length < files.length) {
-        report("Only PNG, JPEG, WebP, or GIF images can be attached.");
+      const textFiles = variant === "composer" ? files.filter(isAcceptedTextFile) : [];
+      const unsupported = files.filter(
+        (file) => !isAcceptedImage(file) && !(variant === "composer" && isAcceptedTextFile(file)),
+      );
+      if (unsupported.length > 0) {
+        report(
+          "That file type is not supported yet. Add an image or a text, code, Markdown, JSON, or CSV file.",
+        );
+      }
+
+      if (textFiles.length > 0 && onTextChange) {
+        const readable = textFiles.filter((file) => {
+          if (file.size <= MAX_TEXT_FILE_BYTES) return true;
+          report(`${file.name} is too large. Text files must be 200 KB or smaller.`);
+          return false;
+        });
+        const inserted = await Promise.all(
+          readable.map(async (file) => ({ name: file.name, text: await file.text() })),
+        );
+        if (inserted.length > 0) {
+          onTextChange(appendTextFiles(textValue, inserted));
+        }
       }
       const room = maxAttachments - value.length;
-      if (room <= 0) {
+      if (room <= 0 && images.length > 0) {
         report(`You can attach at most ${maxAttachments} images.`);
         return;
       }
@@ -186,7 +285,17 @@ export function AttachmentInput({
         onChange(merged);
       }
     },
-    [disabled, maxAttachments, onChange, report, uploadOne, value],
+    [
+      disabled,
+      maxAttachments,
+      onChange,
+      onTextChange,
+      report,
+      textValue,
+      uploadOne,
+      value,
+      variant,
+    ],
   );
 
   const removeOne = useCallback(
@@ -211,22 +320,113 @@ export function AttachmentInput({
   );
 
   const onPaste = (event: ReactClipboardEvent<HTMLDivElement>) => {
-    const images = imagesFromDataTransfer(event.clipboardData);
-    if (images.length > 0) {
+    const files = filesFromDataTransfer(event.clipboardData);
+    if (files.length > 0) {
       event.preventDefault();
-      void handleFiles(images);
+      void handleFiles(files);
     }
   };
 
   const onDrop = (event: ReactDragEvent<HTMLDivElement>) => {
     event.preventDefault();
-    void handleFiles(imagesFromDataTransfer(event.dataTransfer));
+    void handleFiles(filesFromDataTransfer(event.dataTransfer));
   };
 
   const onFilePicked = (event: ReactChangeEvent<HTMLInputElement>) => {
     void handleFiles(Array.from(event.target.files ?? []));
     event.target.value = "";
   };
+
+  const picker = (
+    <input
+      ref={fileInputRef}
+      type="file"
+      accept={
+        variant === "composer"
+          ? `${ATTACHMENT_ACCEPTED_MIMES.join(",")},${TEXT_FILE_ACCEPT}`
+          : ATTACHMENT_ACCEPTED_MIMES.join(",")
+      }
+      multiple
+      hidden
+      data-testid="attachment-file-input"
+      onChange={onFilePicked}
+    />
+  );
+
+  const chips =
+    value.length > 0 ? (
+      <ul className="attachment-chips" data-testid="attachment-chips">
+        {value.map((id) => {
+          const descriptor = descriptors[id];
+          return (
+            <li key={id} className="attachment-chip" data-testid="attachment-chip">
+              <img
+                src={`/api/v2/projects/${projectId}/attachments/${id}`}
+                alt={
+                  descriptor?.filename ??
+                  (descriptor
+                    ? `Attachment ${descriptor.width ?? "?"}×${descriptor.height ?? "?"}`
+                    : "Attachment")
+                }
+              />
+              <button
+                type="button"
+                className="attachment-chip-remove"
+                aria-label="Remove attachment"
+                disabled={disabled}
+                onClick={() => void removeOne(id)}
+              >
+                ×
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    ) : null;
+
+  if (variant === "composer") {
+    return (
+      <div className="attachment-input attachment-composer-field">
+        <label className="field-label" htmlFor={composerId}>
+          {label}
+        </label>
+        <div
+          className={`prompt-composer${atCapacity ? " is-full" : ""}`}
+          data-testid="attachment-dropzone"
+          onPaste={onPaste}
+          onDrop={onDrop}
+          onDragOver={(event) => event.preventDefault()}
+        >
+          {chips}
+          <textarea
+            id={composerId}
+            className="prompt-composer-textarea"
+            data-testid={textAreaTestId}
+            placeholder={placeholder}
+            value={textValue}
+            disabled={disabled}
+            onChange={(event) => onTextChange?.(event.target.value)}
+          />
+          <div className="prompt-composer-toolbar">
+            <button
+              type="button"
+              className="composer-add-button"
+              aria-label="Add images or files"
+              title="Add images or text files"
+              disabled={!interactive}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <span aria-hidden="true">+</span>
+            </button>
+            <span className="composer-help">Paste, drop, or add images and text files</span>
+            {uploading > 0 ? <Spinner label={`Uploading ${uploading} image(s)…`} /> : null}
+          </div>
+          {picker}
+        </div>
+        {error && !hideInlineError ? <Alert testId="attachment-error">{error}</Alert> : null}
+      </div>
+    );
+  }
 
   return (
     <div className="attachment-input">
@@ -253,45 +453,10 @@ export function AttachmentInput({
             Browse images
           </Button>
         )}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept={ATTACHMENT_ACCEPTED_MIMES.join(",")}
-          multiple
-          hidden
-          data-testid="attachment-file-input"
-          onChange={onFilePicked}
-        />
+        {picker}
       </div>
 
-      {value.length > 0 && (
-        <ul className="attachment-chips" data-testid="attachment-chips">
-          {value.map((id) => {
-            const descriptor = descriptors[id];
-            return (
-              <li key={id} className="attachment-chip" data-testid="attachment-chip">
-                <img
-                  src={`/api/v2/projects/${projectId}/attachments/${id}`}
-                  alt={
-                    descriptor
-                      ? `Attachment ${descriptor.width ?? "?"}×${descriptor.height ?? "?"}`
-                      : "Attachment"
-                  }
-                />
-                <button
-                  type="button"
-                  className="attachment-chip-remove"
-                  aria-label="Remove attachment"
-                  disabled={disabled}
-                  onClick={() => void removeOne(id)}
-                >
-                  ×
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+      {chips}
 
       {uploading > 0 && <Spinner label={`Uploading ${uploading} image(s)…`} />}
       {error && !hideInlineError && <Alert testId="attachment-error">{error}</Alert>}

@@ -249,27 +249,19 @@ export function PhaseTab({
       {showSetupForm ? (
         <section className="card side-section phase-setup" data-testid="phase-setup">
           <div className="side-body form-stack">
-            <Field label="What should this phase deliver?">
-              <TextArea
-                data-testid="phase-goal"
-                placeholder="Describe the goal — type or paste it here."
-                value={goal}
-                onChange={(event) => setGoal(event.target.value)}
-                disabled={starting}
-              />
-            </Field>
-            <Field label="Attach images">
-              <AttachmentInput
-                projectId={projectId}
-                value={attachmentIds}
-                onChange={setAttachmentIds}
-                purpose="objective"
-                disabled={starting}
-              />
-              <span className="field-help">
-                Images are supported today — paste a screenshot, drop a file, or browse.
-              </span>
-            </Field>
+            <AttachmentInput
+              variant="composer"
+              label="What should this phase deliver?"
+              textAreaTestId="phase-goal"
+              placeholder="Describe the goal, paste a screenshot, or add a reference file…"
+              textValue={goal}
+              onTextChange={setGoal}
+              projectId={projectId}
+              value={attachmentIds}
+              onChange={setAttachmentIds}
+              purpose="objective"
+              disabled={starting}
+            />
             <div className="two-col-fields">
               <Field label="Agents">
                 <Select

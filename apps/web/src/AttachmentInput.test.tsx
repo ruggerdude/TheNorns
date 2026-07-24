@@ -22,6 +22,27 @@ function Harness({ initial = [] as string[] }: { initial?: string[] }) {
   );
 }
 
+function ComposerHarness() {
+  const [value, setValue] = useState<string[]>([]);
+  const [text, setText] = useState("");
+  return (
+    <>
+      <AttachmentInput
+        variant="composer"
+        label="Project brief"
+        textAreaTestId="project-brief"
+        textValue={text}
+        onTextChange={setText}
+        projectId="p1"
+        value={value}
+        onChange={setValue}
+      />
+      <output data-testid="selected-ids">{value.join(",")}</output>
+      <output data-testid="prompt-text">{text}</output>
+    </>
+  );
+}
+
 const UPLOAD_URL = "/api/v2/projects/p1/attachments";
 
 describe("AttachmentInput (FRONT DOOR P4)", () => {
@@ -85,6 +106,40 @@ describe("AttachmentInput (FRONT DOOR P4)", () => {
       expect(screen.getByTestId("selected-ids")).toHaveTextContent("att_2");
     });
     expect(screen.getAllByTestId("attachment-chip")).toHaveLength(1);
+  });
+
+  it("pastes an image directly into the composer textarea", async () => {
+    fetchMock.post(UPLOAD_URL, {
+      status: 201,
+      body: { id: "att_3", mime: "image/png", bytes: 8, width: 1, height: 1, purpose: "objective" },
+    });
+
+    render(<ComposerHarness />);
+    fireEvent.paste(screen.getByTestId("project-brief"), {
+      clipboardData: { files: [pngFile("clipboard.png")], items: [] },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("selected-ids")).toHaveTextContent("att_3");
+    });
+    expect(screen.getByRole("button", { name: "Add images or files" })).toBeVisible();
+  });
+
+  it("imports a text file selected with the + picker into the prompt", async () => {
+    render(<ComposerHarness />);
+    const notes = new File(["Use a compact dashboard."], "notes.md", {
+      type: "text/markdown",
+    });
+
+    fireEvent.change(screen.getByTestId("attachment-file-input"), {
+      target: { files: [notes] },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("prompt-text")).toHaveTextContent("Reference file: notes.md");
+      expect(screen.getByTestId("prompt-text")).toHaveTextContent("Use a compact dashboard.");
+    });
+    expect(fetchMock.calls.some((call) => call.method === "POST")).toBe(false);
   });
 
   it("renders a thumbnail for a pre-selected attachment id", () => {

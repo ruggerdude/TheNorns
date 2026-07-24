@@ -1502,6 +1502,7 @@ function ProjectGraph({
           <button
             type="button"
             className={workspaceTab === "overview" ? "on" : ""}
+            aria-current={workspaceTab === "overview" ? "page" : undefined}
             onClick={() => setWorkspaceTab("overview")}
           >
             Overview
@@ -1509,6 +1510,7 @@ function ProjectGraph({
           <button
             type="button"
             className={workspaceTab === "plan" ? "on" : ""}
+            aria-current={workspaceTab === "plan" ? "page" : undefined}
             onClick={() => setWorkspaceTab("plan")}
           >
             Plan
@@ -1516,6 +1518,7 @@ function ProjectGraph({
           <button
             type="button"
             className={workspaceTab === "phase" ? "on" : ""}
+            aria-current={workspaceTab === "phase" ? "page" : undefined}
             onClick={() => setWorkspaceTab("phase")}
           >
             Phase
@@ -1523,6 +1526,7 @@ function ProjectGraph({
           <button
             type="button"
             className={workspaceTab === "graph" ? "on" : ""}
+            aria-current={workspaceTab === "graph" ? "page" : undefined}
             onClick={() => setWorkspaceTab("graph")}
           >
             Graph
@@ -1825,27 +1829,21 @@ function ProjectGraph({
                        *  plan goes through exactly the same durable planning-run
                        *  flow as every subsequent phase (no separate legacy
                        *  "01 · Live planning" box anymore). */}
-                      <Field
+                      <AttachmentInput
+                        variant="composer"
                         label={
                           resume.phases.length === 0 ? "Draft the plan" : "Draft the next phase"
                         }
-                      >
-                        <TextArea
-                          data-testid="next-phase-objective"
-                          placeholder="What should this phase deliver?"
-                          value={nextPhaseObjective}
-                          onChange={(event) => setNextPhaseObjective(event.target.value)}
-                        />
-                      </Field>
-                      <Field label="Attach screenshots">
-                        <AttachmentInput
-                          projectId={project.id}
-                          value={nextPhaseAttachmentIds}
-                          onChange={setNextPhaseAttachmentIds}
-                          purpose="objective"
-                          disabled={planningRunStarting}
-                        />
-                      </Field>
+                        textAreaTestId="next-phase-objective"
+                        placeholder="Describe what this phase should deliver…"
+                        textValue={nextPhaseObjective}
+                        onTextChange={setNextPhaseObjective}
+                        projectId={project.id}
+                        value={nextPhaseAttachmentIds}
+                        onChange={setNextPhaseAttachmentIds}
+                        purpose="objective"
+                        disabled={planningRunStarting}
+                      />
                       <Field label="Plan review rounds">
                         <div className="rounds-stepper" data-testid="next-phase-rounds-stepper">
                           <Button

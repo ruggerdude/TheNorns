@@ -1617,22 +1617,19 @@ export function Projects({
                   (optional), then start planning — Norns drafts a plan you'll review before any
                   agent starts.
                 </Alert>
-                <Field label="Objective">
-                  <TextArea
-                    data-testid="wizard-objective"
-                    value={wizardObjective}
-                    onChange={(e) => setWizardObjective(e.target.value)}
-                  />
-                </Field>
-                <Field label="Attach screenshots">
-                  <AttachmentInput
-                    projectId={draftProject.id}
-                    value={wizardAttachmentIds}
-                    onChange={setWizardAttachmentIds}
-                    purpose="objective"
-                    disabled={planningStarting}
-                  />
-                </Field>
+                <AttachmentInput
+                  variant="composer"
+                  label="Objective"
+                  textAreaTestId="wizard-objective"
+                  placeholder="Describe the project, paste a screenshot, or add a reference file…"
+                  textValue={wizardObjective}
+                  onTextChange={setWizardObjective}
+                  projectId={draftProject.id}
+                  value={wizardAttachmentIds}
+                  onChange={setWizardAttachmentIds}
+                  purpose="objective"
+                  disabled={planningStarting}
+                />
                 <Field label="Plan review rounds">
                   <div className="rounds-stepper" data-testid="rounds-stepper">
                     <Button

@@ -1,6 +1,6 @@
 # FRONT DOOR Program — Revised Delivery Plan
 
-**Status:** Delivered and verified · **Completed:** 2026-07-23
+**Status:** Delivered and verified · **Completed:** 2026-07-24
 
 **Mandate:** Give the user one truthful path from the project dashboard to a
 staffed, approved, running project, whether the source is GitHub or a local
@@ -36,9 +36,11 @@ The following capabilities existed before this program and must be reused:
 |---|---|
 | Light mode | Delivered: light/dark toggle, system preference, and persisted selection |
 | Project dashboard | Delivered: project cards, overall completion, ETA, active agents, decisions, row-wide click/keyboard entry, and explicit project entry |
+| Project workspace | Delivered: responsive 1500px desktop canvas, flat section navigation, modern pill actions, and readable light/dark surfaces |
 | Dashboard project removal | Delivered: confirmed removal archives an idle project, closes its open tab, removes it from active reads, preserves repository/history, records human evidence, and refuses while agent/planning/debate work is active |
 | GitHub onboarding | Delivered: connection, repository selection/creation, and project creation |
 | Planning | Delivered: persisted asynchronous planning runs backed by `runPlanning`, selectable reviewer, configurable rounds, transcript/status, and refresh recovery |
+| Prompt composer | Delivered: the new-project brief, Plan, and Phase use one chat-style composer with direct image paste, whole-control drag/drop, a `+` picker, previews/removal, and local text/code-file import into the planning prompt |
 | Images | Delivered for the MVP: paste/drop upload, validation and caps, provider-neutral image parts, and Anthropic/OpenAI planning context |
 | Strategy and staffing | Delivered: planning output bridges to relational strategy; the PM recommends workers/models/reviewers/budgets; the user can review before approval |
 | Approval and execution | Delivered: approved strategy materialization and execution kickoff with readiness checks |
@@ -121,11 +123,13 @@ existing cookies/local storage:
 The browser acceptance layer now runs in Chromium and WebKit (Desktop Safari
 engine). It covers the GitHub and Local-folder project front doors through
 immediate entry into a nonblank Overview workspace, with persisted session and
-theme state. The wider Vitest and server integration suites cover image
-planning, editable PM staffing, approval/execution, refresh/reopen, dashboard
-keyboard entry, multiple tabs, archival refusal, and attention decisions.
-Fresh projects treat a missing graph as a normal draft state rather than a
-blank workspace.
+theme state. It also verifies the wider desktop canvas, flat workspace
+navigation, and integrated prompt composer in both engines. The wider Vitest
+and server integration suites cover image planning, direct composer paste,
+text-file prompt import, editable PM staffing, approval/execution,
+refresh/reopen, dashboard keyboard entry, multiple tabs, archival refusal,
+and attention decisions. Fresh projects treat a missing graph as a normal
+draft state rather than a blank workspace.
 
 Native Safari normal/private cookie smoke testing remains a deployment
 operation because it requires the deployed origin and a real account; WebKit
@@ -151,6 +155,15 @@ is the committed automated regression gate for both creation paths.
 - Multiple projects can remain open and retain independent UI state.
 - The project workspace opens on an Overview/Phase surface; the graph is
   optional, never an empty front door.
+- On desktop, the project workspace uses the available screen width rather
+  than a narrow 1100px column, while retaining responsive mobile margins.
+- Workspace navigation is a flat, accessible tab row with a clear current
+  section rather than browser-default raised buttons.
+- New-project, Plan, and Phase prompts accept normal text paste, direct
+  screenshot paste, drag/drop, and a `+` file picker in the same composer.
+- Selected images remain visible and removable. Text, code, Markdown, JSON,
+  and CSV reference files are inserted into the prompt so agents actually
+  receive their contents; unsupported binary documents are rejected clearly.
 - Light and dark modes remain readable across dashboard, wizard, workspace,
   settings, planning review, and errors.
 - The PM recommends the best cost/capability mix of workers and models from the
@@ -164,13 +177,13 @@ is the committed automated regression gate for both creation paths.
 
 - Scoped lint: `biome check apps packages scripts`
 - Monorepo build and typecheck: passed
-- Web unit/integration suite: 37 files, 140 tests passed
+- Web unit/integration suite: 37 files, 142 tests passed
 - Server suite: 109 files passed plus the real-runtime regression rerun; 8
   database-environment tests remain intentionally skipped
 - Contracts: 15 files, 122 tests passed
 - Adapters: 26 tests passed, one live-provider smoke intentionally skipped
-- Browser front door: four passes across Chromium and WebKit (GitHub and
-  Local-folder journeys)
+- Browser front door: six passes across Chromium and WebKit (GitHub,
+  Local-folder, and workspace/composer journeys)
 
 ## Delivery controls
 

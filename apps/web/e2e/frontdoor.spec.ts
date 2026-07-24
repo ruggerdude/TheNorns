@@ -129,7 +129,16 @@ async function prepare(page: Page, mode: "github" | "local") {
     if (path.includes("/planning-reviewer") && request.method() === "DELETE") {
       return route.fulfill({ status: 204, body: "" });
     }
-    if (path.endsWith("/resume")) return fulfill(route, {}, 404);
+    if (path.endsWith("/resume")) {
+      return fulfill(route, {
+        project_id: projects[0]?.id ?? "project-e2e",
+        architecture: null,
+        repositories: [],
+        phases: [],
+        attention: { open_decisions: 0, active_runs: 0, blocked_tasks: 0 },
+        next_recommended_action: "Create the project's next phase",
+      });
+    }
     if (path.endsWith("/graph")) return fulfill(route, { error: "not_planned" }, 409);
     return fulfill(route, { error: `Unexpected ${request.method()} ${path} (${mode})` }, 404);
   });
@@ -161,4 +170,31 @@ test("Local front door uses the helper selection and opens a nonblank workspace"
   await expect(page.getByText("local-front-door", { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/loading graph/i)).toHaveCount(0);
   await expect(page.getByRole("button", { name: /main menu/i })).toBeVisible();
+});
+
+test("Workspace is wide, uses flat navigation, and has one integrated prompt composer", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await prepare(page, "github");
+  await page.goto("/");
+  await page.getByRole("button", { name: /new project/i }).click();
+  await page.getByRole("button", { name: /^existing/i }).click();
+  await page.getByRole("button", { name: /octocat\/front-door-app/i }).click();
+  await page.getByRole("button", { name: /create and open project/i }).click();
+
+  const workspace = page.locator(".workspace-page");
+  await expect(workspace).toBeVisible();
+  expect((await workspace.boundingBox())?.width ?? 0).toBeGreaterThan(1400);
+
+  const planTab = page.getByRole("button", { name: "Plan", exact: true });
+  await planTab.click();
+  await expect(planTab).toHaveAttribute("aria-current", "page");
+  await expect(planTab).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+
+  const composer = page.getByTestId("attachment-dropzone");
+  await expect(composer).toBeVisible();
+  await expect(page.getByTestId("next-phase-objective")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add images or files" })).toBeVisible();
+  await expect(page.getByText("Attach screenshots")).toHaveCount(0);
 });
