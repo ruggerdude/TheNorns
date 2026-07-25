@@ -65,6 +65,7 @@ import { ThemeToggle, useTheme } from "./theme";
 import {
   Alert,
   Badge,
+  Brand,
   Button,
   DismissibleNote,
   Field,
@@ -1532,10 +1533,16 @@ function ProjectGraph({
         onClose={onCloseProject}
       />
       <header className="workspace-topbar">
-        <Button className="btn-small" variant="ghost" onClick={onBack}>
-          ← Main menu
-        </Button>
+        <div className="workspace-nav-start">
+          <Brand />
+          <Button className="btn-small" variant="ghost" onClick={onBack}>
+            ← Portfolio
+          </Button>
+        </div>
         <div className="header-actions">
+          <Button className="btn-small" variant="ghost" onClick={() => onOpenAccount()}>
+            Settings
+          </Button>
           {user?.role === "admin" ? (
             <Button className="btn-small" variant="ghost" onClick={onOpenAdmin}>
               Admin

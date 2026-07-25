@@ -1185,6 +1185,29 @@ export function Projects({
     [projects, query],
   );
   const planned = projects?.filter((p) => p.status === "planned").length ?? 0;
+  const quickAccessProjects = useMemo(() => {
+    if (query.trim()) return (visible ?? []).slice(0, 4);
+    const ordered = new Map<string, ProjectSummary>();
+    for (const project of openProjects) ordered.set(project.id, project);
+    for (const project of projects ?? []) ordered.set(project.id, project);
+    return [...ordered.values()].slice(0, 4);
+  }, [openProjects, projects, query, visible]);
+  const activeAgents =
+    attention?.counts.active_runs ??
+    Object.values(resumeById).reduce((sum, resume) => sum + resume.agents_active, 0);
+  const waitingDecisions =
+    attention?.counts.decisions ??
+    Object.values(resumeById).reduce((sum, resume) => sum + resume.decisions_waiting, 0);
+  const blockedProjects =
+    attention?.projects.filter((project) => project.health === "blocked").length ??
+    Object.values(resumeById).filter((resume) => resume.phases.some((phase) => phase.blocked))
+      .length;
+  const portfolioState =
+    (attention?.counts.critical ?? 0) > 0 || blockedProjects > 0
+      ? "Needs attention"
+      : activeAgents > 0
+        ? "Work in progress"
+        : "Ready";
   const connectedGitHub =
     githubStatus?.connections.filter((connection) => connection.status === "connected") ?? [];
   const selectedConnection = connectedGitHub.find(
@@ -1236,8 +1259,19 @@ export function Projects({
   return (
     <div className="app-shell">
       <header className="topbar">
-        <Brand />
+        <div className="topbar-main">
+          <Brand />
+          <span className="topbar-location">Portfolio</span>
+        </div>
         <div className="header-actions">
+          {user ? (
+            <span className="user-chip" title={user.email}>
+              <span className="user-avatar">
+                {(user.name ?? user.email).slice(0, 1).toUpperCase()}
+              </span>
+              <span>{user.name ?? user.email}</span>
+            </span>
+          ) : null}
           <Button variant="ghost" className="btn-small" onClick={() => onOpenAccount()}>
             Settings
           </Button>
@@ -1255,10 +1289,11 @@ export function Projects({
       <main className="page project-dashboard">
         <div className="dashboard-hero">
           <div>
-            <div className="eyebrow">Project dashboard</div>
-            <h1>Your projects</h1>
+            <div className="eyebrow">Portfolio command center</div>
+            <h1>Keep every project in motion.</h1>
             <p>
-              See what is moving, reopen active work, or bring another project into your workspace.
+              Jump straight into the work you need, then scan progress, decisions, and delivery
+              health without chasing updates.
             </p>
           </div>
           <div className="dashboard-actions">
@@ -1274,6 +1309,157 @@ export function Projects({
           </div>
         </div>
         {error ? <Alert testId="projects-error">{error}</Alert> : null}
+        <div className="dashboard-focus-grid">
+          <section
+            className="focus-panel quick-access-panel"
+            aria-labelledby="quick-access-heading"
+          >
+            <div className="focus-panel-head">
+              <div>
+                <div className="eyebrow">01 · Get to work</div>
+                <h2 id="quick-access-heading">Quick access</h2>
+              </div>
+              <span className="focus-hint">Your open and recent projects</span>
+            </div>
+            <Input
+              aria-label="Search projects"
+              placeholder="Find a project by name, brief, or objective…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {projects === null ? (
+              <Spinner label="Loading projects…" />
+            ) : quickAccessProjects.length ? (
+              <div className="quick-project-list">
+                {quickAccessProjects.map((project) => {
+                  const resume = resumeById[project.id];
+                  const blocked = resume?.phases.some((phase) => phase.blocked) ?? false;
+                  const active = resume?.phases.some((phase) => phase.status === "active") ?? false;
+                  const state = blocked
+                    ? "Needs you"
+                    : active
+                      ? "In progress"
+                      : project.status === "planned"
+                        ? "Plan ready"
+                        : "Draft";
+                  const stateClass = blocked
+                    ? "is-blocked"
+                    : active
+                      ? "is-active"
+                      : project.status === "planned"
+                        ? "is-ready"
+                        : "is-draft";
+                  return (
+                    <a
+                      className="quick-project"
+                      key={project.id}
+                      href={`#project-${encodeURIComponent(project.id)}`}
+                      aria-label={`Quick access: ${project.name}`}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        onOpenProject(project);
+                      }}
+                    >
+                      <span className="quick-project-mark">
+                        {project.name.slice(0, 2).toUpperCase()}
+                      </span>
+                      <span className="quick-project-copy">
+                        <strong>
+                          <span>{project.name.slice(0, 1)}</span>
+                          <span>{project.name.slice(1)}</span>
+                        </strong>
+                        <small>{project.description || "No project brief yet"}</small>
+                      </span>
+                      <span className={`quick-project-state ${stateClass}`}>
+                        <i />
+                        {state}
+                      </span>
+                      <span className="quick-project-progress">
+                        <strong>{resume ? `${resume.overall_percent_complete}%` : "—"}</strong>
+                        <small>complete</small>
+                      </span>
+                      <span className="quick-project-enter" aria-hidden="true">
+                        →
+                      </span>
+                    </a>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="quick-access-empty">
+                <strong>{query ? "No matching projects" : "No projects yet"}</strong>
+                <span>{query ? "Try a broader search." : "Create a project to get started."}</span>
+              </div>
+            )}
+          </section>
+
+          <section
+            className="focus-panel portfolio-pulse-panel"
+            aria-labelledby="portfolio-pulse-heading"
+          >
+            <div className="focus-panel-head">
+              <div>
+                <div className="eyebrow">02 · Read the room</div>
+                <h2 id="portfolio-pulse-heading">Portfolio status</h2>
+              </div>
+              <Badge
+                tone={
+                  portfolioState === "Needs attention"
+                    ? "danger"
+                    : portfolioState === "Work in progress"
+                      ? "success"
+                      : "info"
+                }
+              >
+                {portfolioState}
+              </Badge>
+            </div>
+            <div className="portfolio-pulse-hero">
+              <div className="pulse-orbit" aria-hidden="true">
+                <span />
+              </div>
+              <div>
+                <strong>
+                  {waitingDecisions > 0
+                    ? `${waitingDecisions} decision${waitingDecisions === 1 ? "" : "s"} waiting`
+                    : activeAgents > 0
+                      ? `${activeAgents} active run${activeAgents === 1 ? "" : "s"}`
+                      : "No urgent interventions"}
+                </strong>
+                <p>
+                  {waitingDecisions > 0
+                    ? "Your input will unblock the next stretch of work."
+                    : activeAgents > 0
+                      ? "Execution is moving and status will refresh automatically."
+                      : "Everything is quiet. Start or approve work when you are ready."}
+                </p>
+              </div>
+            </div>
+            <div className="project-stats" aria-label="Project overview">
+              <div>
+                <strong>{projects?.length ?? "—"}</strong>
+                <span>Total</span>
+              </div>
+              <div>
+                <strong>{activeAgents}</strong>
+                <span>Active runs</span>
+              </div>
+              <div>
+                <strong>{waitingDecisions}</strong>
+                <span>Decisions</span>
+              </div>
+              <div>
+                <strong>{blockedProjects}</strong>
+                <span>Blocked</span>
+              </div>
+            </div>
+            <div className="pulse-foot">
+              <span>{planned} planned</span>
+              <span>{(projects?.length ?? 0) - planned} drafts</span>
+              <span>{openProjects.length} open now</span>
+            </div>
+          </section>
+        </div>
         {attention ? (
           <section className="attention-center" aria-labelledby="attention-heading">
             <div className="section-head">
@@ -1439,35 +1625,13 @@ export function Projects({
             </div>
           </section>
         ) : null}
-        <section className="project-stats" aria-label="Project overview">
-          <div>
-            <strong>{projects?.length ?? "—"}</strong>
-            <span>Total projects</span>
-          </div>
-          <div>
-            <strong>{planned}</strong>
-            <span>Planned</span>
-          </div>
-          <div>
-            <strong>{(projects?.length ?? 0) - planned}</strong>
-            <span>Drafts</span>
-          </div>
-          <div>
-            <strong>{openProjects.length}</strong>
-            <span>Open now</span>
-          </div>
-        </section>
         <div className="project-toolbar">
           <div>
+            <div className="eyebrow">Delivery detail</div>
             <h2>All projects</h2>
-            <span className="muted">Select a project to view its workspace and details.</span>
+            <span className="muted">Phase-by-phase progress, ownership, and next action.</span>
           </div>
-          <Input
-            aria-label="Search projects"
-            placeholder="Search projects…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
+          <span className="project-count">{visible?.length ?? 0} shown</span>
         </div>
         {projects === null ? (
           <Spinner label="Loading projects…" />
