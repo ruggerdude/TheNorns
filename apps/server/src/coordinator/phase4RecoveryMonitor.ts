@@ -20,6 +20,8 @@ interface StuckRun {
   aggregate_version: number;
 }
 
+export const QUICK_COMPLETION_RECOVERY_BATCH_SIZE = 25;
+
 export class Phase4RecoveryMonitor {
   constructor(
     private readonly transactions: V2TransactionRunner,
@@ -65,7 +67,10 @@ export class Phase4RecoveryMonitor {
             AND run.commit_sha=verification.commit_sha
             AND run.published_commit_sha=verification.commit_sha
             AND handoff.payload->>'commit'=verification.commit_sha
-            AND run.publication_outcome IN ('pushed','local_only')`,
+            AND run.publication_outcome IN ('pushed','local_only')
+          ORDER BY run.id
+          LIMIT $1`,
+        [QUICK_COMPLETION_RECOVERY_BATCH_SIZE],
       );
       const repairedPhases = new Set<string>();
       for (const run of completedQuickRuns.rows) {

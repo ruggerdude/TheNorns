@@ -58,6 +58,7 @@ import {
 import { PgPersistence, SnapshotFlusher } from "./persistence/pg.js";
 import {
   PostgresConnectionConfigurationError,
+  assertCurrentRuntimeSchema,
   assertRestrictedRuntimeDatabase,
   postgresPoolConfig,
 } from "./persistence/postgresConnection.js";
@@ -169,7 +170,6 @@ let phase6Services: { coordination: Phase6CoordinationService } | undefined;
 let phase7Services: { operations: Phase7OperationsService } | undefined;
 let debateService: DebateService | undefined;
 let debateWorkerTimer: NodeJS.Timeout | undefined;
-let phase4RecoveryTimer: NodeJS.Timeout | undefined;
 let integrationServices: { github: GitHubIntegrationService | null } | undefined;
 // FRONT DOOR P2 §D1: observable planning runs need the relational runtime.
 // PHASE TAB P4: `executionKickoff` is the real approve-auto-starts-execution
@@ -212,6 +212,7 @@ if (databaseUrl) {
     const pool = new Pool(postgresPoolConfig(databaseUrl));
     databasePool = pool;
     await assertRestrictedRuntimeDatabase(pool, process.env);
+    await assertCurrentRuntimeSchema(pool);
     persistenceLease = await Phase2ApplicationPersistenceLease.acquire(pool);
     const persistence = new PgPersistence({
       query: (sql, params) => pool.query(sql, params as unknown[]),
@@ -577,11 +578,9 @@ if (databaseUrl) {
       }
     };
     // Run once before serving traffic so terminal residue from an older
-    // process converges on restart, then keep the same deterministic monitor
-    // active for stuck-run detection and post-terminal cleanup.
+    // process converges on restart. buildServer owns the single recurring
+    // recovery timer and clears it with the rest of the server lifecycle.
     await runPhase4Recovery();
-    phase4RecoveryTimer = setInterval(() => void runPhase4Recovery(), 60_000);
-    phase4RecoveryTimer.unref();
     console.log(
       `postgres: relay ${relaySnap ? "restored" : "fresh"}, projects ${projectsSnap ? "restored" : "fresh"}, identity ${identityRuntime.mode} ${usersPersistenceState}`,
     );
@@ -591,7 +590,6 @@ if (databaseUrl) {
         if (shutdownRequested) return;
         shutdownRequested = true;
         if (debateWorkerTimer) clearInterval(debateWorkerTimer);
-        if (phase4RecoveryTimer) clearInterval(phase4RecoveryTimer);
         void Promise.all(flushers.map((f) => f.stop()))
           .then(() => persistenceLease?.release())
           .then(() => databasePool?.end())

@@ -8,6 +8,7 @@ export class PostgresConnectionConfigurationError extends Error {
       | "invalid_database_url"
       | "privileged_runtime_login"
       | "runtime_role_unavailable"
+      | "runtime_schema_outdated"
       | "archive_ciphertext_visible"
       | "archive_key_in_runtime",
     message: string,
@@ -78,6 +79,51 @@ function assertArchiveKeyAbsent(environment: NodeJS.ProcessEnv): void {
     throw new PostgresConnectionConfigurationError(
       "archive_key_in_runtime",
       `ordinary application startup refuses archive key variables: ${forbidden.join(", ")}`,
+    );
+  }
+}
+
+interface RuntimeSchemaPosture {
+  planning_mode: boolean;
+  knowledge_packages: string | null;
+  agent_execution_registrations: string | null;
+  agent_handoffs: string | null;
+  knowledge_deltas: string | null;
+}
+
+/**
+ * Refuses to serve a build against a database that has not received the
+ * additive migrations required by its runtime paths. The ordinary application
+ * role intentionally cannot read the migration ledger, so compatibility is
+ * proven from the exact relations and columns the build needs.
+ */
+export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Promise<void> {
+  const result = await pool.query<RuntimeSchemaPosture>(
+    `SELECT EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='planning_runs'
+                 AND column_name='mode'
+            ) AS planning_mode,
+            to_regclass('public.knowledge_packages')::text AS knowledge_packages,
+            to_regclass('public.agent_execution_registrations')::text
+              AS agent_execution_registrations,
+            to_regclass('public.agent_handoffs')::text AS agent_handoffs,
+            to_regclass('public.knowledge_deltas')::text AS knowledge_deltas`,
+  );
+  const posture = result.rows[0];
+  const missing = [
+    ...(!posture?.planning_mode ? ["planning_runs.mode"] : []),
+    ...(!posture?.knowledge_packages ? ["knowledge_packages"] : []),
+    ...(!posture?.agent_execution_registrations ? ["agent_execution_registrations"] : []),
+    ...(!posture?.agent_handoffs ? ["agent_handoffs"] : []),
+    ...(!posture?.knowledge_deltas ? ["knowledge_deltas"] : []),
+  ];
+  if (missing.length > 0) {
+    throw new PostgresConnectionConfigurationError(
+      "runtime_schema_outdated",
+      `database migrations are required before startup; missing: ${missing.join(", ")}`,
     );
   }
 }

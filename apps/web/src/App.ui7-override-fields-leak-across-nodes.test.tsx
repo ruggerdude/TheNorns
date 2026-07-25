@@ -32,7 +32,7 @@ describe("UI-7: override draft fields must be scoped to the selected node", () =
     // event) — a jsdom/d3-drag interaction issue unrelated to the bug this
     // test targets. A plain click event still fires React Flow's
     // onNodeClick.
-    fireEvent.click(screen.getByText("Core API"));
+    fireEvent.click(await screen.findByText("Core API"));
     await screen.findByTestId("node-panel");
 
     const modelInput = screen.getByLabelText(/override model/i);

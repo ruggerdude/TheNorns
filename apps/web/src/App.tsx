@@ -14,19 +14,8 @@ import { pmModelOption } from "@norns/contracts";
 // pre-existing execution path for a project whose graph was already loaded
 // before this change; it renders once `graph` exists and is otherwise
 // dormant behind the "No plan yet" hint.
-import {
-  Background,
-  type Connection,
-  ConnectionLineType,
-  Controls,
-  type Edge,
-  type EdgeTypes,
-  type Node,
-  Position,
-  ReactFlow,
-} from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Connection, Edge, Node } from "@xyflow/react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Account, type SettingsTab } from "./Account";
 import { Admin } from "./Admin";
 import { AnalyzeRepositoryControl } from "./AnalyzeRepositoryControl";
@@ -34,7 +23,6 @@ import { Debates } from "./Debates";
 import { Gantt, type GanttPhase } from "./Gantt";
 import { KnowledgeStatusPanel } from "./KnowledgeStatusPanel";
 import { Login, type LoginMode } from "./Login";
-import { OrthogonalEdge } from "./OrthogonalEdge";
 import { PhaseTab } from "./PhaseTab";
 import {
   AttentionDecisionForm,
@@ -81,6 +69,10 @@ import {
   Spinner,
   TextArea,
 } from "./ui";
+
+const GraphCanvas = lazy(() =>
+  import("./GraphCanvas").then(({ GraphCanvas }) => ({ default: GraphCanvas })),
+);
 
 interface Assignment {
   provider: string;
@@ -698,8 +690,6 @@ async function patchJson<T>(path: string, body: unknown): Promise<T> {
     );
   return json;
 }
-
-const graphEdgeTypes: EdgeTypes = { orthogonal: OrthogonalEdge };
 
 /** Layered layout with clear horizontal and vertical connector corridors. */
 function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
@@ -1553,8 +1543,6 @@ function ProjectGraph({
     const flowNodes: Node[] = displayGraph.nodes.map((node) => ({
       id: node.id,
       position: positions.get(node.id) ?? { x: 0, y: 0 },
-      sourcePosition: Position.Right,
-      targetPosition: Position.Left,
       style: {
         border:
           node.id === selected
@@ -2193,20 +2181,17 @@ function ProjectGraph({
              *  same component, same props, same handlers as before; only the
              *  surrounding layout changed. */}
             <div className="graph-canvas" data-testid="graph-canvas">
-              <ReactFlow
-                nodes={nodes}
-                edges={edges}
-                edgeTypes={graphEdgeTypes}
-                connectionLineType={ConnectionLineType.SmoothStep}
-                onConnect={graph ? onConnect : undefined}
-                onEdgesDelete={graph ? onEdgesDelete : undefined}
-                onNodeClick={(_event, node) => setSelected(node.id)}
-                nodesConnectable={!graphIsReadOnly}
-                fitView
-              >
-                <Background color={theme === "light" ? "#c5ccd3" : "#353c44"} gap={24} size={1} />
-                <Controls />
-              </ReactFlow>
+              <Suspense fallback={<Spinner label="Loading graph…" />}>
+                <GraphCanvas
+                  nodes={nodes}
+                  edges={edges}
+                  editable={Boolean(graph) && !graphIsReadOnly}
+                  theme={theme}
+                  onConnect={onConnect}
+                  onEdgesDelete={onEdgesDelete}
+                  onNodeSelect={setSelected}
+                />
+              </Suspense>
             </div>
             {displayGraph ? (
               <>

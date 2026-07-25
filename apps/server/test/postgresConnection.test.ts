@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertCurrentRuntimeSchema,
   assertRestrictedRuntimeDatabase,
   isPrivatePostgresHostname,
   postgresPoolConfig,
@@ -84,5 +85,48 @@ describe("PostgreSQL connection security", () => {
       },
     };
     await expect(assertRestrictedRuntimeDatabase(restricted as never, {})).resolves.toBeUndefined();
+  });
+});
+
+describe("PostgreSQL runtime schema compatibility", () => {
+  it("accepts the quick-change and knowledge-package schema", async () => {
+    const compatible = {
+      query: async () => ({
+        rows: [
+          {
+            planning_mode: true,
+            knowledge_packages: "knowledge_packages",
+            agent_execution_registrations: "agent_execution_registrations",
+            agent_handoffs: "agent_handoffs",
+            knowledge_deltas: "knowledge_deltas",
+          },
+        ],
+      }),
+    };
+
+    await expect(assertCurrentRuntimeSchema(compatible as never)).resolves.toBeUndefined();
+  });
+
+  it("fails closed with the exact missing runtime schema surfaces", async () => {
+    const outdated = {
+      query: async () => ({
+        rows: [
+          {
+            planning_mode: false,
+            knowledge_packages: null,
+            agent_execution_registrations: "agent_execution_registrations",
+            agent_handoffs: null,
+            knowledge_deltas: "knowledge_deltas",
+          },
+        ],
+      }),
+    };
+
+    await expect(assertCurrentRuntimeSchema(outdated as never)).rejects.toMatchObject({
+      code: "runtime_schema_outdated",
+      message:
+        "database migrations are required before startup; missing: " +
+        "planning_runs.mode, knowledge_packages, agent_handoffs",
+    });
   });
 });

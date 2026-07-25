@@ -6,7 +6,7 @@
   "description": "TheNorns browser frontend: workflow graph editor + allocation (Phase 4)",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/check-entry-bundle.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test"
