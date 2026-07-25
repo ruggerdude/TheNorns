@@ -47,6 +47,8 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
     expect(usage.provider).toBe(name);
     expect(usage.input_tokens).toBe(120);
     expect(usage.output_tokens).toBe(45);
+    expect(usage.cache_read_tokens).toBe(15);
+    expect(usage.cache_write_tokens).toBe(5);
     expect(usage.usage_source).toBe("provider_api");
     expect(usage.node_id).toBe("node-1");
     expect(result.provider_execution_id).toBe(name === "anthropic" ? "msg_mock" : "resp_mock");

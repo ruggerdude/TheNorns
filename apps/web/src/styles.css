@@ -4935,10 +4935,14 @@ button:disabled {
 }
 
 .workspace-tabs button:nth-child(5)::before {
-  content: "↗";
+  content: "05";
 }
 
 .workspace-tabs button:nth-child(6)::before {
+  content: "↗";
+}
+
+.workspace-tabs button:nth-child(7)::before {
   content: "••";
 }
 

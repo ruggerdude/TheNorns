@@ -41,12 +41,19 @@ export const MAX_IMAGE_PARTS_PER_REQUEST = 8;
 /** Stable attribution copied into debate usage and execution records by the caller. */
 export interface CompletionAttribution {
   projectId: string;
+  initiatedByUserId?: string | null | undefined;
+  phaseId?: string | null | undefined;
+  taskId?: string | null | undefined;
   nodeId?: string | null | undefined;
   runId?: string | null | undefined;
   debateId?: string | null | undefined;
   debateRunId?: string | null | undefined;
   debateTurnId?: string | null | undefined;
   debateTurnAttemptId?: string | null | undefined;
+  /** Correlates caller-level retries without exposing request content. */
+  telemetryRetryGroupId?: string | null | undefined;
+  /** Zero is the initial attempt; positive values are retries. */
+  telemetryRetryAttempt?: number | undefined;
 }
 
 export interface CompletionRequest extends CompletionAttribution {

@@ -320,6 +320,13 @@ export class Phase4EventProcessor {
               .slice(0, 4_000),
           ],
         );
+        await this.recordRuntimeUsageFallback(
+          sql,
+          scope,
+          eventId,
+          event.payload,
+          event.occurred_at,
+        );
       } else if (event.payload.kind === "verification_result") {
         const currentRun = await lifecycle.lockAgentRunLifecycle(scope.id);
         if (currentRun?.state === "running") {
@@ -595,6 +602,114 @@ export class Phase4EventProcessor {
       await sql.query("UPDATE runner_events SET applied_at = now() WHERE id = $1", [eventId]);
       return { duplicate: false };
     });
+  }
+
+  /**
+   * Runtime usage is an aggregate fallback, not another provider request.
+   * Record it only when the run has no canonical provider/gateway requests;
+   * otherwise it would double count the same tokens.
+   */
+  private async recordRuntimeUsageFallback(
+    sql: V2SqlExecutor,
+    scope: RunScope,
+    eventId: string,
+    runtime: {
+      runtime: string;
+      outcome: "completed" | "failed" | "cancelled";
+    },
+    occurredAt: string,
+  ): Promise<void> {
+    const providerRequests = await sql.query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM ai_usage_events
+         WHERE run_id = $1 AND request_type <> 'runtime_aggregate_report'
+       ) AS exists`,
+      [scope.id],
+    );
+    if (providerRequests.rows[0]?.exists) return;
+
+    const profile = await sql.query<{ provider: string; model: string }>(
+      `SELECT profile.provider, profile.model
+       FROM agent_assignments assignment
+       JOIN agent_profiles profile ON profile.id = assignment.agent_profile_id
+       WHERE assignment.id = $1`,
+      [scope.assignment_id],
+    );
+    const selection = profile.rows[0];
+    if (!selection) return;
+    const usage = await sql.query<{
+      input_tokens: string | number;
+      output_tokens: string | number;
+    }>(
+      `SELECT usage_input_tokens AS input_tokens, usage_output_tokens AS output_tokens
+       FROM agent_runs WHERE id = $1`,
+      [scope.id],
+    );
+    const totals = usage.rows[0];
+    if (!totals) return;
+
+    const requestId = `runtime-report:${scope.id}:${eventId}`;
+    const endpoint = `runner-runtime:${runtime.runtime}`;
+    const common = [
+      requestId,
+      occurredAt,
+      selection.provider,
+      selection.model,
+      endpoint,
+      scope.project_id,
+      scope.phase_id,
+      scope.task_id,
+      scope.id,
+    ] as const;
+    await sql.query(
+      `INSERT INTO ai_usage_events (
+         id, request_id, sequence, event_type, status, occurred_at,
+         provider, model, endpoint, request_type, retry_attempt,
+         project_id, phase_id, task_id, run_id, usage_source, confidence,
+         cost_classification
+       ) VALUES (
+         $1,$2,1,'request_started','started',$3,$4,$5,$6,
+         'runtime_aggregate_report',0,$7,$8,$9,$10,'unavailable',0,'unavailable'
+       )`,
+      [`${requestId}:started`, ...common],
+    );
+    await sql.query(
+      `INSERT INTO ai_usage_events (
+         id, request_id, sequence, event_type, status, occurred_at,
+         provider, model, endpoint, request_type, retry_attempt,
+         project_id, phase_id, task_id, run_id, usage_source, confidence,
+         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+         cost_classification
+       ) VALUES (
+         $1,$2,2,'usage_observed','in_progress',$3,$4,$5,$6,
+         'runtime_aggregate_report',0,$7,$8,$9,$10,'runtime_report',0.6,
+         $11,$12,0,0,'unavailable'
+       )`,
+      [`${requestId}:usage`, ...common, Number(totals.input_tokens), Number(totals.output_tokens)],
+    );
+    const completed = runtime.outcome === "completed";
+    await sql.query(
+      `INSERT INTO ai_usage_events (
+         id, request_id, sequence, event_type, status, occurred_at,
+         provider, model, endpoint, request_type, retry_attempt,
+         project_id, phase_id, task_id, run_id, usage_source, confidence,
+         cost_classification, error_code, error_category, error_message_redacted,
+         sanitized_error
+       ) VALUES (
+         $1,$2,3,$11,$12,$3,$4,$5,$6,'runtime_aggregate_report',0,
+         $7,$8,$9,$10,'unavailable',0,'unavailable',$13,$14,$15,$16::jsonb
+       )`,
+      [
+        `${requestId}:terminal`,
+        ...common,
+        completed ? "request_completed" : "request_failed",
+        completed ? "succeeded" : "failed",
+        completed ? null : `runtime_${runtime.outcome}`,
+        completed ? null : "runtime",
+        completed ? null : `runner runtime ${runtime.outcome}`,
+        completed ? null : JSON.stringify({ outcome: runtime.outcome }),
+      ],
+    );
   }
 
   /**

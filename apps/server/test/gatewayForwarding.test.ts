@@ -33,6 +33,7 @@ import {
   anthropicGatewayBaseUrl,
   openAiGatewayBaseUrl,
 } from "../src/gateway/index.js";
+import { SqlAiUsageTelemetryRepository } from "../src/persistence/v2/aiUsageTelemetry.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import {
@@ -43,6 +44,7 @@ import {
 } from "../src/runners/inferenceProxy.js";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
+import { AiInvocationTelemetry } from "../src/usage-intelligence/telemetry.js";
 import { UserStore } from "../src/users/store.js";
 import { listen } from "./helpers.js";
 
@@ -227,6 +229,18 @@ interface Fixture {
       cost_usd: number;
     }>
   >;
+  canonicalUsageRows(): Promise<
+    Array<{
+      event_type: string;
+      status: string;
+      input_tokens: number | null;
+      output_tokens: number | null;
+      project_id: string | null;
+      phase_id: string | null;
+      task_id: string | null;
+      run_id: string | null;
+    }>
+  >;
   stop(): Promise<void>;
 }
 
@@ -357,6 +371,7 @@ async function startFixture(
     credentials,
     budget: new SqlRunReservationBudget(transactions),
     meter: new SqlInferenceMeter(transactions),
+    telemetry: new AiInvocationTelemetry(new SqlAiUsageTelemetryRepository(transactions)),
     allowedModels: options.allowedModels ?? [
       `anthropic/${ANTHROPIC_MODEL}`,
       `openai/${OPENAI_MODEL}`,
@@ -404,6 +419,31 @@ async function startFixture(
           input_tokens: Number(row.input_tokens),
           output_tokens: Number(row.output_tokens),
           cost_usd: Number(row.cost_usd),
+        }));
+      }),
+    canonicalUsageRows: async () =>
+      transactions.transaction(async (sql) => {
+        const result = await sql.query<{
+          event_type: string;
+          status: string;
+          input_tokens: number | string | null;
+          output_tokens: number | string | null;
+          project_id: string | null;
+          phase_id: string | null;
+          task_id: string | null;
+          run_id: string | null;
+        }>(
+          `SELECT event_type, status, input_tokens, output_tokens,
+                  project_id, phase_id, task_id, run_id
+           FROM ai_usage_events
+           WHERE run_id = $1
+           ORDER BY sequence`,
+          [runId],
+        );
+        return result.rows.map((row) => ({
+          ...row,
+          input_tokens: row.input_tokens === null ? null : Number(row.input_tokens),
+          output_tokens: row.output_tokens === null ? null : Number(row.output_tokens),
         }));
       }),
     stop: async () => {
@@ -606,6 +646,26 @@ describe.sequential("EXECUTION E9 provider gateway", () => {
     expect(rows[0]?.output_tokens).toBe(200);
     // 1000 * $2/MTok + 200 * $10/MTok = 0.002 + 0.002 = 0.004
     expect(rows[0]?.cost_usd).toBeCloseTo(0.004, 9);
+    expect(await fx.canonicalUsageRows()).toEqual([
+      expect.objectContaining({
+        event_type: "request_started",
+        status: "started",
+        project_id: "project-1",
+        phase_id: "phase-1",
+        task_id: "task-1",
+        run_id: fx.run.run_id,
+      }),
+      expect.objectContaining({
+        event_type: "usage_observed",
+        status: "in_progress",
+        input_tokens: 1_000,
+        output_tokens: 200,
+      }),
+      expect.objectContaining({
+        event_type: "request_completed",
+        status: "succeeded",
+      }),
+    ]);
   });
 
   it("meters an OpenAI stream from the terminal usage event", async () => {

@@ -337,6 +337,8 @@ export class InferenceProxy {
     try {
       const result = await adapter.complete({
         projectId: run.project_id,
+        phaseId: run.phase_id,
+        taskId: run.task_id,
         nodeId: run.task_id,
         runId: run.run_id,
         prompt: request.prompt,

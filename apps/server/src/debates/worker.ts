@@ -45,6 +45,7 @@ interface ClaimedJob {
   jobId: string;
   leaseToken: string;
   turnAttemptId: string;
+  attemptNumber: number;
   debate: z.infer<typeof V2Debate>;
   run: z.infer<typeof V2DebateRun>;
   round: z.infer<typeof V2DebateRound>;
@@ -151,6 +152,8 @@ export class DebateWorker {
           debateRunId: claim.run.id,
           debateTurnId: claim.turn.id,
           debateTurnAttemptId: claim.turnAttemptId,
+          telemetryRetryGroupId: claim.turn.id,
+          telemetryRetryAttempt: claim.attemptNumber - 1,
           signal: abortController.signal,
           structuredOutputPrepared: true,
         },
@@ -780,7 +783,7 @@ export class DebateWorker {
     leaseToken: string;
   }): Promise<ClaimedJob> {
     return this.transactions.transaction(async (tx) => {
-      const [debateResult, runResult, turnResult, actorResult] = await Promise.all([
+      const [debateResult, runResult, turnResult, actorResult, attemptResult] = await Promise.all([
         tx.query<Record<string, unknown>>("SELECT * FROM debates WHERE id = $1", [
           claimed.debate_id,
         ]),
@@ -794,6 +797,10 @@ export class DebateWorker {
         tx.query<Record<string, unknown>>(
           `SELECT a.* FROM debate_actors a JOIN debate_turns t ON t.actor_id = a.id
            WHERE t.designated_attempt_id = $1`,
+          [claimed.turn_attempt_id],
+        ),
+        tx.query<{ attempt_number: number }>(
+          "SELECT attempt_number FROM debate_turn_attempts WHERE id = $1",
           [claimed.turn_attempt_id],
         ),
       ]);
@@ -919,6 +926,7 @@ export class DebateWorker {
         jobId: claimed.id,
         leaseToken: claimed.leaseToken,
         turnAttemptId: claimed.turn_attempt_id,
+        attemptNumber: Number(attemptResult.rows[0]?.attempt_number ?? 1),
         debate,
         run,
         round,

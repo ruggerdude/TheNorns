@@ -321,7 +321,7 @@ export class RelationalCompositionBridge {
     }
   }
 
-  async ensureProjectAnchor(project: ProjectSummary): Promise<void> {
+  async ensureProjectAnchor(project: ProjectSummary, ownerUserId?: string): Promise<void> {
     try {
       await this.options.transactions.transaction(async (sql) => {
         await insertProjectCore(sql, {
@@ -332,6 +332,7 @@ export class RelationalCompositionBridge {
           pmModel: project.pm_model,
           reviewerProvider: project.reviewer_provider,
           createdAt: project.created_at,
+          ...(ownerUserId ? { ownerUserId } : {}),
           onboardingScenario: project.onboarding_scenario,
         });
         const row = (

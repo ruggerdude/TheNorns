@@ -4,7 +4,7 @@
 // at the same database, with full fidelity.
 import { PGlite } from "@electric-sql/pglite";
 import { type EventEnvelopeT, PlanContract } from "@norns/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { autoAllocate, overrideAssignment } from "../src/graph/allocation.js";
 import { GraphSession } from "../src/graph/session.js";
 import { type PgClient, PgPersistence, SnapshotFlusher } from "../src/persistence/pg.js";
@@ -112,6 +112,45 @@ describe("Tier-2 postgres persistence", () => {
     store.registerRunner("r", "pem"); // mutate
     await flusher.flush(); // changed -> write
     expect(writes).toBe(2);
+  });
+
+  it("reuses unchanged relay serialization and invalidates it after a mutation", () => {
+    const store = new RelayStores();
+    const stringify = vi.spyOn(JSON, "stringify");
+
+    const first = store.snapshot();
+    const callsAfterFirst = stringify.mock.calls.length;
+    const unchanged = store.snapshot();
+    const callsAfterUnchanged = stringify.mock.calls.length;
+    store.audit("operator", "test.changed", "durable mutation", new Date("2026-07-14T00:00:00Z"));
+    const changed = store.snapshot();
+    const callsAfterChanged = stringify.mock.calls.length;
+    stringify.mockRestore();
+
+    expect(unchanged).toBe(first);
+    expect(callsAfterUnchanged).toBe(callsAfterFirst);
+    expect(changed).not.toBe(first);
+    expect(callsAfterChanged).toBe(callsAfterFirst + 1);
+  });
+
+  it("reuses the restored relay bytes until restored state changes", () => {
+    const original = new RelayStores();
+    original.registerRunner("runner-restored", "pem");
+    const durable = original.snapshot();
+    const stringify = vi.spyOn(JSON, "stringify");
+
+    const restored = RelayStores.restore(durable);
+    const unchanged = restored.snapshot();
+    const callsAfterRestore = stringify.mock.calls.length;
+    restored.markSeen("runner-restored", new Date("2026-07-14T00:00:01Z"));
+    const changed = restored.snapshot();
+    const callsAfterMutation = stringify.mock.calls.length;
+    stringify.mockRestore();
+
+    expect(unchanged).toBe(durable);
+    expect(callsAfterRestore).toBe(0);
+    expect(changed).not.toBe(durable);
+    expect(callsAfterMutation).toBe(1);
   });
 
   it("serializes concurrent flushes and can pause, drain, and resume", async () => {

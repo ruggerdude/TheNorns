@@ -132,6 +132,7 @@ import {
 } from "./integrations/runnerDistribution.js";
 import { type KnowledgeSystemService, registerKnowledgeRoutes } from "./knowledge/index.js";
 import type { Phase7OperationsService } from "./operations/phase7Operations.js";
+import { SqlAiUsageTelemetryRepository } from "./persistence/v2/aiUsageTelemetry.js";
 import type { V2TransactionRunner } from "./persistence/v2/database.js";
 import {
   AllocationRecommendationError,
@@ -163,6 +164,9 @@ import {
   PhaseWorkflowConflictError,
   type PhaseWorkflowService,
 } from "./projects/phaseWorkflowService.js";
+import { PostgresProjectAccessRepository } from "./projects/projectAccessRepository.js";
+import { registerProjectAccessRoutes } from "./projects/projectAccessRoutes.js";
+import { ProjectAccessError, ProjectAccessService } from "./projects/projectAccessService.js";
 import {
   ProjectActivationError,
   ProjectActivationService,
@@ -180,6 +184,7 @@ import {
 import {
   Phase3RequiredError,
   ProjectArchiveConflictError,
+  insertProjectCore,
 } from "./projects/relationalReadRepository.js";
 import {
   RemoteRepositoryVerificationError,
@@ -246,6 +251,14 @@ import {
   RelationalCompositionConflictError,
 } from "./startup/relationalCompositionBridge.js";
 import type { RelayStores } from "./stores.js";
+import { registerUsageAnalyticsRoutes } from "./usage-intelligence/analyticsRoutes.js";
+import { UsageAnalyticsService } from "./usage-intelligence/analyticsService.js";
+import { PostgresUsageBudgetPolicyRepository } from "./usage-intelligence/budgetPolicyRepository.js";
+import { registerUsageBudgetPolicyRoutes } from "./usage-intelligence/budgetPolicyRoutes.js";
+import { UsageBudgetPolicyService } from "./usage-intelligence/budgetPolicyService.js";
+import { registerUsageIntelligenceRoutes } from "./usage-intelligence/routes.js";
+import { UsageIntelligenceService } from "./usage-intelligence/service.js";
+import { AiInvocationTelemetry } from "./usage-intelligence/telemetry.js";
 import type {
   IdentityService,
   IdentityUser,
@@ -254,6 +267,7 @@ import type {
 import { IdentityAlreadyBootstrappedError } from "./users/identityService.js";
 import { LegacyIdentityService } from "./users/legacyIdentityService.js";
 import { LoginAttemptThrottle } from "./users/loginThrottle.js";
+import { detectPasswordHashScheme } from "./users/passwords.js";
 import { LastActiveAdminError, type UserStore } from "./users/store.js";
 
 const DEFAULT_COMMAND_TTL_MS = 5 * 60 * 1000;
@@ -536,6 +550,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const executionModelCatalog = () => executionModelCatalogFromEnvironment(integrationEnvironment);
   const configuredExecutionModels = () =>
     executionModelCatalog().filter((entry) => entry.available);
+  const runtimeTransactionsForInference =
+    options.runnerInference?.transactions ??
+    options.planningRuns?.transactions ??
+    options.onboarding?.transactions ??
+    options.attachments?.transactions;
+  const canonicalTelemetry = runtimeTransactionsForInference
+    ? new AiInvocationTelemetry(
+        new SqlAiUsageTelemetryRepository(runtimeTransactionsForInference),
+        now,
+      )
+    : undefined;
+  const instrumentAdapter = (adapter: LlmAdapter): LlmAdapter =>
+    canonicalTelemetry?.wrapAdapter(adapter) ?? adapter;
   const buildPlanningAdapter = (provider: ProviderName, model: string): LlmAdapter => {
     const apiKey =
       provider === "anthropic"
@@ -548,11 +575,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       );
     }
     if (options.createPlanningAdapter) {
-      return options.createPlanningAdapter(provider, model, apiKey);
+      return instrumentAdapter(options.createPlanningAdapter(provider, model, apiKey));
     }
-    return provider === "anthropic"
-      ? new AnthropicAdapter({ apiKey, model })
-      : new OpenAiAdapter({ apiKey, model });
+    return instrumentAdapter(
+      provider === "anthropic"
+        ? new AnthropicAdapter({ apiKey, model })
+        : new OpenAiAdapter({ apiKey, model }),
+    );
   };
 
   // === EXECUTION E3 (proxied model inference) ==============================
@@ -570,11 +599,6 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // they keep every existing test (and any deployment not yet passing the new
   // option) behaving exactly as before. Production always supplies the named
   // one, and a boot-shape test asserts it.
-  const runtimeTransactionsForInference =
-    options.runnerInference?.transactions ??
-    options.planningRuns?.transactions ??
-    options.onboarding?.transactions ??
-    options.attachments?.transactions;
   const inferenceProxy: InferenceProxy | null =
     options.inferenceProxy ??
     (runtimeTransactionsForInference
@@ -595,11 +619,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 : integrationEnvironment.OPENAI_API_KEY;
             if (!apiKey?.trim()) return null;
             if (options.createPlanningAdapter) {
-              return options.createPlanningAdapter(provider, model, apiKey);
+              return instrumentAdapter(options.createPlanningAdapter(provider, model, apiKey));
             }
-            return provider === "anthropic"
-              ? new AnthropicAdapter({ apiKey, model })
-              : new OpenAiAdapter({ apiKey, model });
+            return instrumentAdapter(
+              provider === "anthropic"
+                ? new AnthropicAdapter({ apiKey, model })
+                : new OpenAiAdapter({ apiKey, model }),
+            );
           },
           audit: (actor, action, detail) => stores.audit(actor, action, detail, now()),
         })
@@ -671,6 +697,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             return key?.trim() ? key.trim() : null;
           },
           audit: (actor, action, detail) => stores.audit(actor, action, detail, now()),
+          telemetry: canonicalTelemetry,
           now,
         })
       : undefined);
@@ -807,6 +834,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
   let phase4DispatchTimer: ReturnType<typeof setInterval> | undefined;
   let phase4RecoveryTimer: ReturnType<typeof setInterval> | undefined;
+  let usageBudgetEvaluationTimer: ReturnType<typeof setInterval> | undefined;
   // EXECUTION E12 — declared here, assigned far below where PhaseLaunchService
   // is constructed, so the onClose hook can clear it alongside its siblings.
   let phaseQueueDrainTimer: ReturnType<typeof setInterval> | undefined;
@@ -866,6 +894,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (phase4DispatchTimer) clearInterval(phase4DispatchTimer);
     if (phase4RecoveryTimer) clearInterval(phase4RecoveryTimer);
     if (phaseQueueDrainTimer) clearInterval(phaseQueueDrainTimer);
+    if (usageBudgetEvaluationTimer) clearInterval(usageBudgetEvaluationTimer);
     workspaceBroker.close();
   });
 
@@ -920,22 +949,129 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   /** Resolve the caller's bearer token to a real user, or undefined. Real
    *  per-user sessions are the only session credential — the deploy token is
    *  never accepted here, only by the bootstrap route below. */
+  const compatibilityActorPromises = new Map<string, Promise<void>>();
+  const ensureCompatibilityActor = (user: IdentityUser): Promise<void> => {
+    if (!usesLegacyIdentity || !runtimeTransactionsForInference || options.relationalComposition) {
+      return Promise.resolve();
+    }
+    const legacy = users.snapshot().users.find((candidate) => candidate.id === user.id);
+    if (!legacy?.passwordHash) {
+      return Promise.reject(
+        new RelationalCompositionConflictError(
+          "legacy_actor_credential_invalid",
+          "identity_bridge",
+          "Sign out and sign in again. If the problem persists, repair the legacy user snapshot.",
+          `authenticated legacy actor ${user.id} has no durable credential`,
+        ),
+      );
+    }
+    const passwordScheme = detectPasswordHashScheme(legacy.passwordHash);
+    if (!passwordScheme) {
+      return Promise.reject(
+        new RelationalCompositionConflictError(
+          "legacy_actor_credential_invalid",
+          "identity_bridge",
+          "Repair or re-create the legacy account before using relational workflows.",
+          `legacy actor ${user.id} has an unsupported credential`,
+        ),
+      );
+    }
+    const key = [
+      user.id,
+      user.email,
+      user.name,
+      user.role,
+      user.status,
+      user.createdAt,
+      legacy.passwordHash,
+    ].join("\u0000");
+    const existing = compatibilityActorPromises.get(key);
+    if (existing) return existing;
+    const pending = runtimeTransactionsForInference
+      .transaction(async (sql) => {
+        const normalizedEmail = user.email.trim().toLowerCase();
+        await sql.query(
+          `INSERT INTO users (
+             id, username, display_name, email, name, password_hash,
+             password_hash_scheme, role, status, source, source_record_id,
+             created_at, updated_at
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,'legacy_snapshot',$1,$10,$10
+           )
+           ON CONFLICT (id) DO NOTHING`,
+          [
+            user.id,
+            normalizedEmail,
+            user.name ?? user.email,
+            normalizedEmail,
+            user.name,
+            legacy.passwordHash,
+            passwordScheme,
+            user.role,
+            user.status,
+            user.createdAt,
+          ],
+        );
+        const stored = (
+          await sql.query<{
+            email: string;
+            role: string;
+            status: string;
+          }>("SELECT email, role, status FROM users WHERE id=$1", [user.id])
+        ).rows[0];
+        if (
+          !stored ||
+          stored.email !== normalizedEmail ||
+          stored.role !== user.role ||
+          stored.status !== user.status
+        ) {
+          throw new RelationalCompositionConflictError(
+            "relational_actor_conflict",
+            "identity_bridge",
+            "Reconcile the legacy and relational identity records before retrying.",
+            `relational actor ${user.id} conflicts with the authenticated legacy identity`,
+          );
+        }
+      })
+      .catch((error) => {
+        compatibilityActorPromises.delete(key);
+        if (error instanceof RelationalCompositionConflictError) throw error;
+        throw new RelationalCompositionConflictError(
+          "relational_actor_conflict",
+          "identity_bridge",
+          "Reconcile duplicate identity records, then retry the authenticated action.",
+          `relational identity cannot accept legacy actor ${user.id}`,
+        );
+      });
+    compatibilityActorPromises.set(key, pending);
+    return pending;
+  };
+
   const resolveUser = async (req: FastifyRequest): Promise<IdentityUser | undefined> => {
     const token = credentialFor(req);
     if (!token) return undefined;
     const user = await identityService.userForToken(token);
-    if (user) await options.relationalComposition?.ensureActor(user);
+    if (user) {
+      await options.relationalComposition?.ensureActor(user);
+      await ensureCompatibilityActor(user);
+    }
     return user;
   };
 
-  const requireSession = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> => {
-    if (!(await resolveUser(req))) {
+  const requireSessionUser = async (
+    req: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<IdentityUser | null> => {
+    const user = await resolveUser(req);
+    if (!user) {
       stores.audit("anonymous", "auth.rejected", `${req.method} ${req.url}`, now());
       reply.code(401).send({ error: "unauthorized" });
-      return false;
+      return null;
     }
-    return true;
+    return user;
   };
+  const requireSession = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> =>
+    (await requireSessionUser(req, reply)) !== null;
 
   /** Like requireSession, but also enforces the admin role. Returns the
    *  resolved admin user (so the caller can attribute audit entries), or
@@ -965,6 +1101,186 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       return null;
     }
     return user;
+  };
+
+  let projectAccessService: ProjectAccessService | null = null;
+  const projectRepositoryForAccess = options.projects
+    ? projectRepository(options.projects)
+    : undefined;
+
+  // Canonical AI usage host composition. The relational runtime is the single
+  // source for collaboration, reporting, budget, and analytics authorization.
+  // When it is absent these routes remain unavailable, matching every other
+  // relational V2 feature instead of silently falling back to broad access.
+  if (runtimeTransactionsForInference) {
+    const projectAccess = new ProjectAccessService(
+      new PostgresProjectAccessRepository(runtimeTransactionsForInference),
+    );
+    projectAccessService = projectAccess;
+    const strictProjectAccess = async (userId: string, projectId: string): Promise<boolean> => {
+      try {
+        const access = await projectAccess.access(projectId, { id: userId });
+        // The legacy-unowned compatibility state is intentionally not enough
+        // to authorize cost/usage data. Reporting is deny-by-default until an
+        // owner or explicit active membership exists.
+        return access.can_access && access.source !== "legacy_unowned";
+      } catch {
+        return false;
+      }
+    };
+    const projectForPhase = async (phaseId: string): Promise<string | null> => {
+      try {
+        return await runtimeTransactionsForInference.transaction(async (sql) => {
+          const result = await sql.query<{ project_id: string }>(
+            "SELECT project_id FROM phases WHERE id=$1",
+            [phaseId],
+          );
+          return result.rows[0]?.project_id ?? null;
+        });
+      } catch {
+        return null;
+      }
+    };
+
+    // Every project-scoped host route registered below this composition point
+    // shares one deny-by-default authorization gate. Collaboration's explicit
+    // access-decision route remains callable so a signed-in non-member can
+    // receive a truthful `can_access: false`; membership/ownership routes add
+    // their stricter owner-only checks inside ProjectAccessService.
+    app.addHook("preHandler", async (request, reply) => {
+      const route = request.routeOptions.url ?? "";
+      if (route === "/api/v2/project-access" || route === "/api/v2/projects/:projectId/access") {
+        return;
+      }
+      if (
+        !route.startsWith("/api/projects/:id") &&
+        !route.startsWith("/api/v2/projects/:id") &&
+        !route.startsWith("/api/v2/projects/:projectId")
+      ) {
+        return;
+      }
+      const params = request.params as { id?: string; projectId?: string };
+      const projectId = params.id ?? params.projectId;
+      if (!projectId) return;
+      const user = await requireSessionUser(request, reply);
+      if (!user) return reply;
+      try {
+        await projectAccess.assertCanAccess(projectId, { id: user.id });
+      } catch (error) {
+        if (!(error instanceof ProjectAccessError)) throw error;
+        if (
+          error.code === "project_not_found" &&
+          user.role === "admin" &&
+          options.relationalComposition &&
+          projectRepositoryForAccess
+        ) {
+          try {
+            const legacyProject = await projectRepositoryForAccess.summary(projectId);
+            await options.relationalComposition.ensureProjectAnchor(legacyProject, user.id);
+            await projectAccess.assertCanAccess(projectId, { id: user.id });
+            return;
+          } catch (anchorError) {
+            if (
+              anchorError instanceof RelationalCompositionConflictError ||
+              !(anchorError instanceof ProjectNotFoundError)
+            ) {
+              throw anchorError;
+            }
+          }
+        }
+        const status =
+          error.code === "project_not_found" ? 404 : error.code === "identity_inactive" ? 401 : 403;
+        const responseCode =
+          error.code === "project_not_found" && route === "/api/v2/projects/:id/planning-reviewer"
+            ? "not_found"
+            : error.code;
+        return reply.code(status).send({ error: responseCode, message: error.message });
+      }
+    });
+
+    registerProjectAccessRoutes(app, {
+      service: projectAccess,
+      requireIdentity: requireSessionUser,
+    });
+
+    const usageIntelligence = new UsageIntelligenceService(runtimeTransactionsForInference);
+    registerUsageIntelligenceRoutes(app, {
+      service: usageIntelligence,
+      resolveUser,
+      authorizeScope: async (user, scope) => {
+        if (scope.kind === "project") {
+          return strictProjectAccess(user.id, scope.id);
+        }
+        const projectId = await projectForPhase(scope.id);
+        return projectId !== null && strictProjectAccess(user.id, projectId);
+      },
+    });
+
+    const usageBudgets = new UsageBudgetPolicyService(
+      new PostgresUsageBudgetPolicyRepository(runtimeTransactionsForInference),
+      { clock: now },
+    );
+    registerUsageBudgetPolicyRoutes(app, {
+      service: usageBudgets,
+      resolveUser,
+      authorizeProject: async (user, projectId, action) => {
+        try {
+          const access = await projectAccess.access(projectId, { id: user.id });
+          if (access.source === "legacy_unowned") return false;
+          return action === "read"
+            ? access.can_access
+            : access.can_manage_members || user.role === "admin";
+        } catch {
+          return false;
+        }
+      },
+    });
+
+    registerUsageAnalyticsRoutes(app, {
+      service: new UsageAnalyticsService(runtimeTransactionsForInference, now),
+      requireAdmin,
+    });
+
+    // Evaluation is periodic rather than inline with provider settlement.
+    // Telemetry writes are deliberately best-effort and provider responses
+    // must never wait on a cross-scope budget scan. The notification table's
+    // period/threshold/metric uniqueness makes every scan retry-safe.
+    let evaluationInFlight = false;
+    usageBudgetEvaluationTimer = setInterval(() => {
+      if (evaluationInFlight) return;
+      evaluationInFlight = true;
+      void usageBudgets
+        .evaluate()
+        .catch((error) =>
+          console.error(
+            `usage budget evaluation failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        )
+        .finally(() => {
+          evaluationInFlight = false;
+        });
+    }, 60_000);
+    usageBudgetEvaluationTimer.unref();
+  }
+
+  const ensureAuthenticatedProjectOwner = async (
+    project: Awaited<ReturnType<ProjectRepository["create"]>>,
+    ownerUserId: string,
+  ): Promise<void> => {
+    if (!runtimeTransactionsForInference) return;
+    await runtimeTransactionsForInference.transaction((sql) =>
+      insertProjectCore(sql, {
+        projectId: project.id,
+        name: project.name,
+        description: project.description,
+        pmProvider: project.pm_provider,
+        pmModel: project.pm_model,
+        reviewerProvider: project.reviewer_provider,
+        createdAt: project.created_at,
+        ownerUserId,
+        onboardingScenario: project.onboarding_scenario,
+      }),
+    );
   };
 
   const deliverPending = (runnerId: string, executed: ReadonlySet<string>): void => {
@@ -2647,7 +2963,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // ---- multi-project management: create/list projects; plan, edit, and ------
   // ---- allocate each one's own graph ------------------------------------------
 
-  const projects = options.projects ? projectRepository(options.projects) : undefined;
+  const projects = projectRepositoryForAccess;
   const attachmentService = options.attachments
     ? new AttachmentService(options.attachments.transactions)
     : null;
@@ -2708,8 +3024,17 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     };
 
     app.get("/api/projects", async (req, reply) => {
-      if (!(await requireSession(req, reply))) return;
-      reply.send(await projects.list());
+      const user = await requireSessionUser(req, reply);
+      if (!user) return;
+      const listed = await projects.list();
+      if (!projectAccessService) {
+        reply.send(listed);
+        return;
+      }
+      const accessible = new Set(
+        await projectAccessService.listAccessibleProjectIds({ id: user.id }),
+      );
+      reply.send(listed.filter((project) => accessible.has(project.id)));
     });
 
     app.delete("/api/projects/:id", async (req, reply) => {
@@ -2813,6 +3138,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         description: body.data.description,
         pmProvider: body.data.pm_provider,
         pmModel: body.data.pm_model,
+        ownerUserId: user.id,
         ...(body.data.source_type ? { sourceType: body.data.source_type } : {}),
         ...(resolvedGitHubRepository
           ? {
@@ -2823,6 +3149,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             }
           : {}),
       });
+      await ensureAuthenticatedProjectOwner(project, user.id);
       stores.audit(
         user.email,
         "project.created",
@@ -3349,6 +3676,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             description: body.data.description,
             pmProvider: body.data.pm_provider,
             pmModel: body.data.pm_model,
+            ownerUserId: user.id,
             ...(options.relationalComposition?.readiness().new_project_write_authority === "legacy"
               ? {
                   sourceType: "local" as const,
@@ -3359,7 +3687,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 }
               : {}),
           });
-          await options.relationalComposition?.ensureProjectAnchor(project);
+          if (options.relationalComposition) {
+            await options.relationalComposition.ensureProjectAnchor(project, user.id);
+          } else {
+            await ensureAuthenticatedProjectOwner(project, user.id);
+          }
           await options.phase3?.sourceBindings.createLocal({
             project_id: project.id,
             runner_id: selection.runner_id,
@@ -3458,7 +3790,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
         try {
           if (options.relationalComposition) {
-            await options.relationalComposition.ensureProjectAnchor(await projects.summary(id));
+            await options.relationalComposition.ensureProjectAnchor(
+              await projects.summary(id),
+              user.id,
+            );
           }
           const binding = await options.phase3?.sourceBindings.createLocal({
             project_id: id,
@@ -3491,7 +3826,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         const { id } = req.params as { id: string };
         try {
           if (options.relationalComposition) {
-            await options.relationalComposition.ensureProjectAnchor(await projects.summary(id));
+            await options.relationalComposition.ensureProjectAnchor(
+              await projects.summary(id),
+              user.id,
+            );
           }
           reply.code(201).send(
             await options.phase3?.sourceBindings.createGitHub({
@@ -4237,7 +4575,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       .object({ objective: z.string().trim().min(1).max(100_000).optional() })
       .strict();
     app.post("/api/projects/:id/graph/recommend-allocation", async (req, reply) => {
-      if (!(await requireSession(req, reply))) return;
+      const user = await requireSessionUser(req, reply);
+      if (!user) return;
       const { id } = req.params as { id: string };
       const body = RecommendAllocationBody.safeParse(req.body ?? {});
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
@@ -4262,6 +4601,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         const recommendation = await recommendProjectAllocation({
           pm,
           projectId: id,
+          initiatedByUserId: user.id,
           projectName: summary.name,
           objective: body.data.objective ?? summary.plan_objective ?? summary.description,
           graph: graphView.graph,
@@ -4345,7 +4685,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       maxRounds: z.number().int().min(1).max(5).optional(),
     });
     app.post("/api/projects/:id/plan", async (req, reply) => {
-      if (!(await requireSession(req, reply))) return;
+      const user = await requireSessionUser(req, reply);
+      if (!user) return;
       const { id } = req.params as { id: string };
       let pmSelection: { provider: ProviderName; model: string | null };
       try {
@@ -4401,6 +4742,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           reviewer,
           objective: body.data.objective,
           projectId: id,
+          initiatedByUserId: user.id,
           ...(body.data.maxRounds !== undefined ? { maxRounds: body.data.maxRounds } : {}),
         });
         options.recordUsage?.(result.usage);
@@ -4537,6 +4879,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           : {}),
         buildStaffingProposal: async ({
           projectId,
+          initiatedByUserId,
           objective,
           plan,
           workerProviders,
@@ -4554,6 +4897,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           const recommendation = await recommendProjectAllocation({
             pm,
             projectId,
+            ...(initiatedByUserId ? { initiatedByUserId } : {}),
             projectName: summary.name,
             objective,
             graph: WorkflowGraph.fromPlan(plan).snapshot(),
@@ -4692,7 +5036,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         const maxRounds = mode === "quick" ? 1 : (body.data.review_rounds ?? body.data.max_rounds);
         try {
           if (options.relationalComposition) {
-            await options.relationalComposition.ensureProjectAnchor(await projects.summary(id));
+            await options.relationalComposition.ensureProjectAnchor(
+              await projects.summary(id),
+              user.id,
+            );
           }
 
           const availableExecutionModels = configuredExecutionModels().filter(
@@ -4744,7 +5091,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           const run = await planningRunService.create(id, {
             objective: body.data.objective,
             mode,
-            ...(mode === "quick" ? { requestedBy: user.id } : {}),
+            requestedBy: user.id,
             ...(maxRounds !== undefined ? { maxRounds } : {}),
             ...(agent
               ? { workerProviders: agent.provider }

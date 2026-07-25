@@ -132,6 +132,8 @@ export class OpenAiAdapter implements LlmAdapter {
   }
 
   private usageOf(response: OpenAI.Responses.Response, request: CompletionRequest) {
+    const cacheReadTokens = response.usage?.input_tokens_details.cached_tokens ?? 0;
+    const cacheWriteTokens = response.usage?.input_tokens_details.cache_write_tokens ?? 0;
     return makeUsageEvent(
       this.model,
       this.registry,
@@ -139,6 +141,7 @@ export class OpenAiAdapter implements LlmAdapter {
       response.usage?.input_tokens ?? 0,
       response.usage?.output_tokens ?? 0,
       "provider_api",
+      { readTokens: cacheReadTokens, writeTokens: cacheWriteTokens },
     );
   }
 

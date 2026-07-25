@@ -59,8 +59,12 @@ export function emptyUsage(): GatewayTokenUsage {
  * what a human approved, which is the failure this whole subsystem exists to
  * prevent.
  */
-export function billableInputTokens(usage: GatewayTokenUsage): number {
-  return usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+export function billableInputTokens(usage: GatewayTokenUsage, provider: GatewayProvider): number {
+  // Anthropic reports uncached input and cache categories separately. OpenAI
+  // reports input_tokens inclusive of both cache detail fields.
+  return provider === "anthropic"
+    ? usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
+    : usage.input_tokens;
 }
 
 function finiteInt(value: unknown): number | null {
@@ -300,6 +304,15 @@ export class GatewayUsageTap {
     }
     if (output !== null && output >= this.usageSoFar.output_tokens) {
       this.usageSoFar.output_tokens = output;
+    }
+    const details = record(usage.input_tokens_details);
+    const cacheRead = finiteInt(details?.cached_tokens);
+    const cacheWrite = finiteInt(details?.cache_write_tokens);
+    if (cacheRead !== null && cacheRead >= this.usageSoFar.cache_read_input_tokens) {
+      this.usageSoFar.cache_read_input_tokens = cacheRead;
+    }
+    if (cacheWrite !== null && cacheWrite >= this.usageSoFar.cache_creation_input_tokens) {
+      this.usageSoFar.cache_creation_input_tokens = cacheWrite;
     }
     this.sawAny = true;
     return true;

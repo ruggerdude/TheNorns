@@ -49,6 +49,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     // Overview is the default tab, and it's the one already marked "on".
     expect(await screen.findByRole("button", { name: "Overview" })).toHaveClass("on");
+    expect(screen.getByRole("button", { name: "Usage" })).toBeInTheDocument();
     expect(screen.getByTestId("project-resume")).toBeInTheDocument();
     expect(screen.getByTestId("tracking-settings")).toBeInTheDocument();
     // The graph canvas is NOT the dominant panel anymore — it isn't even

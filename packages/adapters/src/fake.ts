@@ -17,6 +17,8 @@ export interface RecordedRequest {
   system: string | undefined;
   prompt: string;
   schemaName: string | null;
+  initiatedByUserId: string | null | undefined;
+  projectId: string | null | undefined;
   /** FRONT DOOR P4: image parts carried by this request (undefined when none). */
   images: readonly ImagePart[] | undefined;
 }
@@ -61,6 +63,8 @@ export class FakeAdapter implements LlmAdapter {
       system: request.system,
       prompt: request.prompt,
       schemaName: null,
+      initiatedByUserId: request.initiatedByUserId,
+      projectId: request.projectId,
       images: request.images,
     });
     return { text: String(this.next()), usage: this.usage(request) };
@@ -75,6 +79,8 @@ export class FakeAdapter implements LlmAdapter {
       system: request.system,
       prompt: request.prompt,
       schemaName,
+      initiatedByUserId: request.initiatedByUserId,
+      projectId: request.projectId,
       images: request.images,
     });
     // canned data must satisfy the real contracts schema — keeps fakes honest

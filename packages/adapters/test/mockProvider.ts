@@ -58,7 +58,12 @@ export async function startMockProvider(): Promise<MockProvider> {
           content: [{ type: "text", text }],
           stop_reason: "end_turn",
           stop_sequence: null,
-          usage: { input_tokens: 120, output_tokens: 45 },
+          usage: {
+            input_tokens: 100,
+            output_tokens: 45,
+            cache_read_input_tokens: 15,
+            cache_creation_input_tokens: 5,
+          },
         });
       } else if (req.url?.includes("/responses")) {
         // OpenAI Responses API shape
@@ -84,7 +89,7 @@ export async function startMockProvider(): Promise<MockProvider> {
             input_tokens: 120,
             output_tokens: 45,
             total_tokens: 165,
-            input_tokens_details: { cached_tokens: 0 },
+            input_tokens_details: { cached_tokens: 15, cache_write_tokens: 5 },
             output_tokens_details: { reasoning_tokens: 0 },
           },
         });

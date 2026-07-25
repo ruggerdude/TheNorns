@@ -14,7 +14,10 @@ import type { GraphNode, GraphSnapshot, WorkflowGraph } from "../graph/graph.js"
 import type { ProjectStore, ProjectSummary } from "./store.js";
 
 type Awaitable<T> = T | Promise<T>;
-type CreateProjectInput = Parameters<ProjectStore["create"]>[0];
+type CreateProjectInput = Parameters<ProjectStore["create"]>[0] & {
+  /** Authenticated creator used by relational ownership enforcement. */
+  ownerUserId?: string;
+};
 type AddNodeInput = Parameters<WorkflowGraph["addNode"]>[0];
 type RemoveNodeMode = Parameters<WorkflowGraph["removeNode"]>[1];
 type AssignmentPatch = Parameters<typeof overrideAssignment>[2];

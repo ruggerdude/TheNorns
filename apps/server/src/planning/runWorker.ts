@@ -40,6 +40,7 @@ export interface ResolvedPlanningModels {
 
 export interface PlanningStaffingInput {
   projectId: string;
+  initiatedByUserId: string | null;
   objective: string;
   plan: PlanContractT;
   /** PHASE TAB P1: the run's implementation-provider constraint. */
@@ -383,6 +384,7 @@ export class PlanningRunWorker {
           pm,
           objective: claim.objective,
           projectId: claim.project_id,
+          ...(claim.requested_by ? { initiatedByUserId: claim.requested_by } : {}),
           ...(roundOneImages.length > 0 ? { images: roundOneImages } : {}),
         });
         this.options.recordUsage?.(result.usage);
@@ -435,6 +437,7 @@ export class PlanningRunWorker {
         reviewer,
         objective: claim.objective,
         projectId: claim.project_id,
+        ...(claim.requested_by ? { initiatedByUserId: claim.requested_by } : {}),
         maxRounds: claim.max_rounds,
         onRound,
         ...(roundOneImages.length > 0 ? { roundOneImages } : {}),
@@ -459,6 +462,7 @@ export class PlanningRunWorker {
         try {
           staffingProposal = await this.options.buildStaffingProposal({
             projectId: claim.project_id,
+            initiatedByUserId: claim.requested_by,
             objective: claim.objective,
             plan: result.finalPlan,
             workerProviders: claim.worker_providers ?? "both",

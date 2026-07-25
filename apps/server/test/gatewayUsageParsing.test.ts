@@ -75,7 +75,7 @@ describe("EXECUTION E9 usage tap — Anthropic Messages", () => {
     });
     // Cache reads and writes are billed at the input rate — conservative on
     // purpose, and the number the ledger actually charges.
-    expect(billableInputTokens(tap.snapshot())).toBe(3295);
+    expect(billableInputTokens(tap.snapshot(), "anthropic")).toBe(3295);
   });
 
   it("never lets a later cumulative event move a counter backwards", () => {
@@ -211,7 +211,9 @@ describe("EXECUTION E9 usage tap — OpenAI Responses", () => {
     expect(tap.snapshot().output_tokens).toBe(1_204);
     // ResponseUsage.input_tokens is INCLUSIVE of cached tokens, so the cached
     // count is never added on top. 328, not 392.
-    expect(billableInputTokens(tap.snapshot())).toBe(328);
+    expect(tap.snapshot().cache_read_input_tokens).toBe(64);
+    expect(tap.snapshot().cache_creation_input_tokens).toBe(0);
+    expect(billableInputTokens(tap.snapshot(), "openai")).toBe(328);
   });
 
   it("meters response.incomplete and response.failed, which also carry usage", () => {

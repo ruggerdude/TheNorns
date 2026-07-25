@@ -1,0 +1,99 @@
+@import "./UsageIntelligence.css";
+
+.usage-analytics-page {
+  display: grid;
+  gap: 20px;
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.usage-analytics-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr)) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 16px;
+}
+
+.usage-analytics-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.usage-analytics-forecast {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 20px;
+  align-items: center;
+  padding: 18px;
+}
+
+.usage-analytics-forecast > .muted {
+  grid-column: 1 / -1;
+}
+
+.usage-forecast-at_risk,
+.usage-forecast-exhausted {
+  color: var(--danger, #bc2e3b);
+}
+
+.usage-forecast-on_track {
+  color: var(--success, #238754);
+}
+
+.usage-forecast-insufficient_data {
+  color: var(--text-muted, #687083);
+}
+
+.usage-recommendations {
+  display: grid;
+  gap: 12px;
+}
+
+.usage-recommendation {
+  padding: 18px;
+}
+
+.usage-priority {
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.usage-priority-high {
+  color: var(--danger, #bc2e3b);
+  background: color-mix(in srgb, var(--danger, #bc2e3b) 12%, transparent);
+}
+
+.usage-priority-medium {
+  color: #8a5b00;
+  background: #fff2cf;
+}
+
+.usage-priority-low {
+  color: var(--text-muted, #687083);
+  background: var(--surface-subtle, #eef0f5);
+}
+
+@media (max-width: 900px) {
+  .usage-analytics-filters,
+  .usage-analytics-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .usage-analytics-page {
+    padding: 16px;
+  }
+
+  .usage-analytics-filters,
+  .usage-analytics-summary,
+  .usage-analytics-forecast {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,4 +1,5 @@
 export { PgPersistence, SnapshotFlusher, type PgClient } from "./pg.js";
+export * from "./v2/aiUsageTelemetry.js";
 export * from "./v2/application.js";
 export * from "./v2/budget.js";
 export * from "./v2/database.js";

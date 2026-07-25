@@ -438,6 +438,7 @@ export class ProjectOnboardingService {
         pmModel: command.pm_model,
         reviewerProvider: reviewerFor(command.pm_provider),
         createdAt,
+        ownerUserId: command.actor.actor_id,
         onboardingScenario: scenario,
       });
 

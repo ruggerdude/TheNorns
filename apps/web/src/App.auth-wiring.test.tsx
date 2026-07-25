@@ -75,7 +75,7 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     expect(getToken()).toBeNull();
   });
 
-  test("shows Settings but not Admin for a member", async () => {
+  test("shows Settings and Usage but not Admin for a member", async () => {
     mock.get("/api/auth/me", {
       body: { id: "u1", email: "member@x.com", name: null, role: "member", status: "active" },
     });
@@ -83,12 +83,13 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     render(<App />);
 
     expect(await screen.findByRole("button", { name: /settings/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^usage$/i })).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: /^admin$/i })).not.toBeInTheDocument(),
     );
   });
 
-  test("shows both Settings and Admin for an admin, and Admin opens the panel", async () => {
+  test("shows Settings, Usage, and Admin for an admin, and Admin opens the panel", async () => {
     mock.get("/api/auth/me", {
       body: { id: "u1", email: "admin@x.com", name: null, role: "admin", status: "active" },
     });
@@ -98,7 +99,53 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     render(<App />);
 
     const adminButton = await screen.findByRole("button", { name: /^admin$/i });
+    expect(screen.getByRole("button", { name: /^usage$/i })).toBeInTheDocument();
     await user.click(adminButton);
     expect(await screen.findByTestId("admin-panel")).toBeInTheDocument();
+  });
+
+  test("opens personal usage from the authenticated portfolio navigation", async () => {
+    mock.get("/api/auth/me", {
+      body: { id: "u1", email: "member@x.com", name: null, role: "member", status: "active" },
+    });
+    mock.get("/api/usage/users/u1/summary", {
+      body: {
+        requests: 1,
+        succeeded_requests: 1,
+        failed_requests: 0,
+        in_progress_requests: 0,
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        cost_usd: 0.01,
+        known_cost_usd: 0.01,
+        priced_requests: 1,
+        unpriced_requests: 0,
+        average_latency_ms: 200,
+        average_output_tokens: 20,
+        average_known_cost_usd: 0.01,
+      },
+    });
+    mock.get("/api/usage/users/u1/timeseries?interval=day", {
+      body: { interval: "day", points: [] },
+    });
+    mock.get("/api/usage/users/u1/events?limit=100", {
+      body: { events: [], limit: 100, offset: 0, has_more: false },
+    });
+    mock.get(/\/api\/usage\/users\/u1\/breakdown(?:\?.*)?$/, {
+      body: { breakdowns: [] },
+    });
+    mock.install();
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Usage" }));
+
+    expect(await screen.findByRole("heading", { name: "User usage" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "My usage" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 });

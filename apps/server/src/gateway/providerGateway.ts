@@ -50,6 +50,7 @@ import {
   type ProxiedRunLookup,
   authorizeProxiedRunAccess,
 } from "../runners/inferenceProxy.js";
+import type { AiInvocationTelemetry, AiInvocationTrace } from "../usage-intelligence/telemetry.js";
 import type { GatewayCredentialService } from "./credentials.js";
 import { inspectGatewayRequest } from "./request.js";
 import {
@@ -285,6 +286,8 @@ export interface ProviderGatewayOptions {
   apiKey: GatewayKeyResolver;
   budget?: InferenceBudget | undefined;
   meter?: InferenceMeter | undefined;
+  /** Canonical request lifecycle ledger; legacy usage metering remains unchanged. */
+  telemetry?: AiInvocationTelemetry | undefined;
   /** `provider/model` pairs runners may spend on. Empty means NONE. */
   allowedModels?: Iterable<string> | undefined;
   registry?: Record<string, ModelEntry> | undefined;
@@ -593,6 +596,20 @@ export class ProviderGateway {
       headers.set(name, value);
     }
 
+    const startedAt = this.now().getTime();
+    const trace =
+      metered && this.options.telemetry
+        ? await this.options.telemetry.start({
+            provider: surface.provider,
+            model: metered.model,
+            endpoint: input.path,
+            requestType: "provider_native",
+            projectId: run.project_id,
+            phaseId: run.phase_id,
+            taskId: run.task_id,
+            runId: run.run_id,
+          })
+        : undefined;
     let upstream: Response;
     try {
       upstream = await this.fetchImpl(`${surface.origin}${input.path}${input.query}`, {
@@ -606,6 +623,13 @@ export class ProviderGateway {
       });
     } catch {
       if (hold) await hold.release();
+      await trace?.fail({
+        code: "upstream_unreachable",
+        category: "network",
+        messageRedacted: "the model provider could not be reached",
+        latencyMs: Math.max(0, this.now().getTime() - startedAt),
+        sanitized: { request_dispatched: true },
+      });
       // The caught error may be an undici failure whose message can name the
       // request — including headers. It is never surfaced or logged verbatim.
       return this.refuse(
@@ -625,12 +649,25 @@ export class ProviderGateway {
 
     const streaming = isEventStream(upstream.headers.get("content-type"));
     const tap = metered ? new GatewayUsageTap(surface.provider, streaming) : null;
+    const providerRequestId =
+      upstream.headers.get("request-id") ?? upstream.headers.get("x-request-id");
 
     return {
       kind: "forwarded",
       status: upstream.status,
       headers: responseHeaders,
-      body: this.pump(upstream, tap, hold, run, surface.provider, metered, actor),
+      body: this.pump(
+        upstream,
+        tap,
+        hold,
+        run,
+        surface.provider,
+        metered,
+        actor,
+        trace,
+        startedAt,
+        providerRequestId,
+      ),
     };
   }
 
@@ -651,6 +688,9 @@ export class ProviderGateway {
     provider: GatewayProvider,
     metered: { model: string; maxChargeUsd: number } | null,
     actor: string,
+    trace: AiInvocationTrace | undefined,
+    startedAt: number,
+    providerRequestId: string | null,
   ): AsyncGenerator<Uint8Array> {
     let truncated = true;
     try {
@@ -675,7 +715,19 @@ export class ProviderGateway {
       truncated = false;
     } finally {
       tap?.end();
-      await this.finalize(tap, hold, run, provider, metered, actor, truncated);
+      await this.finalize(
+        tap,
+        hold,
+        run,
+        provider,
+        metered,
+        actor,
+        truncated,
+        trace,
+        startedAt,
+        upstream.status,
+        providerRequestId,
+      );
     }
   }
 
@@ -688,6 +740,10 @@ export class ProviderGateway {
     metered: { model: string; maxChargeUsd: number } | null,
     actor: string,
     truncated: boolean,
+    trace: AiInvocationTrace | undefined,
+    startedAt: number,
+    httpStatus: number,
+    providerRequestId: string | null,
   ): Promise<void> {
     if (!hold || !metered || !tap) {
       await hold?.release();
@@ -705,11 +761,19 @@ export class ProviderGateway {
         "gateway.unmetered",
         `run=${run.run_id} model=${metered.model} truncated=${truncated}`,
       );
+      await this.finishTelemetry(
+        trace,
+        truncated,
+        tap.complete,
+        startedAt,
+        httpStatus,
+        providerRequestId,
+      );
       return;
     }
 
     const usage = tap.snapshot();
-    const inputTokens = billableInputTokens(usage);
+    const inputTokens = billableInputTokens(usage, provider);
     let pricing: ReturnType<typeof snapshotModelPricing>;
     try {
       pricing = snapshotModelPricing(provider as ProviderName, metered.model, this.registry);
@@ -717,6 +781,14 @@ export class ProviderGateway {
       // Unreachable: pricing was proved before the request went out. Settling
       // the full hold is the fail-safe direction if it ever happens.
       await hold.settle(metered.maxChargeUsd);
+      await trace?.fail({
+        code: "pricing_unavailable",
+        category: "telemetry",
+        messageRedacted: "provider usage could not be priced",
+        latencyMs: Math.max(0, this.now().getTime() - startedAt),
+        httpStatus,
+        providerRequestId,
+      });
       return;
     }
     const costUsd =
@@ -734,6 +806,32 @@ export class ProviderGateway {
     // maximum a run can exceed its reservation by is therefore ONE request's
     // excess of true cost over its own pre-computed hold — never a runaway.
     await hold.settle(costUsd);
+    await trace?.observe({
+      inputTokens,
+      outputTokens: usage.output_tokens,
+      cacheReadTokens: usage.cache_read_input_tokens,
+      cacheWriteTokens: usage.cache_creation_input_tokens,
+      costUsd,
+      // Cache categories are exact, but the current execution registry does
+      // not yet carry cache-specific rates; the dollar value is conservative.
+      costClassification:
+        usage.cache_read_input_tokens > 0 || usage.cache_creation_input_tokens > 0
+          ? "estimated"
+          : "actual",
+      pricingVersion: pricing.pricing_version,
+      usageSource: "provider_api",
+      confidence:
+        usage.cache_read_input_tokens > 0 || usage.cache_creation_input_tokens > 0 ? 0.9 : 1,
+      providerRequestId,
+    });
+    await this.finishTelemetry(
+      trace,
+      truncated,
+      tap.complete,
+      startedAt,
+      httpStatus,
+      providerRequestId,
+    );
 
     const event: UsageEventT = {
       id: newId("usage"),
@@ -744,6 +842,8 @@ export class ProviderGateway {
       run_id: run.run_id,
       input_tokens: inputTokens,
       output_tokens: usage.output_tokens,
+      cache_read_tokens: usage.cache_read_input_tokens,
+      cache_write_tokens: usage.cache_creation_input_tokens,
       estimated_cost_usd: costUsd,
       // The numbers came from the provider's own stream, so this is an ACTUAL
       // cost at the pricing table we snapshotted, not an estimate of tokens.
@@ -769,5 +869,40 @@ export class ProviderGateway {
       truncated || !tap.complete ? "gateway.metered_partial" : "gateway.metered",
       `${provider}/${metered.model} run=${run.run_id} in=${inputTokens} out=${usage.output_tokens} usd=${costUsd}`,
     );
+  }
+
+  private async finishTelemetry(
+    trace: AiInvocationTrace | undefined,
+    truncated: boolean,
+    usageComplete: boolean,
+    startedAt: number,
+    httpStatus: number,
+    providerRequestId: string | null,
+  ): Promise<void> {
+    if (!trace) return;
+    const terminal = {
+      latencyMs: Math.max(0, this.now().getTime() - startedAt),
+      httpStatus,
+      providerRequestId,
+    };
+    if (httpStatus >= 400) {
+      await trace.fail({
+        ...terminal,
+        code: `upstream_http_${httpStatus}`,
+        category: "upstream_response",
+        messageRedacted: "the model provider returned an unsuccessful response",
+      });
+      return;
+    }
+    if (truncated || !usageComplete) {
+      await trace.fail({
+        ...terminal,
+        code: truncated ? "stream_truncated" : "usage_incomplete",
+        category: "stream",
+        messageRedacted: "the provider stream ended without a complete usage observation",
+      });
+      return;
+    }
+    await trace.complete(terminal);
   }
 }

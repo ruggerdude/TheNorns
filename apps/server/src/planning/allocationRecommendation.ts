@@ -52,6 +52,7 @@ function providerModelKey(provider: ProviderName, model: string): string {
 export async function recommendProjectAllocation(options: {
   pm: LlmAdapter;
   projectId: string;
+  initiatedByUserId?: string;
   projectName: string;
   objective: string;
   graph: GraphSnapshot;
@@ -119,6 +120,7 @@ export async function recommendProjectAllocation(options: {
   const completion = await options.pm.completeStructured(
     {
       projectId: options.projectId,
+      ...(options.initiatedByUserId ? { initiatedByUserId: options.initiatedByUserId } : {}),
       system:
         "You are the project's accountable program manager. Build a right-sized, cost-aware, cross-provider implementation team and explain each staffing decision.",
       prompt,

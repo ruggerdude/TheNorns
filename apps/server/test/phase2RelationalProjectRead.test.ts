@@ -387,10 +387,39 @@ describe.sequential("Phase 2 relational project read projection", () => {
     });
     const plan = parseLegacyProjectPayloads(source).plan;
     if (plan === null) throw new Error("fixture lacks plan");
+    await pg.query(
+      `INSERT INTO users (
+         id, username, display_name, email, name, password_hash,
+         password_hash_scheme, role, status
+       ) VALUES (
+         'relational-creator','creator@example.com','Creator',
+         'creator@example.com','Creator','x','scrypt-v1','member','active'
+       )`,
+    );
 
     await expect(
-      relationalRepository.create({ name: "x", description: "x", pmProvider: "anthropic" }),
+      relationalRepository.create({
+        name: "x",
+        description: "x",
+        pmProvider: "anthropic",
+        ownerUserId: "relational-creator",
+      }),
     ).resolves.toMatchObject({ name: "x", pm_provider: "anthropic" });
+    const owned = await pg.query<{ owner_user_id: string; owner_membership: boolean }>(
+      `SELECT project.owner_user_id,
+              EXISTS (
+                SELECT 1 FROM project_members membership
+                WHERE membership.project_id=project.id
+                  AND membership.user_id=project.owner_user_id
+                  AND membership.status='active'
+              ) AS owner_membership
+       FROM projects project
+       WHERE project.name='x'`,
+    );
+    expect(owned.rows[0]).toEqual({
+      owner_user_id: "relational-creator",
+      owner_membership: true,
+    });
 
     const attempts = [
       () => relationalRepository.addEdge(source.id, "a", "b"),

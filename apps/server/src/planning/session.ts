@@ -93,6 +93,7 @@ export interface PlanningOptions {
   reviewer: LlmAdapter;
   objective: string;
   projectId: string;
+  initiatedByUserId?: string;
   memory?: readonly ProjectMemoryEntryT[];
   maxRounds?: number; // default 3 (PRD)
   maxValidationRetries?: number; // default 2
@@ -123,12 +124,14 @@ export async function runQuickPlanning(options: {
   pm: LlmAdapter;
   objective: string;
   projectId: string;
+  initiatedByUserId?: string;
   memory?: readonly ProjectMemoryEntryT[];
   maxValidationRetries?: number;
   images?: readonly ImagePart[];
 }): Promise<QuickPlanningResult> {
   const usage: UsageEventT[] = [];
   const maxValidationRetries = options.maxValidationRetries ?? 2;
+  const retryGroupId = newId("ai_retry");
   let prompt = quickChangePrompt(options.objective);
   for (let attempt = 0; attempt <= maxValidationRetries; attempt += 1) {
     const draft = await options.pm.completeStructured(
@@ -136,6 +139,9 @@ export async function runQuickPlanning(options: {
         system: pmSystem(options.memory ?? []),
         prompt,
         projectId: options.projectId,
+        ...(options.initiatedByUserId ? { initiatedByUserId: options.initiatedByUserId } : {}),
+        telemetryRetryGroupId: retryGroupId,
+        telemetryRetryAttempt: attempt,
         ...(attempt === 0 && options.images && options.images.length > 0
           ? { images: options.images }
           : {}),
@@ -181,7 +187,10 @@ export async function runPlanning(options: PlanningOptions): Promise<PlanningRes
     exception_approved_by: options.reviewException?.approvedBy ?? null,
   };
 
-  const meter = { projectId: options.projectId };
+  const meter = {
+    projectId: options.projectId,
+    ...(options.initiatedByUserId ? { initiatedByUserId: options.initiatedByUserId } : {}),
+  };
   const system = pmSystem(memory);
   const roundOneImages = options.roundOneImages ?? [];
 
@@ -193,10 +202,18 @@ export async function runPlanning(options: PlanningOptions): Promise<PlanningRes
     // and re-sending the images would just repay their token cost.
     images: readonly ImagePart[] = [],
   ): Promise<PlanContractT> => {
+    const retryGroupId = newId("ai_retry");
     let prompt = initialPrompt;
     for (let attempt = 0; attempt <= maxValidationRetries; attempt += 1) {
       const draft = await options.pm.completeStructured(
-        { system, prompt, ...meter, ...(attempt === 0 && images.length > 0 ? { images } : {}) },
+        {
+          system,
+          prompt,
+          ...meter,
+          telemetryRetryGroupId: retryGroupId,
+          telemetryRetryAttempt: attempt,
+          ...(attempt === 0 && images.length > 0 ? { images } : {}),
+        },
         PlanContract,
         "plan_contract",
       );
