@@ -3480,32 +3480,390 @@ button:disabled {
   display: none;
 }
 
-/* ---- PHASE TAB (P2) ------------------------------------------------------ */
-/* Goal -> planning run -> decision -> execution status. Theme variables only
-   so both light and dark render correctly (matches recent ui.tsx work). */
+/* ---- PHASE TAB: one continuous planning -> approval -> coding journey ---- */
+/* Theme variables only so each state keeps the same hierarchy in light and
+   dark modes. The content stays full-width and collapses to stacked records
+   instead of introducing horizontal navigation on narrow screens. */
+.phase-journey-shell {
+  width: min(1080px, 100%);
+  margin-inline: auto;
+  gap: 1rem;
+}
+.phase-inline-error .alert {
+  margin: 0;
+}
+.phase-journey {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  padding: 1rem 1.1rem;
+}
+.phase-journey ol {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.phase-journey-step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  gap: .65rem;
+  min-width: 0;
+}
+.phase-journey-step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 1rem;
+  left: 2rem;
+  right: -1rem;
+  height: 1px;
+  background: var(--line2);
+  z-index: 0;
+}
+.phase-journey-step.is-complete::after {
+  background: color-mix(in srgb, var(--success) 70%, var(--line));
+}
+.phase-journey-marker {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid var(--line2);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--muted);
+  font: 600 .75rem "DM Mono", monospace;
+}
+.phase-journey-step.is-current .phase-journey-marker {
+  border-color: var(--accent);
+  color: var(--accent2);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 13%, transparent);
+}
+.phase-journey-step.is-complete .phase-journey-marker {
+  border-color: var(--success);
+  background: color-mix(in srgb, var(--success) 17%, var(--surface));
+  color: var(--success);
+}
+.phase-journey-copy {
+  display: grid;
+  gap: .15rem;
+  min-width: 0;
+  padding-top: .05rem;
+}
+.phase-journey-copy strong {
+  font-size: .82rem;
+}
+.phase-journey-copy > span {
+  max-width: 30ch;
+  color: var(--muted);
+  font-size: .7rem;
+  line-height: 1.4;
+}
+.phase-journey-step:not(.is-current, .is-complete) .phase-journey-copy {
+  opacity: 0.68;
+}
+.phase-state-card {
+  margin-top: 0;
+  padding: clamp(1.1rem, 2.4vw, 1.7rem);
+}
+.phase-state-card > .side-body {
+  margin-top: 0;
+}
+.phase-state-heading {
+  margin-bottom: .15rem;
+}
+.phase-state-heading h3,
+.phase-state-card h3 {
+  margin: .2rem 0 0;
+  font-size: clamp(1.15rem, 2vw, 1.45rem);
+  letter-spacing: -.025em;
+}
+.phase-run-recovering .side-body {
+  display: grid;
+  gap: .45rem;
+}
+.phase-run-recovering p {
+  margin: 0 0 0 1.65rem;
+  font-size: .78rem;
+}
+.phase-run-progress {
+  border-color: color-mix(in srgb, var(--info) 38%, var(--line));
+  background: linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--info) 7%, transparent),
+      transparent 45%
+    ), var(--surface);
+}
+.phase-planning-progress {
+  display: grid;
+  gap: .4rem;
+}
+.phase-planning-progress-copy {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--muted);
+  font-size: .75rem;
+}
+.phase-planning-progress progress {
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  background: var(--raised);
+  accent-color: var(--info);
+}
+.phase-planning-progress progress::-webkit-progress-bar {
+  border-radius: 999px;
+  background: var(--raised);
+}
+.phase-planning-progress progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: var(--info);
+}
+.phase-planning-progress progress::-moz-progress-bar {
+  border-radius: 999px;
+  background: var(--info);
+}
 .phase-identity-line {
   font-size: .85rem;
+}
+.phase-findings {
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  margin-top: .2rem;
+  padding-top: .85rem;
+  border-top: 1px solid var(--line);
+}
+.phase-findings h4 {
+  margin: 0 0 .15rem;
+  font-size: .8rem;
+}
+.phase-findings .planning-finding {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--raised) 70%, transparent);
+  padding: .75rem .85rem;
+}
+.phase-findings .planning-finding p {
+  margin: .45rem 0 0;
+}
+.phase-decision {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
+  background: linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--accent) 7%, transparent),
+      transparent 42%
+    ), var(--surface);
+  box-shadow: 0 22px 70px color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.phase-plan-ready-copy {
+  max-width: 68ch;
+  margin: .2rem 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+.phase-plan-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .55rem;
+  list-style: none;
+  margin: .25rem 0 .4rem;
+  padding: 0;
+}
+.phase-plan-meta li {
+  display: grid;
+  gap: .1rem;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--raised) 78%, transparent);
+  padding: .7rem .8rem;
+}
+.phase-plan-meta strong {
+  font: 600 .9rem "DM Mono", monospace;
+  overflow-wrap: anywhere;
+}
+.phase-plan-meta span {
+  color: var(--muted);
+  font-size: .68rem;
+  line-height: 1.35;
+}
+.phase-plan-list {
+  display: grid;
+  gap: .65rem;
 }
 .phase-plan-card {
   display: flex;
   flex-direction: column;
   gap: .5rem;
-  padding: .9rem 1rem;
-  background: var(--raised);
+  padding: .9rem 1rem .9rem .9rem;
+  background: color-mix(in srgb, var(--raised) 82%, transparent);
+  box-shadow: none;
 }
 .phase-plan-card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: .5rem;
+  gap: .75rem;
 }
-.phase-findings {
+.phase-plan-title {
   display: flex;
-  flex-direction: column;
-  gap: .4rem;
+  align-items: center;
+  gap: .65rem;
+  min-width: 0;
+}
+.phase-plan-title h4 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.phase-plan-index {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 1.7rem;
+  height: 1.7rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line2));
+  border-radius: 8px;
+  color: var(--accent2);
+  font: 600 .72rem "DM Mono", monospace;
+}
+.phase-plan-card > p {
+  margin: 0 0 0 2.35rem;
+  line-height: 1.5;
+}
+.phase-staffing-options {
+  margin-top: .2rem;
+  padding: .9rem 1rem;
+  background: color-mix(in srgb, var(--raised) 55%, transparent);
+  box-shadow: none;
+}
+.phase-staffing-options summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: .7rem;
+}
+.phase-staffing-options summary small {
+  align-self: center;
+  color: var(--muted);
+  font-size: .68rem;
+  font-weight: 500;
+}
+.phase-staffing-options .side-body {
+  padding-top: .9rem;
+  border-top: 1px solid var(--line);
+}
+.phase-staffing-body > p {
+  max-width: 70ch;
+  margin: 0;
+}
+.phase-staffing-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .8rem;
+}
+.phase-modify-form {
+  margin-top: .3rem;
+  border: 1px solid var(--line2);
+  border-radius: 12px;
+  background: var(--raised);
+  padding: 1rem;
+}
+.phase-modify-form h4,
+.phase-modify-form p {
+  margin: 0;
+}
+.phase-modify-form p {
+  margin-top: .25rem;
+  line-height: 1.45;
+}
+.phase-decision-actions {
+  display: grid;
+  gap: 1rem;
+  margin-top: .25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+.phase-primary-action {
+  justify-self: start;
+  min-width: min(320px, 100%);
+  min-height: 48px;
+  padding-inline: 1.2rem;
+}
+.phase-secondary-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem 1rem;
+  flex-wrap: wrap;
+}
+.phase-secondary-actions > span {
+  font-size: .75rem;
+}
+.phase-execution-status {
+  border-color: color-mix(in srgb, var(--success) 42%, var(--line));
+  background: linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--success) 6%, transparent),
+      transparent 42%
+    ), var(--surface);
+}
+.phase-kickoff-note {
+  display: flex;
+  align-items: flex-start;
+  gap: .65rem;
+  border: 1px solid color-mix(in srgb, var(--success) 34%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--success) 8%, var(--raised));
+  padding: .75rem .85rem;
+  color: var(--text);
+  font-size: .8rem;
+  line-height: 1.45;
+}
+.phase-kickoff-note::before {
+  content: "✓";
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 1px solid var(--success);
+  border-radius: 50%;
+  color: var(--success);
+  font: 700 .66rem "DM Mono", monospace;
+}
+.phase-kickoff-note.needs-attention {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  background: color-mix(in srgb, var(--accent) 9%, var(--raised));
+}
+.phase-kickoff-note.needs-attention::before {
+  content: "!";
+  border-color: var(--accent);
+  color: var(--accent2);
+}
+.phase-kickoff-note p {
+  margin: 0;
+}
+.phase-execution-error {
+  display: grid;
+  justify-items: start;
+  gap: .55rem;
+}
+.phase-execution-error .alert {
+  width: 100%;
+  margin: 0;
 }
 .phase-execution-table-wrap {
-  overflow-x: auto;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 11px;
 }
 .phase-execution-table {
   width: 100%;
@@ -3518,15 +3876,147 @@ button:disabled {
   text-transform: uppercase;
   letter-spacing: .06em;
   color: var(--muted);
-  padding: .45rem .6rem;
+  padding: .65rem .7rem;
   border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--raised) 72%, transparent);
 }
 .phase-execution-table td {
-  padding: .5rem .6rem;
+  padding: .7rem;
   border-bottom: 1px solid var(--line);
   color: var(--text);
   vertical-align: top;
+  line-height: 1.4;
 }
 .phase-execution-table tr:last-child td {
   border-bottom: 0;
+}
+.phase-execution-table td:first-child {
+  font-weight: 650;
+}
+.phase-failed-panel {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
+}
+.phase-state-card > .side-body > div > .eyebrow + h3 {
+  margin-top: .2rem;
+}
+
+@media (max-width: 760px) {
+  .phase-journey {
+    padding: .9rem;
+  }
+  .phase-journey ol {
+    grid-template-columns: 1fr;
+    gap: .85rem;
+  }
+  .phase-journey-step:not(:last-child)::after {
+    top: 2rem;
+    bottom: -.85rem;
+    left: 1rem;
+    right: auto;
+    width: 1px;
+    height: auto;
+  }
+  .phase-journey-copy > span {
+    max-width: none;
+  }
+  .phase-plan-meta {
+    grid-template-columns: 1fr;
+  }
+  .phase-staffing-grid {
+    grid-template-columns: 1fr;
+  }
+  .phase-staffing-options summary {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .phase-staffing-options summary small {
+    display: none;
+  }
+  .phase-primary-action {
+    width: 100%;
+    justify-self: stretch;
+  }
+  .phase-secondary-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .phase-state-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .phase-execution-table-wrap {
+    overflow: visible;
+    border: 0;
+  }
+  .phase-execution-table,
+  .phase-execution-table tbody,
+  .phase-execution-table tr,
+  .phase-execution-table td {
+    display: block;
+    width: 100%;
+  }
+  .phase-execution-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .phase-execution-table tbody {
+    display: grid;
+    gap: .7rem;
+  }
+  .phase-execution-table tr {
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    background: color-mix(in srgb, var(--raised) 65%, transparent);
+  }
+  .phase-execution-table td,
+  .phase-execution-table tr:last-child td {
+    display: grid;
+    grid-template-columns: minmax(7rem, .6fr) minmax(0, 1fr);
+    gap: .75rem;
+    border-bottom: 1px solid var(--line);
+    overflow-wrap: anywhere;
+  }
+  .phase-execution-table td:last-child,
+  .phase-execution-table tr:last-child td:last-child {
+    border-bottom: 0;
+  }
+  .phase-execution-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: .68rem;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+}
+
+@media (max-width: 440px) {
+  .phase-state-card {
+    padding: 1rem;
+  }
+  .phase-plan-card-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .phase-plan-card > p {
+    margin-left: 0;
+  }
+  .phase-secondary-actions .actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .phase-journey-shell .spinner {
+    animation: none;
+  }
 }

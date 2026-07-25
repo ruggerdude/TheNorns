@@ -46,6 +46,21 @@ const PROVIDER_GROUP_LABEL: Record<Provider, string> = {
   openai: "OpenAI",
 };
 
+const JOURNEY_STEPS = [
+  {
+    label: "Planning",
+    description: "Coordinator and reviewer prepare the implementation plan.",
+  },
+  {
+    label: "Plan ready",
+    description: "Review one plan and approve it when it is ready.",
+  },
+  {
+    label: "Coding",
+    description: "Follow dispatched work and implementation progress.",
+  },
+] as const;
+
 /** Human status line for the live-progress section. */
 function runStatusLabel(run: PhasePlanningRunDto): string {
   const total = run.review_rounds_total;
@@ -294,18 +309,80 @@ export function PhaseTab({
   const runIsActive = runStatus !== null && PHASE_RUN_ACTIVE_STATUSES.has(runStatus);
   const runAwaitsDecision = runStatus !== null && PHASE_RUN_DECISION_STATUSES.has(runStatus);
   const showSetupForm = recoveryAttempted && !recovering && !runId;
+  const journeyStage =
+    runStatus === "approved" ? 3 : runAwaitsDecision || runStatus === "rejected" ? 2 : 1;
 
   const reviewerFindings = (run?.transcript ?? []).filter((entry) => entry.role === "reviewer");
+  const executionHasProgress =
+    executionKickoff?.started === true ||
+    (executionRows?.some((row) => row.state === "active" || row.state === "completed") ?? false);
+  const executionStartRetryAvailable =
+    executionRows !== null &&
+    (executionRows.length === 0 ||
+      executionRows.some((row) =>
+        ["proposed", "awaiting_approval", "approved", "blocked"].includes(row.state),
+      ));
+  const executionNeedsStartAttention =
+    !executionHasProgress && (executionKickoff?.started === false || executionStartRetryAvailable);
 
   return (
-    <div className="form-stack" data-testid="phase-tab">
-      {error ? <Alert testId="phase-error">{error}</Alert> : null}
+    <div className="form-stack phase-journey-shell" data-testid="phase-tab">
+      {error ? (
+        <div className="phase-inline-error" role="alert">
+          <Alert testId="phase-error">{error}</Alert>
+        </div>
+      ) : null}
+
+      {recovering || runId ? (
+        <nav
+          className="phase-journey"
+          aria-label="Planning to coding progress"
+          data-testid="phase-journey"
+        >
+          <ol>
+            {JOURNEY_STEPS.map((step, index) => {
+              const stepNumber = index + 1;
+              const isCurrent = stepNumber === journeyStage;
+              const isComplete = stepNumber < journeyStage;
+              return (
+                <li
+                  key={step.label}
+                  className={
+                    isCurrent
+                      ? "phase-journey-step is-current"
+                      : isComplete
+                        ? "phase-journey-step is-complete"
+                        : "phase-journey-step"
+                  }
+                  aria-current={isCurrent ? "step" : undefined}
+                >
+                  <span className="phase-journey-marker" aria-hidden="true">
+                    {isComplete ? "✓" : stepNumber}
+                  </span>
+                  <span className="phase-journey-copy">
+                    <strong>{step.label}</strong>
+                    <span>{step.description}</span>
+                    {isComplete ? <span className="sr-only">Complete</span> : null}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+        </nav>
+      ) : null}
 
       {recovering ? (
-        <section className="card side-section" data-testid="phase-run-recovering">
-          <div className="side-body">
+        <section
+          className="card side-section phase-state-card phase-run-recovering"
+          data-testid="phase-run-recovering"
+          aria-label="Resuming planning"
+        >
+          <output className="side-body" aria-live="polite">
             <Spinner label="Resuming the latest planning work…" />
-          </div>
+            <p className="muted">
+              Your project and planning progress are saved. This should only take a moment.
+            </p>
+          </output>
         </section>
       ) : null}
 
@@ -369,24 +446,47 @@ export function PhaseTab({
       ) : null}
 
       {runId && (runIsActive || !run) ? (
-        <section className="card side-section phase-run-progress" data-testid="phase-run-progress">
+        <section
+          className="card side-section phase-state-card phase-run-progress"
+          data-testid="phase-run-progress"
+          aria-labelledby="phase-planning-title"
+        >
           <div className="side-body form-stack">
-            <div className="section-head">
+            <div className="section-head phase-state-heading">
               <div>
                 <div className="eyebrow">Planning</div>
-                <h3 data-testid="phase-run-status">{run ? runStatusLabel(run) : "Starting…"}</h3>
+                <h3 id="phase-planning-title" data-testid="phase-run-status" aria-live="polite">
+                  {run ? runStatusLabel(run) : "Starting the plan…"}
+                </h3>
               </div>
-              <Badge tone="info">{run?.status ?? "queued"}</Badge>
+              <Badge tone="info">In progress</Badge>
             </div>
             {run ? (
-              <p className="muted" data-testid="phase-run-rounds">
-                {run.rounds_completed} of {run.review_rounds_total} review rounds complete
-              </p>
+              <div className="phase-planning-progress">
+                <div className="phase-planning-progress-copy">
+                  <span data-testid="phase-run-rounds">
+                    {run.rounds_completed} of {run.review_rounds_total} review rounds complete
+                  </span>
+                  <span>
+                    {Math.round(
+                      (run.rounds_completed / Math.max(run.review_rounds_total, 1)) * 100,
+                    )}
+                    %
+                  </span>
+                </div>
+                <progress
+                  aria-label="Review rounds completed"
+                  max={Math.max(run.review_rounds_total, 1)}
+                  value={run.rounds_completed}
+                />
+              </div>
             ) : null}
-            <Spinner label="Coordinator and reviewer are working…" />
+            <output aria-live="polite">
+              <Spinner label="Coordinator and reviewer are working…" />
+            </output>
             {reviewerFindings.length > 0 ? (
               <div className="phase-findings" data-testid="phase-run-findings">
-                <strong>Reviewer findings so far</strong>
+                <h4>Reviewer findings so far</h4>
                 {reviewerFindings.map((entry, index) => (
                   <article
                     className="planning-finding"
@@ -404,7 +504,7 @@ export function PhaseTab({
                         Round {entry.round}
                       </Badge>
                       <span>
-                        {entry.model}
+                        Reviewer
                         {entry.finding_counts
                           ? ` · ${entry.finding_counts.must_fix} must fix · ${entry.finding_counts.should_fix} should fix · ${entry.finding_counts.suggestion} suggestions`
                           : ""}
@@ -420,79 +520,126 @@ export function PhaseTab({
       ) : null}
 
       {run && runAwaitsDecision ? (
-        <section className="card side-section phase-decision" data-testid="phase-decision-panel">
+        <section
+          className="card side-section phase-state-card phase-decision"
+          data-testid="phase-decision-panel"
+          aria-labelledby="phase-decision-title"
+        >
           <div className="side-body form-stack">
-            <div className="section-head">
+            <div className="section-head phase-state-heading">
               <div>
                 <div className="eyebrow">Plan ready</div>
-                <h3>
+                <h3 id="phase-decision-title">
                   {run.status === "cap_reached"
-                    ? "Round cap reached — review the plan"
-                    : "Review the plan"}
+                    ? "The plan needs your review"
+                    : "Your implementation plan is ready"}
                 </h3>
               </div>
-              <Badge tone={run.status === "cap_reached" ? "warn" : "success"}>{run.status}</Badge>
+              <Badge tone={run.status === "cap_reached" ? "warn" : "success"}>
+                {run.status === "cap_reached" ? "Review needed" : "Ready"}
+              </Badge>
             </div>
-            <p className="muted" data-testid="phase-decision-rounds">
-              {run.rounds_completed} of {run.review_rounds_total} review rounds complete
-              {run.result ? ` · plan cost $${run.result.total_cost_usd.toFixed(2)}` : ""}
+            <p className="phase-plan-ready-copy">
+              The coordinator and reviewer have prepared the first coding plan. Review the phases
+              below, then approve once to staff and dispatch the work.
             </p>
 
-            {planPhases.map((phase) => (
-              <article
-                className="card phase-plan-card"
-                key={phase.node_id}
-                data-testid={`phase-plan-card-${phase.node_id}`}
-              >
-                <div className="phase-plan-card-head">
-                  <strong>{phase.name ?? phase.node_id}</strong>
-                  <Badge tone="info">
-                    {phase.worker_count} worker{phase.worker_count === 1 ? "" : "s"}
-                  </Badge>
-                </div>
-                {phase.description ? <p className="muted">{phase.description}</p> : null}
-              </article>
-            ))}
+            <ul className="phase-plan-meta" data-testid="phase-decision-rounds">
+              <li>
+                <strong>{planPhases.length}</strong>
+                <span>implementation phase{planPhases.length === 1 ? "" : "s"}</span>
+              </li>
+              <li>
+                <strong>
+                  {run.rounds_completed}/{run.review_rounds_total}
+                </strong>
+                <span>review rounds complete</span>
+              </li>
+              {run.result ? (
+                <li>
+                  <strong>${run.result.total_cost_usd.toFixed(2)}</strong>
+                  <span>planning cost</span>
+                </li>
+              ) : null}
+            </ul>
+
+            <div className="phase-plan-list" aria-label="Implementation phases">
+              {planPhases.map((phase, index) => (
+                <article
+                  className="card phase-plan-card"
+                  key={phase.node_id}
+                  data-testid={`phase-plan-card-${phase.node_id}`}
+                >
+                  <div className="phase-plan-card-head">
+                    <div className="phase-plan-title">
+                      <span className="phase-plan-index" aria-hidden="true">
+                        {index + 1}
+                      </span>
+                      <h4>{phase.name ?? phase.node_id}</h4>
+                    </div>
+                    <Badge tone="info">
+                      {phase.worker_count} worker{phase.worker_count === 1 ? "" : "s"}
+                    </Badge>
+                  </div>
+                  {phase.description ? <p className="muted">{phase.description}</p> : null}
+                </article>
+              ))}
+            </div>
 
             {planPhases.length > 0 ? (
-              <details className="card side-section" data-testid="phase-staffing-options">
-                <summary>Optional · adjust staffing</summary>
-                <div className="side-body form-stack">
+              <details
+                className="card side-section phase-staffing-options"
+                data-testid="phase-staffing-options"
+              >
+                <summary>
+                  <span>Optional · adjust staffing</span>
+                  <small>Recommended models selected</small>
+                </summary>
+                <div className="side-body form-stack phase-staffing-body">
                   <p className="muted">
                     The recommended models are ready. Change them only when the implementation needs
                     a specific provider or model.
                   </p>
-                  {planPhases.map((phase) => (
-                    <Field key={phase.node_id} label={phase.name ?? phase.node_id}>
-                      <Select
-                        data-testid={`phase-staffing-${phase.node_id}`}
-                        value={staffingValue(phase)}
-                        disabled={decisionBusy}
-                        onChange={(event) =>
-                          setStaffingDrafts((current) => ({
-                            ...current,
-                            [phase.node_id]: event.target.value,
-                          }))
-                        }
-                      >
-                        {activeProviders.map((provider) => (
-                          <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
-                            {PM_MODEL_OPTIONS[provider].map((model) => (
-                              <option key={model.id} value={`${provider}:${model.id}`}>
-                                {model.label}
-                              </option>
-                            ))}
-                          </optgroup>
-                        ))}
-                      </Select>
-                    </Field>
-                  ))}
+                  <div className="phase-staffing-grid">
+                    {planPhases.map((phase) => (
+                      <Field key={phase.node_id} label={phase.name ?? phase.node_id}>
+                        <Select
+                          data-testid={`phase-staffing-${phase.node_id}`}
+                          value={staffingValue(phase)}
+                          disabled={decisionBusy}
+                          onChange={(event) =>
+                            setStaffingDrafts((current) => ({
+                              ...current,
+                              [phase.node_id]: event.target.value,
+                            }))
+                          }
+                        >
+                          {activeProviders.map((provider) => (
+                            <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
+                              {PM_MODEL_OPTIONS[provider].map((model) => (
+                                <option key={model.id} value={`${provider}:${model.id}`}>
+                                  {model.label}
+                                </option>
+                              ))}
+                            </optgroup>
+                          ))}
+                        </Select>
+                      </Field>
+                    ))}
+                  </div>
                 </div>
               </details>
             ) : null}
 
             {modifyOpen ? (
-              <div className="form-stack" data-testid="phase-modify-form">
+              <div className="form-stack phase-modify-form" data-testid="phase-modify-form">
+                <div>
+                  <h4>Request a revision</h4>
+                  <p className="muted">
+                    Give the coordinator clear direction. The revised plan will pass through review
+                    again before you approve it.
+                  </p>
+                </div>
                 <Field label="Direction for the next revision">
                   <TextArea
                     data-testid="phase-modify-direction"
@@ -517,42 +664,48 @@ export function PhaseTab({
                 </div>
               </div>
             ) : (
-              <div className="actions">
+              <div className="phase-decision-actions">
                 <Button
                   variant="primary"
+                  className="phase-primary-action"
                   data-testid="phase-approve"
                   disabled={decisionBusy}
                   onClick={() => void approve()}
                 >
-                  {decisionBusy ? "Starting…" : "Approve & start coding"}
+                  {decisionBusy ? "Starting coding…" : "Approve & start coding"}
                 </Button>
-                <Button
-                  data-testid="phase-modify"
-                  disabled={decisionBusy}
-                  onClick={() => {
-                    setModifyOpen(true);
-                    setConfirmingReject(false);
-                  }}
-                >
-                  Modify
-                </Button>
-                <Button
-                  variant="danger"
-                  data-testid="phase-reject"
-                  disabled={decisionBusy}
-                  onClick={() =>
-                    confirmingReject
-                      ? void decide({ decision: "reject" })
-                      : setConfirmingReject(true)
-                  }
-                >
-                  {confirmingReject ? "Confirm reject" : "Reject"}
-                </Button>
-                {confirmingReject ? (
-                  <Button disabled={decisionBusy} onClick={() => setConfirmingReject(false)}>
-                    Keep the plan
-                  </Button>
-                ) : null}
+                <div className="phase-secondary-actions">
+                  <span className="muted">Need a change before coding?</span>
+                  <div className="actions">
+                    <Button
+                      data-testid="phase-modify"
+                      disabled={decisionBusy}
+                      onClick={() => {
+                        setModifyOpen(true);
+                        setConfirmingReject(false);
+                      }}
+                    >
+                      Modify
+                    </Button>
+                    <Button
+                      variant="danger"
+                      data-testid="phase-reject"
+                      disabled={decisionBusy}
+                      onClick={() =>
+                        confirmingReject
+                          ? void decide({ decision: "reject" })
+                          : setConfirmingReject(true)
+                      }
+                    >
+                      {confirmingReject ? "Confirm reject" : "Reject"}
+                    </Button>
+                    {confirmingReject ? (
+                      <Button disabled={decisionBusy} onClick={() => setConfirmingReject(false)}>
+                        Keep the plan
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -561,39 +714,54 @@ export function PhaseTab({
 
       {runStatus === "approved" ? (
         <section
-          className="card side-section phase-execution-status"
+          className="card side-section phase-state-card phase-execution-status"
           data-testid="phase-execution-panel"
+          aria-labelledby="phase-execution-title"
         >
           <div className="side-body form-stack">
-            <div className="section-head">
+            <div className="section-head phase-state-heading">
               <div>
-                <div className="eyebrow">Executing</div>
-                <h3>Phase execution</h3>
+                <div className="eyebrow">Coding</div>
+                <h3 id="phase-execution-title">
+                  {executionNeedsStartAttention
+                    ? "Coding needs a restart"
+                    : executionHasProgress
+                      ? "Coding is underway"
+                      : "Preparing coding status…"}
+                </h3>
               </div>
-              <Badge tone="success">approved</Badge>
+              <Badge tone={executionNeedsStartAttention ? "warn" : "success"}>
+                {executionNeedsStartAttention ? "Needs attention" : "Approved"}
+              </Badge>
             </div>
-            {executionKickoff?.started ? (
-              <p className="muted" data-testid="phase-execution-kickoff-note">
-                Execution started automatically from this approval.
-                {executionKickoff.detail ? ` ${executionKickoff.detail}` : ""}
-              </p>
-            ) : executionKickoff?.started === false ? (
-              <p className="muted" data-testid="phase-execution-kickoff-note">
-                Plan approved and recorded, but coding did not start.
-                {executionKickoff.detail ? ` ${executionKickoff.detail}` : ""}
-              </p>
-            ) : (
-              <p className="muted" data-testid="phase-execution-kickoff-note">
-                Plan approved. Checking the current coding status…
-              </p>
-            )}
-            {executionRows &&
-            (executionRows.length === 0 ||
-              executionRows.some((row) =>
-                ["proposed", "awaiting_approval", "approved", "blocked"].includes(row.state),
-              )) ? (
+            <output
+              className={
+                executionNeedsStartAttention
+                  ? "phase-kickoff-note needs-attention"
+                  : "phase-kickoff-note"
+              }
+              aria-live="polite"
+            >
+              {executionKickoff?.started ? (
+                <p data-testid="phase-execution-kickoff-note">
+                  Execution started automatically from this approval.
+                  {executionKickoff.detail ? ` ${executionKickoff.detail}` : ""}
+                </p>
+              ) : executionKickoff?.started === false ? (
+                <p data-testid="phase-execution-kickoff-note">
+                  Plan approved and recorded, but coding did not start.
+                  {executionKickoff.detail ? ` ${executionKickoff.detail}` : ""}
+                </p>
+              ) : (
+                <p data-testid="phase-execution-kickoff-note">
+                  Plan approved. Checking the current coding status…
+                </p>
+              )}
+            </output>
+            {executionStartRetryAvailable ? (
               <Button
                 variant="primary"
+                className="phase-primary-action"
                 data-testid="phase-retry-execution"
                 disabled={decisionBusy}
                 onClick={() => void retryExecution()}
@@ -601,7 +769,14 @@ export function PhaseTab({
                 {decisionBusy ? "Starting…" : "Retry coding start"}
               </Button>
             ) : null}
-            {executionError ? <Alert testId="phase-execution-error">{executionError}</Alert> : null}
+            {executionError ? (
+              <div className="phase-execution-error" role="alert">
+                <Alert testId="phase-execution-error">{executionError}</Alert>
+                <Button disabled={decisionBusy} onClick={() => void pollExecution()}>
+                  Check coding status again
+                </Button>
+              </div>
+            ) : null}
             {executionRows ? (
               <div className="phase-execution-table-wrap">
                 <table className="phase-execution-table" data-testid="phase-execution-table">
@@ -617,8 +792,8 @@ export function PhaseTab({
                   <tbody>
                     {executionRows.map((row) => (
                       <tr key={row.phase_id} data-testid={`phase-execution-row-${row.phase_id}`}>
-                        <td>{row.name}</td>
-                        <td>
+                        <td data-label="Phase">{row.name}</td>
+                        <td data-label="State">
                           <Badge
                             tone={
                               row.state === "completed"
@@ -631,25 +806,33 @@ export function PhaseTab({
                             {row.state.replaceAll("_", " ")}
                           </Badge>
                         </td>
-                        <td className="mono">{Math.round(row.percent_complete)}%</td>
-                        <td>{row.est_completion ?? "—"}</td>
-                        <td>{row.notes}</td>
+                        <td className="mono" data-label="Complete">
+                          {Math.round(row.percent_complete)}%
+                        </td>
+                        <td data-label="Est. completion">{row.est_completion ?? "—"}</td>
+                        <td data-label="Notes">{row.notes}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
             ) : (
-              <Spinner label="Loading execution status…" />
+              <output aria-live="polite">
+                <Spinner label="Loading coding status…" />
+              </output>
             )}
           </div>
         </section>
       ) : null}
 
       {runStatus === "rejected" ? (
-        <section className="card side-section" data-testid="phase-rejected-panel">
+        <section className="card side-section phase-state-card" data-testid="phase-rejected-panel">
           <div className="side-body form-stack">
-            <p className="muted">Plan rejected — this planning run is closed.</p>
+            <div>
+              <div className="eyebrow">Plan closed</div>
+              <h3>Nothing was sent to coding</h3>
+              <p className="muted">The rejected plan is saved with this project.</p>
+            </div>
             <Button data-testid="phase-new-run" onClick={resetToNewRun}>
               Start a new phase plan
             </Button>
@@ -658,11 +841,25 @@ export function PhaseTab({
       ) : null}
 
       {runStatus === "failed" ? (
-        <section className="card side-section" data-testid="phase-failed-panel">
+        <section
+          className="card side-section phase-state-card phase-failed-panel"
+          data-testid="phase-failed-panel"
+        >
           <div className="side-body form-stack">
-            <Alert testId="phase-run-failed">{run?.error ?? "The planning run failed."}</Alert>
-            <Button data-testid="phase-new-run" onClick={resetToNewRun}>
-              Start a new phase plan
+            <div>
+              <div className="eyebrow">Planning stopped</div>
+              <h3>The plan could not be completed</h3>
+              <p className="muted">The project is safe. Start a new run when you are ready.</p>
+            </div>
+            <div role="alert">
+              <Alert testId="phase-run-failed">{run?.error ?? "The planning run failed."}</Alert>
+            </div>
+            <Button
+              className="phase-primary-action"
+              data-testid="phase-new-run"
+              onClick={resetToNewRun}
+            >
+              Plan again
             </Button>
           </div>
         </section>
