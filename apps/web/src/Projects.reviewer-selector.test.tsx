@@ -71,6 +71,10 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
         }),
       };
     });
+    mock.post("/api/v2/projects/project-created/planning-runs", {
+      status: 202,
+      body: { planning_run_id: "run-reviewer" },
+    });
     // Installed here, before render — the dashboard's mount-time effects
     // (refresh/refreshGitHub) fetch immediately, so the mock must be live
     // before render(), not after. Routes registered later by individual
@@ -105,11 +109,7 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
     );
     await user.selectOptions(screen.getByTestId("reviewer-model"), "openai:gpt-5.6-sol");
     await user.type(await screen.findByTestId("github-new-repository-name"), "ravel-search-index");
-    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
-
-    // The wizard's attach-and-launch step confirms creation succeeded; the
-    // reviewer PATCH already happened by this point (right after creation).
-    await screen.findByTestId("wizard-attach-step");
+    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
 
     await waitFor(() =>
       expect(
@@ -144,9 +144,7 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
       await screen.findByTestId("github-new-repository-name"),
       "helm-mobile-onboarding",
     );
-    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
-
-    await screen.findByTestId("wizard-attach-step");
+    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
 
     await waitFor(() =>
       expect(
@@ -180,8 +178,7 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
     await user.type(screen.getByTestId("project-description"), "Consolidate the edge gateways.");
     await user.selectOptions(screen.getByTestId("reviewer-model"), "anthropic:claude-opus-4-8");
     await user.type(await screen.findByTestId("github-new-repository-name"), "nimbus-api-gateway");
-    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
-
-    expect(await screen.findByTestId("wizard-attach-step")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
   });
 });

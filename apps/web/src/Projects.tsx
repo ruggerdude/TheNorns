@@ -7,7 +7,6 @@ import {
 } from "@norns/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GitHubConnection, GitHubIntegrationStatus, SettingsTab } from "./Account";
-import { AttachmentInput } from "./AttachmentInput";
 import { ApiError, type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
 import {
   type LocalRepositoryInventory,
@@ -50,10 +49,78 @@ export interface ProjectSummary {
    *  planning run for this project — the workspace opens pre-focused on
    *  that run's progress instead of a blank graph. */
   focus_planning_run_id?: string | null;
-  /** Transient entry hint: adopted repositories use the streamlined
-   *  planning-to-code journey; the existing new-project flow stays unchanged
-   *  until its dedicated follow-up redesign. */
-  entry_flow?: "adoption" | null;
+  /** Transient entry hint for the streamlined planning-to-code journey.
+   * Durable recovery is based on the persisted onboarding scenario and latest
+   * planning run, so losing this browser-only hint on refresh is harmless. */
+  entry_flow?: "adoption" | "new" | null;
+}
+
+export interface DerivedProjectIdentity {
+  projectName: string;
+  repositorySlug: string;
+}
+
+/** Turn the one required brief into a concise, editable project identity. */
+export function deriveProjectIdentity(
+  brief: string,
+  explicitName = "",
+  explicitRepositorySlug = "",
+): DerivedProjectIdentity {
+  const normalizedBrief = brief.trim().replace(/\s+/g, " ");
+  const briefTitle = normalizedBrief
+    .split(/[.!?](?:\s|$)/, 1)[0]
+    ?.replace(
+      /^(?:please\s+)?(?:build|create|make|develop|implement|design|launch|stand\s+up|set\s+up)\s+/i,
+      "",
+    )
+    .replace(/^(?:a|an|the)\s+/i, "")
+    .trim();
+  const requestedName = explicitName.trim().replace(/\s+/g, " ");
+  const rawName = requestedName || briefTitle || "New project";
+  const shortened =
+    rawName.length <= 64
+      ? rawName
+      : `${rawName
+          .slice(0, 61)
+          .replace(/\s+\S*$/, "")
+          .trimEnd()}…`;
+  const projectName = shortened.charAt(0).toUpperCase() + shortened.slice(1);
+  const repositorySlug =
+    (explicitRepositorySlug.trim() || projectName)
+      .normalize("NFKD")
+      .replace(/\p{M}/gu, "")
+      .toLowerCase()
+      .replace(/&/g, " and ")
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^[._-]+|[._-]+$/g, "")
+      .slice(0, 100)
+      .replace(/[._-]+$/g, "") || "new-project";
+  return { projectName, repositorySlug };
+}
+
+async function uploadObjectiveAttachment(projectId: string, file: File): Promise<string> {
+  const response = await fetch(`/api/v2/projects/${projectId}/attachments`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(),
+      "content-type": file.type,
+      "x-attachment-purpose": "objective",
+    },
+    credentials: "include",
+    body: file,
+  });
+  if (response.status === 401) throw new UnauthorizedError();
+  const payload = (await response.json().catch(() => ({}))) as {
+    id?: string;
+    message?: string;
+  };
+  if (!response.ok || !payload.id) {
+    throw new ApiError(
+      payload.message ?? `Attachment upload failed: ${response.status}`,
+      response.status,
+    );
+  }
+  return payload.id;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +472,7 @@ export function Projects({
   const repositoryRequestEpoch = useRef(0);
   const [repositoryName, setRepositoryName] = useState("");
   const [repositoryPrivate, setRepositoryPrivate] = useState(true);
+  const [pendingAttachmentFiles, setPendingAttachmentFiles] = useState<File[]>([]);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [localSources, setLocalSources] = useState<LocalRepositoryInventory | null>(null);
   const [localSelection, setLocalSelection] = useState<LocalRepositorySelection | null>(null);
@@ -417,14 +485,11 @@ export function Projects({
   // (the server's automatic opposite-provider default); any other value is
   // "provider:model" as offered by MODEL_CHOICES below.
   const [reviewerSelection, setReviewerSelection] = useState("auto");
-  // FRONT DOOR P1: after `create()` makes a brand-new project with an
-  // objective, the wizard moves to a second in-place step — attach reference
-  // screenshots (the real AttachmentInput, which needs a live project id),
-  // then explicitly kick off the planning run. `wizardStep` gates which half
-  // of the single wizard screen renders; `draftProject` is the project that
-  // step operates on. "blocker" is a third step: the onboarding call
-  // succeeded but came back with something like installation_not_ready —
-  // shown before "attach"/navigating away so it isn't missed.
+  // A new project's single submit creates the repository/project, uploads
+  // any locally staged references, and starts planning. The "attach" step is
+  // now a progress/recovery state only: no second confirmation is required.
+  // "blocker" means creation succeeded but repository activation needs human
+  // attention before the same recoverable continuation can run.
   const [wizardStep, setWizardStep] = useState<"form" | "blocker" | "attach" | "adopting">("form");
   const [draftProject, setDraftProject] = useState<ProjectSummary | null>(null);
   const [wizardAttachmentIds, setWizardAttachmentIds] = useState<string[]>([]);
@@ -442,6 +507,10 @@ export function Projects({
   // failed-attempt retry, so a double-click or a retried request replays the
   // same outcome instead of creating a second project/repository.
   const [idempotencyKey, setIdempotencyKey] = useState(() => globalThis.crypto.randomUUID());
+  const derivedIdentity = useMemo(
+    () => deriveProjectIdentity(description, name, repositoryName),
+    [description, name, repositoryName],
+  );
   // Per-project phase/progress read model for the dashboard rows (P5's
   // tracking additions to GET .../resume). Best-effort: a project whose
   // resume call fails (404 for a brand-new draft, network error, etc.)
@@ -737,28 +806,25 @@ export function Projects({
     [onCloseProject, onUnauthorized, refreshAttention],
   );
 
-  // FRONT DOOR P1: a brand-new project with an objective moves to the
-  // wizard's attach-and-launch step instead of navigating away — the
-  // objective becomes the planning run's brief once the human confirms
-  // (optionally after attaching reference screenshots). "Existing work"
-  // imports (no fresh objective to plan from) keep the original
-  // immediate-navigate behavior. Shared by the direct success path and by
-  // "Continue" on the onboarding-blockers step, so a blocker doesn't skip
-  // this logic.
+  // Close the front door around a project that is ready to open. Creation is
+  // inserted into the dashboard earlier so a later planning failure never
+  // makes the durable project disappear from the browser.
   const proceedAfterCreate = useCallback(
     (completedProject: ProjectSummary) => {
-      setProjects((current) => (current ? [completedProject, ...current] : [completedProject]));
-      if (startingPoint === "new" && description.trim()) {
-        setDraftProject(completedProject);
-        setWizardObjective(description.trim());
-        setWizardAttachmentIds([]);
-        setPlanningError(null);
-        setWizardStep("attach");
-        return;
-      }
+      setProjects((current) =>
+        current?.some((project) => project.id === completedProject.id)
+          ? current
+          : current
+            ? [completedProject, ...current]
+            : [completedProject],
+      );
       setDialog(false);
       setWizardStep("form");
       setDraftProject(null);
+      setWizardAttachmentIds([]);
+      setWizardObjective("");
+      setPendingAttachmentFiles([]);
+      setPlanningError(null);
       setOnboardingBlockers([]);
       setName("");
       setDescription("");
@@ -773,7 +839,7 @@ export function Projects({
       setIdempotencyKey(globalThis.crypto.randomUUID());
       onOpenProject(completedProject);
     },
-    [startingPoint, description, onOpenProject],
+    [onOpenProject],
   );
 
   const completeAdoption = useCallback(
@@ -809,6 +875,71 @@ export function Projects({
       }
     },
     [onUnauthorized, proceedAfterCreate],
+  );
+
+  const finishNewProject = useCallback(
+    async (
+      project: ProjectSummary,
+      objective: string,
+      queuedFiles: File[],
+      uploadedAttachmentIds: string[],
+    ): Promise<void> => {
+      setDraftProject(project);
+      setWizardObjective(objective);
+      setWizardStep("attach");
+      setPlanningStarting(true);
+      setPlanningError(null);
+      let remainingFiles = [...queuedFiles];
+      const attachmentIds = [...uploadedAttachmentIds];
+      try {
+        for (const file of queuedFiles) {
+          const attachmentId = await uploadObjectiveAttachment(project.id, file);
+          attachmentIds.push(attachmentId);
+          remainingFiles = remainingFiles.slice(1);
+          setWizardAttachmentIds([...attachmentIds]);
+          setPendingAttachmentFiles([...remainingFiles]);
+        }
+        const run = await request<{ planning_run_id: string }>(
+          `/api/v2/projects/${project.id}/planning-runs`,
+          {
+            objective,
+            max_rounds: roundsCount,
+            attachment_ids: attachmentIds,
+          },
+        );
+        proceedAfterCreate({
+          ...project,
+          focus_planning_run_id: run.planning_run_id,
+          entry_flow: "new",
+        });
+      } catch (error) {
+        if (error instanceof UnauthorizedError) onUnauthorized();
+        else {
+          // The planning POST may have committed even if its response was
+          // lost. Resolve that ambiguity from durable state before asking the
+          // human to retry, which avoids creating a duplicate planning run.
+          try {
+            const latest = await request<{ planning_run: { id: string } | null }>(
+              `/api/v2/projects/${project.id}/planning-runs/latest`,
+            );
+            if (latest.planning_run) {
+              proceedAfterCreate({
+                ...project,
+                focus_planning_run_id: latest.planning_run.id,
+                entry_flow: "new",
+              });
+              return;
+            }
+          } catch {
+            // Preserve the original actionable failure below.
+          }
+          setPlanningError(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        setPlanningStarting(false);
+      }
+    },
+    [onUnauthorized, proceedAfterCreate, roundsCount],
   );
 
   const create = useCallback(async () => {
@@ -849,7 +980,7 @@ export function Projects({
           scenario === "new_repo"
             ? {
                 connectionId: selectedConnectionId,
-                repositoryName: repositoryName.trim(),
+                repositoryName: derivedIdentity.repositorySlug,
                 private: repositoryPrivate,
               }
             : undefined,
@@ -865,7 +996,7 @@ export function Projects({
       const projectName =
         startingPoint === "existing"
           ? (repository?.name ?? "Untitled project")
-          : name.trim() || repositoryName.trim() || "Untitled project";
+          : derivedIdentity.projectName;
       const projectDescription =
         description.trim() ||
         (repository
@@ -886,6 +1017,37 @@ export function Projects({
       const completedProject = await request<ProjectSummary>(
         `/api/projects/${onboarding.project_id}`,
       );
+      setProjects((current) =>
+        current?.some((project) => project.id === completedProject.id)
+          ? current
+          : current
+            ? [completedProject, ...current]
+            : [completedProject],
+      );
+      // Advanced reviewer selection changes planning behavior, so apply it
+      // before either the normal continuation or a blocker recovery.
+      if (startingPoint === "new") {
+        try {
+          if (reviewerSelection !== "auto") {
+            const [reviewerProviderChoice, ...modelParts] = reviewerSelection.split(":");
+            await requestVerb(
+              `/api/v2/projects/${completedProject.id}/planning-reviewer`,
+              "PATCH",
+              {
+                provider: reviewerProviderChoice,
+                model: modelParts.join(":"),
+              },
+            );
+          } else {
+            await requestVerb(
+              `/api/v2/projects/${completedProject.id}/planning-reviewer`,
+              "DELETE",
+            );
+          }
+        } catch {
+          // Best-effort: planning safely falls back to the account default.
+        }
+      }
       if (onboarding.blockers.length > 0) {
         setOnboardingBlockers(onboarding.blockers);
         setDraftProject(completedProject);
@@ -897,34 +1059,20 @@ export function Projects({
         await completeAdoption(completedProject, description.trim());
         return;
       }
-      // FRONT DOOR P2b: apply the reviewer selection right after creation,
-      // before starting any planning run — resolvePlanningParticipants()
-      // reads this per-project setting on every subsequent run.
-      try {
-        if (reviewerSelection !== "auto") {
-          const [reviewerProviderChoice, ...modelParts] = reviewerSelection.split(":");
-          await requestVerb(`/api/v2/projects/${completedProject.id}/planning-reviewer`, "PATCH", {
-            provider: reviewerProviderChoice,
-            model: modelParts.join(":"),
-          });
-        } else {
-          await requestVerb(`/api/v2/projects/${completedProject.id}/planning-reviewer`, "DELETE");
-        }
-      } catch {
-        // Best-effort: an explicit reviewer preference is a nice-to-have,
-        // not a blocker — the project still exists and planning still works
-        // (falling back to the automatic default) if this call fails.
-      }
-      proceedAfterCreate(completedProject);
+      await finishNewProject(
+        completedProject,
+        description.trim(),
+        pendingAttachmentFiles,
+        wizardAttachmentIds,
+      );
     } catch (e) {
       e instanceof UnauthorizedError
         ? onUnauthorized()
-        : setError(e instanceof Error ? e.message : String(e));
+        : setSourceError(e instanceof Error ? e.message : String(e));
     } finally {
       setCreating(false);
     }
   }, [
-    name,
     description,
     pmProvider,
     pmModel,
@@ -935,12 +1083,14 @@ export function Projects({
     existingSource,
     localSelection,
     selectedConnectionId,
-    repositoryName,
+    derivedIdentity,
     repositoryPrivate,
     reviewerSelection,
     idempotencyKey,
     completeAdoption,
-    proceedAfterCreate,
+    finishNewProject,
+    pendingAttachmentFiles,
+    wizardAttachmentIds,
     onUnauthorized,
   ]);
 
@@ -964,14 +1114,23 @@ export function Projects({
       void completeAdoption(project, wizardObjective);
       return;
     }
-    proceedAfterCreate(project);
-  }, [completeAdoption, draftProject, proceedAfterCreate, startingPoint, wizardObjective]);
+    void finishNewProject(project, wizardObjective, pendingAttachmentFiles, wizardAttachmentIds);
+  }, [
+    completeAdoption,
+    draftProject,
+    finishNewProject,
+    pendingAttachmentFiles,
+    startingPoint,
+    wizardAttachmentIds,
+    wizardObjective,
+  ]);
 
   const closeWizard = useCallback(() => {
     setDialog(false);
     setWizardStep("form");
     setDraftProject(null);
     setWizardAttachmentIds([]);
+    setPendingAttachmentFiles([]);
     setWizardObjective("");
     setPlanningError(null);
     setOnboardingBlockers([]);
@@ -990,43 +1149,25 @@ export function Projects({
     setIdempotencyKey(globalThis.crypto.randomUUID());
   }, []);
 
-  // FRONT DOOR P1: the wizard's second step — start the planning run the
-  // objective + rounds + attachments describe. `attachment_ids` come straight
-  // from AttachmentInput's controlled selection (P4's documented contract).
+  // Recovery action after attachment upload or planning kickoff failed. Files
+  // already uploaded stay as ids; only the remaining local files are retried.
   const startPlanningRun = useCallback(async () => {
     if (!draftProject) return;
-    setPlanningStarting(true);
-    setPlanningError(null);
-    try {
-      const run = await request<{ planning_run_id: string }>(
-        `/api/v2/projects/${draftProject.id}/planning-runs`,
-        {
-          objective: wizardObjective,
-          max_rounds: roundsCount,
-          attachment_ids: wizardAttachmentIds,
-        },
-      );
-      const project = draftProject;
-      closeWizard();
-      onOpenProject({ ...project, focus_planning_run_id: run.planning_run_id });
-    } catch (e) {
-      if (e instanceof UnauthorizedError) onUnauthorized();
-      else setPlanningError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setPlanningStarting(false);
-    }
+    await finishNewProject(
+      draftProject,
+      wizardObjective,
+      pendingAttachmentFiles,
+      wizardAttachmentIds,
+    );
   }, [
     draftProject,
+    finishNewProject,
+    pendingAttachmentFiles,
     wizardObjective,
-    roundsCount,
     wizardAttachmentIds,
-    closeWizard,
-    onOpenProject,
-    onUnauthorized,
   ]);
 
-  /** Skip drafting a plan right now — the project already exists; open its
-   *  (still-empty) workspace directly, same as the "existing codebase" path. */
+  /** Planning could not start, but project/repository creation succeeded. */
   const skipPlanning = useCallback(() => {
     if (!draftProject) return;
     const project = draftProject;
@@ -1070,11 +1211,10 @@ export function Projects({
     ? Boolean(localSelection)
     : scenario === "existing_repo"
       ? Boolean(selectedRepositoryId)
-      : Boolean(selectedConnectionId) && Boolean(repositoryName.trim());
+      : Boolean(selectedConnectionId);
   const canCreate =
     !creating &&
     (isLocalExisting || githubConnected) &&
-    (name.trim().length > 0 || startingPoint === "existing") &&
     (description.trim().length > 0 || startingPoint === "existing") &&
     sourceReady;
   // The confirmation step's one honest passage about where the human's code
@@ -1084,8 +1224,8 @@ export function Projects({
     ? null
     : scenario === "existing_repo"
       ? (selectedRepository?.full_name ?? null)
-      : selectedConnection && repositoryName.trim()
-        ? `${selectedConnection.owner_login}/${repositoryName.trim()}`
+      : selectedConnection && description.trim()
+        ? `${selectedConnection.owner_login}/${derivedIdentity.repositorySlug}`
         : null;
   const confirmationText = isLocalExisting
     ? localSelection
@@ -1564,7 +1704,9 @@ export function Projects({
                 <h2>Let's set the brief</h2>
                 <p className="muted">
                   {wizardStep === "attach"
-                    ? "Add reference screenshots, then start the plan."
+                    ? planningError
+                      ? "The project exists. Resume the interrupted planning setup without creating it again."
+                      : "Creating the repository, preserving references, and starting planning."
                     : wizardStep === "blocker"
                       ? "One thing needs fixing before this project can run."
                       : "Start fresh or bring an existing codebase into The Norns. Nothing runs until you approve the plan."}
@@ -1577,63 +1719,21 @@ export function Projects({
             {wizardStep === "attach" && draftProject ? (
               <div className="form-stack wizard-attach-step" data-testid="wizard-attach-step">
                 <Alert>
-                  <strong>{draftProject.name}</strong> was created. Attach reference screenshots
-                  (optional), then start planning — Norns drafts a plan you'll review before any
-                  agent starts.
+                  <strong>{draftProject.name}</strong> was created. Norns is preparing the plan
+                  you'll review before any agent starts coding.
                 </Alert>
-                <AttachmentInput
-                  variant="composer"
-                  label="Objective"
-                  textAreaTestId="wizard-objective"
-                  placeholder="Describe the project, paste a screenshot, or add a reference file…"
-                  textValue={wizardObjective}
-                  onTextChange={setWizardObjective}
-                  projectId={draftProject.id}
-                  value={wizardAttachmentIds}
-                  onChange={setWizardAttachmentIds}
-                  purpose="objective"
-                  disabled={planningStarting}
-                />
-                <Field label="Plan review rounds">
-                  <div className="rounds-stepper" data-testid="rounds-stepper">
-                    <Button
-                      type="button"
-                      className="btn-small"
-                      disabled={roundsCount <= 1}
-                      onClick={() => setRoundsCount((n) => Math.max(1, n - 1))}
-                      aria-label="Fewer rounds"
-                    >
-                      −
+                {planningError ? <Alert testId="planning-run-error">{planningError}</Alert> : null}
+                {planningStarting ? <Spinner label="Starting the planning journey…" /> : null}
+                {planningError ? (
+                  <div className="actions">
+                    <Button variant="ghost" onClick={skipPlanning}>
+                      Open project
                     </Button>
-                    <span className="rounds-value mono">{roundsCount}</span>
-                    <Button
-                      type="button"
-                      className="btn-small"
-                      disabled={roundsCount >= 5}
-                      onClick={() => setRoundsCount((n) => Math.min(5, n + 1))}
-                      aria-label="More rounds"
-                    >
-                      +
+                    <Button variant="primary" onClick={() => void startPlanningRun()}>
+                      Retry planning
                     </Button>
                   </div>
-                  <span className="field-help">
-                    The coordinator and reviewer debate the plan up to this many rounds, then stop
-                    early once they converge.
-                  </span>
-                </Field>
-                {planningError ? <Alert testId="planning-run-error">{planningError}</Alert> : null}
-                <div className="actions">
-                  <Button variant="ghost" disabled={planningStarting} onClick={skipPlanning}>
-                    Skip for now
-                  </Button>
-                  <Button
-                    variant="primary"
-                    disabled={planningStarting || !wizardObjective.trim()}
-                    onClick={() => void startPlanningRun()}
-                  >
-                    {planningStarting ? "Starting planning run…" : "Start planning run →"}
-                  </Button>
-                </div>
+                ) : null}
               </div>
             ) : wizardStep === "adopting" && draftProject ? (
               <div className="form-stack" data-testid="wizard-adoption-step">
@@ -1858,49 +1958,35 @@ export function Projects({
                       </div>
                     ) : (
                       <>
-                        <Field label="GitHub account or organization">
-                          <Select
-                            data-testid="github-connection"
-                            value={selectedConnectionId}
-                            onChange={(event) => {
-                              setSelectedConnectionId(event.target.value);
-                              setSelectedRepositoryId("");
-                            }}
+                        {scenario === "existing_repo" || connectedGitHub.length > 1 ? (
+                          <Field
+                            label={
+                              scenario === "new_repo"
+                                ? "Create repository under"
+                                : "GitHub account or organization"
+                            }
                           >
-                            {connectedGitHub.map((connection: GitHubConnection) => (
-                              <option key={connection.id} value={connection.id}>
-                                {connection.owner_login} · {connection.owner_type}
-                              </option>
-                            ))}
-                          </Select>
-                        </Field>
-                        {scenario === "new_repo" ? (
-                          <div className="repository-create-fields">
-                            <Field label="Repository name">
-                              <Input
-                                data-testid="github-new-repository-name"
-                                value={repositoryName}
-                                onChange={(event) => setRepositoryName(event.target.value)}
-                                placeholder="notifications-service"
-                              />
-                            </Field>
-                            <Field label="Visibility">
-                              <Select
-                                value={repositoryPrivate ? "private" : "public"}
-                                onChange={(event) =>
-                                  setRepositoryPrivate(event.target.value === "private")
-                                }
-                              >
-                                <option value="private">Private</option>
-                                <option value="public">Public</option>
-                              </Select>
-                            </Field>
-                            <p className="field-help">
-                              The selected GitHub installation must allow repository administration
-                              to create a repository.
-                            </p>
-                          </div>
-                        ) : (
+                            <Select
+                              data-testid="github-connection"
+                              value={selectedConnectionId}
+                              onChange={(event) => {
+                                setSelectedConnectionId(event.target.value);
+                                setSelectedRepositoryId("");
+                              }}
+                            >
+                              {connectedGitHub.map((connection: GitHubConnection) => (
+                                <option key={connection.id} value={connection.id}>
+                                  {connection.owner_login} · {connection.owner_type}
+                                </option>
+                              ))}
+                            </Select>
+                          </Field>
+                        ) : selectedConnection ? (
+                          <p className="field-help" data-testid="automatic-github-destination">
+                            Repository destination: {selectedConnection.owner_login}
+                          </p>
+                        ) : null}
+                        {scenario === "new_repo" ? null : (
                           <>
                             <div className="repository-search">
                               <Input
@@ -1961,115 +2047,185 @@ export function Projects({
 
                 {startingPoint === "new" ? (
                   <>
-                    <div className="project-create-grid">
-                      <Field label="Project name">
-                        <Input
-                          data-testid="project-name"
-                          value={name}
-                          onChange={(e) => setName(e.target.value)}
-                          placeholder="e.g. Notifications service"
-                          autoFocus
-                        />
-                      </Field>
-                      <Field label="Objective">
-                        <TextArea
-                          data-testid="project-description"
-                          value={description}
-                          onChange={(e) => setDescription(e.target.value)}
-                          placeholder="What should this project deliver?"
-                        />
-                      </Field>
-                    </div>
-                    <div className="two-col-fields">
-                      <Field label="Coordinator model">
-                        <Select
-                          data-testid="pm-model"
-                          value={pmModel}
-                          aria-describedby="pm-model-description"
-                          onChange={(e) => setPmModel(e.target.value as PmModelT)}
-                        >
-                          <optgroup label="Anthropic">
-                            {PM_MODEL_OPTIONS.anthropic.map((model) => (
-                              <option key={model.id} value={model.id}>
-                                {model.label}
-                              </option>
-                            ))}
-                          </optgroup>
-                          <optgroup label="OpenAI">
-                            {PM_MODEL_OPTIONS.openai.map((model) => (
-                              <option key={model.id} value={model.id}>
-                                {model.label}
-                              </option>
-                            ))}
-                          </optgroup>
-                        </Select>
-                        <span className="field-help" id="pm-model-description">
-                          {selectedModel?.description}
-                        </span>
-                      </Field>
-                      <Field label="Reviewer model">
-                        <Select
-                          data-testid="reviewer-model"
-                          value={reviewerSelection}
-                          onChange={(e) => setReviewerSelection(e.target.value)}
-                        >
-                          <option value="auto">
-                            Automatic (cross-provider) · {reviewerPreviewLabel}
-                          </option>
-                          <optgroup label="Anthropic">
-                            {PM_MODEL_OPTIONS.anthropic.map((model) => (
-                              <option key={model.id} value={`anthropic:${model.id}`}>
-                                {model.label}
-                              </option>
-                            ))}
-                          </optgroup>
-                          <optgroup label="OpenAI">
-                            {PM_MODEL_OPTIONS.openai.map((model) => (
-                              <option key={model.id} value={`openai:${model.id}`}>
-                                {model.label}
-                              </option>
-                            ))}
-                          </optgroup>
-                        </Select>
-                        <span className="field-help">
-                          Automatic picks the opposite provider from the coordinator.
-                        </span>
-                      </Field>
-                    </div>
-                    <Field label="Plan review rounds">
-                      <div className="rounds-stepper" data-testid="rounds-stepper">
-                        <Button
-                          type="button"
-                          className="btn-small"
-                          disabled={roundsCount <= 1}
-                          onClick={() => setRoundsCount((n) => Math.max(1, n - 1))}
-                          aria-label="Fewer rounds"
-                        >
-                          −
-                        </Button>
-                        <span className="rounds-value mono">{roundsCount}</span>
-                        <Button
-                          type="button"
-                          className="btn-small"
-                          disabled={roundsCount >= 5}
-                          onClick={() => setRoundsCount((n) => Math.min(5, n + 1))}
-                          aria-label="More rounds"
-                        >
-                          +
-                        </Button>
-                      </div>
-                      <span className="field-help">
-                        Coordinator and reviewer debate the plan up to this many rounds, then stop
-                        early once they converge.
-                      </span>
+                    <Field label="What should The Norns build?">
+                      <TextArea
+                        data-testid="project-description"
+                        value={description}
+                        onChange={(event) => setDescription(event.target.value)}
+                        placeholder="Describe the product, outcome, and any important constraints."
+                        autoFocus
+                      />
                     </Field>
-                    <div className="policy">
-                      <strong>Cross-provider review is on.</strong>
-                      <br />
-                      {selectedModel?.label} will lead planning.{" "}
-                      {pmProvider === "anthropic" ? "OpenAI" : "Anthropic"} will independently
-                      review the plan.
-                    </div>
+                    {description.trim() ? (
+                      <div className="policy" data-testid="derived-project-summary">
+                        <strong>{derivedIdentity.projectName}</strong>
+                        <br />
+                        {selectedConnection?.owner_login ?? "GitHub"}/
+                        {derivedIdentity.repositorySlug} ·{" "}
+                        {repositoryPrivate ? "Private" : "Public"}
+                      </div>
+                    ) : null}
+                    <details>
+                      <summary>Optional details</summary>
+                      <div className="form-stack">
+                        <div className="project-create-grid">
+                          <Field label="Project name override">
+                            <Input
+                              data-testid="project-name"
+                              value={name}
+                              onChange={(event) => setName(event.target.value)}
+                              placeholder={deriveProjectIdentity(description).projectName}
+                            />
+                          </Field>
+                          <Field label="Repository slug override">
+                            <Input
+                              data-testid="github-new-repository-name"
+                              value={repositoryName}
+                              onChange={(event) => setRepositoryName(event.target.value)}
+                              placeholder={deriveProjectIdentity(description).repositorySlug}
+                            />
+                          </Field>
+                        </div>
+                        <Field label="Reference images">
+                          <Input
+                            data-testid="new-project-attachment-input"
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp,image/gif"
+                            multiple
+                            disabled={pendingAttachmentFiles.length >= 8}
+                            onChange={(event) => {
+                              const files = Array.from(event.target.files ?? []).filter((file) =>
+                                ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(
+                                  file.type,
+                                ),
+                              );
+                              setPendingAttachmentFiles((current) =>
+                                [...current, ...files].slice(0, 8),
+                              );
+                              event.target.value = "";
+                            }}
+                          />
+                          {pendingAttachmentFiles.length ? (
+                            <ul data-testid="new-project-attachment-list">
+                              {pendingAttachmentFiles.map((file, index) => (
+                                <li key={`${file.name}-${file.size}-${index}`}>
+                                  {file.name}{" "}
+                                  <button
+                                    type="button"
+                                    aria-label={`Remove ${file.name}`}
+                                    onClick={() =>
+                                      setPendingAttachmentFiles((current) =>
+                                        current.filter((_, candidate) => candidate !== index),
+                                      )
+                                    }
+                                  >
+                                    ×
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : null}
+                        </Field>
+                        <Field label="Visibility">
+                          <Select
+                            data-testid="github-repository-visibility"
+                            value={repositoryPrivate ? "private" : "public"}
+                            onChange={(event) =>
+                              setRepositoryPrivate(event.target.value === "private")
+                            }
+                          >
+                            <option value="private">Private (default)</option>
+                            <option value="public">Public</option>
+                          </Select>
+                        </Field>
+                        <div className="two-col-fields">
+                          <Field label="Coordinator model">
+                            <Select
+                              data-testid="pm-model"
+                              value={pmModel}
+                              aria-describedby="pm-model-description"
+                              onChange={(event) => setPmModel(event.target.value as PmModelT)}
+                            >
+                              <optgroup label="Anthropic">
+                                {PM_MODEL_OPTIONS.anthropic.map((model) => (
+                                  <option key={model.id} value={model.id}>
+                                    {model.label}
+                                  </option>
+                                ))}
+                              </optgroup>
+                              <optgroup label="OpenAI">
+                                {PM_MODEL_OPTIONS.openai.map((model) => (
+                                  <option key={model.id} value={model.id}>
+                                    {model.label}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            </Select>
+                            <span className="field-help" id="pm-model-description">
+                              {selectedModel?.description}
+                            </span>
+                          </Field>
+                          <Field label="Reviewer model">
+                            <Select
+                              data-testid="reviewer-model"
+                              value={reviewerSelection}
+                              onChange={(event) => setReviewerSelection(event.target.value)}
+                            >
+                              <option value="auto">
+                                Automatic (cross-provider) · {reviewerPreviewLabel}
+                              </option>
+                              <optgroup label="Anthropic">
+                                {PM_MODEL_OPTIONS.anthropic.map((model) => (
+                                  <option key={model.id} value={`anthropic:${model.id}`}>
+                                    {model.label}
+                                  </option>
+                                ))}
+                              </optgroup>
+                              <optgroup label="OpenAI">
+                                {PM_MODEL_OPTIONS.openai.map((model) => (
+                                  <option key={model.id} value={`openai:${model.id}`}>
+                                    {model.label}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            </Select>
+                            <span className="field-help">
+                              Automatic picks the opposite provider from the coordinator.
+                            </span>
+                          </Field>
+                        </div>
+                        <Field label="Plan review rounds">
+                          <div className="rounds-stepper" data-testid="rounds-stepper">
+                            <Button
+                              type="button"
+                              className="btn-small"
+                              disabled={roundsCount <= 1}
+                              onClick={() => setRoundsCount((count) => Math.max(1, count - 1))}
+                              aria-label="Fewer rounds"
+                            >
+                              −
+                            </Button>
+                            <span className="rounds-value mono">{roundsCount}</span>
+                            <Button
+                              type="button"
+                              className="btn-small"
+                              disabled={roundsCount >= 5}
+                              onClick={() => setRoundsCount((count) => Math.min(5, count + 1))}
+                              aria-label="More rounds"
+                            >
+                              +
+                            </Button>
+                          </div>
+                        </Field>
+                        <div className="policy">
+                          <strong>Cross-provider review is on.</strong>
+                          <br />
+                          {selectedModel?.label} will lead planning.{" "}
+                          {pmProvider === "anthropic" ? "OpenAI" : "Anthropic"} will independently
+                          review the plan.
+                        </div>
+                      </div>
+                    </details>
                   </>
                 ) : (
                   <Field label="What should The Norns do first? (optional)">
@@ -2093,7 +2249,7 @@ export function Projects({
                       ? "Creating repository and project…"
                       : "Creating…"
                     : startingPoint === "new"
-                      ? "Create & draft plan →"
+                      ? "Create & start planning →"
                       : "Adopt project →"}
                 </Button>
               </div>

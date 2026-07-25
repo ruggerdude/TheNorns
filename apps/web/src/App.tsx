@@ -723,6 +723,8 @@ function ProjectGraph({
     project.entry_flow === "adoption" ||
     project.onboarding_scenario === "existing_repo" ||
     project.source_type === "local";
+  const isCanonicalPlanningJourney =
+    isAdoptionJourney || project.entry_flow === "new" || project.onboarding_scenario === "new_repo";
   const [graph, setGraph] = useState<GraphDto | null>(null);
   const [draftOnly, setDraftOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
@@ -743,7 +745,7 @@ function ProjectGraph({
   const [executionError, setExecutionError] = useState<string | null>(null);
   const [showDebates, setShowDebates] = useState(false);
   const [phaseJourneyRunId, setPhaseJourneyRunId] = useState<string | null>(
-    isAdoptionJourney ? (project.focus_planning_run_id ?? null) : null,
+    isCanonicalPlanningJourney ? (project.focus_planning_run_id ?? null) : null,
   );
   // FRONT DOOR P1d (layout): the workspace shell reorganized into a normal
   // top-width page with a tab bar, per the approved mockup — the graph
@@ -751,7 +753,7 @@ function ProjectGraph({
   // a narrow sidebar. Purely a layout change: every section below is the
   // exact same JSX/logic that existed already, just grouped under a tab.
   const [workspaceTab, setWorkspaceTab] = useState<"overview" | "plan" | "phase" | "graph">(
-    isAdoptionJourney && project.focus_planning_run_id ? "phase" : "overview",
+    isCanonicalPlanningJourney && project.focus_planning_run_id ? "phase" : "overview",
   );
   const focusedTaskId = project.focus_task_id ?? null;
 
@@ -766,7 +768,7 @@ function ProjectGraph({
   const [nextPhaseRounds, setNextPhaseRounds] = useState(3);
   const [nextPhaseAttachmentIds, setNextPhaseAttachmentIds] = useState<string[]>([]);
   const [activePlanningRunId, setActivePlanningRunId] = useState<string | null>(
-    isAdoptionJourney ? null : (project.focus_planning_run_id ?? null),
+    isCanonicalPlanningJourney ? null : (project.focus_planning_run_id ?? null),
   );
   const [planningRun, setPlanningRun] = useState<PlanningRunPollDto | null>(null);
   const [planningRunStarting, setPlanningRunStarting] = useState(false);
@@ -877,12 +879,12 @@ function ProjectGraph({
     void loadResume();
   }, [loadResume]);
 
-  // Adoption hands us a transient run id so the first open is immediate.
-  // A refresh loses that hint, so recover a still-running or awaiting-
-  // approval journey from the server and return the user to the same screen.
+  // New and adopted projects hand us a transient run id so the first open is
+  // immediate. A refresh loses that hint, so recover a still-running,
+  // awaiting-approval, or failed-kickoff journey from durable server state.
   useEffect(() => {
     let cancelled = false;
-    if (isAdoptionJourney && project.focus_planning_run_id) {
+    if (isCanonicalPlanningJourney && project.focus_planning_run_id) {
       setPhaseJourneyRunId(project.focus_planning_run_id);
       setWorkspaceTab("phase");
       return () => {
@@ -890,7 +892,7 @@ function ProjectGraph({
       };
     }
     setPhaseJourneyRunId(null);
-    if (!isAdoptionJourney) {
+    if (!isCanonicalPlanningJourney) {
       return () => {
         cancelled = true;
       };
@@ -940,7 +942,7 @@ function ProjectGraph({
     return () => {
       cancelled = true;
     };
-  }, [project.id, project.focus_planning_run_id, isAdoptionJourney, onLogout]);
+  }, [project.id, project.focus_planning_run_id, isCanonicalPlanningJourney, onLogout]);
 
   // FRONT DOOR P5 (tracking): poll cadence honors the persisted
   // update_interval_seconds once known; falls back to a 15s default until

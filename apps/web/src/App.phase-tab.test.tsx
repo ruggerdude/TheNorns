@@ -15,6 +15,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "./App";
+import type { ProjectSummary } from "./Projects";
 import { setToken } from "./auth";
 import type { PhasePlanningRunDto } from "./phaseTabApi";
 import { fullyAllocatedGraph, projectAlpha } from "./test/fixtures";
@@ -125,7 +126,7 @@ const executionStatus = {
   ],
 };
 
-function workspaceMocks(project = projectAlpha): MockFetch {
+function workspaceMocks(project: ProjectSummary = projectAlpha): MockFetch {
   const mock = new MockFetch();
   mock.get("/api/projects", { body: [project] });
   mock.get(`/api/projects/${projectId}/graph`, { body: fullyAllocatedGraph });
@@ -208,7 +209,61 @@ describe("PHASE TAB (P2)", () => {
     expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
   });
 
-  it("restores an approved adoption whose coding kickoff still needs recovery", async () => {
+  it("opens a new project's approval decision directly and restores that same decision after refresh", async () => {
+    setToken("present");
+    mock = workspaceMocks({
+      ...projectAlpha,
+      entry_flow: "new",
+      onboarding_scenario: "new_repo",
+      focus_planning_run_id: "run-1",
+    });
+    mock.get(runUrl, { body: convergedRun });
+    mock.install();
+
+    const firstOpen = render(<App />);
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: new RegExp(`^${projectAlpha.name}$`, "i"),
+      }),
+    );
+    expect(await screen.findByTestId("phase-decision-panel")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+
+    firstOpen.unmount();
+    mock.restore();
+    mock = workspaceMocks({ ...projectAlpha, onboarding_scenario: "new_repo" });
+    mock.get(`${runsUrl}/latest`, { body: { planning_run: convergedRun } });
+    mock.get(runUrl, { body: convergedRun });
+    mock.install();
+
+    render(<App />);
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: new RegExp(`^${projectAlpha.name}$`, "i"),
+      }),
+    );
+    expect(await screen.findByTestId("phase-decision-panel")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+  });
+
+  it("restores a new project's active planning run from the durable latest-run endpoint", async () => {
+    setToken("present");
+    mock = workspaceMocks({ ...projectAlpha, onboarding_scenario: "new_repo" });
+    mock.get(`${runsUrl}/latest`, { body: { planning_run: makeRun() } });
+    mock.get(runUrl, { body: makeRun() });
+    mock.install();
+
+    render(<App />);
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: new RegExp(`^${projectAlpha.name}$`, "i"),
+      }),
+    );
+    expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+  });
+
+  it("restores an approved new project whose coding kickoff still needs recovery", async () => {
     setToken("present");
     const approvedRun = makeRun({
       status: "approved",
@@ -219,7 +274,7 @@ describe("PHASE TAB (P2)", () => {
         decided_at: "2026-07-25T12:00:00.000Z",
       },
     });
-    mock = workspaceMocks({ ...projectAlpha, onboarding_scenario: "existing_repo" });
+    mock = workspaceMocks({ ...projectAlpha, onboarding_scenario: "new_repo" });
     mock.get(`${runsUrl}/latest`, { body: { planning_run: approvedRun } });
     mock.get(runUrl, { body: approvedRun });
     mock.get(`/api/v2/projects/${projectId}/execution-status`, {

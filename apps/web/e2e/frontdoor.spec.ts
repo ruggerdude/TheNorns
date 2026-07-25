@@ -100,10 +100,13 @@ async function fulfill(route: Route, payload: unknown, status = 200) {
   });
 }
 
-async function prepare(page: Page, mode: "github" | "local") {
+async function prepare(page: Page, mode: "github" | "local" | "new") {
   let projects: ReturnType<typeof project>[] = [];
   let planningCreated = false;
-  const observed = { planningDecisions: [] as unknown[] };
+  const observed = {
+    onboardingRequests: [] as unknown[],
+    planningDecisions: [] as unknown[],
+  };
   await page.addInitScript(() => {
     sessionStorage.setItem("norns_cookie_session", "present");
     localStorage.setItem("norns_theme", "light");
@@ -156,12 +159,25 @@ async function prepare(page: Page, mode: "github" | "local") {
       });
     }
     if (path === "/api/v2/projects/onboarding") {
-      projects = [project("project-github", "github")];
+      const body = request.postDataJSON() as {
+        name: string;
+        description: string;
+        scenario: "new_repo" | "existing_repo";
+      };
+      observed.onboardingRequests.push(body);
+      projects = [
+        {
+          ...project("project-github", "github"),
+          name: body.name,
+          description: body.description,
+          onboarding_scenario: body.scenario,
+        },
+      ];
       return fulfill(
         route,
         {
           project_id: "project-github",
-          scenario: "existing_repo",
+          scenario: body.scenario,
           replayed: false,
           blockers: [],
         },
@@ -289,6 +305,36 @@ test("Directed adoption reaches one approval and starts the first coding task", 
     "Execution started automatically",
   );
   await expect(page.getByTestId("phase-execution-table")).toContainText("active");
+  expect(observed.planningDecisions).toEqual([expect.objectContaining({ decision: "approve" })]);
+});
+
+test("New project goes from one brief to the first coding task", async ({ page }) => {
+  const observed = await prepare(page, "new");
+  await page.goto("/");
+  await page.getByRole("button", { name: /new project/i }).click();
+
+  await expect(page.getByTestId("automatic-github-destination")).toContainText("octocat");
+  await page
+    .getByTestId("project-description")
+    .fill("Build a deployment workflow dashboard for release managers.");
+  await expect(page.getByTestId("derived-project-summary")).toContainText(
+    "Deployment workflow dashboard for release managers",
+  );
+  await page.getByRole("button", { name: /create & start planning/i }).click();
+
+  await expect(page.getByTestId("phase-decision-panel")).toBeVisible();
+  await page.getByRole("button", { name: /approve & start coding/i }).click();
+  await expect(page.getByTestId("phase-execution-kickoff-note")).toContainText(
+    "Execution started automatically",
+  );
+  await expect(page.getByTestId("phase-execution-table")).toContainText("active");
+  expect(observed.onboardingRequests).toEqual([
+    expect.objectContaining({
+      scenario: "new_repo",
+      name: "Deployment workflow dashboard for release managers",
+      repository_name: "deployment-workflow-dashboard-for-release-managers",
+    }),
+  ]);
   expect(observed.planningDecisions).toEqual([expect.objectContaining({ decision: "approve" })]);
 });
 

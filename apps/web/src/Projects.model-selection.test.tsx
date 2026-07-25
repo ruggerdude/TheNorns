@@ -78,6 +78,11 @@ describe("project manager model selection", () => {
         }),
       };
     });
+    mock.del("/api/v2/projects/proj_created/planning-reviewer", { status: 204 });
+    mock.post("/api/v2/projects/proj_created/planning-runs", {
+      status: 202,
+      body: { planning_run_id: "run-model" },
+    });
     mock.install();
     render(
       <Projects
@@ -104,17 +109,11 @@ describe("project manager model selection", () => {
   async function submit(name: string) {
     await userEvent.type(screen.getByTestId("project-name"), name);
     await userEvent.type(screen.getByTestId("project-description"), "Plan the delivery");
-    // "Start something new" always creates a GitHub repository now — give
-    // it a name so the create button is enabled.
     await userEvent.type(
       await screen.findByTestId("github-new-repository-name"),
       "plan-the-delivery",
     );
-    // A "new" project with an objective moves to the wizard's attach-and-launch
-    // step (FRONT DOOR P1) instead of navigating away immediately; skip it here
-    // since this suite is only exercising the PM-model selection, not planning.
-    await userEvent.click(screen.getByRole("button", { name: /create & draft plan/i }));
-    await userEvent.click(await screen.findByRole("button", { name: /skip for now/i }));
+    await userEvent.click(screen.getByRole("button", { name: /create & start planning/i }));
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     return mock.calls.find(
       (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",

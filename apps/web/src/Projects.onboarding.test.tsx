@@ -80,6 +80,11 @@ describe("O1: GitHub and local-folder onboarding", () => {
         summary: "Understood",
       },
     });
+    mock.del(/^\/api\/v2\/projects\/[^/]+\/planning-reviewer$/, { status: 204 });
+    mock.post(/^\/api\/v2\/projects\/[^/]+\/planning-runs$/, {
+      status: 202,
+      body: { planning_run_id: "new-project-run" },
+    });
     // O1: onboarding always creates/binds a GitHub repository — POST
     // /api/v2/projects/onboarding is the single creation endpoint. It
     // returns a lean { project_id, scenario, replayed, ... } summary, not
@@ -156,15 +161,8 @@ describe("O1: GitHub and local-folder onboarding", () => {
     const user = userEvent.setup();
     renderWizard();
     await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.type(screen.getByTestId("project-name"), "Fresh app");
     await user.type(screen.getByTestId("project-description"), "Build a fresh application");
-    await user.type(await screen.findByTestId("github-new-repository-name"), "fresh-app");
-
-    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
-    // A "new" project with an objective moves to the wizard's
-    // attach-and-launch step (FRONT DOOR P1); skip it — this test is only
-    // about the onboarding request shape.
-    await user.click(await screen.findByRole("button", { name: /skip for now/i }));
+    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
 
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     const onboardingCall = mock.calls.find(
@@ -173,11 +171,11 @@ describe("O1: GitHub and local-folder onboarding", () => {
     expect(onboardingCall).toMatchObject({
       body: {
         scenario: "new_repo",
-        name: "Fresh app",
+        name: "Fresh application",
         description: "Build a fresh application",
         pm_provider: "anthropic",
         connection_id: "github:42",
-        repository_name: "fresh-app",
+        repository_name: "fresh-application",
         private: true,
       },
     });
@@ -390,9 +388,9 @@ describe("O1: GitHub and local-folder onboarding", () => {
       /choose or create a github repository/i,
     );
 
-    await user.type(await screen.findByTestId("github-new-repository-name"), "fresh-app");
+    await user.type(screen.getByTestId("project-description"), "Build a fresh application");
     expect(await screen.findByTestId("setup-confirmation")).toHaveTextContent(
-      "Work happens in a GitHub Actions job inside octocat/fresh-app. Changes arrive as commits and pull requests in that repository — to get the files on your own machine, clone or pull as usual.",
+      "Work happens in a GitHub Actions job inside octocat/fresh-application. Changes arrive as commits and pull requests in that repository — to get the files on your own machine, clone or pull as usual.",
     );
 
     await user.click(screen.getByRole("button", { name: /^existing/i }));
@@ -402,14 +400,13 @@ describe("O1: GitHub and local-folder onboarding", () => {
     );
   });
 
-  it("disables Create until a repository is named (new) or selected (existing)", async () => {
+  it("requires only a brief for New and a repository selection for Existing", async () => {
     const user = userEvent.setup();
     renderWizard();
     await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.type(screen.getByTestId("project-name"), "Fresh app");
+    expect(screen.getByRole("button", { name: /create & start planning/i })).toBeDisabled();
     await user.type(screen.getByTestId("project-description"), "Build a fresh application");
-    await screen.findByTestId("github-new-repository-name");
-    expect(screen.getByRole("button", { name: /create & draft plan/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /create & start planning/i })).toBeEnabled();
 
     await user.click(screen.getByRole("button", { name: /^existing/i }));
     await screen.findByRole("button", { name: /octocat\/existing-app/i });
@@ -460,11 +457,8 @@ describe("O1: GitHub and local-folder onboarding", () => {
     const user = userEvent.setup();
     renderWizard();
     await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.type(screen.getByTestId("project-name"), "Fresh app");
     await user.type(screen.getByTestId("project-description"), "Build a fresh application");
-    await user.type(await screen.findByTestId("github-new-repository-name"), "fresh-app");
-    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
-    await user.click(await screen.findByRole("button", { name: /skip for now/i }));
+    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
 
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     const firstKey = (
@@ -477,11 +471,8 @@ describe("O1: GitHub and local-folder onboarding", () => {
     // Reopening the wizard for a new project gets a fresh key — keys are
     // per-submit-attempt, not global constants.
     await user.click(await screen.findByRole("button", { name: /new project/i }));
-    await user.type(screen.getByTestId("project-name"), "Second app");
     await user.type(screen.getByTestId("project-description"), "Build a second application");
-    await user.type(await screen.findByTestId("github-new-repository-name"), "second-app");
-    await user.click(screen.getByRole("button", { name: /create & draft plan/i }));
-    await user.click(await screen.findByRole("button", { name: /skip for now/i }));
+    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
 
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledTimes(2));
     const secondKey = (
