@@ -20,9 +20,12 @@ import { pmModelOption } from "@norns/contracts";
 import {
   Background,
   type Connection,
+  ConnectionLineType,
   Controls,
   type Edge,
+  type EdgeTypes,
   type Node,
+  Position,
   ReactFlow,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -34,6 +37,7 @@ import { AttachmentInput } from "./AttachmentInput";
 import { Debates } from "./Debates";
 import { Gantt, type GanttPhase } from "./Gantt";
 import { Login, type LoginMode } from "./Login";
+import { OrthogonalEdge } from "./OrthogonalEdge";
 import { PhaseTab } from "./PhaseTab";
 import {
   AttentionDecisionForm,
@@ -669,7 +673,9 @@ async function patchJson<T>(path: string, body: unknown): Promise<T> {
   return json;
 }
 
-/** Layered layout: x by longest-path depth, y by index within the layer. */
+const graphEdgeTypes: EdgeTypes = { orthogonal: OrthogonalEdge };
+
+/** Layered layout with clear horizontal and vertical connector corridors. */
 function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
   const depths = new Map<string, number>();
   const depthOf = (id: string, seen: Set<string>): number => {
@@ -692,7 +698,7 @@ function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
     const depth = depths.get(node.id) ?? 0;
     const index = perLayer.get(depth) ?? 0;
     perLayer.set(depth, index + 1);
-    positions.set(node.id, { x: depth * 250 + 20, y: index * 110 + 20 });
+    positions.set(node.id, { x: depth * 300 + 20, y: index * 140 + 20 });
   }
   return positions;
 }
@@ -1406,6 +1412,8 @@ function ProjectGraph({
     const flowNodes: Node[] = graph.nodes.map((node) => ({
       id: node.id,
       position: positions.get(node.id) ?? { x: 0, y: 0 },
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
       style: {
         border:
           node.id === selected
@@ -1477,6 +1485,7 @@ function ProjectGraph({
         id: `${dep}->${node.id}`,
         source: dep,
         target: node.id,
+        type: "orthogonal",
         markerEnd: "arrowclosed" as const,
         style: { stroke: theme === "light" ? "#7a8793" : "#66717d", strokeWidth: 1.7 },
         animated: node.id === selected || dep === selected,
@@ -2010,6 +2019,8 @@ function ProjectGraph({
               <ReactFlow
                 nodes={nodes}
                 edges={edges}
+                edgeTypes={graphEdgeTypes}
+                connectionLineType={ConnectionLineType.SmoothStep}
                 onConnect={onConnect}
                 onEdgesDelete={onEdgesDelete}
                 onNodeClick={(_event, node) => setSelected(node.id)}
