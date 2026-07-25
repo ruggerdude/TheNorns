@@ -126,6 +126,58 @@ describe.sequential("relational composition matrix", () => {
     });
   });
 
+  it("synchronizes an authoritative legacy credential upgrade without weakening identity checks", async () => {
+    const actor = await legacyActor();
+    const composition = bridge("legacy", "legacy", "legacy");
+    const legacy = users.snapshot().users.find((user) => user.id === actor.id);
+    if (!legacy) throw new Error("legacy actor disappeared from the snapshot");
+    if (!legacy.passwordHash) throw new Error("legacy actor has no credential");
+    const upgradedHash = legacy.passwordHash;
+    const staleLegacyHash = `${"a".repeat(32)}:${"b".repeat(128)}`;
+    await pg.query(
+      `INSERT INTO users (
+         id, username, display_name, email, name, password_hash,
+         password_hash_scheme, role, status, source, source_record_id,
+         created_at, updated_at
+       ) VALUES (
+         $1,$2,$3,$2,$3,$4,'legacy-scrypt-v0',$5,$6,
+         'legacy_snapshot',$1,$7,$7
+       )`,
+      [
+        actor.id,
+        actor.email,
+        actor.name,
+        staleLegacyHash,
+        actor.role,
+        actor.status,
+        actor.createdAt,
+      ],
+    );
+
+    await composition.prepare();
+
+    const result = await pg.query<{
+      password_hash: string;
+      password_hash_scheme: string;
+      password_rehashed_at: Date | null;
+      source: string;
+      source_record_id: string | null;
+    }>(
+      `SELECT password_hash, password_hash_scheme, password_rehashed_at,
+              source, source_record_id
+       FROM users
+       WHERE id = $1`,
+      [actor.id],
+    );
+    expect(result.rows[0]).toMatchObject({
+      password_hash: upgradedHash,
+      password_hash_scheme: "scrypt-v1",
+      source: "legacy_snapshot",
+      source_record_id: actor.id,
+    });
+    expect(result.rows[0]?.password_rehashed_at).not.toBeNull();
+  });
+
   it("anchors an existing legacy local project before the relational source FK is written", async () => {
     const actor = await legacyActor();
     const composition = bridge("legacy", "legacy", "legacy");

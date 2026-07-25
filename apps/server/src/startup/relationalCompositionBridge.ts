@@ -4,7 +4,11 @@ import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import { insertProjectCore } from "../projects/relationalReadRepository.js";
 import type { ProjectStore, ProjectSummary } from "../projects/store.js";
 import type { IdentityUser } from "../users/identityService.js";
-import { detectPasswordHashScheme } from "../users/passwords.js";
+import {
+  CURRENT_PASSWORD_HASH_SCHEME,
+  LEGACY_PASSWORD_HASH_SCHEME,
+  detectPasswordHashScheme,
+} from "../users/passwords.js";
 import type { UserStore } from "../users/store.js";
 
 export type CompositionAuthority = "legacy" | "relational";
@@ -237,11 +241,12 @@ export class RelationalCompositionBridge {
             legacy.createdAt,
           ],
         );
-        const row = (
+        let row = (
           await sql.query<StoredActor>(
             `SELECT id, email, name, password_hash, password_hash_scheme, role,
                   status, source, source_record_id, created_at
-           FROM users WHERE id = $1`,
+           FROM users WHERE id = $1
+           FOR UPDATE`,
             [legacy.id],
           )
         ).rows[0];
@@ -249,8 +254,6 @@ export class RelationalCompositionBridge {
           !row ||
           !same(row.email, normalizedEmail) ||
           !same(row.name, legacy.name) ||
-          !same(row.password_hash, legacy.passwordHash) ||
-          !same(row.password_hash_scheme, scheme) ||
           !same(row.role, legacy.role) ||
           !same(row.status, legacy.status) ||
           !same(row.source, "legacy_snapshot") ||
@@ -262,6 +265,48 @@ export class RelationalCompositionBridge {
             "identity_bridge",
             "Reconcile the legacy and relational identity records before retrying.",
             `relational actor ${legacy.id} conflicts with the authenticated legacy identity`,
+          );
+        }
+        const credentialChanged =
+          !same(row.password_hash, legacy.passwordHash) || !same(row.password_hash_scheme, scheme);
+        if (credentialChanged) {
+          const isSupportedRehash =
+            row.password_hash !== null &&
+            row.password_hash_scheme === LEGACY_PASSWORD_HASH_SCHEME &&
+            legacy.passwordHash !== null &&
+            scheme === CURRENT_PASSWORD_HASH_SCHEME;
+          if (!isSupportedRehash) {
+            throw new RelationalCompositionConflictError(
+              "relational_actor_conflict",
+              "identity_bridge",
+              "Reconcile the legacy and relational identity records before retrying.",
+              `relational actor ${legacy.id} has an unsupported credential divergence`,
+            );
+          }
+          row = (
+            await sql.query<StoredActor>(
+              `UPDATE users
+               SET password_hash = $2,
+                   password_hash_scheme = $3,
+                   password_rehashed_at = transaction_timestamp(),
+                   updated_at = transaction_timestamp()
+               WHERE id = $1
+               RETURNING id, email, name, password_hash, password_hash_scheme,
+                         role, status, source, source_record_id, created_at`,
+              [legacy.id, legacy.passwordHash, scheme],
+            )
+          ).rows[0];
+        }
+        if (
+          !row ||
+          !same(row.password_hash, legacy.passwordHash) ||
+          !same(row.password_hash_scheme, scheme)
+        ) {
+          throw new RelationalCompositionConflictError(
+            "relational_actor_conflict",
+            "identity_bridge",
+            "Reconcile the legacy and relational identity records before retrying.",
+            `relational actor ${legacy.id} credentials could not be synchronized`,
           );
         }
       });
