@@ -32,6 +32,13 @@ export interface TaskContextAssembler {
   assembleForTask(taskId: string): Promise<V2ContentAddressedReferenceT[]>;
 }
 
+export interface TaskKnowledgeContextSource {
+  contextSectionForTask(
+    sql: V2SqlExecutor,
+    taskId: string,
+  ): Promise<{ section: "knowledge"; content: Buffer } | null>;
+}
+
 // ---- size policy ------------------------------------------------------------
 
 /**
@@ -234,6 +241,7 @@ interface ContextModel {
   /** Set once dependency detail has been degraded to title+state. */
   dependenciesCompact: boolean;
   memory: MemoryItem[];
+  knowledge: string | null;
 }
 
 /** Emission order. The runner's loader concatenates refs in array order, so
@@ -242,6 +250,7 @@ const SECTION_ORDER = [
   "mission",
   "objective",
   "task",
+  "knowledge",
   "dependencies",
   "repository",
   "directives",
@@ -455,6 +464,10 @@ function renderMemory(model: ContextModel): string | null {
   return lines.join("\n");
 }
 
+function renderKnowledge(model: ContextModel): string | null {
+  return model.knowledge;
+}
+
 function renderSection(section: SectionName, model: ContextModel): string | null {
   switch (section) {
     case "mission":
@@ -463,6 +476,8 @@ function renderSection(section: SectionName, model: ContextModel): string | null
       return renderObjective(model);
     case "task":
       return renderTask(model);
+    case "knowledge":
+      return renderKnowledge(model);
     case "dependencies":
       return renderDependencies(model);
     case "repository":
@@ -556,6 +571,7 @@ export interface TaskContextAssemblerOptions {
    */
   baseUrl: string;
   maxTotalBytes?: number;
+  knowledgeSource?: TaskKnowledgeContextSource;
 }
 
 export const TASK_CONTEXT_ROUTE_PREFIX = "/api/v2/execution/task-context";
@@ -563,6 +579,7 @@ export const TASK_CONTEXT_ROUTE_PREFIX = "/api/v2/execution/task-context";
 export class RelationalTaskContextAssembler implements TaskContextAssembler {
   private readonly baseUrl: string;
   private readonly maxTotalBytes: number;
+  private readonly knowledgeSource: TaskKnowledgeContextSource | undefined;
 
   constructor(
     private readonly transactions: V2TransactionRunner,
@@ -578,6 +595,7 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
     }
     this.baseUrl = url.origin;
     this.maxTotalBytes = options.maxTotalBytes ?? MAX_TOTAL_CONTEXT_BYTES;
+    this.knowledgeSource = options.knowledgeSource;
   }
 
   async assembleForTask(taskId: string): Promise<V2ContentAddressedReferenceT[]> {
@@ -816,6 +834,10 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
       assignment = assignmentResult.rows[0] ?? null;
     }
 
+    const knowledgeSection = this.knowledgeSource
+      ? await this.knowledgeSource.contextSectionForTask(tx, task.id)
+      : null;
+
     return {
       project,
       phase,
@@ -828,6 +850,7 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
       dependencies,
       dependenciesCompact: false,
       memory,
+      knowledge: knowledgeSection?.content.toString("utf8").trimEnd() ?? null,
     };
   }
 }

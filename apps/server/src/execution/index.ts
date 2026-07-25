@@ -9,6 +9,7 @@ export {
   type TaskContextAssembler,
   type TaskContextAssemblerOptions,
   type TaskContextAssemblyCode,
+  type TaskKnowledgeContextSource,
 } from "./taskContextAssembler.js";
 export {
   TASK_CONTEXT_MEDIA_TYPE,

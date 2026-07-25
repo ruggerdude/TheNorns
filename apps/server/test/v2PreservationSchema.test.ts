@@ -12,6 +12,7 @@ import {
   FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
   GATEWAY_CREDENTIALS_MIGRATION_NAME,
   GITHUB_APP_MANIFEST_MIGRATION_NAME,
+  KNOWLEDGE_PACKAGES_MIGRATION_NAME,
   ONBOARDING_BINDINGS_MIGRATION_NAME,
   ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME,
   PHASE1_V2_MIGRATION_NAME,
@@ -235,6 +236,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       { name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME, applied: false },
       // PHASE TAB P1 (number 0025 assigned at integration).
       { name: PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME, applied: false },
+      { name: KNOWLEDGE_PACKAGES_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -268,9 +270,9 @@ describe.sequential("Phase 2 preservation schema", () => {
       RUN_PUBLICATION_MIGRATION_NAME,
       ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
       PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
-      // PHASE TAB P1: 0025, the highest number, so it stays last in the
-      // alphabetical tracking query.
+      // Phase-tab workflow migrations remain in numeric order.
       PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME,
+      KNOWLEDGE_PACKAGES_MIGRATION_NAME,
     ]);
   });
 

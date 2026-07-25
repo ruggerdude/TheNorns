@@ -49,6 +49,7 @@ import {
   formatRunnerTarballSpec,
   loadRunnerTarball,
 } from "./integrations/runnerDistribution.js";
+import { KnowledgeSystemService } from "./knowledge/index.js";
 import { Phase7OperationsService } from "./operations/phase7Operations.js";
 import {
   Phase2ApplicationPersistenceLease,
@@ -185,6 +186,7 @@ let onboardingOptions: { transactions: V2TransactionRunner } | undefined;
 // constructor throws on anything other than HTTPS (or http on localhost),
 // so a misconfiguration fails at boot, not silently at runner-fetch time.
 let executionOptions: { transactions: V2TransactionRunner; baseUrl?: string } | undefined;
+let knowledgeOptions: { service: KnowledgeSystemService } | undefined;
 // EXECUTION E10 (E9-10, = E3-10): the relational runtime behind BOTH the E3
 // completion proxy and E9's provider-native model gateway. Both previously
 // reached for `planningRuns ?? onboarding ?? attachments` inside buildServer --
@@ -219,6 +221,8 @@ if (databaseUrl) {
       mode: "runtime",
       role: "norns_app",
     });
+    const knowledgeService = new KnowledgeSystemService(runtimeTransactions);
+    knowledgeOptions = { service: knowledgeService };
     // GitHub manifest credentials are durable PostgreSQL data and may be used
     // before identity routing completes its relational cutover. Coupling this
     // keyring to the identity route incorrectly disabled guided GitHub setup
@@ -460,7 +464,7 @@ if (databaseUrl) {
       new RelationalTaskContextAssembler(
         runtimeTransactions,
         new TaskContextStore(runtimeTransactions),
-        { baseUrl: publicOrigin },
+        { baseUrl: publicOrigin, knowledgeSource: knowledgeService },
       ),
       new DispatchContextScopeRepository(runtimeTransactions),
       (runnerId) => {
@@ -745,6 +749,7 @@ const server = await buildServer({
   ...(attachmentsOptions !== undefined ? { attachments: attachmentsOptions } : {}),
   ...(onboardingOptions !== undefined ? { onboarding: onboardingOptions } : {}),
   ...(executionOptions !== undefined ? { execution: executionOptions } : {}),
+  ...(knowledgeOptions !== undefined ? { knowledge: knowledgeOptions } : {}),
   // EXECUTION E10 (E9-10, = E3-10): the E3 proxy and the E9 gateway.
   ...(runnerInferenceOptions !== undefined ? { runnerInference: runnerInferenceOptions } : {}),
   ...(integrationServices !== undefined ? { integrations: integrationServices } : {}),

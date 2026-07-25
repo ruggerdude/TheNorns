@@ -125,6 +125,7 @@ import {
   loadRunnerTarball,
   runnerTarballPath,
 } from "./integrations/runnerDistribution.js";
+import { type KnowledgeSystemService, registerKnowledgeRoutes } from "./knowledge/index.js";
 import type { Phase7OperationsService } from "./operations/phase7Operations.js";
 import type { V2TransactionRunner } from "./persistence/v2/database.js";
 import {
@@ -391,6 +392,11 @@ export interface ServerOptions {
    * `publicOrigin`.
    */
   execution?: { transactions: V2TransactionRunner; baseUrl?: string };
+  /**
+   * Versioned project knowledge, exact task manifests, structured agent
+   * reporting, delta reconciliation, conflict checks, and completion gates.
+   */
+  knowledge?: { service: KnowledgeSystemService };
   /**
    * ONBOARDING O2: the two project-creation scenarios (new_repo,
    * existing_repo). Every project is GitHub-backed and executes in a GitHub
@@ -4829,7 +4835,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     taskContextAssembler = new RelationalTaskContextAssembler(
       options.execution.transactions,
       taskContextStore,
-      { baseUrl: options.execution.baseUrl ?? options.publicOrigin ?? "http://127.0.0.1" },
+      {
+        baseUrl: options.execution.baseUrl ?? options.publicOrigin ?? "http://127.0.0.1",
+        ...(options.knowledge ? { knowledgeSource: options.knowledge.service } : {}),
+      },
     );
     // EXECUTION E2: the fetch route below authenticates identity; this is
     // what additionally authorizes a specific document to a specific runner.
@@ -5421,6 +5430,16 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         });
     });
   });
+
+  if (options.knowledge) {
+    registerKnowledgeRoutes(app, {
+      service: options.knowledge.service,
+      clock: now,
+      requireSession,
+      requireAdmin,
+      resolveUser,
+    });
+  }
 
   return {
     app,

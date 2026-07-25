@@ -11,3 +11,4 @@ export * from "./events.js";
 export * from "./attention.js";
 export * from "./coordination.js";
 export * from "./debate.js";
+export * from "./knowledge.js";
