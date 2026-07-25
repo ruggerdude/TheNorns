@@ -162,15 +162,122 @@ describe("PHASE TAB (P2)", () => {
     mock = workspaceMocks();
     mock.install();
 
-    await openPhaseTab();
+    const user = await openPhaseTab();
 
     expect(screen.getByTestId("phase-goal")).toBeInTheDocument();
+    expect(screen.getByTestId("phase-mode-quick")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("phase-quick-summary")).toHaveTextContent("no reviewer");
+    expect(screen.getByTestId("phase-identity-line")).toHaveTextContent(
+      "PM: Project default · Agent: Matches PM · No reviewer",
+    );
+
+    await user.click(screen.getByTestId("phase-mode-planned"));
     expect(screen.getByTestId("phase-agents")).toHaveValue("both");
     expect(screen.getByTestId("phase-rounds")).toHaveValue("2");
     expect(screen.getByTestId("phase-identity-line")).toHaveTextContent(
-      "PM: Claude Fable · Reviewer: ChatGPT Sol (gpt-5.6-sol)",
+      "PM: Project default · Agent: Recommended automatically · Reviewer: Automatic cross-provider",
     );
     expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+  });
+
+  it("runs a quick change without a reviewer and honors optional PM and agent identities", async () => {
+    setToken("present");
+    const quickReady = makeRun({
+      mode: "quick",
+      status: "converged",
+      round: 0,
+      rounds_completed: 0,
+      review_rounds_total: 0,
+      transcript: [
+        {
+          round: 0,
+          role: "pm",
+          provider: "openai",
+          model: "gpt-5.6-terra",
+          summary: "Prepared one executable quick-change task.",
+          finding_counts: null,
+        },
+      ],
+      result: {
+        plan: {
+          modules: [
+            {
+              id: "quick-change",
+              title: "Correct empty-state grammar",
+              description: "Make the requested copy correction.",
+            },
+          ],
+        },
+        content_hash: "q".repeat(64),
+        total_cost_usd: 0.08,
+        staffing_proposal: {
+          summary: "One selected agent.",
+          recommendations: [
+            {
+              node_id: "quick-change",
+              provider: "anthropic",
+              model: "claude-haiku-4-5-20251001",
+              worker_count: 1,
+            },
+          ],
+        },
+      },
+    });
+    mock = workspaceMocks();
+    mock.post(runsUrl, { body: { planning_run_id: "run-1" } });
+    mock.get(runUrl, { body: quickReady });
+    mock.post(`${runUrl}/decision`, {
+      body: {
+        ...quickReady,
+        status: "approved",
+        decision: {
+          decision: "approve",
+          direction: null,
+          staffing: null,
+          decided_at: "2026-07-25T12:00:00.000Z",
+        },
+        execution: { started: true, detail: "One task dispatched." },
+      },
+    });
+    mock.get(`/api/v2/projects/${projectId}/execution-status`, {
+      body: {
+        project_id: projectId,
+        phases: [
+          {
+            phase_id: "quick-change",
+            name: "Correct empty-state grammar",
+            state: "active",
+            percent_complete: 0,
+            est_completion: null,
+            notes: "Implementation is in progress.",
+          },
+        ],
+      },
+    });
+    mock.install();
+
+    const user = await openPhaseTab();
+    await user.type(screen.getByTestId("phase-goal"), "Correct the empty-state grammar");
+    await user.click(screen.getByTestId("phase-team-toggle"));
+    await user.selectOptions(screen.getByTestId("phase-pm"), "openai:gpt-5.6-terra");
+    await user.selectOptions(
+      screen.getByTestId("phase-agent"),
+      "anthropic:claude-haiku-4-5-20251001",
+    );
+    await user.click(screen.getByTestId("phase-start"));
+
+    expect(await screen.findByTestId("phase-execution-panel")).toBeInTheDocument();
+    expect(screen.queryByTestId("phase-decision-panel")).not.toBeInTheDocument();
+    expect(postCalls(mock, "/planning-runs")[0]?.body).toEqual({
+      objective: "Correct the empty-state grammar",
+      attachment_ids: [],
+      mode: "quick",
+      review_rounds: 0,
+      worker_providers: "anthropic",
+      pm: { provider: "openai", model: "gpt-5.6-terra" },
+      agent: { provider: "anthropic", model: "claude-haiku-4-5-20251001" },
+    });
+    expect(postCalls(mock, "/decision")[0]?.body).toEqual({ decision: "approve" });
   });
 
   it("opens an adopted project's in-flight plan directly and restores it from the durable latest run after refresh", async () => {
@@ -324,6 +431,7 @@ describe("PHASE TAB (P2)", () => {
       },
     });
     await screen.findByTestId("attachment-chip");
+    await user.click(screen.getByTestId("phase-mode-planned"));
     await user.selectOptions(screen.getByTestId("phase-agents"), "anthropic");
     await user.selectOptions(screen.getByTestId("phase-rounds"), "4");
     await user.click(screen.getByTestId("phase-start"));
@@ -333,6 +441,7 @@ describe("PHASE TAB (P2)", () => {
     expect(startCall?.body).toEqual({
       objective: "Ship the notification inbox",
       attachment_ids: ["att-1"],
+      mode: "planned",
       review_rounds: 4,
       worker_providers: "anthropic",
     });
@@ -378,6 +487,7 @@ describe("PHASE TAB (P2)", () => {
 
     const user = await openPhaseTab();
     await user.type(screen.getByTestId("phase-goal"), "Ship it");
+    await user.click(screen.getByTestId("phase-mode-planned"));
     await user.click(screen.getByTestId("phase-start"));
 
     await screen.findByTestId("phase-decision-panel");
@@ -447,6 +557,7 @@ describe("PHASE TAB (P2)", () => {
 
     const user = await openPhaseTab();
     await user.type(screen.getByTestId("phase-goal"), "Ship it");
+    await user.click(screen.getByTestId("phase-mode-planned"));
     await user.click(screen.getByTestId("phase-start"));
     await screen.findByTestId("phase-decision-panel");
     await user.click(screen.getByTestId("phase-approve"));
@@ -552,6 +663,7 @@ describe("PHASE TAB (P2)", () => {
 
     const user = await openPhaseTab();
     await user.type(screen.getByTestId("phase-goal"), "Ship it");
+    await user.click(screen.getByTestId("phase-mode-planned"));
     await user.click(screen.getByTestId("phase-start"));
 
     await screen.findByTestId("phase-decision-panel");
@@ -590,6 +702,7 @@ describe("PHASE TAB (P2)", () => {
 
     const user = await openPhaseTab();
     await user.type(screen.getByTestId("phase-goal"), "Ship it");
+    await user.click(screen.getByTestId("phase-mode-planned"));
     await user.click(screen.getByTestId("phase-start"));
     await screen.findByTestId("phase-decision-panel");
 

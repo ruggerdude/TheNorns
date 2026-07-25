@@ -88,6 +88,50 @@ describe.sequential("planning_runs schema", () => {
     ).rejects.toThrow();
   });
 
+  it("persists quick mode and requires complete PM and agent selections", async () => {
+    await expect(
+      pg.query(
+        `INSERT INTO planning_runs (
+           id, project_id, status, round, max_rounds, objective, mode, pm_provider
+         ) VALUES ('run-partial-pm', 'project-1', 'queued', 0, 1, 'x', 'quick', 'openai')`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      pg.query(
+        `INSERT INTO planning_runs (
+           id, project_id, status, round, max_rounds, objective, mode, agent_model
+         ) VALUES ('run-partial-agent', 'project-1', 'queued', 0, 1, 'x', 'quick', 'gpt-5.6-terra')`,
+      ),
+    ).rejects.toThrow();
+
+    await pg.query(
+      `INSERT INTO planning_runs (
+         id, project_id, status, round, max_rounds, objective, mode,
+         pm_provider, pm_model, agent_provider, agent_model
+       ) VALUES (
+         'run-quick', 'project-1', 'queued', 0, 1, 'Fix the copy', 'quick',
+         'openai', 'gpt-5.6-terra', 'anthropic', 'claude-sonnet-5'
+       )`,
+    );
+    const row = await pg.query<{
+      mode: string;
+      pm_provider: string;
+      pm_model: string;
+      agent_provider: string;
+      agent_model: string;
+    }>(
+      `SELECT mode, pm_provider, pm_model, agent_provider, agent_model
+         FROM planning_runs WHERE id = 'run-quick'`,
+    );
+    expect(row.rows[0]).toEqual({
+      mode: "quick",
+      pm_provider: "openai",
+      pm_model: "gpt-5.6-terra",
+      agent_provider: "anthropic",
+      agent_model: "claude-sonnet-5",
+    });
+  });
+
   it("persists a per-project reviewer override with the provider/model pair required together", async () => {
     await expect(
       pg.query(

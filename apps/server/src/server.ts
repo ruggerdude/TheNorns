@@ -47,6 +47,7 @@ import {
   V2RepositoryIngestionSeed,
   V2StartDebateRunCommand,
   V2StrategyVersion,
+  isPmModelForProvider,
   parseRunnerFrame,
 } from "@norns/contracts";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -4221,11 +4222,31 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (options.planningRuns) {
       const { transactions: planningTransactions } = options.planningRuns;
       const planningRunService = new PlanningRunService(planningTransactions);
-      const resolvePlanningModels = async (projectId: string) => {
-        const [pmSelection, persistedReviewer] = await Promise.all([
+      const resolvePlanningModels = async (
+        projectId: string,
+        run?: {
+          mode: "planned" | "quick";
+          pm: { provider: ProviderName; model: string } | null;
+        },
+      ) => {
+        const [projectPm, persistedReviewer] = await Promise.all([
           projects.pmSelectionOf(projectId),
           planningRunService.reviewerSelectionOf(projectId),
         ]);
+        const pmSelection = run?.pm ?? projectPm;
+        if (run?.mode === "quick") {
+          const pmModel =
+            pmSelection.model ??
+            (pmSelection.provider === "anthropic"
+              ? PLANNING_RUN_DEFAULT_PM_MODEL
+              : DEFAULT_PM_MODEL.openai);
+          return {
+            pm: { provider: pmSelection.provider, model: pmModel },
+            // Quick changes never instantiate or call this reviewer. Keeping a
+            // complete pair preserves the worker's shared resolution shape.
+            reviewer: { provider: pmSelection.provider, model: pmModel },
+          };
+        }
         // Throws PlanningConfigurationError when the deployment lacks what's
         // needed; the worker catches it and records a truthful failure.
         // PHASE TAB P1: durable planning runs pin their last-resort defaults
@@ -4235,7 +4256,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         // resolved a model.
         return resolvePlanningParticipants({
           pmSelection,
-          persistedReviewer,
+          persistedReviewer:
+            persistedReviewer?.provider === pmSelection.provider ? null : persistedReviewer,
           env: integrationEnvironment,
           defaultPmModel: {
             anthropic: PLANNING_RUN_DEFAULT_PM_MODEL,
@@ -4328,6 +4350,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         throw error;
       };
 
+      const PlanningParticipantBody = z
+        .object({
+          provider: z.enum(["anthropic", "openai"]),
+          model: z.string().trim().min(1).max(200),
+        })
+        .strict();
+
       const CreatePlanningRunBody = z
         .object({
           objective: z.string().trim().min(1).max(100_000),
@@ -4335,7 +4364,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           // PHASE TAB P1: per-run review-round cap. Same semantics as
           // max_rounds (it IS the round cap); when both are supplied,
           // review_rounds wins.
-          review_rounds: z.number().int().min(1).max(5).optional(),
+          review_rounds: z.number().int().min(0).max(5).optional(),
+          mode: z.enum(["planned", "quick"]).optional(),
+          pm: PlanningParticipantBody.optional(),
+          agent: PlanningParticipantBody.optional(),
           // PHASE TAB P1: which implementation providers allocation staffing
           // may use. Default "both".
           worker_providers: z.enum(["anthropic", "openai", "both"]).optional(),
@@ -4350,21 +4382,62 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         const { id } = req.params as { id: string };
         const body = CreatePlanningRunBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: "bad_request" });
-        const maxRounds = body.data.review_rounds ?? body.data.max_rounds;
+        const mode = body.data.mode ?? "planned";
+        if (mode === "planned" && body.data.review_rounds === 0) {
+          return reply.code(400).send({
+            error: "bad_request",
+            message: "planned phases require at least one review round",
+          });
+        }
+        if (
+          mode === "quick" &&
+          body.data.review_rounds !== undefined &&
+          body.data.review_rounds !== 0
+        ) {
+          return reply.code(400).send({
+            error: "bad_request",
+            message: "quick changes do not use review rounds",
+          });
+        }
+        for (const selection of [body.data.pm, body.data.agent]) {
+          if (selection && !isPmModelForProvider(selection.provider, selection.model)) {
+            return reply.code(422).send({
+              error: "invalid_model",
+              message: `model "${selection.model}" is not available for ${selection.provider}`,
+            });
+          }
+        }
+        if (
+          body.data.agent &&
+          body.data.worker_providers &&
+          body.data.worker_providers !== "both" &&
+          body.data.worker_providers !== body.data.agent.provider
+        ) {
+          return reply.code(400).send({
+            error: "bad_request",
+            message: "the selected agent must be inside the allowed provider pool",
+          });
+        }
+        const maxRounds = mode === "quick" ? 1 : (body.data.review_rounds ?? body.data.max_rounds);
         try {
           const run = await planningRunService.create(id, {
             objective: body.data.objective,
+            mode,
             ...(maxRounds !== undefined ? { maxRounds } : {}),
-            ...(body.data.worker_providers !== undefined
-              ? { workerProviders: body.data.worker_providers }
-              : {}),
+            ...(body.data.agent
+              ? { workerProviders: body.data.agent.provider }
+              : body.data.worker_providers !== undefined
+                ? { workerProviders: body.data.worker_providers }
+                : {}),
+            ...(body.data.pm ? { pm: body.data.pm } : {}),
+            ...(body.data.agent ? { agent: body.data.agent } : {}),
             // FRONT DOOR P4: persist objective attachments so the worker injects
             // them into round 1. Previously validated-but-ignored input.
             ...(body.data.attachment_ids !== undefined
               ? { attachmentIds: body.data.attachment_ids }
               : {}),
           });
-          stores.audit("operator", "planning_run.created", `${id}:${run.id}`, now());
+          stores.audit("operator", "planning_run.created", `${id}:${run.id}:${mode}`, now());
           reply.code(202).send({ planning_run_id: run.id });
           void planningWorker.runNow(run.id).catch((error) => {
             stores.audit(

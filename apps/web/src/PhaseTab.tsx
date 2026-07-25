@@ -8,8 +8,9 @@ import { PM_MODEL_OPTIONS } from "@norns/contracts";
 //   e. Execution status table once approved (fast/idle poll cadence)
 // ALL fetches go through phaseTabApi.ts (single reconciliation point for the
 // integrator); this file renders and holds state only.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AttachmentInput } from "./AttachmentInput";
+import "./PhaseTab.css";
 import { UnauthorizedError } from "./auth";
 import {
   PHASE_EXECUTION_ACTIVE_STATES,
@@ -17,8 +18,10 @@ import {
   PHASE_RUN_DECISION_STATUSES,
   type PhaseExecutionKickoffReport,
   type PhaseExecutionStatusRow,
+  type PhaseParticipantSelection,
   type PhasePlanStaffedPhase,
   type PhasePlanningRunDto,
+  type PhaseRunMode,
   type WorkerProviders,
   getLatestPhasePlanningRun,
   getPhaseExecutionStatus,
@@ -46,6 +49,24 @@ const PROVIDER_GROUP_LABEL: Record<Provider, string> = {
   openai: "OpenAI",
 };
 
+const PARTICIPANT_OPTIONS = (Object.keys(PM_MODEL_OPTIONS) as Provider[]).flatMap((provider) =>
+  PM_MODEL_OPTIONS[provider].map((model) => ({
+    value: `${provider}:${model.id}`,
+    label: model.label,
+    provider,
+    model: model.id,
+  })),
+);
+
+function participantFor(value: string): PhaseParticipantSelection | undefined {
+  const option = PARTICIPANT_OPTIONS.find((candidate) => candidate.value === value);
+  return option ? { provider: option.provider, model: option.model } : undefined;
+}
+
+function participantLabel(value: string, fallback: string): string {
+  return PARTICIPANT_OPTIONS.find((candidate) => candidate.value === value)?.label ?? fallback;
+}
+
 const JOURNEY_STEPS = [
   {
     label: "Planning",
@@ -58,6 +79,21 @@ const JOURNEY_STEPS = [
   {
     label: "Coding",
     description: "Follow dispatched work and implementation progress.",
+  },
+] as const;
+
+const QUICK_JOURNEY_STEPS = [
+  {
+    label: "Preparing",
+    description: "The PM turns your request into one executable task.",
+  },
+  {
+    label: "Starting",
+    description: "The selected agent is assigned without a review round.",
+  },
+  {
+    label: "Working",
+    description: "Follow implementation and verification progress.",
   },
 ] as const;
 
@@ -93,8 +129,12 @@ export function PhaseTab({
   // a/b — setup form
   const [goal, setGoal] = useState("");
   const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
+  const [mode, setMode] = useState<PhaseRunMode>("quick");
   const [agents, setAgents] = useState<WorkerProviders>("both");
   const [reviewRounds, setReviewRounds] = useState(2);
+  const [pmSelection, setPmSelection] = useState("");
+  const [agentSelection, setAgentSelection] = useState("");
+  const [customizeTeam, setCustomizeTeam] = useState(false);
   // c — run lifecycle
   const [runId, setRunId] = useState<string | null>(initialRunId);
   const [run, setRun] = useState<PhasePlanningRunDto | null>(null);
@@ -111,6 +151,7 @@ export function PhaseTab({
   const [direction, setDirection] = useState("");
   const [confirmingReject, setConfirmingReject] = useState(false);
   const [decisionBusy, setDecisionBusy] = useState(false);
+  const quickApprovalAttempts = useRef(new Set<string>());
   // e — execution status
   const [executionRows, setExecutionRows] = useState<PhaseExecutionStatusRow[] | null>(null);
   const [executionError, setExecutionError] = useState<string | null>(null);
@@ -161,13 +202,19 @@ export function PhaseTab({
     setStarting(true);
     setError(null);
     try {
+      const pm = participantFor(pmSelection);
+      const agent = participantFor(agentSelection);
+      const workerProviders = agent?.provider ?? agents;
       const created = await startPhasePlanningRun(projectId, {
         objective: goal.trim(),
         attachment_ids: attachmentIds,
-        review_rounds: reviewRounds,
-        worker_providers: agents,
+        mode,
+        review_rounds: mode === "quick" ? 0 : reviewRounds,
+        worker_providers: workerProviders,
+        ...(pm ? { pm } : {}),
+        ...(agent ? { agent } : {}),
       });
-      setActiveProviders(providersFor(agents));
+      setActiveProviders(providersFor(workerProviders));
       setRunId(created.planning_run_id);
       setRun(null);
       setStaffingDrafts({});
@@ -177,12 +224,23 @@ export function PhaseTab({
       setExecutionRows(null);
       setExecutionError(null);
       setExecutionKickoff(undefined);
+      quickApprovalAttempts.current.delete(created.planning_run_id);
     } catch (err) {
       fail(err, setError);
     } finally {
       setStarting(false);
     }
-  }, [goal, attachmentIds, reviewRounds, agents, projectId, fail]);
+  }, [
+    goal,
+    attachmentIds,
+    mode,
+    reviewRounds,
+    agents,
+    pmSelection,
+    agentSelection,
+    projectId,
+    fail,
+  ]);
 
   const pollRun = useCallback(async () => {
     if (!runId) return;
@@ -262,6 +320,19 @@ export function PhaseTab({
     [runId, projectId, fail, onJourneyChanged],
   );
 
+  useEffect(() => {
+    if (
+      !runId ||
+      run?.mode !== "quick" ||
+      !PHASE_RUN_DECISION_STATUSES.has(run.status) ||
+      quickApprovalAttempts.current.has(runId)
+    ) {
+      return;
+    }
+    quickApprovalAttempts.current.add(runId);
+    void decide({ decision: "approve" });
+  }, [runId, run, decide]);
+
   const retryExecution = useCallback(async () => {
     if (!runId) return;
     setDecisionBusy(true);
@@ -294,6 +365,7 @@ export function PhaseTab({
   };
 
   const resetToNewRun = useCallback(() => {
+    if (runId) quickApprovalAttempts.current.delete(runId);
     setRunId(null);
     setRun(null);
     setError(null);
@@ -304,13 +376,15 @@ export function PhaseTab({
     setExecutionRows(null);
     setExecutionError(null);
     setExecutionKickoff(undefined);
-  }, []);
+  }, [runId]);
 
   const runIsActive = runStatus !== null && PHASE_RUN_ACTIVE_STATUSES.has(runStatus);
   const runAwaitsDecision = runStatus !== null && PHASE_RUN_DECISION_STATUSES.has(runStatus);
   const showSetupForm = recoveryAttempted && !recovering && !runId;
   const journeyStage =
     runStatus === "approved" ? 3 : runAwaitsDecision || runStatus === "rejected" ? 2 : 1;
+  const runMode = run?.mode ?? "planned";
+  const journeySteps = runMode === "quick" ? QUICK_JOURNEY_STEPS : JOURNEY_STEPS;
 
   const reviewerFindings = (run?.transcript ?? []).filter((entry) => entry.role === "reviewer");
   const executionHasProgress =
@@ -340,7 +414,7 @@ export function PhaseTab({
           data-testid="phase-journey"
         >
           <ol>
-            {JOURNEY_STEPS.map((step, index) => {
+            {journeySteps.map((step, index) => {
               const stepNumber = index + 1;
               const isCurrent = stepNumber === journeyStage;
               const isComplete = stepNumber < journeyStage;
@@ -389,11 +463,42 @@ export function PhaseTab({
       {showSetupForm ? (
         <section className="card side-section phase-setup" data-testid="phase-setup">
           <div className="side-body form-stack">
+            <fieldset className="phase-mode-picker">
+              <legend className="sr-only">Choose a phase workflow</legend>
+              <button
+                type="button"
+                className={mode === "quick" ? "phase-mode-option is-selected" : "phase-mode-option"}
+                data-testid="phase-mode-quick"
+                aria-pressed={mode === "quick"}
+                disabled={starting}
+                onClick={() => setMode("quick")}
+              >
+                <strong>Quick change</strong>
+                <span>One task · no reviewer · starts automatically</span>
+              </button>
+              <button
+                type="button"
+                className={
+                  mode === "planned" ? "phase-mode-option is-selected" : "phase-mode-option"
+                }
+                data-testid="phase-mode-planned"
+                aria-pressed={mode === "planned"}
+                disabled={starting}
+                onClick={() => setMode("planned")}
+              >
+                <strong>Planned phase</strong>
+                <span>Detailed plan · review rounds · approval</span>
+              </button>
+            </fieldset>
             <AttachmentInput
               variant="composer"
-              label="What should this phase deliver?"
+              label={mode === "quick" ? "What should change?" : "What should this phase deliver?"}
               textAreaTestId="phase-goal"
-              placeholder="Describe the goal, paste a screenshot, or add a reference file…"
+              placeholder={
+                mode === "quick"
+                  ? "Describe the tweak, paste a screenshot, or add a reference file…"
+                  : "Describe the goal, paste a screenshot, or add a reference file…"
+              }
               textValue={goal}
               onTextChange={setGoal}
               projectId={projectId}
@@ -402,36 +507,112 @@ export function PhaseTab({
               purpose="objective"
               disabled={starting}
             />
-            <div className="two-col-fields">
-              <Field label="Agents">
-                <Select
-                  data-testid="phase-agents"
-                  value={agents}
-                  disabled={starting}
-                  onChange={(event) => setAgents(event.target.value as WorkerProviders)}
-                >
-                  <option value="anthropic">Claude</option>
-                  <option value="openai">ChatGPT</option>
-                  <option value="both">Both</option>
-                </Select>
-              </Field>
-              <Field label="Review rounds">
-                <Select
-                  data-testid="phase-rounds"
-                  value={String(reviewRounds)}
-                  disabled={starting}
-                  onChange={(event) => setReviewRounds(Number(event.target.value))}
-                >
-                  {[1, 2, 3, 4, 5].map((n) => (
-                    <option key={n} value={String(n)}>
-                      {n}
+            {mode === "planned" ? (
+              <div className="two-col-fields">
+                <Field label="Available agent providers">
+                  <Select
+                    data-testid="phase-agents"
+                    value={agents}
+                    disabled={starting || Boolean(agentSelection)}
+                    onChange={(event) => setAgents(event.target.value as WorkerProviders)}
+                  >
+                    <option value="anthropic">Claude</option>
+                    <option value="openai">ChatGPT</option>
+                    <option value="both">Both</option>
+                  </Select>
+                </Field>
+                <Field label="Review rounds">
+                  <Select
+                    data-testid="phase-rounds"
+                    value={String(reviewRounds)}
+                    disabled={starting}
+                    onChange={(event) => setReviewRounds(Number(event.target.value))}
+                  >
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <option key={n} value={String(n)}>
+                        {n}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+            ) : (
+              <div className="phase-quick-summary" data-testid="phase-quick-summary">
+                <span aria-hidden="true">↗</span>
+                <p>
+                  The PM prepares one focused task, the agent implements it, and relevant checks
+                  still run. There is no reviewer or plan approval step.
+                </p>
+              </div>
+            )}
+
+            <button
+              type="button"
+              className="phase-team-toggle"
+              aria-expanded={customizeTeam}
+              data-testid="phase-team-toggle"
+              disabled={starting}
+              onClick={() => setCustomizeTeam((current) => !current)}
+            >
+              <span>
+                <strong>Choose PM and agent</strong>
+                <small>Optional · project defaults are ready</small>
+              </span>
+              <span aria-hidden="true">{customizeTeam ? "−" : "+"}</span>
+            </button>
+
+            {customizeTeam ? (
+              <div className="two-col-fields phase-team-fields" data-testid="phase-team-fields">
+                <Field label="PM">
+                  <Select
+                    data-testid="phase-pm"
+                    value={pmSelection}
+                    disabled={starting}
+                    onChange={(event) => setPmSelection(event.target.value)}
+                  >
+                    <option value="">Project default</option>
+                    {(Object.keys(PM_MODEL_OPTIONS) as Provider[]).map((provider) => (
+                      <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
+                        {PM_MODEL_OPTIONS[provider].map((model) => (
+                          <option key={model.id} value={`${provider}:${model.id}`}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="Agent">
+                  <Select
+                    data-testid="phase-agent"
+                    value={agentSelection}
+                    disabled={starting}
+                    onChange={(event) => setAgentSelection(event.target.value)}
+                  >
+                    <option value="">
+                      {mode === "quick" ? "Match the PM" : "Recommended automatically"}
                     </option>
-                  ))}
-                </Select>
-              </Field>
-            </div>
+                    {(Object.keys(PM_MODEL_OPTIONS) as Provider[]).map((provider) => (
+                      <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
+                        {PM_MODEL_OPTIONS[provider].map((model) => (
+                          <option key={model.id} value={`${provider}:${model.id}`}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+            ) : null}
+
             <p className="muted phase-identity-line" data-testid="phase-identity-line">
-              PM: Claude Fable · Reviewer: ChatGPT Sol (gpt-5.6-sol)
+              PM: {participantLabel(pmSelection, "Project default")} · Agent:{" "}
+              {participantLabel(
+                agentSelection,
+                mode === "quick" ? "Matches PM" : "Recommended automatically",
+              )}
+              {mode === "planned" ? " · Reviewer: Automatic cross-provider" : " · No reviewer"}
             </p>
             <Button
               variant="primary"
@@ -439,7 +620,13 @@ export function PhaseTab({
               disabled={starting || !goal.trim()}
               onClick={() => void start()}
             >
-              {starting ? "Starting…" : "Start"}
+              {starting
+                ? mode === "quick"
+                  ? "Preparing change…"
+                  : "Starting plan…"
+                : mode === "quick"
+                  ? "Make change"
+                  : "Start planning"}
             </Button>
           </div>
         </section>
@@ -454,14 +641,18 @@ export function PhaseTab({
           <div className="side-body form-stack">
             <div className="section-head phase-state-heading">
               <div>
-                <div className="eyebrow">Planning</div>
+                <div className="eyebrow">{runMode === "quick" ? "Quick change" : "Planning"}</div>
                 <h3 id="phase-planning-title" data-testid="phase-run-status" aria-live="polite">
-                  {run ? runStatusLabel(run) : "Starting the plan…"}
+                  {runMode === "quick"
+                    ? "Preparing one focused task"
+                    : run
+                      ? runStatusLabel(run)
+                      : "Starting the plan…"}
                 </h3>
               </div>
               <Badge tone="info">In progress</Badge>
             </div>
-            {run ? (
+            {run && runMode !== "quick" ? (
               <div className="phase-planning-progress">
                 <div className="phase-planning-progress-copy">
                   <span data-testid="phase-run-rounds">
@@ -482,9 +673,15 @@ export function PhaseTab({
               </div>
             ) : null}
             <output aria-live="polite">
-              <Spinner label="Coordinator and reviewer are working…" />
+              <Spinner
+                label={
+                  runMode === "quick"
+                    ? "The PM is preparing the change for the selected agent…"
+                    : "Coordinator and reviewer are working…"
+                }
+              />
             </output>
-            {reviewerFindings.length > 0 ? (
+            {runMode !== "quick" && reviewerFindings.length > 0 ? (
               <div className="phase-findings" data-testid="phase-run-findings">
                 <h4>Reviewer findings so far</h4>
                 {reviewerFindings.map((entry, index) => (
@@ -519,7 +716,40 @@ export function PhaseTab({
         </section>
       ) : null}
 
-      {run && runAwaitsDecision ? (
+      {run && runAwaitsDecision && runMode === "quick" ? (
+        <section
+          className="card side-section phase-state-card phase-quick-starting"
+          data-testid="phase-quick-starting"
+          aria-labelledby="phase-quick-starting-title"
+        >
+          <div className="side-body form-stack">
+            <div className="section-head phase-state-heading">
+              <div>
+                <div className="eyebrow">No review required</div>
+                <h3 id="phase-quick-starting-title">Starting the selected agent</h3>
+              </div>
+              <Badge tone="info">Automatic</Badge>
+            </div>
+            <p className="muted">
+              The focused task is ready. It is being approved and dispatched without a reviewer or
+              another decision from you.
+            </p>
+            {error ? (
+              <Button
+                variant="primary"
+                disabled={decisionBusy}
+                onClick={() => void decide({ decision: "approve" })}
+              >
+                {decisionBusy ? "Starting…" : "Try starting again"}
+              </Button>
+            ) : (
+              <Spinner label="Starting implementation…" />
+            )}
+          </div>
+        </section>
+      ) : null}
+
+      {run && runAwaitsDecision && runMode !== "quick" ? (
         <section
           className="card side-section phase-state-card phase-decision"
           data-testid="phase-decision-panel"
@@ -744,17 +974,23 @@ export function PhaseTab({
             >
               {executionKickoff?.started ? (
                 <p data-testid="phase-execution-kickoff-note">
-                  Execution started automatically from this approval.
+                  {runMode === "quick"
+                    ? "The quick change started automatically."
+                    : "Execution started automatically from this approval."}
                   {executionKickoff.detail ? ` ${executionKickoff.detail}` : ""}
                 </p>
               ) : executionKickoff?.started === false ? (
                 <p data-testid="phase-execution-kickoff-note">
-                  Plan approved and recorded, but coding did not start.
+                  {runMode === "quick"
+                    ? "The quick change is recorded, but coding did not start."
+                    : "Plan approved and recorded, but coding did not start."}
                   {executionKickoff.detail ? ` ${executionKickoff.detail}` : ""}
                 </p>
               ) : (
                 <p data-testid="phase-execution-kickoff-note">
-                  Plan approved. Checking the current coding status…
+                  {runMode === "quick"
+                    ? "Quick change dispatched. Checking the current coding status…"
+                    : "Plan approved. Checking the current coding status…"}
                 </p>
               )}
             </output>

@@ -18,6 +18,7 @@ import { PlanContract, type PlanContractT } from "@norns/contracts";
 import type { ReviewFindingT, UsageEventT } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import type {
+  PlanningRunMode,
   PlanningRunResultDto,
   PlanningRunStatus,
   PlanningRunTranscriptEntryDto,
@@ -25,7 +26,7 @@ import type {
   WorkerProviderSelection,
 } from "./runService.js";
 import type { PlanningRoundEvent, PlanningRoundHook } from "./session.js";
-import { planContentHash, runPlanning } from "./session.js";
+import { planContentHash, runPlanning, runQuickPlanning } from "./session.js";
 
 export type PlanningAdapterFactory = (provider: ProviderName, model: string) => LlmAdapter;
 
@@ -46,7 +47,13 @@ export interface PlanningRunWorkerOptions {
   now?: () => Date;
   leaseMs?: number;
   /** Resolves the exact PM/reviewer provider+model pairing for a project. */
-  resolveModels: (projectId: string) => Promise<ResolvedPlanningModels>;
+  resolveModels: (
+    projectId: string,
+    run?: {
+      mode: PlanningRunMode;
+      pm: { provider: ProviderName; model: string } | null;
+    },
+  ) => Promise<ResolvedPlanningModels>;
   /**
    * Best-effort staffing recommendation (apps/server/src/planning/
    * allocationRecommendation.ts). A failure here never fails the run —
@@ -71,6 +78,11 @@ export interface PlanningRunWorkerOptions {
 interface ClaimedPlanningRunRow {
   id: string;
   project_id: string;
+  mode: PlanningRunMode;
+  pm_provider: ProviderName | null;
+  pm_model: string | null;
+  agent_provider: ProviderName | null;
+  agent_model: string | null;
   objective: string;
   max_rounds: number;
   lease_token: string;
@@ -262,7 +274,9 @@ export class PlanningRunWorker {
            FROM next_run WHERE planning_runs.id = next_run.id
            RETURNING planning_runs.id, planning_runs.project_id, planning_runs.objective,
              planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids,
-             planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript`
+             planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript,
+             planning_runs.mode, planning_runs.pm_provider, planning_runs.pm_model,
+             planning_runs.agent_provider, planning_runs.agent_model`
         : `WITH next_run AS (
              SELECT id FROM planning_runs WHERE status = 'queued'
              ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1
@@ -271,7 +285,9 @@ export class PlanningRunWorker {
            FROM next_run WHERE planning_runs.id = next_run.id
            RETURNING planning_runs.id, planning_runs.project_id, planning_runs.objective,
              planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids,
-             planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript`;
+             planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript,
+             planning_runs.mode, planning_runs.pm_provider, planning_runs.pm_model,
+             planning_runs.agent_provider, planning_runs.agent_model`;
       const params = runId
         ? [leaseToken, leasedUntil, now.toISOString(), runId]
         : [leaseToken, leasedUntil, now.toISOString()];
@@ -281,16 +297,26 @@ export class PlanningRunWorker {
   }
 
   private async execute(claim: ClaimedPlanningRunRow): Promise<void> {
+    const quick = claim.mode === "quick";
+    const pmOverride =
+      claim.pm_provider && claim.pm_model
+        ? { provider: claim.pm_provider, model: claim.pm_model }
+        : null;
     let models: ResolvedPlanningModels;
     try {
-      models = await this.options.resolveModels(claim.project_id);
+      models = await this.options.resolveModels(claim.project_id, {
+        mode: claim.mode ?? "planned",
+        pm: pmOverride,
+      });
     } catch (error) {
       await this.fail(claim, error);
       return;
     }
 
     const pm = this.createAdapter(models.pm.provider, models.pm.model);
-    const reviewer = this.createAdapter(models.reviewer.provider, models.reviewer.model);
+    const reviewer = quick
+      ? null
+      : this.createAdapter(models.reviewer.provider, models.reviewer.model);
     // PHASE TAB P1: a modify re-entry appends to the run's prior transcript
     // (the earlier rounds are history the human already saw) and seeds the
     // loop with the prior plan + the human's direction.
@@ -312,6 +338,49 @@ export class PlanningRunWorker {
     const roundOneImages = revisionSeed ? [] : await this.loadRoundOneImages(claim);
 
     try {
+      if (quick) {
+        const result = await runQuickPlanning({
+          pm,
+          objective: claim.objective,
+          projectId: claim.project_id,
+          ...(roundOneImages.length > 0 ? { images: roundOneImages } : {}),
+        });
+        this.options.recordUsage?.(result.usage);
+        const totalCostUsd = result.usage.reduce((sum, usage) => sum + usage.estimated_cost_usd, 0);
+        transcript.push({
+          round: 0,
+          role: "pm",
+          provider: models.pm.provider,
+          model: models.pm.model,
+          summary: "Prepared one executable quick-change task.",
+          finding_counts: null,
+        });
+        const agent =
+          claim.agent_provider && claim.agent_model
+            ? { provider: claim.agent_provider, model: claim.agent_model }
+            : models.pm;
+        const staffingProposal: PlanningStaffingProposalDto = {
+          summary: `Quick change assigned to ${agent.provider}:${agent.model}.`,
+          recommendations: result.finalPlan.modules.map((module) => ({
+            node_id: module.id,
+            provider: agent.provider,
+            model: agent.model,
+            worker_count: 1,
+            budget_usd: 25,
+            rationale: "Single accountable agent for a focused quick change.",
+          })),
+        };
+        const resultDto: PlanningRunResultDto = {
+          plan: result.finalPlan,
+          content_hash: planContentHash(result.finalPlan),
+          total_cost_usd: totalCostUsd,
+          staffing_proposal: staffingProposal,
+        };
+        await this.persistTerminal(claim, "converged", 0, transcript, resultDto, totalCostUsd);
+        return;
+      }
+
+      if (!reviewer) throw new Error("planned run is missing its reviewer");
       const result = await runPlanning({
         pm,
         reviewer,
@@ -325,7 +394,19 @@ export class PlanningRunWorker {
       this.options.recordUsage?.(result.usage);
       const totalCostUsd = result.usage.reduce((sum, usage) => sum + usage.estimated_cost_usd, 0);
       let staffingProposal: PlanningStaffingProposalDto | null = null;
-      if (this.options.buildStaffingProposal) {
+      if (claim.agent_provider && claim.agent_model) {
+        staffingProposal = {
+          summary: `Plan assigned to ${claim.agent_provider}:${claim.agent_model}.`,
+          recommendations: result.finalPlan.modules.map((module) => ({
+            node_id: module.id,
+            provider: claim.agent_provider,
+            model: claim.agent_model,
+            worker_count: 1,
+            budget_usd: 25,
+            rationale: "Agent explicitly selected for this run.",
+          })),
+        };
+      } else if (this.options.buildStaffingProposal) {
         try {
           staffingProposal = await this.options.buildStaffingProposal({
             projectId: claim.project_id,
