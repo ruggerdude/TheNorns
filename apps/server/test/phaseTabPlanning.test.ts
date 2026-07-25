@@ -410,6 +410,57 @@ describe.sequential("phase tab: HTTP surface (production option shape)", () => {
     });
   });
 
+  it("runs a quick change with one PM pass, no reviewer, and pinned PM/agent identities", async () => {
+    reviewerAdapter.enqueue(plan(["copy-fix"]));
+    const created = await inject("POST", `/api/v2/projects/${projectId}/planning-runs`, {
+      objective: "Correct the empty-state grammar",
+      mode: "quick",
+      review_rounds: 0,
+      pm: { provider: "openai", model: "gpt-5.6-luna" },
+      agent: { provider: "anthropic", model: "claude-sonnet-5" },
+    });
+    expect(created.statusCode).toBe(202);
+    const { planning_run_id: runId } = created.json() as { planning_run_id: string };
+    const run = await pollUntil(runId, (candidate) => candidate.status === "converged");
+
+    expect(run).toMatchObject({
+      mode: "quick",
+      review_rounds_total: 0,
+      rounds_completed: 0,
+      pm: { provider: "openai", model: "gpt-5.6-luna" },
+      agent: { provider: "anthropic", model: "claude-sonnet-5" },
+      worker_providers: "anthropic",
+    });
+    expect(run.transcript).toMatchObject([
+      {
+        role: "pm",
+        provider: "openai",
+        model: "gpt-5.6-luna",
+        finding_counts: null,
+      },
+    ]);
+    const quickResult = run.result as {
+      staffing_proposal?: { recommendations?: unknown[] };
+    };
+    expect(quickResult.staffing_proposal?.recommendations).toMatchObject([
+      {
+        node_id: "copy-fix",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        worker_count: 1,
+      },
+    ]);
+
+    const approved = await inject(
+      "POST",
+      `/api/v2/projects/${projectId}/planning-runs/${runId}/decision`,
+      { decision: "approve" },
+    );
+    expect(approved.statusCode).toBe(200);
+    expect(approved.json()).toMatchObject({ status: "approved" });
+    expect(kickoffCalls).toHaveLength(1);
+  });
+
   it("409s a decision before the run reaches a terminal-review state", async () => {
     const created = await inject("POST", `/api/v2/projects/${projectId}/planning-runs`, {
       objective: "do the thing",

@@ -25,6 +25,12 @@ export type PlanningRunStatus =
 
 /** PHASE TAB P1: which implementation providers allocation staffing may use. */
 export type WorkerProviderSelection = "anthropic" | "openai" | "both";
+export type PlanningRunMode = "planned" | "quick";
+
+export interface PlanningParticipantSelection {
+  provider: ProviderName;
+  model: string;
+}
 
 /** Statuses a human decision may be recorded against. */
 export const DECIDABLE_PLANNING_RUN_STATUSES: readonly PlanningRunStatus[] = [
@@ -78,6 +84,9 @@ export interface PlanningRunDecisionDto {
 export interface PlanningRunDto {
   id: string;
   project_id: string;
+  mode: PlanningRunMode;
+  pm: PlanningParticipantSelection | null;
+  agent: PlanningParticipantSelection | null;
   status: PlanningRunStatus;
   round: number;
   max_rounds: number;
@@ -123,6 +132,11 @@ export class PlanningRunDecisionError extends Error {
 interface PlanningRunRow {
   id: string;
   project_id: string;
+  mode: PlanningRunMode;
+  pm_provider: ProviderName | null;
+  pm_model: string | null;
+  agent_provider: ProviderName | null;
+  agent_model: string | null;
   status: PlanningRunStatus;
   round: number;
   max_rounds: number;
@@ -154,10 +168,16 @@ function rowToDto(row: PlanningRunRow): PlanningRunDto {
   return {
     id: row.id,
     project_id: row.project_id,
+    mode: row.mode ?? "planned",
+    pm: row.pm_provider && row.pm_model ? { provider: row.pm_provider, model: row.pm_model } : null,
+    agent:
+      row.agent_provider && row.agent_model
+        ? { provider: row.agent_provider, model: row.agent_model }
+        : null,
     status: row.status,
     round: row.round,
     max_rounds: row.max_rounds,
-    review_rounds_total: row.max_rounds,
+    review_rounds_total: row.mode === "quick" ? 0 : row.max_rounds,
     rounds_completed: row.round,
     worker_providers: row.worker_providers,
     decision: row.decision
@@ -176,6 +196,9 @@ function rowToDto(row: PlanningRunRow): PlanningRunDto {
 export interface CreatePlanningRunInput {
   objective: string;
   maxRounds?: number;
+  mode?: PlanningRunMode;
+  pm?: PlanningParticipantSelection;
+  agent?: PlanningParticipantSelection;
   /**
    * PHASE TAB P1: which implementation providers the allocation
    * recommendation may staff phases with. Defaults to "both".
@@ -266,8 +289,11 @@ export class PlanningRunService {
         `INSERT INTO planning_runs (
            id, project_id, status, round, max_rounds, objective, transcript,
            result, total_cost_usd, error, created_at, updated_at, attachment_ids,
-           worker_providers
-         ) VALUES ($1,$2,'queued',0,$3,$4,'[]'::jsonb,NULL,0,NULL,$5,$5,$6::jsonb,$7)`,
+           worker_providers, mode, pm_provider, pm_model, agent_provider, agent_model
+         ) VALUES (
+           $1,$2,'queued',0,$3,$4,'[]'::jsonb,NULL,0,NULL,$5,$5,$6::jsonb,$7,
+           $8,$9,$10,$11,$12
+         )`,
         [
           id,
           projectId,
@@ -276,6 +302,11 @@ export class PlanningRunService {
           createdAt,
           attachmentIds,
           input.workerProviders ?? "both",
+          input.mode ?? "planned",
+          input.pm?.provider ?? null,
+          input.pm?.model ?? null,
+          input.agent?.provider ?? null,
+          input.agent?.model ?? null,
         ],
       );
       const row = await this.loadRow(tx, projectId, id);

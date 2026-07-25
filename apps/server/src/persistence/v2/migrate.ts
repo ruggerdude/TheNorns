@@ -197,6 +197,12 @@ export const PHASE_TAB_PLANNING_DECISIONS_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const QUICK_CHANGES_MIGRATION_NAME = "0026_quick_changes";
+export const QUICK_CHANGES_MIGRATION_URL = new URL(
+  "../../../drizzle/0026_quick_changes.sql",
+  import.meta.url,
+);
+
 export const KNOWLEDGE_PACKAGES_MIGRATION_NAME = "0027_knowledge_packages";
 export const KNOWLEDGE_PACKAGES_MIGRATION_URL = new URL(
   "../../../drizzle/0027_knowledge_packages.sql",
@@ -333,6 +339,10 @@ export async function loadPhaseConcurrencyConflictsMigrationSql(): Promise<strin
 
 export async function loadPhaseTabPlanningDecisionsMigrationSql(): Promise<string> {
   return readFile(PHASE_TAB_PLANNING_DECISIONS_MIGRATION_URL, "utf8");
+}
+
+export async function loadQuickChangesMigrationSql(): Promise<string> {
+  return readFile(QUICK_CHANGES_MIGRATION_URL, "utf8");
 }
 
 export async function loadKnowledgePackagesMigrationSql(): Promise<string> {
@@ -546,6 +556,10 @@ export async function runCurrentV2Migrations(
     {
       name: PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME,
       sql: await loadPhaseTabPlanningDecisionsMigrationSql(),
+    },
+    {
+      name: QUICK_CHANGES_MIGRATION_NAME,
+      sql: await loadQuickChangesMigrationSql(),
     },
     {
       name: KNOWLEDGE_PACKAGES_MIGRATION_NAME,

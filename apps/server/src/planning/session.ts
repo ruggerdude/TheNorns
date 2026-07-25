@@ -25,6 +25,7 @@ import {
   directionRevisionPrompt,
   draftPlanPrompt,
   pmSystem,
+  quickChangePrompt,
   reviewPrompt,
   reviewerSystem,
   revisionPrompt,
@@ -61,6 +62,11 @@ export interface PlanningResult {
   /** must-fix findings still open at the cap — shown to the human */
   outstanding: ReviewFindingT[];
   policy: ReviewPolicyRecordT;
+  usage: UsageEventT[];
+}
+
+export interface QuickPlanningResult {
+  finalPlan: PlanContractT;
   usage: UsageEventT[];
 }
 
@@ -111,6 +117,45 @@ export interface PlanningOptions {
    * already encodes what they established.
    */
   revisionSeed?: { plan: PlanContractT; direction: string };
+}
+
+export async function runQuickPlanning(options: {
+  pm: LlmAdapter;
+  objective: string;
+  projectId: string;
+  memory?: readonly ProjectMemoryEntryT[];
+  maxValidationRetries?: number;
+  images?: readonly ImagePart[];
+}): Promise<QuickPlanningResult> {
+  const usage: UsageEventT[] = [];
+  const maxValidationRetries = options.maxValidationRetries ?? 2;
+  let prompt = quickChangePrompt(options.objective);
+  for (let attempt = 0; attempt <= maxValidationRetries; attempt += 1) {
+    const draft = await options.pm.completeStructured(
+      {
+        system: pmSystem(options.memory ?? []),
+        prompt,
+        projectId: options.projectId,
+        ...(attempt === 0 && options.images && options.images.length > 0
+          ? { images: options.images }
+          : {}),
+      },
+      PlanContract,
+      "quick_change",
+    );
+    usage.push(draft.usage);
+    const validation = validatePlan(draft.value);
+    if (validation.ok) {
+      if (validation.plan.modules.length !== 1) {
+        prompt =
+          "A quick change must contain exactly one module. Collapse the prior response into one focused module and return the corrected Plan Contract JSON.";
+        continue;
+      }
+      return { finalPlan: validation.plan, usage };
+    }
+    prompt = validationRetryPrompt(validation.errors);
+  }
+  throw new PlanningError("plan_invalid", "quick change failed engine validation after retries");
 }
 
 export async function runPlanning(options: PlanningOptions): Promise<PlanningResult> {

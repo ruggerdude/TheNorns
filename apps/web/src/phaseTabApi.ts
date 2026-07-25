@@ -4,8 +4,8 @@
 // backend as actually built (apps/server/src/planning/runService.ts and the
 // PHASE TAB P1 routes in apps/server/src/server.ts):
 //   1. POST /api/v2/projects/:id/planning-runs
-//        body: { objective, attachment_ids?, review_rounds? (1–5),
-//        worker_providers?: "anthropic" | "openai" | "both" } -> 202
+//        body: { objective, mode: "quick"|"planned", attachment_ids?,
+//        review_rounds: 0|1–5, worker_providers?, pm?, agent? } -> 202
 //        { planning_run_id }.
 //   2. GET  /api/v2/projects/:id/planning-runs/:runId -> PlanningRunDto.
 //        There is NO `awaiting_decision` status: a run with status
@@ -64,13 +64,21 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 // ---------------------------------------------------------------------------
 
 export type WorkerProviders = "anthropic" | "openai" | "both";
+export type PhaseRunMode = "planned" | "quick";
+export type PhaseParticipantSelection = {
+  provider: "anthropic" | "openai";
+  model: string;
+};
 
 export interface StartPhasePlanningRunBody {
   objective: string;
   attachment_ids: string[];
-  /** 1–5; server default applies when omitted. */
+  mode: PhaseRunMode;
+  /** 0 for a quick change; 1–5 for a planned phase. */
   review_rounds: number;
   worker_providers: WorkerProviders;
+  pm?: PhaseParticipantSelection;
+  agent?: PhaseParticipantSelection;
 }
 
 /** The backend's PlanningRunStatus. There is NO `awaiting_decision`. */
@@ -155,6 +163,9 @@ export interface PhasePlanningRunDecision {
 
 export interface PhasePlanningRunDto {
   id: string;
+  mode?: PhaseRunMode;
+  pm?: PhaseParticipantSelection | null;
+  agent?: PhaseParticipantSelection | null;
   status: PhasePlanningRunStatus;
   round: number;
   max_rounds: number;
