@@ -18,6 +18,10 @@ import { PlanContract, type PlanContractT } from "@norns/contracts";
 import type { ReviewFindingT, UsageEventT } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import type {
+  ApprovedPlanExecutionKickoff,
+  PlanningRunDecisionDto,
+  PlanningRunExecutionDto,
+  PlanningRunMode,
   PlanningRunResultDto,
   PlanningRunStatus,
   PlanningRunTranscriptEntryDto,
@@ -25,7 +29,7 @@ import type {
   WorkerProviderSelection,
 } from "./runService.js";
 import type { PlanningRoundEvent, PlanningRoundHook } from "./session.js";
-import { planContentHash, runPlanning } from "./session.js";
+import { planContentHash, runPlanning, runQuickPlanning } from "./session.js";
 
 export type PlanningAdapterFactory = (provider: ProviderName, model: string) => LlmAdapter;
 
@@ -45,8 +49,22 @@ export interface PlanningStaffingInput {
 export interface PlanningRunWorkerOptions {
   now?: () => Date;
   leaseMs?: number;
+  /** Delay before retrying a kickoff seam that threw before returning. */
+  kickoffRetryMs?: number;
+  /**
+   * Durable quick-change execution seam. Quick plans are approved in the
+   * same transaction as their terminal result, then claimed from the
+   * persisted kickoff outbox and sent through this idempotent saga.
+   */
+  executionKickoff?: ApprovedPlanExecutionKickoff;
   /** Resolves the exact PM/reviewer provider+model pairing for a project. */
-  resolveModels: (projectId: string) => Promise<ResolvedPlanningModels>;
+  resolveModels: (
+    projectId: string,
+    run?: {
+      mode: PlanningRunMode;
+      pm: { provider: ProviderName; model: string } | null;
+    },
+  ) => Promise<ResolvedPlanningModels>;
   /**
    * Best-effort staffing recommendation (apps/server/src/planning/
    * allocationRecommendation.ts). A failure here never fails the run —
@@ -71,6 +89,12 @@ export interface PlanningRunWorkerOptions {
 interface ClaimedPlanningRunRow {
   id: string;
   project_id: string;
+  mode: PlanningRunMode;
+  requested_by: string | null;
+  pm_provider: ProviderName | null;
+  pm_model: string | null;
+  agent_provider: ProviderName | null;
+  agent_model: string | null;
   objective: string;
   max_rounds: number;
   lease_token: string;
@@ -83,6 +107,14 @@ interface ClaimedPlanningRunRow {
   /** PHASE TAB P1: transcript accumulated before a modify re-entry — the new
    *  loop's entries append to it rather than erasing the history. */
   transcript: PlanningRunTranscriptEntryDto[] | string;
+}
+
+interface ClaimedQuickKickoffRow {
+  id: string;
+  project_id: string;
+  requested_by: string;
+  decision: PlanningRunDecisionDto | string;
+  lease_token: string;
 }
 
 function tally(findings: readonly ReviewFindingT[]) {
@@ -203,6 +235,7 @@ function safeJsonArray(value: string): unknown[] {
 export class PlanningRunWorker {
   private readonly now: () => Date;
   private readonly leaseMs: number;
+  private readonly kickoffRetryMs: number;
 
   constructor(
     private readonly transactions: V2TransactionRunner,
@@ -211,6 +244,7 @@ export class PlanningRunWorker {
   ) {
     this.now = options.now ?? (() => new Date());
     this.leaseMs = options.leaseMs ?? 10 * 60_000;
+    this.kickoffRetryMs = options.kickoffRetryMs ?? 30_000;
   }
 
   /** Call once at startup, before any tick(). See the module-level note on
@@ -218,7 +252,7 @@ export class PlanningRunWorker {
    *  reconciled. */
   async reconcileOrphans(): Promise<number> {
     return this.transactions.transaction(async (tx) => {
-      const result = await tx.query<{ id: string }>(
+      const planning = await tx.query<{ id: string }>(
         `UPDATE planning_runs
          SET status = 'failed',
              error = 'orphaned: server restarted before the run completed',
@@ -227,16 +261,30 @@ export class PlanningRunWorker {
          RETURNING id`,
         [this.now().toISOString()],
       );
-      return result.rows.length;
+      // A quick kickoff is a durable outbox operation. Unlike an interrupted
+      // LLM round, it is safe to resume because the downstream saga is keyed
+      // by planning_run_id and is idempotent at every materialization step.
+      const kickoff = await tx.query<{ id: string }>(
+        `UPDATE planning_runs
+         SET quick_kickoff_status = 'pending',
+             lease_token = NULL, leased_until = NULL, updated_at = $1
+         WHERE mode = 'quick' AND status = 'approved'
+           AND quick_kickoff_status = 'in_progress'
+         RETURNING id`,
+        [this.now().toISOString()],
+      );
+      return planning.rows.length + kickoff.rows.length;
     });
   }
 
-  /** Processes at most one queued run. Safe to call from a recurring timer. */
+  /** Processes at most one planning run or pending quick kickoff. */
   async tick(): Promise<"idle" | "processed"> {
     const claim = await this.claim();
-    if (!claim) return "idle";
-    await this.execute(claim);
-    return "processed";
+    if (claim) {
+      await this.execute(claim);
+      return "processed";
+    }
+    return (await this.executeQuickKickoff()) ? "processed" : "idle";
   }
 
   /** Claims and executes one specific run immediately (used right after
@@ -244,9 +292,11 @@ export class PlanningRunWorker {
    *  no longer queued (e.g. a concurrent tick already claimed it). */
   async runNow(runId: string): Promise<"processed" | "not_found"> {
     const claim = await this.claim(runId);
-    if (!claim) return "not_found";
-    await this.execute(claim);
-    return "processed";
+    if (claim) {
+      await this.execute(claim);
+      return "processed";
+    }
+    return (await this.executeQuickKickoff(runId)) ? "processed" : "not_found";
   }
 
   private async claim(runId?: string): Promise<ClaimedPlanningRunRow | null> {
@@ -262,7 +312,10 @@ export class PlanningRunWorker {
            FROM next_run WHERE planning_runs.id = next_run.id
            RETURNING planning_runs.id, planning_runs.project_id, planning_runs.objective,
              planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids,
-             planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript`
+             planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript,
+             planning_runs.mode, planning_runs.requested_by,
+             planning_runs.pm_provider, planning_runs.pm_model,
+             planning_runs.agent_provider, planning_runs.agent_model`
         : `WITH next_run AS (
              SELECT id FROM planning_runs WHERE status = 'queued'
              ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1
@@ -271,7 +324,10 @@ export class PlanningRunWorker {
            FROM next_run WHERE planning_runs.id = next_run.id
            RETURNING planning_runs.id, planning_runs.project_id, planning_runs.objective,
              planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids,
-             planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript`;
+             planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript,
+             planning_runs.mode, planning_runs.requested_by,
+             planning_runs.pm_provider, planning_runs.pm_model,
+             planning_runs.agent_provider, planning_runs.agent_model`;
       const params = runId
         ? [leaseToken, leasedUntil, now.toISOString(), runId]
         : [leaseToken, leasedUntil, now.toISOString()];
@@ -281,16 +337,26 @@ export class PlanningRunWorker {
   }
 
   private async execute(claim: ClaimedPlanningRunRow): Promise<void> {
+    const quick = claim.mode === "quick";
+    const pmOverride =
+      claim.pm_provider && claim.pm_model
+        ? { provider: claim.pm_provider, model: claim.pm_model }
+        : null;
     let models: ResolvedPlanningModels;
     try {
-      models = await this.options.resolveModels(claim.project_id);
+      models = await this.options.resolveModels(claim.project_id, {
+        mode: claim.mode ?? "planned",
+        pm: pmOverride,
+      });
     } catch (error) {
       await this.fail(claim, error);
       return;
     }
 
     const pm = this.createAdapter(models.pm.provider, models.pm.model);
-    const reviewer = this.createAdapter(models.reviewer.provider, models.reviewer.model);
+    const reviewer = quick
+      ? null
+      : this.createAdapter(models.reviewer.provider, models.reviewer.model);
     // PHASE TAB P1: a modify re-entry appends to the run's prior transcript
     // (the earlier rounds are history the human already saw) and seeds the
     // loop with the prior plan + the human's direction.
@@ -312,6 +378,58 @@ export class PlanningRunWorker {
     const roundOneImages = revisionSeed ? [] : await this.loadRoundOneImages(claim);
 
     try {
+      if (quick) {
+        const result = await runQuickPlanning({
+          pm,
+          objective: claim.objective,
+          projectId: claim.project_id,
+          ...(roundOneImages.length > 0 ? { images: roundOneImages } : {}),
+        });
+        this.options.recordUsage?.(result.usage);
+        const totalCostUsd = result.usage.reduce((sum, usage) => sum + usage.estimated_cost_usd, 0);
+        transcript.push({
+          round: 0,
+          role: "pm",
+          provider: models.pm.provider,
+          model: models.pm.model,
+          summary: "Prepared one executable quick-change task.",
+          finding_counts: null,
+        });
+        const agent =
+          claim.agent_provider && claim.agent_model
+            ? { provider: claim.agent_provider, model: claim.agent_model }
+            : models.pm;
+        const staffingProposal: PlanningStaffingProposalDto = {
+          summary: `Quick change assigned to ${agent.provider}:${agent.model}.`,
+          recommendations: result.finalPlan.modules.map((module) => ({
+            node_id: module.id,
+            provider: agent.provider,
+            model: agent.model,
+            worker_count: 1,
+            budget_usd: 25,
+            rationale: "Single accountable agent for a focused quick change.",
+          })),
+        };
+        const resultDto: PlanningRunResultDto = {
+          plan: result.finalPlan,
+          content_hash: planContentHash(result.finalPlan),
+          total_cost_usd: totalCostUsd,
+          staffing_proposal: staffingProposal,
+        };
+        // A quick change has no human-review checkpoint. Persisting the plan,
+        // approval, actor, and pending kickoff together means correctness
+        // never depends on a React effect surviving navigation or tab close.
+        const approved = await this.persistQuickApproval(
+          claim,
+          transcript,
+          resultDto,
+          totalCostUsd,
+        );
+        if (approved) await this.executeQuickKickoff(claim.id);
+        return;
+      }
+
+      if (!reviewer) throw new Error("planned run is missing its reviewer");
       const result = await runPlanning({
         pm,
         reviewer,
@@ -325,7 +443,19 @@ export class PlanningRunWorker {
       this.options.recordUsage?.(result.usage);
       const totalCostUsd = result.usage.reduce((sum, usage) => sum + usage.estimated_cost_usd, 0);
       let staffingProposal: PlanningStaffingProposalDto | null = null;
-      if (this.options.buildStaffingProposal) {
+      if (claim.agent_provider && claim.agent_model) {
+        staffingProposal = {
+          summary: `Plan assigned to ${claim.agent_provider}:${claim.agent_model}.`,
+          recommendations: result.finalPlan.modules.map((module) => ({
+            node_id: module.id,
+            provider: claim.agent_provider,
+            model: claim.agent_model,
+            worker_count: 1,
+            budget_usd: 25,
+            rationale: "Agent explicitly selected for this run.",
+          })),
+        };
+      } else if (this.options.buildStaffingProposal) {
         try {
           staffingProposal = await this.options.buildStaffingProposal({
             projectId: claim.project_id,
@@ -355,6 +485,119 @@ export class PlanningRunWorker {
     } catch (error) {
       await this.fail(claim, error);
     }
+  }
+
+  /**
+   * Claims and executes one durable quick-change kickoff. There may be more
+   * than one invocation after a process death between the external call and
+   * the completion write; the kickoff saga's planning_run_id idempotency
+   * makes the observable phase/task/run effects exactly once.
+   */
+  private async executeQuickKickoff(runId?: string): Promise<boolean> {
+    if (!this.options.executionKickoff) return false;
+    const claim = await this.claimQuickKickoff(runId);
+    if (!claim) return false;
+    try {
+      const decision =
+        typeof claim.decision === "string"
+          ? (JSON.parse(claim.decision) as PlanningRunDecisionDto)
+          : claim.decision;
+      const report = await this.options.executionKickoff.kickoff({
+        projectId: claim.project_id,
+        planningRunId: claim.id,
+        staffing: decision.staffing ?? null,
+        decidedBy: claim.requested_by,
+      });
+      await this.completeQuickKickoff(claim, report);
+    } catch (error) {
+      await this.retryQuickKickoff(claim, error);
+    }
+    return true;
+  }
+
+  private async claimQuickKickoff(runId?: string): Promise<ClaimedQuickKickoffRow | null> {
+    const leaseToken = randomUUID();
+    const now = this.now();
+    const nowIso = now.toISOString();
+    const leasedUntil = new Date(now.getTime() + this.leaseMs).toISOString();
+    return this.transactions.transaction(async (tx) => {
+      const sql = runId
+        ? `WITH next_run AS (
+             SELECT id FROM planning_runs
+              WHERE id = $4 AND mode = 'quick' AND status = 'approved'
+                AND quick_kickoff_status = 'pending'
+                AND (leased_until IS NULL OR leased_until <= $3)
+              FOR UPDATE SKIP LOCKED
+           )
+           UPDATE planning_runs
+              SET quick_kickoff_status = 'in_progress',
+                  quick_kickoff_attempts = quick_kickoff_attempts + 1,
+                  lease_token = $1, leased_until = $2, updated_at = $3
+             FROM next_run
+            WHERE planning_runs.id = next_run.id
+           RETURNING planning_runs.id, planning_runs.project_id,
+             planning_runs.requested_by, planning_runs.decision,
+             planning_runs.lease_token`
+        : `WITH next_run AS (
+             SELECT id FROM planning_runs
+              WHERE mode = 'quick' AND status = 'approved'
+                AND quick_kickoff_status = 'pending'
+                AND (leased_until IS NULL OR leased_until <= $3)
+              ORDER BY updated_at ASC
+              FOR UPDATE SKIP LOCKED LIMIT 1
+           )
+           UPDATE planning_runs
+              SET quick_kickoff_status = 'in_progress',
+                  quick_kickoff_attempts = quick_kickoff_attempts + 1,
+                  lease_token = $1, leased_until = $2, updated_at = $3
+             FROM next_run
+            WHERE planning_runs.id = next_run.id
+           RETURNING planning_runs.id, planning_runs.project_id,
+             planning_runs.requested_by, planning_runs.decision,
+             planning_runs.lease_token`;
+      const params = runId
+        ? [leaseToken, leasedUntil, nowIso, runId]
+        : [leaseToken, leasedUntil, nowIso];
+      const result = await tx.query<ClaimedQuickKickoffRow>(sql, params);
+      return result.rows[0] ?? null;
+    });
+  }
+
+  private async completeQuickKickoff(
+    claim: ClaimedQuickKickoffRow,
+    report: PlanningRunExecutionDto,
+  ): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      await tx.query(
+        `UPDATE planning_runs
+            SET quick_kickoff_status = 'completed',
+                quick_kickoff_result = $2::jsonb,
+                lease_token = NULL, leased_until = NULL, updated_at = $3
+          WHERE id = $1 AND status = 'approved'
+            AND quick_kickoff_status = 'in_progress' AND lease_token = $4`,
+        [claim.id, JSON.stringify(report), this.now().toISOString(), claim.lease_token],
+      );
+    });
+  }
+
+  private async retryQuickKickoff(claim: ClaimedQuickKickoffRow, error: unknown): Promise<void> {
+    const now = this.now();
+    const retryAt = new Date(now.getTime() + this.kickoffRetryMs).toISOString();
+    const report: PlanningRunExecutionDto = {
+      started: false,
+      detail: errorMessage(error),
+    };
+    await this.transactions.transaction(async (tx) => {
+      await tx.query(
+        `UPDATE planning_runs
+            SET quick_kickoff_status = 'pending',
+                quick_kickoff_result = $2::jsonb,
+                lease_token = NULL, leased_until = $3, updated_at = $4
+          WHERE id = $1 AND status = 'approved'
+            AND quick_kickoff_status = 'in_progress' AND lease_token = $5`,
+        [claim.id, JSON.stringify(report), retryAt, now.toISOString(), claim.lease_token],
+      );
+    });
   }
 
   /** FRONT DOOR P4: parse the claimed row's attachment ids and resolve them to
@@ -390,6 +633,46 @@ export class PlanningRunWorker {
           claim.lease_token,
         ],
       );
+    });
+  }
+
+  private async persistQuickApproval(
+    claim: ClaimedPlanningRunRow,
+    transcript: PlanningRunTranscriptEntryDto[],
+    result: PlanningRunResultDto,
+    totalCostUsd: number,
+  ): Promise<boolean> {
+    if (!claim.requested_by) {
+      throw new Error("quick change is missing its authenticated requesting user");
+    }
+    const decidedAt = this.now().toISOString();
+    const decision: PlanningRunDecisionDto = {
+      decision: "approve",
+      direction: null,
+      staffing: null,
+      decided_at: decidedAt,
+    };
+    return this.transactions.transaction(async (tx) => {
+      const persisted = await tx.query<{ id: string }>(
+        `UPDATE planning_runs
+            SET status = 'approved', round = 0, transcript = $2::jsonb,
+                result = $3::jsonb, total_cost_usd = total_cost_usd + $4,
+                decision = $5::jsonb, quick_kickoff_status = 'pending',
+                quick_kickoff_result = NULL, error = NULL, revision_seed = NULL,
+                lease_token = NULL, leased_until = NULL, updated_at = $6
+          WHERE id = $1 AND mode = 'quick' AND lease_token = $7
+          RETURNING id`,
+        [
+          claim.id,
+          JSON.stringify(transcript),
+          JSON.stringify(result),
+          totalCostUsd,
+          JSON.stringify(decision),
+          decidedAt,
+          claim.lease_token,
+        ],
+      );
+      return persisted.rows.length === 1;
     });
   }
 

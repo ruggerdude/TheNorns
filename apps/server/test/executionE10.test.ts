@@ -237,6 +237,27 @@ describe.sequential("EXECUTION E10 — verification commands reach the runner", 
     expect(stored.rows[0]?.envelope).not.toHaveProperty("verification_commands");
   });
 
+  it("signals a committed manifest without converting or dropping its custom commands", async () => {
+    await recordRepositoryFact(
+      pg,
+      "memory-manifest",
+      "verification_manifest: .norns/verification.json",
+    );
+
+    const result = await coordinator.schedule(scheduleInput());
+
+    expect(result.command.verification_commands).toBeUndefined();
+    expect(result.command.repository_verification_manifest).toBe(".norns/verification.json");
+    const stored = await pg.query<{ envelope: Record<string, unknown> }>(
+      "SELECT envelope FROM commands WHERE command_id = $1",
+      [result.command_id],
+    );
+    expect(stored.rows[0]?.envelope).toMatchObject({
+      repository_verification_manifest: ".norns/verification.json",
+    });
+    expect(stored.rows[0]?.envelope).not.toHaveProperty("verification_commands");
+  });
+
   it("drops a command that would need a shell, keeps the rest, and reports what it dropped", async () => {
     await recordRepositoryFact(pg, "memory-build", "build_command: pnpm run build");
     await recordRepositoryFact(pg, "memory-test", "test_command: pnpm build && pnpm test");
@@ -347,6 +368,76 @@ describe.sequential("EXECUTION E10 — the runner's fallback chain is real", () 
 
     expect(result.passed).toBe(true);
     expect(result.command_results.map((entry) => entry.name)).toEqual(["test"]);
+  });
+
+  it("prefers the full signaled manifest over built-in hygiene without dropping custom commands", async () => {
+    const repository = await repositoryWith(
+      JSON.stringify({
+        commands: [
+          { name: "test", command: ["git", "--version"] },
+          { name: "git-hygiene", command: ["git", "status", "--porcelain"] },
+        ],
+      }),
+    );
+    // `undefined` installs the built-in default hygiene policy. The explicit
+    // repository-manifest signal must outrank that default or `test` disappears.
+    const verifier = new CommandPolicyVerifier(runnerVerificationPolicies(undefined));
+
+    const result = await verifier.verify({
+      worktree_path: repository.path,
+      policy_ref: DEFAULT_VERIFICATION_POLICY_REF,
+      expected_commit: repository.head,
+      base_revision: `${repository.head}~1`,
+      repository_manifest: true,
+    });
+
+    expect(result.passed).toBe(true);
+    expect(result.command_results.map((entry) => entry.name)).toEqual(["test", "git-hygiene"]);
+    expect(result.hygiene_only).toBe(false);
+  });
+
+  it("fails closed on a malformed signaled manifest instead of substituting built-in hygiene", async () => {
+    const repository = await repositoryWith('{"commands":');
+    const verifier = new CommandPolicyVerifier(runnerVerificationPolicies(undefined));
+
+    const result = await verifier.verify({
+      worktree_path: repository.path,
+      policy_ref: DEFAULT_VERIFICATION_POLICY_REF,
+      expected_commit: repository.head,
+      base_revision: `${repository.head}~1`,
+      repository_manifest: true,
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("is not valid JSON");
+    expect(result.command_results).toEqual([]);
+    expect(result.hygiene_only).toBe(false);
+  });
+
+  it("keeps exact dispatch commands above a signaled manifest", async () => {
+    const repository = await repositoryWith(
+      JSON.stringify({
+        commands: [
+          {
+            name: "manifest-failure",
+            command: ["git", "cat-file", "-e", "0000000000000000000000000000000000000000"],
+          },
+        ],
+      }),
+    );
+    const verifier = new CommandPolicyVerifier(runnerVerificationPolicies(undefined));
+
+    const result = await verifier.verify({
+      worktree_path: repository.path,
+      policy_ref: DEFAULT_VERIFICATION_POLICY_REF,
+      expected_commit: repository.head,
+      base_revision: `${repository.head}~1`,
+      commands: [{ name: "server-test", command: ["git", "--version"] }],
+      repository_manifest: true,
+    });
+
+    expect(result.passed).toBe(true);
+    expect(result.command_results.map((entry) => entry.name)).toEqual(["server-test"]);
   });
 
   it("FAILS CLOSED when there is neither an approved policy nor a committed manifest", async () => {

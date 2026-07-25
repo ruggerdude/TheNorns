@@ -73,6 +73,13 @@ describe.sequential("phase tab: planning run decisions (service + worker)", () =
       INSERT INTO projects (
         id, name, status, assignment_policy_ref, verification_policy_ref, budget_policy_ref
       ) VALUES ('project-1', 'Planning project', 'active', 'assignment/default', 'verification/default', 'budget/default');
+      INSERT INTO users (
+        id, username, display_name, email, name, password_hash,
+        password_hash_scheme, role, status
+      ) VALUES (
+        'admin-1', 'admin-1@example.com', 'Admin One',
+        'admin-1@example.com', 'Admin One', 'x', 'scrypt-v1', 'admin', 'active'
+      );
     `);
     service = new PlanningRunService(new PGliteTransactionRunner(pg));
     pm = new FakeAdapter("anthropic");
@@ -154,6 +161,106 @@ describe.sequential("phase tab: planning run decisions (service + worker)", () =
     await worker.runNow(created.id);
     expect(staffingInputs).toHaveLength(1);
     expect(staffingInputs[0]?.workerProviders).toBe("openai");
+  });
+
+  it("durably approves and kicks off a quick change once without reviewer or browser follow-up", async () => {
+    pm.enqueue(plan(["copy-fix"]));
+    const kickoffCalls: unknown[] = [];
+    const worker = makeWorker({
+      executionKickoff: {
+        kickoff: async (input) => {
+          kickoffCalls.push(input);
+          return { started: true, detail: "started" };
+        },
+      },
+    });
+    const created = await service.create("project-1", {
+      objective: "Correct the empty-state grammar",
+      mode: "quick",
+      requestedBy: "admin-1",
+      pm: { provider: "anthropic", model: "claude-sonnet-5" },
+      agent: { provider: "openai", model: "gpt-5.6-terra" },
+      workerProviders: "openai",
+    });
+
+    // Competing immediate dispatches represent duplicate workers/retries.
+    // Only one can claim the plan and only one can claim its kickoff outbox.
+    await Promise.all([worker.runNow(created.id), worker.runNow(created.id)]);
+    expect(await worker.runNow(created.id)).toBe("not_found");
+
+    const run = await service.get("project-1", created.id);
+    expect(run).toMatchObject({
+      status: "approved",
+      mode: "quick",
+      review_rounds_total: 0,
+      rounds_completed: 0,
+      pm: { provider: "anthropic", model: "claude-sonnet-5" },
+      agent: { provider: "openai", model: "gpt-5.6-terra" },
+      decision: { decision: "approve", direction: null, staffing: null },
+      execution: { started: true, detail: "started" },
+    });
+    expect(run.transcript.map((entry) => entry.role)).toEqual(["pm"]);
+    expect(reviewer.requests).toHaveLength(0);
+    expect(kickoffCalls).toEqual([
+      {
+        projectId: "project-1",
+        planningRunId: created.id,
+        staffing: null,
+        decidedBy: "admin-1",
+      },
+    ]);
+    expect(run.result?.staffing_proposal?.recommendations).toMatchObject([
+      {
+        node_id: "copy-fix",
+        provider: "openai",
+        model: "gpt-5.6-terra",
+        worker_count: 1,
+      },
+    ]);
+  });
+
+  it("recovers a durable quick kickoff after a transient seam failure", async () => {
+    pm.enqueue(plan(["copy-fix"]));
+    let attempts = 0;
+    const worker = makeWorker({
+      kickoffRetryMs: 0,
+      executionKickoff: {
+        kickoff: async () => {
+          attempts += 1;
+          if (attempts === 1) throw new Error("temporary launch failure");
+          return { started: true, detail: "recovered" };
+        },
+      },
+    });
+    const created = await service.create("project-1", {
+      objective: "Correct the empty-state grammar",
+      mode: "quick",
+      requestedBy: "admin-1",
+    });
+
+    await worker.runNow(created.id);
+    const afterFailure = await service.get("project-1", created.id);
+    expect(afterFailure).toMatchObject({
+      status: "approved",
+      execution: { started: false, detail: "temporary launch failure" },
+    });
+
+    expect(await worker.tick()).toBe("processed");
+    expect(await service.get("project-1", created.id)).toMatchObject({
+      status: "approved",
+      execution: { started: true, detail: "recovered" },
+    });
+    expect(attempts).toBe(2);
+    const outbox = await pg.query<{
+      quick_kickoff_status: string;
+      quick_kickoff_attempts: number;
+    }>("SELECT quick_kickoff_status, quick_kickoff_attempts FROM planning_runs WHERE id = $1", [
+      created.id,
+    ]);
+    expect(outbox.rows[0]).toMatchObject({
+      quick_kickoff_status: "completed",
+      quick_kickoff_attempts: 2,
+    });
   });
 
   it("refuses a decision while the run is not in a terminal-review state", async () => {
@@ -348,6 +455,16 @@ describe.sequential("phase tab: HTTP surface (production option shape)", () => {
     const admin = users.userForToken(token);
     if (!admin) throw new Error("seeded admin session did not resolve");
     adminId = admin.id;
+    await pg.query(
+      `INSERT INTO users (
+         id, username, display_name, email, name, password_hash,
+         password_hash_scheme, role, status
+       ) VALUES (
+         $1, 'test-admin@example.com', 'Test Admin', 'test-admin@example.com',
+         'Test Admin', 'x', 'scrypt-v1', 'admin', 'active'
+       )`,
+      [adminId],
+    );
     pmAdapter = new FakeAdapter("anthropic");
     reviewerAdapter = new FakeAdapter("openai");
     kickoffCalls = [];
@@ -373,6 +490,8 @@ describe.sequential("phase tab: HTTP surface (production option shape)", () => {
         ANTHROPIC_API_KEY: "test-anthropic",
         OPENAI_API_KEY: "test-openai",
         NORNS_OPENAI_MODEL: "gpt-5.6-luna",
+        NORNS_RUNNER_ALLOWED_MODELS:
+          "anthropic/claude-fable-5,anthropic/claude-sonnet-5,anthropic/claude-haiku-4-5-20251001,openai/gpt-5.6-sol,openai/gpt-5.6-terra,openai/gpt-5.6-luna",
       },
       createPlanningAdapter: (provider: ProviderName): LlmAdapter =>
         provider === "anthropic" ? pmAdapter : reviewerAdapter,
@@ -407,6 +526,103 @@ describe.sequential("phase tab: HTTP surface (production option shape)", () => {
       rounds_completed: 1,
       worker_providers: "anthropic",
       decision: null,
+    });
+  });
+
+  it("exposes runner-backed execution capability and rejects an unavailable agent before PM spend", async () => {
+    const capability = await inject("GET", "/api/v2/capabilities/execution-models");
+    expect(capability.statusCode).toBe(200);
+    const capabilityBody = capability.json() as {
+      ready: boolean;
+      required_environment: string[];
+      models: Array<Record<string, unknown>>;
+    };
+    expect(capabilityBody).toMatchObject({
+      ready: true,
+      required_environment: ["NORNS_RUNNER_ALLOWED_MODELS"],
+    });
+    expect(capabilityBody.models).toContainEqual(
+      expect.objectContaining({
+        id: "claude-opus-4-8",
+        provider: "anthropic",
+        available: false,
+        unavailable_reason: "model_not_in_runner_allowlist",
+      }),
+    );
+    expect(capabilityBody.models).toContainEqual(
+      expect.objectContaining({
+        id: "claude-sonnet-5",
+        provider: "anthropic",
+        available: true,
+        unavailable_reason: null,
+      }),
+    );
+
+    const refused = await inject("POST", `/api/v2/projects/${projectId}/planning-runs`, {
+      objective: "Make a small visual adjustment",
+      mode: "quick",
+      review_rounds: 0,
+      pm: { provider: "anthropic", model: "claude-sonnet-5" },
+      agent: { provider: "anthropic", model: "claude-opus-4-8" },
+    });
+    expect(refused.statusCode).toBe(422);
+    expect(refused.json()).toMatchObject({
+      error: "agent_model_unavailable",
+      message: expect.stringContaining("NORNS_RUNNER_ALLOWED_MODELS"),
+    });
+    expect(pmAdapter.requests).toHaveLength(0);
+  });
+
+  it("runs a quick change with one PM pass, no reviewer, and pinned PM/agent identities", async () => {
+    pmAdapter.enqueue(plan(["copy-fix"]));
+    const created = await inject("POST", `/api/v2/projects/${projectId}/planning-runs`, {
+      objective: "Correct the empty-state grammar",
+      mode: "quick",
+      review_rounds: 0,
+      pm: { provider: "anthropic", model: "claude-sonnet-5" },
+      agent: { provider: "openai", model: "gpt-5.6-luna" },
+    });
+    expect(created.statusCode).toBe(202);
+    const { planning_run_id: runId } = created.json() as { planning_run_id: string };
+    const run = await pollUntil(runId, (candidate) => candidate.status === "approved");
+
+    expect(run).toMatchObject({
+      mode: "quick",
+      status: "approved",
+      review_rounds_total: 0,
+      rounds_completed: 0,
+      pm: { provider: "anthropic", model: "claude-sonnet-5" },
+      agent: { provider: "openai", model: "gpt-5.6-luna" },
+      worker_providers: "openai",
+      decision: { decision: "approve", staffing: null },
+      execution: { started: false, detail: "kickoff seam invoked (test double)" },
+    });
+    expect(run.transcript).toMatchObject([
+      {
+        role: "pm",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        finding_counts: null,
+      },
+    ]);
+    expect(reviewerAdapter.requests).toHaveLength(0);
+    const quickResult = run.result as {
+      staffing_proposal?: { recommendations?: unknown[] };
+    };
+    expect(quickResult.staffing_proposal?.recommendations).toMatchObject([
+      {
+        node_id: "copy-fix",
+        provider: "openai",
+        model: "gpt-5.6-luna",
+        worker_count: 1,
+      },
+    ]);
+    expect(kickoffCalls).toHaveLength(1);
+    expect(kickoffCalls[0]).toMatchObject({
+      projectId,
+      planningRunId: runId,
+      staffing: null,
+      decidedBy: adminId,
     });
   });
 

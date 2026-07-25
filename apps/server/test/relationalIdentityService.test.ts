@@ -250,6 +250,38 @@ describe.sequential("Phase 2 relational identity service", () => {
     });
   });
 
+  it("coalesces session last-seen writes while still refreshing an active session", async () => {
+    const harness = await setup();
+    databases.push(harness.pg);
+    await harness.service.createActive({
+      email: "admin@example.com",
+      password: "current-password",
+      role: "admin",
+    });
+    const login = await harness.service.login("admin@example.com", "current-password");
+    const initial = await harness.pg.query<{ last_seen_at: Date | string }>(
+      "SELECT last_seen_at FROM sessions",
+    );
+
+    harness.setNow("2026-07-16T20:00:30.000Z");
+    await expect(harness.service.userForToken(login.token)).resolves.toBeDefined();
+    const withinWindow = await harness.pg.query<{ last_seen_at: Date | string }>(
+      "SELECT last_seen_at FROM sessions",
+    );
+    expect(new Date(withinWindow.rows[0]?.last_seen_at ?? 0).toISOString()).toBe(
+      new Date(initial.rows[0]?.last_seen_at ?? 0).toISOString(),
+    );
+
+    harness.setNow("2026-07-16T20:01:01.000Z");
+    await expect(harness.service.userForToken(login.token)).resolves.toBeDefined();
+    const afterWindow = await harness.pg.query<{ last_seen_at: Date | string }>(
+      "SELECT last_seen_at FROM sessions",
+    );
+    expect(new Date(afterWindow.rows[0]?.last_seen_at ?? 0).toISOString()).toBe(
+      "2026-07-16T20:01:01.000Z",
+    );
+  });
+
   it("enforces logout and server-side expiry", async () => {
     const harness = await setup({ sessionTtlMs: 1_000 });
     databases.push(harness.pg);

@@ -1,9 +1,12 @@
 import {
   EventEnvelope,
   type EventEnvelopeInputT,
+  V2EvidenceRef,
+  type V2EvidenceRefT,
   resolveV2BudgetReservation,
 } from "@norns/contracts";
-import type { V2TransactionRunner } from "../persistence/v2/database.js";
+import { canonicalSha256 } from "../persistence/migration/canonicalJson.js";
+import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   transitionV2AgentRunLifecycle,
   transitionV2TaskLifecycle,
@@ -12,6 +15,11 @@ import {
   SqlV2ApplicationTransaction,
   SqlV2BudgetTransaction,
 } from "../persistence/v2/sqlRepositories.js";
+import {
+  type Phase4KnowledgeEvent,
+  Phase4KnowledgeEventAdapter,
+} from "./phase4KnowledgeEventAdapter.js";
+import { dismissRecoveryDecisionsForSuccessfulRun } from "./phase4TerminalReconciliation.js";
 import { RunIntegrationConflictService } from "./runIntegrationConflicts.js";
 
 /**
@@ -37,13 +45,27 @@ interface RunScope {
   aggregate_version: number;
   runner_id: string | null;
   repository_binding_id: string;
+  expected_revision: string;
+  assignment_id: string;
+  reviewer_agent_profile_id: string | null;
+  execution_mode: "quick" | "planned";
   verification_policy_ref: string;
   task_state: string;
   task_aggregate_version: number;
 }
 
+interface ReconciledRunUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  gateway_events: number;
+}
+
 export class Phase4EventProcessor {
-  constructor(private readonly transactions: V2TransactionRunner) {}
+  constructor(
+    private readonly transactions: V2TransactionRunner,
+    private readonly knowledge = new Phase4KnowledgeEventAdapter(),
+  ) {}
 
   apply(input: EventEnvelopeInputT): Promise<{ duplicate: boolean; ignored?: boolean }> {
     const event = EventEnvelope.parse(input);
@@ -107,9 +129,16 @@ export class Phase4EventProcessor {
           const failedScope = await sql.query<RunScope>(
             `SELECT run.id, run.project_id, run.phase_id, run.task_id, run.state,
                     run.aggregate_version, run.runner_id, run.repository_binding_id,
+                    run.expected_revision, run.assignment_id,
+                    assignment.reviewer_agent_profile_id,
+                    COALESCE(planning.mode, 'planned') AS execution_mode,
                     task.verification_policy_ref, task.state AS task_state,
                     task.aggregate_version AS task_aggregate_version
-             FROM agent_runs run JOIN tasks task ON task.id=run.task_id
+             FROM agent_runs run
+             JOIN tasks task ON task.id=run.task_id
+             JOIN agent_assignments assignment ON assignment.id=run.assignment_id
+             JOIN phases phase ON phase.id=run.phase_id
+             LEFT JOIN planning_runs planning ON planning.id=phase.planning_run_id
              WHERE run.id=$1 FOR UPDATE OF run, task`,
             [row.run_id],
           );
@@ -154,34 +183,23 @@ export class Phase4EventProcessor {
                 reason: `command ${event.payload.state} requires operator attention`,
               });
             }
-            const budget = new SqlV2BudgetTransaction(sql);
-            const reservation = await budget.lockReservation(`budget-reservation:${scope.id}`);
-            if (reservation?.status === "active") {
-              const outcome: "cancelled" | "expired" | "rejected" =
-                event.payload.state === "cancelled"
-                  ? "cancelled"
-                  : event.payload.state === "expired"
-                    ? "expired"
-                    : "rejected";
-              const request = {
-                reservation_id: reservation.id,
-                expected_version: reservation.version,
-                outcome,
-                attributable_usage_usd: 0,
-                reason: `command ${event.payload.state}`,
-                actor_type: "runner" as const,
-                actor_id: event.runner_id,
-                correlation_id: event.correlation_id,
-                causation_id: event.causation_id,
-                occurred_at: event.occurred_at,
-              };
-              await budget.applyResolution(
-                reservation,
-                request,
-                resolveV2BudgetReservation(reservation.amount_usd, request),
-              );
-            }
           }
+        }
+        const terminalCommandState =
+          event.payload.state === "succeeded" ||
+          event.payload.state === "failed" ||
+          event.payload.state === "rejected" ||
+          event.payload.state === "expired" ||
+          event.payload.state === "cancelled"
+            ? event.payload.state
+            : null;
+        if (terminalCommandState) {
+          await this.settleTerminalUsage(sql, row.run_id, terminalCommandState, {
+            runner_id: event.runner_id,
+            correlation_id: event.correlation_id,
+            causation_id: event.causation_id,
+            occurred_at: event.occurred_at,
+          });
         }
         await sql.query("UPDATE runner_events SET run_id = $2, applied_at = now() WHERE id = $1", [
           eventId,
@@ -195,15 +213,29 @@ export class Phase4EventProcessor {
         runId
           ? `SELECT run.id, run.project_id, run.phase_id, run.task_id, run.state,
                     run.aggregate_version, run.runner_id, run.repository_binding_id,
+                    run.expected_revision, run.assignment_id,
+                    assignment.reviewer_agent_profile_id,
+                    COALESCE(planning.mode, 'planned') AS execution_mode,
                     task.verification_policy_ref, task.state AS task_state,
                     task.aggregate_version AS task_aggregate_version
-             FROM agent_runs run JOIN tasks task ON task.id = run.task_id
+             FROM agent_runs run
+             JOIN tasks task ON task.id = run.task_id
+             JOIN agent_assignments assignment ON assignment.id=run.assignment_id
+             JOIN phases phase ON phase.id=run.phase_id
+             LEFT JOIN planning_runs planning ON planning.id=phase.planning_run_id
              WHERE run.id = $1 FOR UPDATE OF run, task`
           : `SELECT run.id, run.project_id, run.phase_id, run.task_id, run.state,
                     run.aggregate_version, run.runner_id, run.repository_binding_id,
+                    run.expected_revision, run.assignment_id,
+                    assignment.reviewer_agent_profile_id,
+                    COALESCE(planning.mode, 'planned') AS execution_mode,
                     task.verification_policy_ref, task.state AS task_state,
                     task.aggregate_version AS task_aggregate_version
-             FROM tasks task JOIN agent_runs run ON run.id = task.designated_run_id
+             FROM tasks task
+             JOIN agent_runs run ON run.id = task.designated_run_id
+             JOIN agent_assignments assignment ON assignment.id=run.assignment_id
+             JOIN phases phase ON phase.id=run.phase_id
+             LEFT JOIN planning_runs planning ON planning.id=phase.planning_run_id
              WHERE task.id = $1 FOR UPDATE OF run, task`,
         [runId ?? (event.payload.kind === "verification_result" ? event.payload.node_id : "")],
       );
@@ -224,7 +256,6 @@ export class Phase4EventProcessor {
       }
       await sql.query("UPDATE runner_events SET run_id = $2 WHERE id = $1", [eventId, scope.id]);
       const lifecycle = new SqlV2ApplicationTransaction(sql);
-      const budget = new SqlV2BudgetTransaction(sql);
       const actor = {
         actor_type: "runner" as const,
         actor_id: event.runner_id,
@@ -233,7 +264,14 @@ export class Phase4EventProcessor {
         occurred_at: event.occurred_at,
       };
 
-      if (event.payload.kind === "run_status" && event.payload.status === "started") {
+      if (
+        event.payload.kind === "knowledge_registration" ||
+        event.payload.kind === "knowledge_heartbeat" ||
+        event.payload.kind === "knowledge_delta" ||
+        event.payload.kind === "knowledge_handoff"
+      ) {
+        await this.knowledge.apply(sql, event as Phase4KnowledgeEvent, scope);
+      } else if (event.payload.kind === "run_status" && event.payload.status === "started") {
         if (scope.state === "dispatched") {
           await transitionV2AgentRunLifecycle(lifecycle, {
             ...actor,
@@ -262,6 +300,25 @@ export class Phase4EventProcessor {
           `UPDATE agent_runs SET usage_input_tokens = $2, usage_output_tokens = $3,
                                  updated_at = now() WHERE id = $1`,
           [scope.id, event.payload.input_tokens, event.payload.output_tokens],
+        );
+      } else if (event.payload.kind === "runtime_result") {
+        await sql.query(
+          `UPDATE agent_runs
+              SET runtime_session_id = COALESCE($2, runtime_session_id),
+                  result_summary = $3, updated_at = now()
+            WHERE id = $1`,
+          [
+            scope.id,
+            event.payload.session_id,
+            [
+              `${event.payload.runtime} ${event.payload.outcome}`,
+              event.payload.stop_reason ? `stop=${event.payload.stop_reason}` : null,
+              event.payload.detail || null,
+            ]
+              .filter(Boolean)
+              .join(": ")
+              .slice(0, 4_000),
+          ],
         );
       } else if (event.payload.kind === "verification_result") {
         const currentRun = await lifecycle.lockAgentRunLifecycle(scope.id);
@@ -401,23 +458,70 @@ export class Phase4EventProcessor {
               reason: "runner completed with green verification",
             });
           }
-          if (currentTask?.state === "verifying") {
-            await transitionV2TaskLifecycle(lifecycle, {
+          await dismissRecoveryDecisionsForSuccessfulRun(sql, {
+            project_id: scope.project_id,
+            phase_id: scope.phase_id,
+            task_id: scope.task_id,
+            run_id: scope.id,
+            actor: { actor_type: "runner", actor_id: event.runner_id },
+            occurred_at: event.occurred_at,
+          });
+          let reviewReadyTask = currentTask;
+          if (reviewReadyTask?.state === "verifying") {
+            reviewReadyTask = await transitionV2TaskLifecycle(lifecycle, {
               ...actor,
               project_id: scope.project_id,
               phase_id: scope.phase_id,
               task_id: scope.task_id,
-              expected_aggregate_version: currentTask.aggregate_version,
+              expected_aggregate_version: reviewReadyTask.aggregate_version,
               to: "in_review",
-              reason: "verified result awaiting review",
+              reason:
+                scope.execution_mode === "quick" && scope.reviewer_agent_profile_id === null
+                  ? "Quick Change verification passed; independent review is not required"
+                  : "verified result awaiting review",
             });
+          }
+          if (
+            scope.execution_mode === "quick" &&
+            scope.reviewer_agent_profile_id === null &&
+            reviewReadyTask?.state === "in_review"
+          ) {
+            await this.completeQuickChange(
+              sql,
+              lifecycle,
+              scope,
+              reviewReadyTask.aggregate_version,
+              actor,
+            );
           }
           await sql.query("UPDATE agent_runs SET finished_at = $2 WHERE id = $1", [
             scope.id,
             event.occurred_at,
           ]);
+          await this.settleTerminalUsage(sql, scope.id, "succeeded", {
+            runner_id: event.runner_id,
+            correlation_id: event.correlation_id,
+            causation_id: event.causation_id,
+            occurred_at: event.occurred_at,
+          });
         } else if (["failed", "cancelled"].includes(event.payload.status)) {
           const runTarget = event.payload.status === "cancelled" ? "cancelled" : "failed";
+          const failure =
+            event.payload.status === "failed"
+              ? (event.payload.failure ?? {
+                  stage: "unknown",
+                  code: "runner_failed",
+                  detail: "runner reported failed",
+                })
+              : {
+                  stage: "cancellation",
+                  code: "runner_cancelled",
+                  detail: "runner reported cancelled",
+                };
+          const lifecycleReason =
+            event.payload.status === "failed"
+              ? `${failure.code} during ${failure.stage}: ${failure.detail}`
+              : failure.detail;
           if (
             currentRun &&
             !["succeeded", "failed", "cancelled", "expired"].includes(currentRun.state)
@@ -430,58 +534,369 @@ export class Phase4EventProcessor {
               run_id: scope.id,
               expected_aggregate_version: currentRun.aggregate_version,
               to: runTarget,
-              reason: `runner reported ${event.payload.status}`,
+              reason: lifecycleReason,
             });
           }
           if (currentTask && !["completed", "cancelled"].includes(currentTask.state)) {
-            await transitionV2TaskLifecycle(lifecycle, {
-              ...actor,
-              project_id: scope.project_id,
-              phase_id: scope.phase_id,
-              task_id: scope.task_id,
-              expected_aggregate_version: currentTask.aggregate_version,
-              to: event.payload.status === "cancelled" ? "cancelled" : "failed",
-              reason: `designated run ${event.payload.status}`,
-            });
+            if (event.payload.status === "cancelled") {
+              await transitionV2TaskLifecycle(lifecycle, {
+                ...actor,
+                project_id: scope.project_id,
+                phase_id: scope.phase_id,
+                task_id: scope.task_id,
+                expected_aggregate_version: currentTask.aggregate_version,
+                to: "cancelled",
+                reason: lifecycleReason,
+              });
+            } else if (currentTask.state !== "failed") {
+              // A bootstrap failure occurs before `started`, while the task is
+              // still assigned. assigned -> failed is intentionally not a
+              // legal lifecycle edge, so converge through blocked in the same
+              // transaction. Replays see the event row and do nothing.
+              const failureReadyTask = ["pending", "ready", "assigned"].includes(currentTask.state)
+                ? await transitionV2TaskLifecycle(lifecycle, {
+                    ...actor,
+                    project_id: scope.project_id,
+                    phase_id: scope.phase_id,
+                    task_id: scope.task_id,
+                    expected_aggregate_version: currentTask.aggregate_version,
+                    to: "blocked",
+                    reason: lifecycleReason,
+                  })
+                : currentTask;
+              await transitionV2TaskLifecycle(lifecycle, {
+                ...actor,
+                project_id: scope.project_id,
+                phase_id: scope.phase_id,
+                task_id: scope.task_id,
+                expected_aggregate_version: failureReadyTask.aggregate_version,
+                to: "failed",
+                reason: lifecycleReason,
+              });
+            }
           }
           await sql.query(
             "UPDATE agent_runs SET failure_code=$2, failure_detail=$3, finished_at=$4 WHERE id=$1",
-            [
-              scope.id,
-              `runner_${event.payload.status}`,
-              `runner reported ${event.payload.status}`,
-              event.occurred_at,
-            ],
+            [scope.id, failure.code, `${failure.stage}: ${failure.detail}`, event.occurred_at],
           );
-          const reservation = await budget.lockReservation(`budget-reservation:${scope.id}`);
-          if (reservation?.status === "active") {
-            const outcome = event.payload.status === "cancelled" ? "cancelled" : "rejected";
-            const resolution = resolveV2BudgetReservation(reservation.amount_usd, {
-              outcome,
-              attributable_usage_usd: 0,
-              reason: `runner ${event.payload.status} before attributable usage was recorded`,
-            });
-            await budget.applyResolution(
-              reservation,
-              {
-                reservation_id: reservation.id,
-                expected_version: reservation.version,
-                outcome,
-                attributable_usage_usd: 0,
-                reason: `runner ${event.payload.status}`,
-                actor_type: "runner",
-                actor_id: event.runner_id,
-                correlation_id: event.correlation_id,
-                causation_id: event.causation_id,
-                occurred_at: event.occurred_at,
-              },
-              resolution,
-            );
-          }
+          await this.settleTerminalUsage(
+            sql,
+            scope.id,
+            event.payload.status === "cancelled" ? "cancelled" : "failed",
+            {
+              runner_id: event.runner_id,
+              correlation_id: event.correlation_id,
+              causation_id: event.causation_id,
+              occurred_at: event.occurred_at,
+            },
+          );
         }
       }
       await sql.query("UPDATE runner_events SET applied_at = now() WHERE id = $1", [eventId]);
       return { duplicate: false };
     });
+  }
+
+  /**
+   * Quick Change has no reviewer by design, but V2 still requires every task
+   * to traverse the legal verifying -> in_review -> completed lifecycle and to
+   * carry review/completion evidence. Here `in_review` is a transactional
+   * waypoint, not a queue: the review evidence records the explicit Quick
+   * Change waiver backed by exact-commit verification, and the completion
+   * evidence is the durable runner handoff for that same published commit.
+   */
+  private async completeQuickChange(
+    sql: V2SqlExecutor,
+    lifecycle: SqlV2ApplicationTransaction,
+    scope: RunScope,
+    expectedTaskVersion: number,
+    actor: {
+      actor_type: "runner";
+      actor_id: string;
+      correlation_id: string;
+      causation_id: string | null;
+      occurred_at: string;
+    },
+  ): Promise<void> {
+    const evidence = await sql.query<{
+      verification_id: string;
+      verification_commit: string;
+      handoff_id: string;
+      handoff_payload: unknown;
+      handoff_commit: string;
+      run_commit: string | null;
+      published_commit: string | null;
+      publication_outcome: string | null;
+    }>(
+      `SELECT verification.id AS verification_id,
+              verification.commit_sha AS verification_commit,
+              handoff.id AS handoff_id,
+              handoff.payload AS handoff_payload,
+              handoff.payload->>'commit' AS handoff_commit,
+              run.commit_sha AS run_commit,
+              run.published_commit_sha AS published_commit,
+              run.publication_outcome
+         FROM agent_runs run
+         JOIN verification_results verification
+           ON verification.run_id=run.id AND verification.passed=true
+         JOIN agent_handoffs handoff
+           ON handoff.run_id=run.id AND handoff.status='completed'
+        WHERE run.id=$1
+        ORDER BY verification.created_at DESC, handoff.submitted_at DESC
+        LIMIT 1`,
+      [scope.id],
+    );
+    const durable = evidence.rows[0];
+    if (
+      !durable ||
+      durable.run_commit !== durable.verification_commit ||
+      durable.published_commit !== durable.verification_commit ||
+      durable.handoff_commit !== durable.verification_commit ||
+      !["pushed", "local_only"].includes(durable.publication_outcome ?? "")
+    ) {
+      throw new Phase4RunnerEventRejectedError(
+        "Quick Change completion requires verification, publication, and handoff for the same commit",
+      );
+    }
+    const reviewEvidence: V2EvidenceRefT[] = [
+      V2EvidenceRef.parse({
+        artifact_id: `quick-review-waiver:${scope.id}`,
+        content_hash: canonicalSha256({
+          execution_mode: "quick",
+          reviewer_agent_profile_id: null,
+          verification_result_id: durable.verification_id,
+          commit: durable.verification_commit,
+        }),
+        media_type: "application/vnd.norns.quick-review-waiver+json",
+        label: "Quick Change review waiver with exact-commit verification",
+      }),
+    ];
+    const completionEvidence: V2EvidenceRefT[] = [
+      V2EvidenceRef.parse({
+        artifact_id: durable.handoff_id,
+        content_hash: canonicalSha256(durable.handoff_payload),
+        media_type: "application/vnd.norns.agent-handoff+json",
+        label: "Verified and published Quick Change handoff",
+      }),
+    ];
+    const openConflicts = await sql.query<{ id: string }>(
+      `SELECT id FROM run_integration_conflicts
+        WHERE status='awaiting_human'
+          AND (task_id=$1 OR counterpart_task_id=$1)
+        ORDER BY detected_at`,
+      [scope.task_id],
+    );
+    if (openConflicts.rows.length > 0) {
+      throw new Phase4RunnerEventRejectedError(
+        `Quick Change has unresolved integration conflict(s): ${openConflicts.rows
+          .map((conflict) => conflict.id)
+          .join(", ")}`,
+      );
+    }
+    const deltaEvidence = await this.knowledge.acceptQuickCompletionDelta(
+      sql,
+      scope,
+      actor.occurred_at,
+    );
+    const gate = await this.knowledge.evaluateCompletion(sql, scope.task_id, actor.occurred_at);
+    if (!gate.passed) {
+      throw new Phase4RunnerEventRejectedError(
+        `Quick Change completion requires durable knowledge: ${gate.blockers.join("; ")}`,
+      );
+    }
+    completionEvidence.push(
+      V2EvidenceRef.parse({
+        artifact_id: deltaEvidence.artifact_id,
+        content_hash: deltaEvidence.content_hash,
+        media_type: "application/vnd.norns.knowledge-delta+json",
+        label: "Accepted Quick Change knowledge delta",
+      }),
+    );
+
+    await sql.query(
+      `UPDATE tasks
+          SET review_evidence=$2::jsonb, completion_evidence=$3::jsonb,
+              completed_at=$4
+        WHERE id=$1`,
+      [
+        scope.task_id,
+        JSON.stringify(reviewEvidence),
+        JSON.stringify(completionEvidence),
+        actor.occurred_at,
+      ],
+    );
+    await transitionV2TaskLifecycle(lifecycle, {
+      ...actor,
+      project_id: scope.project_id,
+      phase_id: scope.phase_id,
+      task_id: scope.task_id,
+      expected_aggregate_version: expectedTaskVersion,
+      to: "completed",
+      reason:
+        "Quick Change completed after exact-commit verification, publication, and durable handoff; independent review was not required",
+    });
+    await sql.query(
+      `UPDATE agent_assignments
+          SET status='completed', aggregate_version=aggregate_version+1,
+              updated_at=now()
+        WHERE id=$1`,
+      [scope.assignment_id],
+    );
+
+    const remaining = await sql.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM tasks
+        WHERE phase_id=$1 AND state NOT IN ('completed','cancelled')`,
+      [scope.phase_id],
+    );
+    if ((remaining.rows[0]?.count ?? 0) > 0) return;
+
+    const phaseGate = await this.knowledge.evaluatePhaseCompletion(
+      sql,
+      scope.project_id,
+      scope.phase_id,
+      actor.occurred_at,
+    );
+    if (!phaseGate.passed) {
+      throw new Phase4RunnerEventRejectedError(
+        `Quick Change phase completion requires reconciled knowledge: ${phaseGate.blockers.join("; ")}`,
+      );
+    }
+    const closureSummary =
+      "Quick Change completed with exact-commit verification, publication, durable knowledge handoff, and an accepted runner knowledge delta.";
+    await sql.query(
+      `UPDATE objectives
+          SET status='completed', completion_evidence=$2::jsonb,
+              aggregate_version=aggregate_version+1, updated_at=now()
+        WHERE phase_id=$1 AND status <> 'cancelled'`,
+      [scope.phase_id, JSON.stringify(completionEvidence)],
+    );
+    await sql.query(
+      `UPDATE phases
+          SET status='completed', closed_at=$2, closure_summary=$3,
+              closure_evidence=$4::jsonb,
+              aggregate_version=aggregate_version+1, updated_at=now()
+        WHERE id=$1`,
+      [scope.phase_id, actor.occurred_at, closureSummary, JSON.stringify(completionEvidence)],
+    );
+    await sql.query(
+      `INSERT INTO project_memory_entries (
+         id, project_id, phase_id, category, content, provenance, source_ref,
+         confidence, version, status, approved_by_human
+       ) VALUES ($1,$2,$3,'phase_completion',$4,'phase4_quick_completion',$5::jsonb,
+                 1,1,'active',false)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        `memory:phase-completion:${scope.phase_id}`,
+        scope.project_id,
+        scope.phase_id,
+        closureSummary,
+        JSON.stringify({ run_id: scope.id, task_id: scope.task_id }),
+      ],
+    );
+  }
+
+  /**
+   * Replace provisional SDK usage with the gateway's durable per-request
+   * aggregate when it exists. This is an absolute SUM assignment, never an
+   * increment, so replay and the SDK's session report cannot double-count.
+   */
+  private async reconcileRunUsage(sql: V2SqlExecutor, runId: string): Promise<ReconciledRunUsage> {
+    const aggregate = await sql.query<{
+      gateway_events: number | string;
+      input_tokens: number | string;
+      output_tokens: number | string;
+      cost_usd: number | string;
+    }>(
+      `SELECT count(*)::int AS gateway_events,
+              COALESCE(sum(input_tokens), 0) AS input_tokens,
+              COALESCE(sum(output_tokens), 0) AS output_tokens,
+              COALESCE(sum(cost_usd), 0) AS cost_usd
+         FROM usage_events
+        WHERE run_id = $1`,
+      [runId],
+    );
+    const row = aggregate.rows[0];
+    const usage: ReconciledRunUsage = {
+      gateway_events: Number(row?.gateway_events ?? 0),
+      input_tokens: Number(row?.input_tokens ?? 0),
+      output_tokens: Number(row?.output_tokens ?? 0),
+      cost_usd: Number(row?.cost_usd ?? 0),
+    };
+    if (usage.gateway_events > 0) {
+      await sql.query(
+        `UPDATE agent_runs
+            SET usage_input_tokens = $2, usage_output_tokens = $3,
+                usage_cost_usd = $4, updated_at = now()
+          WHERE id = $1`,
+        [runId, usage.input_tokens, usage.output_tokens, usage.cost_usd],
+      );
+      return usage;
+    }
+    const provisional = await sql.query<{
+      input_tokens: number | string;
+      output_tokens: number | string;
+      cost_usd: number | string;
+    }>(
+      `SELECT usage_input_tokens AS input_tokens,
+              usage_output_tokens AS output_tokens,
+              usage_cost_usd AS cost_usd
+         FROM agent_runs WHERE id = $1`,
+      [runId],
+    );
+    return {
+      gateway_events: 0,
+      input_tokens: Number(provisional.rows[0]?.input_tokens ?? 0),
+      output_tokens: Number(provisional.rows[0]?.output_tokens ?? 0),
+      cost_usd: Number(provisional.rows[0]?.cost_usd ?? 0),
+    };
+  }
+
+  private async settleTerminalUsage(
+    sql: V2SqlExecutor,
+    runId: string,
+    terminal: "succeeded" | "failed" | "rejected" | "expired" | "cancelled",
+    actor: {
+      runner_id: string;
+      correlation_id: string;
+      causation_id: string | null;
+      occurred_at: string;
+    },
+  ): Promise<void> {
+    const usage = await this.reconcileRunUsage(sql, runId);
+    const budget = new SqlV2BudgetTransaction(sql);
+    const reservation = await budget.lockReservation(`budget-reservation:${runId}`);
+    if (!reservation || reservation.status !== "active") return;
+
+    // A provider can report slightly more than the pre-flight estimate for its
+    // final request. The usage row and agent-run cost retain that exact truth;
+    // this reservation can settle only the money it actually held.
+    const attributableUsage = Math.min(usage.cost_usd, reservation.amount_usd);
+    const outcome =
+      terminal === "succeeded"
+        ? ("success" as const)
+        : attributableUsage > 0
+          ? ("partial_usage" as const)
+          : terminal === "cancelled"
+            ? ("cancelled" as const)
+            : terminal === "expired"
+              ? ("expired" as const)
+              : ("rejected" as const);
+    const request = {
+      reservation_id: reservation.id,
+      expected_version: reservation.version,
+      outcome,
+      attributable_usage_usd: attributableUsage,
+      reason: `terminal ${terminal}; reconciled ${usage.gateway_events} gateway usage event(s)`,
+      actor_type: "runner" as const,
+      actor_id: actor.runner_id,
+      correlation_id: actor.correlation_id,
+      causation_id: actor.causation_id,
+      occurred_at: actor.occurred_at,
+    };
+    await budget.applyResolution(
+      reservation,
+      request,
+      resolveV2BudgetReservation(reservation.amount_usd, request),
+    );
   }
 }

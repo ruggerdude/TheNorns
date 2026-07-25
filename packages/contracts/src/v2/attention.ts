@@ -44,6 +44,7 @@ export const V2DecisionOptions = z
 export const V2AttentionSourceType = z.enum([
   "decision_point",
   "strategy_version",
+  "planning_run",
   "task",
   "agent_run",
   "budget_reservation",

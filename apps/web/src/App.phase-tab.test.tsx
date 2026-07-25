@@ -55,6 +55,7 @@ function makeRun(overrides: Partial<PhasePlanningRunDto> = {}): PhasePlanningRun
     ],
     result: null,
     error: null,
+    execution: null,
     ...overrides,
   };
 }
@@ -128,6 +129,49 @@ const executionStatus = {
 
 function workspaceMocks(project: ProjectSummary = projectAlpha): MockFetch {
   const mock = new MockFetch();
+  mock.get("/api/v2/capabilities/execution-models", {
+    body: {
+      ready: true,
+      required_environment: ["NORNS_RUNNER_ALLOWED_MODELS"],
+      models: [
+        {
+          id: "claude-sonnet-5",
+          provider: "anthropic",
+          label: "Claude Sonnet 5",
+          available: true,
+          unavailable_reason: null,
+        },
+        {
+          id: "claude-haiku-4-5-20251001",
+          provider: "anthropic",
+          label: "Claude Haiku 4.5",
+          available: true,
+          unavailable_reason: null,
+        },
+        {
+          id: "gpt-5.6-sol",
+          provider: "openai",
+          label: "GPT-5.6 Sol",
+          available: true,
+          unavailable_reason: null,
+        },
+        {
+          id: "gpt-5.6-terra",
+          provider: "openai",
+          label: "GPT-5.6 Terra",
+          available: true,
+          unavailable_reason: null,
+        },
+        {
+          id: "gpt-5.6-luna",
+          provider: "openai",
+          label: "GPT-5.6 Luna",
+          available: true,
+          unavailable_reason: null,
+        },
+      ],
+    },
+  });
   mock.get("/api/projects", { body: [project] });
   mock.get(`/api/projects/${projectId}/graph`, { body: fullyAllocatedGraph });
   mock.get(`/api/v2/projects/${projectId}/resume`, { status: 404, body: {} });
@@ -162,15 +206,162 @@ describe("PHASE TAB (P2)", () => {
     mock = workspaceMocks();
     mock.install();
 
-    await openPhaseTab();
+    const user = await openPhaseTab();
 
     expect(screen.getByTestId("phase-goal")).toBeInTheDocument();
+    expect(screen.getByTestId("phase-mode-quick")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("phase-quick-summary")).toHaveTextContent("no reviewer");
+    expect(screen.getByTestId("phase-identity-line")).toHaveTextContent(
+      "PM: Project default · Agent: Available default · No reviewer",
+    );
+
+    await user.click(screen.getByTestId("phase-mode-planned"));
     expect(screen.getByTestId("phase-agents")).toHaveValue("both");
     expect(screen.getByTestId("phase-rounds")).toHaveValue("2");
     expect(screen.getByTestId("phase-identity-line")).toHaveTextContent(
-      "PM: Claude Fable · Reviewer: ChatGPT Sol (gpt-5.6-sol)",
+      "PM: Project default · Agent: Recommended automatically · Reviewer: Automatic cross-provider",
     );
     expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+  });
+
+  it("keeps PM choices separate while only offering runner-enabled execution agents", async () => {
+    setToken("present");
+    mock = workspaceMocks();
+    mock.get("/api/v2/capabilities/execution-models", {
+      body: {
+        ready: true,
+        required_environment: ["NORNS_RUNNER_ALLOWED_MODELS"],
+        models: [
+          {
+            id: "claude-sonnet-5",
+            provider: "anthropic",
+            label: "Claude Sonnet 5",
+            available: false,
+            unavailable_reason: "model_not_in_runner_allowlist",
+          },
+          {
+            id: "gpt-5.6-terra",
+            provider: "openai",
+            label: "GPT-5.6 Terra",
+            available: true,
+            unavailable_reason: null,
+          },
+        ],
+      },
+    });
+    mock.install();
+
+    const user = await openPhaseTab();
+    await user.click(screen.getByTestId("phase-team-toggle"));
+    const pm = screen.getByTestId("phase-pm") as HTMLSelectElement;
+    const agent = screen.getByTestId("phase-agent") as HTMLSelectElement;
+    await waitFor(() =>
+      expect([...agent.options].map((option) => option.value)).toContain("openai:gpt-5.6-terra"),
+    );
+    expect([...pm.options].map((option) => option.value)).toContain("anthropic:claude-sonnet-5");
+    expect([...agent.options].map((option) => option.value)).not.toContain(
+      "anthropic:claude-sonnet-5",
+    );
+  });
+
+  it("runs a quick change without a reviewer and honors optional PM and agent identities", async () => {
+    setToken("present");
+    const quickReady = makeRun({
+      mode: "quick",
+      status: "converged",
+      round: 0,
+      rounds_completed: 0,
+      review_rounds_total: 0,
+      transcript: [
+        {
+          round: 0,
+          role: "pm",
+          provider: "openai",
+          model: "gpt-5.6-terra",
+          summary: "Prepared one executable quick-change task.",
+          finding_counts: null,
+        },
+      ],
+      result: {
+        plan: {
+          modules: [
+            {
+              id: "quick-change",
+              title: "Correct empty-state grammar",
+              description: "Make the requested copy correction.",
+            },
+          ],
+        },
+        content_hash: "q".repeat(64),
+        total_cost_usd: 0.08,
+        staffing_proposal: {
+          summary: "One selected agent.",
+          recommendations: [
+            {
+              node_id: "quick-change",
+              provider: "anthropic",
+              model: "claude-haiku-4-5-20251001",
+              worker_count: 1,
+            },
+          ],
+        },
+      },
+    });
+    mock = workspaceMocks();
+    mock.post(runsUrl, { body: { planning_run_id: "run-1" } });
+    mock.get(runUrl, { body: quickReady });
+    mock.post(`${runUrl}/decision`, {
+      body: {
+        ...quickReady,
+        status: "approved",
+        decision: {
+          decision: "approve",
+          direction: null,
+          staffing: null,
+          decided_at: "2026-07-25T12:00:00.000Z",
+        },
+        execution: { started: true, detail: "One task dispatched." },
+      },
+    });
+    mock.get(`/api/v2/projects/${projectId}/execution-status`, {
+      body: {
+        project_id: projectId,
+        phases: [
+          {
+            phase_id: "quick-change",
+            name: "Correct empty-state grammar",
+            state: "active",
+            percent_complete: 0,
+            est_completion: null,
+            notes: "Implementation is in progress.",
+          },
+        ],
+      },
+    });
+    mock.install();
+
+    const user = await openPhaseTab();
+    await user.type(screen.getByTestId("phase-goal"), "Correct the empty-state grammar");
+    await user.click(screen.getByTestId("phase-team-toggle"));
+    await user.selectOptions(screen.getByTestId("phase-pm"), "openai:gpt-5.6-terra");
+    await user.selectOptions(
+      screen.getByTestId("phase-agent"),
+      "anthropic:claude-haiku-4-5-20251001",
+    );
+    await user.click(screen.getByTestId("phase-start"));
+
+    expect(await screen.findByTestId("phase-execution-panel")).toBeInTheDocument();
+    expect(screen.queryByTestId("phase-decision-panel")).not.toBeInTheDocument();
+    expect(postCalls(mock, "/planning-runs")[0]?.body).toEqual({
+      objective: "Correct the empty-state grammar",
+      attachment_ids: [],
+      mode: "quick",
+      review_rounds: 0,
+      worker_providers: "anthropic",
+      pm: { provider: "openai", model: "gpt-5.6-terra" },
+      agent: { provider: "anthropic", model: "claude-haiku-4-5-20251001" },
+    });
+    expect(postCalls(mock, "/decision")[0]?.body).toEqual({ decision: "approve" });
   });
 
   it("opens an adopted project's in-flight plan directly and restores it from the durable latest run after refresh", async () => {
@@ -305,6 +496,65 @@ describe("PHASE TAB (P2)", () => {
     expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
   });
 
+  it("restores a quick kickoff refusal and does not mistake another active phase for its progress", async () => {
+    setToken("present");
+    const refusedQuickRun = makeRun({
+      mode: "quick",
+      objective: "Correct the empty-state grammar",
+      status: "approved",
+      review_rounds_total: 0,
+      rounds_completed: 0,
+      decision: {
+        decision: "approve",
+        direction: null,
+        staffing: null,
+        decided_at: "2026-07-25T12:00:00.000Z",
+      },
+      execution: {
+        started: false,
+        detail:
+          'phase "Unrelated migration" (other-phase) is already executing; wait for it to finish',
+      },
+    });
+    mock = workspaceMocks({ ...projectAlpha, onboarding_scenario: "new_repo" });
+    mock.get(`${runsUrl}/latest`, { body: { planning_run: refusedQuickRun } });
+    mock.get(runUrl, { body: refusedQuickRun });
+    mock.get(`/api/v2/projects/${projectId}/execution-status`, {
+      body: {
+        project_id: projectId,
+        phases: [
+          {
+            phase_id: "other-phase",
+            name: "Unrelated migration",
+            state: "active",
+            percent_complete: 62,
+            est_completion: null,
+            notes: "Migration is still running.",
+          },
+        ],
+      },
+    });
+    mock.install();
+
+    render(<App />);
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: new RegExp(`^${projectAlpha.name}$`, "i"),
+      }),
+    );
+
+    expect(await screen.findByRole("heading", { name: "Coding needs a restart" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+    expect(screen.getByTestId("phase-execution-kickoff-note")).toHaveTextContent(
+      "quick change is recorded, but coding did not start",
+    );
+    expect(screen.getByTestId("phase-execution-kickoff-note")).toHaveTextContent(
+      "Unrelated migration",
+    );
+    expect(await screen.findByTestId("phase-retry-execution")).toBeVisible();
+    expect(screen.queryByTestId("phase-execution-row-other-phase")).not.toBeInTheDocument();
+  });
+
   it("Start posts objective, review_rounds, worker_providers, and attachment_ids; live progress renders a mid-review run", async () => {
     setToken("present");
     mock = workspaceMocks();
@@ -324,6 +574,7 @@ describe("PHASE TAB (P2)", () => {
       },
     });
     await screen.findByTestId("attachment-chip");
+    await user.click(screen.getByTestId("phase-mode-planned"));
     await user.selectOptions(screen.getByTestId("phase-agents"), "anthropic");
     await user.selectOptions(screen.getByTestId("phase-rounds"), "4");
     await user.click(screen.getByTestId("phase-start"));
@@ -333,6 +584,7 @@ describe("PHASE TAB (P2)", () => {
     expect(startCall?.body).toEqual({
       objective: "Ship the notification inbox",
       attachment_ids: ["att-1"],
+      mode: "planned",
       review_rounds: 4,
       worker_providers: "anthropic",
     });
@@ -378,6 +630,7 @@ describe("PHASE TAB (P2)", () => {
 
     const user = await openPhaseTab();
     await user.type(screen.getByTestId("phase-goal"), "Ship it");
+    await user.click(screen.getByTestId("phase-mode-planned"));
     await user.click(screen.getByTestId("phase-start"));
 
     await screen.findByTestId("phase-decision-panel");
@@ -447,6 +700,7 @@ describe("PHASE TAB (P2)", () => {
 
     const user = await openPhaseTab();
     await user.type(screen.getByTestId("phase-goal"), "Ship it");
+    await user.click(screen.getByTestId("phase-mode-planned"));
     await user.click(screen.getByTestId("phase-start"));
     await screen.findByTestId("phase-decision-panel");
     await user.click(screen.getByTestId("phase-approve"));
@@ -457,6 +711,121 @@ describe("PHASE TAB (P2)", () => {
     expect(note).toHaveTextContent('Started phase "Core API" (phase-p1): 1 task(s) dispatched.');
     expect(note).not.toHaveTextContent("Execution has not auto-started");
     expect(screen.queryByTestId("phase-execution-error")).not.toBeInTheDocument();
+  });
+
+  it("lets a current failed execution override a stale successful kickoff and opens recovery details", async () => {
+    setToken("present");
+    mock = workspaceMocks();
+    mock.post(runsUrl, { body: { planning_run_id: "run-1" } });
+    mock.get(runUrl, { body: convergedRun });
+    mock.post(`${runUrl}/decision`, {
+      body: {
+        ...convergedRun,
+        status: "approved",
+        decision: {
+          decision: "approve",
+          direction: null,
+          staffing: null,
+          decided_at: "2026-07-25T12:00:00.000Z",
+        },
+        execution: {
+          started: true,
+          detail: "One task was dispatched.",
+        },
+      },
+    });
+    mock.get(`/api/v2/projects/${projectId}/execution-status`, {
+      body: {
+        project_id: projectId,
+        phases: [
+          {
+            phase_id: "p1",
+            name: "Core API",
+            state: "failed",
+            percent_complete: 0,
+            est_completion: null,
+            notes: "The runner command failed.",
+          },
+        ],
+      },
+    });
+    mock.install();
+
+    const user = await openPhaseTab();
+    await user.type(screen.getByTestId("phase-goal"), "Ship it");
+    await user.click(screen.getByTestId("phase-mode-planned"));
+    await user.click(screen.getByTestId("phase-start"));
+    await screen.findByTestId("phase-decision-panel");
+    await user.click(screen.getByTestId("phase-approve"));
+
+    expect(await screen.findByRole("heading", { name: "Coding stopped" })).toBeInTheDocument();
+    expect(screen.getByTestId("phase-execution-kickoff-note")).toHaveTextContent(
+      "Coding stopped after it started for Core API",
+    );
+    expect(screen.getByTestId("phase-execution-kickoff-note")).not.toHaveTextContent(
+      "Execution started automatically",
+    );
+    expect(screen.queryByTestId("phase-retry-execution")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("phase-open-recovery-details"));
+    expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on");
+  });
+
+  it("lets a current blocked execution override a stale successful kickoff", async () => {
+    setToken("present");
+    mock = workspaceMocks();
+    mock.post(runsUrl, { body: { planning_run_id: "run-1" } });
+    mock.get(runUrl, { body: convergedRun });
+    mock.post(`${runUrl}/decision`, {
+      body: {
+        ...convergedRun,
+        status: "approved",
+        decision: {
+          decision: "approve",
+          direction: null,
+          staffing: null,
+          decided_at: "2026-07-25T12:00:00.000Z",
+        },
+        execution: {
+          started: true,
+          detail: "One task was dispatched.",
+        },
+      },
+    });
+    mock.get(`/api/v2/projects/${projectId}/execution-status`, {
+      body: {
+        project_id: projectId,
+        phases: [
+          {
+            phase_id: "p1",
+            name: "Core API",
+            state: "blocked",
+            percent_complete: 10,
+            est_completion: null,
+            notes: "A decision is required.",
+          },
+        ],
+      },
+    });
+    mock.install();
+
+    const user = await openPhaseTab();
+    await user.type(screen.getByTestId("phase-goal"), "Ship it");
+    await user.click(screen.getByTestId("phase-mode-planned"));
+    await user.click(screen.getByTestId("phase-start"));
+    await screen.findByTestId("phase-decision-panel");
+    await user.click(screen.getByTestId("phase-approve"));
+
+    expect(
+      await screen.findByRole("heading", { name: "Coding needs attention" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("phase-execution-kickoff-note")).toHaveTextContent(
+      "Coding is blocked for Core API",
+    );
+    expect(screen.getByTestId("phase-execution-kickoff-note")).not.toHaveTextContent(
+      "Execution started automatically",
+    );
+    expect(screen.queryByTestId("phase-retry-execution")).not.toBeInTheDocument();
   });
 
   it("retries coding kickoff from an approved plan without asking for another approval", async () => {
@@ -552,6 +921,7 @@ describe("PHASE TAB (P2)", () => {
 
     const user = await openPhaseTab();
     await user.type(screen.getByTestId("phase-goal"), "Ship it");
+    await user.click(screen.getByTestId("phase-mode-planned"));
     await user.click(screen.getByTestId("phase-start"));
 
     await screen.findByTestId("phase-decision-panel");
@@ -590,6 +960,7 @@ describe("PHASE TAB (P2)", () => {
 
     const user = await openPhaseTab();
     await user.type(screen.getByTestId("phase-goal"), "Ship it");
+    await user.click(screen.getByTestId("phase-mode-planned"));
     await user.click(screen.getByTestId("phase-start"));
     await screen.findByTestId("phase-decision-panel");
 

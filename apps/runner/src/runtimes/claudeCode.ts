@@ -39,6 +39,44 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { type GatewayCredentialProvider, gatewayEnvironment } from "../modelGateway.js";
 import type { CodingRuntime, RuntimeRunRequest, RuntimeRunResult, RuntimeUsage } from "./types.js";
 
+/**
+ * A quick edit normally needs only a handful of inspect/edit/verify/commit
+ * turns. Keeping a firm ceiling prevents a missing permission or a repeated
+ * tool failure from replaying the full briefing indefinitely. Quick work gets
+ * enough room to finish the verify-and-commit tail observed after turn 12;
+ * planned work retains a larger but still explicit ceiling.
+ */
+export const CLAUDE_CODE_QUICK_MAX_TURNS = 18;
+export const CLAUDE_CODE_PLANNED_MAX_TURNS = 25;
+
+/**
+ * This runtime has no interactive permission channel: its prompt explicitly
+ * tells the agent there is no human in the loop. Pre-approve only the local
+ * coding tools it needs and make every other permission request fail closed.
+ *
+ * Bash remains necessary for repository-native verification and git commits.
+ * The runner supplies an isolated worktree as cwd, a short-lived credential,
+ * a wall-clock timeout, and a dollar ceiling around this process.
+ */
+export const CLAUDE_CODE_AUTONOMOUS_TOOLS = [
+  "Read",
+  "Edit",
+  "Write",
+  "Glob",
+  "Grep",
+  "Bash",
+] as const;
+
+function stopReasonFromError(detail: string): string | undefined {
+  if (/error_max_turns|maximum (?:number of )?turns|max(?:imum)? turns/i.test(detail)) {
+    return "error_max_turns";
+  }
+  if (/error_max_budget_usd|maximum (?:cost|budget)|max(?:imum)? budget/i.test(detail)) {
+    return "error_max_budget_usd";
+  }
+  return undefined;
+}
+
 type StreamedUserMessage = {
   type: "user";
   message: { role: "user"; content: string };
@@ -130,6 +168,8 @@ export class ClaudeCodeRuntime implements CodingRuntime {
       gateway?: GatewayCredentialProvider;
       /** Injectable for tests. Defaults to `process.env`. */
       baseEnv?: NodeJS.ProcessEnv;
+      /** Injectable SDK boundary for focused policy tests. */
+      queryImpl?: typeof query;
     } = {},
   ) {}
 
@@ -140,14 +180,25 @@ export class ClaudeCodeRuntime implements CodingRuntime {
       usage_source: "runtime_report",
     };
     const input = new UserMessageQueue();
+    const controller = new AbortController();
+    let timedOut = false;
+    const onExternalAbort = (): void => {
+      input.close();
+      controller.abort();
+    };
+    request.signal?.addEventListener("abort", onExternalAbort, { once: true });
+    const timeout =
+      request.timeoutMs !== undefined && request.timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            input.close();
+            controller.abort();
+          }, request.timeoutMs)
+        : null;
+    timeout?.unref?.();
+    let sessionId: string | undefined;
+    let observedStopReason: string | undefined;
     try {
-      const controller = new AbortController();
-      request.signal?.addEventListener("abort", () => {
-        // Close the input first: an aborted transport leaves the queue's
-        // consumer parked on a promise that would otherwise never settle.
-        input.close();
-        controller.abort();
-      });
       // A run cancelled before it began must not mint a credential at all.
       if (request.signal?.aborted) {
         return { outcome: "cancelled", detail: "cancelled by operator", usage };
@@ -170,11 +221,27 @@ export class ClaudeCodeRuntime implements CodingRuntime {
         : null;
       // The first message IS the prompt that used to be passed as a string.
       input.push(request.prompt);
-      const stream = query({
+      const stream = (this.options.queryImpl ?? query)({
         prompt: input as AsyncIterable<never>,
         options: {
           cwd: request.worktreePath,
           abortController: controller,
+          maxTurns:
+            request.executionMode === "quick"
+              ? CLAUDE_CODE_QUICK_MAX_TURNS
+              : CLAUDE_CODE_PLANNED_MAX_TURNS,
+          ...(request.maxBudgetUsd !== undefined && request.maxBudgetUsd > 0
+            ? { maxBudgetUsd: request.maxBudgetUsd }
+            : {}),
+          // `default` asks a person to approve edits and shell commands, but
+          // this headless runtime has no permission-prompt transport. The live
+          // consequence was 25 paid retries in which every write was denied.
+          // `dontAsk` plus an explicit allowlist is narrower than globally
+          // bypassing permission checks: these six tools run unattended and
+          // every other tool request is denied.
+          permissionMode: "dontAsk",
+          tools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
+          allowedTools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
           ...(env !== null ? { env } : {}),
           ...(this.options.model !== undefined ? { model: this.options.model } : {}),
           ...(this.options.resumeSessionId !== undefined
@@ -191,8 +258,8 @@ export class ClaudeCodeRuntime implements CodingRuntime {
           await stream.interrupt();
         },
       });
-      let sessionId: string | undefined;
       let resultDetail = "";
+      let stopReason: string | undefined;
       let failed = false;
       for await (const message of stream) {
         const msg = message as {
@@ -201,14 +268,40 @@ export class ClaudeCodeRuntime implements CodingRuntime {
           subtype?: string;
           result?: string;
           usage?: { input_tokens?: number; output_tokens?: number };
+          stop_reason?: string | null;
+          errors?: string[];
+          permission_denials?: Array<{ tool_name?: string }>;
+          tool_name?: string;
         };
         if (msg.session_id) sessionId = msg.session_id;
+        if (msg.type === "system" && msg.subtype === "permission_denied" && msg.tool_name) {
+          observedStopReason = `permission_denied:${msg.tool_name}`;
+        }
         if (msg.type === "assistant" || msg.type === "system") {
           request.onLog?.(JSON.stringify(message).slice(0, 500));
         }
         if (msg.type === "result") {
           failed = msg.subtype !== "success";
-          resultDetail = msg.result ?? msg.subtype ?? "";
+          const deniedTools = [
+            ...new Set(
+              (msg.permission_denials ?? [])
+                .map((denial) => denial.tool_name?.trim())
+                .filter((tool): tool is string => Boolean(tool)),
+            ),
+          ];
+          const details = [
+            msg.result?.trim(),
+            ...(msg.errors ?? []).map((error) => error.trim()).filter(Boolean),
+            deniedTools.length > 0
+              ? `SDK permission denied for ${deniedTools.join(", ")}`
+              : undefined,
+          ].filter((detail): detail is string => Boolean(detail));
+          resultDetail = details.join("; ") || msg.subtype || "runtime stopped";
+          stopReason =
+            deniedTools.length > 0
+              ? `permission_denied:${deniedTools.join(",")}`
+              : (msg.stop_reason ?? msg.subtype ?? undefined);
+          observedStopReason = stopReason;
           usage.input_tokens = msg.usage?.input_tokens ?? 0;
           usage.output_tokens = msg.usage?.output_tokens ?? 0;
           // The run is one turn. Closing the input here ends the session
@@ -218,25 +311,62 @@ export class ClaudeCodeRuntime implements CodingRuntime {
           input.close();
         }
       }
+      if (timedOut) {
+        return {
+          outcome: "failed",
+          detail: `Claude Code execution timed out after ${request.timeoutMs}ms`,
+          usage,
+          ...(sessionId !== undefined ? { sessionId } : {}),
+          stopReason: "timeout",
+        };
+      }
       if (request.signal?.aborted) {
-        return { outcome: "cancelled", detail: "cancelled by operator", usage };
+        return {
+          outcome: "cancelled",
+          detail: "cancelled by operator",
+          usage,
+          ...(sessionId !== undefined ? { sessionId } : {}),
+          ...(observedStopReason !== undefined ? { stopReason: observedStopReason } : {}),
+        };
       }
       return {
         outcome: failed ? "failed" : "completed",
         detail: resultDetail,
         usage,
         ...(sessionId !== undefined ? { sessionId } : {}),
+        ...(stopReason !== undefined ? { stopReason } : {}),
       };
     } catch (error) {
-      if (request.signal?.aborted) {
-        return { outcome: "cancelled", detail: "cancelled by operator", usage };
+      if (timedOut) {
+        return {
+          outcome: "failed",
+          detail: `Claude Code execution timed out after ${request.timeoutMs}ms`,
+          usage,
+          ...(sessionId !== undefined ? { sessionId } : {}),
+          stopReason: "timeout",
+        };
       }
+      if (request.signal?.aborted) {
+        return {
+          outcome: "cancelled",
+          detail: "cancelled by operator",
+          usage,
+          ...(sessionId !== undefined ? { sessionId } : {}),
+          ...(observedStopReason !== undefined ? { stopReason: observedStopReason } : {}),
+        };
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      const stopReason = observedStopReason ?? stopReasonFromError(detail);
       return {
         outcome: "failed",
-        detail: error instanceof Error ? error.message : String(error),
+        detail,
         usage,
+        ...(sessionId !== undefined ? { sessionId } : {}),
+        ...(stopReason !== undefined ? { stopReason } : {}),
       };
     } finally {
+      if (timeout) clearTimeout(timeout);
+      request.signal?.removeEventListener("abort", onExternalAbort);
       input.close();
     }
   }

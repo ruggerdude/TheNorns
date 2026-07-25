@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { type EventPayloadT, V2DispatchCommand } from "@norns/contracts";
@@ -70,6 +70,8 @@ describe("Phase 4 runner-owned execution", () => {
       },
       run: async (request) => {
         receivedPrompt = request.prompt;
+        expect(request.maxBudgetUsd).toBe(10);
+        expect(request.executionMode).toBe("planned");
         request.onLog?.(
           [
             `root=${root}`,
@@ -177,24 +179,25 @@ describe("Phase 4 runner-owned execution", () => {
       private_key_pem: "test-only",
       generation: 3,
     });
-    const result = await executor.execute(command, (event) => {
-      events.push(event);
-      successfulBuffer.bufferEvent({
-        protocol: 1,
-        event_seq: successfulBuffer.nextSeq(),
-        runner_id: "runner-1",
-        generation: 3,
-        correlation_id: "correlation-1",
-        causation_id: command.command_id,
-        occurred_at: new Date().toISOString(),
-        payload: event,
-      });
-    });
-    expect(result).toMatchObject({
-      outcome: "succeeded",
-      commit_sha: COMMIT,
-      verification_passed: true,
-    });
+    const result = await executor.execute(
+      command,
+      (event) => {
+        events.push(event);
+        successfulBuffer.bufferEvent({
+          protocol: 1,
+          event_seq: successfulBuffer.nextSeq(),
+          runner_id: "runner-1",
+          generation: 3,
+          correlation_id: "correlation-1",
+          causation_id: command.command_id,
+          occurred_at: new Date().toISOString(),
+          payload: event,
+        });
+      },
+      { knowledge_transport: true },
+    );
+    expect(result.outcome, `${result.reason}\n${JSON.stringify(events)}`).toBe("succeeded");
+    expect(result).toMatchObject({ commit_sha: COMMIT, verification_passed: true });
     expect(receivedPrompt).toBe("Implement the verified task.");
     expect(worktreeCleaned).toBe(true);
     expect(events).toEqual(
@@ -206,6 +209,13 @@ describe("Phase 4 runner-owned execution", () => {
         }),
         expect.objectContaining({ kind: "usage_report", input_tokens: 100 }),
         expect.objectContaining({ kind: "verification_result", passed: true, commit_sha: COMMIT }),
+        expect.objectContaining({ kind: "knowledge_registration", run_id: "run-1" }),
+        expect.objectContaining({ kind: "knowledge_delta", run_id: "run-1" }),
+        expect.objectContaining({
+          kind: "knowledge_handoff",
+          run_id: "run-1",
+          status: "completed",
+        }),
         expect.objectContaining({ kind: "run_status", status: "completed" }),
       ]),
     );
@@ -218,6 +228,31 @@ describe("Phase 4 runner-owned execution", () => {
       expect(serialized).not.toContain(physicalRoot);
       expect(serialized).not.toContain(physicalRepository);
     }
+
+    const freshScratchRoot = resolve(root, "fresh-runner-data", "scratch");
+    const freshExecutor = new V2RunnerExecutor(
+      { id: "runner-1", generation: 3, scratch_root: freshScratchRoot },
+      registry,
+      context,
+      worktrees,
+      new Map([["codex", runtime]]),
+      verifier,
+      undefined,
+      publisher,
+    );
+    await expect(
+      freshExecutor.execute(
+        V2DispatchCommand.parse({
+          ...command,
+          dispatch_job_id: "job-fresh-runner",
+          command_id: "dispatch:job-fresh-runner",
+          idempotency_key: "dispatch:job-fresh-runner",
+          run_id: "run-fresh-runner",
+        }),
+        () => undefined,
+      ),
+    ).resolves.toMatchObject({ outcome: "succeeded" });
+    expect((await stat(freshScratchRoot)).isDirectory()).toBe(true);
 
     const unapprovedLocalCommand = V2DispatchCommand.parse({
       ...command,
@@ -273,8 +308,18 @@ describe("Phase 4 runner-owned execution", () => {
     ).resolves.toMatchObject({ outcome: "failed" });
     expect(pathLeakEvents).toContainEqual(
       expect.objectContaining({
+        kind: "run_status",
+        status: "failed",
+        failure: expect.objectContaining({
+          stage: "worktree_prepare",
+          code: "runner_worktree_prepare_failed",
+        }),
+      }),
+    );
+    expect(pathLeakEvents).toContainEqual(
+      expect.objectContaining({
         kind: "run_log",
-        chunk: "runner execution failed; inspect the local runner diagnostics",
+        chunk: expect.stringContaining("runner_worktree_prepare_failed"),
       }),
     );
     const serializedFailure = JSON.stringify(pathLeakEvents);

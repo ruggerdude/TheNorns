@@ -316,6 +316,7 @@ describe.sequential("EXECUTION E13 — live run-log tail", () => {
     });
     expect(caughtUp.entries).toEqual([]);
     expect(caughtUp.truncated).toBe(false);
+    expect(caughtUp.total_entries).toBe(3);
 
     await events.apply({
       protocol: 1,
@@ -331,6 +332,7 @@ describe.sequential("EXECUTION E13 — live run-log tail", () => {
       after: lastSeen as number,
     });
     expect(advanced.entries.map((entry) => entry.chunk)).toEqual(["line 3\n"]);
+    expect(advanced.total_entries).toBe(4);
   });
 
   it("bounds the tail at RUN_LOG_PAGE_LIMIT and discloses truncation rather than dropping it silently", async () => {

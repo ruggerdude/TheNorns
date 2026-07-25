@@ -8,18 +8,23 @@ import { PM_MODEL_OPTIONS } from "@norns/contracts";
 //   e. Execution status table once approved (fast/idle poll cadence)
 // ALL fetches go through phaseTabApi.ts (single reconciliation point for the
 // integrator); this file renders and holds state only.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AttachmentInput } from "./AttachmentInput";
+import "./PhaseTab.css";
 import { UnauthorizedError } from "./auth";
 import {
+  type ExecutionModelCapability,
   PHASE_EXECUTION_ACTIVE_STATES,
   PHASE_RUN_ACTIVE_STATUSES,
   PHASE_RUN_DECISION_STATUSES,
   type PhaseExecutionKickoffReport,
   type PhaseExecutionStatusRow,
+  type PhaseParticipantSelection,
   type PhasePlanStaffedPhase,
   type PhasePlanningRunDto,
+  type PhaseRunMode,
   type WorkerProviders,
+  getExecutionModelCapabilities,
   getLatestPhasePlanningRun,
   getPhaseExecutionStatus,
   getPhasePlanningRun,
@@ -46,6 +51,144 @@ const PROVIDER_GROUP_LABEL: Record<Provider, string> = {
   openai: "OpenAI",
 };
 
+const PM_PARTICIPANT_OPTIONS = (Object.keys(PM_MODEL_OPTIONS) as Provider[]).flatMap((provider) =>
+  PM_MODEL_OPTIONS[provider].map((model) => ({
+    value: `${provider}:${model.id}`,
+    label: model.label,
+    provider,
+    model: model.id,
+  })),
+);
+
+interface ParticipantOption {
+  value: string;
+  label: string;
+  provider: Provider;
+  model: string;
+}
+
+export interface PhaseDesignatedExecutionSnapshot {
+  phase: {
+    id: string;
+    objective_summary: string;
+    status?: string;
+  };
+  tasks: Array<{
+    id: string;
+    title: string;
+    run: {
+      id: string;
+      attempt: number;
+      state: string;
+      failure_detail: string | null;
+    } | null;
+  }>;
+}
+
+interface DesignatedAttempt {
+  phaseId: string;
+  attempt: number;
+  state: string;
+  failureDetail: string | null;
+}
+
+function participantFor(
+  value: string,
+  options: readonly ParticipantOption[],
+): PhaseParticipantSelection | undefined {
+  const option = options.find((candidate) => candidate.value === value);
+  return option ? { provider: option.provider, model: option.model } : undefined;
+}
+
+function participantLabel(
+  value: string,
+  fallback: string,
+  options: readonly ParticipantOption[],
+): string {
+  return options.find((candidate) => candidate.value === value)?.label ?? fallback;
+}
+
+function executionScopeForRun(
+  run: PhasePlanningRunDto | null,
+  kickoff: PhaseExecutionKickoffReport | null | undefined,
+): { phaseIds: Set<string>; objectives: Set<string> } {
+  const phaseIds = new Set(run?.result?.plan?.modules?.map((module) => module.id) ?? []);
+  const objectives = new Set(
+    [run?.objective, run?.result?.plan?.objective].filter((objective): objective is string =>
+      Boolean(objective?.trim()),
+    ),
+  );
+
+  // A successful kickoff identifies the new phase. A refusal may name the
+  // *other* active phase that prevented dispatch, so only trust its id when
+  // the detail explicitly says it belongs to this plan.
+  if (
+    kickoff?.detail &&
+    (kickoff.started ||
+      /phase for this plan/i.test(kickoff.detail) ||
+      /was approved/i.test(kickoff.detail))
+  ) {
+    for (const match of kickoff.detail.matchAll(/\bphase\s+"[^"]+"\s+\(([^)]+)\)/gi)) {
+      const phaseId = match[1]?.trim();
+      if (phaseId) phaseIds.add(phaseId);
+    }
+    for (const match of kickoff.detail.matchAll(/phase for this plan\s+\("[^"]+",\s*([^)]+)\)/gi)) {
+      const phaseId = match[1]?.trim();
+      if (phaseId) phaseIds.add(phaseId);
+    }
+  }
+
+  return { phaseIds, objectives };
+}
+
+/**
+ * Execution status is project-scoped, while this screen presents one planning
+ * run. Planned runs intentionally retain the full project view. A quick run
+ * only shows rows that can be tied back to its objective, task ids, or durable
+ * kickoff report so another active phase cannot mask a failed quick kickoff.
+ */
+function scopeExecutionRowsToRun(
+  run: PhasePlanningRunDto | null,
+  rows: PhaseExecutionStatusRow[] | null,
+  kickoff: PhaseExecutionKickoffReport | null | undefined,
+): PhaseExecutionStatusRow[] | null {
+  if (!rows || run?.mode !== "quick") return rows;
+
+  const { phaseIds, objectives } = executionScopeForRun(run, kickoff);
+
+  return rows.filter((row) => phaseIds.has(row.phase_id) || objectives.has(row.name));
+}
+
+/**
+ * The per-phase execution DTO carries the task's current designated run. It
+ * is more precise than the phase-level progress row and newer than the
+ * planning run's immutable kickoff report, so it is the primary presentation
+ * source whenever it belongs to this planning run.
+ */
+function designatedAttemptsForRun(
+  run: PhasePlanningRunDto | null,
+  snapshot: PhaseDesignatedExecutionSnapshot | null | undefined,
+  kickoff: PhaseExecutionKickoffReport | null | undefined,
+): DesignatedAttempt[] {
+  if (!run || !snapshot) return [];
+  const { phaseIds, objectives } = executionScopeForRun(run, kickoff);
+  if (!phaseIds.has(snapshot.phase.id) && !objectives.has(snapshot.phase.objective_summary)) {
+    return [];
+  }
+  return snapshot.tasks.flatMap((task) =>
+    task.run
+      ? [
+          {
+            phaseId: snapshot.phase.id,
+            attempt: task.run.attempt,
+            state: task.run.state,
+            failureDetail: task.run.failure_detail,
+          },
+        ]
+      : [],
+  );
+}
+
 const JOURNEY_STEPS = [
   {
     label: "Planning",
@@ -58,6 +201,21 @@ const JOURNEY_STEPS = [
   {
     label: "Coding",
     description: "Follow dispatched work and implementation progress.",
+  },
+] as const;
+
+const QUICK_JOURNEY_STEPS = [
+  {
+    label: "Preparing",
+    description: "The PM turns your request into one executable task.",
+  },
+  {
+    label: "Starting",
+    description: "The selected agent is assigned without a review round.",
+  },
+  {
+    label: "Working",
+    description: "Follow implementation and verification progress.",
   },
 ] as const;
 
@@ -82,24 +240,42 @@ function runStatusLabel(run: PhasePlanningRunDto): string {
 export function PhaseTab({
   projectId,
   initialRunId = null,
+  designatedExecution = null,
+  composerRequested = false,
+  onComposerOpened,
+  onRunStarted,
   onJourneyChanged,
+  onOpenRecoveryDetails,
   onUnauthorized,
 }: {
   projectId: string;
   initialRunId?: string | null;
+  designatedExecution?: PhaseDesignatedExecutionSnapshot | null;
+  composerRequested?: boolean;
+  onComposerOpened?: () => void;
+  onRunStarted?: (runId: string) => void;
   onJourneyChanged?: () => void;
+  onOpenRecoveryDetails?: (phaseId: string) => void;
   onUnauthorized: () => void;
 }): React.ReactElement {
   // a/b — setup form
   const [goal, setGoal] = useState("");
   const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
+  const [mode, setMode] = useState<PhaseRunMode>("quick");
   const [agents, setAgents] = useState<WorkerProviders>("both");
   const [reviewRounds, setReviewRounds] = useState(2);
+  const [pmSelection, setPmSelection] = useState("");
+  const [agentSelection, setAgentSelection] = useState("");
+  const [customizeTeam, setCustomizeTeam] = useState(false);
+  const [executionModels, setExecutionModels] = useState<ExecutionModelCapability[] | null>(null);
+  const [executionCapabilityError, setExecutionCapabilityError] = useState<string | null>(null);
   // c — run lifecycle
-  const [runId, setRunId] = useState<string | null>(initialRunId);
+  const [runId, setRunId] = useState<string | null>(composerRequested ? null : initialRunId);
   const [run, setRun] = useState<PhasePlanningRunDto | null>(null);
-  const [recoveryAttempted, setRecoveryAttempted] = useState(Boolean(initialRunId));
-  const [recovering, setRecovering] = useState(!initialRunId);
+  const [recoveryAttempted, setRecoveryAttempted] = useState(
+    composerRequested || Boolean(initialRunId),
+  );
+  const [recovering, setRecovering] = useState(!composerRequested && !initialRunId);
   // The worker_providers the active run was started with — model dropdowns in
   // the decision panel are filtered to these.
   const [activeProviders, setActiveProviders] = useState<Provider[]>(["anthropic", "openai"]);
@@ -111,6 +287,7 @@ export function PhaseTab({
   const [direction, setDirection] = useState("");
   const [confirmingReject, setConfirmingReject] = useState(false);
   const [decisionBusy, setDecisionBusy] = useState(false);
+  const quickApprovalAttempts = useRef(new Set<string>());
   // e — execution status
   const [executionRows, setExecutionRows] = useState<PhaseExecutionStatusRow[] | null>(null);
   const [executionError, setExecutionError] = useState<string | null>(null);
@@ -121,6 +298,7 @@ export function PhaseTab({
   const [executionKickoff, setExecutionKickoff] = useState<
     PhaseExecutionKickoffReport | null | undefined
   >(undefined);
+  const lastInitialRunId = useRef(initialRunId);
 
   const fail = useCallback(
     (err: unknown, sink: (message: string) => void) => {
@@ -130,16 +308,55 @@ export function PhaseTab({
     [onUnauthorized],
   );
 
+  useEffect(() => {
+    let current = true;
+    void getExecutionModelCapabilities()
+      .then((capabilities) => {
+        if (!current) return;
+        setExecutionModels(capabilities.models);
+        setExecutionCapabilityError(null);
+      })
+      .catch((err) => {
+        if (!current) return;
+        if (err instanceof UnauthorizedError) onUnauthorized();
+        setExecutionModels([]);
+        setExecutionCapabilityError(
+          err instanceof Error ? err.message : "Could not verify execution agent availability.",
+        );
+      });
+    return () => {
+      current = false;
+    };
+  }, [onUnauthorized]);
+
+  const executionParticipantOptions = useMemo<ParticipantOption[]>(
+    () =>
+      (executionModels ?? [])
+        .filter((model) => model.available)
+        .map((model) => ({
+          value: `${model.provider}:${model.id}`,
+          label: model.label,
+          provider: model.provider,
+          model: model.id,
+        })),
+    [executionModels],
+  );
+  const availableExecutionProviders = useMemo(
+    () => new Set(executionParticipantOptions.map((option) => option.provider)),
+    [executionParticipantOptions],
+  );
+
   // A navigation hint opens the just-created run immediately. If the hint was
   // lost to a refresh, recover the newest durable run instead of showing a
   // second setup form and inviting accidental duplicate planning.
   useEffect(() => {
-    if (!initialRunId || initialRunId === runId) return;
+    if (!initialRunId || initialRunId === lastInitialRunId.current) return;
+    lastInitialRunId.current = initialRunId;
     setRunId(initialRunId);
     setRun(null);
     setRecoveryAttempted(true);
     setRecovering(false);
-  }, [initialRunId, runId]);
+  }, [initialRunId]);
 
   useEffect(() => {
     if (recoveryAttempted || runId) return;
@@ -151,6 +368,7 @@ export function PhaseTab({
         setRun(planning_run);
         setRunId(planning_run.id);
         setActiveProviders(providersFor(planning_run.worker_providers));
+        setExecutionKickoff(planning_run.execution ?? null);
       })
       .catch((err) => fail(err, setError))
       .finally(() => setRecovering(false));
@@ -161,13 +379,19 @@ export function PhaseTab({
     setStarting(true);
     setError(null);
     try {
+      const pm = participantFor(pmSelection, PM_PARTICIPANT_OPTIONS);
+      const agent = participantFor(agentSelection, executionParticipantOptions);
+      const workerProviders = agent?.provider ?? agents;
       const created = await startPhasePlanningRun(projectId, {
         objective: goal.trim(),
         attachment_ids: attachmentIds,
-        review_rounds: reviewRounds,
-        worker_providers: agents,
+        mode,
+        review_rounds: mode === "quick" ? 0 : reviewRounds,
+        worker_providers: workerProviders,
+        ...(pm ? { pm } : {}),
+        ...(agent ? { agent } : {}),
       });
-      setActiveProviders(providersFor(agents));
+      setActiveProviders(providersFor(workerProviders));
       setRunId(created.planning_run_id);
       setRun(null);
       setStaffingDrafts({});
@@ -177,12 +401,26 @@ export function PhaseTab({
       setExecutionRows(null);
       setExecutionError(null);
       setExecutionKickoff(undefined);
+      quickApprovalAttempts.current.delete(created.planning_run_id);
+      onRunStarted?.(created.planning_run_id);
     } catch (err) {
       fail(err, setError);
     } finally {
       setStarting(false);
     }
-  }, [goal, attachmentIds, reviewRounds, agents, projectId, fail]);
+  }, [
+    goal,
+    attachmentIds,
+    mode,
+    reviewRounds,
+    agents,
+    pmSelection,
+    agentSelection,
+    executionParticipantOptions,
+    projectId,
+    fail,
+    onRunStarted,
+  ]);
 
   const pollRun = useCallback(async () => {
     if (!runId) return;
@@ -190,6 +428,7 @@ export function PhaseTab({
       const next = await getPhasePlanningRun(projectId, runId);
       setRun(next);
       setActiveProviders(providersFor(next.worker_providers));
+      setExecutionKickoff(next.execution ?? null);
     } catch (err) {
       fail(err, setError);
     }
@@ -198,6 +437,15 @@ export function PhaseTab({
   // Poll the run: fast while the loop is producing, idle while it waits on
   // the human decision, stopped once terminal (approved/rejected/failed).
   const runStatus = run?.status ?? null;
+  const runMode = run?.mode ?? "planned";
+  const visibleExecutionRows = useMemo(
+    () => scopeExecutionRowsToRun(run, executionRows, executionKickoff),
+    [run, executionRows, executionKickoff],
+  );
+  const designatedAttempts = useMemo(
+    () => designatedAttemptsForRun(run, designatedExecution, executionKickoff),
+    [run, designatedExecution, executionKickoff],
+  );
   useEffect(() => {
     if (!runId) return;
     if (runStatus === "approved" || runStatus === "rejected" || runStatus === "failed") return;
@@ -222,7 +470,7 @@ export function PhaseTab({
 
   // Poll execution status once approved: fast while any phase is active.
   const executionActive =
-    executionRows?.some((row) => PHASE_EXECUTION_ACTIVE_STATES.has(row.state)) ?? true;
+    visibleExecutionRows?.some((row) => PHASE_EXECUTION_ACTIVE_STATES.has(row.state)) ?? true;
   useEffect(() => {
     if (!runId || runStatus !== "approved") return;
     void pollExecution();
@@ -246,9 +494,7 @@ export function PhaseTab({
       try {
         const decided = await postPlanningRunDecision(projectId, runId, body);
         setRun(decided);
-        // Approve responses carry `execution` ({started, detail} | null);
-        // modify/reject responses do not — leave the report untouched then.
-        if ("execution" in decided) setExecutionKickoff(decided.execution ?? null);
+        setExecutionKickoff(decided.execution ?? null);
         setModifyOpen(false);
         setDirection("");
         setConfirmingReject(false);
@@ -261,6 +507,19 @@ export function PhaseTab({
     },
     [runId, projectId, fail, onJourneyChanged],
   );
+
+  useEffect(() => {
+    if (
+      !runId ||
+      run?.mode !== "quick" ||
+      !PHASE_RUN_DECISION_STATUSES.has(run.status) ||
+      quickApprovalAttempts.current.has(runId)
+    ) {
+      return;
+    }
+    quickApprovalAttempts.current.add(runId);
+    void decide({ decision: "approve" });
+  }, [runId, run, decide]);
 
   const retryExecution = useCallback(async () => {
     if (!runId) return;
@@ -293,37 +552,107 @@ export function PhaseTab({
     return decide({ decision: "approve", staffing });
   };
 
-  const resetToNewRun = useCallback(() => {
-    setRunId(null);
-    setRun(null);
-    setError(null);
-    setStaffingDrafts({});
-    setModifyOpen(false);
-    setDirection("");
-    setConfirmingReject(false);
-    setExecutionRows(null);
-    setExecutionError(null);
-    setExecutionKickoff(undefined);
-  }, []);
+  const resetToNewRun = useCallback(
+    (nextMode: PhaseRunMode = "quick") => {
+      if (runId) quickApprovalAttempts.current.delete(runId);
+      setGoal("");
+      setAttachmentIds([]);
+      setMode(nextMode);
+      setRunId(null);
+      setRun(null);
+      setError(null);
+      setStaffingDrafts({});
+      setModifyOpen(false);
+      setDirection("");
+      setConfirmingReject(false);
+      setExecutionRows(null);
+      setExecutionError(null);
+      setExecutionKickoff(undefined);
+      setRecoveryAttempted(true);
+      setRecovering(false);
+      onComposerOpened?.();
+    },
+    [runId, onComposerOpened],
+  );
 
   const runIsActive = runStatus !== null && PHASE_RUN_ACTIVE_STATUSES.has(runStatus);
   const runAwaitsDecision = runStatus !== null && PHASE_RUN_DECISION_STATUSES.has(runStatus);
   const showSetupForm = recoveryAttempted && !recovering && !runId;
   const journeyStage =
     runStatus === "approved" ? 3 : runAwaitsDecision || runStatus === "rejected" ? 2 : 1;
+  const journeySteps = runMode === "quick" ? QUICK_JOURNEY_STEPS : JOURNEY_STEPS;
 
   const reviewerFindings = (run?.transcript ?? []).filter((entry) => entry.role === "reviewer");
-  const executionHasProgress =
-    executionKickoff?.started === true ||
-    (executionRows?.some((row) => row.state === "active" || row.state === "completed") ?? false);
+  const failedExecutionRows = visibleExecutionRows?.filter((row) => row.state === "failed") ?? [];
+  const blockedExecutionRows = visibleExecutionRows?.filter((row) => row.state === "blocked") ?? [];
+  const terminalDesignatedAttempt = designatedAttempts
+    .filter((attempt) => attempt.state === "failed" || attempt.state === "expired")
+    .sort((left, right) => right.attempt - left.attempt)[0];
+  const activeDesignatedAttempt = designatedAttempts
+    .filter((attempt) => ["created", "dispatched", "running", "verifying"].includes(attempt.state))
+    .sort((left, right) => right.attempt - left.attempt)[0];
+  const executionHasActivePhase =
+    visibleExecutionRows?.some((row) => PHASE_EXECUTION_ACTIVE_STATES.has(row.state)) ?? false;
+  const executionHasActiveWork = Boolean(activeDesignatedAttempt) || executionHasActivePhase;
+  const designatedPhaseIsClosed =
+    designatedAttempts.length > 0 &&
+    ["completed", "cancelled"].includes(designatedExecution?.phase.status ?? "");
+  const executionIsClosed =
+    designatedPhaseIsClosed ||
+    (Boolean(visibleExecutionRows?.length) &&
+      (visibleExecutionRows?.every(
+        (row) => row.state === "completed" || row.state === "cancelled",
+      ) ??
+        false));
   const executionStartRetryAvailable =
     executionRows !== null &&
-    (executionRows.length === 0 ||
-      executionRows.some((row) =>
-        ["proposed", "awaiting_approval", "approved", "blocked"].includes(row.state),
+    failedExecutionRows.length === 0 &&
+    blockedExecutionRows.length === 0 &&
+    !executionHasActiveWork &&
+    !executionIsClosed &&
+    ((visibleExecutionRows?.length ?? 0) === 0 ||
+      visibleExecutionRows?.some((row) =>
+        ["proposed", "awaiting_approval", "approved"].includes(row.state),
       ));
-  const executionNeedsStartAttention =
-    !executionHasProgress && (executionKickoff?.started === false || executionStartRetryAvailable);
+  const quickKickoffNeedsAttention = runMode === "quick" && executionKickoff?.started === false;
+  const executionDisplayState:
+    | "failed"
+    | "blocked"
+    | "active"
+    | "closed"
+    | "start_attention"
+    | "loading" = terminalDesignatedAttempt
+    ? "failed"
+    : activeDesignatedAttempt
+      ? "active"
+      : failedExecutionRows.length > 0
+        ? "failed"
+        : blockedExecutionRows.length > 0
+          ? "blocked"
+          : executionHasActiveWork
+            ? "active"
+            : executionIsClosed
+              ? "closed"
+              : quickKickoffNeedsAttention
+                ? "start_attention"
+                : executionStartRetryAvailable || executionKickoff?.started === false
+                  ? "start_attention"
+                  : executionRows === null && executionKickoff?.started === true
+                    ? "active"
+                    : "loading";
+  const executionNeedsAttention =
+    executionDisplayState === "failed" ||
+    executionDisplayState === "blocked" ||
+    executionDisplayState === "start_attention";
+  const recoveryPhaseId = executionIsClosed
+    ? null
+    : (terminalDesignatedAttempt?.phaseId ??
+      failedExecutionRows[0]?.phase_id ??
+      blockedExecutionRows[0]?.phase_id ??
+      null);
+  const affectedExecutionNames = [...failedExecutionRows, ...blockedExecutionRows]
+    .map((row) => row.name)
+    .join(", ");
 
   return (
     <div className="form-stack phase-journey-shell" data-testid="phase-tab">
@@ -340,7 +669,7 @@ export function PhaseTab({
           data-testid="phase-journey"
         >
           <ol>
-            {JOURNEY_STEPS.map((step, index) => {
+            {journeySteps.map((step, index) => {
               const stepNumber = index + 1;
               const isCurrent = stepNumber === journeyStage;
               const isComplete = stepNumber < journeyStage;
@@ -389,11 +718,42 @@ export function PhaseTab({
       {showSetupForm ? (
         <section className="card side-section phase-setup" data-testid="phase-setup">
           <div className="side-body form-stack">
+            <fieldset className="phase-mode-picker">
+              <legend className="sr-only">Choose a phase workflow</legend>
+              <button
+                type="button"
+                className={mode === "quick" ? "phase-mode-option is-selected" : "phase-mode-option"}
+                data-testid="phase-mode-quick"
+                aria-pressed={mode === "quick"}
+                disabled={starting}
+                onClick={() => setMode("quick")}
+              >
+                <strong>Quick change</strong>
+                <span>One task · no reviewer · starts automatically</span>
+              </button>
+              <button
+                type="button"
+                className={
+                  mode === "planned" ? "phase-mode-option is-selected" : "phase-mode-option"
+                }
+                data-testid="phase-mode-planned"
+                aria-pressed={mode === "planned"}
+                disabled={starting}
+                onClick={() => setMode("planned")}
+              >
+                <strong>Planned phase</strong>
+                <span>Detailed plan · review rounds · approval</span>
+              </button>
+            </fieldset>
             <AttachmentInput
               variant="composer"
-              label="What should this phase deliver?"
+              label={mode === "quick" ? "What should change?" : "What should this phase deliver?"}
               textAreaTestId="phase-goal"
-              placeholder="Describe the goal, paste a screenshot, or add a reference file…"
+              placeholder={
+                mode === "quick"
+                  ? "Describe the tweak, paste a screenshot, or add a reference file…"
+                  : "Describe the goal, paste a screenshot, or add a reference file…"
+              }
               textValue={goal}
               onTextChange={setGoal}
               projectId={projectId}
@@ -402,44 +762,152 @@ export function PhaseTab({
               purpose="objective"
               disabled={starting}
             />
-            <div className="two-col-fields">
-              <Field label="Agents">
-                <Select
-                  data-testid="phase-agents"
-                  value={agents}
-                  disabled={starting}
-                  onChange={(event) => setAgents(event.target.value as WorkerProviders)}
-                >
-                  <option value="anthropic">Claude</option>
-                  <option value="openai">ChatGPT</option>
-                  <option value="both">Both</option>
-                </Select>
-              </Field>
-              <Field label="Review rounds">
-                <Select
-                  data-testid="phase-rounds"
-                  value={String(reviewRounds)}
-                  disabled={starting}
-                  onChange={(event) => setReviewRounds(Number(event.target.value))}
-                >
-                  {[1, 2, 3, 4, 5].map((n) => (
-                    <option key={n} value={String(n)}>
-                      {n}
+            {mode === "planned" ? (
+              <div className="two-col-fields">
+                <Field label="Available agent providers">
+                  <Select
+                    data-testid="phase-agents"
+                    value={agents}
+                    disabled={starting || Boolean(agentSelection)}
+                    onChange={(event) => setAgents(event.target.value as WorkerProviders)}
+                  >
+                    <option
+                      value="anthropic"
+                      disabled={!availableExecutionProviders.has("anthropic")}
+                    >
+                      Claude
                     </option>
-                  ))}
-                </Select>
-              </Field>
-            </div>
+                    <option value="openai" disabled={!availableExecutionProviders.has("openai")}>
+                      ChatGPT
+                    </option>
+                    <option value="both">Both</option>
+                  </Select>
+                </Field>
+                <Field label="Review rounds">
+                  <Select
+                    data-testid="phase-rounds"
+                    value={String(reviewRounds)}
+                    disabled={starting}
+                    onChange={(event) => setReviewRounds(Number(event.target.value))}
+                  >
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <option key={n} value={String(n)}>
+                        {n}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+            ) : (
+              <div className="phase-quick-summary" data-testid="phase-quick-summary">
+                <span aria-hidden="true">↗</span>
+                <p>
+                  The PM prepares one focused task, the agent implements it, and relevant checks
+                  still run. There is no reviewer or plan approval step.
+                </p>
+              </div>
+            )}
+
+            <button
+              type="button"
+              className="phase-team-toggle"
+              aria-expanded={customizeTeam}
+              data-testid="phase-team-toggle"
+              disabled={starting}
+              onClick={() => setCustomizeTeam((current) => !current)}
+            >
+              <span>
+                <strong>Choose PM and agent</strong>
+                <small>Optional · project defaults are ready</small>
+              </span>
+              <span aria-hidden="true">{customizeTeam ? "−" : "+"}</span>
+            </button>
+
+            {customizeTeam ? (
+              <div className="two-col-fields phase-team-fields" data-testid="phase-team-fields">
+                <Field label="PM">
+                  <Select
+                    data-testid="phase-pm"
+                    value={pmSelection}
+                    disabled={starting}
+                    onChange={(event) => setPmSelection(event.target.value)}
+                  >
+                    <option value="">Project default</option>
+                    {(Object.keys(PM_MODEL_OPTIONS) as Provider[]).map((provider) => (
+                      <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
+                        {PM_MODEL_OPTIONS[provider].map((model) => (
+                          <option key={model.id} value={`${provider}:${model.id}`}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="Agent">
+                  <Select
+                    data-testid="phase-agent"
+                    value={agentSelection}
+                    disabled={starting || executionModels === null}
+                    onChange={(event) => setAgentSelection(event.target.value)}
+                  >
+                    <option value="">
+                      {mode === "quick" ? "Available default" : "Recommended automatically"}
+                    </option>
+                    {(Object.keys(PM_MODEL_OPTIONS) as Provider[]).map((provider) => (
+                      <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
+                        {executionParticipantOptions
+                          .filter((option) => option.provider === provider)
+                          .map((option) => (
+                            <option key={option.model} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                      </optgroup>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+            ) : null}
+
             <p className="muted phase-identity-line" data-testid="phase-identity-line">
-              PM: Claude Fable · Reviewer: ChatGPT Sol (gpt-5.6-sol)
+              PM: {participantLabel(pmSelection, "Project default", PM_PARTICIPANT_OPTIONS)} ·
+              Agent:{" "}
+              {participantLabel(
+                agentSelection,
+                mode === "quick" ? "Available default" : "Recommended automatically",
+                executionParticipantOptions,
+              )}
+              {mode === "planned" ? " · Reviewer: Automatic cross-provider" : " · No reviewer"}
             </p>
+            {executionCapabilityError ? (
+              <Alert testId="phase-execution-models-unavailable">
+                Execution agent availability could not be verified. {executionCapabilityError}
+              </Alert>
+            ) : executionModels !== null && executionParticipantOptions.length === 0 ? (
+              <Alert testId="phase-execution-models-unavailable">
+                No execution agents are available. Configure the runner model allowlist and a
+                provider API key before starting work.
+              </Alert>
+            ) : null}
             <Button
               variant="primary"
               data-testid="phase-start"
-              disabled={starting || !goal.trim()}
+              disabled={
+                starting ||
+                !goal.trim() ||
+                executionModels === null ||
+                executionParticipantOptions.length === 0
+              }
               onClick={() => void start()}
             >
-              {starting ? "Starting…" : "Start"}
+              {starting
+                ? mode === "quick"
+                  ? "Preparing change…"
+                  : "Starting plan…"
+                : mode === "quick"
+                  ? "Make change"
+                  : "Start planning"}
             </Button>
           </div>
         </section>
@@ -454,14 +922,18 @@ export function PhaseTab({
           <div className="side-body form-stack">
             <div className="section-head phase-state-heading">
               <div>
-                <div className="eyebrow">Planning</div>
+                <div className="eyebrow">{runMode === "quick" ? "Quick change" : "Planning"}</div>
                 <h3 id="phase-planning-title" data-testid="phase-run-status" aria-live="polite">
-                  {run ? runStatusLabel(run) : "Starting the plan…"}
+                  {runMode === "quick"
+                    ? "Preparing one focused task"
+                    : run
+                      ? runStatusLabel(run)
+                      : "Starting the plan…"}
                 </h3>
               </div>
               <Badge tone="info">In progress</Badge>
             </div>
-            {run ? (
+            {run && runMode !== "quick" ? (
               <div className="phase-planning-progress">
                 <div className="phase-planning-progress-copy">
                   <span data-testid="phase-run-rounds">
@@ -482,9 +954,15 @@ export function PhaseTab({
               </div>
             ) : null}
             <output aria-live="polite">
-              <Spinner label="Coordinator and reviewer are working…" />
+              <Spinner
+                label={
+                  runMode === "quick"
+                    ? "The PM is preparing the change for the selected agent…"
+                    : "Coordinator and reviewer are working…"
+                }
+              />
             </output>
-            {reviewerFindings.length > 0 ? (
+            {runMode !== "quick" && reviewerFindings.length > 0 ? (
               <div className="phase-findings" data-testid="phase-run-findings">
                 <h4>Reviewer findings so far</h4>
                 {reviewerFindings.map((entry, index) => (
@@ -519,7 +997,40 @@ export function PhaseTab({
         </section>
       ) : null}
 
-      {run && runAwaitsDecision ? (
+      {run && runAwaitsDecision && runMode === "quick" ? (
+        <section
+          className="card side-section phase-state-card phase-quick-starting"
+          data-testid="phase-quick-starting"
+          aria-labelledby="phase-quick-starting-title"
+        >
+          <div className="side-body form-stack">
+            <div className="section-head phase-state-heading">
+              <div>
+                <div className="eyebrow">No review required</div>
+                <h3 id="phase-quick-starting-title">Starting the selected agent</h3>
+              </div>
+              <Badge tone="info">Automatic</Badge>
+            </div>
+            <p className="muted">
+              The focused task is ready. It is being approved and dispatched without a reviewer or
+              another decision from you.
+            </p>
+            {error ? (
+              <Button
+                variant="primary"
+                disabled={decisionBusy}
+                onClick={() => void decide({ decision: "approve" })}
+              >
+                {decisionBusy ? "Starting…" : "Try starting again"}
+              </Button>
+            ) : (
+              <Spinner label="Starting implementation…" />
+            )}
+          </div>
+        </section>
+      ) : null}
+
+      {run && runAwaitsDecision && runMode !== "quick" ? (
         <section
           className="card side-section phase-state-card phase-decision"
           data-testid="phase-decision-panel"
@@ -540,14 +1051,14 @@ export function PhaseTab({
               </Badge>
             </div>
             <p className="phase-plan-ready-copy">
-              The coordinator and reviewer have prepared the first coding plan. Review the phases
-              below, then approve once to staff and dispatch the work.
+              The coordinator and reviewer have prepared the coding plan. Review the work items
+              below, then approve once to staff and dispatch them.
             </p>
 
             <ul className="phase-plan-meta" data-testid="phase-decision-rounds">
               <li>
                 <strong>{planPhases.length}</strong>
-                <span>implementation phase{planPhases.length === 1 ? "" : "s"}</span>
+                <span>implementation task{planPhases.length === 1 ? "" : "s"}</span>
               </li>
               <li>
                 <strong>
@@ -563,7 +1074,7 @@ export function PhaseTab({
               ) : null}
             </ul>
 
-            <div className="phase-plan-list" aria-label="Implementation phases">
+            <div className="phase-plan-list" aria-label="Implementation tasks">
               {planPhases.map((phase, index) => (
                 <article
                   className="card phase-plan-card"
@@ -616,11 +1127,13 @@ export function PhaseTab({
                         >
                           {activeProviders.map((provider) => (
                             <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
-                              {PM_MODEL_OPTIONS[provider].map((model) => (
-                                <option key={model.id} value={`${provider}:${model.id}`}>
-                                  {model.label}
-                                </option>
-                              ))}
+                              {executionParticipantOptions
+                                .filter((option) => option.provider === provider)
+                                .map((option) => (
+                                  <option key={option.model} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
                             </optgroup>
                           ))}
                         </Select>
@@ -723,41 +1236,123 @@ export function PhaseTab({
               <div>
                 <div className="eyebrow">Coding</div>
                 <h3 id="phase-execution-title">
-                  {executionNeedsStartAttention
-                    ? "Coding needs a restart"
-                    : executionHasProgress
-                      ? "Coding is underway"
-                      : "Preparing coding status…"}
+                  {executionDisplayState === "failed"
+                    ? "Coding stopped"
+                    : executionDisplayState === "blocked"
+                      ? "Coding needs attention"
+                      : executionDisplayState === "active"
+                        ? "Coding is underway"
+                        : executionDisplayState === "closed"
+                          ? "Coding is complete"
+                          : executionDisplayState === "start_attention"
+                            ? "Coding needs a restart"
+                            : "Preparing coding status…"}
                 </h3>
               </div>
-              <Badge tone={executionNeedsStartAttention ? "warn" : "success"}>
-                {executionNeedsStartAttention ? "Needs attention" : "Approved"}
+              <Badge
+                tone={
+                  executionDisplayState === "failed"
+                    ? "danger"
+                    : executionNeedsAttention
+                      ? "warn"
+                      : executionDisplayState === "active"
+                        ? "info"
+                        : "success"
+                }
+              >
+                {executionDisplayState === "failed"
+                  ? "Stopped"
+                  : executionNeedsAttention
+                    ? "Needs attention"
+                    : executionDisplayState === "closed"
+                      ? "Complete"
+                      : executionDisplayState === "active"
+                        ? "In progress"
+                        : "Approved"}
               </Badge>
             </div>
             <output
               className={
-                executionNeedsStartAttention
+                executionNeedsAttention
                   ? "phase-kickoff-note needs-attention"
                   : "phase-kickoff-note"
               }
               aria-live="polite"
             >
-              {executionKickoff?.started ? (
+              {executionDisplayState === "failed" ? (
                 <p data-testid="phase-execution-kickoff-note">
-                  Execution started automatically from this approval.
+                  {terminalDesignatedAttempt ? (
+                    <>
+                      Attempt {terminalDesignatedAttempt.attempt} {terminalDesignatedAttempt.state}
+                      {terminalDesignatedAttempt.failureDetail
+                        ? `: ${terminalDesignatedAttempt.failureDetail.replace(/[.!?]+$/, "")}`
+                        : " without a verified result"}
+                      {executionIsClosed
+                        ? ". This closed phase is retained here as read-only history."
+                        : ". Open recovery details to inspect the current attempt and decide the next step."}
+                    </>
+                  ) : (
+                    <>
+                      Coding stopped after it started
+                      {affectedExecutionNames ? ` for ${affectedExecutionNames}` : ""}. Open
+                      recovery details to inspect the failed work and decide the next step.
+                    </>
+                  )}
+                </p>
+              ) : executionDisplayState === "blocked" ? (
+                <p data-testid="phase-execution-kickoff-note">
+                  Coding is blocked
+                  {affectedExecutionNames ? ` for ${affectedExecutionNames}` : ""}. Open recovery
+                  details to see what needs attention.
+                </p>
+              ) : executionDisplayState === "closed" ? (
+                <p data-testid="phase-execution-kickoff-note">
+                  This implementation work is complete or closed. You can start the next planned
+                  phase or make a quick change.
+                </p>
+              ) : executionDisplayState === "active" &&
+                executionHasActiveWork &&
+                quickKickoffNeedsAttention ? (
+                <p data-testid="phase-execution-kickoff-note">
+                  {runMode === "quick"
+                    ? "The recovered quick change is now running."
+                    : "Implementation is currently running."}
+                  {activeDesignatedAttempt
+                    ? ` Attempt ${activeDesignatedAttempt.attempt} is ${activeDesignatedAttempt.state}.`
+                    : ""}
+                </p>
+              ) : executionKickoff?.started ? (
+                <p data-testid="phase-execution-kickoff-note">
+                  {runMode === "quick"
+                    ? "The quick change started automatically."
+                    : "Execution started automatically from this approval."}
                   {executionKickoff.detail ? ` ${executionKickoff.detail}` : ""}
                 </p>
               ) : executionKickoff?.started === false ? (
                 <p data-testid="phase-execution-kickoff-note">
-                  Plan approved and recorded, but coding did not start.
+                  {runMode === "quick"
+                    ? "The quick change is recorded, but coding did not start."
+                    : "Plan approved and recorded, but coding did not start."}
                   {executionKickoff.detail ? ` ${executionKickoff.detail}` : ""}
                 </p>
               ) : (
                 <p data-testid="phase-execution-kickoff-note">
-                  Plan approved. Checking the current coding status…
+                  {runMode === "quick"
+                    ? "Quick change dispatched. Checking the current coding status…"
+                    : "Plan approved. Checking the current coding status…"}
                 </p>
               )}
             </output>
+            {recoveryPhaseId && onOpenRecoveryDetails ? (
+              <Button
+                variant="primary"
+                className="phase-primary-action"
+                data-testid="phase-open-recovery-details"
+                onClick={() => onOpenRecoveryDetails(recoveryPhaseId)}
+              >
+                Open recovery details
+              </Button>
+            ) : null}
             {executionStartRetryAvailable ? (
               <Button
                 variant="primary"
@@ -777,7 +1372,7 @@ export function PhaseTab({
                 </Button>
               </div>
             ) : null}
-            {executionRows ? (
+            {visibleExecutionRows?.length ? (
               <div className="phase-execution-table-wrap">
                 <table className="phase-execution-table" data-testid="phase-execution-table">
                   <thead>
@@ -790,17 +1385,21 @@ export function PhaseTab({
                     </tr>
                   </thead>
                   <tbody>
-                    {executionRows.map((row) => (
+                    {visibleExecutionRows.map((row) => (
                       <tr key={row.phase_id} data-testid={`phase-execution-row-${row.phase_id}`}>
                         <td data-label="Phase">{row.name}</td>
                         <td data-label="State">
                           <Badge
                             tone={
-                              row.state === "completed"
-                                ? "success"
-                                : PHASE_EXECUTION_ACTIVE_STATES.has(row.state)
-                                  ? "info"
-                                  : "default"
+                              row.state === "failed"
+                                ? "danger"
+                                : row.state === "blocked"
+                                  ? "warn"
+                                  : row.state === "completed"
+                                    ? "success"
+                                    : PHASE_EXECUTION_ACTIVE_STATES.has(row.state)
+                                      ? "info"
+                                      : "default"
                             }
                           >
                             {row.state.replaceAll("_", " ")}
@@ -816,11 +1415,42 @@ export function PhaseTab({
                   </tbody>
                 </table>
               </div>
-            ) : (
+            ) : executionRows === null ? (
               <output aria-live="polite">
                 <Spinner label="Loading coding status…" />
               </output>
-            )}
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+
+      {runStatus === "approved" && executionIsClosed ? (
+        <section
+          className="card side-section phase-state-card phase-new-work"
+          data-testid="phase-new-work"
+          aria-labelledby="phase-new-work-title"
+        >
+          <div className="side-body form-stack">
+            <div>
+              <div className="eyebrow">New work</div>
+              <h3 id="phase-new-work-title">Start something new</h3>
+              <p className="muted">
+                The previous phase remains above as read-only history. Start a new planned phase or
+                make another focused change.
+              </p>
+            </div>
+            <div className="phase-next-actions" data-testid="phase-next-actions">
+              <Button
+                variant="primary"
+                data-testid="phase-start-another"
+                onClick={() => resetToNewRun("planned")}
+              >
+                New planned phase
+              </Button>
+              <Button data-testid="phase-start-quick" onClick={() => resetToNewRun("quick")}>
+                New quick change
+              </Button>
+            </div>
           </div>
         </section>
       ) : null}
@@ -833,7 +1463,7 @@ export function PhaseTab({
               <h3>Nothing was sent to coding</h3>
               <p className="muted">The rejected plan is saved with this project.</p>
             </div>
-            <Button data-testid="phase-new-run" onClick={resetToNewRun}>
+            <Button data-testid="phase-new-run" onClick={() => resetToNewRun("planned")}>
               Start a new phase plan
             </Button>
           </div>
@@ -857,7 +1487,7 @@ export function PhaseTab({
             <Button
               className="phase-primary-action"
               data-testid="phase-new-run"
-              onClick={resetToNewRun}
+              onClick={() => resetToNewRun("planned")}
             >
               Plan again
             </Button>

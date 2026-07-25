@@ -298,6 +298,28 @@ describe("V2 immutable dispatch identity", () => {
     expect(V2DispatchCommand.parse(dispatch).runner_repository_id).toBeUndefined();
   });
 
+  it("carries an explicit quick execution policy while legacy dispatch stays planned-by-default", () => {
+    expect(V2DispatchCommand.parse({ ...dispatch, execution_mode: "quick" }).execution_mode).toBe(
+      "quick",
+    );
+    expect(V2DispatchCommand.parse(dispatch).execution_mode).toBeUndefined();
+  });
+
+  it("carries only the fixed committed verification-manifest path", () => {
+    expect(
+      V2DispatchCommand.parse({
+        ...dispatch,
+        repository_verification_manifest: ".norns/verification.json",
+      }).repository_verification_manifest,
+    ).toBe(".norns/verification.json");
+    expect(
+      V2DispatchCommand.safeParse({
+        ...dispatch,
+        repository_verification_manifest: "scripts/always-green.json",
+      }).success,
+    ).toBe(false);
+  });
+
   it("rejects a freshly minted command id or a different runner dedup key", () => {
     expect(V2DispatchCommand.safeParse({ ...dispatch, command_id: "fresh-command" }).success).toBe(
       false,

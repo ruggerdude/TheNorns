@@ -1,9 +1,14 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type ProjectSummary, Projects } from "./Projects";
+import { type ProjectSummary, Projects, isActionableAttention } from "./Projects";
 import { projectAlpha } from "./test/fixtures";
 import { MockFetch } from "./test/mockFetch";
+
+const recoveryDecisionPointId = "decision:failed_run:run:task%3Aphase%253Arecovery:attempt%3A2";
+const recoveryResolutionUrl =
+  `/api/v2/projects/${projectAlpha.id}/decision-points/` +
+  `${encodeURIComponent(recoveryDecisionPointId)}/resolve`;
 
 describe("Phase 5 attention-first portfolio", () => {
   let mock: MockFetch;
@@ -55,7 +60,7 @@ describe("Phase 5 attention-first portfolio", () => {
                 resumes: "Resolution resumes the release task.",
                 occurred_at: "2026-07-16T20:55:00.000Z",
                 decision: {
-                  decision_point_id: "decision-1",
+                  decision_point_id: recoveryDecisionPointId,
                   condition_fingerprint: "b".repeat(64),
                   recommendation_option_id: "retry",
                   options: [
@@ -67,8 +72,8 @@ describe("Phase 5 attention-first portfolio", () => {
                     },
                     {
                       id: "cancel",
-                      label: "Cancel task",
-                      impact: "Leaves the release incomplete.",
+                      label: "Cancel phase",
+                      impact: "Cancels every unfinished task in the phase.",
                       risk: "Blocks dependent work.",
                     },
                   ],
@@ -90,10 +95,10 @@ describe("Phase 5 attention-first portfolio", () => {
         ],
       },
     }));
-    mock.post(`/api/v2/projects/${projectAlpha.id}/decision-points/decision-1/resolve`, () => {
+    mock.post(recoveryResolutionUrl, () => {
       resolutionAttempts += 1;
       if (failFirstResolution && resolutionAttempts === 1) {
-        return { status: 503, body: { message: "Response was lost" } };
+        return { status: 503, body: { detail: "Response was lost after the resolution attempt" } };
       }
       resolved = true;
       return { body: {} };
@@ -111,6 +116,21 @@ describe("Phase 5 attention-first portfolio", () => {
         onOpenAdmin={vi.fn()}
       />,
     );
+  });
+
+  it("classifies intervention by kind rather than severity", () => {
+    expect(
+      isActionableAttention({
+        kind: "milestone",
+        severity: "high",
+      }),
+    ).toBe(false);
+    expect(
+      isActionableAttention({
+        kind: "blocker",
+        severity: "low",
+      }),
+    ).toBe(true);
   });
 
   afterEach(() => mock.restore());
@@ -132,6 +152,10 @@ describe("Phase 5 attention-first portfolio", () => {
     await screen.findByText("Retry the stalled release run?");
     expect(screen.queryByRole("button", { name: "Acknowledge" })).not.toBeInTheDocument();
     expect(screen.getByText("Recommended")).toBeVisible();
+    expect(screen.getByText("Cancel phase")).toBeVisible();
+    expect(
+      screen.getByText(/Cancel phase closes the phase and every unfinished task/i),
+    ).toBeVisible();
     await userEvent.type(
       screen.getByLabelText("Decision rationale"),
       "The last commit is safe and the external action is idempotent.",
@@ -141,23 +165,22 @@ describe("Phase 5 attention-first portfolio", () => {
       screen.getByLabelText("Optional direction for subsequent work"),
       "Re-run verification before integration.",
     );
-    await userEvent.click(screen.getByRole("button", { name: "Resolve decision" }));
+    await userEvent.click(screen.getByRole("button", { name: "Retry safely" }));
     await waitFor(() => expect(screen.queryByText("Retry the stalled release run?")).toBeNull());
-    expect(
-      mock.calls.find(
-        (call) =>
-          call.url === `/api/v2/projects/${projectAlpha.id}/decision-points/decision-1/resolve`,
-      ),
-    ).toMatchObject({
+    const resolutionCall = mock.calls.find((call) => call.url === recoveryResolutionUrl);
+    expect(resolutionCall).toMatchObject({
       body: {
         expected_condition_fingerprint: "b".repeat(64),
         selected_option_id: "retry",
         rationale: "The last commit is safe and the external action is idempotent.",
         direction_target: "all_agents",
         direction_text: "Re-run verification before integration.",
-        idempotency_key: expect.stringMatching(/^decision-decision-1-/),
+        idempotency_key: expect.stringContaining(`decision-${recoveryDecisionPointId}-`),
       },
     });
+    const transportedId = resolutionCall?.url.match(/decision-points\/(.+)\/resolve$/)?.[1];
+    expect(transportedId).toBe(encodeURIComponent(recoveryDecisionPointId));
+    expect(decodeURIComponent(transportedId ?? "")).toBe(recoveryDecisionPointId);
   });
 
   it("reuses the decision idempotency key when a failed response is retried", async () => {
@@ -168,18 +191,15 @@ describe("Phase 5 attention-first portfolio", () => {
       "The retry is safe after inspecting the existing commit.",
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "Resolve decision" }));
-    expect(await screen.findByText("Response was lost")).toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: "Resolve decision" }));
+    await userEvent.click(screen.getByRole("button", { name: "Retry safely" }));
+    expect(await screen.findByText("Response was lost after the resolution attempt")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Retry safely" }));
     await waitFor(() => expect(screen.queryByText("Retry the stalled release run?")).toBeNull());
 
-    const resolutionCalls = mock.calls.filter(
-      (call) =>
-        call.url === `/api/v2/projects/${projectAlpha.id}/decision-points/decision-1/resolve`,
-    );
+    const resolutionCalls = mock.calls.filter((call) => call.url === recoveryResolutionUrl);
     expect(resolutionCalls).toHaveLength(2);
     expect(resolutionCalls[0]?.body).toMatchObject({
-      idempotency_key: expect.stringMatching(/^decision-decision-1-/),
+      idempotency_key: expect.stringContaining(`decision-${recoveryDecisionPointId}-`),
     });
     expect(resolutionCalls[1]?.body).toMatchObject({
       idempotency_key: (resolutionCalls[0]?.body as { idempotency_key: string }).idempotency_key,

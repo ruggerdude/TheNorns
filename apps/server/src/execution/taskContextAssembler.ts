@@ -52,6 +52,12 @@ export const MAX_TOTAL_CONTEXT_BYTES = 256 * 1024;
 
 /** Repository-fact keys that describe how to build, test, and lint. */
 export const VERIFICATION_COMMAND_KEYS = ["build_command", "test_command", "lint_command"] as const;
+/** A committed manifest is an alternative complete verification policy. */
+export const VERIFICATION_MANIFEST_KEY = "verification_manifest";
+export const VERIFICATION_POLICY_FACT_KEYS = [
+  ...VERIFICATION_COMMAND_KEYS,
+  VERIFICATION_MANIFEST_KEY,
+] as const;
 
 // ---- failures ---------------------------------------------------------------
 
@@ -210,7 +216,7 @@ interface RepositoryFact {
   key: string;
   value: string;
   confidence: number;
-  /** Build/test/lint commands are policy, not trivia — never trimmed. */
+  /** Verification commands or a committed manifest are policy — never trimmed. */
   policy: boolean;
 }
 
@@ -272,12 +278,14 @@ function renderMission(model: ContextModel): string {
     "How to work:",
     "",
     bullets([
-      "Read the repository before changing it. This briefing states facts about the project, not its full source.",
+      "Inspect only the task-relevant files and current git status; do not spend turns broadly exploring the repository.",
       "Do exactly the task in the TASK section. Do not expand its scope.",
+      "Make the smallest complete implementation early, before optional investigation or explanation.",
+      "Run the declared verification commands in the REPOSITORY section immediately after the edit and leave them passing.",
+      "Commit the verified change immediately. A written summary is not a deliverable and must not delay the commit.",
       "Every acceptance criterion must be satisfied and demonstrably true before you finish.",
-      "Run the project's build, test, and lint commands (REPOSITORY section) and leave them passing.",
       "Follow every project directive and constraint; they override your own defaults.",
-      "Commit your work on the branch you were given. Do not merge, rebase onto, or push to other branches.",
+      "Commit on the branch you were given. Do not merge, rebase onto, or push to other branches.",
       "If the task is impossible as specified, stop and report why. Do not substitute a different task.",
     ]),
     "",
@@ -414,9 +422,10 @@ function renderRepository(model: ContextModel): string {
     "",
     model.architecture.summary.trim(),
     "",
-    "### Build, test, and lint",
+    "### Verification",
     "",
-    "Run these from the repository root. They must pass before you finish.",
+    "Run the listed commands from the repository root. When a verification manifest is listed,",
+    "read and run every command it defines; the runner will execute that full committed manifest.",
     "",
     bullets(policy.map((fact) => `${fact.key}: \`${fact.value}\``)),
   ];
@@ -523,7 +532,7 @@ function totalBytes(sections: readonly RenderedSection[]): number {
  *
  * Never dropped: the mission, the phase objective, the task (including its
  * deliverables and acceptance criteria), project directives and constraints,
- * the architecture summary, and the build/test/lint commands.
+ * the architecture summary, and the verification commands or manifest.
  */
 function dropLowestValue(model: ContextModel): boolean {
   if (model.memory.length > 0) {
@@ -752,14 +761,14 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
         key,
         value,
         confidence: numeric(row.confidence),
-        policy: (VERIFICATION_COMMAND_KEYS as readonly string[]).includes(key),
+        policy: (VERIFICATION_POLICY_FACT_KEYS as readonly string[]).includes(key),
       };
     });
     if (!facts.some((fact) => fact.policy)) {
       throw new TaskContextAssemblyError(
         "verification_commands_missing",
-        `project ${project.id} has no ${VERIFICATION_COMMAND_KEYS.join(", ")} repository fact`,
-        `Record at least one of ${VERIFICATION_COMMAND_KEYS.join(", ")} during repository ingestion; an agent cannot verify its own work without one.`,
+        `project ${project.id} has no ${VERIFICATION_POLICY_FACT_KEYS.join(", ")} repository fact`,
+        `Record at least one of ${VERIFICATION_COMMAND_KEYS.join(", ")}, or a committed ${VERIFICATION_MANIFEST_KEY}, during repository ingestion; an agent cannot verify its own work without one.`,
       );
     }
     // Lowest-confidence facts are the first to go when the cap binds, so order

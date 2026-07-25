@@ -120,4 +120,36 @@ describe.sequential("Phase 5 authenticated attention API", () => {
     expect(recorded.statusCode).toBe(200);
     expect(recorded.json()).toMatchObject({ replayed: false });
   });
+
+  it("round-trips generated recovery decision ids longer than Fastify's default param limit", async () => {
+    const decisionPointId = `decision:failed_run:${"run:task:".repeat(18)}recovery`;
+    expect(decisionPointId.length).toBeGreaterThan(100);
+    await pg.query(
+      `INSERT INTO decision_points (
+        id,project_id,scope_entity_type,scope_entity_id,reason_class,source_instance_id,
+        condition_key,condition_fingerprint,question,context,options,recommendation_option_id,
+        urgency,status
+      ) VALUES ($1,'project-1','project','project-1','failed_run','source-long',
+        'decision:long',repeat('f',64),'Retry?','Recovery input required',
+        '[{"id":"retry","label":"Retry","impact":"Continue","risk":"Known risk"}]'::jsonb,
+        'retry','normal','open')`,
+      [decisionPointId],
+    );
+
+    const response = await server.app.inject({
+      method: "POST",
+      url: `/api/v2/projects/project-1/decision-points/${decisionPointId}/resolve`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        idempotency_key: "long-id-resolution",
+        expected_condition_fingerprint: "f".repeat(64),
+        selected_option_id: "retry",
+        rationale: "Safe to retry.",
+        direction_target: "project_manager",
+        direction_text: "Resume from the verified checkpoint.",
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ decision_point_id: decisionPointId });
+  });
 });

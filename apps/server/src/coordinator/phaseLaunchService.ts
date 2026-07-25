@@ -397,11 +397,19 @@ export class PhaseLaunchService {
     authorized_by: V2ActorT;
     authorized_by_session_id: string;
     issued_at: string;
+    /**
+     * Explicit recovery scheduling. Only this task is considered, and the
+     * coordinator must atomically supersede this exact terminal run.
+     */
+    retry?: { task_id: string; failed_run_id: string };
   }): Promise<PhaseLaunchResult> {
     const row = await this.loadPhaseBinding(input.project_id, input.phase_id);
     this.assertLaunchable(row);
 
-    const tasks = await this.schedulableTasks(input.project_id, input.phase_id);
+    const schedulable = await this.schedulableTasks(input.project_id, input.phase_id);
+    const tasks = input.retry
+      ? schedulable.filter((task) => task.task_id === input.retry?.task_id)
+      : schedulable;
     const scheduled: PhaseLaunchTaskOutcome[] = [];
     const deferred: PhaseLaunchTaskOutcome[] = [];
     const blocked: PhaseLaunchTaskOutcome[] = [];
@@ -458,6 +466,7 @@ export class PhaseLaunchService {
         max_duration_seconds: this.policy.maxDurationSeconds,
         issued_at: input.issued_at,
         expires_at: expiresAt,
+        ...(input.retry ? { supersedes_run_id: input.retry.failed_run_id } : {}),
       };
 
       try {

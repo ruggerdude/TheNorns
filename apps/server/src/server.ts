@@ -47,6 +47,7 @@ import {
   V2RepositoryIngestionSeed,
   V2StartDebateRunCommand,
   V2StrategyVersion,
+  isPmModelForProvider,
   parseRunnerFrame,
 } from "@norns/contracts";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -71,6 +72,10 @@ import type { Phase4CompletionService } from "./coordinator/phase4Completion.js"
 import type { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
 import { type Phase4DispatchRepository, Phase4Dispatcher } from "./coordinator/phase4Dispatcher.js";
 import type { Phase4EventProcessor } from "./coordinator/phase4EventProcessor.js";
+import {
+  Phase4RecoveryActionError,
+  Phase4RecoveryActionService,
+} from "./coordinator/phase4RecoveryActions.js";
 import type { Phase4RecoveryMonitor } from "./coordinator/phase4RecoveryMonitor.js";
 import type { Phase6CoordinationService } from "./coordinator/phase6Coordination.js";
 import { describePhaseConcurrency } from "./coordinator/phaseConcurrency.js";
@@ -212,6 +217,10 @@ import {
   type StrategyWorkflowService,
 } from "./projects/strategyWorkflowService.js";
 import {
+  executionModelCatalogFromEnvironment,
+  executionModelUnavailableMessage,
+} from "./runners/executionModelAvailability.js";
+import {
   type HelperRunnerSnapshot,
   helperStatus,
   installCommand,
@@ -232,6 +241,10 @@ import {
   WorkspaceBrokerError,
   WorkspaceSelectionTokens,
 } from "./runners/workspaceBroker.js";
+import {
+  type RelationalCompositionBridge,
+  RelationalCompositionConflictError,
+} from "./startup/relationalCompositionBridge.js";
 import type { RelayStores } from "./stores.js";
 import type {
   IdentityService,
@@ -307,6 +320,11 @@ export interface ServerOptions {
   clock?: () => Date;
   /** Multi-project management: create/list projects, plan + edit + allocate each one's graph. */
   projects?: ProjectRepository | ProjectStore;
+  /**
+   * Explicit compatibility policy for deployments that enable relational
+   * workflows before identity/project reads have completed cutover.
+   */
+  relationalComposition?: RelationalCompositionBridge;
   phase3?: {
     sourceBindings: SourceBindingService;
     ingestion: RepositoryIngestionService;
@@ -471,7 +489,16 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const usesLegacyIdentity = options.identity === undefined;
   const identityService: IdentityService = options.identity ?? new LegacyIdentityService(users);
   const now = options.clock ?? (() => new Date());
-  const app = Fastify({ logger: false });
+  // Recovery decision-point ids include durable aggregate identities and can
+  // legitimately exceed Fastify's 100-character default. Keep the route
+  // bounded while allowing server-generated ids to round-trip through params.
+  const app = Fastify({ logger: false, routerOptions: { maxParamLength: 512 } });
+  app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof RelationalCompositionConflictError) {
+      return reply.code(409).send(error.diagnostic());
+    }
+    return reply.send(error);
+  });
   await app.register(websocket);
   app.addContentTypeParser(
     ["image/png", "image/jpeg", "image/webp", "image/gif"],
@@ -486,6 +513,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // EXECUTION E2: authorizes the fetch route above (not merely authenticates
   // it) and is shared with the start-phase section below.
   let dispatchContextScope: DispatchContextScopeRepository | undefined;
+  // Assigned when the full Phase 4 execution runtime is composed below. The
+  // earlier attention route closes over this seam at request time.
+  let decisionRecoveryActions: Phase4RecoveryActionService | undefined;
 
   const runnerSockets = new Map<string, WsLike>();
   // The socket+generation a runner most recently reconciled at. Event and
@@ -499,10 +529,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const loginThrottle = new LoginAttemptThrottle();
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
   const integrationEnvironment = options.integrationEnvironment ?? process.env;
-  const configuredWorkerModels = () =>
+  const configuredDebateModels = () =>
     buildSelectableModelCatalog(
       modelAvailabilityFromDebateEnvironment(integrationEnvironment),
     ).filter((entry) => entry.available);
+  const executionModelCatalog = () => executionModelCatalogFromEnvironment(integrationEnvironment);
+  const configuredExecutionModels = () =>
+    executionModelCatalog().filter((entry) => entry.available);
   const buildPlanningAdapter = (provider: ProviderName, model: string): LlmAdapter => {
     const apiKey =
       provider === "anthropic"
@@ -890,7 +923,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const resolveUser = async (req: FastifyRequest): Promise<IdentityUser | undefined> => {
     const token = credentialFor(req);
     if (!token) return undefined;
-    return identityService.userForToken(token);
+    const user = await identityService.userForToken(token);
+    if (user) await options.relationalComposition?.ensureActor(user);
+    return user;
   };
 
   const requireSession = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> => {
@@ -1667,6 +1702,89 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     reply.send({ ok: true, contracts: "1.2.0" });
   });
 
+  app.get("/ready", async (_req, reply) => {
+    const checkedAt = now().toISOString();
+    let databaseStatus: "ready" | "unavailable" | "not_configured" = "not_configured";
+    if (runtimeTransactionsForInference) {
+      try {
+        await runtimeTransactionsForInference.transaction(async (sql) => {
+          await sql.query("SELECT 1 AS ready");
+        });
+        databaseStatus = "ready";
+      } catch {
+        databaseStatus = "unavailable";
+      }
+    }
+
+    const runnerSnapshots = helperRunnerSnapshots();
+    const connectedRunners = runnerSnapshots.filter((runner) => runner.connected);
+    const modelReadiness = modelAvailabilityFromDebateEnvironment(integrationEnvironment);
+    const executionModels = executionModelCatalog();
+    const availableExecutionModels = executionModels.filter((model) => model.available);
+    const anthropicReady = modelReadiness.some(
+      (model) => model.provider === "anthropic" && model.available,
+    );
+    const openAiReady = modelReadiness.some(
+      (model) => model.provider === "openai" && model.available,
+    );
+    const compositionReadiness = options.relationalComposition?.readiness() ?? null;
+    const ready =
+      databaseStatus !== "unavailable" &&
+      (compositionReadiness === null || compositionReadiness.status === "ready");
+    return reply.code(ready ? 200 : 503).send({
+      ok: ready,
+      contracts: "1.2.0",
+      checked_at: checkedAt,
+      dependencies: {
+        database: {
+          required: runtimeTransactionsForInference !== undefined,
+          status: databaseStatus,
+        },
+        identity: {
+          status: "ready",
+          mode: usesLegacyIdentity ? "legacy" : "relational",
+        },
+        persistence_composition: compositionReadiness ?? {
+          status: "not_configured",
+          compatibility_bridge: false,
+        },
+        runners: {
+          required: false,
+          status:
+            connectedRunners.length > 0
+              ? "connected"
+              : runnerSnapshots.length > 0
+                ? "disconnected"
+                : "not_registered",
+          registered: runnerSnapshots.length,
+          connected: connectedRunners.length,
+          last_seen_at:
+            runnerSnapshots
+              .map((runner) => runner.last_seen_at)
+              .filter(Boolean)
+              .sort()
+              .at(-1) ?? null,
+        },
+        providers: {
+          required: false,
+          anthropic: anthropicReady,
+          openai: openAiReady,
+          cross_provider_ready: anthropicReady && openAiReady,
+        },
+        execution_models: {
+          required: false,
+          status: availableExecutionModels.length > 0 ? "ready" : "unavailable",
+          available: availableExecutionModels.length,
+          configured: availableExecutionModels.map((model) => ({
+            provider: model.provider,
+            model: model.model,
+          })),
+          required_environment: [RUNNER_ALLOWED_MODELS_ENV],
+        },
+      },
+    });
+  });
+
   // === EXECUTION E3 =======================================================
   // Runner distribution. The GitHub Actions workflow installs the runner from
   // here instead of npm (apps/runner is private and unpublished, so the old
@@ -1802,8 +1920,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (!user) return reply.code(401).send({ error: "unauthorized" });
     const anthropicConfigured = Boolean(integrationEnvironment.ANTHROPIC_API_KEY?.trim());
     const openaiConfigured = Boolean(integrationEnvironment.OPENAI_API_KEY?.trim());
+    const availableExecutionModels = configuredExecutionModels();
     reply.header("Cache-Control", "no-store").send({
       cross_provider_ready: anthropicConfigured && openaiConfigured,
+      execution_ready: availableExecutionModels.length > 0,
+      execution_models: availableExecutionModels.map((entry) => ({
+        provider: entry.provider,
+        model: entry.model,
+        label: entry.label,
+      })),
       providers: [
         {
           id: "anthropic",
@@ -1823,13 +1948,28 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
   });
 
+  app.get("/api/v2/capabilities/execution-models", async (req, reply) => {
+    if (!(await requireSession(req, reply))) return;
+    const models = executionModelCatalog();
+    reply.header("Cache-Control", "no-store").send({
+      ready: models.some((model) => model.available),
+      required_environment: [RUNNER_ALLOWED_MODELS_ENV],
+      models: models.map((model) => ({
+        id: model.model,
+        provider: model.provider,
+        label: model.label,
+        available: model.available,
+        unavailable_reason: model.unavailable_reason,
+      })),
+    });
+  });
+
   // ---- durable debate workflow ------------------------------------------------
   // Browser routes construct application commands from the authenticated
   // identity. Clients never choose actor attribution, command IDs, or
   // correlation IDs themselves.
   if (options.debates) {
     const debates = options.debates;
-    const configuredDebateModels = configuredWorkerModels;
     const debateError = (reply: FastifyReply, error: unknown): void => {
       if (error instanceof DebateConflictError) {
         const status = ["debate_not_found", "debate_run_not_found", "project_not_found"].includes(
@@ -2839,6 +2979,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                   ...base,
                   repository_id: scenario.data.repository_id,
                 });
+          await options.relationalComposition?.mirrorOnboardedProject({
+            project_id: result.project_id,
+            scenario: scenario.data.scenario,
+            name: scenario.data.name,
+            description: scenario.data.description,
+            pm_provider: pm.data.pm_provider,
+            pm_model: pm.data.pm_model,
+            connection_id: scenario.data.connection_id,
+            repository_id:
+              scenario.data.scenario === "existing_repo" ? scenario.data.repository_id : null,
+            default_branch: result.workspace?.default_branch ?? null,
+            github_url: result.workspace?.github?.url ?? null,
+          });
           stores.audit(
             user.email,
             "project.onboarded",
@@ -2886,6 +3039,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           }
           if (error instanceof OnboardingValidationError) {
             return reply.code(409).send({ error: error.code, message: error.message });
+          }
+          if (error instanceof RelationalCompositionConflictError) {
+            return reply.code(409).send(error.diagnostic());
           }
           return reply.code(500).send({ error: "onboarding_failed", detail: String(error) });
         }
@@ -3193,7 +3349,17 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             description: body.data.description,
             pmProvider: body.data.pm_provider,
             pmModel: body.data.pm_model,
+            ...(options.relationalComposition?.readiness().new_project_write_authority === "legacy"
+              ? {
+                  sourceType: "local" as const,
+                  sourceLocation: selection.repository_display_name,
+                  sourceConnectionId: selection.workspace_id,
+                  sourceRepositoryId: selection.repository_id,
+                  sourceDefaultBranch: selection.default_branch,
+                }
+              : {}),
           });
+          await options.relationalComposition?.ensureProjectAnchor(project);
           await options.phase3?.sourceBindings.createLocal({
             project_id: project.id,
             runner_id: selection.runner_id,
@@ -3208,7 +3374,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           workspaceSelections.commit(body.data.selection_token, reserved.reservation_id);
           stores.audit(user.email, "project.created.local", project.id, now());
           return reply.code(201).send(await projects.summary(project.id));
-        } catch {
+        } catch (error) {
           workspaceSelections.release(body.data.selection_token, reserved.reservation_id);
           if (project) {
             try {
@@ -3216,6 +3382,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             } catch {
               // The original create/bind failure remains the public result.
             }
+          }
+          if (error instanceof RelationalCompositionConflictError) {
+            return reply.code(409).send(error.diagnostic());
           }
           return reply.code(409).send({ error: "local_project_creation_failed" });
         }
@@ -3288,6 +3457,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           return reply.code(409).send({ error: "local_selection_invalid" });
         }
         try {
+          if (options.relationalComposition) {
+            await options.relationalComposition.ensureProjectAnchor(await projects.summary(id));
+          }
           const binding = await options.phase3?.sourceBindings.createLocal({
             project_id: id,
             runner_id: selection.runner_id,
@@ -3301,8 +3473,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           });
           workspaceSelections.commit(body.data.selection_token, reserved.reservation_id);
           return reply.code(201).send(binding);
-        } catch {
+        } catch (error) {
           workspaceSelections.release(body.data.selection_token, reserved.reservation_id);
+          if (error instanceof RelationalCompositionConflictError) {
+            return reply.code(409).send(error.diagnostic());
+          }
           return reply.code(409).send({ error: "source_binding_conflict" });
         }
       });
@@ -3315,6 +3490,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         if (!body.success) return reply.code(400).send({ error: "bad_request" });
         const { id } = req.params as { id: string };
         try {
+          if (options.relationalComposition) {
+            await options.relationalComposition.ensureProjectAnchor(await projects.summary(id));
+          }
           reply.code(201).send(
             await options.phase3?.sourceBindings.createGitHub({
               project_id: id,
@@ -3323,6 +3501,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             }),
           );
         } catch (error) {
+          if (error instanceof RelationalCompositionConflictError) {
+            return reply.code(409).send(error.diagnostic());
+          }
           reply.code(409).send({ error: "source_binding_conflict", detail: String(error) });
         }
       });
@@ -3776,15 +3957,84 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           const body = V2DecisionResolutionRequest.safeParse(req.body);
           if (!body.success) return reply.code(400).send({ error: "bad_request" });
           try {
-            reply.send(
-              await options.phase5?.attention.resolveDecision({
-                user_id: user.id,
-                project_id: id,
-                decision_point_id: decisionPointId,
-                ...body.data,
-              }),
-            );
+            const recoveryIntent = await options.phase5?.attention.recoveryDecisionIntent({
+              project_id: id,
+              decision_point_id: decisionPointId,
+              expected_condition_fingerprint: body.data.expected_condition_fingerprint,
+              selected_option_id: body.data.selected_option_id,
+            });
+            let recovery:
+              | Awaited<ReturnType<Phase4RecoveryActionService["retry"]>>
+              | Awaited<ReturnType<Phase4RecoveryActionService["cancel"]>>
+              | null = null;
+            if (recoveryIntent) {
+              if (!decisionRecoveryActions) {
+                return reply.code(503).send({
+                  error: "decision_recovery_unavailable",
+                  detail:
+                    "Execution recovery is not configured on this deployment. The decision remains open.",
+                  retriable: true,
+                });
+              }
+              // A decision can remain open far longer than the command TTL.
+              // Its created_at is historical evidence, not the authorization
+              // time for work launched by the human resolving it now.
+              const recoveryIssuedAt = now().toISOString();
+              const common = {
+                project_id: recoveryIntent.project_id,
+                phase_id: recoveryIntent.phase_id,
+                task_id: recoveryIntent.task_id,
+                failed_run_id: recoveryIntent.failed_run_id,
+                expected_task_version: recoveryIntent.expected_task_version,
+                actor: { actor_type: "human" as const, actor_id: user.id },
+                authorized_by_session_id: `decision-recovery:${decisionPointId}`,
+                idempotency_key: body.data.idempotency_key,
+                correlation_id: `decision-recovery:${decisionPointId}`,
+                causation_id: decisionPointId,
+                issued_at: recoveryIssuedAt,
+                resolve_decisions: false,
+              };
+              recovery =
+                recoveryIntent.action === "retry"
+                  ? await decisionRecoveryActions.retry(common)
+                  : await decisionRecoveryActions.cancel({
+                      ...common,
+                      reason:
+                        body.data.rationale.trim() ||
+                        body.data.direction_text.trim() ||
+                        "Cancelled by recovery decision.",
+                    });
+              if (recovery.action === "retry" && !recovery.started) {
+                return reply.code(409).send({
+                  error: "recovery_not_started",
+                  detail: `${recovery.detail} The decision remains open; retry after resolving the prerequisite.`,
+                  retriable: true,
+                });
+              }
+            }
+            const resolution = await options.phase5?.attention.resolveDecision({
+              user_id: user.id,
+              project_id: id,
+              decision_point_id: decisionPointId,
+              ...body.data,
+            });
+            reply.send(recovery ? { ...resolution, recovery } : resolution);
           } catch (error) {
+            if (error instanceof Phase4RecoveryActionError) {
+              return reply.code(error.status).send({
+                error: error.code,
+                detail: `${error.message} The decision remains open.`,
+                retriable: error.retriable,
+              });
+            }
+            if (error instanceof PhaseLaunchError) {
+              return reply.code(409).send({
+                error: "recovery_not_started",
+                detail: `${error.message} The decision remains open; retry after resolving the prerequisite.`,
+                action_required: error.action_required,
+                retriable: true,
+              });
+            }
             if (error instanceof DecisionResolutionError) {
               const status =
                 error.code === "decision_not_found"
@@ -4015,7 +4265,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           projectName: summary.name,
           objective: body.data.objective ?? summary.plan_objective ?? summary.description,
           graph: graphView.graph,
-          models: configuredWorkerModels(),
+          models: configuredExecutionModels(),
         });
         const view = await projects.applyPmAllocation(id, recommendation.recommendations);
         options.recordUsage?.([recommendation.usage]);
@@ -4227,11 +4477,31 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (options.planningRuns) {
       const { transactions: planningTransactions } = options.planningRuns;
       const planningRunService = new PlanningRunService(planningTransactions);
-      const resolvePlanningModels = async (projectId: string) => {
-        const [pmSelection, persistedReviewer] = await Promise.all([
+      const resolvePlanningModels = async (
+        projectId: string,
+        run?: {
+          mode: "planned" | "quick";
+          pm: { provider: ProviderName; model: string } | null;
+        },
+      ) => {
+        const [projectPm, persistedReviewer] = await Promise.all([
           projects.pmSelectionOf(projectId),
           planningRunService.reviewerSelectionOf(projectId),
         ]);
+        const pmSelection = run?.pm ?? projectPm;
+        if (run?.mode === "quick") {
+          const pmModel =
+            pmSelection.model ??
+            (pmSelection.provider === "anthropic"
+              ? PLANNING_RUN_DEFAULT_PM_MODEL
+              : DEFAULT_PM_MODEL.openai);
+          return {
+            pm: { provider: pmSelection.provider, model: pmModel },
+            // Quick changes never instantiate or call this reviewer. Keeping a
+            // complete pair preserves the worker's shared resolution shape.
+            reviewer: { provider: pmSelection.provider, model: pmModel },
+          };
+        }
         // Throws PlanningConfigurationError when the deployment lacks what's
         // needed; the worker catches it and records a truthful failure.
         // PHASE TAB P1: durable planning runs pin their last-resort defaults
@@ -4241,7 +4511,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         // resolved a model.
         return resolvePlanningParticipants({
           pmSelection,
-          persistedReviewer,
+          persistedReviewer:
+            persistedReviewer?.provider === pmSelection.provider ? null : persistedReviewer,
           env: integrationEnvironment,
           defaultPmModel: {
             anthropic: PLANNING_RUN_DEFAULT_PM_MODEL,
@@ -4252,6 +4523,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       };
       const planningWorker = new PlanningRunWorker(planningTransactions, buildPlanningAdapter, {
         resolveModels: resolvePlanningModels,
+        ...(options.planningRuns.executionKickoff
+          ? { executionKickoff: options.planningRuns.executionKickoff }
+          : {}),
         ...(options.recordUsage ? { recordUsage: options.recordUsage } : {}),
         // FRONT DOOR P4: resolve a run's objective attachment ids to image parts
         // for round-1 injection. Only wired when the attachments runtime exists.
@@ -4283,7 +4557,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             projectName: summary.name,
             objective,
             graph: WorkflowGraph.fromPlan(plan).snapshot(),
-            models: configuredWorkerModels(),
+            models: configuredExecutionModels(),
             // PHASE TAB P1: the run's implementation-provider constraint.
             // Reviewers stay cross-provider (see allocationRecommendation.ts).
             ...(workerProviders !== "both" ? { allowedWorkerProviders: [workerProviders] } : {}),
@@ -4321,6 +4595,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       planningWorkerTimer.unref?.();
 
       const planningRunError = (reply: FastifyReply, error: unknown): void => {
+        if (error instanceof ProjectNotFoundError) {
+          reply.code(404).send({ error: "project_not_found", message: error.message });
+          return;
+        }
         if (error instanceof PlanningRunConflictError) {
           reply.code(404).send({ error: error.code, message: error.message });
           return;
@@ -4334,6 +4612,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         throw error;
       };
 
+      const PlanningParticipantBody = z
+        .object({
+          provider: z.enum(["anthropic", "openai"]),
+          model: z.string().trim().min(1).max(200),
+        })
+        .strict();
+
       const CreatePlanningRunBody = z
         .object({
           objective: z.string().trim().min(1).max(100_000),
@@ -4341,7 +4626,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           // PHASE TAB P1: per-run review-round cap. Same semantics as
           // max_rounds (it IS the round cap); when both are supplied,
           // review_rounds wins.
-          review_rounds: z.number().int().min(1).max(5).optional(),
+          review_rounds: z.number().int().min(0).max(5).optional(),
+          mode: z.enum(["planned", "quick"]).optional(),
+          pm: PlanningParticipantBody.optional(),
+          agent: PlanningParticipantBody.optional(),
           // PHASE TAB P1: which implementation providers allocation staffing
           // may use. Default "both".
           worker_providers: z.enum(["anthropic", "openai", "both"]).optional(),
@@ -4353,28 +4641,129 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
       app.post("/api/v2/projects/:id/planning-runs", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return reply.code(401).send({ error: "unauthorized" });
         const { id } = req.params as { id: string };
         const body = CreatePlanningRunBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: "bad_request" });
-        const maxRounds = body.data.review_rounds ?? body.data.max_rounds;
+        const mode = body.data.mode ?? "planned";
+        if (mode === "planned" && body.data.review_rounds === 0) {
+          return reply.code(400).send({
+            error: "bad_request",
+            message: "planned phases require at least one review round",
+          });
+        }
+        if (
+          mode === "quick" &&
+          body.data.review_rounds !== undefined &&
+          body.data.review_rounds !== 0
+        ) {
+          return reply.code(400).send({
+            error: "bad_request",
+            message: "quick changes do not use review rounds",
+          });
+        }
+        if (body.data.pm && !isPmModelForProvider(body.data.pm.provider, body.data.pm.model)) {
+          return reply.code(422).send({
+            error: "invalid_model",
+            message: `model "${body.data.pm.model}" is not available for ${body.data.pm.provider}`,
+          });
+        }
+        if (
+          body.data.agent &&
+          !isPmModelForProvider(body.data.agent.provider, body.data.agent.model)
+        ) {
+          return reply.code(422).send({
+            error: "invalid_model",
+            message: `model "${body.data.agent.model}" is not available for ${body.data.agent.provider}`,
+          });
+        }
+        if (
+          body.data.agent &&
+          body.data.worker_providers &&
+          body.data.worker_providers !== "both" &&
+          body.data.worker_providers !== body.data.agent.provider
+        ) {
+          return reply.code(400).send({
+            error: "bad_request",
+            message: "the selected agent must be inside the allowed provider pool",
+          });
+        }
+        const maxRounds = mode === "quick" ? 1 : (body.data.review_rounds ?? body.data.max_rounds);
         try {
+          if (options.relationalComposition) {
+            await options.relationalComposition.ensureProjectAnchor(await projects.summary(id));
+          }
+
+          const availableExecutionModels = configuredExecutionModels().filter(
+            (model) =>
+              !body.data.worker_providers ||
+              body.data.worker_providers === "both" ||
+              model.provider === body.data.worker_providers,
+          );
+          if (body.data.agent) {
+            const problem = executionModelUnavailableMessage(
+              body.data.agent.provider,
+              body.data.agent.model,
+              executionModelCatalog(),
+            );
+            if (problem) {
+              return reply.code(422).send({
+                error: "agent_model_unavailable",
+                message: problem,
+              });
+            }
+          } else if (availableExecutionModels.length === 0) {
+            return reply.code(422).send({
+              error: "agent_model_unavailable",
+              message: `No execution agent is available for the selected provider pool. Configure ${RUNNER_ALLOWED_MODELS_ENV} and the corresponding provider API key before starting work.`,
+            });
+          }
+
+          let agent = body.data.agent;
+          if (mode === "quick" && !agent) {
+            const projectPm = body.data.pm ?? (await projects.pmSelectionOf(id));
+            const pmModel =
+              projectPm.model ??
+              (projectPm.provider === "anthropic"
+                ? PLANNING_RUN_DEFAULT_PM_MODEL
+                : DEFAULT_PM_MODEL.openai);
+            const preferred = availableExecutionModels.find(
+              (model) => model.provider === projectPm.provider && model.model === pmModel,
+            );
+            const selected = preferred ?? availableExecutionModels[0];
+            if (!selected) {
+              return reply.code(422).send({
+                error: "agent_model_unavailable",
+                message: `No execution agent is available. Configure ${RUNNER_ALLOWED_MODELS_ENV} before starting work.`,
+              });
+            }
+            agent = { provider: selected.provider, model: selected.model };
+          }
+
           const run = await planningRunService.create(id, {
             objective: body.data.objective,
+            mode,
+            ...(mode === "quick" ? { requestedBy: user.id } : {}),
             ...(maxRounds !== undefined ? { maxRounds } : {}),
-            ...(body.data.worker_providers !== undefined
-              ? { workerProviders: body.data.worker_providers }
-              : {}),
+            ...(agent
+              ? { workerProviders: agent.provider }
+              : body.data.worker_providers !== undefined
+                ? { workerProviders: body.data.worker_providers }
+                : {}),
+            ...(body.data.pm ? { pm: body.data.pm } : {}),
+            ...(agent ? { agent } : {}),
             // FRONT DOOR P4: persist objective attachments so the worker injects
             // them into round 1. Previously validated-but-ignored input.
             ...(body.data.attachment_ids !== undefined
               ? { attachmentIds: body.data.attachment_ids }
               : {}),
           });
-          stores.audit("operator", "planning_run.created", `${id}:${run.id}`, now());
+          stores.audit(user.id, "planning_run.created", `${id}:${run.id}:${mode}`, now());
           reply.code(202).send({ planning_run_id: run.id });
           void planningWorker.runNow(run.id).catch((error) => {
             stores.audit(
-              "operator",
+              user.id,
               "planning_run.dispatch_failed",
               `${id}:${run.id}:${error instanceof Error ? error.message : String(error)}`,
               now(),
@@ -4499,7 +4888,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             `not "${entry.provider}" (node "${entry.node_id}")`
           );
         }
-        return null;
+        return executionModelUnavailableMessage(
+          entry.provider,
+          entry.model,
+          executionModelCatalog(),
+        );
       };
 
       app.post("/api/v2/projects/:id/planning-runs/:runId/decision", async (req, reply) => {
@@ -4915,6 +5308,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           }
         : undefined,
     );
+    const recoveryActions = new Phase4RecoveryActionService(
+      options.execution.transactions,
+      phaseLaunch,
+    );
+    decisionRecoveryActions = recoveryActions;
 
     // ---- EXECUTION E12: drain the queue when a slot frees -------------------
     //
@@ -5072,6 +5470,82 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         reply.code(409).send({ error: "phase_start_conflict", detail: String(error) });
       }
     });
+
+    const TerminalRecoveryBody = z.discriminatedUnion("action", [
+      z
+        .object({
+          action: z.literal("retry"),
+          failed_run_id: z.string().trim().min(1),
+          expected_task_version: z.number().int().positive(),
+          idempotency_key: z.string().trim().min(1),
+        })
+        .strict(),
+      z
+        .object({
+          action: z.literal("cancel"),
+          failed_run_id: z.string().trim().min(1),
+          expected_task_version: z.number().int().positive(),
+          idempotency_key: z.string().trim().min(1),
+          reason: z.string().trim().min(1).max(4_000),
+        })
+        .strict(),
+    ]);
+
+    app.post("/api/v2/projects/:id/phases/:phaseId/tasks/:taskId/recovery", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const user = await resolveUser(req);
+      if (!user) return;
+      const body = TerminalRecoveryBody.safeParse(req.body);
+      if (!body.success) {
+        return reply.code(400).send({ error: "bad_request", detail: body.error.message });
+      }
+      const { id, phaseId, taskId } = req.params as {
+        id: string;
+        phaseId: string;
+        taskId: string;
+      };
+      const issuedAt = now();
+      const common = {
+        project_id: id,
+        phase_id: phaseId,
+        task_id: taskId,
+        failed_run_id: body.data.failed_run_id,
+        expected_task_version: body.data.expected_task_version,
+        actor: { actor_type: "human" as const, actor_id: user.id },
+        authorized_by_session_id: `authenticated-request:${req.id}`,
+        idempotency_key: body.data.idempotency_key,
+        correlation_id: `recovery:${req.id}`,
+        causation_id: body.data.failed_run_id,
+        issued_at: issuedAt.toISOString(),
+      };
+      try {
+        const result =
+          body.data.action === "retry"
+            ? await recoveryActions.retry(common)
+            : await recoveryActions.cancel({ ...common, reason: body.data.reason });
+        if (!result.replayed) {
+          stores.audit(
+            user.email,
+            `execution.recovery.${body.data.action}`,
+            `${taskId} from ${body.data.failed_run_id}`,
+            issuedAt,
+          );
+        }
+        return reply.code(body.data.action === "retry" ? 202 : 200).send(result);
+      } catch (error) {
+        if (error instanceof Phase4RecoveryActionError) {
+          return reply.code(error.status).send({
+            error: error.code,
+            detail: error.message,
+            retriable: error.retriable,
+          });
+        }
+        return reply.code(409).send({
+          error: "recovery_conflict",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
   }
 
   // ---- runner websocket ----------------------------------------------------------
@@ -5148,6 +5622,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             protocol: PROTOCOL_VERSION as 1,
             ack_event_seq: stores.eventWatermark(authedRunnerId),
             generation: runner.generation,
+            capabilities:
+              options.phase4?.events && body.capabilities.includes("knowledge_transport")
+                ? (["knowledge_transport"] as const)
+                : [],
             resend_commands: stores.pendingCommandsFor(
               authedRunnerId,
               new Set(body.recently_executed_command_ids),

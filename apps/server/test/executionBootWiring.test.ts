@@ -98,6 +98,35 @@ describe.sequential("EXECUTION E1/E2: main.ts boot wiring", () => {
       expect(response.statusCode).toBe(401);
     });
 
+    it("mounts terminal recovery and reaches the recovery service", async () => {
+      const url = "/api/v2/projects/proj-1/phases/phase-1/tasks/task-1/recovery";
+      const unauthenticated = await server.app.inject({
+        method: "POST",
+        url,
+        payload: {
+          action: "retry",
+          failed_run_id: "run-1",
+          expected_task_version: 1,
+          idempotency_key: "retry-once",
+        },
+      });
+      expect(unauthenticated.statusCode).toBe(401);
+
+      const authenticated = await server.app.inject({
+        method: "POST",
+        url,
+        headers: { authorization: `Bearer ${token}` },
+        payload: {
+          action: "retry",
+          failed_run_id: "run-1",
+          expected_task_version: 1,
+          idempotency_key: "retry-once",
+        },
+      });
+      expect(authenticated.statusCode).toBe(409);
+      expect(authenticated.json()).toMatchObject({ error: "recovery_scope_not_found" });
+    });
+
     it("an authenticated start-readiness call reaches PhaseLaunchService, not a 404", async () => {
       const response = await server.app.inject({
         method: "GET",

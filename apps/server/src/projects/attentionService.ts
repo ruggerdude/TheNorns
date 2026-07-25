@@ -66,6 +66,17 @@ function fingerprint(value: unknown): string {
 const severityRank = { critical: 0, high: 1, normal: 2, low: 3 } as const;
 
 /**
+ * Milestones are activity/history, not intervention. Every other currently
+ * defined attention kind represents an approval, decision, exception, or
+ * blocked execution condition and remains actionable regardless of severity.
+ * Keeping this kind-based prevents a future low-severity decision from being
+ * silently treated as healthy merely because it is low.
+ */
+export function requiresHumanIntervention(item: Pick<V2AttentionItemT, "kind">): boolean {
+  return item.kind !== "milestone";
+}
+
+/**
  * EXECUTION E10 — project the persisted verification command results down to
  * just the ones that FAILED, which is all a human reading a red run needs.
  *
@@ -240,6 +251,17 @@ function decisionMetadata(value: unknown): unknown {
   return { ...source, options };
 }
 
+export interface RecoveryDecisionIntent {
+  action: "retry" | "cancel";
+  project_id: string;
+  phase_id: string;
+  task_id: string;
+  failed_run_id: string;
+  expected_task_version: number;
+  /** Historical evidence only; never reuse it as a new dispatch deadline. */
+  decision_created_at: string;
+}
+
 export class AttentionService {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
@@ -272,7 +294,24 @@ export class AttentionService {
              d.updated_at AS occurred_at,
              jsonb_build_object('status',d.status,'revision',d.condition_revision,
                                 'fingerprint',d.condition_fingerprint) AS material
-           FROM decision_points d JOIN projects p ON p.id=d.project_id WHERE d.status='open'
+           FROM decision_points d JOIN projects p ON p.id=d.project_id
+           WHERE d.status='open'
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM agent_runs recovery_run
+                 JOIN tasks recovery_task ON recovery_task.id=recovery_run.task_id
+                 JOIN phases recovery_phase ON recovery_phase.id=recovery_run.phase_id
+                WHERE d.reason_class IN ('stuck_run','failed_run')
+                  AND d.scope_entity_type='agent_run'
+                  AND recovery_run.id=d.scope_entity_id
+                  AND (
+                    recovery_run.state='succeeded'
+                    OR recovery_run.is_designated=false
+                    OR recovery_run.superseded_at IS NOT NULL
+                    OR recovery_task.state IN ('completed','cancelled')
+                    OR recovery_phase.status IN ('completed','cancelled')
+                  )
+             )
            UNION ALL
            SELECT p.id, p.name, s.phase_id, NULL, 'strategy_version', s.id,
              'strategy_approval', 'approval', 'high',
@@ -287,6 +326,48 @@ export class AttentionService {
              jsonb_build_object('status',s.status,'hash',s.content_hash,'version',s.version)
            FROM strategy_versions s JOIN projects p ON p.id=s.project_id
            WHERE s.status='awaiting_approval'
+           UNION ALL
+           SELECT p.id, p.name,
+             (SELECT phase.id FROM phases phase
+               WHERE phase.project_id=planning.project_id
+                 AND phase.planning_run_id=planning.id
+               ORDER BY phase.created_at DESC, phase.id LIMIT 1),
+             NULL::text, 'planning_run', planning.id,
+             'quick_kickoff_failed', 'blocker', 'high',
+             'Coding needs a restart',
+             COALESCE(NULLIF(planning.quick_kickoff_result->>'detail', ''),
+                      'The approved quick change did not dispatch any coding work.'),
+             'The quick change is durably approved, but its kickoff completed without starting execution.',
+             'Open the Phase tab, resolve the reported blocker, and retry coding',
+             jsonb_build_array('No execution is active for this quick change',
+                               'Retry only after the reported blocker is resolved'),
+             NULL::jsonb,
+             'The approved phase remains pending and no implementation work is running.',
+             'A successful retry dispatches the pending task without recreating the approved plan.',
+             planning.updated_at,
+             jsonb_build_object(
+               'status', planning.status,
+               'kickoff_status', planning.quick_kickoff_status,
+               'kickoff_result', planning.quick_kickoff_result,
+               'attempts', planning.quick_kickoff_attempts,
+               'phase_status', (
+                 SELECT phase.status FROM phases phase
+                  WHERE phase.project_id=planning.project_id
+                    AND phase.planning_run_id=planning.id
+                  ORDER BY phase.created_at DESC, phase.id LIMIT 1
+               )
+             )
+           FROM planning_runs planning JOIN projects p ON p.id=planning.project_id
+           WHERE planning.mode='quick'
+             AND planning.status='approved'
+             AND planning.quick_kickoff_status='completed'
+             AND planning.quick_kickoff_result @> '{"started":false}'::jsonb
+             AND NOT EXISTS (
+               SELECT 1 FROM phases started_phase
+                WHERE started_phase.project_id=planning.project_id
+                  AND started_phase.planning_run_id=planning.id
+                  AND started_phase.status IN ('active','completed')
+             )
            UNION ALL
            SELECT p.id, p.name, t.phase_id, t.id, 'task', t.id,
              'task_blocked', 'blocker',
@@ -324,8 +405,15 @@ export class AttentionService {
              'A new designated run resumes task execution.', r.updated_at,
              jsonb_build_object('state',r.state,'attempt',r.attempt,
                                 'failure',r.failure_code,'version',r.aggregate_version)
-           FROM agent_runs r JOIN projects p ON p.id=r.project_id
+           FROM agent_runs r
+           JOIN projects p ON p.id=r.project_id
+           JOIN tasks run_task ON run_task.id=r.task_id
+           JOIN phases run_phase ON run_phase.id=r.phase_id
            WHERE r.state IN ('failed','expired')
+             AND r.is_designated=true
+             AND r.superseded_at IS NULL
+             AND run_task.state NOT IN ('completed','cancelled')
+             AND run_phase.status='active'
            UNION ALL
            SELECT p.id, p.name, b.phase_id, b.task_id, 'budget_reservation', b.id,
              'ambiguous_budget', 'budget_exception', 'critical',
@@ -424,8 +512,9 @@ export class AttentionService {
       );
       const projects = projectRows.rows.map((project) => {
         const projectItems = visibleItems.filter((item) => item.project_id === project.id);
-        const blocked = projectItems.some((item) => item.severity === "critical");
-        const attention = projectItems.length > 0;
+        const interventionItems = projectItems.filter(requiresHumanIntervention);
+        const blocked = interventionItems.some((item) => item.severity === "critical");
+        const attention = interventionItems.length > 0;
         return {
           ...project,
           health: blocked
@@ -433,9 +522,9 @@ export class AttentionService {
             : attention
               ? ("attention" as const)
               : ("healthy" as const),
-          attention_count: projectItems.length,
+          attention_count: interventionItems.length,
           next_action:
-            projectItems[0]?.recommendation ??
+            interventionItems[0]?.recommendation ??
             (project.current_phase ? "Monitor the current phase" : "Create the next phase"),
         };
       });
@@ -499,6 +588,109 @@ export class AttentionService {
           (input.now ?? new Date()).toISOString(),
         ],
       );
+    });
+  }
+
+  /**
+   * Resolve the exact execution scope behind a generated recovery decision
+   * without closing it. The recovery action remains authoritative for task/run
+   * state, while resolveDecision records the human decision only after that
+   * action succeeds.
+   */
+  recoveryDecisionIntent(input: {
+    project_id: string;
+    decision_point_id: string;
+    expected_condition_fingerprint: string;
+    selected_option_id: string;
+  }): Promise<RecoveryDecisionIntent | null> {
+    return this.transactions.transaction(async (sql) => {
+      const found = await sql.query<{
+        id: string;
+        status: string;
+        condition_fingerprint: string;
+        options: unknown;
+        reason_class: string;
+        phase_id: string | null;
+        task_id: string | null;
+        scope_entity_type: string;
+        scope_entity_id: string;
+        task_version: number | null;
+        run_state: string | null;
+        created_at: string | Date;
+      }>(
+        `SELECT decision.id, decision.status, decision.condition_fingerprint,
+                decision.options, decision.reason_class, decision.phase_id,
+                decision.task_id, decision.scope_entity_type,
+                decision.scope_entity_id, decision.created_at,
+                task.aggregate_version AS task_version,
+                run.state AS run_state
+           FROM decision_points decision
+           LEFT JOIN tasks task
+             ON task.id=decision.task_id
+            AND task.project_id=decision.project_id
+            AND task.phase_id=decision.phase_id
+           LEFT JOIN agent_runs run
+             ON run.id=decision.scope_entity_id
+            AND run.task_id=decision.task_id
+          WHERE decision.id=$1 AND decision.project_id=$2`,
+        [input.decision_point_id, input.project_id],
+      );
+      const point = found.rows[0];
+      if (
+        !point ||
+        !["failed_run", "stuck_run"].includes(point.reason_class) ||
+        point.scope_entity_type !== "agent_run"
+      ) {
+        return null;
+      }
+      if (point.status !== "open") {
+        throw new DecisionResolutionError("decision_closed", "decision point is already closed");
+      }
+      if (point.condition_fingerprint !== input.expected_condition_fingerprint) {
+        throw new DecisionResolutionError(
+          "stale_decision",
+          "decision condition changed; refresh before resolving",
+        );
+      }
+      const optionIds = Array.isArray(point.options)
+        ? point.options.map((option) =>
+            option && typeof option === "object" && !Array.isArray(option)
+              ? String((option as Record<string, unknown>).id ?? "")
+              : "",
+          )
+        : [];
+      if (!optionIds.includes(input.selected_option_id)) {
+        throw new DecisionResolutionError(
+          "invalid_option",
+          "selected option is not available on this decision point",
+        );
+      }
+      if (input.selected_option_id !== "retry" && input.selected_option_id !== "cancel") {
+        throw new DecisionResolutionError(
+          "invalid_option",
+          "this recovery decision only supports retry or cancel",
+        );
+      }
+      if (
+        !point.phase_id ||
+        !point.task_id ||
+        point.task_version === null ||
+        !["failed", "expired"].includes(point.run_state ?? "")
+      ) {
+        throw new DecisionResolutionError(
+          "scope_not_found",
+          `the recovery scope is not a terminal failed or expired run (current state: ${point.run_state ?? "missing"})`,
+        );
+      }
+      return {
+        action: input.selected_option_id,
+        project_id: input.project_id,
+        phase_id: point.phase_id,
+        task_id: point.task_id,
+        failed_run_id: point.scope_entity_id,
+        expected_task_version: point.task_version,
+        decision_created_at: iso(point.created_at),
+      };
     });
   }
 
@@ -945,7 +1137,7 @@ export class AttentionService {
     // the wrong one. Omitting the keys first avoids the ambiguity entirely.
   ): Promise<
     Omit<V2PhaseExecutionT, "phase" | "tasks"> & {
-      phase: V2PhaseExecutionT["phase"] & V2PhaseProgressT;
+      phase: V2PhaseExecutionT["phase"] & V2PhaseProgressT & { planning_mode: "planned" | "quick" };
       tasks: Array<V2PhaseExecutionT["tasks"][number] & { cost: V2TaskCostT }>;
     }
   > {
@@ -957,11 +1149,15 @@ export class AttentionService {
         completed_tasks: number;
         total_tasks: number;
         approved_budget_usd: string | number;
+        planning_mode: "planned" | "quick";
       }>(
         `SELECT p.id, p.objective_summary, p.status, p.approved_budget_usd,
+          COALESCE(MAX(planning.mode), 'planned') AS planning_mode,
           count(t.id) FILTER (WHERE t.state='completed')::int AS completed_tasks,
           count(t.id)::int AS total_tasks
-         FROM phases p LEFT JOIN tasks t ON t.phase_id=p.id
+         FROM phases p
+         LEFT JOIN planning_runs planning ON planning.id=p.planning_run_id
+         LEFT JOIN tasks t ON t.phase_id=p.id
          WHERE p.id=$1 AND p.project_id=$2 GROUP BY p.id`,
         [phaseId, projectId],
       );
@@ -1130,7 +1326,11 @@ export class AttentionService {
       // the strict, contracts-owned `phase` shape — stripped here so it is
       // not fed back through `.parse()` (it is folded into `progress` above
       // instead, merged on afterwards same as every other additive field).
-      const { approved_budget_usd: _approvedBudgetUsd, ...phaseRowForContract } = phaseRow;
+      const {
+        approved_budget_usd: _approvedBudgetUsd,
+        planning_mode: _planningMode,
+        ...phaseRowForContract
+      } = phaseRow;
       const base = V2PhaseExecution.parse({
         schema_version: 2,
         project_id: projectId,
@@ -1214,7 +1414,7 @@ export class AttentionService {
       );
       return {
         ...base,
-        phase: { ...base.phase, ...progress },
+        phase: { ...base.phase, ...progress, planning_mode: phaseRow.planning_mode },
         tasks: base.tasks.map((task) => ({
           ...task,
           cost: costByTaskId.get(task.id) ?? buildTaskCost(undefined, undefined),
@@ -1377,13 +1577,19 @@ export class AttentionService {
       const cursor = options.after ?? -1;
       const tailMode = options.after === undefined;
 
-      const total = await sql.query<{ total: number | string }>(
-        `SELECT count(*)::int AS total FROM runner_events
+      const counts = await sql.query<{
+        total: number | string;
+        available_after_cursor: number | string;
+      }>(
+        `SELECT count(*)::int AS total,
+                count(*) FILTER (WHERE sequence > $4)::int AS available_after_cursor
+         FROM runner_events
          WHERE runner_id=$1 AND runner_generation=$2 AND event_type='run_log'
-           AND payload->>'run_id'=$3 AND sequence > $4`,
+           AND payload->>'run_id'=$3`,
         [runnerId, generation, runId, cursor],
       );
-      const totalCount = Number(total.rows[0]?.total ?? 0);
+      const totalCount = Number(counts.rows[0]?.total ?? 0);
+      const availableCount = Number(counts.rows[0]?.available_after_cursor ?? 0);
 
       const entries = await sql.query<{
         sequence: number | string;
@@ -1406,7 +1612,7 @@ export class AttentionService {
           occurred_at: iso(entry.received_at),
           chunk: (entry.chunk ?? "").slice(0, RUN_LOG_MAX_CHUNK_CHARS),
         })),
-        truncated: totalCount > entries.rows.length,
+        truncated: availableCount > entries.rows.length,
         total_entries: totalCount,
       });
     });

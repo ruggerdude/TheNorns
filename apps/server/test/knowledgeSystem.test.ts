@@ -472,6 +472,34 @@ describe.sequential("knowledge-package and agent execution system", () => {
       evaluated_at: "2026-07-25T12:23:00.000Z",
     });
     expect(passingGate.passed).toBe(true);
+    await expect(
+      service.evaluateTaskCompletion({
+        task_id: "task-k1",
+        evaluated_at: "2026-07-25T12:23:00.000Z",
+      }),
+    ).resolves.toEqual(passingGate);
+    expect(
+      (
+        await pg.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM knowledge_gate_evaluations WHERE task_id='task-k1'",
+        )
+      ).rows[0]?.count,
+    ).toBe(2);
+
+    // A deterministic id is replay-safe only for the same computed evidence.
+    // If state changes under an identical task/timestamp identity, fail closed
+    // instead of silently returning or overwriting the original evaluation.
+    await pg.exec("UPDATE agent_runs SET verification_status='failed' WHERE id='run-k1'");
+    await expect(
+      service.evaluateTaskCompletion({
+        task_id: "task-k1",
+        evaluated_at: "2026-07-25T12:23:00.000Z",
+      }),
+    ).rejects.toMatchObject({
+      code: "conflict",
+      message: expect.stringContaining("already exists with different evidence"),
+    });
+    await pg.exec("UPDATE agent_runs SET verification_status='passed' WHERE id='run-k1'");
 
     const status = await service.phaseStatus("project-k", "phase-k", "2026-07-25T12:30:01.000Z");
     expect(status.overall_status).toBe("red");

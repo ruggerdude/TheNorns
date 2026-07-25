@@ -118,6 +118,8 @@ export function tokenizeVerificationCommand(value: string): [string, ...string[]
 
 export interface ProjectVerificationCommandResolution {
   commands: V2VerificationCommandT[];
+  /** Full committed manifest should be resolved by the runner at the tested commit. */
+  repository_manifest: boolean;
   /**
    * Facts that were recorded but could not be represented as an argv vector.
    * Surfaced rather than swallowed: "your test command was ignored" is
@@ -131,9 +133,9 @@ export interface ProjectVerificationCommandResolution {
  * Read a project's ingested build/test/lint facts and return them as argv
  * vectors, in the stable order build, test, lint.
  *
- * Returns an empty list when the project has no such facts — an ordinary
- * situation for a project that was never ingested, and the point at which the
- * runner's committed-manifest fallback takes over.
+ * Returns an empty command list when the project has no such facts. A separate
+ * repository_manifest signal preserves the full committed manifest rather than
+ * flattening and potentially dropping project-specific checks.
  */
 export async function resolveProjectVerificationCommands(
   sql: V2SqlExecutor,
@@ -147,8 +149,13 @@ export async function resolveProjectVerificationCommands(
   );
   const keys = VERIFICATION_COMMAND_KEYS as readonly string[];
   const byKey = new Map<string, string>();
+  let repositoryManifest = false;
   for (const row of rows.rows) {
     const { key, value } = splitFact(row.content);
+    if (key === "verification_manifest" && value === ".norns/verification.json") {
+      repositoryManifest = true;
+      continue;
+    }
     // First writer wins per key, so a superseding ingestion that left both rows
     // active cannot make dispatch non-deterministic.
     if (keys.includes(key) && value !== "" && !byKey.has(key)) byKey.set(key, value);
@@ -165,5 +172,5 @@ export async function resolveProjectVerificationCommands(
     }
     commands.push({ name: commandName(key), command: argv });
   }
-  return { commands, rejected };
+  return { commands, repository_manifest: repositoryManifest, rejected };
 }

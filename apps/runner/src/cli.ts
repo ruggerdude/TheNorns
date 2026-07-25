@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { mkdirSync } from "node:fs";
 // norns-runner — the Local Runner CLI. Runs on the operator's own machine and
 // dials the relay outbound (ADR-002 topology). Two commands:
 //
@@ -156,15 +157,22 @@ function createV2Executor(
       },
     };
   };
+  const scratchRoot = join(dataDir, "scratch");
+  const worktreeRoot = join(dataDir, "worktrees");
+  // A freshly paired runner has only runner-state.json. Create both execution
+  // parents before the first dispatch so mkdtemp/worktree setup cannot fail
+  // merely because this is the runner's first real task.
+  mkdirSync(scratchRoot, { recursive: true });
+  mkdirSync(worktreeRoot, { recursive: true });
   return new V2RunnerExecutor(
-    { id: runnerId, generation, scratch_root: join(dataDir, "scratch") },
+    { id: runnerId, generation, scratch_root: scratchRoot },
     repositories,
     // EXECUTION E3 — signed, not anonymous. This single construction site is
     // shared by BOTH the laptop path and the ephemeral GitHub Actions path
     // (createV2Executor is called once, after the pair/enroll branch has
     // rejoined), so the CI runner authenticates its context fetches too.
     new HashVerifiedContextLoader(new RunnerSignedContextFetcher(identity)),
-    new GitWorktreeManager(join(dataDir, "worktrees")),
+    new GitWorktreeManager(worktreeRoot),
     new Map<string, RunnerRuntimeProvider>([
       // EXECUTION E9 — both agentic runtimes now mint a per-run gateway
       // credential lazily, at the moment they execute. Minting is per-run and
@@ -300,7 +308,7 @@ async function main(): Promise<void> {
             },
           }
         : {}),
-      executeV2: async (command, emit) => {
+      executeV2: async (command, emit, capabilities) => {
         if (!execution.executor) throw new Error("Phase 4 executor is not initialized");
         // In CI the repository binding is only knowable from the command, and
         // the one checked-out tree is the only thing that could satisfy it.
@@ -314,7 +322,7 @@ async function main(): Promise<void> {
             repository_path: workspace,
           });
         }
-        return (await execution.executor.execute(command, emit)).outcome;
+        return (await execution.executor.execute(command, emit, capabilities)).outcome;
       },
     });
     if (ephemeral) {

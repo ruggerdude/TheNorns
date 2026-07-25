@@ -303,6 +303,70 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
     await expect(stat(resolve(h.worktreeRoot, "run-1"))).rejects.toThrow();
   });
 
+  it("independently verifies and publishes a commit made before the runtime hit max turns", async () => {
+    const h = await harness(cleanup);
+    const api = githubApi();
+    const events: EventPayloadT[] = [];
+    const committing = committingRuntime("README.md", "# Corrected heading\n");
+    const committedThenStopped: CodingRuntime = {
+      ...committing,
+      run: async (request) => {
+        await committing.run(request);
+        return {
+          outcome: "failed",
+          detail: "Reached the configured maximum number of turns",
+          stopReason: "error_max_turns",
+          sessionId: "claude-session-after-commit",
+          usage: { input_tokens: 175_202, output_tokens: 3_146, usage_source: "runtime_report" },
+        };
+      },
+    };
+
+    const result = await executor(
+      h,
+      committedThenStopped,
+      PASSING,
+      new GitPublisher({
+        repositorySlug: "acme/widgets",
+        token: "test-token",
+        fetchImpl: api.fetchImpl,
+      }),
+    ).execute(dispatchCommand({ expected_revision: h.base }), (event) => events.push(event), {
+      knowledge_transport: true,
+    });
+
+    expect(result).toMatchObject({
+      outcome: "succeeded",
+      verification_passed: true,
+      empty: false,
+      session_id: "claude-session-after-commit",
+    });
+    expect(result.publication).toMatchObject({ outcome: "pushed", commit: result.commit_sha });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "runtime_result",
+        outcome: "failed",
+        session_id: "claude-session-after-commit",
+        stop_reason: "error_max_turns",
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "verification_result",
+        passed: true,
+        commit_sha: result.commit_sha,
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "knowledge_handoff",
+        status: "completed",
+        commit: result.commit_sha,
+        files_changed: ["README.md"],
+      }),
+    );
+  });
+
   it("does not double-publish when the relay redelivers the same command", async () => {
     const h = await harness(cleanup);
     const api = githubApi();
@@ -382,6 +446,49 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
       "",
     );
     expect(api.pulls).toHaveLength(0);
+  });
+
+  it("reports an SDK permission stop precisely when it prevented any commit", async () => {
+    const h = await harness(cleanup);
+    const events: EventPayloadT[] = [];
+    const permissionDeniedRuntime: CodingRuntime = {
+      ...idleRuntime,
+      run: async () => ({
+        outcome: "completed",
+        detail: "SDK permission denied for Edit, Bash",
+        stopReason: "permission_denied:Edit,Bash",
+        sessionId: "claude-session-denied",
+        usage: { input_tokens: 500, output_tokens: 50, usage_source: "runtime_report" },
+      }),
+    };
+
+    const result = await executor(
+      h,
+      permissionDeniedRuntime,
+      PASSING,
+      new GitPublisher({
+        repositorySlug: "acme/widgets",
+        token: "test-token",
+        fetchImpl: githubApi().fetchImpl,
+      }),
+    ).execute(dispatchCommand({ expected_revision: h.base }), (event) => events.push(event));
+
+    expect(result.reason).toContain("SDK permission denied for Edit, Bash");
+    expect(result.session_id).toBe("claude-session-denied");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "runtime_result",
+        session_id: "claude-session-denied",
+        stop_reason: "permission_denied:Edit,Bash",
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "run_status",
+        status: "failed",
+        failure: expect.objectContaining({ code: "runner_permission_denied" }),
+      }),
+    );
   });
 
   it("fails the run with a reason when the push cannot happen, rather than losing the work", async () => {

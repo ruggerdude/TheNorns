@@ -32,6 +32,8 @@ export {
   type ProviderGatewayOptions,
 } from "./providerGateway.js";
 export {
+  CLAUDE_CODE_SONNET_5_MAX_OUTPUT_TOKENS,
+  GATEWAY_REQUEST_BODY_LIMIT_BYTES,
   estimateGatewayInputTokens,
   inspectGatewayRequest,
   type GatewayInspection,

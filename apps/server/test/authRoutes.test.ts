@@ -101,6 +101,8 @@ describe("GET /api/integrations/ai/status", () => {
     expect(status.statusCode).toBe(200);
     expect(status.json()).toEqual({
       cross_provider_ready: false,
+      execution_ready: false,
+      execution_models: [],
       providers: [
         {
           id: "anthropic",

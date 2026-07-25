@@ -89,6 +89,10 @@ import {
   createProjectRuntime,
   loadDurableProjectRoutes,
 } from "./startup/projectRuntime.js";
+import {
+  RelationalCompositionBridge,
+  RelationalCompositionConflictError,
+} from "./startup/relationalCompositionBridge.js";
 import { RelayStores } from "./stores.js";
 import { UserStore } from "./users/store.js";
 
@@ -115,6 +119,7 @@ let projectRuntime = createProjectRuntime({
   projects,
   routes: { new_projects: null, projects: new Map() },
 });
+let relationalComposition: RelationalCompositionBridge | undefined;
 const isProd = process.env.NODE_ENV === "production";
 
 // Tier-2 persistence: when DATABASE_URL is set (Railway Postgres plugin),
@@ -164,6 +169,7 @@ let phase6Services: { coordination: Phase6CoordinationService } | undefined;
 let phase7Services: { operations: Phase7OperationsService } | undefined;
 let debateService: DebateService | undefined;
 let debateWorkerTimer: NodeJS.Timeout | undefined;
+let phase4RecoveryTimer: NodeJS.Timeout | undefined;
 let integrationServices: { github: GitHubIntegrationService | null } | undefined;
 // FRONT DOOR P2 §D1: observable planning runs need the relational runtime.
 // PHASE TAB P4: `executionKickoff` is the real approve-auto-starts-execution
@@ -540,6 +546,15 @@ if (databaseUrl) {
       );
       usersPersistenceState = usersSnap ? "restored" : "fresh";
     }
+    relationalComposition = new RelationalCompositionBridge({
+      transactions: runtimeTransactions,
+      users,
+      projects,
+      identityAuthority: identityRuntime.mode,
+      newProjectReadMode: projectRuntime.new_project_read_mode,
+      newProjectWriteAuthority: projectRuntime.new_project_write_authority,
+    });
+    await relationalComposition.prepare();
     flushers.push(
       new SnapshotFlusher(persistence, "relay", () => stores.snapshot()),
       new SnapshotFlusher(persistence, "projects", () => JSON.stringify(projects.snapshot())),
@@ -547,6 +562,26 @@ if (databaseUrl) {
     if (usersFlusher) flushers.push(usersFlusher);
     for (const f of flushers) f.start();
     persistenceReady = true;
+    let phase4RecoveryTickRunning = false;
+    const runPhase4Recovery = async (): Promise<void> => {
+      if (phase4RecoveryTickRunning || !phase4Services) return;
+      phase4RecoveryTickRunning = true;
+      try {
+        await phase4Services.recovery.scan(new Date());
+      } catch (error) {
+        console.error(
+          `phase4 recovery scan failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      } finally {
+        phase4RecoveryTickRunning = false;
+      }
+    };
+    // Run once before serving traffic so terminal residue from an older
+    // process converges on restart, then keep the same deterministic monitor
+    // active for stuck-run detection and post-terminal cleanup.
+    await runPhase4Recovery();
+    phase4RecoveryTimer = setInterval(() => void runPhase4Recovery(), 60_000);
+    phase4RecoveryTimer.unref();
     console.log(
       `postgres: relay ${relaySnap ? "restored" : "fresh"}, projects ${projectsSnap ? "restored" : "fresh"}, identity ${identityRuntime.mode} ${usersPersistenceState}`,
     );
@@ -556,6 +591,7 @@ if (databaseUrl) {
         if (shutdownRequested) return;
         shutdownRequested = true;
         if (debateWorkerTimer) clearInterval(debateWorkerTimer);
+        if (phase4RecoveryTimer) clearInterval(phase4RecoveryTimer);
         void Promise.all(flushers.map((f) => f.stop()))
           .then(() => persistenceLease?.release())
           .then(() => databasePool?.end())
@@ -568,6 +604,7 @@ if (databaseUrl) {
     const databaseBoundaryMustFailClosed =
       error instanceof Phase2PersistenceLeaseUnavailableError ||
       error instanceof PostgresConnectionConfigurationError;
+    const compositionMustFailClosed = error instanceof RelationalCompositionConflictError;
     await persistenceLease?.release();
     persistenceLease = undefined;
     await databasePool?.end();
@@ -575,6 +612,7 @@ if (databaseUrl) {
     if (
       identityMustFailClosed ||
       databaseBoundaryMustFailClosed ||
+      compositionMustFailClosed ||
       error instanceof ProjectRuntimeConfigurationError
     ) {
       const code =
@@ -582,11 +620,13 @@ if (databaseUrl) {
           ? error.code
           : error instanceof ProjectRuntimeConfigurationError
             ? error.code
-            : error instanceof PostgresConnectionConfigurationError
+            : error instanceof RelationalCompositionConflictError
               ? error.code
-              : error instanceof Phase2PersistenceLeaseUnavailableError
-                ? "phase2_persistence_lease_unavailable"
-                : "relational_identity_unavailable";
+              : error instanceof PostgresConnectionConfigurationError
+                ? error.code
+                : error instanceof Phase2PersistenceLeaseUnavailableError
+                  ? "phase2_persistence_lease_unavailable"
+                  : "relational_identity_unavailable";
       console.error(
         `startup refused [${code}]: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -610,6 +650,7 @@ if (databaseUrl) {
       projects,
       routes: { new_projects: null, projects: new Map() },
     });
+    relationalComposition = undefined;
   }
 }
 
@@ -730,6 +771,7 @@ const server = await buildServer({
   users,
   ...(identityRuntime.mode === "relational" ? { identity: identityRuntime.identity } : {}),
   projects: projectRuntime.repository,
+  ...(relationalComposition !== undefined ? { relationalComposition } : {}),
   ...(phase3Services !== undefined ? { phase3: phase3Services } : {}),
   // POLISH P3: the analyze-repository step. A service that is not passed here
   // is dead in production while CI stays green — this line IS the feature.

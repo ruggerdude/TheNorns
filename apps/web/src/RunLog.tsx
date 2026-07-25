@@ -15,8 +15,9 @@
 // long-lived session watching a chatty agent cannot accumulate an unbounded
 // DOM even if the server-side bound were ever relaxed. Whenever either bound
 // drops something the human hasn't seen, that is disclosed, never silent.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { authHeaders } from "./auth";
+import { useSingleFlightPolling } from "./useSingleFlightPolling";
 
 export interface RunLogEntryDto {
   sequence: number;
@@ -76,58 +77,74 @@ export function RunLog({
   const [serverTruncated, setServerTruncated] = useState(false);
   const [totalEntries, setTotalEntries] = useState<number | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
-  const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const cursorRef = useRef<number | undefined>(undefined);
+  const currentRunIdRef = useRef<string | null>(null);
+  const logResourceKey = `${projectId}:${phaseId}:${taskId}`;
 
-  const poll = useCallback(async () => {
-    try {
-      const query = cursorRef.current !== undefined ? `?after=${cursorRef.current}` : "";
-      const res = await fetch(
-        `/api/v2/projects/${projectId}/phases/${phaseId}/tasks/${taskId}/run-log${query}`,
-        { headers: authHeaders(false) },
-      );
-      if (res.status === 401) {
-        onUnauthorized();
-        return;
+  useEffect(() => {
+    if (!logResourceKey) return;
+    cursorRef.current = undefined;
+    currentRunIdRef.current = null;
+    setEntries([]);
+    setDroppedLocally(false);
+    setServerTruncated(false);
+    setTotalEntries(null);
+    setRunId(null);
+  }, [logResourceKey]);
+
+  const polling = useSingleFlightPolling({
+    intervalMs: active ? POLL_MS : null,
+    maxBackoffMs: 30_000,
+    resourceKey: logResourceKey,
+    load: async (signal) => {
+      const requestedCursor = cursorRef.current;
+      const fetchTail = async (after: number | undefined): Promise<RunLogTailDto> => {
+        const query = after !== undefined ? `?after=${after}` : "";
+        const res = await fetch(
+          `/api/v2/projects/${projectId}/phases/${phaseId}/tasks/${taskId}/run-log${query}`,
+          { headers: authHeaders(false), signal },
+        );
+        if (res.status === 401) {
+          onUnauthorized();
+          throw new Error("Session expired");
+        }
+        if (!res.ok) {
+          throw new Error(`request failed: ${res.status}`);
+        }
+        return (await res.json()) as RunLogTailDto;
+      };
+
+      let body = await fetchTail(requestedCursor);
+      if (
+        requestedCursor !== undefined &&
+        currentRunIdRef.current !== null &&
+        body.run_id !== currentRunIdRef.current
+      ) {
+        body = await fetchTail(undefined);
+        return { body, appending: false };
       }
-      if (!res.ok) {
-        setError(`request failed: ${res.status}`);
-        return;
-      }
-      const body = (await res.json()) as RunLogTailDto;
-      setError(null);
+      return { body, appending: requestedCursor !== undefined };
+    },
+    onSuccess: ({ body, appending }) => {
+      const runChanged = body.run_id !== currentRunIdRef.current;
+      currentRunIdRef.current = body.run_id;
       setRunId(body.run_id);
       setTotalEntries(body.total_entries);
-      if (body.truncated) setServerTruncated(true);
-      const appending = cursorRef.current !== undefined;
+      setServerTruncated((current) => (runChanged ? body.truncated : current || body.truncated));
+      if (runChanged) setDroppedLocally(false);
       const last = body.entries.at(-1);
       if (last) cursorRef.current = last.sequence;
-      else if (cursorRef.current === undefined && body.run_id) cursorRef.current = 0;
+      else if (runChanged || cursorRef.current === undefined) {
+        cursorRef.current = body.run_id ? 0 : undefined;
+      }
       setEntries((prev) => {
-        const merged = appending ? [...prev, ...body.entries] : body.entries;
+        const merged = appending && !runChanged ? [...prev, ...body.entries] : body.entries;
         const { entries: bounded, dropped } = trimToBudget(merged);
         if (dropped) setDroppedLocally(true);
         return bounded;
       });
-      setLastFetchedAt(new Date());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }, [projectId, phaseId, taskId, onUnauthorized]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void poll();
-    if (!active) return () => {};
-    const timer = window.setInterval(() => {
-      if (!cancelled) void poll();
-    }, POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [active, poll]);
+    },
+  });
 
   return (
     <details className="run-log" data-testid={`task-run-log-${taskId}`} open={active}>
@@ -155,12 +172,16 @@ export function RunLog({
             {totalEntries !== null ? ` — showing the most recent of ${totalEntries} lines` : ""}.
           </p>
         ) : null}
-        {error ? <span className="muted">{error}</span> : null}
+        {polling.error ? (
+          <span className="muted">
+            Refresh failed · showing last known output ({polling.error.message})
+          </span>
+        ) : null}
         <div className="run-log-meta">
           <span>{active ? "Live" : "Final"}</span>
           <span>
-            {lastFetchedAt
-              ? `Updated ${new Intl.DateTimeFormat(undefined, { timeStyle: "medium" }).format(lastFetchedAt)}`
+            {polling.lastSuccessAt
+              ? `Updated ${new Intl.DateTimeFormat(undefined, { timeStyle: "medium" }).format(polling.lastSuccessAt)}`
               : "Not yet loaded"}
           </span>
         </div>

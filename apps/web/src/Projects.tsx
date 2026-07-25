@@ -22,6 +22,7 @@ import {
   parseGitHubRepoRef,
 } from "./projectSourceRequest";
 import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
+import { useSingleFlightPolling } from "./useSingleFlightPolling";
 
 export interface ProjectSummary {
   id: string;
@@ -238,6 +239,32 @@ export interface PortfolioAttentionDto {
   }>;
 }
 
+interface RunnerSnapshotDto {
+  runner_id: string;
+  generation: number;
+  connected: boolean;
+  workspace_picker_ready: boolean;
+  last_seen_at: string;
+}
+
+export function isActionableAttention(item: Pick<AttentionItemDto, "kind" | "severity">): boolean {
+  return item.kind !== "milestone";
+}
+
+export function projectSourceLabel(project: ProjectSummary): string {
+  if (project.source_type === "github") return "GitHub";
+  if (project.source_type === "local") return "Local folder";
+  if (
+    project.remote_location ||
+    project.source_location?.includes("github.com") ||
+    project.source_location?.startsWith("git@")
+  ) {
+    return "GitHub";
+  }
+  if (project.workspace_location || project.source_location) return "Local folder";
+  return "Connected source";
+}
+
 interface GitHubRepository {
   id: string;
   connection_id: string;
@@ -255,11 +282,12 @@ interface GitHubRepository {
   binding_ready?: boolean;
 }
 
-async function request<T>(path: string, body?: unknown): Promise<T> {
+async function request<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     method: body ? "POST" : "GET",
     headers: authHeaders(body !== undefined),
     ...(body ? { body: JSON.stringify(body) } : {}),
+    signal,
   });
   if (res.status === 401) throw new UnauthorizedError();
   const json = (await res.json()) as T & { message?: string };
@@ -309,6 +337,9 @@ export function AttentionDecisionForm({
   const [idempotencyKey] = useState(
     () => `decision-${item.decision.decision_point_id}-${globalThis.crypto.randomUUID()}`,
   );
+  const recoveryDecision =
+    item.decision.options.some((option) => option.id === "retry") &&
+    item.decision.options.some((option) => option.id === "cancel");
 
   return (
     <section className="decision-response" aria-label={`Respond to ${item.title}`}>
@@ -363,8 +394,9 @@ export function AttentionDecisionForm({
         </Field>
       </div>
       <p className="meta">
-        Direction is recorded in project memory. Delivery to the selected agent remains pending
-        until a coordinator context-assembly step consumes it; active runs are not interrupted.
+        {recoveryDecision
+          ? "Retry starts a fresh fenced attempt. Cancel phase closes the phase and every unfinished task."
+          : "Direction is recorded in project memory. Delivery to the selected agent remains pending until a coordinator context-assembly step consumes it; active runs are not interrupted."}
       </p>
       <Button
         variant="primary"
@@ -379,7 +411,15 @@ export function AttentionDecisionForm({
           })
         }
       >
-        {busy ? "Recording decision…" : "Resolve decision"}
+        {busy
+          ? recoveryDecision
+            ? "Applying recovery…"
+            : "Recording decision…"
+          : recoveryDecision && selectedOptionId === "retry"
+            ? "Retry safely"
+            : recoveryDecision && selectedOptionId === "cancel"
+              ? "Cancel phase"
+              : "Resolve decision"}
       </Button>
     </section>
   );
@@ -446,13 +486,11 @@ export function Projects({
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [dialog, setDialog] = useState(false);
-  // O1: the wizard's one question — "Is this new, or existing work?" — plus
-  // GitHub connection/repository state. Execution runs in GitHub Actions
-  // (never on the human's machine), so both answers resolve to a GitHub
-  // repository; they differ only in whether Norns creates it (new_repo) or
-  // the human picks one that already exists (existing_repo).
+  // Starting point and source are independent. New work can create a GitHub
+  // repository or use an already-initialized local Git repository approved in
+  // Connections; Existing work can adopt either source.
   const [startingPoint, setStartingPoint] = useState<"new" | "existing">("new");
-  const [existingSource, setExistingSource] = useState<"github" | "local">("github");
+  const [sourceKind, setSourceKind] = useState<"github" | "local">("github");
   const scenario: ProjectOnboardingScenario =
     startingPoint === "new" ? "new_repo" : "existing_repo";
   const [name, setName] = useState("");
@@ -480,6 +518,8 @@ export function Projects({
   const [removingProjectId, setRemovingProjectId] = useState<string | null>(null);
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
   const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
+  const [resumePollIssue, setResumePollIssue] = useState<string | null>(null);
+  const [runners, setRunners] = useState<RunnerSnapshotDto[]>([]);
   const [roundsCount, setRoundsCount] = useState(3);
   // FRONT DOOR P2b: reviewer selector. "auto" means no explicit override
   // (the server's automatic opposite-provider default); any other value is
@@ -535,12 +575,15 @@ export function Projects({
   // facts. Best-effort per project — one project's failure never blocks the
   // others (Promise.allSettled), and a project without a plan yet (404) just
   // renders with no phase lines, matching the "Draft" card in the mockup.
-  useEffect(() => {
-    if (!projects || projects.length === 0) return;
-    let cancelled = false;
-    const load = async () => {
+  const resumePolling = useSingleFlightPolling({
+    enabled: Boolean(projects?.length),
+    intervalMs: 15_000,
+    maxBackoffMs: 120_000,
+    resourceKey: projects?.map((project) => project.id).join("|") ?? "no-projects",
+    load: async (signal) => {
+      const projectList = projects ?? [];
       const settled = await Promise.allSettled(
-        projects.map(async (project) => {
+        projectList.map(async (project) => {
           const resume = await request<{
             phases: Array<{
               id: string;
@@ -562,7 +605,7 @@ export function Projects({
             attention: { open_decisions: number; active_runs: number; blocked_tasks: number };
             // O1: the resume payload's own plain-language onboarding summary.
             onboarding?: { summary_line?: string | null } | null;
-          }>(`/api/v2/projects/${project.id}/resume`);
+          }>(`/api/v2/projects/${project.id}/resume`, undefined, signal);
           const phases: DashboardPhaseSummary[] = resume.phases.map((phase) => ({
             id: phase.id,
             objective_summary: phase.objective_summary,
@@ -585,21 +628,41 @@ export function Projects({
           return [project.id, summary] as const;
         }),
       );
-      if (cancelled) return;
+      return { projectList, settled };
+    },
+    onSuccess: ({ projectList, settled }) => {
+      const failed = settled.filter((outcome) => outcome.status === "rejected").length;
       setResumeById((current) => {
-        const next = { ...current };
-        for (const outcome of settled) {
-          if (outcome.status === "fulfilled") next[outcome.value[0]] = outcome.value[1];
+        const next: Record<string, DashboardResumeSummary> = {};
+        for (let index = 0; index < settled.length; index += 1) {
+          const outcome = settled[index];
+          const project = projectList[index];
+          if (!outcome || !project) continue;
+          if (outcome.status === "fulfilled") {
+            next[outcome.value[0]] = outcome.value[1];
+          } else {
+            const previous = current[project.id];
+            if (previous) next[project.id] = previous;
+          }
         }
         return next;
       });
-    };
-    void load();
-    const timer = window.setInterval(() => void load(), 15_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
+      setResumePollIssue(
+        failed > 0
+          ? `${failed} project update${failed === 1 ? "" : "s"} failed; showing last known progress.`
+          : null,
+      );
+    },
+    onError: (pollError) => {
+      if (pollError instanceof UnauthorizedError) onUnauthorized();
+    },
+  });
+
+  useEffect(() => {
+    if (projects?.length === 0) {
+      setResumeById({});
+      setResumePollIssue(null);
+    }
   }, [projects]);
 
   const refreshGitHub = useCallback(async () => {
@@ -652,9 +715,13 @@ export function Projects({
     }
   }, [dialog, loadRepositories, scenario, selectedConnectionId]);
 
-  const refreshLocalSources = useCallback(async () => {
-    try {
-      const inventory = await loadLocalRepositories();
+  useSingleFlightPolling({
+    enabled: dialog && sourceKind === "local",
+    intervalMs: 4_000,
+    maxBackoffMs: 60_000,
+    resourceKey: "local-sources",
+    load: () => loadLocalRepositories(),
+    onSuccess: (inventory) => {
       setLocalSources(inventory);
       setLocalSelection((current) =>
         current
@@ -664,35 +731,42 @@ export function Projects({
             ) ?? null)
           : null,
       );
-    } catch (error) {
-      if (error instanceof UnauthorizedError) onUnauthorized();
-      else setSourceError(error instanceof Error ? error.message : String(error));
-    }
-  }, [onUnauthorized]);
+    },
+    onError: (pollError) => {
+      if (pollError instanceof UnauthorizedError) onUnauthorized();
+      else setSourceError(pollError.message);
+    },
+  });
 
-  useEffect(() => {
-    if (!dialog || startingPoint !== "existing" || existingSource !== "local") return;
-    void refreshLocalSources();
-    const timer = window.setInterval(() => void refreshLocalSources(), 4_000);
-    return () => window.clearInterval(timer);
-  }, [dialog, existingSource, refreshLocalSources, startingPoint]);
-
-  const refreshAttention = useCallback(async () => {
-    try {
-      setAttention(await request<PortfolioAttentionDto>("/api/v2/attention"));
-    } catch (error) {
-      if (error instanceof UnauthorizedError) onUnauthorized();
-      else if (!(error instanceof ApiError && error.status === 404)) {
-        setError(error instanceof Error ? error.message : String(error));
+  const attentionPolling = useSingleFlightPolling({
+    intervalMs: 10_000,
+    maxBackoffMs: 120_000,
+    resourceKey: "portfolio-attention",
+    load: async (signal) => {
+      try {
+        return await request<PortfolioAttentionDto>("/api/v2/attention", undefined, signal);
+      } catch (pollError) {
+        if (pollError instanceof ApiError && pollError.status === 404) return null;
+        throw pollError;
       }
-    }
-  }, [onUnauthorized]);
+    },
+    onSuccess: setAttention,
+    onError: (pollError) => {
+      if (pollError instanceof UnauthorizedError) onUnauthorized();
+    },
+  });
+  const refreshAttention = attentionPolling.refresh;
 
-  useEffect(() => {
-    void refreshAttention();
-    const timer = window.setInterval(() => void refreshAttention(), 10_000);
-    return () => window.clearInterval(timer);
-  }, [refreshAttention]);
+  const runnerPolling = useSingleFlightPolling({
+    intervalMs: 10_000,
+    maxBackoffMs: 120_000,
+    resourceKey: "runner-freshness",
+    load: (signal) => request<RunnerSnapshotDto[]>("/api/runners", undefined, signal),
+    onSuccess: setRunners,
+    onError: (pollError) => {
+      if (pollError instanceof UnauthorizedError) onUnauthorized();
+    },
+  });
 
   const dispositionAttention = useCallback(
     async (item: AttentionItemDto, disposition: "acknowledged" | "snoozed") => {
@@ -740,7 +814,7 @@ export function Projects({
       setAttentionBusy(item.key);
       try {
         const response = await fetch(
-          `/api/v2/projects/${item.project_id}/decision-points/${decision.decision_point_id}/resolve`,
+          `/api/v2/projects/${item.project_id}/decision-points/${encodeURIComponent(decision.decision_point_id)}/resolve`,
           {
             method: "POST",
             headers: authHeaders(true),
@@ -756,9 +830,14 @@ export function Projects({
         );
         if (response.status === 401) throw new UnauthorizedError();
         if (!response.ok) {
-          const body = (await response.json().catch(() => ({}))) as { message?: string };
+          const body = (await response.json().catch(() => ({}))) as {
+            message?: string;
+            detail?: string;
+          };
           throw new ApiError(
-            body.message ?? "Decision changed; review the latest options and try again",
+            body.message ??
+              body.detail ??
+              "Decision changed; review the latest options and try again",
             response.status,
           );
         }
@@ -829,7 +908,7 @@ export function Projects({
       setName("");
       setDescription("");
       setStartingPoint("new");
-      setExistingSource("github");
+      setSourceKind("github");
       setSelectedRepositoryId("");
       setRepositoryName("");
       setRepositoryQuery("");
@@ -875,6 +954,25 @@ export function Projects({
       }
     },
     [onUnauthorized, proceedAfterCreate],
+  );
+
+  const applyReviewerPreference = useCallback(
+    async (projectId: string): Promise<void> => {
+      try {
+        if (reviewerSelection !== "auto") {
+          const [reviewerProviderChoice, ...modelParts] = reviewerSelection.split(":");
+          await requestVerb(`/api/v2/projects/${projectId}/planning-reviewer`, "PATCH", {
+            provider: reviewerProviderChoice,
+            model: modelParts.join(":"),
+          });
+        } else {
+          await requestVerb(`/api/v2/projects/${projectId}/planning-reviewer`, "DELETE");
+        }
+      } catch {
+        // Best-effort: planning safely falls back to the account default.
+      }
+    },
+    [reviewerSelection],
   );
 
   const finishNewProject = useCallback(
@@ -942,18 +1040,44 @@ export function Projects({
     [onUnauthorized, proceedAfterCreate, roundsCount],
   );
 
+  const prepareNewLocalProject = useCallback(
+    async (
+      project: ProjectSummary,
+      objective: string,
+      queuedFiles: File[],
+      uploadedAttachmentIds: string[],
+    ): Promise<void> => {
+      setDraftProject(project);
+      setWizardObjective(objective);
+      setAdoptionError(null);
+      setAdoptionStage("analyzing");
+      setWizardStep("adopting");
+      try {
+        await request(`/api/v2/projects/${project.id}/analyze-repository`, {});
+        await finishNewProject(project, objective, queuedFiles, uploadedAttachmentIds);
+      } catch (error) {
+        if (error instanceof UnauthorizedError) onUnauthorized();
+        else setAdoptionError(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [finishNewProject, onUnauthorized],
+  );
+
   const create = useCallback(async () => {
     setCreating(true);
     setError(null);
     setSourceError(null);
     try {
-      if (startingPoint === "existing" && existingSource === "local") {
+      if (sourceKind === "local") {
         if (!localSelection) {
           setSourceError("Choose a local Git repository first.");
           return;
         }
+        const isNewLocalProject = startingPoint === "new";
         const completedProject = await request<ProjectSummary>("/api/v2/projects/local", {
-          name: localSelection.repository.repository_display_name,
+          name: isNewLocalProject
+            ? derivedIdentity.projectName
+            : localSelection.repository.repository_display_name,
           description:
             description.trim() ||
             `Continue development of ${localSelection.repository.repository_display_name}`,
@@ -962,6 +1086,16 @@ export function Projects({
           selection_token: localSelection.selection_token,
           verification_policy_ref: "verification",
         });
+        if (isNewLocalProject) {
+          await applyReviewerPreference(completedProject.id);
+          await prepareNewLocalProject(
+            completedProject,
+            description.trim(),
+            pendingAttachmentFiles,
+            wizardAttachmentIds,
+          );
+          return;
+        }
         await completeAdoption(completedProject, description.trim());
         return;
       }
@@ -1026,28 +1160,7 @@ export function Projects({
       );
       // Advanced reviewer selection changes planning behavior, so apply it
       // before either the normal continuation or a blocker recovery.
-      if (startingPoint === "new") {
-        try {
-          if (reviewerSelection !== "auto") {
-            const [reviewerProviderChoice, ...modelParts] = reviewerSelection.split(":");
-            await requestVerb(
-              `/api/v2/projects/${completedProject.id}/planning-reviewer`,
-              "PATCH",
-              {
-                provider: reviewerProviderChoice,
-                model: modelParts.join(":"),
-              },
-            );
-          } else {
-            await requestVerb(
-              `/api/v2/projects/${completedProject.id}/planning-reviewer`,
-              "DELETE",
-            );
-          }
-        } catch {
-          // Best-effort: planning safely falls back to the account default.
-        }
-      }
+      if (startingPoint === "new") await applyReviewerPreference(completedProject.id);
       if (onboarding.blockers.length > 0) {
         setOnboardingBlockers(onboarding.blockers);
         setDraftProject(completedProject);
@@ -1080,23 +1193,42 @@ export function Projects({
     selectedRepositoryId,
     scenario,
     startingPoint,
-    existingSource,
+    sourceKind,
     localSelection,
     selectedConnectionId,
     derivedIdentity,
     repositoryPrivate,
-    reviewerSelection,
     idempotencyKey,
+    applyReviewerPreference,
     completeAdoption,
     finishNewProject,
+    prepareNewLocalProject,
     pendingAttachmentFiles,
     wizardAttachmentIds,
     onUnauthorized,
   ]);
 
   const retryAdoption = useCallback(() => {
-    if (draftProject) void completeAdoption(draftProject, wizardObjective);
-  }, [completeAdoption, draftProject, wizardObjective]);
+    if (!draftProject) return;
+    if (startingPoint === "new") {
+      void prepareNewLocalProject(
+        draftProject,
+        wizardObjective,
+        pendingAttachmentFiles,
+        wizardAttachmentIds,
+      );
+      return;
+    }
+    void completeAdoption(draftProject, wizardObjective);
+  }, [
+    completeAdoption,
+    draftProject,
+    pendingAttachmentFiles,
+    prepareNewLocalProject,
+    startingPoint,
+    wizardAttachmentIds,
+    wizardObjective,
+  ]);
 
   const openAdoptedProject = useCallback(() => {
     if (draftProject) proceedAfterCreate(draftProject);
@@ -1137,7 +1269,7 @@ export function Projects({
     setName("");
     setDescription("");
     setStartingPoint("new");
-    setExistingSource("github");
+    setSourceKind("github");
     setSelectedRepositoryId("");
     setRepositoryName("");
     setRepositoryQuery("");
@@ -1198,16 +1330,43 @@ export function Projects({
   const waitingDecisions =
     attention?.counts.decisions ??
     Object.values(resumeById).reduce((sum, resume) => sum + resume.decisions_waiting, 0);
+  const actionableAttention = attention?.items.filter(isActionableAttention) ?? [];
   const blockedProjects =
     attention?.projects.filter((project) => project.health === "blocked").length ??
     Object.values(resumeById).filter((resume) => resume.phases.some((phase) => phase.blocked))
       .length;
-  const portfolioState =
-    (attention?.counts.critical ?? 0) > 0 || blockedProjects > 0
+  const hasStatusData =
+    attention !== null ||
+    Object.keys(resumeById).length > 0 ||
+    (projects !== null && projects.length === 0);
+  const portfolioState = !hasStatusData
+    ? "Status unavailable"
+    : actionableAttention.length > 0 ||
+        (attention?.counts.approvals ?? 0) > 0 ||
+        (attention?.counts.blockers ?? 0) > 0 ||
+        blockedProjects > 0
       ? "Needs attention"
       : activeAgents > 0
         ? "Work in progress"
         : "Ready";
+  const runnerLastSeen = runners.reduce<number | null>((latest, runner) => {
+    const seen = Date.parse(runner.last_seen_at);
+    return Number.isFinite(seen) && (latest === null || seen > latest) ? seen : latest;
+  }, null);
+  const runnerFresh = runners.some(
+    (runner) =>
+      runner.connected &&
+      Number.isFinite(Date.parse(runner.last_seen_at)) &&
+      Date.now() - Date.parse(runner.last_seen_at) <= 60_000,
+  );
+  const runnerStatus =
+    runners.length === 0
+      ? "No runner registered"
+      : runnerFresh
+        ? "Runner online"
+        : runners.some((runner) => runner.connected)
+          ? "Runner heartbeat stale"
+          : "Runner offline";
   const connectedGitHub =
     githubStatus?.connections.filter((connection) => connection.status === "connected") ?? [];
   const selectedConnection = connectedGitHub.find(
@@ -1229,31 +1388,31 @@ export function Projects({
     (repository) => repository.id === selectedRepositoryId,
   );
   const githubConnected = connectedGitHub.length > 0;
-  const isLocalExisting = startingPoint === "existing" && existingSource === "local";
-  const sourceReady = isLocalExisting
+  const isLocalSource = sourceKind === "local";
+  const sourceReady = isLocalSource
     ? Boolean(localSelection)
     : scenario === "existing_repo"
       ? Boolean(selectedRepositoryId)
       : Boolean(selectedConnectionId);
   const canCreate =
     !creating &&
-    (isLocalExisting || githubConnected) &&
+    (isLocalSource || githubConnected) &&
     (description.trim().length > 0 || startingPoint === "existing") &&
     sourceReady;
   // The confirmation step's one honest passage about where the human's code
   // actually lives (GitHub Actions, not their computer) — null repository
   // name means "not resolved yet", which describeSetup renders as a prompt.
-  const confirmationRepositoryFullName = isLocalExisting
+  const confirmationRepositoryFullName = isLocalSource
     ? null
     : scenario === "existing_repo"
       ? (selectedRepository?.full_name ?? null)
       : selectedConnection && description.trim()
         ? `${selectedConnection.owner_login}/${derivedIdentity.repositorySlug}`
         : null;
-  const confirmationText = isLocalExisting
+  const confirmationText = isLocalSource
     ? localSelection
-      ? `The helper will work only inside ${localSelection.repository.repository_display_name}; its filesystem path stays on this computer.`
-      : "Select an approved local Git repository."
+      ? `Norns will not create a folder or initialize Git. It will work only inside the already-initialized, approved local Git repository ${localSelection.repository.repository_display_name}; its filesystem path stays on this computer.`
+      : "Select an already-initialized local Git repository approved in Connections. Norns will not create a folder or initialize Git."
     : describeSetup(confirmationRepositoryFullName);
 
   return (
@@ -1335,14 +1494,16 @@ export function Projects({
                   const resume = resumeById[project.id];
                   const blocked = resume?.phases.some((phase) => phase.blocked) ?? false;
                   const active = resume?.phases.some((phase) => phase.status === "active") ?? false;
-                  const state = blocked
+                  const needsAttention =
+                    blocked || actionableAttention.some((item) => item.project_id === project.id);
+                  const state = needsAttention
                     ? "Needs you"
                     : active
                       ? "In progress"
                       : project.status === "planned"
                         ? "Plan ready"
                         : "Draft";
-                  const stateClass = blocked
+                  const stateClass = needsAttention
                     ? "is-blocked"
                     : active
                       ? "is-active"
@@ -1408,7 +1569,9 @@ export function Projects({
                     ? "danger"
                     : portfolioState === "Work in progress"
                       ? "success"
-                      : "info"
+                      : portfolioState === "Status unavailable"
+                        ? "warn"
+                        : "info"
                 }
               >
                 {portfolioState}
@@ -1420,18 +1583,26 @@ export function Projects({
               </div>
               <div>
                 <strong>
-                  {waitingDecisions > 0
-                    ? `${waitingDecisions} decision${waitingDecisions === 1 ? "" : "s"} waiting`
-                    : activeAgents > 0
-                      ? `${activeAgents} active run${activeAgents === 1 ? "" : "s"}`
-                      : "No urgent interventions"}
+                  {!hasStatusData
+                    ? "Portfolio status is unavailable"
+                    : waitingDecisions > 0
+                      ? `${waitingDecisions} decision${waitingDecisions === 1 ? "" : "s"} waiting`
+                      : actionableAttention.length > 0
+                        ? `${actionableAttention.length} item${actionableAttention.length === 1 ? "" : "s"} need attention`
+                        : activeAgents > 0
+                          ? `${activeAgents} active run${activeAgents === 1 ? "" : "s"}`
+                          : "No urgent interventions"}
                 </strong>
                 <p>
-                  {waitingDecisions > 0
-                    ? "Your input will unblock the next stretch of work."
-                    : activeAgents > 0
-                      ? "Execution is moving and status will refresh automatically."
-                      : "Everything is quiet. Start or approve work when you are ready."}
+                  {!hasStatusData
+                    ? "Progress could not be refreshed. No healthy state is being inferred."
+                    : waitingDecisions > 0
+                      ? "Your input will unblock the next stretch of work."
+                      : actionableAttention.length > 0
+                        ? "A failed, stalled, blocked, or approval-bound item needs review."
+                        : activeAgents > 0
+                          ? "Execution is moving and status will refresh automatically."
+                          : "Everything is quiet. Start or approve work when you are ready."}
                 </p>
               </div>
             </div>
@@ -1457,7 +1628,35 @@ export function Projects({
               <span>{planned} planned</span>
               <span>{(projects?.length ?? 0) - planned} drafts</span>
               <span>{openProjects.length} open now</span>
+              <span
+                data-testid="runner-freshness"
+                title={
+                  runnerLastSeen === null
+                    ? "No heartbeat has been recorded"
+                    : `Last heartbeat ${new Date(runnerLastSeen).toLocaleString()}`
+                }
+              >
+                {runnerStatus}
+              </span>
             </div>
+            {attentionPolling.error ||
+            resumePolling.error ||
+            resumePollIssue ||
+            runnerPolling.error ? (
+              <p className="muted" data-testid="portfolio-refresh-status" aria-live="polite">
+                Refresh issue · showing last known data
+                {attentionPolling.lastSuccessAt
+                  ? ` from ${attentionPolling.lastSuccessAt.toLocaleTimeString()}`
+                  : ""}
+                .
+              </p>
+            ) : (
+              <p className="muted" data-testid="portfolio-refresh-status" aria-live="polite">
+                {attentionPolling.lastSuccessAt
+                  ? `Last refreshed ${attentionPolling.lastSuccessAt.toLocaleTimeString()}`
+                  : "Refreshing status…"}
+              </p>
+            )}
           </section>
         </div>
         {attention ? (
@@ -1468,7 +1667,7 @@ export function Projects({
                 <h2 id="attention-heading">What needs your attention?</h2>
               </div>
               <span className="muted" aria-live="polite">
-                Updated{" "}
+                {attentionPolling.error ? "Refresh failed · data from " : "Updated "}
                 {new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(
                   new Date(attention.generated_at),
                 )}
@@ -1618,7 +1817,10 @@ export function Projects({
                   <span>
                     {projectHealth.completed_tasks}/{projectHealth.total_tasks} tasks
                   </span>
-                  <span>{projectHealth.active_runs} agents</span>
+                  <span>
+                    {projectHealth.active_runs} active run
+                    {projectHealth.active_runs === 1 ? "" : "s"}
+                  </span>
                   <span>{projectHealth.attention_count} attention</span>
                 </div>
               ))}
@@ -1651,11 +1853,16 @@ export function Projects({
               const resume = resumeById[project.id];
               const blockedPhase = resume?.phases.find((phase) => phase.blocked);
               const activePhase = resume?.phases.find((phase) => phase.status === "active");
+              const projectAttention = actionableAttention.filter(
+                (item) => item.project_id === project.id,
+              );
+              const failedRun = projectAttention.find((item) => item.kind === "failed_run");
+              const stalledRun = projectAttention.find((item) => item.kind === "stalled_run");
               // Color coding (P1 dashboard spec): red = decision waiting/
               // blocked, green = executing, blue = plan ready (staffed but not
               // yet running), neutral = draft/no plan.
               const status: "red" | "green" | "blue" | "neutral" =
-                (resume?.decisions_waiting ?? 0) > 0 || blockedPhase
+                (resume?.decisions_waiting ?? 0) > 0 || blockedPhase || projectAttention.length > 0
                   ? "red"
                   : activePhase
                     ? "green"
@@ -1664,7 +1871,11 @@ export function Projects({
                       : "neutral";
               const statusLabel =
                 status === "red"
-                  ? "Decision waiting"
+                  ? failedRun
+                    ? "Run failed"
+                    : stalledRun
+                      ? "Run stalled"
+                      : "Needs attention"
                   : status === "green"
                     ? "On track"
                     : status === "blue"
@@ -1721,62 +1932,70 @@ export function Projects({
                      *  projects that predate the onboarding endpoint. */}
                     {resume?.onboardingSummaryLine ? (
                       <div className="project-source" title={resume.onboardingSummaryLine}>
-                        <span>GitHub</span>
+                        <span>{projectSourceLabel(project)}</span>
                         <strong>{resume.onboardingSummaryLine}</strong>
                       </div>
                     ) : project.source_location ? (
                       <div className="project-source" title={project.source_location}>
-                        <span>{project.source_type === "github" ? "GitHub" : "Local folder"}</span>
+                        <span>{projectSourceLabel(project)}</span>
                         <strong>{project.source_location}</strong>
                       </div>
                     ) : null}
                     {resume?.phases.length ? (
                       <div className="pr-phases">
-                        {resume.phases.map((phase, index) => (
-                          <div
-                            className={`pr-phase${phase.blocked ? " blocked" : ""}${
-                              phase.status === "completed" ? " done" : ""
-                            }${phase.status === "queued" || phase.status === "proposed" ? " queued" : ""}`}
-                            key={phase.id}
-                            data-testid="pr-phase"
-                          >
-                            <span className="pp-num">P{index + 1}</span>
-                            <span className="pp-name">{phase.objective_summary}</span>
-                            {phase.blocked ? (
-                              <span className="pp-blocked">blocked — needs you</span>
-                            ) : (
-                              <span className="pp-bar">
-                                <span className="track thin">
-                                  <i style={{ width: `${phase.percent_complete}%` }} />
-                                </span>
-                                <span className="pp-pct">{phase.percent_complete}%</span>
-                              </span>
-                            )}
-                            {!phase.blocked ? (
-                              <span className="pp-eta">
-                                <span className="lbl">ETA</span>
-                                {formatEta(phase.eta_at)}
-                              </span>
-                            ) : null}
-                            {/* FRONT DOOR P1 addition: per-phase navigation into
-                             *  that phase's activity feed / decision thread —
-                             *  opens the project workspace pre-focused on this
-                             *  phase (GET .../phases/:phaseId/execution plus
-                             *  phase-scoped attention items). */}
-                            <button
-                              type="button"
-                              className="pp-open"
-                              data-testid="pp-open"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                onOpenProject({ ...project, focus_phase_id: phase.id });
-                              }}
+                        {resume.phases.map((phase, index) => {
+                          const phaseNeedsAttention =
+                            phase.blocked ||
+                            projectAttention.some(
+                              (item) => item.phase_id === phase.id && isActionableAttention(item),
+                            );
+                          return (
+                            <div
+                              className={`pr-phase${phaseNeedsAttention ? " blocked" : ""}${
+                                phase.status === "completed" ? " done" : ""
+                              }${phase.status === "queued" || phase.status === "proposed" ? " queued" : ""}`}
+                              key={phase.id}
+                              data-testid="pr-phase"
                             >
-                              <span className="bubble">💬</span>{" "}
-                              {phase.blocked ? "Answer →" : "Open →"}
-                            </button>
-                          </div>
-                        ))}
+                              <span className="pp-num">P{index + 1}</span>
+                              <span className="pp-name">{phase.objective_summary}</span>
+                              {phaseNeedsAttention ? (
+                                <span className="pp-blocked">
+                                  {phase.blocked ? "blocked — needs you" : "failed — review"}
+                                </span>
+                              ) : (
+                                <span className="pp-bar">
+                                  <span className="track thin">
+                                    <i style={{ width: `${phase.percent_complete}%` }} />
+                                  </span>
+                                  <span className="pp-pct">{phase.percent_complete}%</span>
+                                </span>
+                              )}
+                              {!phaseNeedsAttention ? (
+                                <span className="pp-eta">
+                                  <span className="lbl">ETA</span>
+                                  {formatEta(phase.eta_at)}
+                                </span>
+                              ) : null}
+                              <button
+                                type="button"
+                                className="pp-open"
+                                data-testid="pp-open"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  onOpenProject({ ...project, focus_phase_id: phase.id });
+                                }}
+                              >
+                                <span className="bubble">💬</span>{" "}
+                                {phase.blocked
+                                  ? "Answer →"
+                                  : phaseNeedsAttention
+                                    ? "Review →"
+                                    : "Open →"}
+                              </button>
+                            </div>
+                          );
+                        })}
                       </div>
                     ) : (
                       <div className="pr-phases">
@@ -1870,7 +2089,9 @@ export function Projects({
                   {wizardStep === "attach"
                     ? planningError
                       ? "The project exists. Resume the interrupted planning setup without creating it again."
-                      : "Creating the repository, preserving references, and starting planning."
+                      : sourceKind === "local"
+                        ? "Preserving references and starting planning in the approved local Git repository."
+                        : "Creating the repository, preserving references, and starting planning."
                     : wizardStep === "blocker"
                       ? "One thing needs fixing before this project can run."
                       : "Start fresh or bring an existing codebase into The Norns. Nothing runs until you approve the plan."}
@@ -1902,7 +2123,11 @@ export function Projects({
             ) : wizardStep === "adopting" && draftProject ? (
               <div className="form-stack" data-testid="wizard-adoption-step">
                 <div>
-                  <div className="eyebrow">Adopting {draftProject.name}</div>
+                  <div className="eyebrow">
+                    {startingPoint === "new"
+                      ? `Preparing ${draftProject.name}`
+                      : `Adopting ${draftProject.name}`}
+                  </div>
                   <h3>
                     {adoptionStage === "analyzing"
                       ? "Understanding the repository"
@@ -1911,7 +2136,9 @@ export function Projects({
                   <p className="muted">
                     {adoptionStage === "analyzing"
                       ? "The Norns is reading a bounded sample of committed files and recording the architecture, constraints, and verification facts needed before coding."
-                      : "The repository is understood. The optional direction is becoming a planning run now."}
+                      : startingPoint === "new"
+                        ? "The repository is understood. The product objective is becoming a planning run now."
+                        : "The repository is understood. The optional direction is becoming a planning run now."}
                   </p>
                 </div>
                 {adoptionError ? (
@@ -1967,7 +2194,9 @@ export function Projects({
                       }}
                     >
                       <strong>New</strong>
-                      <span>Norns creates a GitHub repository for it.</span>
+                      <span>
+                        Create a GitHub repository or use an approved local Git repository.
+                      </span>
                     </button>
                     <button
                       type="button"
@@ -1978,44 +2207,53 @@ export function Projects({
                       }}
                     >
                       <strong>Existing</strong>
-                      <span>Choose a GitHub repository or a local folder.</span>
+                      <span>Choose an existing GitHub or approved local Git repository.</span>
                     </button>
                   </div>
                 </fieldset>
 
-                {startingPoint === "existing" ? (
-                  <fieldset className="source-picker">
-                    <legend>Where is the existing code?</legend>
-                    <div className="source-options">
-                      <button
-                        type="button"
-                        className={existingSource === "github" ? "is-selected" : ""}
-                        onClick={() => {
-                          setExistingSource("github");
-                          setLocalSelection(null);
-                          setSourceError(null);
-                        }}
-                      >
-                        <strong>GitHub repository</strong>
-                        <span>Select from a connected account or organization.</span>
-                      </button>
-                      <button
-                        type="button"
-                        className={existingSource === "local" ? "is-selected" : ""}
-                        onClick={() => {
-                          setExistingSource("local");
-                          setSelectedRepositoryId("");
-                          setSourceError(null);
-                        }}
-                      >
-                        <strong>Local folder</strong>
-                        <span>Select a repository already approved in Connections.</span>
-                      </button>
-                    </div>
-                  </fieldset>
-                ) : null}
+                <fieldset className="source-picker">
+                  <legend>
+                    {startingPoint === "new"
+                      ? "Where should Norns work?"
+                      : "Where is the existing code?"}
+                  </legend>
+                  <div className="source-options">
+                    <button
+                      type="button"
+                      className={sourceKind === "github" ? "is-selected" : ""}
+                      onClick={() => {
+                        setSourceKind("github");
+                        setLocalSelection(null);
+                        setSourceError(null);
+                      }}
+                    >
+                      <strong>GitHub repository</strong>
+                      <span>
+                        {startingPoint === "new"
+                          ? "Create a repository in a connected account or organization."
+                          : "Select from a connected account or organization."}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className={sourceKind === "local" ? "is-selected" : ""}
+                      onClick={() => {
+                        setSourceKind("local");
+                        setSelectedRepositoryId("");
+                        setSourceError(null);
+                      }}
+                    >
+                      <strong>Approved local Git repository</strong>
+                      <span>
+                        Use a repository already initialized and approved in Connections. Norns does
+                        not create the folder.
+                      </span>
+                    </button>
+                  </div>
+                </fieldset>
 
-                {isLocalExisting ? (
+                {isLocalSource ? (
                   <div className="repository-picker local-folder-picker">
                     {sourceError ? <Alert>{sourceError}</Alert> : null}
                     {localSources === null ? (
@@ -2224,9 +2462,13 @@ export function Projects({
                       <div className="policy" data-testid="derived-project-summary">
                         <strong>{derivedIdentity.projectName}</strong>
                         <br />
-                        {selectedConnection?.owner_login ?? "GitHub"}/
-                        {derivedIdentity.repositorySlug} ·{" "}
-                        {repositoryPrivate ? "Private" : "Public"}
+                        {isLocalSource
+                          ? localSelection
+                            ? `New Norns project in ${localSelection.repository.repository_display_name}`
+                            : "Choose an approved local Git repository"
+                          : `${selectedConnection?.owner_login ?? "GitHub"}/${derivedIdentity.repositorySlug} · ${
+                              repositoryPrivate ? "Private" : "Public"
+                            }`}
                       </div>
                     ) : null}
                     <details>
@@ -2241,14 +2483,16 @@ export function Projects({
                               placeholder={deriveProjectIdentity(description).projectName}
                             />
                           </Field>
-                          <Field label="Repository slug override">
-                            <Input
-                              data-testid="github-new-repository-name"
-                              value={repositoryName}
-                              onChange={(event) => setRepositoryName(event.target.value)}
-                              placeholder={deriveProjectIdentity(description).repositorySlug}
-                            />
-                          </Field>
+                          {!isLocalSource ? (
+                            <Field label="Repository slug override">
+                              <Input
+                                data-testid="github-new-repository-name"
+                                value={repositoryName}
+                                onChange={(event) => setRepositoryName(event.target.value)}
+                                placeholder={deriveProjectIdentity(description).repositorySlug}
+                              />
+                            </Field>
+                          ) : null}
                         </div>
                         <Field label="Reference images">
                           <Input
@@ -2290,18 +2534,20 @@ export function Projects({
                             </ul>
                           ) : null}
                         </Field>
-                        <Field label="Visibility">
-                          <Select
-                            data-testid="github-repository-visibility"
-                            value={repositoryPrivate ? "private" : "public"}
-                            onChange={(event) =>
-                              setRepositoryPrivate(event.target.value === "private")
-                            }
-                          >
-                            <option value="private">Private (default)</option>
-                            <option value="public">Public</option>
-                          </Select>
-                        </Field>
+                        {!isLocalSource ? (
+                          <Field label="Visibility">
+                            <Select
+                              data-testid="github-repository-visibility"
+                              value={repositoryPrivate ? "private" : "public"}
+                              onChange={(event) =>
+                                setRepositoryPrivate(event.target.value === "private")
+                              }
+                            >
+                              <option value="private">Private (default)</option>
+                              <option value="public">Public</option>
+                            </Select>
+                          </Field>
+                        ) : null}
                         <div className="two-col-fields">
                           <Field label="Coordinator model">
                             <Select
@@ -2409,9 +2655,11 @@ export function Projects({
                 </p>
                 <Button variant="primary" disabled={!canCreate} onClick={() => void create()}>
                   {creating
-                    ? scenario === "new_repo"
-                      ? "Creating repository and project…"
-                      : "Creating…"
+                    ? startingPoint === "new" && sourceKind === "local"
+                      ? "Creating project and starting planning…"
+                      : scenario === "new_repo"
+                        ? "Creating repository and project…"
+                        : "Creating…"
                     : startingPoint === "new"
                       ? "Create & start planning →"
                       : "Adopt project →"}

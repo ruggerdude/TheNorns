@@ -211,6 +211,47 @@ describe("EXECUTION E13: live run log", () => {
   });
 });
 
+describe("dashboard effective status and quick-change review semantics", () => {
+  let mock: MockFetch;
+
+  afterEach(() => mock.restore());
+
+  it("shows failed work as needing attention and an intentional quick change as review-free", async () => {
+    seedAuth();
+    mock = new MockFetch();
+    installCommonRoutes(mock);
+    mock.get(`/api/v2/projects/${projectAlpha.id}/phases/phase-1/execution`, {
+      body: executionPayload(
+        [
+          baseTask({
+            state: "failed",
+            reviewer_agent: null,
+            run: {
+              id: "run-2",
+              state: "failed",
+              attempt: 1,
+              verification_status: "failed",
+              commit_sha: null,
+              failure_detail: "Verification failed",
+            },
+          }),
+        ],
+        { planning_mode: "quick" },
+      ),
+    });
+    mock.install();
+
+    await renderAppAndOpenProject(projectAlpha.name);
+
+    expect(await screen.findByRole("heading", { name: "Release safely" })).toBeVisible();
+    expect(screen.getAllByText("needs attention").length).toBeGreaterThan(0);
+    expect(screen.getByRole("region", { name: "Independent QC Reviewer" })).toHaveTextContent(
+      "Review not required for this quick change",
+    );
+    expect(screen.queryByText("Awaiting independent reviewer assignment")).not.toBeInTheDocument();
+  });
+});
+
 describe("EXECUTION E13: phase-execution polling cadence", () => {
   let mock: MockFetch;
 

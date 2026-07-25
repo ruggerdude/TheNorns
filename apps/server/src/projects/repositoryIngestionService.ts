@@ -16,9 +16,37 @@ export interface RepositoryIngestionResult {
   replayed: boolean;
 }
 
+export interface RepositoryIngestionOptions {
+  /**
+   * Fact keys whose active values are authoritative for this inspection.
+   * Omitted for the public/manual ingestion route; repository analysis passes
+   * only deterministic command and committed-manifest policy keys.
+   */
+  authoritative_repository_fact_keys?: readonly string[];
+}
+
+export interface ExistingRepositoryRevisionResult extends RepositoryIngestionResult {
+  title: string;
+  summary: string;
+}
+
+export interface ExistingRepositoryRevisionFactReconciliation {
+  project_id: string;
+  repository_binding_id: string;
+  repository_revision: string;
+  repository_facts: ReadonlyArray<{ key: string; value: string; confidence: number }>;
+  authoritative_fact_keys: readonly string[];
+}
+
 function stableId(kind: string, parts: readonly string[]): string {
   const digest = createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 32);
   return `${kind}:${digest}`;
+}
+
+function splitFact(content: string): { key: string; value: string } {
+  const index = content.indexOf(":");
+  if (index <= 0) return { key: content.trim(), value: "" };
+  return { key: content.slice(0, index).trim(), value: content.slice(index + 1).trim() };
 }
 
 async function assertBinding(
@@ -39,10 +67,121 @@ async function assertBinding(
   }
 }
 
+async function reconcileAuthoritativeRepositoryFacts(
+  tx: V2SqlExecutor,
+  input: {
+    project_id: string;
+    repository_binding_id: string;
+    repository_revision: string;
+    repository_facts: ReadonlyArray<{ key: string; value: string; confidence: number }>;
+    authoritative_fact_keys: readonly string[];
+  },
+): Promise<void> {
+  const authoritative = new Set(input.authoritative_fact_keys);
+  if (authoritative.size === 0) return;
+  const sourceRef = JSON.stringify({
+    repository_binding_id: input.repository_binding_id,
+    repository_revision: input.repository_revision,
+    source: "committed_repository_inspection",
+  });
+  const desiredByKey = new Map<
+    string,
+    { id: string; key: string; value: string; confidence: number }
+  >();
+  for (const fact of input.repository_facts) {
+    const key = fact.key.trim();
+    const value = fact.value.trim();
+    if (!authoritative.has(key) || value.length === 0) continue;
+    const id = stableId("memory", [
+      input.project_id,
+      input.repository_revision,
+      "repository_fact",
+      `${key}: ${value}`,
+    ]);
+    desiredByKey.set(key, { id, key, value, confidence: fact.confidence });
+  }
+
+  for (const fact of desiredByKey.values()) {
+    await tx.query(
+      `INSERT INTO project_memory_entries (
+         id, project_id, category, content, provenance, source_ref,
+         confidence, version, status, approved_by_human
+       ) VALUES ($1,$2,'repository_fact',$3,'repository_inspection',$4::jsonb,
+                 $5,1,'active',false)
+       ON CONFLICT (id) DO UPDATE
+       SET status='active', superseded_by_memory_entry_id=NULL`,
+      [fact.id, input.project_id, `${fact.key}: ${fact.value}`, sourceRef, fact.confidence],
+    );
+  }
+
+  const active = await tx.query<{ id: string; content: string }>(
+    `SELECT id, content FROM project_memory_entries
+     WHERE project_id=$1 AND category='repository_fact' AND status='active'
+     FOR UPDATE`,
+    [input.project_id],
+  );
+  for (const row of active.rows) {
+    const { key } = splitFact(row.content);
+    if (!authoritative.has(key)) continue;
+    const desired = desiredByKey.get(key);
+    if (desired?.id === row.id) continue;
+    await tx.query(
+      `UPDATE project_memory_entries
+       SET status='obsolete', superseded_by_memory_entry_id=$2
+       WHERE id=$1 AND project_id=$3 AND status='active'`,
+      [row.id, desired?.id ?? null, input.project_id],
+    );
+  }
+}
+
 export class RepositoryIngestionService {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
-  ingest(input: V2RepositoryIngestionSeedT): Promise<RepositoryIngestionResult> {
+  /**
+   * Repair exact command facts for a revision already analyzed by an older
+   * server. Returning null means the revision is new and needs normal model
+   * analysis; a result means the deterministic repair completed idempotently.
+   */
+  reconcileExistingRevisionFacts(
+    input: ExistingRepositoryRevisionFactReconciliation,
+  ): Promise<ExistingRepositoryRevisionResult | null> {
+    return this.transactions.transaction(async (tx) => {
+      await assertBinding(tx, input.project_id, input.repository_binding_id);
+      const existing = await tx.query<{
+        id: string;
+        revision: number;
+        title: string;
+        summary: string;
+      }>(
+        `SELECT id, revision, title, summary FROM architecture_revisions
+         WHERE project_id=$1 AND repository_revision=$2
+         FOR UPDATE`,
+        [input.project_id, input.repository_revision],
+      );
+      const revision = existing.rows[0];
+      if (!revision) return null;
+      await reconcileAuthoritativeRepositoryFacts(tx, input);
+      const memories = await tx.query<{ id: string }>(
+        `SELECT id FROM project_memory_entries
+         WHERE project_id=$1 AND source_ref->>'repository_revision'=$2
+         ORDER BY id`,
+        [input.project_id, input.repository_revision],
+      );
+      return {
+        architecture_revision_id: revision.id,
+        architecture_revision: revision.revision,
+        memory_entry_ids: memories.rows.map((row) => row.id),
+        replayed: true,
+        title: revision.title,
+        summary: revision.summary,
+      };
+    });
+  }
+
+  ingest(
+    input: V2RepositoryIngestionSeedT,
+    options: RepositoryIngestionOptions = {},
+  ): Promise<RepositoryIngestionResult> {
     const seed = V2RepositoryIngestionSeed.parse(input);
     return this.transactions.transaction(async (tx) => {
       await assertBinding(tx, seed.project_id, seed.repository_binding_id);
@@ -75,6 +214,13 @@ export class RepositoryIngestionService {
             "repository revision was already ingested with different architecture evidence",
           );
         }
+        await reconcileAuthoritativeRepositoryFacts(tx, {
+          project_id: seed.project_id,
+          repository_binding_id: seed.repository_binding_id,
+          repository_revision: seed.repository_revision,
+          repository_facts: seed.repository_facts,
+          authoritative_fact_keys: options.authoritative_repository_fact_keys ?? [],
+        });
         const memories = await tx.query<{ id: string }>(
           `SELECT id FROM project_memory_entries
            WHERE project_id = $1 AND source_ref->>'repository_revision' = $2
@@ -190,6 +336,13 @@ export class RepositoryIngestionService {
           ],
         );
       }
+      await reconcileAuthoritativeRepositoryFacts(tx, {
+        project_id: seed.project_id,
+        repository_binding_id: seed.repository_binding_id,
+        repository_revision: seed.repository_revision,
+        repository_facts: seed.repository_facts,
+        authoritative_fact_keys: options.authoritative_repository_fact_keys ?? [],
+      });
       await tx.query(
         `UPDATE projects
          SET current_architecture_revision_id = $2,

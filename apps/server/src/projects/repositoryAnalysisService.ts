@@ -39,6 +39,11 @@ import {
 } from "../integrations/github.js";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import type { RepositoryIngestionService } from "./repositoryIngestionService.js";
+import {
+  REPOSITORY_VERIFICATION_FACT_KEYS,
+  deriveRepositoryVerificationFacts,
+  mergeRepositoryVerificationFacts,
+} from "./repositoryVerificationFacts.js";
 
 const API_BASE = "https://api.github.com";
 const GITHUB_API_VERSION = "2022-11-28";
@@ -161,7 +166,8 @@ export class RepositoryAnalysisService {
       /**
        * Adapter factory — the same seam `main.ts` uses for debate execution.
        * Throwing here (e.g. no ANTHROPIC_API_KEY) is reported to the human as
-       * `model_not_configured` before any GitHub traffic happens.
+       * `model_not_configured` when a new revision needs model analysis. An
+       * existing revision can still receive a deterministic fact repair.
        */
       createAdapter: () => LlmAdapter;
       http?: GitHubFetch;
@@ -221,6 +227,41 @@ export class RepositoryAnalysisService {
     actor: { actor_id: string },
     localInspection?: RepositoryInspectionT,
   ): Promise<RepositoryAnalysisResult> {
+    const sample =
+      target.binding.binding_type === "github"
+        ? await this.githubInspection(target.binding)
+        : this.localInspection(target.binding, localInspection);
+    if (sample.totalFiles === 0) {
+      throw new RepositoryAnalysisError(
+        "repository_empty",
+        `${sample.displayName} has no committed files at ${sample.headSha.slice(0, 12)}, so there is nothing to analyze.`,
+      );
+    }
+    const verificationFacts = deriveRepositoryVerificationFacts(sample.files, sample.treePaths);
+
+    // Upgrade/backfill path: a repository revision may already have been
+    // analyzed before deterministic command discovery existed. Repair its
+    // policy facts from the newly inspected committed files without asking a
+    // model to reproduce byte-identical architecture prose.
+    const replay = await this.deps.ingestion.reconcileExistingRevisionFacts({
+      project_id: target.project_id,
+      repository_binding_id: target.binding.id,
+      repository_revision: sample.headSha,
+      repository_facts: verificationFacts,
+      authoritative_fact_keys: REPOSITORY_VERIFICATION_FACT_KEYS,
+    });
+    if (replay) {
+      return {
+        architecture_revision_id: replay.architecture_revision_id,
+        architecture_revision: replay.architecture_revision,
+        replayed: true,
+        title: replay.title,
+        summary: replay.summary,
+        repository_revision: sample.headSha,
+        model: { provider: "deterministic", model: "repository-inspection" },
+      };
+    }
+
     let adapter: LlmAdapter;
     try {
       adapter = this.deps.createAdapter();
@@ -231,17 +272,6 @@ export class RepositoryAnalysisService {
           error instanceof Error ? error.message : String(error)
         }`,
         503,
-      );
-    }
-
-    const sample =
-      target.binding.binding_type === "github"
-        ? await this.githubInspection(target.binding)
-        : this.localInspection(target.binding, localInspection);
-    if (sample.totalFiles === 0) {
-      throw new RepositoryAnalysisError(
-        "repository_empty",
-        `${sample.displayName} has no committed files at ${sample.headSha.slice(0, 12)}, so there is nothing to analyze.`,
       );
     }
 
@@ -258,32 +288,38 @@ export class RepositoryAnalysisService {
 
     const documentBytes = Buffer.from(analysis.architecture_document, "utf8");
     const contentHash = createHash("sha256").update(documentBytes).digest("hex");
-    const result = await this.deps.ingestion.ingest({
-      project_id: target.project_id,
-      repository_binding_id: target.binding.id,
-      repository_revision: sample.headSha,
-      architecture: {
-        title: analysis.title,
-        summary: analysis.summary,
-        artifact: {
-          storage_ref: `artifact://${target.project_id}/architecture/${sample.headSha}`,
-          content_hash: contentHash,
-          byte_size: documentBytes.byteLength,
-          media_type: "text/markdown",
+    const result = await this.deps.ingestion.ingest(
+      {
+        project_id: target.project_id,
+        repository_binding_id: target.binding.id,
+        repository_revision: sample.headSha,
+        architecture: {
+          title: analysis.title,
+          summary: analysis.summary,
+          artifact: {
+            storage_ref: `artifact://${target.project_id}/architecture/${sample.headSha}`,
+            content_hash: contentHash,
+            byte_size: documentBytes.byteLength,
+            media_type: "text/markdown",
+          },
         },
+        repository_facts: mergeRepositoryVerificationFacts(
+          analysis.repository_facts.filter(
+            (fact) => fact.key.trim().length > 0 && fact.value.trim().length > 0,
+          ),
+          verificationFacts,
+        ),
+        constraints: analysis.constraints.filter((entry) => entry.trim().length > 0),
+        // A directive is an auto-approved human instruction; a model inference
+        // must never enter memory pre-approved, so this stays empty.
+        directives: [],
+        assignment_policy_ref: target.project.assignment_policy_ref,
+        verification_policy_ref: target.project.verification_policy_ref,
+        budget_policy_ref: target.project.budget_policy_ref,
+        created_by: { actor_type: "human", actor_id: actor.actor_id },
       },
-      repository_facts: analysis.repository_facts.filter(
-        (fact) => fact.key.trim().length > 0 && fact.value.trim().length > 0,
-      ),
-      constraints: analysis.constraints.filter((entry) => entry.trim().length > 0),
-      // A directive is an auto-approved human instruction; a model inference
-      // must never enter memory pre-approved, so this stays empty.
-      directives: [],
-      assignment_policy_ref: target.project.assignment_policy_ref,
-      verification_policy_ref: target.project.verification_policy_ref,
-      budget_policy_ref: target.project.budget_policy_ref,
-      created_by: { actor_type: "human", actor_id: actor.actor_id },
-    });
+      { authoritative_repository_fact_keys: REPOSITORY_VERIFICATION_FACT_KEYS },
+    );
     return {
       architecture_revision_id: result.architecture_revision_id,
       architecture_revision: result.architecture_revision,
@@ -369,6 +405,7 @@ export class RepositoryAnalysisService {
       headSha,
       totalFiles: blobs.length,
       treeTruncated: blobs.length > MAX_TREE_PATHS || treeResponse.truncated === true,
+      treePaths: blobs.slice(0, MAX_TREE_PATHS).map((entry) => entry.path),
       treeListing,
       files,
     };
@@ -390,6 +427,7 @@ export class RepositoryAnalysisService {
       headSha: inspection.observed_head,
       totalFiles: inspection.total_files,
       treeTruncated: inspection.tree_truncated,
+      treePaths: inspection.tree_paths,
       treeListing: inspection.tree_paths.join("\n"),
       files: inspection.files,
     };

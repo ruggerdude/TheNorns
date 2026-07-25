@@ -38,6 +38,7 @@ import {
 } from "../runners/inferenceProxy.js";
 import type { GatewayCredentialService } from "./credentials.js";
 import { GATEWAY_REFUSAL_HEADER, type ProviderGateway, refusalBody } from "./providerGateway.js";
+import { GATEWAY_REQUEST_BODY_LIMIT_BYTES } from "./request.js";
 import type { GatewayProvider } from "./usage.js";
 
 /** Mounted prefix. `<origin>${GATEWAY_ROUTE_PREFIX}/<provider>/<path…>` */
@@ -172,9 +173,13 @@ export async function registerGatewayRoutes(
   await app.register(async (scope) => {
     // Raw bytes, for every content type, scoped to this plugin only.
     scope.removeContentTypeParser?.(["application/json"]);
-    scope.addContentTypeParser("*", { parseAs: "buffer" }, (_req, body, done) => {
-      done(null, body);
-    });
+    scope.addContentTypeParser(
+      "*",
+      { parseAs: "buffer", bodyLimit: GATEWAY_REQUEST_BODY_LIMIT_BYTES },
+      (_req, body, done) => {
+        done(null, body);
+      },
+    );
 
     // VERIFIED against the Claude Code CLI: before its first model call it
     // issues `HEAD <ANTHROPIC_BASE_URL>` as a reachability probe. Answering it

@@ -57,7 +57,12 @@ export {
   privateKeySigner,
   runnerContextFetchPayload,
 } from "./contextAuth.js";
-export { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
+export {
+  CLAUDE_CODE_AUTONOMOUS_TOOLS,
+  CLAUDE_CODE_PLANNED_MAX_TURNS,
+  CLAUDE_CODE_QUICK_MAX_TURNS,
+  ClaudeCodeRuntime,
+} from "./runtimes/claudeCode.js";
 // EXECUTION E9 — the provider-native gateway credential the agentic runtimes
 // use in place of a real provider key.
 export {

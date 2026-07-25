@@ -146,4 +146,165 @@ describe("Phase 5 project execution monitoring", () => {
       screen.getByText(/^Direction recorded in project memory\. Agent delivery is pending\.$/i),
     ).toBeVisible();
   });
+
+  it("replaces a stale failed task card with the newly designated recovery attempt", async () => {
+    seedAuth();
+    let recovered = false;
+    const decisionPointId = "decision:failed_run:run-2";
+    mock = new MockFetch();
+    mock.get("/api/projects", { body: [projectAlpha] });
+    mock.get(`/api/projects/${projectAlpha.id}/graph`, { body: fullyAllocatedGraph });
+    mock.get("/api/v2/attention", () => ({
+      body: {
+        generated_at: "2026-07-25T20:00:00.000Z",
+        counts: {
+          critical: 0,
+          high: recovered ? 0 : 1,
+          decisions: recovered ? 0 : 1,
+          approvals: 0,
+          blockers: 0,
+          active_projects: 1,
+          active_runs: recovered ? 1 : 0,
+        },
+        items: recovered
+          ? []
+          : [
+              {
+                key: "attention:project-1:decision:run-2",
+                project_id: projectAlpha.id,
+                project_name: projectAlpha.name,
+                condition_fingerprint: "a".repeat(64),
+                phase_id: "phase-1",
+                task_id: "task-1",
+                source_type: "decision_point",
+                source_id: decisionPointId,
+                kind: "decision",
+                severity: "high",
+                title: "Recover the failed run",
+                summary: "Run 2 failed and needs a fresh fenced attempt.",
+                explanation: "The designated execution attempt stopped.",
+                recommendation: "Retry safely",
+                tradeoffs: ["Retry uses additional budget."],
+                impact: "The task cannot advance.",
+                resumes: "A new designated run resumes execution.",
+                occurred_at: "2026-07-25T19:59:00.000Z",
+                decision: {
+                  decision_point_id: decisionPointId,
+                  condition_fingerprint: "b".repeat(64),
+                  recommendation_option_id: "retry",
+                  options: [
+                    {
+                      id: "retry",
+                      label: "Retry safely",
+                      impact: "Creates a new designated run.",
+                      risk: "May repeat work.",
+                    },
+                    {
+                      id: "cancel",
+                      label: "Cancel phase",
+                      impact: "Stops unfinished work.",
+                      risk: "Leaves the task incomplete.",
+                    },
+                  ],
+                },
+              },
+            ],
+        projects: [],
+      },
+    }));
+    mock.get(`/api/v2/projects/${projectAlpha.id}/resume`, {
+      body: {
+        project: {
+          id: projectAlpha.id,
+          name: projectAlpha.name,
+          status: "active",
+          aggregate_version: 2,
+        },
+        architecture: null,
+        repositories: [],
+        phases: [
+          {
+            id: "phase-1",
+            objective_summary: "Correct the README heading",
+            status: "active",
+            tasks: 1,
+            completed_tasks: 0,
+            blocked_tasks: recovered ? 0 : 1,
+          },
+        ],
+        attention: {
+          open_decisions: recovered ? 0 : 1,
+          active_runs: recovered ? 1 : 0,
+          blocked_tasks: recovered ? 0 : 1,
+        },
+        next_recommended_action: recovered ? "Monitor the recovery attempt" : "Recover run 2",
+      },
+    });
+    mock.get(`/api/v2/projects/${projectAlpha.id}/phases/phase-1/execution`, () => ({
+      body: {
+        phase: {
+          id: "phase-1",
+          objective_summary: "Correct the README heading",
+          status: "active",
+          planning_mode: "quick",
+          completed_tasks: 0,
+          total_tasks: 1,
+        },
+        tasks: [
+          {
+            id: "task-1",
+            title: "Correct the README heading",
+            state: recovered ? "in_progress" : "failed",
+            complexity: "S",
+            risk: "low",
+            dependencies: [],
+            assignment: { provider: "anthropic", model: "claude-sonnet-5", status: "active" },
+            implementation_agent: {
+              profile_id: "agent-claude",
+              provider: "anthropic",
+              model: "claude-sonnet-5",
+              roles: ["implementation"],
+            },
+            reviewer_agent: null,
+            run: {
+              id: recovered ? "run-3" : "run-2",
+              state: recovered ? "running" : "failed",
+              attempt: recovered ? 3 : 2,
+              verification_status: "pending",
+              commit_sha: null,
+              failure_detail: recovered ? null : "The previous attempt failed.",
+            },
+            evidence_count: 0,
+            reviews: [],
+          },
+        ],
+      },
+    }));
+    mock.get(
+      new RegExp(
+        `^/api/v2/projects/${projectAlpha.id}/phases/phase-1/tasks/task-1/run-log(?:\\?.*)?$`,
+      ),
+      { body: { run_id: recovered ? "run-3" : "run-2", entries: [], truncated: false } },
+    );
+    mock.post(
+      `/api/v2/projects/${projectAlpha.id}/decision-points/${encodeURIComponent(decisionPointId)}/resolve`,
+      () => {
+        recovered = true;
+        return { body: {} };
+      },
+    );
+    mock.install();
+
+    const { user } = await renderAppAndOpenProject(projectAlpha.name);
+    expect(await screen.findByText("Run 2: failed")).toBeVisible();
+    expect(await screen.findByTestId("phase-needs-you")).toBeVisible();
+    await user.type(
+      screen.getByLabelText("Decision rationale"),
+      "The previous attempt is safely fenced.",
+    );
+    await user.click(screen.getByRole("button", { name: "Retry safely" }));
+
+    expect(await screen.findByText("Run 3: running")).toBeVisible();
+    expect(screen.queryByText("Run 2: failed")).not.toBeInTheDocument();
+  });
 });

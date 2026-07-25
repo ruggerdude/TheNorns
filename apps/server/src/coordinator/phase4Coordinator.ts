@@ -1,3 +1,4 @@
+import { conservativeMaxChargeUsd, snapshotModelPricing } from "@norns/adapters";
 import {
   type V2ActorT,
   V2ContentAddressedReference,
@@ -6,11 +7,40 @@ import {
   type V2DispatchCommandT,
   v2CommandIdForDispatchJob,
 } from "@norns/contracts";
+import {
+  CLAUDE_CODE_SONNET_5_MAX_OUTPUT_TOKENS,
+  GATEWAY_REQUEST_BODY_LIMIT_BYTES,
+  estimateGatewayInputTokens,
+} from "../gateway/request.js";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import { transitionV2TaskLifecycle } from "../persistence/v2/lifecycleMutation.js";
 import { SqlV2ApplicationTransaction } from "../persistence/v2/sqlRepositories.js";
 import { resolveDispatchRuntime } from "./agenticRuntime.js";
 import { resolveProjectVerificationCommands } from "./verificationCommandSource.js";
+
+/**
+ * Maximum single-call hold the gateway can require for the installed Claude
+ * Code SDK using Sonnet 5: the route's largest accepted body, the SDK's 64k
+ * output declaration, and the registry's conservative token prices.
+ */
+export const CLAUDE_SONNET_5_MAX_GATEWAY_PREFLIGHT_USD = conservativeMaxChargeUsd(
+  snapshotModelPricing("anthropic", "claude-sonnet-5"),
+  {
+    max_input_tokens: estimateGatewayInputTokens(GATEWAY_REQUEST_BODY_LIMIT_BYTES),
+    max_output_tokens: CLAUDE_CODE_SONNET_5_MAX_OUTPUT_TOKENS,
+  },
+);
+
+/**
+ * $2 is the smallest practical round-dollar cap above Sonnet 5's $1.341052
+ * maximum gateway preflight. The $0.658948 margin absorbs pricing/body-limit
+ * rounding while remaining far below the planned-work default.
+ */
+export const DEFAULT_QUICK_CHANGE_MAX_CHARGE_USD = 2;
+
+export interface Phase4CoordinatorOptions {
+  quickChangeMaxChargeUsd?: number;
+}
 
 export class Phase4CoordinatorConflictError extends Error {
   constructor(message: string) {
@@ -77,7 +107,11 @@ export interface Phase4ScheduleInput {
   max_duration_seconds: number;
   issued_at: string;
   expires_at: string;
-  /** Required when reviewer rework supersedes the currently designated run. */
+  /**
+   * Required when a replacement attempt supersedes the currently designated
+   * run. This is accepted only for reviewer rework from a succeeded run or
+   * explicit recovery from a terminal failed/expired/cancelled run.
+   */
   supersedes_run_id?: string | null;
 }
 
@@ -125,6 +159,7 @@ interface SchedulingRow {
   max_concurrent_tasks: number;
   max_concurrent_runs: number;
   active_workload: number;
+  execution_mode: "quick" | "planned";
 }
 
 function runIdentity(taskId: string, attempt: number): string {
@@ -132,7 +167,18 @@ function runIdentity(taskId: string, attempt: number): string {
 }
 
 export class Phase4Coordinator {
-  constructor(private readonly transactions: V2TransactionRunner) {}
+  private readonly quickChangeMaxChargeUsd: number;
+
+  constructor(
+    private readonly transactions: V2TransactionRunner,
+    options: Phase4CoordinatorOptions = {},
+  ) {
+    this.quickChangeMaxChargeUsd =
+      options.quickChangeMaxChargeUsd ?? DEFAULT_QUICK_CHANGE_MAX_CHARGE_USD;
+    if (!Number.isFinite(this.quickChangeMaxChargeUsd) || this.quickChangeMaxChargeUsd < 0) {
+      throw new Error("quickChangeMaxChargeUsd must be finite and nonnegative");
+    }
+  }
 
   schedule(input: Phase4ScheduleInput): Promise<Phase4ScheduledRun> {
     const contextRefs = input.context_refs.map((reference) =>
@@ -151,6 +197,7 @@ export class Phase4Coordinator {
                 project.primary_repository_binding_id AS repository_binding_id,
                 project.max_concurrent_tasks, profile.max_concurrent_runs,
                 profile.active_workload,
+                COALESCE(planning.mode, 'planned') AS execution_mode,
                 binding.observed_head AS expected_revision,
                 binding.repository_id AS runner_repository_id,
                 binding.binding_type AS repository_binding_type,
@@ -161,6 +208,9 @@ export class Phase4Coordinator {
          JOIN projects project ON project.id = t.project_id
          JOIN agent_assignments a ON a.id = $4 AND a.task_id = t.id
          JOIN agent_profiles profile ON profile.id = a.agent_profile_id
+         LEFT JOIN planning_runs planning
+           ON planning.id = p.planning_run_id
+          AND planning.project_id = p.project_id
          -- FRONT DOOR P2b (D2): deliberately a LEFT JOIN (not the prior
          -- inner join requiring status = 'connected'). Planning, staffing,
          -- and approval must all work with no repository binding at all —
@@ -213,10 +263,11 @@ export class Phase4Coordinator {
       if (!["approved", "active"].includes(row.phase_status)) {
         throw new Phase4CoordinatorConflictError("phase is not approved for execution");
       }
-      const isRework = input.supersedes_run_id !== undefined && input.supersedes_run_id !== null;
+      const isReplacement =
+        input.supersedes_run_id !== undefined && input.supersedes_run_id !== null;
       if (
         !["pending", "ready"].includes(row.task_state) &&
-        !(isRework && row.task_state === "in_review")
+        !(isReplacement && row.task_state === "in_review")
       ) {
         throw new Phase4CoordinatorConflictError(`task is not schedulable from ${row.task_state}`);
       }
@@ -312,7 +363,11 @@ export class Phase4Coordinator {
       const dispatchJobId = `dispatch-job:${runId}`;
       const commandId = v2CommandIdForDispatchJob(dispatchJobId);
       const reservationId = `budget-reservation:${runId}`;
-      const maxCharge = Number(row.budget_limit_usd);
+      const assignmentMaxCharge = Number(row.budget_limit_usd);
+      const maxCharge =
+        row.execution_mode === "quick"
+          ? Math.min(assignmentMaxCharge, this.quickChangeMaxChargeUsd)
+          : assignmentMaxCharge;
       const existingReservations = await sql.query<{ amount: string | number }>(
         `SELECT COALESCE(sum(amount_usd), 0) AS amount FROM budget_reservations
          WHERE phase_id = $1 AND status IN ('active','retained_ambiguous')`,
@@ -324,16 +379,23 @@ export class Phase4Coordinator {
       ) {
         throw new Phase4CoordinatorConflictError("approved phase budget is insufficient");
       }
-      if (isRework) {
-        const prior = await sql.query<{ id: string }>(
-          `SELECT id FROM agent_runs
-           WHERE id=$1 AND task_id=$2 AND is_designated=true AND state='succeeded'
+      if (isReplacement) {
+        const prior = await sql.query<{ id: string; state: string }>(
+          `SELECT id, state FROM agent_runs
+           WHERE id=$1 AND task_id=$2 AND is_designated=true
+             AND superseded_at IS NULL
            FOR UPDATE`,
           [input.supersedes_run_id, input.task_id],
         );
-        if (!prior.rows[0]) {
+        const priorRun = prior.rows[0];
+        const validReviewRework = priorRun?.state === "succeeded" && row.task_state === "in_review";
+        const validTerminalRetry =
+          priorRun !== undefined &&
+          ["failed", "expired", "cancelled"].includes(priorRun.state) &&
+          row.task_state === "ready";
+        if (!validReviewRework && !validTerminalRetry) {
           throw new Phase4CoordinatorConflictError(
-            "rework must supersede the designated green run",
+            "replacement must supersede the current designated green review run or a terminal failed run prepared for retry",
           );
         }
       }
@@ -353,10 +415,10 @@ export class Phase4Coordinator {
           input.runner_id,
           row.repository_binding_id,
           row.expected_revision,
-          !isRework,
+          !isReplacement,
         ],
       );
-      if (isRework) {
+      if (isReplacement) {
         await sql.query(
           `UPDATE agent_runs
            SET is_designated=false, superseded_at=$3, superseded_by_run_id=$2, updated_at=now()
@@ -401,7 +463,7 @@ export class Phase4Coordinator {
           to: "assigned",
           reason: `designated run ${runId}`,
         });
-      } else if (task.state === "in_review" && isRework) {
+      } else if (task.state === "in_review" && isReplacement) {
         await transitionV2TaskLifecycle(lifecycle, {
           ...actor,
           project_id: input.project_id,
@@ -430,13 +492,12 @@ export class Phase4Coordinator {
           input.expires_at,
         ],
       );
-      // EXECUTION E10 — carry the project's real build/test/lint commands.
+      // Carry the project's real build/test/lint commands or its explicit
+      // committed-manifest source.
       //
-      // Absent facts produce an absent field, which lands the runner on its
-      // committed-manifest fallback and, failing that, on its fail-closed
-      // refusal. Dispatch is never blocked on this, and this never makes a run
-      // green: the only thing it can do is give the runner something real to
-      // execute where previously it had only an unresolvable policy ref.
+      // Exact commands remain highest precedence. A manifest fact is carried
+      // separately so the runner reads the full file at the tested commit and
+      // does not silently substitute its built-in hygiene-only default.
       const verification = await resolveProjectVerificationCommands(sql, input.project_id);
       const command = V2DispatchCommand.parse({
         schema_version: 2,
@@ -476,9 +537,13 @@ export class Phase4Coordinator {
         max_input_tokens: input.max_input_tokens,
         max_output_tokens: input.max_output_tokens,
         max_duration_seconds: input.max_duration_seconds,
+        execution_mode: row.execution_mode,
         verification_policy_ref: row.verification_policy_ref,
         ...(verification.commands.length > 0
           ? { verification_commands: verification.commands }
+          : {}),
+        ...(verification.repository_manifest
+          ? { repository_verification_manifest: ".norns/verification.json" as const }
           : {}),
         sandbox_policy_ref: input.sandbox_policy_ref,
         authorized_by: input.authorized_by,

@@ -96,6 +96,13 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
   let projectId: string;
   let pmAdapter: FakeAdapter;
   let reviewerAdapter: FakeAdapter;
+  let phase4: {
+    coordinator: Phase4Coordinator;
+    completion: Phase4CompletionService;
+    dispatch: Phase4DispatchRepository;
+    events: Phase4EventProcessor;
+    recovery: Phase4RecoveryMonitor;
+  };
 
   async function inject(
     method: "GET" | "POST",
@@ -246,9 +253,16 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
       phases: phaseWorkflow,
       strategies: strategyWorkflow,
     });
+    phase4 = {
+      coordinator: new Phase4Coordinator(transactions),
+      completion: new Phase4CompletionService(transactions),
+      dispatch: new Phase4DispatchRepository(transactions),
+      events: new Phase4EventProcessor(transactions),
+      recovery: new Phase4RecoveryMonitor(transactions),
+    };
     const phaseLaunch = new PhaseLaunchService(
       transactions,
-      new Phase4Coordinator(transactions),
+      phase4.coordinator,
       new RelationalTaskContextAssembler(transactions, new TaskContextStore(transactions), {
         baseUrl: "https://norns.example.com",
       }),
@@ -273,8 +287,10 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
       stores,
       users,
       projects,
+      phase4,
       planningRuns: { transactions, executionKickoff },
       phase5: { attention: new AttentionService(transactions) },
+      execution: { transactions, baseUrl: "https://norns.example.com" },
       integrationEnvironment: {
         ANTHROPIC_API_KEY: "test-anthropic",
         OPENAI_API_KEY: "test-openai",
@@ -282,6 +298,8 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
         // when they are allow-listed for the deployment; without this the
         // worker's buildStaffingProposal fails and staffing_proposal is null.
         NORNS_DEBATE_ALLOWED_MODELS:
+          "anthropic/claude-sonnet-5,anthropic/claude-opus-4-8,openai/gpt-5.6-terra",
+        NORNS_RUNNER_ALLOWED_MODELS:
           "anthropic/claude-sonnet-5,anthropic/claude-opus-4-8,openai/gpt-5.6-terra",
       },
       createPlanningAdapter: (provider: ProviderName): LlmAdapter =>
@@ -351,6 +369,646 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
     expect(approval.rows).toHaveLength(1);
     expect(approval.rows[0]?.actor_id).toBe(adminId);
     expect(new Date(approval.rows[0]?.approved_at ?? 0).toISOString()).toBe(decidedAt);
+  });
+
+  it("turns a generated failed-run retry decision into immutable attempt N+1", async () => {
+    await seedExecutionEnvironment();
+    const planningRunId = await createConvergedRun();
+    const approved = await inject(
+      "POST",
+      `/api/v2/projects/${projectId}/planning-runs/${planningRunId}/decision`,
+      { decision: "approve" },
+    );
+    expect(approved.statusCode).toBe(200);
+
+    const claimed = await phase4.dispatch.claim("decision-recovery-test", 30_000);
+    expect(claimed).not.toBeNull();
+    if (!claimed) throw new Error("expected the first attempt to be dispatched");
+    await phase4.dispatch.markDelivered(
+      claimed.job_id,
+      "decision-recovery-test",
+      "2026-07-25T19:00:00.000Z",
+    );
+    const event = (eventSeq: number, payload: Record<string, unknown>) => ({
+      protocol: 1 as const,
+      event_seq: eventSeq,
+      runner_id: RUNNER,
+      generation: claimed.command.runner_generation,
+      correlation_id: "failed-run-decision-test",
+      causation_id: claimed.command.command_id,
+      occurred_at: `2026-07-25T19:0${eventSeq}:00.000Z`,
+      payload,
+    });
+    await phase4.events.apply(
+      event(1, { kind: "run_status", run_id: claimed.run_id, status: "started" }) as never,
+    );
+    await phase4.events.apply(
+      event(2, {
+        kind: "run_status",
+        run_id: claimed.run_id,
+        status: "failed",
+        failure: {
+          stage: "runtime",
+          code: "runner_runtime_failed",
+          detail: "agent process exited before completing",
+        },
+      }) as never,
+    );
+    await phase4.recovery.scan(new Date("2026-07-25T19:10:00.000Z"));
+
+    const decision = await pg.query<{
+      id: string;
+      condition_fingerprint: string;
+      status: string;
+    }>(
+      `SELECT id, condition_fingerprint, status
+         FROM decision_points
+        WHERE scope_entity_id=$1 AND reason_class='failed_run'`,
+      [claimed.run_id],
+    );
+    const point = decision.rows[0];
+    expect(point).toMatchObject({ status: "open" });
+    if (!point) throw new Error("recovery monitor did not create a decision");
+    // A human may resolve the decision long after it was created. This
+    // timestamp remains historical evidence and must never become the next
+    // runner command's issued_at.
+    const historicalDecisionTime = "2026-07-25T19:10:00.000Z";
+
+    const decisionUrl = `/api/v2/projects/${projectId}/decision-points/${encodeURIComponent(point.id)}/resolve`;
+    const decisionBody = {
+      expected_condition_fingerprint: point.condition_fingerprint,
+      selected_option_id: "retry",
+      rationale: "The failed attempt made no external changes and is safe to retry.",
+      direction_target: "implementation_agent",
+      direction_text: "Retry from the verified repository head.",
+      idempotency_key: `resolve-${point.id}`,
+    };
+
+    // A recovery prerequisite failure must not consume the human decision.
+    // Replaying the same form key after the prerequisite is restored finishes
+    // the already-prepared retry instead of creating a duplicate attempt.
+    await pg.query("UPDATE repository_bindings SET status='disconnected' WHERE id=$1", [BINDING]);
+    const refused = await inject("POST", decisionUrl, decisionBody);
+    expect(refused.statusCode, JSON.stringify(refused.json())).toBe(409);
+    expect(refused.json()).toMatchObject({
+      error: "recovery_not_started",
+      retriable: true,
+      detail: expect.stringContaining("decision remains open"),
+    });
+    expect(
+      (
+        await pg.query<{ status: string }>("SELECT status FROM decision_points WHERE id=$1", [
+          point.id,
+        ])
+      ).rows[0],
+    ).toEqual({ status: "open" });
+    expect(
+      (
+        await pg.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM decision_records WHERE decision_point_id=$1",
+          [point.id],
+        )
+      ).rows[0]?.count,
+    ).toBe(0);
+
+    await pg.query("UPDATE repository_bindings SET status='connected' WHERE id=$1", [BINDING]);
+    const resolved = await inject("POST", decisionUrl, decisionBody);
+    expect(resolved.statusCode, JSON.stringify(resolved.json())).toBe(200);
+    expect(resolved.json()).toMatchObject({
+      decision_point_id: point.id,
+      recovery: {
+        action: "retry",
+        started: true,
+        prior_run_id: claimed.run_id,
+        attempt: 2,
+      },
+    });
+
+    const runs = await pg.query<{
+      id: string;
+      attempt: number;
+      is_designated: boolean;
+      superseded_by_run_id: string | null;
+    }>(
+      `SELECT id, attempt, is_designated, superseded_by_run_id
+         FROM agent_runs WHERE task_id=$1 ORDER BY attempt`,
+      [claimed.command.task_id],
+    );
+    expect(runs.rows).toHaveLength(2);
+    expect(runs.rows[0]).toMatchObject({
+      id: claimed.run_id,
+      attempt: 1,
+      is_designated: false,
+      superseded_by_run_id: runs.rows[1]?.id,
+    });
+    expect(runs.rows[1]).toMatchObject({ attempt: 2, is_designated: true });
+    const retryCommand = await pg.query<{
+      envelope: { issued_at: string; expires_at: string };
+    }>(
+      `SELECT command.envelope
+         FROM commands command
+         JOIN agent_runs run ON run.id = command.run_id
+        WHERE run.task_id = $1 AND run.attempt = 2`,
+      [claimed.command.task_id],
+    );
+    const retryEnvelope = retryCommand.rows[0]?.envelope;
+    expect(retryEnvelope).toBeDefined();
+    expect(Date.parse(retryEnvelope?.issued_at ?? "")).toBeGreaterThan(
+      Date.parse(historicalDecisionTime),
+    );
+    expect(
+      Date.parse(retryEnvelope?.expires_at ?? "") - Date.parse(retryEnvelope?.issued_at ?? ""),
+    ).toBe(5 * 60_000);
+    // This is the runner's expiry gate, asserted before it receives the
+    // command: a newly recovered attempt must still be live now.
+    expect(Date.parse(retryEnvelope?.expires_at ?? "")).toBeGreaterThan(Date.now());
+    expect(
+      (
+        await pg.query<{ status: string }>("SELECT status FROM decision_points WHERE id=$1", [
+          point.id,
+        ])
+      ).rows[0],
+    ).toEqual({ status: "resolved" });
+    expect(
+      (
+        await pg.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM decision_records WHERE decision_point_id=$1",
+          [point.id],
+        )
+      ).rows[0]?.count,
+    ).toBe(1);
+
+    const attention = await inject("GET", "/api/v2/attention");
+    expect(attention.statusCode).toBe(200);
+    expect(
+      (attention.json() as { items: Array<{ source_id: string }> }).items.some(
+        (item) => item.source_id === claimed.run_id,
+      ),
+    ).toBe(false);
+  });
+
+  it("quick change auto-approves and launches exactly one relational execution lineage", async () => {
+    await seedExecutionEnvironment();
+    pmAdapter.enqueue(plan(["api"]));
+    const created = await inject("POST", `/api/v2/projects/${projectId}/planning-runs`, {
+      objective: "Correct one small copy issue",
+      mode: "quick",
+      review_rounds: 0,
+      pm: { provider: "anthropic", model: "claude-sonnet-5" },
+      agent: { provider: "anthropic", model: "claude-sonnet-5" },
+    });
+    expect(created.statusCode).toBe(202);
+    const { planning_run_id: runId } = created.json() as { planning_run_id: string };
+
+    // No decision POST follows creation. Closing the tab at this point cannot
+    // strand the run: the worker owns approval and the durable kickoff.
+    const run = await pollUntil(runId, (candidate) => candidate.status === "approved");
+    expect(run).toMatchObject({
+      mode: "quick",
+      status: "approved",
+      pm: { provider: "anthropic", model: "claude-sonnet-5" },
+      agent: { provider: "anthropic", model: "claude-sonnet-5" },
+      decision: { decision: "approve", staffing: null },
+      execution: { started: true },
+    });
+    expect(reviewerAdapter.requests).toHaveLength(0);
+
+    // A stale browser approval is rejected and an explicit execution retry
+    // re-enters the idempotent saga. Neither can create a second lineage.
+    const staleApproval = await inject(
+      "POST",
+      `/api/v2/projects/${projectId}/planning-runs/${runId}/decision`,
+      { decision: "approve" },
+    );
+    expect(staleApproval.statusCode).toBe(409);
+    const retry = await inject(
+      "POST",
+      `/api/v2/projects/${projectId}/planning-runs/${runId}/execution`,
+      {},
+    );
+    expect(retry.statusCode).toBe(200);
+
+    const counts = await pg.query<{
+      planning_runs: number;
+      phases: number;
+      strategies: number;
+      tasks: number;
+      assignments: number;
+      approvals: number;
+      dispatches: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::int FROM planning_runs WHERE id = $1) AS planning_runs,
+         (SELECT count(*)::int FROM phases WHERE planning_run_id = $1) AS phases,
+         (SELECT count(*)::int FROM strategy_versions WHERE project_id = $2) AS strategies,
+         (SELECT count(*)::int FROM tasks WHERE project_id = $2) AS tasks,
+         (SELECT count(*)::int FROM agent_assignments WHERE project_id = $2) AS assignments,
+         (SELECT count(*)::int FROM approvals WHERE project_id = $2) AS approvals,
+         (SELECT count(*)::int FROM dispatch_jobs WHERE project_id = $2) AS dispatches`,
+      [runId, projectId],
+    );
+    expect(counts.rows[0]).toEqual({
+      planning_runs: 1,
+      phases: 1,
+      strategies: 1,
+      tasks: 1,
+      assignments: 1,
+      approvals: 1,
+      dispatches: 1,
+    });
+    const quickCommand = await pg.query<{
+      command_id: string;
+      run_id: string;
+      runner_id: string;
+      runner_generation: number;
+      phase_id: string;
+      task_id: string;
+      reviewer_agent_profile_id: string | null;
+      envelope: {
+        execution_mode?: string;
+        max_charge_usd: number;
+        provider: string;
+        model: string;
+        target_branch: string;
+      };
+      amount_usd: number | string;
+    }>(
+      `SELECT command.command_id, command.run_id, command.runner_id,
+              command.runner_generation, command.phase_id, command.task_id,
+              assignment.reviewer_agent_profile_id,
+              command.envelope, reservation.amount_usd
+         FROM commands command
+         JOIN phases phase ON phase.id = command.phase_id
+         JOIN agent_runs agent_run ON agent_run.id=command.run_id
+         JOIN agent_assignments assignment ON assignment.id=agent_run.assignment_id
+         JOIN budget_reservations reservation ON reservation.run_id = command.run_id
+        WHERE phase.planning_run_id = $1`,
+      [runId],
+    );
+    expect(quickCommand.rows[0]?.envelope.execution_mode).toBe("quick");
+    expect(quickCommand.rows[0]?.envelope.max_charge_usd).toBe(2);
+    expect(Number(quickCommand.rows[0]?.amount_usd)).toBe(2);
+    expect(quickCommand.rows[0]?.reviewer_agent_profile_id).toBeNull();
+
+    const command = quickCommand.rows[0];
+    if (!command) throw new Error("Quick Change did not create a command");
+    const claimed = await phase4.dispatch.claim("quick-terminal-dispatcher", 30_000);
+    expect(claimed?.command.command_id).toBe(command.command_id);
+    await phase4.dispatch.markDelivered(
+      claimed?.job_id ?? "",
+      "quick-terminal-dispatcher",
+      "2026-07-25T16:00:00.000Z",
+    );
+    const commit = "d".repeat(40);
+    const apply = (
+      eventSeq: number,
+      payload: Record<string, unknown>,
+      occurredAt = new Date(Date.UTC(2026, 6, 25, 16, eventSeq)).toISOString(),
+    ) =>
+      phase4.events.apply({
+        protocol: 1,
+        event_seq: eventSeq,
+        runner_id: command.runner_id,
+        generation: command.runner_generation,
+        correlation_id: "quick-terminal-correlation",
+        causation_id: command.command_id,
+        occurred_at: occurredAt,
+        payload,
+      } as never);
+    await apply(1, {
+      kind: "knowledge_registration",
+      run_id: command.run_id,
+      provider: command.envelope.provider,
+      model: command.envelope.model,
+      branch_or_workspace: command.envelope.target_branch,
+      token_budget: 14_000,
+    });
+    await apply(2, { kind: "run_status", run_id: command.run_id, status: "started" });
+    await apply(3, {
+      kind: "verification_result",
+      node_id: command.task_id,
+      commit_sha: commit,
+      passed: true,
+      output_digest: "quick-verification-output",
+      command_results: [
+        {
+          name: "test",
+          command: ["pnpm", "test"],
+          exit_code: 0,
+          passed: true,
+          output: "passed",
+        },
+      ],
+    });
+    await apply(4, {
+      kind: "run_published",
+      run_id: command.run_id,
+      outcome: "pushed",
+      branch: command.envelope.target_branch,
+      commit_sha: commit,
+      remote: "origin",
+      pull_request_url: null,
+      pull_request_note: "Quick Change was pushed directly.",
+    });
+    await apply(5, {
+      kind: "knowledge_delta",
+      run_id: command.run_id,
+      changes: [
+        {
+          kind: "confirmed_assumption",
+          summary: "Quick Change completed",
+          detail: "The requested small change was implemented and verified.",
+          affected_package_ids: [],
+        },
+      ],
+      recommended_package_updates: [],
+    });
+    const terminalOccurredAt = "2026-07-25T16:07:18.686Z";
+    await apply(
+      6,
+      {
+        kind: "knowledge_handoff",
+        run_id: command.run_id,
+        status: "completed",
+        summary: `Verified implementation published at commit ${commit}.`,
+        deliverables: [`Verified commit ${commit}`],
+        files_changed: ["README.md"],
+        interfaces_used: [],
+        interfaces_changed: [],
+        tests_added: [],
+        test_results: ["pnpm test passed"],
+        acceptance_criteria: [],
+        known_limitations: [],
+        open_issues: [],
+        dependencies_created: [],
+        recommended_package_updates: [],
+        recommended_follow_up_tasks: [],
+        branch: command.envelope.target_branch,
+        commit,
+        artifacts: [],
+      },
+      terminalOccurredAt,
+    );
+    const durableBeforeCompletion = await pg.query<{
+      task_packages: number;
+      manifests: number;
+      registrations: number;
+      deltas: number;
+      handoffs: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::int FROM task_knowledge_packages
+           WHERE task_id=$1 AND status='approved') AS task_packages,
+         (SELECT count(*)::int FROM task_context_manifests
+           WHERE task_id=$1) AS manifests,
+         (SELECT count(*)::int FROM agent_execution_registrations
+           WHERE run_id=$2) AS registrations,
+         (SELECT count(*)::int FROM knowledge_deltas
+           WHERE run_id=$2) AS deltas,
+         (SELECT count(*)::int FROM agent_handoffs
+           WHERE run_id=$2) AS handoffs`,
+      [command.task_id, command.run_id],
+    );
+    expect(durableBeforeCompletion.rows[0]).toEqual({
+      task_packages: 1,
+      manifests: 1,
+      registrations: 1,
+      deltas: 1,
+      handoffs: 1,
+    });
+    await pg.query("UPDATE agent_runs SET updated_at='2026-07-25T15:00:00.000Z' WHERE id=$1", [
+      command.run_id,
+    ]);
+    await expect(
+      phase4.recovery.scan(new Date("2026-07-25T16:20:00.000Z"), 60_000),
+    ).resolves.toEqual({
+      decision_points: 1,
+      repaired_reservations: [],
+    });
+    expect(
+      (
+        await pg.query<{ status: string }>(
+          `SELECT status FROM decision_points
+            WHERE scope_entity_id=$1 AND reason_class='stuck_run'`,
+          [command.run_id],
+        )
+      ).rows[0],
+    ).toEqual({ status: "open" });
+    // Reproduce the live restart/reorder: the later command acknowledgement
+    // reached durable storage while the lower terminal status was still
+    // buffered. Handoff and completion also share the runner timestamp, so
+    // both evaluate the same deterministic completion-gate id.
+    await apply(8, {
+      kind: "command_ack",
+      command_id: command.command_id,
+      state: "succeeded",
+      detail: "",
+    });
+    await expect(
+      apply(
+        7,
+        { kind: "run_status", run_id: command.run_id, status: "completed" },
+        terminalOccurredAt,
+      ),
+    ).resolves.toEqual({ duplicate: false });
+    await expect(
+      apply(
+        7,
+        { kind: "run_status", run_id: command.run_id, status: "completed" },
+        terminalOccurredAt,
+      ),
+    ).resolves.toEqual({ duplicate: true });
+    await expect(
+      apply(8, {
+        kind: "command_ack",
+        command_id: command.command_id,
+        state: "succeeded",
+        detail: "",
+      }),
+    ).resolves.toEqual({ duplicate: true });
+
+    const completed = await pg.query<{
+      task_state: string;
+      phase_status: string;
+      objective_status: string;
+      assignment_status: string;
+      run_state: string;
+      task_packages: number;
+      manifests: number;
+      registrations: number;
+      deltas: number;
+      handoffs: number;
+      reviews: number;
+      gates: number;
+      phase_gate_passed: boolean;
+      completion_events: number;
+      command_status: string;
+      decision_status: string;
+      delta_status: string;
+      delta_note: string;
+      delta_audits: number;
+      delta_evidence: number;
+      gate_passed: boolean;
+    }>(
+      `SELECT task.state AS task_state, phase.status AS phase_status,
+              objective.status AS objective_status,
+              assignment.status AS assignment_status, agent_run.state AS run_state,
+              (SELECT count(*)::int FROM task_knowledge_packages
+                WHERE task_id=task.id AND status='approved') AS task_packages,
+              (SELECT count(*)::int FROM task_context_manifests
+                WHERE task_id=task.id) AS manifests,
+              (SELECT count(*)::int FROM agent_execution_registrations
+                WHERE run_id=agent_run.id AND status='completed') AS registrations,
+              (SELECT count(*)::int FROM knowledge_deltas
+                WHERE run_id=agent_run.id) AS deltas,
+              (SELECT count(*)::int FROM agent_handoffs
+                WHERE run_id=agent_run.id AND status='completed') AS handoffs,
+              (SELECT count(*)::int FROM agent_reviews
+                WHERE run_id=agent_run.id) AS reviews,
+              (SELECT count(*)::int FROM knowledge_gate_evaluations
+                WHERE task_id=task.id) AS gates,
+              (SELECT passed FROM knowledge_gate_evaluations
+                WHERE phase_id=phase.id AND scope_type='phase'
+                ORDER BY evaluated_at DESC LIMIT 1) AS phase_gate_passed,
+              (SELECT count(*)::int FROM domain_events
+                WHERE stream_type='task' AND stream_id=task.id
+                  AND event_type='task_state_transitioned'
+                  AND payload->>'to'='completed') AS completion_events,
+              (SELECT status FROM commands
+                WHERE run_id=agent_run.id) AS command_status,
+              (SELECT status FROM decision_points
+                WHERE scope_entity_id=agent_run.id AND reason_class='stuck_run'
+                ORDER BY created_at DESC LIMIT 1) AS decision_status,
+              (SELECT status FROM knowledge_deltas
+                WHERE run_id=agent_run.id) AS delta_status,
+              (SELECT disposition_note FROM knowledge_deltas
+                WHERE run_id=agent_run.id) AS delta_note,
+              (SELECT count(*)::int FROM knowledge_audit_log
+                WHERE subject_type='knowledge_delta'
+                  AND subject_id=(SELECT id FROM knowledge_deltas
+                    WHERE run_id=agent_run.id)
+                  AND action='knowledge.delta.accepted') AS delta_audits,
+              (SELECT count(*)::int
+                 FROM jsonb_array_elements(task.completion_evidence) item
+                WHERE item->>'artifact_id'=(SELECT id FROM knowledge_deltas
+                  WHERE run_id=agent_run.id)) AS delta_evidence,
+              (SELECT passed FROM knowledge_gate_evaluations
+                WHERE task_id=task.id ORDER BY evaluated_at DESC LIMIT 1) AS gate_passed
+         FROM tasks task
+         JOIN phases phase ON phase.id=task.phase_id
+         JOIN objectives objective ON objective.id=task.objective_id
+         JOIN agent_assignments assignment ON assignment.id=task.designated_assignment_id
+         JOIN agent_runs agent_run ON agent_run.id=task.designated_run_id
+        WHERE task.id=$1`,
+      [command.task_id],
+    );
+    expect(completed.rows[0]).toEqual({
+      task_state: "completed",
+      phase_status: "completed",
+      objective_status: "completed",
+      assignment_status: "completed",
+      run_state: "succeeded",
+      task_packages: 1,
+      manifests: 1,
+      registrations: 1,
+      deltas: 1,
+      handoffs: 1,
+      reviews: 0,
+      gates: 1,
+      phase_gate_passed: true,
+      completion_events: 1,
+      command_status: "succeeded",
+      decision_status: "dismissed",
+      delta_status: "accepted",
+      delta_note:
+        "Automatically accepted from successful no-review Quick Change after exact-commit verification, publication, and completed handoff.",
+      delta_audits: 1,
+      delta_evidence: 1,
+      gate_passed: true,
+    });
+    const lifecycle = await pg.query<{ to_state: string }>(
+      `SELECT payload->>'to' AS to_state
+         FROM domain_events
+        WHERE stream_type='task' AND stream_id=$1
+          AND event_type='task_state_transitioned'
+        ORDER BY stream_version`,
+      [command.task_id],
+    );
+    expect(lifecycle.rows.map((row) => row.to_state)).toEqual(
+      expect.arrayContaining(["verifying", "in_review", "completed"]),
+    );
+
+    // Simulate the truthful-state residue left by an older process: execution
+    // is already complete, but its Quick delta is proposed and absent from
+    // closure evidence. The recovery monitor must converge this without a
+    // human decision and without duplicating the evidence it appends.
+    const delta = await pg.query<{ id: string }>(
+      "SELECT id FROM knowledge_deltas WHERE run_id=$1",
+      [command.run_id],
+    );
+    const deltaId = delta.rows[0]?.id;
+    if (!deltaId) throw new Error("Quick Change did not persist a knowledge delta");
+    await pg.query(
+      `UPDATE knowledge_deltas
+          SET status='proposed', disposition_note=NULL,
+              dispositioned_by_actor_type=NULL, dispositioned_by_actor_id=NULL,
+              dispositioned_at=NULL
+        WHERE id=$1`,
+      [deltaId],
+    );
+    for (const target of [
+      { table: "tasks", idColumn: "id", id: command.task_id, field: "completion_evidence" },
+      {
+        table: "objectives",
+        idColumn: "phase_id",
+        id: command.phase_id,
+        field: "completion_evidence",
+      },
+      { table: "phases", idColumn: "id", id: command.phase_id, field: "closure_evidence" },
+    ] as const) {
+      await pg.query(
+        `UPDATE ${target.table}
+            SET ${target.field}=(
+              SELECT COALESCE(jsonb_agg(item), '[]'::jsonb)
+                FROM jsonb_array_elements(${target.field}) item
+               WHERE item->>'artifact_id' <> $2
+            )
+          WHERE ${target.idColumn}=$1`,
+        [target.id, deltaId],
+      );
+    }
+    await phase4.recovery.scan(new Date("2026-07-25T16:30:00.000Z"));
+    await phase4.recovery.scan(new Date("2026-07-25T16:31:00.000Z"));
+    const repaired = await pg.query<{
+      delta_status: string;
+      task_evidence: number;
+      objective_evidence: number;
+      phase_evidence: number;
+      phase_gate_passed: boolean;
+    }>(
+      `SELECT
+         (SELECT status FROM knowledge_deltas WHERE id=$1) AS delta_status,
+         (SELECT count(*)::int FROM tasks task,
+            jsonb_array_elements(task.completion_evidence) item
+           WHERE task.id=$2 AND item->>'artifact_id'=$1) AS task_evidence,
+         (SELECT count(*)::int FROM objectives objective,
+            jsonb_array_elements(objective.completion_evidence) item
+           WHERE objective.phase_id=$3 AND item->>'artifact_id'=$1) AS objective_evidence,
+         (SELECT count(*)::int FROM phases phase,
+            jsonb_array_elements(phase.closure_evidence) item
+           WHERE phase.id=$3 AND item->>'artifact_id'=$1) AS phase_evidence,
+         (SELECT passed FROM knowledge_gate_evaluations
+           WHERE phase_id=$3 AND scope_type='phase'
+           ORDER BY evaluated_at DESC LIMIT 1) AS phase_gate_passed`,
+      [deltaId, command.task_id, command.phase_id],
+    );
+    expect(repaired.rows[0]).toEqual({
+      delta_status: "accepted",
+      task_evidence: 1,
+      objective_evidence: 1,
+      phase_evidence: 1,
+      phase_gate_passed: true,
+    });
   });
 
   it("applies the decision's staffing overrides to the created assignments", async () => {

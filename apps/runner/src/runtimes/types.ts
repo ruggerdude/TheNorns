@@ -34,6 +34,14 @@ export interface RuntimeRunRequest {
   worktreePath: string;
   prompt: string;
   timeoutMs?: number;
+  /** Execution-loop policy selected by the approved planning path. */
+  executionMode?: "quick" | "planned";
+  /**
+   * The dispatch's already-authorized dollar ceiling. Agentic SDKs that can
+   * enforce a local budget should use this in addition to the gateway's
+   * reservation check; the two guards fail independently.
+   */
+  maxBudgetUsd?: number;
   signal?: AbortSignal;
   onLog?: (chunk: string) => void;
   /**
@@ -64,6 +72,8 @@ export interface RuntimeRunResult {
   usage: RuntimeUsage;
   /** session/thread id when the runtime supports resumption */
   sessionId?: string;
+  /** Provider/SDK-native reason the agent loop stopped, when reported. */
+  stopReason?: string;
 }
 
 export interface CodingRuntime {

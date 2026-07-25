@@ -25,6 +25,12 @@ export type PlanningRunStatus =
 
 /** PHASE TAB P1: which implementation providers allocation staffing may use. */
 export type WorkerProviderSelection = "anthropic" | "openai" | "both";
+export type PlanningRunMode = "planned" | "quick";
+
+export interface PlanningParticipantSelection {
+  provider: ProviderName;
+  model: string;
+}
 
 /** Statuses a human decision may be recorded against. */
 export const DECIDABLE_PLANNING_RUN_STATUSES: readonly PlanningRunStatus[] = [
@@ -60,6 +66,12 @@ export interface PlanningRunResultDto {
   staffing_proposal: PlanningStaffingProposalDto | null;
 }
 
+/** Durable result of the automatic quick-change execution kickoff. */
+export interface PlanningRunExecutionDto {
+  started: boolean;
+  detail: string;
+}
+
 /** PHASE TAB P1: an approved-staffing override for one plan/graph node. */
 export interface ApprovedStaffingEntryDto {
   node_id: string;
@@ -78,6 +90,9 @@ export interface PlanningRunDecisionDto {
 export interface PlanningRunDto {
   id: string;
   project_id: string;
+  mode: PlanningRunMode;
+  pm: PlanningParticipantSelection | null;
+  agent: PlanningParticipantSelection | null;
   status: PlanningRunStatus;
   round: number;
   max_rounds: number;
@@ -89,6 +104,11 @@ export interface PlanningRunDto {
   worker_providers: WorkerProviderSelection;
   /** PHASE TAB P1: latest human decision, or null while none is recorded. */
   decision: PlanningRunDecisionDto | null;
+  /**
+   * Quick changes approve and start in the worker. Keeping the kickoff report
+   * on the run makes the outcome recoverable after refresh or tab close.
+   */
+  execution: PlanningRunExecutionDto | null;
   objective: string;
   transcript: PlanningRunTranscriptEntryDto[];
   result: PlanningRunResultDto | null;
@@ -123,11 +143,17 @@ export class PlanningRunDecisionError extends Error {
 interface PlanningRunRow {
   id: string;
   project_id: string;
+  mode: PlanningRunMode;
+  pm_provider: ProviderName | null;
+  pm_model: string | null;
+  agent_provider: ProviderName | null;
+  agent_model: string | null;
   status: PlanningRunStatus;
   round: number;
   max_rounds: number;
   worker_providers: WorkerProviderSelection;
   decision: PlanningRunDecisionDto | string | null;
+  quick_kickoff_result: PlanningRunExecutionDto | string | null;
   objective: string;
   transcript: PlanningRunTranscriptEntryDto[] | string;
   result: PlanningRunResultDto | string | null;
@@ -154,14 +180,23 @@ function rowToDto(row: PlanningRunRow): PlanningRunDto {
   return {
     id: row.id,
     project_id: row.project_id,
+    mode: row.mode ?? "planned",
+    pm: row.pm_provider && row.pm_model ? { provider: row.pm_provider, model: row.pm_model } : null,
+    agent:
+      row.agent_provider && row.agent_model
+        ? { provider: row.agent_provider, model: row.agent_model }
+        : null,
     status: row.status,
     round: row.round,
     max_rounds: row.max_rounds,
-    review_rounds_total: row.max_rounds,
+    review_rounds_total: row.mode === "quick" ? 0 : row.max_rounds,
     rounds_completed: row.round,
     worker_providers: row.worker_providers,
     decision: row.decision
       ? jsonField(row.decision, null as unknown as PlanningRunDecisionDto)
+      : null,
+    execution: row.quick_kickoff_result
+      ? jsonField(row.quick_kickoff_result, null as unknown as PlanningRunExecutionDto)
       : null,
     objective: row.objective,
     transcript: jsonField(row.transcript, []),
@@ -176,6 +211,15 @@ function rowToDto(row: PlanningRunRow): PlanningRunDto {
 export interface CreatePlanningRunInput {
   objective: string;
   maxRounds?: number;
+  mode?: PlanningRunMode;
+  /**
+   * Authenticated human initiating the run. Required for quick changes
+   * because their approval and strategy materialization happen
+   * autonomously, after the request has returned.
+   */
+  requestedBy?: string;
+  pm?: PlanningParticipantSelection;
+  agent?: PlanningParticipantSelection;
   /**
    * PHASE TAB P1: which implementation providers the allocation
    * recommendation may staff phases with. Defaults to "both".
@@ -257,6 +301,9 @@ export class PlanningRunService {
         throw new PlanningRunConflictError("project_not_found", `unknown project "${projectId}"`);
       }
       const maxRounds = input.maxRounds ?? (await this.defaultMaxRoundsFor(tx, projectId));
+      if (input.mode === "quick" && !input.requestedBy) {
+        throw new Error("quick changes require the authenticated requesting user");
+      }
       const id = newId("planning_run");
       const createdAt = this.now().toISOString();
       // FRONT DOOR P4: attachment_ids default to '[]' via the column default;
@@ -266,8 +313,12 @@ export class PlanningRunService {
         `INSERT INTO planning_runs (
            id, project_id, status, round, max_rounds, objective, transcript,
            result, total_cost_usd, error, created_at, updated_at, attachment_ids,
-           worker_providers
-         ) VALUES ($1,$2,'queued',0,$3,$4,'[]'::jsonb,NULL,0,NULL,$5,$5,$6::jsonb,$7)`,
+           worker_providers, mode, requested_by, pm_provider, pm_model,
+           agent_provider, agent_model
+         ) VALUES (
+           $1,$2,'queued',0,$3,$4,'[]'::jsonb,NULL,0,NULL,$5,$5,$6::jsonb,$7,
+           $8,$9,$10,$11,$12,$13
+         )`,
         [
           id,
           projectId,
@@ -276,6 +327,12 @@ export class PlanningRunService {
           createdAt,
           attachmentIds,
           input.workerProviders ?? "both",
+          input.mode ?? "planned",
+          input.requestedBy ?? null,
+          input.pm?.provider ?? null,
+          input.pm?.model ?? null,
+          input.agent?.provider ?? null,
+          input.agent?.model ?? null,
         ],
       );
       const row = await this.loadRow(tx, projectId, id);

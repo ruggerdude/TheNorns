@@ -5,6 +5,7 @@ import {
   CommandEnvelope,
   EventEnvelope,
   ReconcileRequest,
+  ReconcileResponse,
   TERMINAL_COMMAND_STATES,
   canCommandTransition,
   isCommandExpired,
@@ -20,6 +21,22 @@ describe("runner capability negotiation", () => {
       recently_executed_command_ids: [],
     });
     expect(parsed.capabilities).toEqual([]);
+  });
+
+  it("keeps knowledge transport off for legacy servers and accepts explicit negotiation", () => {
+    const legacy = ReconcileResponse.parse({
+      protocol: 1,
+      ack_event_seq: 0,
+      generation: 1,
+      resend_commands: [],
+    });
+    expect(legacy.capabilities).toBeUndefined();
+    expect(
+      ReconcileResponse.parse({
+        ...legacy,
+        capabilities: ["knowledge_transport"],
+      }).capabilities,
+    ).toEqual(["knowledge_transport"]);
   });
 });
 
@@ -130,5 +147,110 @@ describe("event envelope", () => {
     };
     expect(EventEnvelope.safeParse(event).success).toBe(true);
     expect(EventEnvelope.safeParse({ ...event, event_seq: 0 }).success).toBe(false);
+  });
+
+  it("accepts structured runner failure diagnostics without breaking legacy status events", () => {
+    const base = {
+      protocol: 1,
+      event_seq: 1,
+      runner_id: "runner-1",
+      generation: 3,
+      correlation_id: "corr-001",
+      causation_id: "cmd-001",
+      occurred_at: "2026-07-14T00:00:01.000Z",
+    };
+    expect(
+      EventEnvelope.safeParse({
+        ...base,
+        payload: { kind: "run_status", run_id: "run-1", status: "failed" },
+      }).success,
+    ).toBe(true);
+    expect(
+      EventEnvelope.safeParse({
+        ...base,
+        payload: {
+          kind: "run_status",
+          run_id: "run-1",
+          status: "failed",
+          failure: {
+            stage: "scratch_prepare",
+            code: "runner_scratch_prepare_failed",
+            detail: "scratch root was unavailable",
+          },
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      EventEnvelope.safeParse({
+        ...base,
+        payload: {
+          kind: "run_status",
+          run_id: "run-1",
+          status: "failed",
+          failure: { stage: "", code: "runner_failed", detail: "missing stage" },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts bounded structured runtime stop metadata", () => {
+    const event = {
+      protocol: 1,
+      event_seq: 7,
+      runner_id: "runner-1",
+      generation: 3,
+      correlation_id: "corr-001",
+      causation_id: "cmd-001",
+      occurred_at: "2026-07-14T00:00:01.000Z",
+      payload: {
+        kind: "runtime_result",
+        run_id: "run-1",
+        runtime: "claude-code",
+        outcome: "completed",
+        session_id: "claude-session-123",
+        stop_reason: "permission_denied:Edit,Bash",
+        detail: "SDK permission denied for Edit, Bash",
+      },
+    };
+    expect(EventEnvelope.safeParse(event).success).toBe(true);
+    expect(
+      EventEnvelope.safeParse({
+        ...event,
+        payload: { ...event.payload, detail: "x".repeat(4_001) },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts bounded structured knowledge events and rejects oversized durable content", () => {
+    const base = {
+      protocol: 1,
+      event_seq: 2,
+      runner_id: "runner-1",
+      generation: 3,
+      correlation_id: "corr-001",
+      causation_id: "cmd-001",
+      occurred_at: "2026-07-14T00:00:02.000Z",
+    };
+    const heartbeat = {
+      kind: "knowledge_heartbeat",
+      run_id: "run-1",
+      status: "working",
+      completed_since_last_update: ["context loaded"],
+      currently_working_on: ["implementation"],
+      findings: [],
+      blockers: [],
+      decisions_needed: [],
+      files_changed: ["src/index.ts"],
+      tests: "not run yet",
+      estimated_remaining_work: "moderate",
+      risk_level: "green",
+    };
+    expect(EventEnvelope.safeParse({ ...base, payload: heartbeat }).success).toBe(true);
+    expect(
+      EventEnvelope.safeParse({
+        ...base,
+        payload: { ...heartbeat, findings: ["x".repeat(4_001)] },
+      }).success,
+    ).toBe(false);
   });
 });

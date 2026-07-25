@@ -26,6 +26,7 @@ import {
   PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME,
   PLANNING_RUNS_MIGRATION_NAME,
   QC_COMMUNICATION_MIGRATION_NAME,
+  QUICK_CHANGES_MIGRATION_NAME,
   RUN_PUBLICATION_MIGRATION_NAME,
   TASK_CONTEXT_MIGRATION_NAME,
   type V2MigrationDatabase,
@@ -236,6 +237,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       { name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME, applied: false },
       // PHASE TAB P1 (number 0025 assigned at integration).
       { name: PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME, applied: false },
+      { name: QUICK_CHANGES_MIGRATION_NAME, applied: false },
       { name: KNOWLEDGE_PACKAGES_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
@@ -272,6 +274,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
       // Phase-tab workflow migrations remain in numeric order.
       PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME,
+      QUICK_CHANGES_MIGRATION_NAME,
       KNOWLEDGE_PACKAGES_MIGRATION_NAME,
     ]);
   });

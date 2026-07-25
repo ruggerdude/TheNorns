@@ -9,10 +9,11 @@
 //     token-scoping request body is asserted for real);
 //   * the model, at the adapter-factory seam (`FakeAdapter`), which still
 //     runs the real structured-output schema validation.
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
 import { FakeAdapter } from "@norns/adapters";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveProjectVerificationCommands } from "../src/coordinator/verificationCommandSource.js";
 import {
   GitHubIntegrationService,
   githubIntegrationConfigFromEnvironment,
@@ -51,7 +52,8 @@ const b64 = (value: string): string => Buffer.from(value, "utf8").toString("base
 
 const FILE_CONTENT: Record<string, string> = {
   "README.md": "# Acme App\nA small demo web service.",
-  "package.json": '{ "name": "acme-app", "scripts": { "test": "vitest run" } }',
+  "package.json":
+    '{ "name": "acme-app", "scripts": { "build": "tsc", "test": "vitest run", "lint": "biome check ." } }',
   "src/index.ts": "export const main = () => 42;",
 };
 
@@ -77,6 +79,7 @@ describe.sequential("POLISH P3: repository analysis", () => {
   let ingestion: RepositoryIngestionService;
   let tokenMintBodies: Array<Record<string, unknown>>;
   let http: ReturnType<typeof vi.fn>;
+  let fileContent: Record<string, string>;
 
   beforeEach(async () => {
     pg = new PGlite();
@@ -99,6 +102,7 @@ describe.sequential("POLISH P3: repository analysis", () => {
     transactions = new PGliteTransactionRunner(pg);
     ingestion = new RepositoryIngestionService(transactions);
     tokenMintBodies = [];
+    fileContent = { ...FILE_CONTENT };
 
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const config = githubIntegrationConfigFromEnvironment(
@@ -134,6 +138,9 @@ describe.sequential("POLISH P3: repository analysis", () => {
         return json({
           truncated: false,
           tree: [
+            ...(fileContent[".norns/verification.json"] !== undefined
+              ? [{ path: ".norns/verification.json", type: "blob", size: 200 }]
+              : []),
             { path: "README.md", type: "blob", size: 40 },
             { path: "package.json", type: "blob", size: 60 },
             { path: "src/index.ts", type: "blob", size: 30 },
@@ -151,7 +158,7 @@ describe.sequential("POLISH P3: repository analysis", () => {
           .split("/")
           .map((segment) => decodeURIComponent(segment))
           .join("/");
-        const content = FILE_CONTENT[path];
+        const content = fileContent[path];
         if (content === undefined) return json({ message: "Not Found" }, 404);
         return json({ type: "file", encoding: "base64", content: b64(content) });
       }
@@ -301,15 +308,27 @@ describe.sequential("POLISH P3: repository analysis", () => {
       status: "active",
       architectures: 1,
       artifacts: 1,
-      // 2 facts + 1 constraint + 1 architecture summary; no directives — a
-      // model inference must never enter memory auto-approved.
-      memories: 4,
+      // 1 descriptive model fact + 3 deterministically derived command facts
+      // + 1 constraint + 1 architecture summary; no directives.
+      memories: 6,
       binding: bindingId,
     });
     const approved = await pg.query<{ count: number }>(
       "SELECT count(*)::int AS count FROM project_memory_entries WHERE approved_by_human",
     );
     expect(approved.rows[0]?.count).toBe(0);
+    const commandFacts = await pg.query<{ content: string }>(
+      `SELECT content FROM project_memory_entries
+       WHERE category='repository_fact'
+         AND split_part(content, ':', 1) IN ('build_command','test_command','lint_command')
+         AND status='active'
+       ORDER BY content`,
+    );
+    expect(commandFacts.rows.map((row) => row.content)).toEqual([
+      "build_command: npm run build",
+      "lint_command: npm run lint",
+      "test_command: npm run test",
+    ]);
 
     // The resume payload now carries the recorded architecture and moves the
     // recommendation past "Analyze the repository".
@@ -329,10 +348,93 @@ describe.sequential("POLISH P3: repository analysis", () => {
     });
 
     // Replay: analyzing the same head again is idempotent, not a duplicate.
-    adapter.enqueue(MODEL_OUTPUT);
     const replay = await post();
     expect(replay.statusCode).toBe(200);
-    expect(replay.json()).toMatchObject({ architecture_revision: 1, replayed: true });
+    expect(replay.json()).toMatchObject({
+      architecture_revision: 1,
+      replayed: true,
+      model: { provider: "deterministic", model: "repository-inspection" },
+    });
+    expect(adapter.requests).toHaveLength(1);
+  });
+
+  it("backfills deterministic command facts on an already-ingested revision without rerunning the model", async () => {
+    fileContent[".norns/verification.json"] = JSON.stringify({
+      commands: [
+        { name: "test", command: ["pnpm", "test"] },
+        { name: "git-hygiene", command: ["git", "diff-tree", "--check", "--root", "HEAD"] },
+      ],
+    });
+    const bindingId = await createGitHubBinding();
+    const document = "# Architecture\n\nRecorded by the previous server.";
+    await ingestion.ingest({
+      project_id: "project-1",
+      repository_binding_id: bindingId,
+      repository_revision: HEAD_SHA,
+      architecture: {
+        title: "Existing architecture",
+        summary: "This revision was analyzed before deterministic command discovery.",
+        artifact: {
+          storage_ref: `artifact://project-1/architecture/${HEAD_SHA}`,
+          content_hash: createHash("sha256").update(document).digest("hex"),
+          byte_size: Buffer.byteLength(document),
+          media_type: "text/markdown",
+        },
+      },
+      repository_facts: [
+        { key: "language", value: "TypeScript", confidence: 1 },
+        // An older model-authored executable fact must not remain authoritative.
+        { key: "test_command", value: "vitest run", confidence: 0.5 },
+      ],
+      constraints: [],
+      directives: [],
+      assignment_policy_ref: "assignment-default",
+      verification_policy_ref: "verification-default",
+      budget_policy_ref: "budget-default",
+      created_by: { actor_type: "human", actor_id: "admin-1" },
+    });
+
+    const repaired = await post();
+    expect(repaired.statusCode).toBe(200);
+    expect(repaired.json()).toMatchObject({
+      architecture_revision: 1,
+      replayed: true,
+      title: "Existing architecture",
+      model: { provider: "deterministic", model: "repository-inspection" },
+    });
+    expect(adapter.requests).toHaveLength(0);
+
+    const policyFacts = await pg.query<{ content: string; status: string }>(
+      `SELECT content, status FROM project_memory_entries
+       WHERE category='repository_fact'
+         AND split_part(content, ':', 1) IN
+             ('build_command','test_command','lint_command','verification_manifest')
+       ORDER BY content`,
+    );
+    expect(policyFacts.rows).toEqual([
+      { content: "test_command: vitest run", status: "obsolete" },
+      { content: "verification_manifest: .norns/verification.json", status: "active" },
+    ]);
+    await transactions.transaction(async (sql) => {
+      await expect(resolveProjectVerificationCommands(sql, "project-1")).resolves.toEqual({
+        // Empty is intentional: the runner must fall back to the full
+        // committed manifest, including its custom git-hygiene command.
+        commands: [],
+        repository_manifest: true,
+        rejected: [],
+      });
+    });
+
+    const replay = await post();
+    expect(replay.statusCode).toBe(200);
+    const active = await pg.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM project_memory_entries
+       WHERE category='repository_fact' AND status='active'
+         AND split_part(content, ':', 1) IN
+             ('build_command','test_command','lint_command','verification_manifest')`,
+    );
+    expect(active.rows[0]?.count).toBe(1);
+    expect(adapter.requests).toHaveLength(0);
   });
 
   it("refuses honestly when the project has no repository", async () => {
@@ -469,6 +571,7 @@ describe.sequential("POLISH P3: repository analysis", () => {
   });
 
   it("bounds the key-file selection deterministically", () => {
+    expect(keyFileScore(".norns/verification.json")).toBe(-1);
     expect(keyFileScore("README.md")).toBe(0);
     expect(keyFileScore("package.json")).toBe(1);
     expect(keyFileScore("docs/README.md")).toBe(10);

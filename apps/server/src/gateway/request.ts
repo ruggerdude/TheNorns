@@ -19,6 +19,26 @@
 import { MAX_INFERENCE_OUTPUT_TOKENS } from "@norns/contracts";
 import type { GatewayProvider } from "./usage.js";
 
+/**
+ * Fastify's request-body ceiling for the provider-native gateway.
+ *
+ * Keep this explicit and shared with the budget policy: the conservative
+ * input-token quote is derived from raw body bytes, so silently changing the
+ * HTTP limit can otherwise make a previously sufficient run reservation fail
+ * before its first model call.
+ */
+export const GATEWAY_REQUEST_BODY_LIMIT_BYTES = 1_048_576;
+
+/**
+ * The installed Claude Code SDK's default `max_tokens` for Sonnet 5.
+ *
+ * This is the value the provider-native request actually declares, not the
+ * smaller completion-proxy default. It is intentionally named at the SDK/model
+ * boundary so a future SDK/model-limit change has one budget assertion to
+ * update.
+ */
+export const CLAUDE_CODE_SONNET_5_MAX_OUTPUT_TOKENS = 64_000;
+
 export interface InspectedGatewayRequest {
   model: string;
   /** What the caller declared it may generate — the hold's output ceiling. */

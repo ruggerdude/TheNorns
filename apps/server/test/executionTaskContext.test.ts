@@ -252,6 +252,12 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
     expect(prompt).toContain("Assemble task context");
     expect(prompt).toContain("build is green"); // acceptance criterion
     expect(prompt).toContain("pnpm run build");
+    expect(prompt.indexOf("Make the smallest complete implementation early")).toBeLessThan(
+      prompt.indexOf("Run the declared verification commands"),
+    );
+    expect(prompt.indexOf("Run the declared verification commands")).toBeLessThan(
+      prompt.indexOf("Commit the verified change immediately"),
+    );
     expect(prompt).toContain("Never push to main.");
     expect(prompt).toContain("Strongest at typed backend work.");
     expect(prompt).toContain("Define the ref contract");
@@ -405,6 +411,22 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
       expect(Number(stored.rows[0]?.count)).toBe(0);
     });
   }
+
+  it("accepts a committed verification manifest without inventing a partial command list", async () => {
+    await pg.exec(
+      "DELETE FROM project_memory_entries WHERE id IN ('memory-fact-build_command','memory-fact-test_command','memory-fact-lint_command')",
+    );
+    await seedFact("verification_manifest", ".norns/verification.json", 1);
+
+    const refs = await assembler().assembleForTask(TASK);
+    const store = new TaskContextStore(transactions);
+    const documents = await Promise.all(
+      refs.map(async (ref) => (await store.content(ref.artifact_id))?.bytes.toString("utf8") ?? ""),
+    );
+    const repository = documents.find((document) => document.startsWith("## Repository"));
+    expect(repository).toContain("verification_manifest: `.norns/verification.json`");
+    expect(repository).toContain("runner will execute that full committed manifest");
+  });
 
   it("never invents repository facts", async () => {
     const refs = await assembler().assembleForTask(TASK);

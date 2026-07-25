@@ -28,7 +28,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
@@ -657,6 +657,45 @@ describe("EXECUTION E11 — the three emits E10 was waiting on", () => {
         output: expect.any(String),
       },
     ]);
+  });
+
+  it("carries the manifest-preference signal through the executor and preserves custom checks", async () => {
+    const h = await harness(cleanup);
+    await mkdir(resolve(h.repository, ".norns"), { recursive: true });
+    await writeFile(
+      resolve(h.repository, ".norns", "verification.json"),
+      JSON.stringify({
+        commands: [
+          { name: "test", command: ["git", "--version"] },
+          { name: "git-hygiene", command: ["git", "status", "--porcelain"] },
+        ],
+      }),
+    );
+    await git(h.repository, "add", ".norns/verification.json");
+    await git(h.repository, "commit", "-m", "add verification manifest");
+    const manifestBase = await git(h.repository, "rev-parse", "HEAD");
+    const events: EventPayloadT[] = [];
+    const { executor, scriptBytes } = executorFor(
+      h,
+      COMMITTING,
+      new LiveRunRegistry(),
+      githubApi().fetchImpl,
+    );
+
+    const result = await executor.execute(
+      dispatchCommand(scriptBytes, manifestBase, {
+        repository_verification_manifest: ".norns/verification.json",
+      }),
+      (event) => events.push(event),
+    );
+
+    expect(result.outcome).toBe("succeeded");
+    const verification = events.find((event) => event.kind === "verification_result");
+    expect(
+      verification?.kind === "verification_result"
+        ? (verification.command_results ?? []).map((entry) => entry.name)
+        : [],
+    ).toEqual(["test", "git-hygiene"]);
   });
 
   it("emits run_published carrying the branch, commit and pull request", async () => {

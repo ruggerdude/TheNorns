@@ -88,6 +88,8 @@ describe.sequential("durable planning run HTTP API", () => {
         ANTHROPIC_API_KEY: "test-anthropic",
         OPENAI_API_KEY: "test-openai",
         NORNS_OPENAI_MODEL: "gpt-5.6-luna",
+        NORNS_RUNNER_ALLOWED_MODELS:
+          "anthropic/claude-fable-5,anthropic/claude-sonnet-5,openai/gpt-5.6-luna",
       },
       createPlanningAdapter: (provider: ProviderName): LlmAdapter =>
         provider === "anthropic" ? pmAdapter : reviewerAdapter,

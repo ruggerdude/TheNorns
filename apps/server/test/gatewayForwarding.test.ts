@@ -17,9 +17,15 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { PGlite } from "@electric-sql/pglite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
 import {
+  CLAUDE_SONNET_5_MAX_GATEWAY_PREFLIGHT_USD,
+  DEFAULT_QUICK_CHANGE_MAX_CHARGE_USD,
+  Phase4Coordinator,
+} from "../src/coordinator/phase4Coordinator.js";
+import {
+  CLAUDE_CODE_SONNET_5_MAX_OUTPUT_TOKENS,
   GATEWAY_REFUSAL_HEADER,
+  GATEWAY_REQUEST_BODY_LIMIT_BYTES,
   GatewayCredentialService,
   type GatewaySurface,
   InMemoryGatewayCredentialStore,
@@ -416,6 +422,26 @@ function responsesUrl(origin: string): string {
   return `${openAiGatewayBaseUrl(origin)}/responses`;
 }
 
+function maxSizedClaudeSonnetRequest(): string {
+  const request = {
+    model: ANTHROPIC_MODEL,
+    max_tokens: CLAUDE_CODE_SONNET_5_MAX_OUTPUT_TOKENS,
+    stream: true,
+    messages: [{ role: "user", content: "quick change" }],
+    // Provider-native requests are forwarded byte for byte, including fields
+    // the gateway does not interpret. Padding exercises the exact HTTP body
+    // ceiling that bounds the conservative input-token estimate.
+    preflight_padding: "",
+  };
+  const base = JSON.stringify(request);
+  request.preflight_padding = "x".repeat(
+    GATEWAY_REQUEST_BODY_LIMIT_BYTES - Buffer.byteLength(base),
+  );
+  const body = JSON.stringify(request);
+  expect(Buffer.byteLength(body)).toBe(GATEWAY_REQUEST_BODY_LIMIT_BYTES);
+  return body;
+}
+
 // ---------------------------------------------------------------------------
 
 describe.sequential("EXECUTION E9 provider gateway", () => {
@@ -654,6 +680,38 @@ describe.sequential("EXECUTION E9 provider gateway", () => {
   });
 
   // -- budget ---------------------------------------------------------------
+
+  it("dispatches the largest Sonnet 5 request under the default Quick Change reservation", async () => {
+    // Exact maximum hold under today's explicit limits:
+    // ceil(1 MiB / 3) + 1,000 estimated input tokens at $2/MTok, plus the
+    // Claude Code SDK's 64k max output tokens at $10/MTok = $1.341052.
+    expect(CLAUDE_SONNET_5_MAX_GATEWAY_PREFLIGHT_USD).toBe(1.341052);
+    expect(DEFAULT_QUICK_CHANGE_MAX_CHARGE_USD).toBeGreaterThan(
+      CLAUDE_SONNET_5_MAX_GATEWAY_PREFLIGHT_USD,
+    );
+
+    fx = await startFixture({ approvedBudgetUsd: DEFAULT_QUICK_CHANGE_MAX_CHARGE_USD });
+    fx.upstream.respondWith({ chunks: anthropicStream(1, 1) });
+
+    const reservation = await fx.transactions.transaction(async (sql) =>
+      sql.query<{ amount_usd: string | number }>(
+        "SELECT amount_usd FROM budget_reservations WHERE run_id = $1",
+        [fx.run.run_id],
+      ),
+    );
+    expect(Number(reservation.rows[0]?.amount_usd)).toBe(DEFAULT_QUICK_CHANGE_MAX_CHARGE_USD);
+
+    const response = await fetch(messagesUrl(fx.origin), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${fx.token}` },
+      body: maxSizedClaudeSonnetRequest(),
+    });
+    await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get(GATEWAY_REFUSAL_HEADER)).toBeNull();
+    expect(fx.upstream.calls).toHaveLength(1);
+  });
 
   it("refuses an exhausted budget BEFORE anything reaches the provider", async () => {
     // $0.01 of headroom against a request declaring 32k output tokens at

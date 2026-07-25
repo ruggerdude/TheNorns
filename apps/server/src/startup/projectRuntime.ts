@@ -135,12 +135,22 @@ export interface ProjectRuntime {
   repository: ProjectRepository;
   route_count: number;
   routed: boolean;
+  new_project_read_mode: "legacy" | "shadow" | "relational";
+  new_project_write_authority: "legacy" | "relational";
 }
 
 export function createProjectRuntime(input: CreateProjectRuntimeInput): ProjectRuntime {
   const legacy = new LegacyProjectRepository(input.projects);
   const routeCount = input.routes.projects.size + (input.routes.new_projects === null ? 0 : 1);
-  if (routeCount === 0) return { repository: legacy, route_count: 0, routed: false };
+  if (routeCount === 0) {
+    return {
+      repository: legacy,
+      route_count: 0,
+      routed: false,
+      new_project_read_mode: "legacy",
+      new_project_write_authority: "legacy",
+    };
+  }
   if (!input.transactions) {
     throw new ProjectRuntimeConfigurationError(
       "project_transactions_missing",
@@ -158,5 +168,8 @@ export function createProjectRuntime(input: CreateProjectRuntimeInput): ProjectR
     }),
     route_count: routeCount,
     routed: true,
+    new_project_read_mode: input.routes.new_projects?.read_mode ?? "legacy",
+    new_project_write_authority:
+      input.routes.new_projects?.write_mode === "relational" ? "relational" : "legacy",
   };
 }

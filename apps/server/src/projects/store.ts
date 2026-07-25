@@ -69,6 +69,9 @@ interface ProjectRecord {
   sourceConnectionId: string | null;
   sourceRepositoryId: string | null;
   sourceDefaultBranch: string | null;
+  workspaceLocation: string | null;
+  remoteLocation: string | null;
+  onboardingScenario: string | null;
   createdAt: string;
   archivedAt: string | null;
   session: GraphSession | null;
@@ -88,6 +91,9 @@ export interface ProjectStoreSnapshot {
     sourceConnectionId?: string | null;
     sourceRepositoryId?: string | null;
     sourceDefaultBranch?: string | null;
+    workspaceLocation?: string | null;
+    remoteLocation?: string | null;
+    onboardingScenario?: string | null;
     /** Optional so snapshots written before dashboard removal can still be restored. */
     archivedAt?: string | null;
     createdAt: string;
@@ -135,7 +141,71 @@ export class ProjectStore {
       sourceConnectionId: input.sourceConnectionId ?? null,
       sourceRepositoryId: input.sourceRepositoryId ?? null,
       sourceDefaultBranch: input.sourceDefaultBranch ?? null,
+      workspaceLocation: null,
+      remoteLocation: null,
+      onboardingScenario: null,
       createdAt: new Date().toISOString(),
+      archivedAt: null,
+      session: null,
+    };
+    this.projects.set(record.id, record);
+    return this.summarize(record);
+  }
+
+  /**
+   * Materialize a relationally-created onboarding project in the legacy
+   * snapshot when legacy remains the configured read authority. The supplied
+   * identity is preserved exactly so retries converge on one project rather
+   * than creating a second legacy-only record.
+   */
+  ensureRelationalMirror(input: {
+    id: string;
+    name: string;
+    description: string;
+    pmProvider: ProviderName;
+    pmModel: PmModelT | null;
+    createdAt: string;
+    sourceLocation: string | null;
+    sourceConnectionId?: string | null;
+    sourceRepositoryId?: string | null;
+    sourceDefaultBranch?: string | null;
+    onboardingScenario: string;
+  }): ProjectSummary {
+    const existing = this.projects.get(input.id);
+    if (existing) {
+      const expected = {
+        name: input.name,
+        description: input.description,
+        pmProvider: input.pmProvider,
+        pmModel: input.pmModel,
+        sourceLocation: input.sourceLocation,
+        onboardingScenario: input.onboardingScenario,
+      };
+      for (const [field, value] of Object.entries(expected)) {
+        if (existing[field as keyof ProjectRecord] !== value) {
+          throw new Error(`legacy project mirror conflicts on ${field}`);
+        }
+      }
+      if (existing.archivedAt !== null) {
+        throw new Error("legacy project mirror is archived");
+      }
+      return this.summarize(existing);
+    }
+    const record: ProjectRecord = {
+      id: input.id,
+      name: input.name,
+      description: input.description,
+      pmProvider: input.pmProvider,
+      pmModel: input.pmModel,
+      sourceType: "github",
+      sourceLocation: input.sourceLocation,
+      sourceConnectionId: input.sourceConnectionId ?? null,
+      sourceRepositoryId: input.sourceRepositoryId ?? null,
+      sourceDefaultBranch: input.sourceDefaultBranch ?? null,
+      workspaceLocation: input.sourceLocation,
+      remoteLocation: input.sourceLocation,
+      onboardingScenario: input.onboardingScenario,
+      createdAt: input.createdAt,
       archivedAt: null,
       session: null,
     };
@@ -212,6 +282,9 @@ export class ProjectStore {
         sourceConnectionId: r.sourceConnectionId,
         sourceRepositoryId: r.sourceRepositoryId,
         sourceDefaultBranch: r.sourceDefaultBranch,
+        workspaceLocation: r.workspaceLocation,
+        remoteLocation: r.remoteLocation,
+        onboardingScenario: r.onboardingScenario,
         archivedAt: r.archivedAt,
         createdAt: r.createdAt,
         plan: r.session?.plan ?? null,
@@ -246,6 +319,9 @@ export class ProjectStore {
         sourceConnectionId: p.sourceConnectionId ?? null,
         sourceRepositoryId: p.sourceRepositoryId ?? null,
         sourceDefaultBranch: p.sourceDefaultBranch ?? null,
+        workspaceLocation: p.workspaceLocation ?? null,
+        remoteLocation: p.remoteLocation ?? null,
+        onboardingScenario: p.onboardingScenario ?? null,
         createdAt: p.createdAt,
         archivedAt: p.archivedAt ?? null,
         session,
@@ -283,9 +359,9 @@ export class ProjectStore {
       // register as a spurious mismatch on every project. Parity is real
       // here, not papered over: an in-memory project has no O2 onboarding and
       // no separate push target, so both are genuinely null.
-      workspace_location: location,
-      remote_location: null,
-      onboarding_scenario: null,
+      workspace_location: record.workspaceLocation ?? location,
+      remote_location: record.remoteLocation,
+      onboarding_scenario: record.onboardingScenario,
     };
   }
 }

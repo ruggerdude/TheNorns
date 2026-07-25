@@ -3,7 +3,7 @@ import { V2AuditEvent, V2DomainEvent, V2ProjectMemoryEntry } from "@norns/contra
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
-import { AttentionService } from "../src/projects/attentionService.js";
+import { AttentionService, requiresHumanIntervention } from "../src/projects/attentionService.js";
 
 describe.sequential("Phase 5 attention projections", () => {
   let pg: PGlite;
@@ -54,6 +54,117 @@ describe.sequential("Phase 5 attention projections", () => {
     await pg.close();
   });
 
+  it("surfaces a completed quick kickoff refusal as restart-needed portfolio attention", async () => {
+    await pg.exec(`
+      UPDATE tasks SET state='pending', aggregate_version=2 WHERE id='task-1';
+      INSERT INTO planning_runs (
+        id,project_id,status,round,max_rounds,objective,result,mode,requested_by,
+        quick_kickoff_status,quick_kickoff_attempts,quick_kickoff_result,updated_at
+      ) VALUES (
+        'planning-run-quick-failure','project-1','approved',0,1,
+        'Correct the empty-state grammar','{}'::jsonb,'quick','user-1',
+        'completed',1,
+        '{"started":false,"detail":"No runner is available for the approved workspace."}'::jsonb,
+        '2026-07-25T18:00:00.000Z'
+      );
+      UPDATE phases
+         SET planning_run_id='planning-run-quick-failure'
+       WHERE id='phase-1';
+    `);
+
+    const portfolio = await attention.portfolio("user-1", {
+      now: new Date("2026-07-25T18:01:00.000Z"),
+    });
+
+    expect(portfolio.counts).toMatchObject({
+      blockers: 1,
+      active_runs: 0,
+    });
+    expect(portfolio.items).toEqual([
+      expect.objectContaining({
+        source_type: "planning_run",
+        source_id: "planning-run-quick-failure",
+        phase_id: "phase-1",
+        task_id: null,
+        condition_class: "quick_kickoff_failed",
+        kind: "blocker",
+        severity: "high",
+        title: "Coding needs a restart",
+        summary: "No runner is available for the approved workspace.",
+        recommendation: "Open the Phase tab, resolve the reported blocker, and retry coding",
+      }),
+    ]);
+    expect(portfolio.projects).toEqual([
+      expect.objectContaining({
+        id: "project-1",
+        health: "attention",
+        active_runs: 0,
+        attention_count: 1,
+        next_action: "Open the Phase tab, resolve the reported blocker, and retry coding",
+      }),
+    ]);
+
+    await pg.exec("UPDATE phases SET status='active' WHERE id='phase-1'");
+    const started = await attention.portfolio("user-1", {
+      now: new Date("2026-07-25T18:02:00.000Z"),
+    });
+    expect(started.items).toHaveLength(0);
+    expect(started.projects[0]).toMatchObject({
+      health: "healthy",
+      active_runs: 0,
+      attention_count: 0,
+    });
+  });
+
+  it("keeps a completion milestone in activity without classifying it as intervention", async () => {
+    expect(requiresHumanIntervention({ kind: "milestone" })).toBe(false);
+    expect(requiresHumanIntervention({ kind: "blocker" })).toBe(true);
+
+    await pg.exec(`
+      UPDATE tasks
+         SET state='completed',
+             review_evidence='[{"artifact_id":"review"}]'::jsonb,
+             completion_evidence='[{"artifact_id":"completion"}]'::jsonb,
+             completed_at='2026-07-25T18:00:00.000Z'
+       WHERE id='task-1';
+      UPDATE objectives SET status='completed' WHERE id='objective-1';
+      UPDATE phases
+         SET status='completed', closed_at='2026-07-25T18:00:00.000Z',
+             closure_summary='Completed successfully',
+             closure_evidence='[{"artifact_id":"completion"}]'::jsonb
+       WHERE id='phase-1';
+    `);
+
+    const portfolio = await attention.portfolio("user-1", {
+      now: new Date("2026-07-25T18:01:00.000Z"),
+    });
+    expect(portfolio.items).toEqual([
+      expect.objectContaining({
+        source_type: "phase",
+        source_id: "phase-1",
+        kind: "milestone",
+        severity: "low",
+        title: "Phase completed",
+      }),
+    ]);
+    expect(portfolio.counts).toMatchObject({
+      critical: 0,
+      high: 0,
+      decisions: 0,
+      approvals: 0,
+      blockers: 0,
+      active_runs: 0,
+    });
+    expect(portfolio.projects).toEqual([
+      expect.objectContaining({
+        id: "project-1",
+        health: "healthy",
+        attention_count: 0,
+        next_action: "Create the next phase",
+      }),
+    ]);
+  });
+
   it("preserves acknowledgement across rebuild and re-raises one changed condition", async () => {
     const now = new Date("2026-07-16T21:00:00.000Z");
     const initial = await attention.portfolio("user-1", { now });
@@ -97,6 +208,97 @@ describe.sequential("Phase 5 attention projections", () => {
         run: null,
       }),
     ]);
+  });
+
+  it("hides recovery attention once its phase is cancelled or its failed run is superseded", async () => {
+    await pg.exec(`
+      UPDATE phases SET status='active' WHERE id='phase-1';
+      INSERT INTO repository_bindings (
+        id, project_id, binding_type, status, runner_id, workspace_id,
+        repository_id, repository_display_name, granted_permissions,
+        default_branch, verification_policy_ref, repository_health,
+        created_by_actor_type
+      ) VALUES (
+        'binding-attention','project-1','local_runner','connected','runner-attention',
+        'workspace-attention','repo-attention','Attention repository','{}'::jsonb,
+        'main','verification','healthy','human'
+      );
+      INSERT INTO agent_profiles (
+        id, provider, runtime, model, roles, context_limit_tokens, status, cost_metadata
+      ) VALUES (
+        'agent-attention','openai','codex','codex','["backend"]'::jsonb,
+        128000,'available','{}'::jsonb
+      );
+      INSERT INTO agent_assignments (
+        id, project_id, phase_id, task_id, agent_profile_id, status,
+        rationale, rationale_factors, allocation_policy_ref
+      ) VALUES (
+        'assignment-attention','project-1','phase-1','task-1','agent-attention','active',
+        'Attention projection fixture','["capability"]'::jsonb,'allocation'
+      );
+      INSERT INTO agent_runs (
+        id, project_id, phase_id, task_id, assignment_id, attempt, state,
+        is_designated, repository_binding_id, expected_revision, failure_code,
+        failure_detail, lifecycle_version
+      ) VALUES (
+        'run-attention','project-1','phase-1','task-1','assignment-attention',1,'failed',
+        true,'binding-attention','base-attention','runner_failed','Runner failed',1
+      );
+      UPDATE tasks
+         SET designated_assignment_id='assignment-attention',
+             designated_run_id='run-attention'
+       WHERE id='task-1';
+      INSERT INTO decision_points (
+        id, project_id, phase_id, task_id, scope_entity_type, scope_entity_id,
+        reason_class, source_instance_id, condition_key, condition_fingerprint,
+        question, context, options, recommendation_option_id, urgency,
+        blocking_scope, status
+      ) VALUES (
+        'decision-attention','project-1','phase-1','task-1','agent_run','run-attention',
+        'failed_run','run-attention','decision:failed:run-attention',repeat('e',64),
+        'Recover the failed run?','The designated run failed.',
+        '[{"id":"retry","label":"Retry"},{"id":"cancel","label":"Cancel"}]'::jsonb,
+        'retry','high','{"entity_type":"task","entity_id":"task-1"}'::jsonb,'open'
+      );
+    `);
+
+    const active = await attention.portfolio("user-1");
+    expect(active.items.map((item) => item.source_id)).toEqual(
+      expect.arrayContaining(["run-attention", "decision-attention"]),
+    );
+
+    await pg.exec(`
+      INSERT INTO agent_runs (
+        id, project_id, phase_id, task_id, assignment_id, attempt, state,
+        is_designated, repository_binding_id, expected_revision
+      ) VALUES (
+        'run-attention-retry','project-1','phase-1','task-1','assignment-attention',2,
+        'created',false,'binding-attention','base-attention'
+      );
+      UPDATE agent_runs
+         SET is_designated=false, superseded_at='2026-07-25T18:00:00.000Z',
+             superseded_by_run_id='run-attention-retry'
+       WHERE id='run-attention';
+      UPDATE agent_runs SET is_designated=true WHERE id='run-attention-retry';
+      UPDATE tasks SET designated_run_id='run-attention-retry' WHERE id='task-1';
+    `);
+    const superseded = await attention.portfolio("user-1");
+    expect(superseded.items.map((item) => item.source_id)).not.toContain("run-attention");
+    expect(superseded.items.map((item) => item.source_id)).not.toContain("decision-attention");
+
+    await pg.exec(`
+      UPDATE agent_runs SET is_designated=false WHERE id='run-attention-retry';
+      UPDATE agent_runs
+         SET is_designated=true, superseded_at=NULL, superseded_by_run_id=NULL
+       WHERE id='run-attention';
+      UPDATE tasks SET designated_run_id='run-attention' WHERE id='task-1';
+      UPDATE phases
+         SET status='cancelled', closed_at='2026-07-25T18:01:00.000Z'
+       WHERE id='phase-1';
+    `);
+    const cancelled = await attention.portfolio("user-1");
+    expect(cancelled.items.map((item) => item.source_id)).not.toContain("run-attention");
+    expect(cancelled.items.map((item) => item.source_id)).not.toContain("decision-attention");
   });
 
   it("snoozes unchanged material but immediately re-raises a changed condition", async () => {

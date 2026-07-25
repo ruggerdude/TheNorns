@@ -1,4 +1,4 @@
-import { type Page, type Route, expect, test } from "@playwright/test";
+import { type Locator, type Page, type Route, expect, test } from "@playwright/test";
 
 const githubStatus = {
   configured: true,
@@ -54,6 +54,8 @@ function project(id: string, source: "github" | "local") {
 
 const convergedAdoptionRun = {
   id: "planning-adoption",
+  mode: "planned",
+  objective: "Improve the deployment workflow and implement it",
   status: "converged",
   round: 1,
   max_rounds: 3,
@@ -90,6 +92,7 @@ const convergedAdoptionRun = {
     },
   },
   error: null,
+  execution: null,
 };
 
 async function fulfill(route: Route, payload: unknown, status = 200) {
@@ -105,6 +108,8 @@ async function prepare(page: Page, mode: "github" | "local" | "new") {
   let planningCreated = false;
   const observed = {
     onboardingRequests: [] as unknown[],
+    localProjectRequests: [] as unknown[],
+    planningRequests: [] as unknown[],
     planningDecisions: [] as unknown[],
   };
   await page.addInitScript(() => {
@@ -185,6 +190,7 @@ async function prepare(page: Page, mode: "github" | "local" | "new") {
       );
     }
     if (path === "/api/v2/projects/local") {
+      observed.localProjectRequests.push(request.postDataJSON());
       projects = [project("project-local", "local")];
       return fulfill(route, projects[0], 201);
     }
@@ -196,6 +202,7 @@ async function prepare(page: Page, mode: "github" | "local" | "new") {
       });
     }
     if (path.endsWith("/planning-runs") && request.method() === "POST") {
+      observed.planningRequests.push(request.postDataJSON());
       planningCreated = true;
       return fulfill(route, { planning_run_id: "planning-adoption" }, 202);
     }
@@ -259,16 +266,52 @@ async function prepare(page: Page, mode: "github" | "local" | "new") {
   return observed;
 }
 
+async function expectWorkspaceNavigation(page: Page) {
+  const navigation = page.getByRole("navigation", { name: "Workspace sections" });
+  const overview = navigation.getByRole("button", { name: /overview/i });
+  const phase = navigation.getByRole("button", { name: /phase/i });
+
+  await expect(navigation).toBeVisible();
+  await expect(overview).toHaveAttribute("aria-current", "page");
+  await expect(phase).toBeVisible();
+  await phase.click();
+  await expect(phase).toHaveAttribute("aria-current", "page");
+  await expect(page.getByTestId("workspace-tab-phase")).toBeVisible();
+}
+
+async function clickUntilVisible(trigger: Locator, result: Locator) {
+  await expect(async () => {
+    if (await result.isVisible()) return;
+    await trigger.click();
+    await expect(result).toBeVisible({ timeout: 2_000 });
+  }).toPass({ intervals: [100, 250, 500], timeout: 10_000 });
+}
+
+async function openExistingProjectWizard(page: Page) {
+  const existing = page.getByRole("button", { name: /^existing/i });
+  await clickUntilVisible(page.getByRole("button", { name: /new project/i }), existing);
+  await clickUntilVisible(
+    existing,
+    page.getByRole("group", { name: /where is the existing code/i }),
+  );
+  return existing;
+}
+
+async function selectExistingGitHubRepository(page: Page) {
+  const existing = await openExistingProjectWizard(page);
+  const repository = page.getByRole("button", { name: /octocat\/front-door-app/i });
+  await clickUntilVisible(existing, repository);
+  await repository.click();
+}
+
 test("GitHub front door creates and immediately enters the project", async ({ page }) => {
   await prepare(page, "github");
   await page.goto("/");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await page.getByRole("button", { name: /new project/i }).click();
-  await page.getByRole("button", { name: /^existing/i }).click();
-  await page.getByRole("button", { name: /octocat\/front-door-app/i }).click();
+  await selectExistingGitHubRepository(page);
   await page.getByRole("button", { name: /adopt project/i }).click();
   await expect(page.getByText("front-door-app", { exact: true }).first()).toBeVisible();
-  await expect(page.getByRole("button", { name: /main menu/i })).toBeVisible();
+  await expectWorkspaceNavigation(page);
 });
 
 test("Local front door uses the helper selection and opens a nonblank workspace", async ({
@@ -276,14 +319,45 @@ test("Local front door uses the helper selection and opens a nonblank workspace"
 }) => {
   await prepare(page, "local");
   await page.goto("/");
-  await page.getByRole("button", { name: /new project/i }).click();
-  await page.getByRole("button", { name: /^existing/i }).click();
-  await page.getByRole("button", { name: /^local folder/i }).click();
+  await openExistingProjectWizard(page);
+  await page.getByRole("button", { name: /^approved local git repository/i }).click();
   await page.getByRole("button", { name: /local-front-door/i }).click();
   await page.getByRole("button", { name: /adopt project/i }).click();
   await expect(page.getByText("local-front-door", { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/loading graph/i)).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /main menu/i })).toBeVisible();
+  await expectWorkspaceNavigation(page);
+});
+
+test("New work can use an approved local Git repository and start planning", async ({ page }) => {
+  const observed = await prepare(page, "local");
+  await page.goto("/");
+  await page.getByRole("button", { name: /new project/i }).click();
+  await page.getByRole("button", { name: /^approved local git repository/i }).click();
+  await expect(page.getByTestId("setup-confirmation")).toContainText(
+    "will not create a folder or initialize Git",
+  );
+  await page.getByRole("button", { name: /local-front-door/i }).click();
+  await page.getByTestId("project-description").fill("Build a local release readiness dashboard");
+  await expect(page.getByTestId("derived-project-summary")).toContainText(
+    "New Norns project in local-front-door",
+  );
+  await page.getByRole("button", { name: /create & start planning/i }).click();
+
+  await expect(page.getByTestId("phase-decision-panel")).toBeVisible();
+  expect(observed.onboardingRequests).toEqual([]);
+  expect(observed.localProjectRequests).toEqual([
+    expect.objectContaining({
+      name: "Local release readiness dashboard",
+      description: "Build a local release readiness dashboard",
+      selection_token: "selection:e2e",
+    }),
+  ]);
+  expect(observed.planningRequests).toEqual([
+    expect.objectContaining({
+      objective: "Build a local release readiness dashboard",
+      attachment_ids: [],
+    }),
+  ]);
 });
 
 test("Directed adoption reaches one approval and starts the first coding task", async ({
@@ -291,9 +365,7 @@ test("Directed adoption reaches one approval and starts the first coding task", 
 }) => {
   const observed = await prepare(page, "github");
   await page.goto("/");
-  await page.getByRole("button", { name: /new project/i }).click();
-  await page.getByRole("button", { name: /^existing/i }).click();
-  await page.getByRole("button", { name: /octocat\/front-door-app/i }).click();
+  await selectExistingGitHubRepository(page);
   await page
     .getByTestId("project-description")
     .fill("Improve the deployment workflow and implement it");
@@ -338,29 +410,37 @@ test("New project goes from one brief to the first coding task", async ({ page }
   expect(observed.planningDecisions).toEqual([expect.objectContaining({ decision: "approve" })]);
 });
 
-test("Workspace is wide, uses flat navigation, and has one integrated prompt composer", async ({
+test("Workspace uses a centered responsive shell, current navigation, and one Phase composer", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await prepare(page, "github");
   await page.goto("/");
-  await page.getByRole("button", { name: /new project/i }).click();
-  await page.getByRole("button", { name: /^existing/i }).click();
-  await page.getByRole("button", { name: /octocat\/front-door-app/i }).click();
+  await selectExistingGitHubRepository(page);
   await page.getByRole("button", { name: /adopt project/i }).click();
 
   const workspace = page.locator(".workspace-page");
   await expect(workspace).toBeVisible();
-  expect((await workspace.boundingBox())?.width ?? 0).toBeGreaterThan(1400);
+  const workspaceBox = await workspace.boundingBox();
+  expect(workspaceBox).not.toBeNull();
+  expect(workspaceBox?.width ?? 0).toBeGreaterThanOrEqual(1280);
+  expect(workspaceBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(1360);
+  expect(Math.abs((workspaceBox?.x ?? 0) - (1920 - (workspaceBox?.width ?? 0)) / 2)).toBeLessThan(
+    1,
+  );
 
-  const planTab = page.getByRole("button", { name: "Plan", exact: true });
-  await planTab.click();
-  await expect(planTab).toHaveAttribute("aria-current", "page");
-  await expect(planTab).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  const workspaceNavigation = page.getByRole("navigation", { name: "Workspace sections" });
+  const phaseTab = workspaceNavigation.getByRole("button", { name: /phase/i });
+  await phaseTab.click();
+  await expect(phaseTab).toHaveAttribute("aria-current", "page");
+  expect(await phaseTab.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe(
+    "rgba(0, 0, 0, 0)",
+  );
 
   const composer = page.getByTestId("attachment-dropzone");
   await expect(composer).toBeVisible();
-  await expect(page.getByTestId("next-phase-objective")).toBeVisible();
+  await expect(composer).toHaveCount(1);
+  await expect(page.getByTestId("phase-goal")).toBeVisible();
   await expect(page.getByRole("button", { name: "Add images or files" })).toBeVisible();
   await expect(page.getByText("Attach screenshots")).toHaveCount(0);
 });

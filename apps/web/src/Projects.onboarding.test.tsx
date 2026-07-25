@@ -1,10 +1,12 @@
-// O1 (ONBOARDING program): new work is GitHub-backed; existing work can be
-// selected from GitHub or through the native local-folder helper:
-//   new_repo:      Norns creates a fresh repository.
+// O1 (ONBOARDING program): New and Existing work can each use GitHub or an
+// already-initialized local Git repository approved through Connections:
+//   new_repo:      Norns creates a fresh GitHub repository.
 //   existing_repo: the human picks one of the connected account's
 //                  repositories (searchable list, or paste a repo URL).
-// Connections are configured once in Settings; adoption only selects a
-// reusable source, analyzes it, and optionally starts planning.
+//   new + local:   Norns creates only its project record, analyzes the
+//                  approved repository, and starts planning the required
+//                  product objective. It never creates a local folder.
+// Connections are configured once in Settings.
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -57,7 +59,20 @@ const repository = {
   updated_at: "2026-07-16T20:00:00Z",
 };
 
-describe("O1: GitHub and local-folder onboarding", () => {
+const localRepositorySelection = {
+  selection_token: "selection:one",
+  expires_at: "2026-07-23T12:05:00Z",
+  repository: {
+    runner_id: "runner-local",
+    workspace_id: "workspace-local",
+    repository_id: "repo-local",
+    repository_display_name: "local-app",
+    default_branch: "main",
+    observed_head: "abc123",
+  },
+};
+
+describe("O1: GitHub and local Git repository onboarding", () => {
   let mock: MockFetch;
   const onOpenProject = vi.fn<(project: ProjectSummary) => void>();
 
@@ -73,6 +88,37 @@ describe("O1: GitHub and local-folder onboarding", () => {
     mock.get("/api/integrations/github/connections/github%3A43/repositories", {
       body: [repository],
     });
+    mock.get("/api/runners/helper/repositories", {
+      body: {
+        state: "connected",
+        runner_id: "runner-local",
+        message: "The Norns helper is ready.",
+        install_command: "",
+        install_command_windows: "",
+        repositories: [localRepositorySelection],
+      },
+    });
+    mock.post("/api/v2/projects/local", (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        name: string;
+        description: string;
+        pm_provider: "anthropic" | "openai";
+        pm_model: ProjectSummary["pm_model"];
+      };
+      return {
+        status: 201,
+        body: makeProject({
+          id: "project-local",
+          name: body.name,
+          description: body.description,
+          pm_provider: body.pm_provider,
+          pm_model: body.pm_model ?? undefined,
+          reviewer_provider: body.pm_provider === "anthropic" ? "openai" : "anthropic",
+          source_type: "local",
+          source_location: "local-app",
+        }),
+      };
+    });
     mock.post(/^\/api\/v2\/projects\/[^/]+\/analyze-repository$/, {
       body: {
         architecture_revision: 1,
@@ -80,6 +126,11 @@ describe("O1: GitHub and local-folder onboarding", () => {
         summary: "Understood",
       },
     });
+    mock.post(/^\/api\/v2\/projects\/[^/]+\/attachments$/, {
+      status: 201,
+      body: { id: "attachment-local" },
+    });
+    mock.patch(/^\/api\/v2\/projects\/[^/]+\/planning-reviewer$/, { status: 204 });
     mock.del(/^\/api\/v2\/projects\/[^/]+\/planning-reviewer$/, { status: 204 });
     mock.post(/^\/api\/v2\/projects\/[^/]+\/planning-runs$/, {
       status: 202,
@@ -256,7 +307,7 @@ describe("O1: GitHub and local-folder onboarding", () => {
     renderWizard();
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.click(screen.getByRole("button", { name: /^existing/i }));
-    await user.click(screen.getByRole("button", { name: /^local folder/i }));
+    await user.click(screen.getByRole("button", { name: /^approved local git repository/i }));
     await user.click(await screen.findByRole("button", { name: /local-app/i }));
     await user.click(screen.getByRole("button", { name: /adopt project/i }));
 
@@ -278,6 +329,157 @@ describe("O1: GitHub and local-folder onboarding", () => {
       },
     });
   });
+
+  it.each([
+    {
+      label: "New + GitHub",
+      startingPoint: "new",
+      source: "github",
+      creationPath: "/api/v2/projects/onboarding",
+      analyzes: false,
+      plans: true,
+      entryFlow: "new",
+    },
+    {
+      label: "New + Local",
+      startingPoint: "new",
+      source: "local",
+      creationPath: "/api/v2/projects/local",
+      analyzes: true,
+      plans: true,
+      entryFlow: "new",
+    },
+    {
+      label: "Existing + GitHub",
+      startingPoint: "existing",
+      source: "github",
+      creationPath: "/api/v2/projects/onboarding",
+      analyzes: true,
+      plans: false,
+      entryFlow: undefined,
+    },
+    {
+      label: "Existing + Local",
+      startingPoint: "existing",
+      source: "local",
+      creationPath: "/api/v2/projects/local",
+      analyzes: true,
+      plans: false,
+      entryFlow: undefined,
+    },
+  ] as const)(
+    "supports the onboarding source matrix: $label",
+    async ({ startingPoint, source, creationPath, analyzes, plans, entryFlow }) => {
+      const user = userEvent.setup();
+      renderWizard();
+      await user.click(await screen.findByRole("button", { name: /new project/i }));
+
+      if (startingPoint === "existing") {
+        await user.click(screen.getByRole("button", { name: /^existing/i }));
+      }
+      if (source === "local") {
+        await user.click(screen.getByRole("button", { name: /^approved local git repository/i }));
+        expect(screen.getByTestId("setup-confirmation")).toHaveTextContent(
+          /will not create a folder or initialize git/i,
+        );
+        expect(screen.getByTestId("setup-confirmation")).toHaveTextContent(
+          /approved in connections/i,
+        );
+        await user.click(await screen.findByRole("button", { name: /local-app/i }));
+      } else if (startingPoint === "existing") {
+        await user.click(await screen.findByRole("button", { name: /octocat\/existing-app/i }));
+      }
+
+      if (startingPoint === "new") {
+        if (source === "local") {
+          expect(screen.getByRole("button", { name: /create & start planning/i })).toBeDisabled();
+        }
+        await user.type(
+          screen.getByTestId("project-description"),
+          "Build a local inventory dashboard",
+        );
+        if (source === "local") {
+          await user.click(screen.getByText("Optional details"));
+          await user.selectOptions(screen.getByTestId("pm-model"), "gpt-5.6-terra");
+          await user.selectOptions(
+            screen.getByTestId("reviewer-model"),
+            "anthropic:claude-opus-4-8",
+          );
+          await user.click(screen.getByRole("button", { name: /fewer rounds/i }));
+          await user.upload(
+            screen.getByTestId("new-project-attachment-input"),
+            new File(["reference"], "reference.png", { type: "image/png" }),
+          );
+          expect(screen.queryByTestId("github-new-repository-name")).not.toBeInTheDocument();
+          expect(screen.queryByTestId("github-repository-visibility")).not.toBeInTheDocument();
+        }
+      }
+
+      await user.click(
+        screen.getByRole("button", {
+          name: startingPoint === "new" ? /create & start planning/i : /adopt project/i,
+        }),
+      );
+      await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
+
+      const creationCall = mock.calls.find(
+        (call) => call.method === "POST" && call.url === creationPath,
+      );
+      expect(creationCall).toBeDefined();
+      expect(
+        mock.calls.some(
+          (call) => call.method === "POST" && call.url.endsWith("/analyze-repository"),
+        ),
+      ).toBe(analyzes);
+      const planningCall = mock.calls.find(
+        (call) => call.method === "POST" && call.url.endsWith("/planning-runs"),
+      );
+      expect(Boolean(planningCall)).toBe(plans);
+      expect(onOpenProject.mock.calls[0]?.[0]?.entry_flow).toBe(entryFlow);
+
+      if (source === "github") {
+        expect(creationCall).toMatchObject({
+          body: {
+            scenario: startingPoint === "new" ? "new_repo" : "existing_repo",
+          },
+        });
+      } else {
+        expect(
+          mock.calls.some(
+            (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
+          ),
+        ).toBe(false);
+      }
+
+      if (startingPoint === "new" && source === "local") {
+        expect(creationCall).toMatchObject({
+          body: {
+            name: "Local inventory dashboard",
+            description: "Build a local inventory dashboard",
+            pm_provider: "openai",
+            pm_model: "gpt-5.6-terra",
+            selection_token: "selection:one",
+          },
+        });
+        expect(planningCall).toMatchObject({
+          body: {
+            objective: "Build a local inventory dashboard",
+            max_rounds: 2,
+            attachment_ids: ["attachment-local"],
+          },
+        });
+        expect(
+          mock.calls.find(
+            (call) =>
+              call.method === "PATCH" &&
+              call.url === "/api/v2/projects/project-local/planning-reviewer",
+          ),
+        ).toMatchObject({
+          body: { provider: "anthropic", model: "claude-opus-4-8" },
+        });
+      }
+    },
+  );
 
   it("starts planning automatically only when the optional first direction is provided", async () => {
     mock.post("/api/v2/projects/project-created/planning-runs", {

@@ -32,6 +32,7 @@ export interface DaemonOptions {
   executeV2?: (
     command: V2DispatchCommandT,
     emit: (event: EventPayloadT) => void,
+    capabilities: { knowledge_transport: boolean },
   ) => Promise<"succeeded" | "failed" | "cancelled">;
   /** Optional runner-local folder registry.  Paths never enter relay frames. */
   workspaces?: WorkspaceRegistry;
@@ -60,6 +61,7 @@ export class RunnerDaemon {
   private fenced = false;
   private readonly executor: FixtureExecutor;
   private serverAckSeq = 0;
+  private knowledgeTransportEnabled = false;
   readonly redactor = new Redactor();
   /**
    * EXECUTION E3 — proxied model inference. Always constructed (it is inert
@@ -245,7 +247,7 @@ export class RunnerDaemon {
                 generation: state.state.generation,
                 // EXECUTION E3 adds model_proxy. Advertised unconditionally:
                 // it costs nothing if the server does not offer it.
-                capabilities: ["workspace_picker", "model_proxy"],
+                capabilities: ["workspace_picker", "model_proxy", "knowledge_transport"],
                 last_event_seq_sent: state.state.seq,
                 recently_executed_command_ids: state.executedIds(),
               },
@@ -259,10 +261,25 @@ export class RunnerDaemon {
         }
         case "reconcile_response": {
           this.serverAckSeq = frame.body.ack_event_seq;
+          this.knowledgeTransportEnabled =
+            frame.body.capabilities?.includes("knowledge_transport") ?? false;
           state.pruneAcked(frame.body.ack_event_seq);
           // replay everything the server has not acked, in order
           for (const event of state.unackedSince(frame.body.ack_event_seq)) {
             socket.send(JSON.stringify({ type: "event", event }));
+          }
+          // A crash may have landed after the terminal execution state was
+          // persisted but before its acknowledgement was buffered. The relay
+          // excludes recently executed commands from resend_commands, so the
+          // runner must repair that gap proactively rather than wait for a
+          // duplicate command that will never arrive.
+          for (const [commandId, terminalState] of state.terminalExecutions()) {
+            this.terminalAck(
+              commandId,
+              terminalState,
+              { causation: commandId },
+              "recovered terminal acknowledgement from durable execution state",
+            );
           }
           for (const command of frame.body.resend_commands) {
             this.handleCommand(command);
@@ -423,7 +440,21 @@ export class RunnerDaemon {
     const recorded = state.executionState(command.command_id);
     const meta = { correlation: command.correlation_id, causation: command.command_id };
     if (recorded) {
-      this.ack(command.command_id, recorded, meta);
+      if (TERMINAL_COMMAND_STATES.has(recorded)) {
+        // The normal path buffers a terminal acknowledgement before sending.
+        // If a process died after persisting `executed` but before that buffer
+        // write, ensureTerminalAck repairs the missing event exactly once.
+        // Existing buffered events are replayed by reconciliation, while the
+        // durable tombstone prevents a new sequence after server pruning.
+        this.terminalAck(
+          command.command_id,
+          recorded,
+          meta,
+          "recovered terminal acknowledgement from durable execution state",
+        );
+      } else {
+        this.ack(command.command_id, recorded, meta);
+      }
       return;
     }
     if (isCommandExpired(command, new Date())) {
@@ -463,7 +494,9 @@ export class RunnerDaemon {
         }
         executing();
         void this.opts
-          .executeV2(payload.dispatch, (event) => this.emit(event, meta))
+          .executeV2(payload.dispatch, (event) => this.emit(event, meta), {
+            knowledge_transport: this.knowledgeTransportEnabled,
+          })
           .then((outcome) => {
             state.recordExecution(command.command_id, outcome);
             this.ack(command.command_id, outcome, meta);
@@ -590,7 +623,41 @@ export class RunnerDaemon {
     meta: { correlation?: string; causation?: string },
     detail = "",
   ): void {
+    if (TERMINAL_COMMAND_STATES.has(ackState)) {
+      this.terminalAck(commandId, ackState, meta, detail);
+      return;
+    }
     this.emit({ kind: "command_ack", command_id: commandId, state: ackState, detail }, meta);
+    this.reportRunSettled(commandId, ackState);
+  }
+
+  private terminalAck(
+    commandId: string,
+    ackState: CommandStateT,
+    meta: { correlation?: string; causation?: string },
+    detail: string,
+  ): void {
+    if (this.fenced) return;
+    const state = this.requireState();
+    const ensured = state.ensureTerminalAck({
+      command_id: commandId,
+      state: ackState,
+      runner_id: this.opts.runnerId,
+      generation: state.state.generation,
+      correlation_id: meta.correlation ?? `runner:${this.opts.runnerId}`,
+      causation_id: meta.causation ?? null,
+      occurred_at: new Date().toISOString(),
+      detail,
+    });
+    // Reconciliation sends an existing buffered event before redelivering
+    // commands. Only a newly synthesized event needs sending here.
+    if (ensured.created && ensured.event && this.connected) {
+      this.socket?.send(JSON.stringify({ type: "event", event: ensured.event }));
+    }
+    this.reportRunSettled(commandId, ackState);
+  }
+
+  private reportRunSettled(commandId: string, ackState: CommandStateT): void {
     // ONBOARDING O4: report the first terminal outcome of a launch_run so an
     // ephemeral host can shut down. Reported at most once, and only when a
     // caller asked for it.

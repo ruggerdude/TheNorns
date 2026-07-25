@@ -15,6 +15,13 @@ describe.sequential("planning_runs schema", () => {
       INSERT INTO projects (
         id, name, status, assignment_policy_ref, verification_policy_ref, budget_policy_ref
       ) VALUES ('project-1', 'Planning project', 'active', 'assignment/default', 'verification/default', 'budget/default');
+      INSERT INTO users (
+        id, username, display_name, email, name, password_hash,
+        password_hash_scheme, role, status
+      ) VALUES (
+        'admin-1', 'admin-1@example.com', 'Admin One',
+        'admin-1@example.com', 'Admin One', 'x', 'scrypt-v1', 'admin', 'active'
+      );
     `);
   }, 30_000);
 
@@ -84,6 +91,77 @@ describe.sequential("planning_runs schema", () => {
       pg.query(
         `INSERT INTO planning_runs (id, project_id, status, round, max_rounds, objective)
          VALUES ('run-bad-project', 'no-such-project', 'queued', 0, 3, 'x')`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("persists quick mode and requires complete PM and agent selections", async () => {
+    await expect(
+      pg.query(
+        `INSERT INTO planning_runs (
+           id, project_id, status, round, max_rounds, objective, mode
+         ) VALUES ('run-no-actor', 'project-1', 'queued', 0, 1, 'x', 'quick')`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      pg.query(
+        `INSERT INTO planning_runs (
+           id, project_id, status, round, max_rounds, objective, mode,
+           requested_by, pm_provider
+         ) VALUES (
+           'run-partial-pm', 'project-1', 'queued', 0, 1, 'x', 'quick',
+           'admin-1', 'openai'
+         )`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      pg.query(
+        `INSERT INTO planning_runs (
+           id, project_id, status, round, max_rounds, objective, mode,
+           requested_by, agent_model
+         ) VALUES (
+           'run-partial-agent', 'project-1', 'queued', 0, 1, 'x', 'quick',
+           'admin-1', 'gpt-5.6-terra'
+         )`,
+      ),
+    ).rejects.toThrow();
+
+    await pg.query(
+      `INSERT INTO planning_runs (
+         id, project_id, status, round, max_rounds, objective, mode,
+         requested_by, pm_provider, pm_model, agent_provider, agent_model
+       ) VALUES (
+         'run-quick', 'project-1', 'queued', 0, 1, 'Fix the copy', 'quick',
+         'admin-1', 'openai', 'gpt-5.6-terra', 'anthropic', 'claude-sonnet-5'
+       )`,
+    );
+    const row = await pg.query<{
+      mode: string;
+      pm_provider: string;
+      pm_model: string;
+      agent_provider: string;
+      agent_model: string;
+      requested_by: string;
+    }>(
+      `SELECT mode, requested_by, pm_provider, pm_model, agent_provider, agent_model
+         FROM planning_runs WHERE id = 'run-quick'`,
+    );
+    expect(row.rows[0]).toEqual({
+      mode: "quick",
+      requested_by: "admin-1",
+      pm_provider: "openai",
+      pm_model: "gpt-5.6-terra",
+      agent_provider: "anthropic",
+      agent_model: "claude-sonnet-5",
+    });
+
+    await pg.query(
+      `INSERT INTO planning_runs (id, project_id, status, round, max_rounds, objective)
+       VALUES ('run-planned', 'project-1', 'queued', 0, 3, 'Plan it')`,
+    );
+    await expect(
+      pg.query(
+        "UPDATE planning_runs SET quick_kickoff_status = 'completed' WHERE id = 'run-planned'",
       ),
     ).rejects.toThrow();
   });

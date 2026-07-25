@@ -2,14 +2,11 @@ import { pmModelOption } from "@norns/contracts";
 // TheNorns web app: sole point of entry. Login gates everything; Projects is
 // the landing view (list/create); opening a project shows its workspace.
 //
-// FRONT DOOR P1c: planning (first phase and every subsequent one) goes
-// through exactly one canonical path — a durable, observable planning run
-// (POST .../planning-runs, polled), materialized into a phase + proposed
-// strategy (POST .../phases {planning_run_id}), reviewed/staffed/approved in
-// StrategyReview.tsx. The old synchronous `${base}/plan` + `/plan/load` +
-// PlanReview.tsx flow (this file's former "01 · Live planning" box) has no
-// remaining caller here per the design freeze; PlanReview.tsx itself is kept
-// only because its own component tests still exercise it directly.
+// PhaseTab is the canonical entry point for new quick changes and planned
+// work. The Plan tab keeps only the recovery UI for durable legacy planning
+// runs and strategy reviews so existing work is never abandoned. The older
+// synchronous `${base}/plan` + `/plan/load` + PlanReview.tsx flow has no
+// remaining caller here; PlanReview.tsx stays for its direct component tests.
 //
 // The graph editor below (React Flow rendering with editing — edges with
 // cycle rejection, node deletion with re-parent/cascade confirmation, Auto
@@ -33,9 +30,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Account, type SettingsTab } from "./Account";
 import { Admin } from "./Admin";
 import { AnalyzeRepositoryControl } from "./AnalyzeRepositoryControl";
-import { AttachmentInput } from "./AttachmentInput";
 import { Debates } from "./Debates";
 import { Gantt, type GanttPhase } from "./Gantt";
+import { KnowledgeStatusPanel } from "./KnowledgeStatusPanel";
 import { Login, type LoginMode } from "./Login";
 import { OrthogonalEdge } from "./OrthogonalEdge";
 import { PhaseTab } from "./PhaseTab";
@@ -65,6 +62,11 @@ import {
   requestLogout,
   setToken,
 } from "./auth";
+import type { PhasePlanningRunDto } from "./phaseTabApi";
+import {
+  type RelationalGraphReadModel,
+  buildRelationalGraphReadModel,
+} from "./relationalGraphReadModel";
 import { ThemeToggle, useTheme } from "./theme";
 import {
   Alert,
@@ -200,6 +202,7 @@ interface PhaseExecutionDto {
     id: string;
     objective_summary: string;
     status: string;
+    planning_mode?: "planned" | "quick";
     completed_tasks: number;
     total_tasks: number;
     // EXECUTION E13 — live cost at the phase scope; see TaskCostDto's note
@@ -284,6 +287,22 @@ const RUN_ACTIVE_STATES = new Set(["created", "dispatched", "running", "verifyin
 
 type PhaseExecutionTask = PhaseExecutionDto["tasks"][number];
 
+function effectivePhaseStatus(execution: PhaseExecutionDto): string {
+  const needsAttention = execution.tasks.some(
+    (task) =>
+      task.state === "failed" ||
+      task.state === "blocked" ||
+      task.run?.state === "failed" ||
+      task.run?.state === "expired" ||
+      task.run?.verification_status === "failed",
+  );
+  if (needsAttention) return "needs attention";
+  if (execution.tasks.length > 0 && execution.tasks.every((task) => task.state === "completed")) {
+    return "completed";
+  }
+  return execution.phase.status;
+}
+
 /** FRONT DOOR P2's durable planning-run DTO (GET .../planning-runs/:runId),
  *  mirrored client-side. */
 interface PlanningRunPollDto {
@@ -362,12 +381,14 @@ function TaskQcPanel({
   task,
   projectId,
   phaseId,
+  reviewRequired,
   focused,
   onUnauthorized,
 }: {
   task: PhaseExecutionTask;
   projectId: string;
   phaseId: string;
+  reviewRequired: boolean;
   focused: boolean;
   onUnauthorized: () => void;
 }): React.ReactElement {
@@ -462,7 +483,11 @@ function TaskQcPanel({
               <span className="mono">{reviewer.profile_id}</span>
             </>
           ) : (
-            <span className="muted">Awaiting independent reviewer assignment</span>
+            <span className="muted">
+              {reviewRequired
+                ? "Awaiting independent reviewer assignment"
+                : "Review not required for this quick change"}
+            </span>
           )}
         </section>
       </div>
@@ -588,7 +613,11 @@ function TaskQcPanel({
               </article>
             ))
           ) : (
-            <p className="muted">No independent QC review has been recorded yet.</p>
+            <p className="muted">
+              {reviewRequired
+                ? "No independent QC review has been recorded yet."
+                : "Review not required for this quick change."}
+            </p>
           )}
 
           <section className="task-direction" aria-label={`Direction for ${task.title}`}>
@@ -648,12 +677,9 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (res.status === 401) throw new UnauthorizedError();
-  const json = (await res.json()) as T & { message?: string };
+  const json = (await res.json()) as T & { message?: string; detail?: string };
   if (!res.ok)
-    throw new ApiError(
-      (json as { message?: string }).message ?? `request failed: ${res.status}`,
-      res.status,
-    );
+    throw new ApiError(json.message ?? json.detail ?? `request failed: ${res.status}`, res.status);
   return json;
 }
 
@@ -754,6 +780,10 @@ function ProjectGraph({
   const [phaseJourneyRunId, setPhaseJourneyRunId] = useState<string | null>(
     isCanonicalPlanningJourney ? (project.focus_planning_run_id ?? null) : null,
   );
+  const [phaseComposerRequested, setPhaseComposerRequested] = useState(false);
+  const [relationalPlanningRun, setRelationalPlanningRun] = useState<PhasePlanningRunDto | null>(
+    null,
+  );
   // FRONT DOOR P1d (layout): the workspace shell reorganized into a normal
   // top-width page with a tab bar, per the approved mockup — the graph
   // canvas was the dominant panel before this, everything else crammed into
@@ -765,20 +795,14 @@ function ProjectGraph({
   const focusedTaskId = project.focus_task_id ?? null;
 
   // ------------------------------------------------------------------
-  // FRONT DOOR P1: new-phase creation goes through an observable planning
-  // run -> materialize-into-phase -> strategy review, replacing the old
-  // "Create the next phase" raw-objective text box (UI regression it left:
-  // a phase created that way had no staffing, no reviewer, no plan to
-  // approve — just a bare objective string).
+  // Legacy Plan-tab recovery state. New work is composed in PhaseTab; these
+  // values remain only so a pre-existing planning run can still be inspected
+  // and materialized without abandoning durable work.
   // ------------------------------------------------------------------
-  const [nextPhaseObjective, setNextPhaseObjective] = useState("");
-  const [nextPhaseRounds, setNextPhaseRounds] = useState(3);
-  const [nextPhaseAttachmentIds, setNextPhaseAttachmentIds] = useState<string[]>([]);
   const [activePlanningRunId, setActivePlanningRunId] = useState<string | null>(
     isCanonicalPlanningJourney ? null : (project.focus_planning_run_id ?? null),
   );
   const [planningRun, setPlanningRun] = useState<PlanningRunPollDto | null>(null);
-  const [planningRunStarting, setPlanningRunStarting] = useState(false);
   const [planningRunError, setPlanningRunError] = useState<string | null>(null);
   const [materializingPhase, setMaterializingPhase] = useState(false);
   const [strategyReview, setStrategyReview] = useState<StrategyReviewDto | null>(null);
@@ -795,6 +819,10 @@ function ProjectGraph({
   // Last-known-*good* approval state (never "pending"): what we revert to when
   // an in-flight mutation fails, so the banner is never left stuck at pending.
   const lastGoodApprovalRef = useRef<ApprovalState>({ kind: "never" });
+  const handleWorkspaceUnauthorized = useCallback(
+    () => onLogout("Session expired. Sign in again."),
+    [onLogout],
+  );
 
   const applyApproval = useCallback((next: ApprovalState) => {
     lastGoodApprovalRef.current = next;
@@ -886,6 +914,27 @@ function ProjectGraph({
     void loadResume();
   }, [loadResume]);
 
+  const loadLatestRelationalPlanningRun = useCallback(async () => {
+    try {
+      const { planning_run } = await getJson<{ planning_run: PhasePlanningRunDto | null }>(
+        `/api/v2/projects/${project.id}/planning-runs/latest`,
+      );
+      setRelationalPlanningRun(planning_run);
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      // Projects created before planning runs existed legitimately have no
+      // relational fallback. Their legacy workspace remains unchanged.
+    }
+  }, [project.id, onLogout]);
+
+  const selectWorkspaceTab = useCallback(
+    (nextTab: "overview" | "plan" | "phase" | "graph") => {
+      setWorkspaceTab(nextTab);
+      if (draftOnly && !graph) void loadLatestRelationalPlanningRun();
+    },
+    [draftOnly, graph, loadLatestRelationalPlanningRun],
+  );
+
   // New and adopted projects hand us a transient run id so the first open is
   // immediate. A refresh loses that hint, so recover a still-running,
   // awaiting-approval, or failed-kickoff journey from durable server state.
@@ -894,6 +943,15 @@ function ProjectGraph({
     if (isCanonicalPlanningJourney && project.focus_planning_run_id) {
       setPhaseJourneyRunId(project.focus_planning_run_id);
       setWorkspaceTab("phase");
+      void getJson<PhasePlanningRunDto>(
+        `/api/v2/projects/${project.id}/planning-runs/${project.focus_planning_run_id}`,
+      )
+        .then((planningRun) => {
+          if (!cancelled) setRelationalPlanningRun(planningRun);
+        })
+        .catch((err) => {
+          if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+        });
       return () => {
         cancelled = true;
       };
@@ -904,11 +962,12 @@ function ProjectGraph({
         cancelled = true;
       };
     }
-    void getJson<{
-      planning_run: { id: string; status: string } | null;
-    }>(`/api/v2/projects/${project.id}/planning-runs/latest`)
+    void getJson<{ planning_run: PhasePlanningRunDto | null }>(
+      `/api/v2/projects/${project.id}/planning-runs/latest`,
+    )
       .then(async ({ planning_run }) => {
         if (cancelled || !planning_run) return;
+        setRelationalPlanningRun(planning_run);
         const planningNeedsAttention = [
           "queued",
           "drafting",
@@ -923,6 +982,15 @@ function ProjectGraph({
           return;
         }
         if (planning_run.status !== "approved") return;
+
+        // Quick runs persist their automatic kickoff outcome on the planning
+        // run. Surface a refusal/failure before consulting project-scoped
+        // phase rows, where an unrelated active phase could mask it.
+        if (planning_run.mode === "quick" && planning_run.execution?.started !== true) {
+          setPhaseJourneyRunId(planning_run.id);
+          setWorkspaceTab("phase");
+          return;
+        }
 
         // An approved run normally belongs on Overview once coding is active.
         // If approval survived but materialization/dispatch did not, return to
@@ -950,6 +1018,15 @@ function ProjectGraph({
       cancelled = true;
     };
   }, [project.id, project.focus_planning_run_id, isCanonicalPlanningJourney, onLogout]);
+
+  // A project can remain visible through the legacy workspace while all new
+  // work is relational. Load the same fallback used by Graph as soon as the
+  // legacy graph is absent so Overview, Tracking, and Knowledge do not claim
+  // there is no phase until the human happens to open Graph.
+  useEffect(() => {
+    if (!draftOnly || graph) return;
+    void loadLatestRelationalPlanningRun();
+  }, [draftOnly, graph, loadLatestRelationalPlanningRun]);
 
   // FRONT DOOR P5 (tracking): poll cadence honors the persisted
   // update_interval_seconds once known; falls back to a 15s default until
@@ -996,6 +1073,14 @@ function ProjectGraph({
     }
   }, [monitoredPhaseId, project.id, onLogout]);
 
+  // Do not display the previous phase's tasks while a newly-selected phase is
+  // loading; the relational Graph read model consumes this same state.
+  useEffect(() => {
+    if (!monitoredPhaseId) return;
+    setPhaseExecution(null);
+    setExecutionError(null);
+  }, [monitoredPhaseId]);
+
   // EXECUTION E13 — polling cadence, and why it does NOT simply obey
   // `update_interval_seconds` here.
   //
@@ -1021,6 +1106,7 @@ function ProjectGraph({
       ),
     [phaseExecution],
   );
+  const monitoredPhaseStatus = phaseExecution ? effectivePhaseStatus(phaseExecution) : null;
   useEffect(() => {
     if (!monitoredPhaseId) return;
     void loadPhaseExecution();
@@ -1029,34 +1115,6 @@ function ProjectGraph({
     const timer = window.setInterval(() => void loadPhaseExecution(), pollMs);
     return () => window.clearInterval(timer);
   }, [monitoredPhaseId, loadPhaseExecution, phaseHasActiveRun, resume?.update_interval_seconds]);
-
-  // FRONT DOOR P1: replaces the old raw-objective "Create the next phase"
-  // text box. New-phase creation goes through an observable planning run
-  // (poll below), then materializing that run into a phase + proposed
-  // strategy, then the StrategyReview screen for staffing + approval.
-  const startNextPhasePlanningRun = useCallback(async () => {
-    if (!nextPhaseObjective.trim()) return;
-    setPlanningRunStarting(true);
-    setPlanningRunError(null);
-    try {
-      const run = await postJson<{ planning_run_id: string }>(
-        `/api/v2/projects/${project.id}/planning-runs`,
-        {
-          objective: nextPhaseObjective.trim(),
-          max_rounds: nextPhaseRounds,
-          attachment_ids: nextPhaseAttachmentIds,
-        },
-      );
-      setActivePlanningRunId(run.planning_run_id);
-      setNextPhaseObjective("");
-      setNextPhaseAttachmentIds([]);
-    } catch (err) {
-      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
-      else setPlanningRunError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setPlanningRunStarting(false);
-    }
-  }, [nextPhaseObjective, nextPhaseRounds, nextPhaseAttachmentIds, project.id, onLogout]);
 
   const pollPlanningRun = useCallback(async () => {
     if (!activePlanningRunId) return;
@@ -1221,24 +1279,98 @@ function ProjectGraph({
     return () => window.clearInterval(timer);
   }, [loadPhaseAgentCounts]);
 
+  const relationalGraph = useMemo<RelationalGraphReadModel | null>(() => {
+    if (!draftOnly) return null;
+    const currentPhase =
+      resume?.phases.find((phase) => phase.id === monitoredPhaseId) ?? resume?.phases[0] ?? null;
+    return buildRelationalGraphReadModel({
+      planningRun: relationalPlanningRun,
+      phaseExecution,
+      phase: currentPhase,
+    });
+  }, [draftOnly, monitoredPhaseId, phaseExecution, relationalPlanningRun, resume?.phases]);
+
+  // When the legacy resume has not learned about a relational run yet, keep a
+  // single honest phase projection for every Overview consumer. This is a
+  // presentation fallback only: its planning-run id is never sent to a
+  // phase-scoped API as though it were a durable phase id.
+  const relationalPhaseFallback = useMemo(() => {
+    if (resume?.phases.length || !relationalGraph || !relationalPlanningRun) return null;
+    const run = relationalPlanningRun;
+    const title =
+      run.objective?.trim() ||
+      run.result?.plan?.objective?.trim() ||
+      run.result?.plan?.modules?.[0]?.title?.trim() ||
+      relationalGraph.title;
+    const kickoffNeedsAttention = run.status === "approved" && run.execution?.started !== true;
+    const failed = run.status === "failed";
+    const status =
+      run.status === "approved" && run.execution?.started === true ? "active" : run.status;
+    const statusLabel = kickoffNeedsAttention
+      ? "approved · coding needs restart"
+      : failed
+        ? "planning failed"
+        : status.replaceAll("_", " ");
+    const nextAction = kickoffNeedsAttention
+      ? "Retry coding start in Phase"
+      : failed
+        ? "Review the planning failure in Phase"
+        : run.status === "converged" || run.status === "cap_reached"
+          ? "Review the plan in Phase"
+          : status === "active"
+            ? "Monitor coding in Phase"
+            : "Continue this work in Phase";
+
+    return {
+      id: `planning-run:${run.id}`,
+      title,
+      status,
+      statusLabel,
+      taskCount: relationalGraph.graph.nodes.length,
+      completedTasks: 0,
+      percentComplete: 0,
+      blockedLabel: kickoffNeedsAttention
+        ? "Coding needs a restart"
+        : failed
+          ? "Planning stopped"
+          : null,
+      needsAttention: kickoffNeedsAttention || failed || run.status === "cap_reached",
+      nextAction,
+    };
+  }, [relationalGraph, relationalPlanningRun, resume?.phases.length]);
+
+  const projectNeedsAttention =
+    (resume?.attention.blocked_tasks ?? 0) > 0 ||
+    monitoredPhaseStatus === "needs attention" ||
+    Boolean(relationalPhaseFallback?.needsAttention);
+
   // FRONT DOOR P1b: the resume phase list, projected into the Gantt's input
   // shape. Phases are already priority-ordered by the server (resume SQL:
   // `ORDER BY p.priority DESC, ...`).
-  const ganttPhases: GanttPhase[] = useMemo(
-    () =>
-      (resume?.phases ?? []).map((phase) => ({
-        id: phase.id,
-        name: phase.objective_summary,
-        status: phase.status,
-        percentComplete:
-          phase.percent_complete ??
-          (phase.tasks > 0 ? Math.round((phase.completed_tasks / phase.tasks) * 100) : 0),
-        etaAt: phase.eta_at ?? null,
-        agentCount: phaseAgentCounts[phase.id],
-        blockedLabel: blockedPhaseLabels.get(phase.id) ?? null,
-      })),
-    [resume?.phases, phaseAgentCounts, blockedPhaseLabels],
-  );
+  const ganttPhases: GanttPhase[] = useMemo(() => {
+    const durablePhases = (resume?.phases ?? []).map((phase) => ({
+      id: phase.id,
+      name: phase.objective_summary,
+      status: phase.status,
+      percentComplete:
+        phase.percent_complete ??
+        (phase.tasks > 0 ? Math.round((phase.completed_tasks / phase.tasks) * 100) : 0),
+      etaAt: phase.eta_at ?? null,
+      agentCount: phaseAgentCounts[phase.id],
+      blockedLabel: blockedPhaseLabels.get(phase.id) ?? null,
+    }));
+    if (durablePhases.length > 0 || !relationalPhaseFallback) return durablePhases;
+    return [
+      {
+        id: relationalPhaseFallback.id,
+        name: relationalPhaseFallback.title,
+        status: relationalPhaseFallback.status,
+        percentComplete: relationalPhaseFallback.percentComplete,
+        etaAt: null,
+        blockedLabel: relationalPhaseFallback.blockedLabel,
+      },
+    ];
+  }, [resume?.phases, phaseAgentCounts, blockedPhaseLabels, relationalPhaseFallback]);
 
   const resolvePhaseDecision = useCallback(
     async (
@@ -1248,6 +1380,7 @@ function ProjectGraph({
         rationale: string;
         directionTarget: string;
         directionText: string;
+        idempotencyKey: string;
       },
     ) => {
       const decision = item.decision;
@@ -1255,24 +1388,29 @@ function ProjectGraph({
       setPhaseAttentionBusy(item.key);
       try {
         await postJson(
-          `/api/v2/projects/${item.project_id}/decision-points/${decision.decision_point_id}/resolve`,
+          `/api/v2/projects/${item.project_id}/decision-points/${encodeURIComponent(decision.decision_point_id)}/resolve`,
           {
             expected_condition_fingerprint: decision.condition_fingerprint,
             selected_option_id: input.selectedOptionId,
             rationale: input.rationale,
             direction_target: input.directionTarget,
             direction_text: input.directionText,
-            idempotency_key: `decision-${decision.decision_point_id}-${globalThis.crypto.randomUUID()}`,
+            idempotency_key: input.idempotencyKey,
           },
         );
-        await loadProjectAttention();
+        // A retry can replace the designated run immediately. Refresh the
+        // task/run read model in the same user action so Overview never keeps
+        // showing the failed attempt while the attention feed already refers
+        // to its replacement.
+        await Promise.all([loadProjectAttention(), loadPhaseExecution(), loadResume()]);
       } catch (err) {
         if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+        else setResumeError(err instanceof Error ? err.message : String(err));
       } finally {
         setPhaseAttentionBusy(null);
       }
     },
-    [onLogout, loadProjectAttention],
+    [onLogout, loadProjectAttention, loadPhaseExecution, loadResume],
   );
 
   // FRONT DOOR P5 (tracking): update-interval control, PATCHed to the
@@ -1406,10 +1544,13 @@ function ProjectGraph({
     setOverrideError(null);
   }, [selected, clearDraft]);
 
+  const displayGraph: GraphDto | null = graph ?? relationalGraph?.graph ?? null;
+  const graphIsReadOnly = !graph && relationalGraph !== null;
+
   const { nodes, edges } = useMemo(() => {
-    if (!graph) return { nodes: [] as Node[], edges: [] as Edge[] };
-    const positions = layout(graph.nodes);
-    const flowNodes: Node[] = graph.nodes.map((node) => ({
+    if (!displayGraph) return { nodes: [] as Node[], edges: [] as Edge[] };
+    const positions = layout(displayGraph.nodes);
+    const flowNodes: Node[] = displayGraph.nodes.map((node) => ({
       id: node.id,
       position: positions.get(node.id) ?? { x: 0, y: 0 },
       sourcePosition: Position.Right,
@@ -1457,11 +1598,11 @@ function ProjectGraph({
                   fontSize: 10,
                 }}
               >
-                {node.assignment.model} · {node.assignment.worker_count}w · $
-                {node.assignment.budget_usd}
-                {node.assignment.source === "override"
+                {node.assignment.model} · {node.assignment.worker_count}w
+                {graphIsReadOnly ? "" : ` · $${node.assignment.budget_usd}`}
+                {!graphIsReadOnly && node.assignment.source === "override"
                   ? " · OVERRIDE"
-                  : node.assignment.source === "pm"
+                  : !graphIsReadOnly && node.assignment.source === "pm"
                     ? " · PM PICK"
                     : ""}
               </div>
@@ -1480,7 +1621,7 @@ function ProjectGraph({
         ),
       },
     }));
-    const flowEdges: Edge[] = graph.nodes.flatMap((node) =>
+    const flowEdges: Edge[] = displayGraph.nodes.flatMap((node) =>
       node.dependencies.map((dep) => ({
         id: `${dep}->${node.id}`,
         source: dep,
@@ -1492,7 +1633,7 @@ function ProjectGraph({
       })),
     );
     return { nodes: flowNodes, edges: flowEdges };
-  }, [graph, selected, theme]);
+  }, [displayGraph, graphIsReadOnly, selected, theme]);
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -1515,7 +1656,7 @@ function ProjectGraph({
     [call, base],
   );
 
-  const selectedNode = graph?.nodes.find((n) => n.id === selected) ?? null;
+  const selectedNode = displayGraph?.nodes.find((n) => n.id === selected) ?? null;
 
   if (showDebates) {
     return (
@@ -1567,7 +1708,13 @@ function ProjectGraph({
           <div className="eyebrow">Workspace</div>
           <h1>{project.name}</h1>
           <div className="meta">
-            <Badge tone={project.status === "planned" ? "success" : "warn"}>{project.status}</Badge>
+            <Badge
+              tone={
+                projectNeedsAttention ? "danger" : project.status === "planned" ? "success" : "warn"
+              }
+            >
+              {projectNeedsAttention ? "needs attention" : project.status}
+            </Badge>
             <span className="chip model-c">
               {project.pm_model
                 ? (pmModelOption(project.pm_model)?.label ?? project.pm_model)
@@ -1593,7 +1740,7 @@ function ProjectGraph({
             type="button"
             className={workspaceTab === "overview" ? "on" : ""}
             aria-current={workspaceTab === "overview" ? "page" : undefined}
-            onClick={() => setWorkspaceTab("overview")}
+            onClick={() => selectWorkspaceTab("overview")}
           >
             Overview
           </button>
@@ -1601,7 +1748,7 @@ function ProjectGraph({
             type="button"
             className={workspaceTab === "plan" ? "on" : ""}
             aria-current={workspaceTab === "plan" ? "page" : undefined}
-            onClick={() => setWorkspaceTab("plan")}
+            onClick={() => selectWorkspaceTab("plan")}
           >
             Plan
           </button>
@@ -1609,7 +1756,7 @@ function ProjectGraph({
             type="button"
             className={workspaceTab === "phase" ? "on" : ""}
             aria-current={workspaceTab === "phase" ? "page" : undefined}
-            onClick={() => setWorkspaceTab("phase")}
+            onClick={() => selectWorkspaceTab("phase")}
           >
             Phase
           </button>
@@ -1617,7 +1764,7 @@ function ProjectGraph({
             type="button"
             className={workspaceTab === "graph" ? "on" : ""}
             aria-current={workspaceTab === "graph" ? "page" : undefined}
-            onClick={() => setWorkspaceTab("graph")}
+            onClick={() => selectWorkspaceTab("graph")}
           >
             Graph
           </button>
@@ -1633,15 +1780,19 @@ function ProjectGraph({
           <div className="workspace-tab-panel" data-testid="workspace-tab-overview">
             {error ? <Alert testId="error">{error}</Alert> : null}
 
-            {resume && resume.phases.length === 0 && !strategyReview && !activePlanningRunId ? (
+            {resume &&
+            resume.phases.length === 0 &&
+            !relationalPhaseFallback &&
+            !strategyReview &&
+            !activePlanningRunId ? (
               <button
                 type="button"
                 className="card workspace-empty-pointer"
                 data-testid="overview-no-plan-pointer"
-                onClick={() => setWorkspaceTab("plan")}
+                onClick={() => setWorkspaceTab("phase")}
               >
                 <strong>No plan yet</strong>
-                <span>Draft the plan →</span>
+                <span>Start work in Phase →</span>
               </button>
             ) : null}
 
@@ -1651,12 +1802,20 @@ function ProjectGraph({
                 <div className="side-body form-stack">
                   <div className="stat-strip">
                     <div className="stat">
-                      <strong>{resume.phases.length}</strong>
+                      <strong data-testid="overview-phase-count">
+                        {resume.phases.length > 0
+                          ? resume.phases.length
+                          : relationalPhaseFallback
+                            ? 1
+                            : 0}
+                      </strong>
                       <span>PHASES</span>
                     </div>
                     <div className="stat">
-                      <strong>
-                        {resume.attention.open_decisions + resume.attention.blocked_tasks}
+                      <strong data-testid="overview-attention-count">
+                        {resume.attention.open_decisions +
+                          resume.attention.blocked_tasks +
+                          (relationalPhaseFallback?.needsAttention ? 1 : 0)}
                       </strong>
                       <span>NEEDS ATTENTION</span>
                     </div>
@@ -1688,7 +1847,7 @@ function ProjectGraph({
                       ) : undefined
                     }
                   >
-                    {resume.next_recommended_action}
+                    {relationalPhaseFallback?.nextAction ?? resume.next_recommended_action}
                   </NextStep>
                   {/* FRONT DOOR P1b: the mini-Gantt strip on the workspace phase
                    *  board — compact per-phase gates + progress at a glance. */}
@@ -1726,6 +1885,29 @@ function ProjectGraph({
                       </div>
                     </div>
                   ))}
+                  {relationalPhaseFallback ? (
+                    <div
+                      className="project-row"
+                      data-testid="relational-overview-phase"
+                      key={relationalPhaseFallback.id}
+                    >
+                      <div>
+                        <strong>{relationalPhaseFallback.title}</strong>
+                        <div className="muted" style={{ fontSize: 12 }}>
+                          {relationalPhaseFallback.statusLabel} ·{" "}
+                          {relationalPhaseFallback.completedTasks}/
+                          {relationalPhaseFallback.taskCount} tasks complete
+                        </div>
+                      </div>
+                      <Button
+                        className="btn-small"
+                        variant={relationalPhaseFallback.needsAttention ? "primary" : "default"}
+                        onClick={() => setWorkspaceTab("phase")}
+                      >
+                        Open in Phase
+                      </Button>
+                    </div>
+                  ) : null}
                   {phaseExecution ? (
                     <section className="phase-execution" aria-labelledby="phase-execution-heading">
                       <div className="section-head">
@@ -1736,9 +1918,15 @@ function ProjectGraph({
                           </h3>
                         </div>
                         <Badge
-                          tone={phaseExecution.phase.status === "completed" ? "success" : "info"}
+                          tone={
+                            monitoredPhaseStatus === "needs attention"
+                              ? "danger"
+                              : monitoredPhaseStatus === "completed"
+                                ? "success"
+                                : "info"
+                          }
                         >
-                          {phaseExecution.phase.status}
+                          {monitoredPhaseStatus}
                         </Badge>
                       </div>
                       <div className="phase-progress" aria-label="Phase task progress">
@@ -1777,6 +1965,7 @@ function ProjectGraph({
                             task={task}
                             projectId={project.id}
                             phaseId={phaseExecution.phase.id}
+                            reviewRequired={phaseExecution.phase.planning_mode !== "quick"}
                             focused={focusedTaskId === task.id}
                             onUnauthorized={() => onLogout("Session expired. Sign in again.")}
                           />
@@ -1831,6 +2020,21 @@ function ProjectGraph({
               </details>
             ) : null}
 
+            <KnowledgeStatusPanel
+              projectId={project.id}
+              phaseId={monitoredPhaseId}
+              relationalPhase={
+                relationalPhaseFallback
+                  ? {
+                      name: relationalPhaseFallback.title,
+                      status: relationalPhaseFallback.statusLabel,
+                      nextAction: relationalPhaseFallback.nextAction,
+                    }
+                  : null
+              }
+              onUnauthorized={handleWorkspaceUnauthorized}
+            />
+
             {resume ? (
               <details className="card side-section" open data-testid="tracking-settings">
                 <summary>Tracking</summary>
@@ -1866,116 +2070,73 @@ function ProjectGraph({
 
         {workspaceTab === "plan" ? (
           <div className="workspace-tab-panel" data-testid="workspace-tab-plan">
-            {/* FRONT DOOR P1: new-phase creation via an observable planning
-             *  run, replacing the old raw-objective text box. FRONT DOOR
-             *  P1c: also the one canonical entry point for a project's very
-             *  first plan (see the "Draft the plan" label below). */}
-            {resume ? (
-              <details className="card side-section" open data-testid="planning-section">
-                <summary>Plan</summary>
-                <div className="side-body form-stack">
-                  {activePlanningRunId ? (
-                    <section className="card planning-run-status" data-testid="planning-run-status">
-                      <div className="eyebrow">Drafting next phase</div>
-                      <Badge tone={planningRun?.status === "failed" ? "danger" : "info"}>
-                        {planningRun?.status ?? "queued"}
-                      </Badge>
-                      <p className="muted" style={{ fontSize: 12 }}>
-                        Round {planningRun?.round ?? 0} of{" "}
-                        {planningRun?.max_rounds ?? nextPhaseRounds}
+            {/* The Plan tab preserves recovery for legacy planning runs and
+             * strategy reviews. Phase is the canonical composer for all new
+             * quick changes and planned work. */}
+            <details className="card side-section" open data-testid="planning-section">
+              <summary>Plan</summary>
+              <div className="side-body form-stack">
+                {activePlanningRunId ? (
+                  <section className="card planning-run-status" data-testid="planning-run-status">
+                    <div className="eyebrow">Drafting next phase</div>
+                    <Badge tone={planningRun?.status === "failed" ? "danger" : "info"}>
+                      {planningRun?.status ?? "queued"}
+                    </Badge>
+                    <p className="muted" style={{ fontSize: 12 }}>
+                      Round {planningRun?.round ?? 0} of {planningRun?.max_rounds ?? "—"}
+                    </p>
+                    {planningRun?.result ? (
+                      <p className="meta mono" data-testid="planning-run-cost">
+                        Planning cost so far: ${planningRun.result.total_cost_usd.toFixed(2)}
                       </p>
-                      {planningRun?.result ? (
-                        <p className="meta mono" data-testid="planning-run-cost">
-                          Planning cost so far: ${planningRun.result.total_cost_usd.toFixed(2)}
-                        </p>
-                      ) : null}
-                      {planningRun?.transcript.length ? (
-                        <ul className="planning-transcript" data-testid="planning-transcript">
-                          {planningRun.transcript.map((entry, index) => (
-                            <li key={`${entry.round}-${entry.role}-${index}`}>
-                              Round {entry.round} · {entry.role} ({entry.model}): {entry.summary}
-                            </li>
-                          ))}
-                        </ul>
-                      ) : null}
-                      {planningRun &&
-                      (planningRun.status === "converged" ||
-                        planningRun.status === "cap_reached") ? (
-                        <Button
-                          variant="primary"
-                          disabled={materializingPhase}
-                          onClick={() => void materializePhaseFromRun()}
-                        >
-                          {materializingPhase ? "Creating phase…" : "Create phase from this run →"}
-                        </Button>
-                      ) : NON_TERMINAL_RUN_STATUSES.has(planningRun?.status ?? "queued") ? (
-                        <Spinner label="Coordinator and reviewer are drafting…" />
-                      ) : null}
-                    </section>
-                  ) : (
-                    <>
-                      {/* FRONT DOOR P1c: this is the ONE canonical planning
-                       *  entry point — a brand-new draft project's very first
-                       *  plan goes through exactly the same durable planning-run
-                       *  flow as every subsequent phase (no separate legacy
-                       *  "01 · Live planning" box anymore). */}
-                      <AttachmentInput
-                        variant="composer"
-                        label={
-                          resume.phases.length === 0 ? "Draft the plan" : "Draft the next phase"
-                        }
-                        textAreaTestId="next-phase-objective"
-                        placeholder="Describe what this phase should deliver…"
-                        textValue={nextPhaseObjective}
-                        onTextChange={setNextPhaseObjective}
-                        projectId={project.id}
-                        value={nextPhaseAttachmentIds}
-                        onChange={setNextPhaseAttachmentIds}
-                        purpose="objective"
-                        disabled={planningRunStarting}
-                      />
-                      <Field label="Plan review rounds">
-                        <div className="rounds-stepper" data-testid="next-phase-rounds-stepper">
-                          <Button
-                            type="button"
-                            className="btn-small"
-                            disabled={nextPhaseRounds <= 1}
-                            onClick={() => setNextPhaseRounds((n) => Math.max(1, n - 1))}
-                            aria-label="Fewer rounds"
-                          >
-                            −
-                          </Button>
-                          <span className="rounds-value mono">{nextPhaseRounds}</span>
-                          <Button
-                            type="button"
-                            className="btn-small"
-                            disabled={nextPhaseRounds >= 5}
-                            onClick={() => setNextPhaseRounds((n) => Math.min(5, n + 1))}
-                            aria-label="More rounds"
-                          >
-                            +
-                          </Button>
-                        </div>
-                      </Field>
+                    ) : null}
+                    {planningRun?.transcript.length ? (
+                      <ul className="planning-transcript" data-testid="planning-transcript">
+                        {planningRun.transcript.map((entry, index) => (
+                          <li key={`${entry.round}-${entry.role}-${index}`}>
+                            Round {entry.round} · {entry.role} ({entry.model}): {entry.summary}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {planningRun &&
+                    (planningRun.status === "converged" || planningRun.status === "cap_reached") ? (
                       <Button
                         variant="primary"
-                        disabled={planningRunStarting || !nextPhaseObjective.trim()}
-                        onClick={() => void startNextPhasePlanningRun()}
+                        disabled={materializingPhase}
+                        onClick={() => void materializePhaseFromRun()}
                       >
-                        {planningRunStarting
-                          ? "Starting planning run…"
-                          : resume.phases.length === 0
-                            ? "Draft plan →"
-                            : "Draft next phase →"}
+                        {materializingPhase ? "Creating phase…" : "Create phase from this run →"}
                       </Button>
-                    </>
-                  )}
-                  {planningRunError ? (
-                    <Alert testId="planning-run-error">{planningRunError}</Alert>
-                  ) : null}
-                </div>
-              </details>
-            ) : null}
+                    ) : NON_TERMINAL_RUN_STATUSES.has(planningRun?.status ?? "queued") ? (
+                      <Spinner label="Coordinator and reviewer are drafting…" />
+                    ) : null}
+                  </section>
+                ) : strategyReview ? null : (
+                  <section className="card planning-run-status" data-testid="plan-phase-pointer">
+                    <div className="eyebrow">New work</div>
+                    <h3>Start in Phase</h3>
+                    <p className="muted">
+                      Phase is the single place to make a quick change or prepare reviewed, planned
+                      work.
+                    </p>
+                    <Button
+                      variant="primary"
+                      data-testid="plan-open-phase"
+                      onClick={() => {
+                        setPhaseComposerRequested(true);
+                        setWorkspaceTab("phase");
+                      }}
+                    >
+                      Create work in Phase →
+                    </Button>
+                  </section>
+                )}
+                {planningRunError ? (
+                  <Alert testId="planning-run-error">{planningRunError}</Alert>
+                ) : null}
+              </div>
+            </details>
 
             {strategyReview ? (
               <details className="card side-section" open data-testid="strategy-review-section">
@@ -2004,7 +2165,23 @@ function ProjectGraph({
             <PhaseTab
               projectId={project.id}
               initialRunId={phaseJourneyRunId}
-              onJourneyChanged={() => void loadResume()}
+              designatedExecution={phaseExecution}
+              composerRequested={phaseComposerRequested}
+              onComposerOpened={() => setPhaseComposerRequested(true)}
+              onRunStarted={(runId) => {
+                setPhaseJourneyRunId(runId);
+                setPhaseComposerRequested(false);
+              }}
+              onJourneyChanged={() => {
+                void loadResume();
+                void loadLatestRelationalPlanningRun();
+                void loadPhaseExecution();
+              }}
+              onOpenRecoveryDetails={(phaseId) => {
+                setMonitoredPhaseId(phaseId);
+                setWorkspaceTab("overview");
+                if (phaseId === monitoredPhaseId) void loadPhaseExecution();
+              }}
               onUnauthorized={() => onLogout("Session expired. Sign in again.")}
             />
           </div>
@@ -2021,32 +2198,52 @@ function ProjectGraph({
                 edges={edges}
                 edgeTypes={graphEdgeTypes}
                 connectionLineType={ConnectionLineType.SmoothStep}
-                onConnect={onConnect}
-                onEdgesDelete={onEdgesDelete}
+                onConnect={graph ? onConnect : undefined}
+                onEdgesDelete={graph ? onEdgesDelete : undefined}
                 onNodeClick={(_event, node) => setSelected(node.id)}
+                nodesConnectable={!graphIsReadOnly}
                 fitView
               >
                 <Background color={theme === "light" ? "#c5ccd3" : "#353c44"} gap={24} size={1} />
                 <Controls />
               </ReactFlow>
             </div>
-            {graph ? (
+            {displayGraph ? (
               <>
                 <div className="actions">
-                  <Badge tone={graph.cost.unallocated.length ? "warn" : "success"}>
-                    {graph.cost.unallocated.length
-                      ? `${graph.cost.unallocated.length} unallocated`
-                      : "Ready"}
+                  <Badge
+                    tone={
+                      graphIsReadOnly
+                        ? relationalGraph?.status === "blocked" ||
+                          relationalGraph?.status === "failed"
+                          ? "warn"
+                          : "info"
+                        : displayGraph.cost.unallocated.length
+                          ? "warn"
+                          : "success"
+                    }
+                  >
+                    {graphIsReadOnly
+                      ? "Relational read model"
+                      : displayGraph.cost.unallocated.length
+                        ? `${displayGraph.cost.unallocated.length} unallocated`
+                        : "Ready"}
                   </Badge>
                 </div>
                 <div className="stat-strip">
                   <div className="stat" data-testid="graph-version">
-                    <strong>v{graph.version}</strong>
-                    <span>GRAPH VERSION</span>
+                    <strong>
+                      {graphIsReadOnly ? displayGraph.nodes.length : `v${displayGraph.version}`}
+                    </strong>
+                    <span>{graphIsReadOnly ? "CURRENT WORK ITEMS" : "GRAPH VERSION"}</span>
                   </div>
                   <div className="stat" data-testid="cost-total">
-                    <strong>${graph.cost.total_usd}</strong>
-                    <span>COST PREVIEW</span>
+                    <strong>
+                      {graphIsReadOnly
+                        ? (relationalGraph?.status ?? "current")
+                        : `$${displayGraph.cost.total_usd}`}
+                    </strong>
+                    <span>{graphIsReadOnly ? "RELATIONAL STATUS" : "COST PREVIEW"}</span>
                   </div>
                 </div>
               </>
@@ -2055,7 +2252,7 @@ function ProjectGraph({
                 <div>
                   <div className="empty-icon">◇</div>
                   <strong>No plan yet</strong>
-                  <p>Describe the outcome below to begin live planning.</p>
+                  <p>Start work in Phase to create the first planning run.</p>
                 </div>
               </div>
             ) : (
@@ -2320,6 +2517,57 @@ function ProjectGraph({
                   )}
                 </section>
               </>
+            ) : relationalGraph ? (
+              <section
+                className="card side-section"
+                data-testid="relational-graph-summary"
+                aria-labelledby="relational-graph-title"
+              >
+                <div className="side-body form-stack">
+                  <div className="section-head">
+                    <div>
+                      <div className="eyebrow">Read-only relational view</div>
+                      <h3 id="relational-graph-title">{relationalGraph.title}</h3>
+                    </div>
+                    <Badge
+                      tone={
+                        relationalGraph.status === "blocked" || relationalGraph.status === "failed"
+                          ? "warn"
+                          : "info"
+                      }
+                    >
+                      {relationalGraph.status.replaceAll("_", " ")}
+                    </Badge>
+                  </div>
+                  <p className="muted">
+                    This graph comes from the current planning run and phase execution records.
+                    Allocation and graph-edit controls remain available only for legacy imported
+                    graphs.
+                  </p>
+                  {selectedNode ? (
+                    <div className="assignment" data-testid="relational-node-details">
+                      <span>Work item</span>
+                      <strong>{selectedNode.title}</strong>
+                      <span>Complexity</span>
+                      <strong>{selectedNode.complexity}</strong>
+                      <span>Risk</span>
+                      <strong>{selectedNode.risk}</strong>
+                      <span>Depends on</span>
+                      <strong>{selectedNode.dependencies.join(", ") || "Nothing"}</strong>
+                      <span>Agent</span>
+                      <strong>
+                        {selectedNode.assignment
+                          ? `${selectedNode.assignment.provider} · ${selectedNode.assignment.model}`
+                          : "Not assigned yet"}
+                      </strong>
+                      <span>Reviewer</span>
+                      <strong>{selectedNode.assignment?.reviewer_model ?? "Not assigned"}</strong>
+                    </div>
+                  ) : (
+                    <p className="muted">Select a work item to inspect its current assignment.</p>
+                  )}
+                </div>
+              </section>
             ) : null}
           </div>
         ) : null}

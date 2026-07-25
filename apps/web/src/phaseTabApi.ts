@@ -4,8 +4,8 @@
 // backend as actually built (apps/server/src/planning/runService.ts and the
 // PHASE TAB P1 routes in apps/server/src/server.ts):
 //   1. POST /api/v2/projects/:id/planning-runs
-//        body: { objective, attachment_ids?, review_rounds? (1–5),
-//        worker_providers?: "anthropic" | "openai" | "both" } -> 202
+//        body: { objective, mode: "quick"|"planned", attachment_ids?,
+//        review_rounds: 0|1–5, worker_providers?, pm?, agent? } -> 202
 //        { planning_run_id }.
 //   2. GET  /api/v2/projects/:id/planning-runs/:runId -> PlanningRunDto.
 //        There is NO `awaiting_decision` status: a run with status
@@ -64,13 +64,35 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 // ---------------------------------------------------------------------------
 
 export type WorkerProviders = "anthropic" | "openai" | "both";
+export type PhaseRunMode = "planned" | "quick";
+export type PhaseParticipantSelection = {
+  provider: "anthropic" | "openai";
+  model: string;
+};
+
+export interface ExecutionModelCapability {
+  id: string;
+  provider: "anthropic" | "openai";
+  label: string;
+  available: boolean;
+  unavailable_reason: string | null;
+}
+
+export interface ExecutionModelCapabilities {
+  ready: boolean;
+  required_environment: string[];
+  models: ExecutionModelCapability[];
+}
 
 export interface StartPhasePlanningRunBody {
   objective: string;
   attachment_ids: string[];
-  /** 1–5; server default applies when omitted. */
+  mode: PhaseRunMode;
+  /** 0 for a quick change; 1–5 for a planned phase. */
   review_rounds: number;
   worker_providers: WorkerProviders;
+  pm?: PhaseParticipantSelection;
+  agent?: PhaseParticipantSelection;
 }
 
 /** The backend's PlanningRunStatus. There is NO `awaiting_decision`. */
@@ -138,8 +160,8 @@ export interface PhasePlanningRunTranscriptEntry {
 }
 
 export interface PhasePlanningRunResult {
-  /** The PlanContract payload; only `modules` is read here. */
-  plan: { modules?: PhasePlanModule[] } | null;
+  /** The PlanContract payload; objective and modules identify its execution phase. */
+  plan: { objective?: string; modules?: PhasePlanModule[] } | null;
   content_hash: string;
   total_cost_usd: number;
   staffing_proposal: PhaseStaffingProposal | null;
@@ -153,8 +175,21 @@ export interface PhasePlanningRunDecision {
   decided_at: string;
 }
 
+/**
+ * Durable automatic-execution report for an approved planning run. `null`
+ * means no kickoff result has been recorded yet.
+ */
+export interface PhaseExecutionKickoffReport {
+  started: boolean;
+  detail: string;
+}
+
 export interface PhasePlanningRunDto {
   id: string;
+  mode?: PhaseRunMode;
+  objective?: string;
+  pm?: PhaseParticipantSelection | null;
+  agent?: PhaseParticipantSelection | null;
   status: PhasePlanningRunStatus;
   round: number;
   max_rounds: number;
@@ -165,6 +200,7 @@ export interface PhasePlanningRunDto {
   transcript: PhasePlanningRunTranscriptEntry[];
   result: PhasePlanningRunResult | null;
   error: string | null;
+  execution: PhaseExecutionKickoffReport | null;
 }
 
 /** One planned phase with its staffing recommendation, ready for display. */
@@ -214,20 +250,7 @@ export interface PlanningRunDecisionBody {
   staffing?: PlanningRunStaffingOverride[];
 }
 
-/**
- * Approve's kickoff report. `null` means the approval is recorded but this
- * deployment did not report a kickoff result; the UI reconciles the durable
- * execution read model before offering recovery.
- */
-export interface PhaseExecutionKickoffReport {
-  started: boolean;
-  detail: string;
-}
-
-export type PlanningRunDecisionResponse = PhasePlanningRunDto & {
-  /** Present on approve responses only. */
-  execution?: PhaseExecutionKickoffReport | null;
-};
+export type PlanningRunDecisionResponse = PhasePlanningRunDto;
 
 export interface PhaseExecutionStatusRow {
   phase_id: string;
@@ -256,6 +279,10 @@ export function startPhasePlanningRun(
   body: StartPhasePlanningRunBody,
 ): Promise<{ planning_run_id: string }> {
   return postJson(`/api/v2/projects/${projectId}/planning-runs`, body);
+}
+
+export function getExecutionModelCapabilities(): Promise<ExecutionModelCapabilities> {
+  return getJson("/api/v2/capabilities/execution-models");
 }
 
 export function getPhasePlanningRun(

@@ -44,6 +44,10 @@ export function draftPlanPrompt(objective: string): string {
   return `Objective:\n${objective}\n\n${PLAN_SHAPE_HINT}\n\nProduce the Plan Contract JSON for this objective.`;
 }
 
+export function quickChangePrompt(objective: string): string {
+  return `Quick change:\n${objective}\n\n${PLAN_SHAPE_HINT}\n\nReturn the smallest executable Plan Contract for this change. Use exactly one module. Keep the module focused on the requested edit, include proportionate verification, and do not add speculative work or unrelated cleanup.`;
+}
+
 export function validationRetryPrompt(errors: readonly PlanValidationError[]): string {
   const list = errors.map((e) => `- [${e.code}] ${e.message}`).join("\n");
   return `Your previous plan failed engine validation:\n${list}\n\nFix every error and return the corrected Plan Contract JSON.`;

@@ -41,6 +41,7 @@ type Clock = () => Date;
 type IdFactory = (kind: "user") => string;
 
 const DEFAULT_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+const DEFAULT_SESSION_TOUCH_INTERVAL_MS = 60_000;
 const DEFAULT_INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const DEFAULT_RECOVERY_TTL_MS = 60 * 60 * 1_000;
 
@@ -62,6 +63,7 @@ interface SessionIdentityRow extends UserRow {
   token_key_id: string | null;
   session_status: "active" | "revoked" | "expired";
   expires_at: Date | string;
+  last_seen_at: Date | string | null;
   session_source: "native" | "legacy_snapshot";
 }
 
@@ -83,6 +85,7 @@ export interface RelationalIdentityServiceOptions {
   newId?: IdFactory | undefined;
   randomBytes?: RandomBytes | undefined;
   sessionTtlMs?: number | undefined;
+  sessionTouchIntervalMs?: number | undefined;
   invitationTtlMs?: number | undefined;
 }
 
@@ -187,10 +190,15 @@ export class RelationalIdentityService implements IdentityService {
   private readonly idFactory: IdFactory;
   private readonly randomBytes: RandomBytes | undefined;
   private readonly sessionTtlMs: number;
+  private readonly sessionTouchIntervalMs: number;
   private readonly invitationTtlMs: number;
 
   constructor(options: RelationalIdentityServiceOptions) {
     assertDuration("sessionTtlMs", options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS);
+    assertDuration(
+      "sessionTouchIntervalMs",
+      options.sessionTouchIntervalMs ?? DEFAULT_SESSION_TOUCH_INTERVAL_MS,
+    );
     assertDuration("invitationTtlMs", options.invitationTtlMs ?? DEFAULT_INVITATION_TTL_MS);
     if (options.credentialKey.keyId.trim().length === 0) {
       throw new Error("credential key id must not be empty");
@@ -207,6 +215,8 @@ export class RelationalIdentityService implements IdentityService {
     this.idFactory = options.newId ?? ((kind) => defaultNewId(kind));
     this.randomBytes = options.randomBytes;
     this.sessionTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+    this.sessionTouchIntervalMs =
+      options.sessionTouchIntervalMs ?? DEFAULT_SESSION_TOUCH_INTERVAL_MS;
     this.invitationTtlMs = options.invitationTtlMs ?? DEFAULT_INVITATION_TTL_MS;
   }
 
@@ -266,11 +276,10 @@ export class RelationalIdentityService implements IdentityService {
            u.password_hash_scheme, u.created_at,
            s.id AS session_id, s.token_hash, s.token_hash_scheme,
            s.token_key_id, s.status AS session_status, s.expires_at,
-           s.source AS session_source
+           s.last_seen_at, s.source AS session_source
          FROM sessions s
          JOIN users u ON u.id = s.user_id
-         WHERE s.id = $1
-         FOR UPDATE`,
+         WHERE s.id = $1`,
         [parsed.id],
       );
       const row = result.rows[0];
@@ -304,10 +313,21 @@ export class RelationalIdentityService implements IdentityService {
         );
         return undefined;
       }
-      await sql.query("UPDATE sessions SET last_seen_at = $2 WHERE id = $1", [
-        row.session_id,
-        now.toISOString(),
-      ]);
+      const lastSeenAt = row.last_seen_at ? new Date(row.last_seen_at).getTime() : 0;
+      if (now.getTime() - lastSeenAt >= this.sessionTouchIntervalMs) {
+        await sql.query(
+          `UPDATE sessions
+           SET last_seen_at = $2
+           WHERE id = $1
+             AND status = 'active'
+             AND (last_seen_at IS NULL OR last_seen_at <= $3)`,
+          [
+            row.session_id,
+            now.toISOString(),
+            new Date(now.getTime() - this.sessionTouchIntervalMs).toISOString(),
+          ],
+        );
+      }
       return identity(row);
     });
   }

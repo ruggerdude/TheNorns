@@ -251,6 +251,7 @@ describe("project graph API", () => {
         ANTHROPIC_API_KEY: "test-anthropic",
         OPENAI_API_KEY: "test-openai",
         NORNS_DEBATE_ALLOWED_MODELS: "anthropic/claude-sonnet-5,openai/gpt-5.6-terra",
+        NORNS_RUNNER_ALLOWED_MODELS: "anthropic/claude-sonnet-5,openai/gpt-5.6-terra",
       },
       createPlanningAdapter: () => pm,
       recordUsage: (events) => usage.push(...events),

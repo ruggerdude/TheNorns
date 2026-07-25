@@ -25,6 +25,9 @@ import type { WorkspaceRegistry } from "./workspaceRegistry.js";
 
 const execFileAsync = promisify(execFile);
 const LOCAL_PATH_REDACTION = "[LOCAL_PATH]";
+const KNOWLEDGE_TEXT_LIMIT = 4_000;
+const KNOWLEDGE_ITEM_LIMIT = 32;
+const KNOWLEDGE_HEARTBEAT_INTERVAL_MS = 60_000;
 
 function redactExactLocalPaths(value: string, paths: readonly (string | undefined)[]): string {
   let redacted = value;
@@ -32,6 +35,11 @@ function redactExactLocalPaths(value: string, paths: readonly (string | undefine
   for (const path of paths.filter((candidate): candidate is string => Boolean(candidate))) {
     variants.add(path);
     variants.add(resolve(path));
+    // macOS exposes the same temporary tree through `/var` and
+    // `/private/var`; runtimes may report either spelling even when the
+    // registry stores only the physical one.
+    if (path.startsWith("/private/")) variants.add(path.slice("/private".length));
+    if (path.startsWith("/var/")) variants.add(`/private${path}`);
     try {
       variants.add(realpathSync(path));
     } catch {
@@ -43,6 +51,26 @@ function redactExactLocalPaths(value: string, paths: readonly (string | undefine
     redacted = redacted.replaceAll(path, LOCAL_PATH_REDACTION);
   }
   return redacted;
+}
+
+function redactKnowledgeText(
+  value: string,
+  paths: readonly (string | undefined)[],
+  fallback: string,
+): string {
+  const bounded = redactExactLocalPaths(value, paths)
+    .replace(/\b(sk-[A-Za-z0-9_-]{8,})\b/g, "[REDACTED]")
+    .replace(/\b(token|password|secret|api[_ -]?key)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]")
+    .trim()
+    .slice(0, KNOWLEDGE_TEXT_LIMIT);
+  return bounded || fallback;
+}
+
+function boundedKnowledgeList(values: readonly string[]): string[] {
+  return values
+    .map((value) => value.trim().slice(0, KNOWLEDGE_TEXT_LIMIT))
+    .filter(Boolean)
+    .slice(0, KNOWLEDGE_ITEM_LIMIT);
 }
 
 export interface RunnerRepositoryBinding {
@@ -173,6 +201,25 @@ export interface RunnerWorktreeManager {
   }): Promise<PreparedWorktree>;
 }
 
+type RunnerExecutionStage =
+  | "context_load"
+  | "scratch_prepare"
+  | "worktree_prepare"
+  | "runtime"
+  | "worktree_inspection"
+  | "verification"
+  | "publication";
+
+const FAILURE_CODE_BY_STAGE: Record<RunnerExecutionStage, string> = {
+  context_load: "runner_context_load_failed",
+  scratch_prepare: "runner_scratch_prepare_failed",
+  worktree_prepare: "runner_worktree_prepare_failed",
+  runtime: "runner_runtime_failed",
+  worktree_inspection: "runner_worktree_inspection_failed",
+  verification: "runner_verification_failed",
+  publication: "runner_publication_failed",
+};
+
 export class GitWorktreeManager implements RunnerWorktreeManager {
   constructor(private readonly worktreeRoot: string) {}
 
@@ -282,6 +329,12 @@ export interface RunnerVerifier {
      * the resolution below is exactly what it was before.
      */
     commands?: readonly VerificationCommand[];
+    /**
+     * The server confirmed that repository verification is defined by the
+     * committed manifest. Exact commands still win; otherwise the manifest must
+     * be read at expected_commit before any runner-local policy is considered.
+     */
+    repository_manifest?: true;
   }): Promise<RunnerVerificationResult>;
 }
 
@@ -328,6 +381,7 @@ export class CommandPolicyVerifier implements RunnerVerifier {
     expected_commit: string;
     base_revision: string;
     commands?: readonly VerificationCommand[];
+    repository_manifest?: true;
   }): Promise<RunnerVerificationResult> {
     const refuse = (reason: string): RunnerVerificationResult => ({
       passed: false,
@@ -355,7 +409,10 @@ export class CommandPolicyVerifier implements RunnerVerifier {
       );
     }
 
-    // EXECUTION E11 — RESOLUTION ORDER, and why the dispatch field is first.
+    // RESOLUTION ORDER: exact dispatch commands, an explicitly signaled full
+    // repository manifest, the runner policy map, then the legacy manifest
+    // fallback. The explicit manifest signal must precede the built-in default
+    // policy or a real test suite is silently replaced by Git hygiene.
     //
     // E10 closed E4-5 by putting the project's real commands on the dispatch
     // command, where they are the human-reviewed server-side record of how this
@@ -374,6 +431,23 @@ export class CommandPolicyVerifier implements RunnerVerifier {
     let commands: readonly VerificationCommand[] | undefined =
       input.commands && input.commands.length > 0 ? input.commands : undefined;
     let source = "verification commands from the dispatch command";
+    if (!commands && input.repository_manifest) {
+      try {
+        const manifest = await readRepositoryVerificationManifest(
+          input.worktree_path,
+          input.expected_commit,
+        );
+        if (!manifest) {
+          return refuse(
+            `dispatch requires ${REPOSITORY_VERIFICATION_MANIFEST}, but it is absent or empty at ${input.expected_commit}`,
+          );
+        }
+        commands = manifest;
+        source = `${REPOSITORY_VERIFICATION_MANIFEST} at ${input.expected_commit}`;
+      } catch (error) {
+        return refuse(error instanceof Error ? error.message : String(error));
+      }
+    }
     if (!commands) {
       commands = this.policies.get(input.policy_ref);
       source = `policy ${input.policy_ref}`;
@@ -598,6 +672,7 @@ export class V2RunnerExecutor {
   async execute(
     commandInput: V2DispatchCommandT,
     emit: (event: EventPayloadT) => void,
+    capabilities: { knowledge_transport: boolean } = { knowledge_transport: false },
   ): Promise<V2RunnerExecutionResult> {
     const command = V2DispatchCommand.parse(commandInput);
     if (
@@ -634,6 +709,7 @@ export class V2RunnerExecutor {
         : runtimeProvider;
     let scratch: string | undefined;
     let worktree: PreparedWorktree | undefined;
+    let stage: RunnerExecutionStage = "context_load";
 
     // EXECUTION E11 — the run becomes controllable HERE, before any expensive
     // work starts, not just once the model call is in flight. A human who hits
@@ -652,6 +728,109 @@ export class V2RunnerExecutor {
     let sessionId: string | null = null;
     let session: RuntimeSession | null = null;
     let settled: V2RunnerExecutionResult["outcome"] = "failed";
+    let knowledgeHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let knowledgeTerminalEmitted = false;
+    let knowledgeCommit = command.expected_revision;
+    let knowledgeFiles: string[] = [];
+    let knowledgeTestResults: string[] = [];
+    let knowledgeArtifacts: string[] = [];
+    const sensitivePaths = (): (string | undefined)[] => [
+      ...registeredSensitivePaths,
+      repositoryPath,
+      worktree?.path,
+      scratch,
+      this.runner.scratch_root,
+    ];
+    const knowledgeText = (value: string, fallback: string): string =>
+      redactKnowledgeText(value, sensitivePaths(), fallback);
+    const emitKnowledgeHeartbeat = (input: {
+      status: "working" | "waiting" | "blocked" | "completed";
+      completed: string[];
+      current: string[];
+      findings?: string[];
+      blockers?: string[];
+      tests?: string;
+      remaining: "small" | "moderate" | "significant";
+      risk: "green" | "yellow" | "red";
+    }): void => {
+      if (!capabilities.knowledge_transport) return;
+      emit({
+        kind: "knowledge_heartbeat",
+        run_id: command.run_id,
+        status: input.status,
+        completed_since_last_update: boundedKnowledgeList(input.completed),
+        currently_working_on: boundedKnowledgeList(input.current),
+        findings: boundedKnowledgeList(input.findings ?? []),
+        blockers: boundedKnowledgeList(input.blockers ?? []),
+        decisions_needed: [],
+        files_changed: boundedKnowledgeList(knowledgeFiles),
+        tests: knowledgeText(input.tests ?? "Verification has not run yet.", "No test report."),
+        estimated_remaining_work: input.remaining,
+        risk_level: input.risk,
+      });
+    };
+    const stopKnowledgeHeartbeats = (): void => {
+      if (knowledgeHeartbeatTimer) clearInterval(knowledgeHeartbeatTimer);
+      knowledgeHeartbeatTimer = null;
+    };
+    const startKnowledgeHeartbeats = (): void => {
+      if (!capabilities.knowledge_transport) return;
+      emitKnowledgeHeartbeat({
+        status: "working",
+        completed: ["Context and isolated worktree prepared."],
+        current: ["Coding runtime is executing the assigned task."],
+        remaining: "significant",
+        risk: "green",
+      });
+      knowledgeHeartbeatTimer = setInterval(() => {
+        emitKnowledgeHeartbeat({
+          status: "working",
+          completed: [],
+          current: ["Coding runtime is still executing the assigned task."],
+          remaining: "moderate",
+          risk: "green",
+        });
+      }, KNOWLEDGE_HEARTBEAT_INTERVAL_MS);
+      knowledgeHeartbeatTimer.unref?.();
+    };
+    const emitKnowledgeHandoff = (
+      status: "completed" | "blocked" | "failed",
+      summary: string,
+      limitations: string[],
+      issues: string[],
+    ): void => {
+      if (!capabilities.knowledge_transport || knowledgeTerminalEmitted) return;
+      stopKnowledgeHeartbeats();
+      knowledgeTerminalEmitted = true;
+      emit({
+        kind: "knowledge_handoff",
+        run_id: command.run_id,
+        status,
+        summary: knowledgeText(summary, `Runner ended with status ${status}.`),
+        deliverables:
+          status === "completed"
+            ? boundedKnowledgeList([`Verified commit ${knowledgeCommit}`])
+            : [],
+        files_changed: boundedKnowledgeList(knowledgeFiles),
+        interfaces_used: [],
+        interfaces_changed: [],
+        tests_added: [],
+        test_results: boundedKnowledgeList(knowledgeTestResults),
+        acceptance_criteria: [],
+        known_limitations: boundedKnowledgeList(
+          limitations.map((item) => knowledgeText(item, "Unspecified limitation.")),
+        ),
+        open_issues: boundedKnowledgeList(
+          issues.map((item) => knowledgeText(item, "Unspecified issue.")),
+        ),
+        dependencies_created: [],
+        recommended_package_updates: [],
+        recommended_follow_up_tasks: [],
+        branch: command.target_branch,
+        commit: knowledgeCommit,
+        artifacts: boundedKnowledgeList(knowledgeArtifacts),
+      });
+    };
     const release = this.liveRuns?.register({
       runId: command.run_id,
       runtimeName: runtime.name,
@@ -673,6 +852,7 @@ export class V2RunnerExecutor {
     /** The cancelled result, shaped once so every early exit agrees. */
     const cancelledBefore = (stage: string): V2RunnerExecutionResult => {
       const reason = `${cancelReason ?? "the run was cancelled"} while ${stage}; no commit had been made, so there was nothing to publish`;
+      emitKnowledgeHandoff("blocked", reason, [reason], []);
       emit({ kind: "run_log", run_id: command.run_id, chunk: reason });
       emit({ kind: "run_status", run_id: command.run_id, status: "cancelled" });
       return finish({
@@ -686,14 +866,55 @@ export class V2RunnerExecutor {
         reason,
       });
     };
+    const emitFailure = (
+      failureStage: RunnerExecutionStage,
+      code: string,
+      detail: string,
+    ): void => {
+      const safeDetail = redactExactLocalPaths(detail, [
+        ...registeredSensitivePaths,
+        repositoryPath,
+        worktree?.path,
+        scratch,
+        this.runner.scratch_root,
+      ]).slice(0, 4_000);
+      emitKnowledgeHandoff("failed", safeDetail, [safeDetail], [`${code} during ${failureStage}`]);
+      emit({
+        kind: "run_status",
+        run_id: command.run_id,
+        status: "failed",
+        failure: { stage: failureStage, code, detail: safeDetail },
+      });
+      emit({
+        kind: "run_log",
+        run_id: command.run_id,
+        chunk: `runner failure [${code}] during ${failureStage}: ${safeDetail}`,
+      });
+    };
+
+    if (capabilities.knowledge_transport) {
+      const tokenBudget = command.max_input_tokens + command.max_output_tokens;
+      emit({
+        kind: "knowledge_registration",
+        run_id: command.run_id,
+        provider: command.provider.slice(0, 200),
+        model: command.model.slice(0, 500),
+        branch_or_workspace: command.target_branch.slice(0, 500),
+        token_budget: tokenBudget > 0 ? tokenBudget : null,
+      });
+    }
 
     try {
       const prompt = await this.context.load(command.context_refs);
       if (controller.signal.aborted) return cancelledBefore("loading context");
-      scratch = await mkdtemp(resolve(this.runner.scratch_root ?? tmpdir(), "norns-context-"));
+      stage = "scratch_prepare";
+      const scratchRoot = resolve(this.runner.scratch_root ?? tmpdir());
+      await mkdir(scratchRoot, { recursive: true });
+      scratch = await mkdtemp(resolve(scratchRoot, "norns-context-"));
       await writeFile(resolve(scratch, "prompt.txt"), prompt, { mode: 0o600 });
       // Local workspace removal or filesystem replacement may happen while
       // context is loading. Resolve again immediately before worktree setup.
+      stage = "worktree_prepare";
       const currentRepositoryPath = resolveRepositoryPath();
       if (currentRepositoryPath !== repositoryPath) {
         throw new Error("runner repository identity changed before execution");
@@ -706,11 +927,15 @@ export class V2RunnerExecutor {
       });
       if (controller.signal.aborted) return cancelledBefore("preparing the worktree");
       emit({ kind: "run_status", run_id: command.run_id, status: "started" });
+      startKnowledgeHeartbeats();
+      stage = "runtime";
       const runtimeResult = await runtime.run({
         runId: command.run_id,
         worktreePath: worktree.path,
         prompt,
         timeoutMs: command.max_duration_seconds * 1_000,
+        executionMode: command.execution_mode ?? "planned",
+        ...(command.max_charge_usd > 0 ? { maxBudgetUsd: command.max_charge_usd } : {}),
         // EXECUTION E11 — THE line that was missing. Every adapter accepted a
         // signal and none was ever handed one, so `cancelled` was a result the
         // executor could report and nothing could produce.
@@ -751,6 +976,25 @@ export class V2RunnerExecutor {
         input_tokens: runtimeResult.usage.input_tokens,
         output_tokens: runtimeResult.usage.output_tokens,
       });
+      emit({
+        kind: "runtime_result",
+        run_id: command.run_id,
+        runtime: runtime.name,
+        outcome: runtimeResult.outcome,
+        session_id: runtimeResult.sessionId ?? null,
+        stop_reason: runtimeResult.stopReason?.trim().slice(0, 500) || null,
+        detail: knowledgeText(runtimeResult.detail, "Runtime finished."),
+      });
+      emitKnowledgeHeartbeat({
+        status: "working",
+        completed: ["Coding runtime finished."],
+        current: ["Inspecting the resulting worktree and preparing verification."],
+        findings: runtimeResult.detail
+          ? [knowledgeText(runtimeResult.detail, "Runtime finished.")]
+          : [],
+        remaining: "moderate",
+        risk: runtimeResult.outcome === "completed" ? "green" : "red",
+      });
       // EXECUTION E11 — A CANCELLED RUN IS NOT A FAILED RUN, AND ITS WORK IS
       // NOT FORFEIT.
       //
@@ -777,6 +1021,7 @@ export class V2RunnerExecutor {
       if (runtimeResult.outcome === "cancelled") {
         const commit = await worktree.head();
         const produced = commit !== worktree.base_revision;
+        knowledgeCommit = produced ? commit : command.expected_revision;
         const stopped = cancelReason ?? "the run was cancelled";
         const sensitive = [
           ...registeredSensitivePaths,
@@ -789,6 +1034,7 @@ export class V2RunnerExecutor {
         // fabricating a commit it never made. Say so rather than lose it
         // quietly — a human can still recover it from a laptop worktree.
         const dirty = await this.uncommittedPaths(worktree.path);
+        knowledgeFiles = boundedKnowledgeList(dirty);
         if (dirty.length > 0) {
           emit({
             kind: "run_log",
@@ -817,6 +1063,11 @@ export class V2RunnerExecutor {
                 "the run was cancelled before verification, so this work is UNVERIFIED",
             });
             reason = `${stopped}; the work committed before cancellation was published to ${publication.branch}`;
+            knowledgeArtifacts = boundedKnowledgeList([
+              `branch:${publication.branch}`,
+              `commit:${publication.commit}`,
+              ...(publication.pull_request_url ? [publication.pull_request_url] : []),
+            ]);
             emit({
               kind: "run_log",
               run_id: command.run_id,
@@ -847,6 +1098,16 @@ export class V2RunnerExecutor {
             emit({ kind: "run_log", run_id: command.run_id, chunk: reason });
           }
         }
+        emitKnowledgeHandoff(
+          "blocked",
+          reason,
+          ["Run cancelled before verification."],
+          [
+            ...(dirty.length > 0
+              ? [`${dirty.length} uncommitted path(s) could not be published.`]
+              : []),
+          ],
+        );
         emit({ kind: "run_log", run_id: command.run_id, chunk: reason });
         emit({ kind: "run_status", run_id: command.run_id, status: "cancelled" });
         return finish({
@@ -860,20 +1121,12 @@ export class V2RunnerExecutor {
           reason,
         });
       }
-      if (runtimeResult.outcome !== "completed") {
-        emit({ kind: "run_status", run_id: command.run_id, status: "failed" });
-        return finish({
-          outcome: "failed",
-          commit_sha: null,
-          verification_passed: false,
-          usage: runtimeResult.usage,
-          empty: false,
-          publication: null,
-          session_id: sessionId,
-          reason: `the coding runtime ${runtimeResult.outcome}`,
-        });
-      }
+      stage = "worktree_inspection";
       const commit = await worktree.head();
+      knowledgeCommit = commit;
+      knowledgeFiles = boundedKnowledgeList(
+        await this.changedPaths(worktree.path, worktree.base_revision, commit),
+      );
 
       // EXECUTION E4 — an empty run, reported as empty.
       //
@@ -884,9 +1137,22 @@ export class V2RunnerExecutor {
       // and calling that a success is the exact dishonesty this phase exists to
       // remove.
       if (commit === worktree.base_revision) {
-        const reason = "the coding agent produced no commit; the run is empty";
-        emit({ kind: "run_log", run_id: command.run_id, chunk: reason });
-        emit({ kind: "run_status", run_id: command.run_id, status: "failed" });
+        const permissionDenied = runtimeResult.stopReason?.startsWith("permission_denied");
+        const runtimeStopped = runtimeResult.outcome !== "completed";
+        const reason = permissionDenied
+          ? `the coding agent produced no commit because ${runtimeResult.detail}`
+          : runtimeStopped
+            ? `the coding runtime ${runtimeResult.outcome} before producing a commit: ${runtimeResult.detail}`
+            : "the coding agent produced no commit; the run is empty";
+        emitFailure(
+          runtimeStopped ? "runtime" : "worktree_inspection",
+          permissionDenied
+            ? "runner_permission_denied"
+            : runtimeStopped
+              ? "runner_runtime_unsuccessful"
+              : "runner_empty_result",
+          reason,
+        );
         return finish({
           outcome: "failed",
           commit_sha: null,
@@ -896,6 +1162,13 @@ export class V2RunnerExecutor {
           publication: null,
           session_id: sessionId,
           reason,
+        });
+      }
+      if (runtimeResult.outcome !== "completed") {
+        emit({
+          kind: "run_log",
+          run_id: command.run_id,
+          chunk: `the coding runtime stopped (${runtimeResult.stopReason ?? runtimeResult.outcome}) after producing commit ${commit}; running independent verification before deciding whether to publish it`,
         });
       }
 
@@ -910,6 +1183,7 @@ export class V2RunnerExecutor {
           return file ? { name: entry.name, command: [file, ...args] as const } : null;
         })
         .filter((entry): entry is VerificationCommand => entry !== null);
+      stage = "verification";
       const verification = await this.verifier.verify({
         worktree_path: worktree.path,
         policy_ref: command.verification_policy_ref,
@@ -925,6 +1199,9 @@ export class V2RunnerExecutor {
         // fails closed.
         ...(dispatchVerificationCommands && dispatchVerificationCommands.length > 0
           ? { commands: dispatchVerificationCommands }
+          : {}),
+        ...(command.repository_verification_manifest !== undefined
+          ? { repository_manifest: true as const }
           : {}),
       });
       // The failing output is the single most useful thing a human can be
@@ -968,6 +1245,12 @@ export class V2RunnerExecutor {
           output: result.output,
         })),
       });
+      knowledgeTestResults = boundedKnowledgeList(
+        verification.command_results.map(
+          (result) =>
+            `${result.passed ? "pass" : "fail"}: ${result.name} (${result.command.join(" ")})`,
+        ),
+      );
 
       // EXECUTION E4 — publish BEFORE the `finally` removes the worktree.
       //
@@ -978,6 +1261,7 @@ export class V2RunnerExecutor {
       // has none.
       let publication: PublicationResult | null = null;
       try {
+        stage = "publication";
         if (!this.publisher) {
           throw new PublicationError(
             "this runner has no publisher configured, so the run's commits cannot be made durable",
@@ -1015,6 +1299,12 @@ export class V2RunnerExecutor {
             ],
           ),
         });
+        knowledgeArtifacts = boundedKnowledgeList([
+          `branch:${publication.branch}`,
+          `commit:${publication.commit}`,
+          ...(publication.remote ? [`remote:${publication.remote}`] : []),
+          ...(publication.pull_request_url ? [publication.pull_request_url] : []),
+        ]);
         emit(this.publishedEvent(command.run_id, publication));
       } catch (error) {
         // A push that did not happen is a FAILED run with a reason, never a
@@ -1024,8 +1314,7 @@ export class V2RunnerExecutor {
           error instanceof PublicationError
             ? `the run's work could not be published: ${error.reason}`
             : "the run's work could not be published";
-        emit({ kind: "run_log", run_id: command.run_id, chunk: reason });
-        emit({ kind: "run_status", run_id: command.run_id, status: "failed" });
+        emitFailure("publication", "runner_publication_failed", reason);
         return finish({
           outcome: "failed",
           commit_sha: commit,
@@ -1038,11 +1327,64 @@ export class V2RunnerExecutor {
         });
       }
 
-      emit({
-        kind: "run_status",
-        run_id: command.run_id,
-        status: verification.passed ? "completed" : "failed",
-      });
+      if (verification.passed) {
+        if (capabilities.knowledge_transport) {
+          emit({
+            kind: "knowledge_delta",
+            run_id: command.run_id,
+            changes: [
+              {
+                kind: "confirmed_assumption",
+                summary: "Verified task implementation completed",
+                detail: knowledgeText(
+                  `Runner verification passed for commit ${commit}${
+                    knowledgeFiles.length > 0 ? ` after changing ${knowledgeFiles.join(", ")}` : ""
+                  }.`,
+                  `Runner verification passed for commit ${commit}.`,
+                ),
+                affected_package_ids: [],
+              },
+            ],
+            recommended_package_updates: [],
+          });
+        }
+        emitKnowledgeHeartbeat({
+          status: "completed",
+          completed: [
+            runtimeResult.outcome === "completed"
+              ? "Coding runtime completed."
+              : `Coding runtime stopped after producing commit ${commit}; the runner recovered it.`,
+            "Verification passed.",
+            "Work was published.",
+          ],
+          current: [],
+          tests: knowledgeTestResults.join("; ") || "Runner verification passed.",
+          remaining: "small",
+          risk: "green",
+        });
+        emitKnowledgeHandoff(
+          "completed",
+          `Verified implementation published at commit ${commit}.`,
+          [
+            ...(runtimeResult.outcome !== "completed"
+              ? [
+                  `The coding runtime stopped (${runtimeResult.stopReason ?? runtimeResult.outcome}) after committing; the runner independently verified and published the commit.`,
+                ]
+              : []),
+            ...(verification.hygiene_only
+              ? ["Only the built-in Git hygiene verification policy ran."]
+              : []),
+          ],
+          [],
+        );
+        emit({ kind: "run_status", run_id: command.run_id, status: "completed" });
+      } else {
+        emitFailure(
+          "verification",
+          "runner_verification_failed",
+          verification.reason ?? "verification failed",
+        );
+      }
       return finish({
         outcome: verification.passed ? "succeeded" : "failed",
         commit_sha: commit,
@@ -1053,19 +1395,15 @@ export class V2RunnerExecutor {
         session_id: sessionId,
         reason: verification.passed ? null : (verification.reason ?? "verification failed"),
       });
-    } catch {
+    } catch (error) {
       // EXECUTION E11 — an abort mid-stage typically surfaces as a thrown
       // error (a killed child process, a rejected fetch). Reporting that as
       // `failed` would tell a human their cancellation broke the run.
       if (controller.signal.aborted) return cancelledBefore("the run was in progress");
-      emit({ kind: "run_status", run_id: command.run_id, status: "failed" });
-      emit({
-        kind: "run_log",
-        run_id: command.run_id,
-        // Never serialize local exception text: child-process and filesystem
-        // errors routinely contain the physical repository/worktree path.
-        chunk: "runner execution failed; inspect the local runner diagnostics",
-      });
+      const code = FAILURE_CODE_BY_STAGE[stage];
+      const rawDetail = error instanceof Error ? error.message : String(error);
+      const detail = rawDetail.trim() || "runner execution failed without diagnostic detail";
+      emitFailure(stage, code, detail);
       return finish({
         outcome: "failed",
         commit_sha: null,
@@ -1078,9 +1416,16 @@ export class V2RunnerExecutor {
         empty: false,
         publication: null,
         session_id: sessionId,
-        reason: "runner execution failed; inspect the local runner diagnostics",
+        reason: `${code}: ${redactExactLocalPaths(detail, [
+          ...registeredSensitivePaths,
+          repositoryPath,
+          worktree?.path,
+          scratch,
+          this.runner.scratch_root,
+        ])}`,
       });
     } finally {
+      stopKnowledgeHeartbeats();
       // Deregister BEFORE the worktree is destroyed: from this moment a control
       // aimed at this run is answered with "already ended (<outcome>)" rather
       // than being applied to something that no longer exists.
@@ -1134,6 +1479,30 @@ export class V2RunnerExecutor {
       return stdout
         .split("\n")
         .map((line) => line.slice(3).trim())
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Repository-relative committed paths are useful evidence and reveal no local root. */
+  private async changedPaths(
+    worktreePath: string,
+    baseRevision: string,
+    commit: string,
+  ): Promise<string[]> {
+    try {
+      const { stdout } = await execFileAsync("git", [
+        "-C",
+        worktreePath,
+        "diff",
+        "--name-only",
+        "--no-renames",
+        `${baseRevision}..${commit}`,
+      ]);
+      return stdout
+        .split("\n")
+        .map((line) => line.trim())
         .filter(Boolean);
     } catch {
       return [];

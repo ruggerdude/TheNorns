@@ -96,6 +96,9 @@ export function repositoryKeyFileScore(path: string): number | null {
   const depth = path.split("/").length - 1;
   const base = path.slice(path.lastIndexOf("/") + 1).toLowerCase();
   const depthPenalty = depth * 10;
+  // Verification policy must be inspected deterministically rather than left
+  // to model inference. Keep the exact root manifest ahead of prose files.
+  if (path === ".norns/verification.json") return -1;
   if (/^readme(\.(md|rst|txt|adoc))?$/.test(base)) return depthPenalty;
   if (
     [

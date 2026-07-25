@@ -6,6 +6,8 @@ export {
   TASK_CONTEXT_ROUTE_PREFIX,
   TaskContextAssemblyError,
   VERIFICATION_COMMAND_KEYS,
+  VERIFICATION_MANIFEST_KEY,
+  VERIFICATION_POLICY_FACT_KEYS,
   type TaskContextAssembler,
   type TaskContextAssemblerOptions,
   type TaskContextAssemblyCode,

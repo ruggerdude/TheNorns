@@ -2089,8 +2089,23 @@ export class KnowledgeSystemService {
     const reviewPolicy = await sql.query<{
       requires_independent_review: boolean;
     }>(
-      `SELECT COALESCE(requires_independent_review,true) AS requires_independent_review
-         FROM task_coordination_constraints WHERE task_id=$1`,
+      `SELECT COALESCE(
+                constraint_row.requires_independent_review,
+                CASE
+                  WHEN planning.mode='quick'
+                   AND assignment.reviewer_agent_profile_id IS NULL
+                  THEN false
+                  ELSE true
+                END
+              ) AS requires_independent_review
+         FROM tasks task
+         JOIN phases phase ON phase.id=task.phase_id
+         LEFT JOIN planning_runs planning ON planning.id=phase.planning_run_id
+         LEFT JOIN agent_assignments assignment
+           ON assignment.id=task.designated_assignment_id
+         LEFT JOIN task_coordination_constraints constraint_row
+           ON constraint_row.task_id=task.id
+        WHERE task.id=$1`,
       [taskId],
     );
     const review = await sql.query<{ approved: number }>(
@@ -2193,23 +2208,107 @@ export class KnowledgeSystemService {
       blockers,
     });
     if (persist) {
-      await sql.query(
-        `INSERT INTO knowledge_gate_evaluations (
-           id, project_id, phase_id, task_id, scope_type, scope_id,
-           passed, payload, evaluated_at
-         ) VALUES ($1,$2,$3,$4,'task',$4,$5,$6::jsonb,$7)`,
-        [
-          idFor("gate", "task", taskId, evaluatedAt),
-          taskRow.project_id,
-          taskRow.phase_id,
-          taskId,
-          gate.passed,
-          JSON.stringify(gate),
-          evaluatedAt,
-        ],
-      );
+      return this.persistCompletionGate(sql, {
+        id: idFor("gate", "task", taskId, evaluatedAt),
+        project_id: taskRow.project_id,
+        phase_id: taskRow.phase_id,
+        task_id: taskId,
+        gate,
+      });
     }
     return gate;
+  }
+
+  /**
+   * Completion-gate ids are deterministic across runner replay. A knowledge
+   * handoff and the terminal run event may legitimately evaluate the same
+   * task at the same runner timestamp, and reconnect can evaluate it again.
+   * Treat that exact write as an idempotent replay, but never let the primary
+   * key hide a different evaluation: every persisted field and the canonical
+   * gate payload must still match the value computed in this transaction.
+   */
+  private async persistCompletionGate(
+    sql: V2SqlExecutor,
+    input: {
+      id: string;
+      project_id: string;
+      phase_id: string;
+      task_id: string | null;
+      gate: V2CompletionGateT;
+    },
+  ): Promise<V2CompletionGateT> {
+    const inserted = await sql.query<{ id: string }>(
+      `INSERT INTO knowledge_gate_evaluations (
+         id, project_id, phase_id, task_id, scope_type, scope_id,
+         passed, payload, evaluated_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
+       ON CONFLICT (id) DO NOTHING
+       RETURNING id`,
+      [
+        input.id,
+        input.project_id,
+        input.phase_id,
+        input.task_id,
+        input.gate.scope_type,
+        input.gate.scope_id,
+        input.gate.passed,
+        JSON.stringify(input.gate),
+        input.gate.evaluated_at,
+      ],
+    );
+    if (inserted.rows[0]) return input.gate;
+
+    const existing = await sql.query<{
+      project_id: string;
+      phase_id: string | null;
+      task_id: string | null;
+      scope_type: string;
+      scope_id: string;
+      passed: boolean;
+      payload: unknown;
+      evaluated_at: unknown;
+    }>(
+      `SELECT project_id, phase_id, task_id, scope_type, scope_id,
+              passed, payload, evaluated_at
+         FROM knowledge_gate_evaluations
+        WHERE id=$1`,
+      [input.id],
+    );
+    const row = existing.rows[0];
+    const persistedGate = row ? V2CompletionGate.parse(asObject(row.payload)) : null;
+    if (!row || !persistedGate) {
+      throw new KnowledgeSystemError(
+        "conflict",
+        `completion gate ${input.id} conflicted but could not be loaded`,
+      );
+    }
+    const expectedFingerprint = canonicalJson({
+      project_id: input.project_id,
+      phase_id: input.phase_id,
+      task_id: input.task_id,
+      scope_type: input.gate.scope_type,
+      scope_id: input.gate.scope_id,
+      passed: input.gate.passed,
+      evaluated_at: input.gate.evaluated_at,
+      payload: input.gate,
+    });
+    const persistedFingerprint = canonicalJson({
+      project_id: row.project_id,
+      phase_id: row.phase_id,
+      task_id: row.task_id,
+      scope_type: row.scope_type,
+      scope_id: row.scope_id,
+      passed: row.passed,
+      evaluated_at: iso(row.evaluated_at),
+      payload: persistedGate,
+    });
+    if (persistedFingerprint !== expectedFingerprint) {
+      throw new KnowledgeSystemError(
+        "conflict",
+        `completion gate ${input.id} already exists with different evidence`,
+      );
+    }
+    return persistedGate;
   }
 
   evaluatePhaseCompletion(input: {
@@ -2334,21 +2433,13 @@ export class KnowledgeSystemService {
         checks,
         blockers,
       });
-      await sql.query(
-        `INSERT INTO knowledge_gate_evaluations (
-           id, project_id, phase_id, task_id, scope_type, scope_id,
-           passed, payload, evaluated_at
-         ) VALUES ($1,$2,$3,NULL,'phase',$3,$4,$5::jsonb,$6)`,
-        [
-          idFor("gate", "phase", input.phase_id, input.evaluated_at),
-          input.project_id,
-          input.phase_id,
-          gate.passed,
-          JSON.stringify(gate),
-          input.evaluated_at,
-        ],
-      );
-      return gate;
+      return this.persistCompletionGate(sql, {
+        id: idFor("gate", "phase", input.phase_id, input.evaluated_at),
+        project_id: input.project_id,
+        phase_id: input.phase_id,
+        task_id: null,
+        gate,
+      });
     });
   }
 

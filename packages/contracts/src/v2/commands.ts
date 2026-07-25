@@ -470,6 +470,12 @@ export const V2DispatchCommand = z
     max_input_tokens: z.number().int().nonnegative(),
     max_output_tokens: z.number().int().nonnegative(),
     max_duration_seconds: z.number().int().positive(),
+    /**
+     * Quick changes and planned phases have different bounded agent-loop
+     * policies. Optional keeps older dispatch producers wire-compatible;
+     * runners treat absence as planned work.
+     */
+    execution_mode: z.enum(["quick", "planned"]).optional(),
     verification_policy_ref: V2EntityId,
     /**
      * EXECUTION E10 — the project's REAL build/test/lint commands, carried
@@ -490,6 +496,14 @@ export const V2DispatchCommand = z
      * makes a run green by omission.
      */
     verification_commands: z.array(V2VerificationCommand).min(1).max(32).optional(),
+    /**
+     * The server inspected and recorded the repository's committed verification
+     * manifest. When exact verification_commands are absent, this signal tells
+     * the runner to execute the FULL manifest before consulting its local
+     * policy map. The literal path prevents an envelope from selecting an
+     * arbitrary repository file.
+     */
+    repository_verification_manifest: z.literal(".norns/verification.json").optional(),
     sandbox_policy_ref: V2EntityId,
     authorized_by: V2Actor,
     authorized_by_session_id: V2EntityId,
