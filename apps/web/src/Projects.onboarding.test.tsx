@@ -295,7 +295,10 @@ describe("O1: GitHub and local-folder onboarding", () => {
 
     await waitFor(() =>
       expect(onOpenProject).toHaveBeenCalledWith(
-        expect.objectContaining({ focus_planning_run_id: "planning-adoption" }),
+        expect.objectContaining({
+          focus_planning_run_id: "planning-adoption",
+          entry_flow: "adoption",
+        }),
       ),
     );
     expect(

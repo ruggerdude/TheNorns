@@ -4379,11 +4379,72 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
       });
 
+      // The newest run is the durable resume pointer for the planning-to-code
+      // journey. A browser refresh must not send the user back to a blank
+      // setup form merely because the transient focus_planning_run_id was
+      // lost.
+      app.get("/api/v2/projects/:id/planning-runs/latest", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        try {
+          reply.header("Cache-Control", "no-store").send({
+            planning_run: await planningRunService.latest(id),
+          });
+        } catch (error) {
+          planningRunError(reply, error);
+        }
+      });
+
       app.get("/api/v2/projects/:id/planning-runs/:runId", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
         const { id, runId } = req.params as { id: string; runId: string };
         try {
           reply.header("Cache-Control", "no-store").send(await planningRunService.get(id, runId));
+        } catch (error) {
+          planningRunError(reply, error);
+        }
+      });
+
+      // Retry only the materialize/approve/launch half of an already-approved
+      // run. The kickoff implementation is an idempotent saga, so a temporary
+      // dispatch or setup failure does not require another planning decision.
+      app.post("/api/v2/projects/:id/planning-runs/:runId/execution", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return reply.code(401).send({ error: "unauthorized" });
+        const { id, runId } = req.params as { id: string; runId: string };
+        try {
+          const run = await planningRunService.get(id, runId);
+          if (run.status !== "approved" || run.decision?.decision !== "approve") {
+            return reply.code(409).send({
+              error: "invalid_status",
+              message: `planning run "${runId}" must be approved before execution can be retried`,
+            });
+          }
+          let execution: { started: boolean; detail: string } | null = null;
+          const kickoff = options.planningRuns?.executionKickoff;
+          if (kickoff) {
+            try {
+              execution = await kickoff.kickoff({
+                projectId: id,
+                planningRunId: runId,
+                staffing: run.decision.staffing ?? null,
+                decidedBy: user.id,
+              });
+            } catch (error) {
+              execution = {
+                started: false,
+                detail: error instanceof Error ? error.message : String(error),
+              };
+            }
+          }
+          stores.audit(
+            user.id,
+            "planning_run.execution_retry",
+            `${id}:${runId}:${execution?.started ? "started" : "not_started"}`,
+            now(),
+          );
+          reply.send({ ...run, execution });
         } catch (error) {
           planningRunError(reply, error);
         }

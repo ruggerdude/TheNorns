@@ -20,10 +20,12 @@ import {
   type PhasePlanStaffedPhase,
   type PhasePlanningRunDto,
   type WorkerProviders,
+  getLatestPhasePlanningRun,
   getPhaseExecutionStatus,
   getPhasePlanningRun,
   planPhasesFromRun,
   postPlanningRunDecision,
+  retryPlanningRunExecution,
   startPhasePlanningRun,
 } from "./phaseTabApi";
 import { Alert, Badge, Button, Field, Select, Spinner, TextArea } from "./ui";
@@ -64,9 +66,13 @@ function runStatusLabel(run: PhasePlanningRunDto): string {
 
 export function PhaseTab({
   projectId,
+  initialRunId = null,
+  onJourneyChanged,
   onUnauthorized,
 }: {
   projectId: string;
+  initialRunId?: string | null;
+  onJourneyChanged?: () => void;
   onUnauthorized: () => void;
 }): React.ReactElement {
   // a/b — setup form
@@ -75,8 +81,10 @@ export function PhaseTab({
   const [agents, setAgents] = useState<WorkerProviders>("both");
   const [reviewRounds, setReviewRounds] = useState(2);
   // c — run lifecycle
-  const [runId, setRunId] = useState<string | null>(null);
+  const [runId, setRunId] = useState<string | null>(initialRunId);
   const [run, setRun] = useState<PhasePlanningRunDto | null>(null);
+  const [recoveryAttempted, setRecoveryAttempted] = useState(Boolean(initialRunId));
+  const [recovering, setRecovering] = useState(!initialRunId);
   // The worker_providers the active run was started with — model dropdowns in
   // the decision panel are filtered to these.
   const [activeProviders, setActiveProviders] = useState<Provider[]>(["anthropic", "openai"]);
@@ -92,8 +100,9 @@ export function PhaseTab({
   const [executionRows, setExecutionRows] = useState<PhaseExecutionStatusRow[] | null>(null);
   const [executionError, setExecutionError] = useState<string | null>(null);
   // The approve response's kickoff report: null means the approval is
-  // recorded but execution did not auto-start (a neutral fact, not an
-  // error); undefined until an approve response has been seen this session.
+  // recorded but no kickoff report is available (a neutral fact, reconciled
+  // against execution status); undefined until an approve response has been
+  // seen this session.
   const [executionKickoff, setExecutionKickoff] = useState<
     PhaseExecutionKickoffReport | null | undefined
   >(undefined);
@@ -105,6 +114,32 @@ export function PhaseTab({
     },
     [onUnauthorized],
   );
+
+  // A navigation hint opens the just-created run immediately. If the hint was
+  // lost to a refresh, recover the newest durable run instead of showing a
+  // second setup form and inviting accidental duplicate planning.
+  useEffect(() => {
+    if (!initialRunId || initialRunId === runId) return;
+    setRunId(initialRunId);
+    setRun(null);
+    setRecoveryAttempted(true);
+    setRecovering(false);
+  }, [initialRunId, runId]);
+
+  useEffect(() => {
+    if (recoveryAttempted || runId) return;
+    setRecoveryAttempted(true);
+    setRecovering(true);
+    void getLatestPhasePlanningRun(projectId)
+      .then(({ planning_run }) => {
+        if (!planning_run) return;
+        setRun(planning_run);
+        setRunId(planning_run.id);
+        setActiveProviders(providersFor(planning_run.worker_providers));
+      })
+      .catch((err) => fail(err, setError))
+      .finally(() => setRecovering(false));
+  }, [recoveryAttempted, runId, projectId, fail]);
 
   const start = useCallback(async () => {
     if (!goal.trim()) return;
@@ -137,7 +172,9 @@ export function PhaseTab({
   const pollRun = useCallback(async () => {
     if (!runId) return;
     try {
-      setRun(await getPhasePlanningRun(projectId, runId));
+      const next = await getPhasePlanningRun(projectId, runId);
+      setRun(next);
+      setActiveProviders(providersFor(next.worker_providers));
     } catch (err) {
       fail(err, setError);
     }
@@ -200,14 +237,32 @@ export function PhaseTab({
         setModifyOpen(false);
         setDirection("");
         setConfirmingReject(false);
+        if (body.decision === "approve") onJourneyChanged?.();
       } catch (err) {
         fail(err, setError);
       } finally {
         setDecisionBusy(false);
       }
     },
-    [runId, projectId, fail],
+    [runId, projectId, fail, onJourneyChanged],
   );
+
+  const retryExecution = useCallback(async () => {
+    if (!runId) return;
+    setDecisionBusy(true);
+    setError(null);
+    try {
+      const retried = await retryPlanningRunExecution(projectId, runId);
+      setRun(retried);
+      setExecutionKickoff(retried.execution ?? null);
+      await pollExecution();
+      onJourneyChanged?.();
+    } catch (err) {
+      fail(err, setError);
+    } finally {
+      setDecisionBusy(false);
+    }
+  }, [runId, projectId, pollExecution, onJourneyChanged, fail]);
 
   // Plain function (not useCallback): reads the current dropdown drafts at
   // click time, so the approve payload always reflects what is on screen.
@@ -238,13 +293,21 @@ export function PhaseTab({
 
   const runIsActive = runStatus !== null && PHASE_RUN_ACTIVE_STATUSES.has(runStatus);
   const runAwaitsDecision = runStatus !== null && PHASE_RUN_DECISION_STATUSES.has(runStatus);
-  const showSetupForm = !runId;
+  const showSetupForm = recoveryAttempted && !recovering && !runId;
 
   const reviewerFindings = (run?.transcript ?? []).filter((entry) => entry.role === "reviewer");
 
   return (
     <div className="form-stack" data-testid="phase-tab">
       {error ? <Alert testId="phase-error">{error}</Alert> : null}
+
+      {recovering ? (
+        <section className="card side-section" data-testid="phase-run-recovering">
+          <div className="side-body">
+            <Spinner label="Resuming the latest planning work…" />
+          </div>
+        </section>
+      ) : null}
 
       {showSetupForm ? (
         <section className="card side-section phase-setup" data-testid="phase-setup">
@@ -388,31 +451,45 @@ export function PhaseTab({
                   </Badge>
                 </div>
                 {phase.description ? <p className="muted">{phase.description}</p> : null}
-                <Field label="Model">
-                  <Select
-                    data-testid={`phase-staffing-${phase.node_id}`}
-                    value={staffingValue(phase)}
-                    disabled={decisionBusy}
-                    onChange={(event) =>
-                      setStaffingDrafts((current) => ({
-                        ...current,
-                        [phase.node_id]: event.target.value,
-                      }))
-                    }
-                  >
-                    {activeProviders.map((provider) => (
-                      <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
-                        {PM_MODEL_OPTIONS[provider].map((model) => (
-                          <option key={model.id} value={`${provider}:${model.id}`}>
-                            {model.label}
-                          </option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </Select>
-                </Field>
               </article>
             ))}
+
+            {planPhases.length > 0 ? (
+              <details className="card side-section" data-testid="phase-staffing-options">
+                <summary>Optional · adjust staffing</summary>
+                <div className="side-body form-stack">
+                  <p className="muted">
+                    The recommended models are ready. Change them only when the implementation needs
+                    a specific provider or model.
+                  </p>
+                  {planPhases.map((phase) => (
+                    <Field key={phase.node_id} label={phase.name ?? phase.node_id}>
+                      <Select
+                        data-testid={`phase-staffing-${phase.node_id}`}
+                        value={staffingValue(phase)}
+                        disabled={decisionBusy}
+                        onChange={(event) =>
+                          setStaffingDrafts((current) => ({
+                            ...current,
+                            [phase.node_id]: event.target.value,
+                          }))
+                        }
+                      >
+                        {activeProviders.map((provider) => (
+                          <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
+                            {PM_MODEL_OPTIONS[provider].map((model) => (
+                              <option key={model.id} value={`${provider}:${model.id}`}>
+                                {model.label}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </Select>
+                    </Field>
+                  ))}
+                </div>
+              </details>
+            ) : null}
 
             {modifyOpen ? (
               <div className="form-stack" data-testid="phase-modify-form">
@@ -447,7 +524,7 @@ export function PhaseTab({
                   disabled={decisionBusy}
                   onClick={() => void approve()}
                 >
-                  {decisionBusy ? "Working…" : "Approve"}
+                  {decisionBusy ? "Starting…" : "Approve & start coding"}
                 </Button>
                 <Button
                   data-testid="phase-modify"
@@ -500,15 +577,30 @@ export function PhaseTab({
                 Execution started automatically from this approval.
                 {executionKickoff.detail ? ` ${executionKickoff.detail}` : ""}
               </p>
+            ) : executionKickoff?.started === false ? (
+              <p className="muted" data-testid="phase-execution-kickoff-note">
+                Plan approved and recorded, but coding did not start.
+                {executionKickoff.detail ? ` ${executionKickoff.detail}` : ""}
+              </p>
             ) : (
               <p className="muted" data-testid="phase-execution-kickoff-note">
-                Plan approved and recorded. Execution has not auto-started — it begins through the
-                existing strategy and phase start flow.
-                {executionKickoff?.started === false && executionKickoff.detail
-                  ? ` (${executionKickoff.detail})`
-                  : ""}
+                Plan approved. Checking the current coding status…
               </p>
             )}
+            {executionRows &&
+            (executionRows.length === 0 ||
+              executionRows.some((row) =>
+                ["proposed", "awaiting_approval", "approved", "blocked"].includes(row.state),
+              )) ? (
+              <Button
+                variant="primary"
+                data-testid="phase-retry-execution"
+                disabled={decisionBusy}
+                onClick={() => void retryExecution()}
+              >
+                {decisionBusy ? "Starting…" : "Retry coding start"}
+              </Button>
+            ) : null}
             {executionError ? <Alert testId="phase-execution-error">{executionError}</Alert> : null}
             {executionRows ? (
               <div className="phase-execution-table-wrap">

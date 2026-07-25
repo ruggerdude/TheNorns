@@ -122,6 +122,21 @@ describe.sequential("phase tab: planning run decisions (service + worker)", () =
     expect(created.decision).toBeNull();
   });
 
+  it("recovers the newest durable planning run and returns null before any run exists", async () => {
+    let tick = 0;
+    service = new PlanningRunService(new PGliteTransactionRunner(pg), {
+      now: () => new Date(`2026-07-25T12:00:0${tick++}.000Z`),
+    });
+    expect(await service.latest("project-1")).toBeNull();
+    const first = await service.create("project-1", { objective: "first objective" });
+    const second = await service.create("project-1", { objective: "second objective" });
+    expect((await service.latest("project-1"))?.id).toBe(second.id);
+    expect((await service.latest("project-1"))?.id).not.toBe(first.id);
+    await expect(service.latest("missing-project")).rejects.toMatchObject({
+      code: "project_not_found",
+    });
+  });
+
   it("worker passes the run's worker_providers to the staffing proposal", async () => {
     pm.enqueue(plan(["api"]));
     reviewer.enqueue({ findings: [] });
@@ -476,6 +491,58 @@ describe.sequential("phase tab: HTTP surface (production option shape)", () => {
         (entry) => entry.actor === "operator" && entry.action !== "planning_run.created",
       ),
     ).toEqual([]);
+  });
+
+  it("serves the newest run for refresh recovery and retries execution without a second approval", async () => {
+    const empty = await inject("GET", `/api/v2/projects/${projectId}/planning-runs/latest`);
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toEqual({ planning_run: null });
+
+    const runId = await createConvergedRun();
+    const latest = await inject("GET", `/api/v2/projects/${projectId}/planning-runs/latest`);
+    expect(latest.statusCode).toBe(200);
+    expect(latest.json()).toMatchObject({
+      planning_run: { id: runId, status: "converged" },
+    });
+
+    const approved = await inject(
+      "POST",
+      `/api/v2/projects/${projectId}/planning-runs/${runId}/decision`,
+      { decision: "approve" },
+    );
+    expect(approved.statusCode).toBe(200);
+    expect(kickoffCalls).toHaveLength(1);
+
+    const retried = await inject(
+      "POST",
+      `/api/v2/projects/${projectId}/planning-runs/${runId}/execution`,
+      {},
+    );
+    expect(retried.statusCode).toBe(200);
+    expect(retried.json()).toMatchObject({
+      id: runId,
+      status: "approved",
+      execution: { started: false, detail: "kickoff seam invoked (test double)" },
+    });
+    expect(kickoffCalls).toHaveLength(2);
+    expect(stores.auditEntries()).toContainEqual(
+      expect.objectContaining({
+        actor: adminId,
+        action: "planning_run.execution_retry",
+      }),
+    );
+  });
+
+  it("refuses execution retry before the run has been approved", async () => {
+    const runId = await createConvergedRun();
+    const retried = await inject(
+      "POST",
+      `/api/v2/projects/${projectId}/planning-runs/${runId}/execution`,
+      {},
+    );
+    expect(retried.statusCode).toBe(409);
+    expect(retried.json()).toMatchObject({ error: "invalid_status" });
+    expect(kickoffCalls).toHaveLength(0);
   });
 
   it("rejects approve staffing outside the run's worker_providers constraint, leaving the run decidable", async () => {

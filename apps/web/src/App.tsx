@@ -719,6 +719,10 @@ function ProjectGraph({
 }): React.ReactElement {
   const { theme } = useTheme();
   const base = `/api/projects/${project.id}`;
+  const isAdoptionJourney =
+    project.entry_flow === "adoption" ||
+    project.onboarding_scenario === "existing_repo" ||
+    project.source_type === "local";
   const [graph, setGraph] = useState<GraphDto | null>(null);
   const [draftOnly, setDraftOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
@@ -738,13 +742,16 @@ function ProjectGraph({
   const [phaseExecution, setPhaseExecution] = useState<PhaseExecutionDto | null>(null);
   const [executionError, setExecutionError] = useState<string | null>(null);
   const [showDebates, setShowDebates] = useState(false);
+  const [phaseJourneyRunId, setPhaseJourneyRunId] = useState<string | null>(
+    isAdoptionJourney ? (project.focus_planning_run_id ?? null) : null,
+  );
   // FRONT DOOR P1d (layout): the workspace shell reorganized into a normal
   // top-width page with a tab bar, per the approved mockup — the graph
   // canvas was the dominant panel before this, everything else crammed into
   // a narrow sidebar. Purely a layout change: every section below is the
   // exact same JSX/logic that existed already, just grouped under a tab.
   const [workspaceTab, setWorkspaceTab] = useState<"overview" | "plan" | "phase" | "graph">(
-    "overview",
+    isAdoptionJourney && project.focus_planning_run_id ? "phase" : "overview",
   );
   const focusedTaskId = project.focus_task_id ?? null;
 
@@ -759,7 +766,7 @@ function ProjectGraph({
   const [nextPhaseRounds, setNextPhaseRounds] = useState(3);
   const [nextPhaseAttachmentIds, setNextPhaseAttachmentIds] = useState<string[]>([]);
   const [activePlanningRunId, setActivePlanningRunId] = useState<string | null>(
-    project.focus_planning_run_id ?? null,
+    isAdoptionJourney ? null : (project.focus_planning_run_id ?? null),
   );
   const [planningRun, setPlanningRun] = useState<PlanningRunPollDto | null>(null);
   const [planningRunStarting, setPlanningRunStarting] = useState(false);
@@ -869,6 +876,71 @@ function ProjectGraph({
   useEffect(() => {
     void loadResume();
   }, [loadResume]);
+
+  // Adoption hands us a transient run id so the first open is immediate.
+  // A refresh loses that hint, so recover a still-running or awaiting-
+  // approval journey from the server and return the user to the same screen.
+  useEffect(() => {
+    let cancelled = false;
+    if (isAdoptionJourney && project.focus_planning_run_id) {
+      setPhaseJourneyRunId(project.focus_planning_run_id);
+      setWorkspaceTab("phase");
+      return () => {
+        cancelled = true;
+      };
+    }
+    setPhaseJourneyRunId(null);
+    if (!isAdoptionJourney) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    void getJson<{
+      planning_run: { id: string; status: string } | null;
+    }>(`/api/v2/projects/${project.id}/planning-runs/latest`)
+      .then(async ({ planning_run }) => {
+        if (cancelled || !planning_run) return;
+        const planningNeedsAttention = [
+          "queued",
+          "drafting",
+          "reviewing",
+          "revising",
+          "converged",
+          "cap_reached",
+        ].includes(planning_run.status);
+        if (planningNeedsAttention) {
+          setPhaseJourneyRunId(planning_run.id);
+          setWorkspaceTab("phase");
+          return;
+        }
+        if (planning_run.status !== "approved") return;
+
+        // An approved run normally belongs on Overview once coding is active.
+        // If approval survived but materialization/dispatch did not, return to
+        // the journey so its idempotent Retry coding start action is visible.
+        const execution = await getJson<{ phases: Array<{ state: string }> }>(
+          `/api/v2/projects/${project.id}/execution-status`,
+        );
+        if (cancelled) return;
+        const needsKickoffRecovery =
+          execution.phases.length === 0 ||
+          execution.phases.some((phase) =>
+            ["proposed", "awaiting_approval", "approved", "blocked"].includes(phase.state),
+          );
+        if (needsKickoffRecovery) {
+          setPhaseJourneyRunId(planning_run.id);
+          setWorkspaceTab("phase");
+        }
+      })
+      .catch((err) => {
+        if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+        // Planning-run recovery is best-effort for projects created before
+        // this API existed; the normal workspace remains fully available.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id, project.focus_planning_run_id, isAdoptionJourney, onLogout]);
 
   // FRONT DOOR P5 (tracking): poll cadence honors the persisted
   // update_interval_seconds once known; falls back to a 15s default until
@@ -1913,6 +1985,8 @@ function ProjectGraph({
           <div className="workspace-tab-panel" data-testid="workspace-tab-phase">
             <PhaseTab
               projectId={project.id}
+              initialRunId={phaseJourneyRunId}
+              onJourneyChanged={() => void loadResume()}
               onUnauthorized={() => onLogout("Session expired. Sign in again.")}
             />
           </div>

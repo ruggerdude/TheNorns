@@ -125,9 +125,9 @@ const executionStatus = {
   ],
 };
 
-function workspaceMocks(): MockFetch {
+function workspaceMocks(project = projectAlpha): MockFetch {
   const mock = new MockFetch();
-  mock.get("/api/projects", { body: [projectAlpha] });
+  mock.get("/api/projects", { body: [project] });
   mock.get(`/api/projects/${projectId}/graph`, { body: fullyAllocatedGraph });
   mock.get(`/api/v2/projects/${projectId}/resume`, { status: 404, body: {} });
   mock.get("/api/v2/attention", { status: 404, body: {} });
@@ -169,6 +169,84 @@ describe("PHASE TAB (P2)", () => {
     expect(screen.getByTestId("phase-identity-line")).toHaveTextContent(
       "PM: Claude Fable · Reviewer: ChatGPT Sol (gpt-5.6-sol)",
     );
+    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+  });
+
+  it("opens an adopted project's in-flight plan directly and restores it from the durable latest run after refresh", async () => {
+    setToken("present");
+    mock = workspaceMocks({
+      ...projectAlpha,
+      entry_flow: "adoption",
+      focus_planning_run_id: "run-1",
+    });
+    mock.get(runUrl, { body: makeRun() });
+    mock.install();
+
+    const firstOpen = render(<App />);
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: new RegExp(`^${projectAlpha.name}$`, "i"),
+      }),
+    );
+    expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+
+    firstOpen.unmount();
+    mock.restore();
+    mock = workspaceMocks({ ...projectAlpha, onboarding_scenario: "existing_repo" });
+    mock.get(`${runsUrl}/latest`, { body: { planning_run: makeRun() } });
+    mock.get(runUrl, { body: makeRun() });
+    mock.install();
+
+    render(<App />);
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: new RegExp(`^${projectAlpha.name}$`, "i"),
+      }),
+    );
+    expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+  });
+
+  it("restores an approved adoption whose coding kickoff still needs recovery", async () => {
+    setToken("present");
+    const approvedRun = makeRun({
+      status: "approved",
+      decision: {
+        decision: "approve",
+        direction: null,
+        staffing: null,
+        decided_at: "2026-07-25T12:00:00.000Z",
+      },
+    });
+    mock = workspaceMocks({ ...projectAlpha, onboarding_scenario: "existing_repo" });
+    mock.get(`${runsUrl}/latest`, { body: { planning_run: approvedRun } });
+    mock.get(runUrl, { body: approvedRun });
+    mock.get(`/api/v2/projects/${projectId}/execution-status`, {
+      body: {
+        project_id: projectId,
+        phases: [
+          {
+            phase_id: "p1",
+            name: "Core API",
+            state: "approved",
+            percent_complete: 0,
+            est_completion: null,
+            notes: "ready to start",
+          },
+        ],
+      },
+    });
+    mock.install();
+
+    render(<App />);
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: new RegExp(`^${projectAlpha.name}$`, "i"),
+      }),
+    );
+
+    expect(await screen.findByTestId("phase-retry-execution")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
   });
 
@@ -278,9 +356,10 @@ describe("PHASE TAB (P2)", () => {
     expect(table).toHaveTextContent("1/3 tasks complete");
     expect(table).toHaveTextContent("Web UI");
     expect(table).toHaveTextContent("proposed");
-    // execution:null on the approve response -> neutral note, no error.
+    // execution:null on the approve response -> neutral recovery state, no
+    // false claim that coding started.
     expect(screen.getByTestId("phase-execution-kickoff-note")).toHaveTextContent(
-      "Execution has not auto-started",
+      "Checking the current coding status",
     );
     expect(screen.queryByTestId("phase-execution-error")).not.toBeInTheDocument();
   });
@@ -323,6 +402,72 @@ describe("PHASE TAB (P2)", () => {
     expect(note).toHaveTextContent('Started phase "Core API" (phase-p1): 1 task(s) dispatched.');
     expect(note).not.toHaveTextContent("Execution has not auto-started");
     expect(screen.queryByTestId("phase-execution-error")).not.toBeInTheDocument();
+  });
+
+  it("retries coding kickoff from an approved plan without asking for another approval", async () => {
+    setToken("present");
+    mock = workspaceMocks({
+      ...projectAlpha,
+      entry_flow: "adoption",
+      focus_planning_run_id: "run-1",
+    });
+    mock.get(runUrl, { body: convergedRun });
+    mock.post(`${runUrl}/decision`, {
+      body: {
+        ...convergedRun,
+        status: "approved",
+        decision: {
+          decision: "approve",
+          direction: null,
+          staffing: null,
+          decided_at: "2026-07-25T12:00:00.000Z",
+        },
+        execution: { started: false, detail: "Runner was temporarily offline." },
+      },
+    });
+    mock.get(`/api/v2/projects/${projectId}/execution-status`, {
+      body: {
+        project_id: projectId,
+        phases: [
+          {
+            phase_id: "p1",
+            name: "Core API",
+            state: "approved",
+            percent_complete: 0,
+            est_completion: null,
+            notes: "ready to start",
+          },
+        ],
+      },
+    });
+    mock.post(`${runUrl}/execution`, {
+      body: {
+        ...convergedRun,
+        status: "approved",
+        decision: {
+          decision: "approve",
+          direction: null,
+          staffing: null,
+          decided_at: "2026-07-25T12:00:00.000Z",
+        },
+        execution: { started: true, detail: "1 task dispatched." },
+      },
+    });
+    mock.install();
+
+    render(<App />);
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: new RegExp(`^${projectAlpha.name}$`, "i"),
+      }),
+    );
+    await userEvent.click(await screen.findByTestId("phase-approve"));
+    await userEvent.click(await screen.findByTestId("phase-retry-execution"));
+
+    expect(await screen.findByTestId("phase-execution-kickoff-note")).toHaveTextContent(
+      "1 task dispatched",
+    );
+    expect(postCalls(mock, "/planning-runs/run-1/execution")).toHaveLength(1);
   });
 
   it("modify requires direction, sends it, and returns the panel to live progress", async () => {

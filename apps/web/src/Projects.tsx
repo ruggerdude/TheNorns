@@ -50,6 +50,10 @@ export interface ProjectSummary {
    *  planning run for this project — the workspace opens pre-focused on
    *  that run's progress instead of a blank graph. */
   focus_planning_run_id?: string | null;
+  /** Transient entry hint: adopted repositories use the streamlined
+   *  planning-to-code journey; the existing new-project flow stays unchanged
+   *  until its dedicated follow-up redesign. */
+  entry_flow?: "adoption" | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -791,7 +795,11 @@ export function Projects({
               attachment_ids: [],
             },
           );
-          proceedAfterCreate({ ...project, focus_planning_run_id: run.planning_run_id });
+          proceedAfterCreate({
+            ...project,
+            focus_planning_run_id: run.planning_run_id,
+            entry_flow: "adoption",
+          });
           return;
         }
         proceedAfterCreate(project);

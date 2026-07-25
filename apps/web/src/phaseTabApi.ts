@@ -18,7 +18,7 @@
 //        { decision: "approve"|"modify"|"reject", direction?, staffing? }.
 //        approve/reject -> 200 run DTO (approve additionally carries
 //        `execution: { started, detail } | null` — null means the approval
-//        is recorded but execution did not auto-start; NOT an error).
+//        is recorded but no kickoff report is available; NOT an error).
 //        modify -> 202 run DTO re-queued (status "queued",
 //        rounds_completed 0): the UI returns to live-progress polling.
 //   4. GET /api/v2/projects/:id/execution-status (project-scoped, no runId)
@@ -215,9 +215,9 @@ export interface PlanningRunDecisionBody {
 }
 
 /**
- * Approve's kickoff report. `null` means the approval is recorded but
- * execution did not auto-start (it currently begins through the existing
- * strategy/phase start flow) — a neutral fact, not an error.
+ * Approve's kickoff report. `null` means the approval is recorded but this
+ * deployment did not report a kickoff result; the UI reconciles the durable
+ * execution read model before offering recovery.
  */
 export interface PhaseExecutionKickoffReport {
   started: boolean;
@@ -265,12 +265,25 @@ export function getPhasePlanningRun(
   return getJson(`/api/v2/projects/${projectId}/planning-runs/${runId}`);
 }
 
+export function getLatestPhasePlanningRun(
+  projectId: string,
+): Promise<{ planning_run: PhasePlanningRunDto | null }> {
+  return getJson(`/api/v2/projects/${projectId}/planning-runs/latest`);
+}
+
 export function postPlanningRunDecision(
   projectId: string,
   runId: string,
   body: PlanningRunDecisionBody,
 ): Promise<PlanningRunDecisionResponse> {
   return postJson(`/api/v2/projects/${projectId}/planning-runs/${runId}/decision`, body);
+}
+
+export function retryPlanningRunExecution(
+  projectId: string,
+  runId: string,
+): Promise<PlanningRunDecisionResponse> {
+  return postJson(`/api/v2/projects/${projectId}/planning-runs/${runId}/execution`, {});
 }
 
 /**

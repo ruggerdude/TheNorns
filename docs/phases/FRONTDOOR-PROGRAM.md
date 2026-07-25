@@ -1,6 +1,6 @@
 # FRONT DOOR Program — Revised Delivery Plan
 
-**Status:** Delivered and verified · **Completed:** 2026-07-24
+**Status:** Delivered and verified · **Completed:** 2026-07-25
 
 **Mandate:** Give the user one truthful path from the project dashboard to a
 staffed, approved, running project, whether the source is GitHub or a local
@@ -45,7 +45,7 @@ The following capabilities existed before this program and must be reused:
 | Strategy and staffing | Delivered: planning output bridges to relational strategy; the PM recommends workers/models/reviewers/budgets; the user can review before approval |
 | Approval and execution | Delivered: approved strategy materialization and execution kickoff with readiness checks |
 | Tracking | Delivered: explicit percentage, blended ETA, phase progress, and decision handling |
-| Existing-project adoption | Delivered: reusable GitHub/local source selection, derived defaults, automatic repository analysis, optional automatic planning, recoverable retry, and no duplicate creation |
+| Existing-project adoption | Delivered end to end: reusable GitHub/local source selection, derived defaults, automatic repository analysis, optional automatic planning, direct live-plan entry, one approval to first-code dispatch, durable refresh recovery, idempotent kickoff retry, and no duplicate creation |
 | Local source setup | Delivered in Settings → Connections: one-time helper setup, native folder approval, reusable repository inventory, expiring user-bound selection tokens, safe reopen, and no browser or server raw-path seam |
 
 ## Completed hardening
@@ -182,13 +182,16 @@ is the committed automated regression gate for both creation paths.
 
 - Scoped lint: `biome check apps packages scripts`
 - Monorepo build and typecheck: passed
-- Web unit/integration suite: 37 files, 143 tests passed
-- Server suite: 110 files passed; 4 database-environment files / 8 tests
-  remain intentionally skipped
+- Web unit/integration suite: 37 files, 146 tests passed
+- Server suite: 882/883 passed in the final parallel run; the one unrelated
+  Phase-2 cutover timing case passed on immediate isolated rerun alongside all
+  19 planning-journey tests. Four database-environment files / 8 tests remain
+  intentionally skipped.
 - Contracts: 15 files, 123 tests passed
 - Adapters: 26 tests passed, one live-provider smoke intentionally skipped
-- Browser front door: six passes across Chromium and WebKit (GitHub,
-  Local-folder, and workspace/composer journeys)
+- Browser front door: eight passes across Chromium and WebKit (GitHub,
+  Local-folder, directed adoption through first coding dispatch, and
+  workspace/composer journeys)
 
 ## Delivery controls
 

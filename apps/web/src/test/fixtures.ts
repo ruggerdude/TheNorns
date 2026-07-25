@@ -378,6 +378,9 @@ export interface ProjectSummaryFixture {
   plan_objective: string | null;
   source_type?: "local" | "github" | null;
   source_location?: string | null;
+  onboarding_scenario?: "new_repo" | "existing_repo" | null;
+  focus_planning_run_id?: string | null;
+  entry_flow?: "adoption" | null;
 }
 
 export function makeProject(overrides: Partial<ProjectSummaryFixture> = {}): ProjectSummaryFixture {

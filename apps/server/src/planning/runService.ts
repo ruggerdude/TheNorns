@@ -289,6 +289,34 @@ export class PlanningRunService {
     );
   }
 
+  /**
+   * Returns the project's newest planning run, if one exists.
+   *
+   * Planning is a durable journey, so the browser must be able to recover it
+   * without a transient navigation hint. Ordering by creation time and id
+   * makes the result deterministic even when two runs are created in the same
+   * database clock tick.
+   */
+  async latest(projectId: string): Promise<PlanningRunDto | null> {
+    return this.transactions.transaction(async (tx) => {
+      const project = await tx.query<{ id: string }>("SELECT id FROM projects WHERE id = $1", [
+        projectId,
+      ]);
+      if (!project.rows[0]) {
+        throw new PlanningRunConflictError("project_not_found", `unknown project "${projectId}"`);
+      }
+      const result = await tx.query<PlanningRunRow>(
+        `SELECT * FROM planning_runs
+         WHERE project_id = $1
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+        [projectId],
+      );
+      const row = result.rows[0];
+      return row ? rowToDto(row) : null;
+    });
+  }
+
   // ---------------------------------------------------------------------
   // PHASE TAB P1: human decision on a terminal-review run.
   //   approve — records the decision (with optional staffing overrides,

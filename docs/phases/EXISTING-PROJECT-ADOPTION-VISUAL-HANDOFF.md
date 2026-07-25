@@ -22,8 +22,12 @@ Everything else is derived or automatic:
   policy, and three planning rounds are used.
 - Repository analysis always runs after creation.
 - If the optional direction is non-empty, a planning run starts after
-  analysis. If it is blank, the analyzed project opens without creating a
-  plan.
+  analysis and the project opens directly on its live planning journey. When
+  the plan is ready, the only required human action is **Approve & start
+  coding**. That decision materializes the phase, approves its strategy,
+  creates assignments, and dispatches dependency-ready code tasks through the
+  normal execution gate. If the direction is blank, the analyzed project opens
+  without creating a plan.
 
 Do not add name, model, reviewer, policy, runner, path, or round-count inputs
 to the adoption path. “Advanced options” that do not change behavior should
@@ -75,12 +79,32 @@ progress narrative:
 The visual treatment should communicate forward motion without exposing
 internal service names, token mechanics, or runner identifiers.
 
+After the modal closes, preserve one continuous journey:
+
+1. **Planning** — live coordinator/reviewer progress and findings.
+2. **Plan ready** — readable plan summary and one primary **Approve & start
+   coding** action.
+3. **Coding** — execution status and dispatched task progress.
+
+Staffing changes are optional and belong in a collapsed **Optional · adjust
+staffing** section. Do not visually give model selection the same weight as the
+approval action.
+
+The journey restores the newest durable planning run after refresh. Do not
+replace the restored state with a blank phase form or require the user to
+remember which workspace tab contained it.
+
 On failure, preserve the already-created project and show:
 
 - A concrete error.
 - **Retry**, which resumes analysis/planning without creating another project.
 - **Open project anyway**, which leaves the recoverable analysis step visible
   in the project workspace.
+
+If planning fails, retain the failure and offer a new run without recreating
+the project. If approval is recorded but execution cannot start, state that
+coding did not start and offer **Retry coding start**. Retrying must not ask
+for another approval.
 
 ## Copy guidance
 
@@ -118,5 +142,10 @@ Avoid:
 - `GET /api/runners/helper/repositories` for reusable local inventory.
 - `POST /api/runners/helper/repositories/choose` only from Connections.
 - `POST /api/v2/projects/:id/analyze-repository` before optional planning.
+- `GET /api/v2/projects/:id/planning-runs/latest` for refresh/reopen recovery.
+- `POST /api/v2/projects/:id/planning-runs/:runId/decision` as the single
+  approval-to-coding action.
+- `POST /api/v2/projects/:id/planning-runs/:runId/execution` for idempotent
+  kickoff recovery after an already-recorded approval.
 - Retry against the existing project ID.
 - No browser/server transport of raw Mac paths.

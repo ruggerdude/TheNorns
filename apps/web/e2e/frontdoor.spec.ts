@@ -48,8 +48,49 @@ function project(id: string, source: "github" | "local") {
     source_type: source,
     source_location:
       source === "github" ? "https://github.com/octocat/front-door-app.git" : "local-front-door",
+    onboarding_scenario: source === "github" ? "existing_repo" : null,
   };
 }
+
+const convergedAdoptionRun = {
+  id: "planning-adoption",
+  status: "converged",
+  round: 1,
+  max_rounds: 3,
+  review_rounds_total: 3,
+  rounds_completed: 1,
+  worker_providers: "both",
+  decision: null,
+  transcript: [],
+  result: {
+    plan: {
+      modules: [
+        {
+          id: "implementation",
+          title: "Deployment workflow",
+          description: "Implement and verify the requested deployment improvements.",
+        },
+      ],
+    },
+    content_hash: "a".repeat(64),
+    total_cost_usd: 1.25,
+    staffing_proposal: {
+      summary: "One implementation agent with cross-provider review.",
+      recommendations: [
+        {
+          node_id: "implementation",
+          provider: "anthropic",
+          model: "claude-sonnet-5",
+          worker_count: 1,
+          reviewer_model: "gpt-5.6-sol",
+          budget_usd: 25,
+          rationale: "Focused implementation.",
+        },
+      ],
+    },
+  },
+  error: null,
+};
 
 async function fulfill(route: Route, payload: unknown, status = 200) {
   await route.fulfill({
@@ -61,6 +102,8 @@ async function fulfill(route: Route, payload: unknown, status = 200) {
 
 async function prepare(page: Page, mode: "github" | "local") {
   let projects: ReturnType<typeof project>[] = [];
+  let planningCreated = false;
+  const observed = { planningDecisions: [] as unknown[] };
   await page.addInitScript(() => {
     sessionStorage.setItem("norns_cookie_session", "present");
     localStorage.setItem("norns_theme", "light");
@@ -136,6 +179,48 @@ async function prepare(page: Page, mode: "github" | "local") {
         summary: "Understood",
       });
     }
+    if (path.endsWith("/planning-runs") && request.method() === "POST") {
+      planningCreated = true;
+      return fulfill(route, { planning_run_id: "planning-adoption" }, 202);
+    }
+    if (path.endsWith("/planning-runs/latest")) {
+      return fulfill(route, { planning_run: planningCreated ? convergedAdoptionRun : null });
+    }
+    if (path.endsWith("/planning-runs/planning-adoption") && request.method() === "GET") {
+      return fulfill(route, convergedAdoptionRun);
+    }
+    if (path.endsWith("/planning-runs/planning-adoption/decision") && request.method() === "POST") {
+      observed.planningDecisions.push(request.postDataJSON());
+      return fulfill(route, {
+        ...convergedAdoptionRun,
+        status: "approved",
+        decision: {
+          decision: "approve",
+          direction: null,
+          staffing: null,
+          decided_at: "2026-07-25T12:00:00Z",
+        },
+        execution: {
+          started: true,
+          detail: "Started phase: 1 task dispatched.",
+        },
+      });
+    }
+    if (path.endsWith("/execution-status")) {
+      return fulfill(route, {
+        project_id: projects[0]?.id ?? "project-e2e",
+        phases: [
+          {
+            phase_id: "phase-implementation",
+            name: "Deployment workflow",
+            state: "active",
+            percent_complete: 0,
+            est_completion: null,
+            notes: "1 run active",
+          },
+        ],
+      });
+    }
     if (/^\/api\/projects\/project-[^/]+$/.test(path) && request.method() === "GET") {
       return fulfill(route, projects[0]);
     }
@@ -155,6 +240,7 @@ async function prepare(page: Page, mode: "github" | "local") {
     if (path.endsWith("/graph")) return fulfill(route, { error: "not_planned" }, 409);
     return fulfill(route, { error: `Unexpected ${request.method()} ${path} (${mode})` }, 404);
   });
+  return observed;
 }
 
 test("GitHub front door creates and immediately enters the project", async ({ page }) => {
@@ -182,6 +268,28 @@ test("Local front door uses the helper selection and opens a nonblank workspace"
   await expect(page.getByText("local-front-door", { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/loading graph/i)).toHaveCount(0);
   await expect(page.getByRole("button", { name: /main menu/i })).toBeVisible();
+});
+
+test("Directed adoption reaches one approval and starts the first coding task", async ({
+  page,
+}) => {
+  const observed = await prepare(page, "github");
+  await page.goto("/");
+  await page.getByRole("button", { name: /new project/i }).click();
+  await page.getByRole("button", { name: /^existing/i }).click();
+  await page.getByRole("button", { name: /octocat\/front-door-app/i }).click();
+  await page
+    .getByTestId("project-description")
+    .fill("Improve the deployment workflow and implement it");
+  await page.getByRole("button", { name: /adopt project/i }).click();
+
+  await expect(page.getByTestId("phase-decision-panel")).toBeVisible();
+  await page.getByRole("button", { name: /approve & start coding/i }).click();
+  await expect(page.getByTestId("phase-execution-kickoff-note")).toContainText(
+    "Execution started automatically",
+  );
+  await expect(page.getByTestId("phase-execution-table")).toContainText("active");
+  expect(observed.planningDecisions).toEqual([expect.objectContaining({ decision: "approve" })]);
 });
 
 test("Workspace is wide, uses flat navigation, and has one integrated prompt composer", async ({
