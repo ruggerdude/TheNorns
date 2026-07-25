@@ -36,6 +36,22 @@ describe("runner workspace wire", () => {
     ).toBe(true);
     expect(
       RunnerWorkspaceResponse.safeParse({
+        request_id: "workspace:catalog",
+        operation: "catalog",
+        status: "ok",
+        repositories: [
+          {
+            workspace_id: "local:workspace",
+            repository_id: "local:repository",
+            repository_display_name: "Project One",
+            default_branch: "main",
+            observed_head: "abc123",
+          },
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      RunnerWorkspaceResponse.safeParse({
         request_id: "workspace:choose",
         operation: "choose",
         status: "ok",
@@ -55,6 +71,49 @@ describe("runner workspace wire", () => {
         status: "cancelled",
       }).success,
     ).toBe(true);
+  });
+
+  it("accepts a bounded committed-repository inspection and rejects path leakage", () => {
+    const request = {
+      request_id: "workspace:inspect",
+      operation: "inspect",
+      repository_id: "local:repository",
+    };
+    expect(RunnerWorkspaceRequest.safeParse(request).success).toBe(true);
+    const inspection = {
+      repository_id: "local:repository",
+      repository_display_name: "Project One",
+      default_branch: "main",
+      observed_head: "abc123".padEnd(40, "0"),
+      total_files: 2,
+      tree_truncated: false,
+      tree_paths: ["README.md", "src/index.ts"],
+      files: [{ path: "README.md", content: "# Project One", truncated: false }],
+    };
+    expect(
+      RunnerWorkspaceResponse.safeParse({
+        request_id: request.request_id,
+        operation: "inspect",
+        status: "ok",
+        inspection,
+      }).success,
+    ).toBe(true);
+    expect(
+      RunnerWorkspaceResponse.safeParse({
+        request_id: request.request_id,
+        operation: "inspect",
+        status: "ok",
+        inspection: { ...inspection, repository_display_name: "/Users/operator/Project One" },
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerWorkspaceResponse.safeParse({
+        request_id: request.request_id,
+        operation: "inspect",
+        status: "ok",
+        inspection: { ...inspection, tree_paths: ["/Users/operator/Project One/README.md"] },
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects raw paths, unknown fields, and mismatched operation payloads", () => {

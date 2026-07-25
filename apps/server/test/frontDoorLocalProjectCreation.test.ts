@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
+import { FakeAdapter } from "@norns/adapters";
 import { RunnerDaemon, WorkspaceRegistry } from "@norns/runner";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
@@ -10,6 +11,7 @@ import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persist
 import { PhaseWorkflowService } from "../src/projects/phaseWorkflowService.js";
 import { ProjectResumeService } from "../src/projects/projectResumeService.js";
 import { RelationalProjectReadRepository } from "../src/projects/relationalReadRepository.js";
+import { RepositoryAnalysisService } from "../src/projects/repositoryAnalysisService.js";
 import { RepositoryIngestionService } from "../src/projects/repositoryIngestionService.js";
 import { SourceBindingService } from "../src/projects/sourceBindingService.js";
 import { StrategyBridgeService } from "../src/projects/strategyBridgeService.js";
@@ -26,6 +28,7 @@ describe.sequential("Front Door secure local-folder creation", () => {
   let url: string;
   let token: string;
   let repository: string;
+  let adapter: FakeAdapter;
 
   beforeEach(async () => {
     pg = new PGlite();
@@ -36,13 +39,15 @@ describe.sequential("Front Door secure local-folder creation", () => {
     const transactions = new PGliteTransactionRunner(pg);
     const users = new UserStore();
     token = testAdminToken(users);
+    adapter = new FakeAdapter("anthropic");
+    const ingestion = new RepositoryIngestionService(transactions);
     server = await buildServer({
       stores: new RelayStores(),
       users,
       projects: new RelationalProjectReadRepository(transactions, "secure-local-test"),
       phase3: {
         sourceBindings: new SourceBindingService(transactions),
-        ingestion: new RepositoryIngestionService(transactions),
+        ingestion,
         phases: new PhaseWorkflowService(transactions),
         strategies: new StrategyWorkflowService(transactions),
         bridge: new StrategyBridgeService({
@@ -52,6 +57,12 @@ describe.sequential("Front Door secure local-folder creation", () => {
         }),
         resume: new ProjectResumeService(transactions),
       },
+      repositoryAnalysis: new RepositoryAnalysisService({
+        transactions,
+        github: null,
+        ingestion,
+        createAdapter: () => adapter,
+      }),
     });
     url = await listen(server);
 
@@ -107,7 +118,7 @@ describe.sequential("Front Door secure local-folder creation", () => {
       runner_id: "runner-local",
     });
 
-    const chosen = await api("/api/runners/runner-local/workspaces/choose", {
+    const chosen = await api("/api/runners/helper/repositories/choose", {
       method: "POST",
       body: JSON.stringify({}),
     });
@@ -119,6 +130,18 @@ describe.sequential("Front Door secure local-folder creation", () => {
     expect(selection.repository.repository_display_name).toBe("secret-app");
     expect(JSON.stringify(selection)).not.toContain(repository);
 
+    const inventoryResponse = await api("/api/runners/helper/repositories");
+    expect(inventoryResponse.status).toBe(200);
+    const inventory = (await inventoryResponse.json()) as {
+      repositories: Array<{
+        selection_token: string;
+        repository: { repository_display_name: string };
+      }>;
+    };
+    expect(inventory.repositories).toHaveLength(1);
+    expect(inventory.repositories[0]?.repository.repository_display_name).toBe("secret-app");
+    expect(JSON.stringify(inventory)).not.toContain(repository);
+
     const created = await api("/api/v2/projects/local", {
       method: "POST",
       body: JSON.stringify({
@@ -126,7 +149,7 @@ describe.sequential("Front Door secure local-folder creation", () => {
         description: "Continue the selected repository",
         pm_provider: "anthropic",
         pm_model: "claude-sonnet-5",
-        selection_token: selection.selection_token,
+        selection_token: inventory.repositories[0]?.selection_token,
         verification_policy_ref: "verification",
       }),
     });
@@ -153,6 +176,28 @@ describe.sequential("Front Door secure local-folder creation", () => {
       ],
     });
 
+    adapter.enqueue({
+      title: "Local app architecture",
+      summary: "A local repository analyzed from its committed revision.",
+      architecture_document: "# Architecture\n\nA small local project.",
+      repository_facts: [
+        { key: "readme", value: "README.md is present", confidence: 0.99 },
+        { key: "verification", value: "Repository has committed source", confidence: 0.9 },
+      ],
+      constraints: ["Use committed repository content"],
+    });
+    const analyzed = await api(`/api/v2/projects/${projectId}/analyze-repository`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(analyzed.status).toBe(200);
+    expect(await analyzed.json()).toMatchObject({
+      title: "Local app architecture",
+      repository_revision: expect.stringMatching(/^[a-f0-9]{40}$/),
+    });
+    expect(adapter.requests[0]?.prompt).toContain("secure local test");
+    expect(adapter.requests[0]?.prompt).not.toContain(repository);
+
     const reused = await api("/api/v2/projects/local", {
       method: "POST",
       body: JSON.stringify({
@@ -160,7 +205,7 @@ describe.sequential("Front Door secure local-folder creation", () => {
         description: "Must not reuse selection",
         pm_provider: "anthropic",
         pm_model: "claude-sonnet-5",
-        selection_token: selection.selection_token,
+        selection_token: inventory.repositories[0]?.selection_token,
       }),
     });
     expect(reused.status).toBe(409);

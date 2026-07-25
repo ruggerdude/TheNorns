@@ -57,7 +57,9 @@ export class RunnerWorkspaceBroker {
       const timeoutMs =
         request.operation === "choose"
           ? (this.options.timeoutMs ?? 5 * 60_000)
-          : (this.options.timeoutMs ?? 8_000);
+          : request.operation === "inspect"
+            ? (this.options.timeoutMs ?? 20_000)
+            : (this.options.timeoutMs ?? 8_000);
       const timer = setTimeout(() => {
         this.pending.delete(request.request_id);
         reject(new WorkspaceBrokerError("timeout"));

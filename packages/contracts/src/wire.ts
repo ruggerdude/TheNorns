@@ -4,6 +4,7 @@
 import { z } from "zod";
 import { RunnerInferenceRequest, RunnerInferenceResponse } from "./inference.js";
 import { CommandEnvelope, EventEnvelope, ReconcileRequest, ReconcileResponse } from "./protocol.js";
+import { RepositoryInspection } from "./repositoryInspection.js";
 
 const nonEmpty = z.string().min(1);
 const opaqueId = z
@@ -33,9 +34,10 @@ const safeDisplayLabel = z
 export const RunnerWorkspaceRequest = z
   .object({
     request_id: opaqueId,
-    operation: z.enum(["list", "browse", "validate", "choose"]),
+    operation: z.enum(["list", "catalog", "browse", "validate", "choose", "inspect"]),
     workspace_id: opaqueId.optional(),
     entry_id: opaqueId.optional(),
+    repository_id: opaqueId.optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -47,6 +49,13 @@ export const RunnerWorkspaceRequest = z
         code: z.ZodIssueCode.custom,
         path: ["entry_id"],
         message: "workspace and entry required",
+      });
+    }
+    if (value.operation === "inspect" && !value.repository_id) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["repository_id"],
+        message: "required",
       });
     }
   });
@@ -62,31 +71,39 @@ export const RunnerWorkspaceEntry = z
   .strict();
 export type RunnerWorkspaceEntryT = z.infer<typeof RunnerWorkspaceEntry>;
 
+export const RunnerWorkspaceRepository = z
+  .object({
+    workspace_id: opaqueId,
+    repository_id: opaqueId,
+    repository_display_name: safeDisplayLabel,
+    default_branch: z.string().min(1).max(240),
+    observed_head: z.string().min(1).max(240),
+  })
+  .strict();
+export type RunnerWorkspaceRepositoryT = z.infer<typeof RunnerWorkspaceRepository>;
+
 export const RunnerWorkspaceResponse = z
   .object({
     request_id: opaqueId,
-    operation: z.enum(["list", "browse", "validate", "choose"]),
+    operation: z.enum(["list", "catalog", "browse", "validate", "choose", "inspect"]),
     status: z.enum(["ok", "cancelled", "invalid_request", "not_found", "unavailable"]),
     workspaces: z
       .array(z.object({ workspace_id: opaqueId, label: safeDisplayLabel }).strict())
       .optional(),
     entries: z.array(RunnerWorkspaceEntry).optional(),
-    repository: z
-      .object({
-        workspace_id: opaqueId,
-        repository_id: opaqueId,
-        repository_display_name: safeDisplayLabel,
-        default_branch: z.string().min(1).max(240),
-        observed_head: z.string().min(1).max(240),
-      })
-      .strict()
-      .optional(),
+    repository: RunnerWorkspaceRepository.optional(),
+    repositories: z.array(RunnerWorkspaceRepository).max(200).optional(),
+    inspection: RepositoryInspection.optional(),
   })
   .strict()
   .superRefine((value, context) => {
-    const payloads = [value.workspaces, value.entries, value.repository].filter(
-      (payload) => payload !== undefined,
-    );
+    const payloads = [
+      value.workspaces,
+      value.entries,
+      value.repository,
+      value.repositories,
+      value.inspection,
+    ].filter((payload) => payload !== undefined);
     if (value.status !== "ok" && payloads.length > 0) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -97,9 +114,11 @@ export const RunnerWorkspaceResponse = z
     if (value.status !== "ok") return;
     const correctPayload =
       (value.operation === "list" && value.workspaces !== undefined) ||
+      (value.operation === "catalog" && value.repositories !== undefined) ||
       (value.operation === "browse" && value.entries !== undefined) ||
       ((value.operation === "validate" || value.operation === "choose") &&
-        value.repository !== undefined);
+        value.repository !== undefined) ||
+      (value.operation === "inspect" && value.inspection !== undefined);
     if (!correctPayload || payloads.length !== 1) {
       context.addIssue({
         code: z.ZodIssueCode.custom,

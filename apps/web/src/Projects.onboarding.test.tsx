@@ -3,8 +3,8 @@
 //   new_repo:      Norns creates a fresh repository.
 //   existing_repo: the human picks one of the connected account's
 //                  repositories (searchable list, or paste a repo URL).
-// Both require a GitHub connection first, so the connect step is
-// first-class inside the wizard rather than something buried in Settings.
+// Connections are configured once in Settings; adoption only selects a
+// reusable source, analyzes it, and optionally starts planning.
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -72,6 +72,13 @@ describe("O1: GitHub and local-folder onboarding", () => {
     });
     mock.get("/api/integrations/github/connections/github%3A43/repositories", {
       body: [repository],
+    });
+    mock.post(/^\/api\/v2\/projects\/[^/]+\/analyze-repository$/, {
+      body: {
+        architecture_revision: 1,
+        title: "Repository architecture",
+        summary: "Understood",
+      },
     });
     // O1: onboarding always creates/binds a GitHub repository — POST
     // /api/v2/projects/onboarding is the single creation endpoint. It
@@ -185,10 +192,12 @@ describe("O1: GitHub and local-folder onboarding", () => {
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.click(screen.getByRole("button", { name: /^existing/i }));
     await user.click(await screen.findByRole("button", { name: /octocat\/existing-app/i }));
-    expect(screen.getByTestId("project-name")).toHaveValue("existing-app");
-    expect(screen.getByTestId("project-description")).toHaveValue("Existing application");
+    expect(screen.queryByTestId("project-name")).not.toBeInTheDocument();
+    expect(screen.getByTestId("project-description")).toHaveValue("");
+    expect(screen.queryByTestId("pm-model")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("reviewer-model")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+    await user.click(screen.getByRole("button", { name: /adopt project/i }));
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     expect(
       mock.calls.find(
@@ -201,29 +210,37 @@ describe("O1: GitHub and local-folder onboarding", () => {
         repository_id: "9001",
       },
     });
+    expect(
+      mock.calls.some(
+        (call) =>
+          call.method === "POST" &&
+          call.url === "/api/v2/projects/project-created/analyze-repository",
+      ),
+    ).toBe(true);
   });
 
-  it("creates an existing project from the native local folder selection", async () => {
-    mock.get("/api/runners/helper/status", {
+  it("adopts an existing project from the reusable local repository inventory", async () => {
+    mock.get("/api/runners/helper/repositories", {
       body: {
         state: "connected",
         runner_id: "runner-local",
         message: "The Norns helper is ready.",
         install_command: "",
         install_command_windows: "",
-      },
-    });
-    mock.post("/api/runners/runner-local/workspaces/choose", {
-      body: {
-        selection_token: "selection:one",
-        expires_at: "2026-07-23T12:05:00Z",
-        repository: {
-          runner_id: "runner-local",
-          repository_id: "repo-local",
-          repository_display_name: "local-app",
-          default_branch: "main",
-          observed_head: "abc123",
-        },
+        repositories: [
+          {
+            selection_token: "selection:one",
+            expires_at: "2026-07-23T12:05:00Z",
+            repository: {
+              runner_id: "runner-local",
+              workspace_id: "workspace-local",
+              repository_id: "repo-local",
+              repository_display_name: "local-app",
+              default_branch: "main",
+              observed_head: "abc123",
+            },
+          },
+        ],
       },
     });
     mock.post("/api/v2/projects/local", {
@@ -242,9 +259,8 @@ describe("O1: GitHub and local-folder onboarding", () => {
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.click(screen.getByRole("button", { name: /^existing/i }));
     await user.click(screen.getByRole("button", { name: /^local folder/i }));
-    await user.click(await screen.findByRole("button", { name: /^choose folder$/i }));
-    expect(await screen.findByTestId("local-folder-selection")).toHaveTextContent("local-app");
-    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+    await user.click(await screen.findByRole("button", { name: /local-app/i }));
+    await user.click(screen.getByRole("button", { name: /adopt project/i }));
 
     await waitFor(() =>
       expect(onOpenProject).toHaveBeenCalledWith(
@@ -265,6 +281,37 @@ describe("O1: GitHub and local-folder onboarding", () => {
     });
   });
 
+  it("starts planning automatically only when the optional first direction is provided", async () => {
+    mock.post("/api/v2/projects/project-created/planning-runs", {
+      body: { planning_run_id: "planning-adoption" },
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /^existing/i }));
+    await user.click(await screen.findByRole("button", { name: /octocat\/existing-app/i }));
+    await user.type(screen.getByTestId("project-description"), "Improve the deployment workflow");
+    await user.click(screen.getByRole("button", { name: /adopt project/i }));
+
+    await waitFor(() =>
+      expect(onOpenProject).toHaveBeenCalledWith(
+        expect.objectContaining({ focus_planning_run_id: "planning-adoption" }),
+      ),
+    );
+    expect(
+      mock.calls.find(
+        (call) =>
+          call.method === "POST" && call.url === "/api/v2/projects/project-created/planning-runs",
+      ),
+    ).toMatchObject({
+      body: {
+        objective: "Improve the deployment workflow",
+        max_rounds: 3,
+        attachment_ids: [],
+      },
+    });
+  });
+
   it("resolves a pasted repo URL to the matching entry in the searchable list", async () => {
     const user = userEvent.setup();
     renderWizard();
@@ -278,10 +325,10 @@ describe("O1: GitHub and local-folder onboarding", () => {
     );
     await user.click(await screen.findByRole("button", { name: /octocat\/existing-app/i }));
 
-    expect(screen.getByTestId("project-name")).toHaveValue("existing-app");
+    expect(screen.queryByTestId("project-name")).not.toBeInTheDocument();
   });
 
-  it("shows a single Connect GitHub button (not a Settings redirect) when nothing is connected yet, and runs the existing authorize flow", async () => {
+  it("routes GitHub setup to reusable Connections instead of running it in the wizard", async () => {
     mock.get("/api/integrations/github/status", {
       body: {
         configured: true,
@@ -289,26 +336,28 @@ describe("O1: GitHub and local-folder onboarding", () => {
         connections: [],
       },
     });
-    mock.get("/api/integrations/github/authorize", {
-      body: { authorization_url: "https://github.com/login/oauth/authorize?state=abc" },
-    });
-    const assignSpy = vi.fn();
-    Object.defineProperty(window, "location", {
-      value: { ...window.location, assign: assignSpy },
-      writable: true,
-    });
+    const openAccount = vi.fn();
 
     const user = userEvent.setup();
-    renderWizard();
+    mock.install();
+    render(
+      <Projects
+        onOpenProject={onOpenProject}
+        openProjects={[]}
+        onCloseProject={vi.fn()}
+        onUnauthorized={vi.fn()}
+        onSignOut={vi.fn()}
+        user={null}
+        onOpenAccount={openAccount}
+        onOpenAdmin={vi.fn()}
+      />,
+    );
     await user.click(await screen.findByRole("button", { name: /new project/i }));
 
     expect(await screen.findByText(/connect github to continue/i)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /open settings/i })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /^connect github$/i }));
-
-    await waitFor(() =>
-      expect(assignSpy).toHaveBeenCalledWith("https://github.com/login/oauth/authorize?state=abc"),
-    );
+    await user.click(screen.getByRole("button", { name: /open connections/i }));
+    expect(openAccount).toHaveBeenCalledWith("connections");
+    expect(mock.calls.some((call) => call.url.includes("/authorize"))).toBe(false);
   });
 
   it("sends the human to Settings only when the GitHub App itself isn't configured (an admin-only setup step)", async () => {
@@ -326,8 +375,7 @@ describe("O1: GitHub and local-folder onboarding", () => {
     await user.click(await screen.findByRole("button", { name: /new project/i }));
 
     expect(await screen.findByText(/github is not configured/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /open settings/i })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^connect github$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /open connections/i })).toBeInTheDocument();
   });
 
   it("shows the plain-language confirmation before the submit button, honest about GitHub Actions and never claiming to touch the user's machine", async () => {
@@ -362,7 +410,7 @@ describe("O1: GitHub and local-folder onboarding", () => {
 
     await user.click(screen.getByRole("button", { name: /^existing/i }));
     await screen.findByRole("button", { name: /octocat\/existing-app/i });
-    expect(screen.getByRole("button", { name: /create and open project/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /adopt project/i })).toBeDisabled();
   });
 
   it("surfaces installation_not_ready as a clear, actionable message and requires Continue before proceeding", async () => {
@@ -392,7 +440,7 @@ describe("O1: GitHub and local-folder onboarding", () => {
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.click(screen.getByRole("button", { name: /^existing/i }));
     await user.click(await screen.findByRole("button", { name: /octocat\/existing-app/i }));
-    await user.click(screen.getByRole("button", { name: /create and open project/i }));
+    await user.click(screen.getByRole("button", { name: /adopt project/i }));
 
     expect(await screen.findByTestId("wizard-blocker-step")).toBeInTheDocument();
     expect(screen.getByTestId("onboarding-blockers")).toHaveTextContent(

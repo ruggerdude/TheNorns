@@ -1618,14 +1618,18 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       };
     });
 
-  app.get("/api/runners/helper/status", async (req, reply) => {
-    if (!(await requireSession(req, reply))) return;
+  const helperStatusPayload = (req: FastifyRequest) => {
     const origin = externalOrigin(req);
-    return reply.send({
+    return {
       ...helperStatus(helperRunnerSnapshots()),
       install_command: installCommand({ origin }),
       install_command_windows: installCommandWindows({ origin }),
-    });
+    };
+  };
+
+  app.get("/api/runners/helper/status", async (req, reply) => {
+    if (!(await requireSession(req, reply))) return;
+    return reply.send(helperStatusPayload(req));
   });
 
   app.get("/api/runners", async (req, reply) => {
@@ -3024,10 +3028,18 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         });
       };
 
-      app.post("/api/runners/:runnerId/workspaces/choose", async (req, reply) => {
+      const chooseLocalRepository = async (
+        req: FastifyRequest,
+        reply: FastifyReply,
+        requestedRunnerId?: string,
+      ) => {
         const user = await resolveUser(req);
         if (!user) return reply.code(401).send({ error: "unauthorized" });
-        const { runnerId } = req.params as { runnerId: string };
+        const status = helperStatus(helperRunnerSnapshots());
+        const runnerId = requestedRunnerId ?? status.runner_id;
+        if (status.state !== "connected" || !runnerId) {
+          return workspaceFailure(reply, new WorkspaceBrokerError("runner_unavailable"));
+        }
         const runner = stores.runner(runnerId);
         const reconciled = reconciledRunners.get(runnerId);
         if (
@@ -3074,6 +3086,55 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             ...grant,
             repository: { runner_id: runnerId, ...response.repository },
           });
+        } catch (error) {
+          return workspaceFailure(reply, error);
+        }
+      };
+
+      app.post("/api/runners/:runnerId/workspaces/choose", async (req, reply) => {
+        const { runnerId } = req.params as { runnerId: string };
+        return chooseLocalRepository(req, reply, runnerId);
+      });
+
+      // Account-level local source setup. Projects consume this reusable
+      // inventory and never install/pair helpers or open native pickers.
+      app.post("/api/runners/helper/repositories/choose", async (req, reply) => {
+        return chooseLocalRepository(req, reply);
+      });
+
+      app.get("/api/runners/helper/repositories", async (req, reply) => {
+        const user = await resolveUser(req);
+        if (!user) return reply.code(401).send({ error: "unauthorized" });
+        const status = helperStatus(helperRunnerSnapshots());
+        if (status.state !== "connected" || !status.runner_id) {
+          return reply.send({ ...helperStatusPayload(req), repositories: [] });
+        }
+        const runnerId = status.runner_id;
+        const runner = stores.runner(runnerId);
+        const reconciled = reconciledRunners.get(runnerId);
+        if (!runner || !reconciled) {
+          return reply.send({ ...helperStatusPayload(req), repositories: [] });
+        }
+        try {
+          const catalog = await workspaceBroker.request(runnerId, runner.generation, {
+            operation: "catalog",
+          });
+          if (catalog.status !== "ok" || !catalog.repositories) {
+            return reply.send({ ...helperStatusPayload(req), repositories: [] });
+          }
+          const repositories = catalog.repositories.map((repository) => {
+            const grant = workspaceSelections.issue(
+              user.id,
+              runnerId,
+              runner.generation,
+              repository,
+            );
+            return {
+              ...grant,
+              repository: { runner_id: runnerId, ...repository },
+            };
+          });
+          return reply.send({ ...helperStatusPayload(req), repositories });
         } catch (error) {
           return workspaceFailure(reply, error);
         }
@@ -3297,8 +3358,46 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
         const { id } = req.params as { id: string };
         try {
-          reply.send(await analysis.analyze(id, { actor_id: user.id }));
+          const target = await analysis.target(id);
+          if (target.binding.binding_type === "local_runner") {
+            const runner = stores.runner(target.binding.runner_id);
+            const reconciled = reconciledRunners.get(target.binding.runner_id);
+            if (
+              !runner ||
+              !reconciled ||
+              reconciled.socket !== runnerSockets.get(target.binding.runner_id) ||
+              reconciled.generation !== runner.generation
+            ) {
+              return reply.code(409).send({
+                error: "local_helper_unavailable",
+                message:
+                  "Open the Norns helper on the computer that owns this repository, then retry analysis.",
+              });
+            }
+            const response = await workspaceBroker.request(
+              target.binding.runner_id,
+              runner.generation,
+              {
+                operation: "inspect",
+                repository_id: target.binding.repository_id,
+              },
+            );
+            if (response.status !== "ok" || !response.inspection) {
+              return reply.code(409).send({
+                error: "local_inspection_failed",
+                message:
+                  "The local helper could not inspect the repository's committed files. Confirm the folder is still available, then retry.",
+              });
+            }
+            return reply.send(
+              await analysis.analyzeTarget(target, { actor_id: user.id }, response.inspection),
+            );
+          }
+          return reply.send(await analysis.analyzeTarget(target, { actor_id: user.id }));
         } catch (error) {
+          if (error instanceof WorkspaceBrokerError) {
+            return workspaceFailure(reply, error);
+          }
           if (error instanceof RepositoryAnalysisError || error instanceof GitHubIntegrationError) {
             return reply.code(error.status).send({ error: error.code, message: error.message });
           }

@@ -83,27 +83,33 @@ async function prepare(page: Page, mode: "github" | "local") {
     }
     if (path === "/api/v2/attention") return fulfill(route, {}, 404);
     if (path === "/api/integrations/github/status") return fulfill(route, githubStatus);
-    if (path.endsWith("/repositories")) return fulfill(route, [repository]);
-    if (path === "/api/runners/helper/status") {
+    if (
+      path.startsWith("/api/integrations/github/connections/") &&
+      path.endsWith("/repositories")
+    ) {
+      return fulfill(route, [repository]);
+    }
+    if (path === "/api/runners/helper/repositories") {
       return fulfill(route, {
         state: "connected",
         runner_id: "runner-local",
         message: "The Norns helper is ready.",
         install_command: "",
         install_command_windows: "",
-      });
-    }
-    if (path === "/api/runners/runner-local/workspaces/choose") {
-      return fulfill(route, {
-        selection_token: "selection:e2e",
-        expires_at: "2026-07-23T12:05:00Z",
-        repository: {
-          runner_id: "runner-local",
-          repository_id: "repo-local",
-          repository_display_name: "local-front-door",
-          default_branch: "main",
-          observed_head: "abc123",
-        },
+        repositories: [
+          {
+            selection_token: "selection:e2e",
+            expires_at: "2026-07-23T12:05:00Z",
+            repository: {
+              runner_id: "runner-local",
+              workspace_id: "workspace-local",
+              repository_id: "repo-local",
+              repository_display_name: "local-front-door",
+              default_branch: "main",
+              observed_head: "abc123",
+            },
+          },
+        ],
       });
     }
     if (path === "/api/v2/projects/onboarding") {
@@ -122,6 +128,13 @@ async function prepare(page: Page, mode: "github" | "local") {
     if (path === "/api/v2/projects/local") {
       projects = [project("project-local", "local")];
       return fulfill(route, projects[0], 201);
+    }
+    if (path.endsWith("/analyze-repository")) {
+      return fulfill(route, {
+        architecture_revision: 1,
+        title: "Repository architecture",
+        summary: "Understood",
+      });
     }
     if (/^\/api\/projects\/project-[^/]+$/.test(path) && request.method() === "GET") {
       return fulfill(route, projects[0]);
@@ -151,7 +164,7 @@ test("GitHub front door creates and immediately enters the project", async ({ pa
   await page.getByRole("button", { name: /new project/i }).click();
   await page.getByRole("button", { name: /^existing/i }).click();
   await page.getByRole("button", { name: /octocat\/front-door-app/i }).click();
-  await page.getByRole("button", { name: /create and open project/i }).click();
+  await page.getByRole("button", { name: /adopt project/i }).click();
   await expect(page.getByText("front-door-app", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: /main menu/i })).toBeVisible();
 });
@@ -164,9 +177,8 @@ test("Local front door uses the helper selection and opens a nonblank workspace"
   await page.getByRole("button", { name: /new project/i }).click();
   await page.getByRole("button", { name: /^existing/i }).click();
   await page.getByRole("button", { name: /^local folder/i }).click();
-  await page.getByRole("button", { name: /^choose folder$/i }).click();
-  await expect(page.getByTestId("local-folder-selection")).toContainText("local-front-door");
-  await page.getByRole("button", { name: /create and open project/i }).click();
+  await page.getByRole("button", { name: /local-front-door/i }).click();
+  await page.getByRole("button", { name: /adopt project/i }).click();
   await expect(page.getByText("local-front-door", { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/loading graph/i)).toHaveCount(0);
   await expect(page.getByRole("button", { name: /main menu/i })).toBeVisible();
@@ -181,7 +193,7 @@ test("Workspace is wide, uses flat navigation, and has one integrated prompt com
   await page.getByRole("button", { name: /new project/i }).click();
   await page.getByRole("button", { name: /^existing/i }).click();
   await page.getByRole("button", { name: /octocat\/front-door-app/i }).click();
-  await page.getByRole("button", { name: /create and open project/i }).click();
+  await page.getByRole("button", { name: /adopt project/i }).click();
 
   const workspace = page.locator(".workspace-page");
   await expect(workspace).toBeVisible();

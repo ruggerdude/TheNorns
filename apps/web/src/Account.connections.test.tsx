@@ -18,8 +18,23 @@ describe("workspace connections settings", () => {
 
   afterEach(() => mock?.restore());
 
+  function accountMock(): MockFetch {
+    const next = new MockFetch();
+    next.get("/api/runners/helper/repositories", {
+      body: {
+        state: "not_installed",
+        runner_id: null,
+        message: "Set up the local helper once.",
+        install_command: "install-helper",
+        install_command_windows: "install-helper-windows",
+        repositories: [],
+      },
+    });
+    return next;
+  }
+
   it("shows GitHub identity and reusable workspace installations", async () => {
-    mock = new MockFetch();
+    mock = accountMock();
     mock.get("/api/auth/sessions", { body: { sessions: [] } });
     mock.get("/api/integrations/github/status", {
       body: {
@@ -56,7 +71,7 @@ describe("workspace connections settings", () => {
   });
 
   it("explains when the deployment has not configured a GitHub App", async () => {
-    mock = new MockFetch();
+    mock = accountMock();
     mock.get("/api/auth/sessions", { body: { sessions: [] } });
     mock.get("/api/integrations/github/status", {
       body: {
@@ -98,7 +113,7 @@ describe("workspace connections settings", () => {
     // route handler ran — so Disconnect always failed. Assert the REAL fetch
     // invocation shape; a mock that only checks the URL is what let the
     // sibling buttons ship broken.
-    mock = new MockFetch();
+    mock = accountMock();
     mock.get("/api/auth/sessions", { body: { sessions: [] } });
     mock.get("/api/integrations/github/status", {
       body: {
@@ -135,7 +150,7 @@ describe("workspace connections settings", () => {
   });
 
   it("surfaces manifest callback failures and opens the GitHub setup details", async () => {
-    mock = new MockFetch();
+    mock = accountMock();
     mock.get("/api/auth/sessions", { body: { sessions: [] } });
     mock.get("/api/integrations/github/status", {
       body: {
@@ -164,12 +179,8 @@ describe("workspace connections settings", () => {
     expect(screen.getByText(/Connect GitHub with guided setup/i)).toBeInTheDocument();
   });
 
-  it("offers no local-runner install or pairing surface", async () => {
-    // POLISH P1: the product owner rejected any design where a user installs a
-    // local runner. Execution is dispatched to ephemeral GitHub Actions
-    // runners by the server; Settings must never surface installing, pairing,
-    // or managing local runners.
-    mock = new MockFetch();
+  it("keeps one-time local helper setup in Connections", async () => {
+    mock = accountMock();
     mock.get("/api/auth/sessions", { body: { sessions: [] } });
     mock.get("/api/integrations/github/status", {
       body: {
@@ -180,20 +191,22 @@ describe("workspace connections settings", () => {
         connections: [],
       },
     });
+    mock.post("/api/pairing/start", {
+      body: { install_command: "curl https://norns.example/install | sh" },
+    });
     mock.install();
 
     render(<Account user={admin} initialTab="connections" onClose={vi.fn()} onSignOut={vi.fn()} />);
 
     expect(await screen.findByText("Not configured")).toBeInTheDocument();
-    expect(screen.queryByText(/local runner/i)).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /manage runners/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /pair new runner/i })).not.toBeInTheDocument();
-    expect(screen.queryByText(/install-runner/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/pairing code/i)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /manage local/i }));
+    expect(screen.getByText(/set up the local helper once/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /set up local helper/i }));
+    expect(await screen.findByText("curl https://norns.example/install | sh")).toBeInTheDocument();
   });
 
   it("shows provider readiness and the exact missing deployment variables", async () => {
-    mock = new MockFetch();
+    mock = accountMock();
     mock.get("/api/auth/sessions", { body: { sessions: [] } });
     mock.get("/api/integrations/github/status", {
       body: {

@@ -341,7 +341,7 @@ describe.sequential("POLISH P3: repository analysis", () => {
     expect(res.json()).toMatchObject({ error: "no_repository" });
   });
 
-  it("refuses honestly when the only connected repository is not GitHub-backed", async () => {
+  it("asks for the owning helper when the connected repository is local", async () => {
     await new SourceBindingService(transactions).createLocal({
       project_id: "project-1",
       runner_id: "runner-1",
@@ -355,7 +355,7 @@ describe.sequential("POLISH P3: repository analysis", () => {
     });
     const res = await post();
     expect(res.statusCode).toBe(409);
-    expect(res.json()).toMatchObject({ error: "no_github_repository" });
+    expect(res.json()).toMatchObject({ error: "local_helper_unavailable" });
   });
 
   it("refuses honestly for an unknown project", async () => {
@@ -369,6 +369,7 @@ describe.sequential("POLISH P3: repository analysis", () => {
   });
 
   it("refuses honestly when GitHub is not configured on the deployment", async () => {
+    await createGitHubBinding();
     const bare = await buildServer({
       stores: new RelayStores(),
       users,
@@ -395,6 +396,7 @@ describe.sequential("POLISH P3: repository analysis", () => {
   });
 
   it("refuses honestly when no model provider is configured", async () => {
+    await createGitHubBinding();
     const bare = await buildServer({
       stores: new RelayStores(),
       users,

@@ -6,9 +6,14 @@ import {
   providerForPmModel,
 } from "@norns/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { GitHubConnection, GitHubIntegrationStatus } from "./Account";
+import type { GitHubConnection, GitHubIntegrationStatus, SettingsTab } from "./Account";
 import { AttachmentInput } from "./AttachmentInput";
 import { ApiError, type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
+import {
+  type LocalRepositoryInventory,
+  type LocalRepositorySelection,
+  loadLocalRepositories,
+} from "./localSources";
 import {
   type OnboardingResponse,
   type ProjectOnboardingScenario,
@@ -177,26 +182,6 @@ interface GitHubRepository {
   archived: boolean;
   updated_at: string;
   binding_ready?: boolean;
-}
-
-interface LocalHelperStatus {
-  state: "connected" | "degraded" | "disconnected" | "not_installed";
-  runner_id: string | null;
-  message: string;
-  install_command: string;
-  install_command_windows: string;
-}
-
-interface LocalFolderSelection {
-  selection_token: string;
-  expires_at: string;
-  repository: {
-    runner_id: string;
-    repository_id: string;
-    repository_display_name: string;
-    default_branch: string;
-    observed_head: string;
-  };
 }
 
 async function request<T>(path: string, body?: unknown): Promise<T> {
@@ -383,7 +368,7 @@ export function Projects({
   onUnauthorized: () => void;
   onSignOut: () => void;
   user: CurrentUser | null;
-  onOpenAccount: () => void;
+  onOpenAccount: (tab?: SettingsTab) => void;
   onOpenAdmin: () => void;
 }): React.ReactElement {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
@@ -408,7 +393,6 @@ export function Projects({
   const reviewerPreviewLabel =
     pmModelOption(DEFAULT_PM_MODEL[reviewerProviderPreview])?.label ?? reviewerProviderPreview;
   const [githubStatus, setGitHubStatus] = useState<GitHubIntegrationStatus | null>(null);
-  const [githubConnectBusy, setGitHubConnectBusy] = useState(false);
   const [selectedConnectionId, setSelectedConnectionId] = useState("");
   const [repositories, setRepositories] = useState<GitHubRepository[]>([]);
   const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
@@ -418,10 +402,8 @@ export function Projects({
   const [repositoryName, setRepositoryName] = useState("");
   const [repositoryPrivate, setRepositoryPrivate] = useState(true);
   const [sourceError, setSourceError] = useState<string | null>(null);
-  const [localHelper, setLocalHelper] = useState<LocalHelperStatus | null>(null);
-  const [localInstallCommand, setLocalInstallCommand] = useState("");
-  const [localSelection, setLocalSelection] = useState<LocalFolderSelection | null>(null);
-  const [localBusy, setLocalBusy] = useState(false);
+  const [localSources, setLocalSources] = useState<LocalRepositoryInventory | null>(null);
+  const [localSelection, setLocalSelection] = useState<LocalRepositorySelection | null>(null);
   const [creating, setCreating] = useState(false);
   const [removingProjectId, setRemovingProjectId] = useState<string | null>(null);
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
@@ -439,12 +421,14 @@ export function Projects({
   // step operates on. "blocker" is a third step: the onboarding call
   // succeeded but came back with something like installation_not_ready —
   // shown before "attach"/navigating away so it isn't missed.
-  const [wizardStep, setWizardStep] = useState<"form" | "blocker" | "attach">("form");
+  const [wizardStep, setWizardStep] = useState<"form" | "blocker" | "attach" | "adopting">("form");
   const [draftProject, setDraftProject] = useState<ProjectSummary | null>(null);
   const [wizardAttachmentIds, setWizardAttachmentIds] = useState<string[]>([]);
   const [wizardObjective, setWizardObjective] = useState("");
   const [planningStarting, setPlanningStarting] = useState(false);
   const [planningError, setPlanningError] = useState<string | null>(null);
+  const [adoptionStage, setAdoptionStage] = useState<"analyzing" | "planning">("analyzing");
+  const [adoptionError, setAdoptionError] = useState<string | null>(null);
   // O1: onboarding blockers (e.g. installation_not_ready) surfaced after a
   // successful create — the project exists either way, this just needs the
   // human's attention before execution can actually run.
@@ -595,35 +579,18 @@ export function Projects({
     }
   }, [dialog, loadRepositories, scenario, selectedConnectionId]);
 
-  /** Run the existing GitHub authorize/install flow inline, right from the
-   *  wizard — "never make the user hunt through settings mid-setup". Mirrors
-   *  Account.tsx's openGitHubFlow exactly (same endpoints, same redirect),
-   *  just triggered from here instead of the Settings modal. Both scenarios
-   *  need a GitHub connection now, so this is first-class in the wizard, not
-   *  a secondary path. */
-  const connectGitHubInline = useCallback(async () => {
-    setGitHubConnectBusy(true);
-    setSourceError(null);
+  const refreshLocalSources = useCallback(async () => {
     try {
-      const kind = githubStatus?.user_authorization.connected ? "install" : "authorize";
-      const response = await request<{ authorization_url: string } | { installation_url: string }>(
-        `/api/integrations/github/${kind}`,
+      const inventory = await loadLocalRepositories();
+      setLocalSources(inventory);
+      setLocalSelection((current) =>
+        current
+          ? (inventory.repositories.find(
+              (selection) =>
+                selection.repository.repository_id === current.repository.repository_id,
+            ) ?? null)
+          : null,
       );
-      const url =
-        "authorization_url" in response ? response.authorization_url : response.installation_url;
-      window.location.assign(url);
-    } catch (error) {
-      if (error instanceof UnauthorizedError) onUnauthorized();
-      else setSourceError(error instanceof Error ? error.message : String(error));
-      setGitHubConnectBusy(false);
-    }
-  }, [githubStatus, onUnauthorized]);
-
-  const refreshLocalHelper = useCallback(async () => {
-    try {
-      const status = await request<LocalHelperStatus>("/api/runners/helper/status");
-      setLocalHelper(status);
-      if (status.state === "connected") setLocalInstallCommand("");
     } catch (error) {
       if (error instanceof UnauthorizedError) onUnauthorized();
       else setSourceError(error instanceof Error ? error.message : String(error));
@@ -632,49 +599,10 @@ export function Projects({
 
   useEffect(() => {
     if (!dialog || startingPoint !== "existing" || existingSource !== "local") return;
-    void refreshLocalHelper();
-    const timer = window.setInterval(() => void refreshLocalHelper(), 2_000);
+    void refreshLocalSources();
+    const timer = window.setInterval(() => void refreshLocalSources(), 4_000);
     return () => window.clearInterval(timer);
-  }, [dialog, existingSource, refreshLocalHelper, startingPoint]);
-
-  const prepareLocalHelper = useCallback(async () => {
-    setLocalBusy(true);
-    setSourceError(null);
-    try {
-      const setup = await request<{ install_command: string }>("/api/pairing/start", {});
-      setLocalInstallCommand(setup.install_command);
-    } catch (error) {
-      if (error instanceof UnauthorizedError) onUnauthorized();
-      else setSourceError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setLocalBusy(false);
-    }
-  }, [onUnauthorized]);
-
-  const chooseLocalFolder = useCallback(async () => {
-    if (!localHelper?.runner_id) return;
-    setLocalBusy(true);
-    setSourceError(null);
-    try {
-      const selection = await request<LocalFolderSelection | { cancelled: true }>(
-        `/api/runners/${encodeURIComponent(localHelper.runner_id)}/workspaces/choose`,
-        {},
-      );
-      if ("cancelled" in selection) return;
-      setLocalSelection(selection);
-      setName((current) => current || selection.repository.repository_display_name);
-      setDescription(
-        (current) =>
-          current ||
-          `Analyze and continue development of ${selection.repository.repository_display_name}`,
-      );
-    } catch (error) {
-      if (error instanceof UnauthorizedError) onUnauthorized();
-      else setSourceError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setLocalBusy(false);
-    }
-  }, [localHelper, onUnauthorized]);
+  }, [dialog, existingSource, refreshLocalSources, startingPoint]);
 
   const refreshAttention = useCallback(async () => {
     try {
@@ -836,11 +764,43 @@ export function Projects({
       setRepositoryName("");
       setRepositoryQuery("");
       setLocalSelection(null);
-      setLocalInstallCommand("");
+      setLocalSources(null);
+      setAdoptionError(null);
       setIdempotencyKey(globalThis.crypto.randomUUID());
       onOpenProject(completedProject);
     },
     [startingPoint, description, onOpenProject],
+  );
+
+  const completeAdoption = useCallback(
+    async (project: ProjectSummary, objective: string): Promise<void> => {
+      setDraftProject(project);
+      setWizardObjective(objective);
+      setAdoptionError(null);
+      setAdoptionStage("analyzing");
+      setWizardStep("adopting");
+      try {
+        await request(`/api/v2/projects/${project.id}/analyze-repository`, {});
+        if (objective) {
+          setAdoptionStage("planning");
+          const run = await request<{ planning_run_id: string }>(
+            `/api/v2/projects/${project.id}/planning-runs`,
+            {
+              objective,
+              max_rounds: 3,
+              attachment_ids: [],
+            },
+          );
+          proceedAfterCreate({ ...project, focus_planning_run_id: run.planning_run_id });
+          return;
+        }
+        proceedAfterCreate(project);
+      } catch (error) {
+        if (error instanceof UnauthorizedError) onUnauthorized();
+        else setAdoptionError(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [onUnauthorized, proceedAfterCreate],
   );
 
   const create = useCallback(async () => {
@@ -854,36 +814,16 @@ export function Projects({
           return;
         }
         const completedProject = await request<ProjectSummary>("/api/v2/projects/local", {
-          name: name.trim() || localSelection.repository.repository_display_name,
+          name: localSelection.repository.repository_display_name,
           description:
             description.trim() ||
-            `Analyze and continue development of ${localSelection.repository.repository_display_name}`,
+            `Continue development of ${localSelection.repository.repository_display_name}`,
           pm_provider: pmProvider,
           pm_model: pmModel,
           selection_token: localSelection.selection_token,
           verification_policy_ref: "verification",
         });
-        try {
-          if (reviewerSelection !== "auto") {
-            const [reviewerProviderChoice, ...modelParts] = reviewerSelection.split(":");
-            await requestVerb(
-              `/api/v2/projects/${completedProject.id}/planning-reviewer`,
-              "PATCH",
-              {
-                provider: reviewerProviderChoice,
-                model: modelParts.join(":"),
-              },
-            );
-          } else {
-            await requestVerb(
-              `/api/v2/projects/${completedProject.id}/planning-reviewer`,
-              "DELETE",
-            );
-          }
-        } catch {
-          // The automatic opposite-provider reviewer remains active.
-        }
-        proceedAfterCreate(completedProject);
+        await completeAdoption(completedProject, description.trim());
         return;
       }
       const repository = repositories.find((candidate) => candidate.id === selectedRepositoryId);
@@ -915,12 +855,13 @@ export function Projects({
             : undefined,
       });
       const projectName =
-        name.trim() || repository?.name || repositoryName.trim() || "Untitled project";
+        startingPoint === "existing"
+          ? (repository?.name ?? "Untitled project")
+          : name.trim() || repositoryName.trim() || "Untitled project";
       const projectDescription =
         description.trim() ||
-        repository?.description ||
         (repository
-          ? `Analyze and continue development of ${repository.full_name}`
+          ? repository.description || `Continue development of ${repository.full_name}`
           : "New project");
       const onboarding = await request<OnboardingResponse>("/api/v2/projects/onboarding", {
         name: projectName,
@@ -937,6 +878,17 @@ export function Projects({
       const completedProject = await request<ProjectSummary>(
         `/api/projects/${onboarding.project_id}`,
       );
+      if (onboarding.blockers.length > 0) {
+        setOnboardingBlockers(onboarding.blockers);
+        setDraftProject(completedProject);
+        setWizardObjective(description.trim());
+        setWizardStep("blocker");
+        return;
+      }
+      if (startingPoint === "existing") {
+        await completeAdoption(completedProject, description.trim());
+        return;
+      }
       // FRONT DOOR P2b: apply the reviewer selection right after creation,
       // before starting any planning run — resolvePlanningParticipants()
       // reads this per-project setting on every subsequent run.
@@ -954,16 +906,6 @@ export function Projects({
         // Best-effort: an explicit reviewer preference is a nice-to-have,
         // not a blocker — the project still exists and planning still works
         // (falling back to the automatic default) if this call fails.
-      }
-      if (onboarding.blockers.length > 0) {
-        // The project exists either way — a blocker (e.g.
-        // installation_not_ready) means execution can't actually run yet,
-        // not that creation failed. Surface it plainly and require an
-        // explicit "Continue" before moving on, so it isn't missed.
-        setOnboardingBlockers(onboarding.blockers);
-        setDraftProject(completedProject);
-        setWizardStep("blocker");
-        return;
       }
       proceedAfterCreate(completedProject);
     } catch (e) {
@@ -989,9 +931,18 @@ export function Projects({
     repositoryPrivate,
     reviewerSelection,
     idempotencyKey,
+    completeAdoption,
     proceedAfterCreate,
     onUnauthorized,
   ]);
+
+  const retryAdoption = useCallback(() => {
+    if (draftProject) void completeAdoption(draftProject, wizardObjective);
+  }, [completeAdoption, draftProject, wizardObjective]);
+
+  const openAdoptedProject = useCallback(() => {
+    if (draftProject) proceedAfterCreate(draftProject);
+  }, [draftProject, proceedAfterCreate]);
 
   /** The "blocker" step's Continue action — the project already exists;
    *  this just resumes the normal post-creation flow (attach-and-launch for
@@ -1001,8 +952,12 @@ export function Projects({
     const project = draftProject;
     setOnboardingBlockers([]);
     setWizardStep("form");
+    if (startingPoint === "existing") {
+      void completeAdoption(project, wizardObjective);
+      return;
+    }
     proceedAfterCreate(project);
-  }, [draftProject, proceedAfterCreate]);
+  }, [completeAdoption, draftProject, proceedAfterCreate, startingPoint, wizardObjective]);
 
   const closeWizard = useCallback(() => {
     setDialog(false);
@@ -1020,7 +975,8 @@ export function Projects({
     setRepositoryName("");
     setRepositoryQuery("");
     setLocalSelection(null);
-    setLocalInstallCommand("");
+    setLocalSources(null);
+    setAdoptionError(null);
     setReviewerSelection("auto");
     setRoundsCount(3);
     setIdempotencyKey(globalThis.crypto.randomUUID());
@@ -1126,7 +1082,7 @@ export function Projects({
   const confirmationText = isLocalExisting
     ? localSelection
       ? `The helper will work only inside ${localSelection.repository.repository_display_name}; its filesystem path stays on this computer.`
-      : "Choose a local Git repository with the system folder picker."
+      : "Select an approved local Git repository."
     : describeSetup(confirmationRepositoryFullName);
 
   return (
@@ -1134,7 +1090,7 @@ export function Projects({
       <header className="topbar">
         <Brand />
         <div className="header-actions">
-          <Button variant="ghost" className="btn-small" onClick={onOpenAccount}>
+          <Button variant="ghost" className="btn-small" onClick={() => onOpenAccount()}>
             Settings
           </Button>
           {user?.role === "admin" ? (
@@ -1671,6 +1627,43 @@ export function Projects({
                   </Button>
                 </div>
               </div>
+            ) : wizardStep === "adopting" && draftProject ? (
+              <div className="form-stack" data-testid="wizard-adoption-step">
+                <div>
+                  <div className="eyebrow">Adopting {draftProject.name}</div>
+                  <h3>
+                    {adoptionStage === "analyzing"
+                      ? "Understanding the repository"
+                      : "Starting the first plan"}
+                  </h3>
+                  <p className="muted">
+                    {adoptionStage === "analyzing"
+                      ? "The Norns is reading a bounded sample of committed files and recording the architecture, constraints, and verification facts needed before coding."
+                      : "The repository is understood. The optional direction is becoming a planning run now."}
+                  </p>
+                </div>
+                {adoptionError ? (
+                  <>
+                    <Alert testId="adoption-error">{adoptionError}</Alert>
+                    <div className="actions">
+                      <Button variant="ghost" onClick={openAdoptedProject}>
+                        Open project anyway
+                      </Button>
+                      <Button variant="primary" onClick={retryAdoption}>
+                        Retry
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <Spinner
+                    label={
+                      adoptionStage === "analyzing"
+                        ? "Analyzing committed code…"
+                        : "Starting planning run…"
+                    }
+                  />
+                )}
+              </div>
             ) : wizardStep === "blocker" && draftProject ? (
               <div className="form-stack" data-testid="wizard-blocker-step">
                 <Alert testId="onboarding-blockers">
@@ -1744,7 +1737,7 @@ export function Projects({
                         }}
                       >
                         <strong>Local folder</strong>
-                        <span>Use this computer's secure system folder picker.</span>
+                        <span>Select a repository already approved in Connections.</span>
                       </button>
                     </div>
                   </fieldset>
@@ -1753,66 +1746,65 @@ export function Projects({
                 {isLocalExisting ? (
                   <div className="repository-picker local-folder-picker">
                     {sourceError ? <Alert>{sourceError}</Alert> : null}
-                    {localHelper?.state === "connected" ? (
+                    {localSources === null ? (
+                      <Spinner label="Loading approved local repositories…" />
+                    ) : localSources.state !== "connected" ? (
                       <div className="connection-required">
                         <div>
-                          <strong>Local folder access is ready</strong>
-                          <p>{localHelper.message}</p>
-                          {localSelection ? (
-                            <p data-testid="local-folder-selection">
-                              Selected:{" "}
-                              <strong>{localSelection.repository.repository_display_name}</strong>
-                            </p>
-                          ) : null}
+                          <strong>Local repositories need workspace setup</strong>
+                          <p>{localSources.message}</p>
                         </div>
                         <Button
                           type="button"
                           variant="primary"
-                          disabled={localBusy}
-                          onClick={() => void chooseLocalFolder()}
+                          className="btn-small"
+                          onClick={() => onOpenAccount("connections")}
                         >
-                          {localBusy
-                            ? "Waiting for folder…"
-                            : localSelection
-                              ? "Choose a different folder"
-                              : "Choose folder"}
+                          Open Connections
                         </Button>
                       </div>
+                    ) : localSources.repositories.length ? (
+                      <div className="repository-list" aria-label="Approved local repositories">
+                        {localSources.repositories.map((selection) => (
+                          <button
+                            type="button"
+                            aria-pressed={
+                              localSelection?.repository.repository_id ===
+                              selection.repository.repository_id
+                            }
+                            className={
+                              localSelection?.repository.repository_id ===
+                              selection.repository.repository_id
+                                ? "is-selected"
+                                : ""
+                            }
+                            key={selection.repository.repository_id}
+                            onClick={() => setLocalSelection(selection)}
+                          >
+                            <span>
+                              <strong>{selection.repository.repository_display_name}</strong>
+                              <small>{selection.repository.default_branch}</small>
+                            </span>
+                            <span className="repository-meta">
+                              {selection.repository.observed_head.slice(0, 8)}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
                     ) : (
-                      <div className="connection-required local-helper-setup">
+                      <div className="connection-required">
                         <div>
-                          <strong>One-time local helper setup</strong>
-                          <p>
-                            {localHelper?.message ??
-                              "Checking whether the local folder helper is available…"}
-                          </p>
+                          <strong>No approved local repositories yet</strong>
+                          <p>Add one once in Connections, then it will be available here.</p>
                         </div>
                         <Button
                           type="button"
                           variant="primary"
-                          disabled={localBusy}
-                          onClick={() => void prepareLocalHelper()}
+                          className="btn-small"
+                          onClick={() => onOpenAccount("connections")}
                         >
-                          {localBusy ? "Preparing…" : "Set up local folder access"}
+                          Open Connections
                         </Button>
-                        {localInstallCommand ? (
-                          <div className="local-helper-command">
-                            <code>{localInstallCommand}</code>
-                            <Button
-                              type="button"
-                              className="btn-small"
-                              onClick={() =>
-                                void navigator.clipboard.writeText(localInstallCommand)
-                              }
-                            >
-                              Copy setup command
-                            </Button>
-                            <small>
-                              Paste this once in Terminal. This page will detect the helper
-                              automatically; no runner or pairing code needs to be entered here.
-                            </small>
-                          </div>
-                        ) : null}
                       </div>
                     )}
                   </div>
@@ -1832,9 +1824,9 @@ export function Projects({
                           type="button"
                           variant="primary"
                           className="btn-small"
-                          onClick={onOpenAccount}
+                          onClick={() => onOpenAccount("connections")}
                         >
-                          Open Settings
+                          Open Connections
                         </Button>
                       </div>
                     ) : !githubConnected ? (
@@ -1851,10 +1843,9 @@ export function Projects({
                           type="button"
                           variant="primary"
                           className="btn-small"
-                          disabled={githubConnectBusy}
-                          onClick={() => void connectGitHubInline()}
+                          onClick={() => onOpenAccount("connections")}
                         >
-                          {githubConnectBusy ? "Connecting…" : "Connect GitHub"}
+                          Open Connections
                         </Button>
                       </div>
                     ) : (
@@ -1932,16 +1923,7 @@ export function Projects({
                                       selectedRepositoryId === repository.id ? "is-selected" : ""
                                     }
                                     key={repository.id}
-                                    onClick={() => {
-                                      setSelectedRepositoryId(repository.id);
-                                      setName((current) => current || repository.name);
-                                      setDescription(
-                                        (current) =>
-                                          current ||
-                                          repository.description ||
-                                          `Analyze and continue development of ${repository.full_name}`,
-                                      );
-                                    }}
+                                    onClick={() => setSelectedRepositoryId(repository.id)}
                                   >
                                     <span>
                                       <strong>{repository.full_name}</strong>
@@ -1969,144 +1951,131 @@ export function Projects({
                   </div>
                 )}
 
-                <div className="project-create-grid">
-                  <Field
-                    label={
-                      startingPoint === "existing" ? "Project name (optional)" : "Project name"
-                    }
-                  >
-                    <Input
-                      data-testid="project-name"
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      placeholder={
-                        startingPoint === "existing"
-                          ? "Defaults to repository name"
-                          : "e.g. Notifications service"
-                      }
-                      autoFocus
-                    />
-                  </Field>
-                  <Field
-                    label={
-                      startingPoint === "existing" ? "Initial direction (optional)" : "Objective"
-                    }
-                  >
+                {startingPoint === "new" ? (
+                  <>
+                    <div className="project-create-grid">
+                      <Field label="Project name">
+                        <Input
+                          data-testid="project-name"
+                          value={name}
+                          onChange={(e) => setName(e.target.value)}
+                          placeholder="e.g. Notifications service"
+                          autoFocus
+                        />
+                      </Field>
+                      <Field label="Objective">
+                        <TextArea
+                          data-testid="project-description"
+                          value={description}
+                          onChange={(e) => setDescription(e.target.value)}
+                          placeholder="What should this project deliver?"
+                        />
+                      </Field>
+                    </div>
+                    <div className="two-col-fields">
+                      <Field label="Coordinator model">
+                        <Select
+                          data-testid="pm-model"
+                          value={pmModel}
+                          aria-describedby="pm-model-description"
+                          onChange={(e) => setPmModel(e.target.value as PmModelT)}
+                        >
+                          <optgroup label="Anthropic">
+                            {PM_MODEL_OPTIONS.anthropic.map((model) => (
+                              <option key={model.id} value={model.id}>
+                                {model.label}
+                              </option>
+                            ))}
+                          </optgroup>
+                          <optgroup label="OpenAI">
+                            {PM_MODEL_OPTIONS.openai.map((model) => (
+                              <option key={model.id} value={model.id}>
+                                {model.label}
+                              </option>
+                            ))}
+                          </optgroup>
+                        </Select>
+                        <span className="field-help" id="pm-model-description">
+                          {selectedModel?.description}
+                        </span>
+                      </Field>
+                      <Field label="Reviewer model">
+                        <Select
+                          data-testid="reviewer-model"
+                          value={reviewerSelection}
+                          onChange={(e) => setReviewerSelection(e.target.value)}
+                        >
+                          <option value="auto">
+                            Automatic (cross-provider) · {reviewerPreviewLabel}
+                          </option>
+                          <optgroup label="Anthropic">
+                            {PM_MODEL_OPTIONS.anthropic.map((model) => (
+                              <option key={model.id} value={`anthropic:${model.id}`}>
+                                {model.label}
+                              </option>
+                            ))}
+                          </optgroup>
+                          <optgroup label="OpenAI">
+                            {PM_MODEL_OPTIONS.openai.map((model) => (
+                              <option key={model.id} value={`openai:${model.id}`}>
+                                {model.label}
+                              </option>
+                            ))}
+                          </optgroup>
+                        </Select>
+                        <span className="field-help">
+                          Automatic picks the opposite provider from the coordinator.
+                        </span>
+                      </Field>
+                    </div>
+                    <Field label="Plan review rounds">
+                      <div className="rounds-stepper" data-testid="rounds-stepper">
+                        <Button
+                          type="button"
+                          className="btn-small"
+                          disabled={roundsCount <= 1}
+                          onClick={() => setRoundsCount((n) => Math.max(1, n - 1))}
+                          aria-label="Fewer rounds"
+                        >
+                          −
+                        </Button>
+                        <span className="rounds-value mono">{roundsCount}</span>
+                        <Button
+                          type="button"
+                          className="btn-small"
+                          disabled={roundsCount >= 5}
+                          onClick={() => setRoundsCount((n) => Math.min(5, n + 1))}
+                          aria-label="More rounds"
+                        >
+                          +
+                        </Button>
+                      </div>
+                      <span className="field-help">
+                        Coordinator and reviewer debate the plan up to this many rounds, then stop
+                        early once they converge.
+                      </span>
+                    </Field>
+                    <div className="policy">
+                      <strong>Cross-provider review is on.</strong>
+                      <br />
+                      {selectedModel?.label} will lead planning.{" "}
+                      {pmProvider === "anthropic" ? "OpenAI" : "Anthropic"} will independently
+                      review the plan.
+                    </div>
+                  </>
+                ) : (
+                  <Field label="What should The Norns do first? (optional)">
                     <TextArea
                       data-testid="project-description"
                       value={description}
-                      onChange={(e) => setDescription(e.target.value)}
-                      placeholder={
-                        startingPoint === "existing"
-                          ? "What should The Norns focus on after understanding the repository?"
-                          : "What should this project deliver?"
-                      }
+                      onChange={(event) => setDescription(event.target.value)}
+                      placeholder="Leave blank to adopt and understand the repository without starting a plan."
                     />
-                  </Field>
-                </div>
-
-                <div className="two-col-fields">
-                  <Field label="Coordinator model">
-                    <Select
-                      data-testid="pm-model"
-                      value={pmModel}
-                      aria-describedby="pm-model-description"
-                      onChange={(e) => setPmModel(e.target.value as PmModelT)}
-                    >
-                      <optgroup label="Anthropic">
-                        {PM_MODEL_OPTIONS.anthropic.map((model) => (
-                          <option key={model.id} value={model.id}>
-                            {model.label}
-                          </option>
-                        ))}
-                      </optgroup>
-                      <optgroup label="OpenAI">
-                        {PM_MODEL_OPTIONS.openai.map((model) => (
-                          <option key={model.id} value={model.id}>
-                            {model.label}
-                          </option>
-                        ))}
-                      </optgroup>
-                    </Select>
-                    <span className="field-help" id="pm-model-description">
-                      {selectedModel?.description}
-                    </span>
-                  </Field>
-                  <Field label="Reviewer model">
-                    {/* FRONT DOOR P2b: wired to GET/PATCH/DELETE
-                     *  .../planning-reviewer. "Automatic" leaves no override —
-                     *  the server picks the opposite provider from whatever
-                     *  the coordinator is. An explicit pick is PATCHed (or
-                     *  DELETEd back to automatic) right after the project is
-                     *  created, before any planning run starts. */}
-                    <Select
-                      data-testid="reviewer-model"
-                      value={reviewerSelection}
-                      onChange={(e) => setReviewerSelection(e.target.value)}
-                    >
-                      <option value="auto">
-                        Automatic (cross-provider) · {reviewerPreviewLabel}
-                      </option>
-                      <optgroup label="Anthropic">
-                        {PM_MODEL_OPTIONS.anthropic.map((model) => (
-                          <option key={model.id} value={`anthropic:${model.id}`}>
-                            {model.label}
-                          </option>
-                        ))}
-                      </optgroup>
-                      <optgroup label="OpenAI">
-                        {PM_MODEL_OPTIONS.openai.map((model) => (
-                          <option key={model.id} value={`openai:${model.id}`}>
-                            {model.label}
-                          </option>
-                        ))}
-                      </optgroup>
-                    </Select>
                     <span className="field-help">
-                      A second opinion. Automatic picks the opposite provider from the coordinator;
-                      cross-provider review works best.
+                      If provided, planning starts automatically after repository analysis.
                     </span>
                   </Field>
-                </div>
-                {startingPoint === "new" ? (
-                  <Field label="Plan review rounds">
-                    <div className="rounds-stepper" data-testid="rounds-stepper">
-                      <Button
-                        type="button"
-                        className="btn-small"
-                        disabled={roundsCount <= 1}
-                        onClick={() => setRoundsCount((n) => Math.max(1, n - 1))}
-                        aria-label="Fewer rounds"
-                      >
-                        −
-                      </Button>
-                      <span className="rounds-value mono">{roundsCount}</span>
-                      <Button
-                        type="button"
-                        className="btn-small"
-                        disabled={roundsCount >= 5}
-                        onClick={() => setRoundsCount((n) => Math.min(5, n + 1))}
-                        aria-label="More rounds"
-                      >
-                        +
-                      </Button>
-                    </div>
-                    <span className="field-help">
-                      Coordinator and reviewer debate the plan up to this many rounds, then stop
-                      early once they converge.
-                    </span>
-                  </Field>
-                ) : null}
-                <div className="policy">
-                  <strong>Cross-provider review is on.</strong>
-                  <br />
-                  {selectedModel?.label} will lead planning.{" "}
-                  {pmProvider === "anthropic" ? "OpenAI" : "Anthropic"} will independently review
-                  the plan.
-                </div>
-                {/* O1: the confirmation step's one honest passage about where
-                 *  the human's code actually lives — a GitHub Actions job
-                 *  inside the repository, never their own computer. */}
+                )}
                 <p className="setup-confirmation" data-testid="setup-confirmation">
                   {confirmationText}
                 </p>
@@ -2117,7 +2086,7 @@ export function Projects({
                       : "Creating…"
                     : startingPoint === "new"
                       ? "Create & draft plan →"
-                      : "Create and open project"}
+                      : "Adopt project →"}
                 </Button>
               </div>
             )}

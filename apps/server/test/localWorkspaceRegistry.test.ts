@@ -31,6 +31,9 @@ describe("runner-local workspace registry", () => {
   it("uses the native chooser to approve and validate a repository in one step", async () => {
     const data = mkdtempSync(join(tmpdir(), "norns-native-choice-"));
     const repository = gitRepository(data, "chosen-project");
+    writeFileSync(join(repository, "README.md"), `test\n${repository}\n`);
+    execFileSync("git", ["-C", repository, "add", "README.md"]);
+    execFileSync("git", ["-C", repository, "commit", "--amend", "--no-edit"]);
     const registry = new WorkspaceRegistry(data, async () => repository);
 
     const response = await registry.handleAsync({
@@ -53,6 +56,41 @@ describe("runner-local workspace registry", () => {
     expect(registry.repositoryPath(response.repository?.repository_id ?? "")).toBe(
       realpathSync(repository),
     );
+    expect(registry.handle({ request_id: "catalog-projects", operation: "catalog" })).toMatchObject(
+      {
+        status: "ok",
+        repositories: [
+          {
+            repository_display_name: "chosen-project",
+            default_branch: "main",
+          },
+        ],
+      },
+    );
+
+    // Inspection is committed-HEAD only: neither a working-tree edit nor an
+    // untracked file may cross the relay.
+    writeFileSync(join(repository, "README.md"), "uncommitted secret\n");
+    writeFileSync(join(repository, "UNTRACKED_SECRET.txt"), "must stay local\n");
+    const inspection = registry.handle({
+      request_id: "inspect-project",
+      operation: "inspect",
+      repository_id: response.repository?.repository_id,
+    });
+    expect(inspection).toMatchObject({
+      operation: "inspect",
+      status: "ok",
+      inspection: {
+        repository_display_name: "chosen-project",
+        default_branch: "main",
+        total_files: 1,
+        tree_paths: ["README.md"],
+        files: [{ path: "README.md", content: "test\n[LOCAL_PATH]\n", truncated: false }],
+      },
+    });
+    expect(JSON.stringify(inspection)).not.toContain(repository);
+    expect(JSON.stringify(inspection)).not.toContain("uncommitted secret");
+    expect(JSON.stringify(inspection)).not.toContain("must stay local");
   });
 
   it("treats closing the native chooser as a clean cancellation", async () => {

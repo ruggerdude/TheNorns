@@ -27,7 +27,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Account } from "./Account";
+import { Account, type SettingsTab } from "./Account";
 import { Admin } from "./Admin";
 import { AnalyzeRepositoryControl } from "./AnalyzeRepositoryControl";
 import { AttachmentInput } from "./AttachmentInput";
@@ -1534,7 +1534,7 @@ function ProjectGraph({
           <button type="button" onClick={() => setShowDebates(true)}>
             Debates
           </button>
-          <button type="button" onClick={onOpenAccount}>
+          <button type="button" onClick={() => onOpenAccount()}>
             Settings
           </button>
         </nav>
@@ -2252,6 +2252,9 @@ export function App(): React.ReactElement {
       ? null
       : new URLSearchParams(window.location.search).get("github");
   const [showAccount, setShowAccount] = useState(requestedSettingsTab !== null);
+  const [accountTab, setAccountTab] = useState<SettingsTab>(
+    requestedSettingsTab === "connections" ? "connections" : "profile",
+  );
   const [showAdmin, setShowAdmin] = useState(false);
 
   useEffect(() => {
@@ -2322,6 +2325,11 @@ export function App(): React.ReactElement {
     setActiveProject((active) => (active?.id === id ? null : active));
   }, []);
 
+  const openAccount = useCallback((tab: SettingsTab = "profile") => {
+    setAccountTab(tab);
+    setShowAccount(true);
+  }, []);
+
   if (!token) {
     const mode: LoginMode = recoveryToken
       ? "recovery"
@@ -2356,7 +2364,7 @@ export function App(): React.ReactElement {
           onUnauthorized={() => logout("Session expired. Sign in again.")}
           onSignOut={() => logout("Signed out.")}
           user={user}
-          onOpenAccount={() => setShowAccount(true)}
+          onOpenAccount={openAccount}
           onOpenAdmin={() => setShowAdmin(true)}
         />
       ) : (
@@ -2368,7 +2376,7 @@ export function App(): React.ReactElement {
           onCloseProject={closeProject}
           onLogout={logout}
           user={user}
-          onOpenAccount={() => setShowAccount(true)}
+          onOpenAccount={openAccount}
           onOpenAdmin={() => setShowAdmin(true)}
         />
       )}
@@ -2378,7 +2386,7 @@ export function App(): React.ReactElement {
           onClose={() => setShowAccount(false)}
           onSignOut={() => logout("Signed out.")}
           onUnauthorized={() => logout("Session expired. Sign in again.")}
-          initialTab={requestedSettingsTab === "connections" ? "connections" : "profile"}
+          initialTab={accountTab}
           githubCallback={githubCallback}
         />
       ) : null}

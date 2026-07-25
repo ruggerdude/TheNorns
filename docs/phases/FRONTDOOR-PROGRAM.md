@@ -45,33 +45,37 @@ The following capabilities existed before this program and must be reused:
 | Strategy and staffing | Delivered: planning output bridges to relational strategy; the PM recommends workers/models/reviewers/budgets; the user can review before approval |
 | Approval and execution | Delivered: approved strategy materialization and execution kickoff with readiness checks |
 | Tracking | Delivered: explicit percentage, blended ETA, phase progress, and decision handling |
-| Local folder onboarding | Delivered: one-time helper setup, native folder selection, expiring user-bound selection tokens, atomic project/binding creation, safe reopen, and no browser or server raw-path seam |
+| Existing-project adoption | Delivered: reusable GitHub/local source selection, derived defaults, automatic repository analysis, optional automatic planning, recoverable retry, and no duplicate creation |
+| Local source setup | Delivered in Settings → Connections: one-time helper setup, native folder approval, reusable repository inventory, expiring user-bound selection tokens, safe reopen, and no browser or server raw-path seam |
 
 ## Completed hardening
 
-### R1 — Local folder: one visible action, secure helper underneath
+### R1 — Local repositories: setup once, select during adoption
 
 The user experience is:
 
-1. Choose **Local folder** beside **GitHub repository**.
-2. Click **Choose project folder…**.
-3. Select the Git repository in the computer's native folder selector.
-4. Return automatically to the completed project form with the selected
-   repository name shown.
+1. In **Settings → Connections**, set up the helper once.
+2. Choose **Add local repository** and approve a Git repository with the
+   computer's native folder selector.
+3. In project creation, choose **Existing → Local folder**.
+4. Select the approved repository and adopt it.
 
-There is no runner ID selector, workspace dropdown, pairing-code workflow, or
-raw-path text field in project creation.
+There is no install action, native picker, runner ID selector, workspace
+dropdown, pairing-code workflow, or raw-path text field in project creation.
 
 Ongoing Git access and agent execution require a local process; a hosted web
 page cannot safely retain an executable Safari folder path. The existing local
 runner therefore becomes a user-invisible local helper for this flow:
 
-- If the helper is installed and running, the folder button opens its native
-  selector immediately.
-- If it is absent, the UI presents one guided install/open action and resumes
-  the same wizard automatically afterward.
+- If the helper is installed and running, Connections can approve additional
+  repositories with the native selector.
+- If it is absent, Connections presents one guided install/open action.
 - The helper returns an expiring, single-use selection token plus safe
-  repository metadata. Raw paths never enter browser DTOs or server storage.
+  repository metadata for each adoption. Raw paths never enter browser DTOs or
+  server storage.
+- Adoption reads a bounded snapshot of committed `HEAD`, records the
+  architecture and repository facts, and starts planning only when the user
+  supplied the optional first direction.
 - Project planning may continue when the helper later goes offline. Execution
   clearly reports that the selected folder's helper must be online.
 - The public raw `source_location` creation seam is retired after existing
@@ -104,8 +108,8 @@ existing cookies/local storage:
 
 1. GitHub authorization → installation → callback → repository selection →
    project creation.
-2. Local helper discovery/install → native folder selection → project
-   creation.
+2. Connections: local helper discovery/install → native folder approval;
+   project wizard: select approved source → analysis → optional planning.
 3. Objective with pasted images → PM/reviewer rounds → editable staffing →
    approval → execution kickoff.
 4. Refresh and reopen during planning, approval, and execution.
@@ -147,11 +151,12 @@ is the committed automated regression gate for both creation paths.
   connected repository and historical evidence remain untouched.
 - Removal is rejected while agent, planning, or debate work is active; the
   dashboard explains what must finish or be cancelled first.
-- **New project** visibly offers both GitHub and Local folder.
+- **New project** visibly distinguishes new work from adoption; adoption
+  offers both GitHub and Local folder.
 - GitHub remains connected after its callback and refresh.
-- Local-folder selection is a native chooser experience; implementation
-  details such as runners and pairing codes are not part of routine project
-  creation.
+- Local-folder approval is a native chooser experience in Connections;
+  project creation only selects approved repositories, and implementation
+  details such as runners and pairing codes are not part of routine adoption.
 - Multiple projects can remain open and retain independent UI state.
 - The project workspace opens on an Overview/Phase surface; the graph is
   optional, never an empty front door.
@@ -177,10 +182,10 @@ is the committed automated regression gate for both creation paths.
 
 - Scoped lint: `biome check apps packages scripts`
 - Monorepo build and typecheck: passed
-- Web unit/integration suite: 37 files, 142 tests passed
-- Server suite: 109 files passed plus the real-runtime regression rerun; 8
-  database-environment tests remain intentionally skipped
-- Contracts: 15 files, 122 tests passed
+- Web unit/integration suite: 37 files, 143 tests passed
+- Server suite: 110 files passed; 4 database-environment files / 8 tests
+  remain intentionally skipped
+- Contracts: 15 files, 123 tests passed
 - Adapters: 26 tests passed, one live-provider smoke intentionally skipped
 - Browser front door: six passes across Chromium and WebKit (GitHub,
   Local-folder, and workspace/composer journeys)

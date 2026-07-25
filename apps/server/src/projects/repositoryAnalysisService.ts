@@ -21,6 +21,15 @@
 //     round-trip well under the route timeout.
 import { createHash } from "node:crypto";
 import type { LlmAdapter } from "@norns/adapters";
+import {
+  MAX_REPOSITORY_FILE_CHARS,
+  MAX_REPOSITORY_KEY_FILES,
+  MAX_REPOSITORY_SAMPLE_CHARS,
+  MAX_REPOSITORY_TREE_PATHS,
+  type RepositoryInspectionT,
+  repositoryKeyFileScore,
+  selectRepositoryKeyFiles,
+} from "@norns/contracts";
 import { z } from "zod";
 import {
   GITHUB_TOKEN_SCOPES,
@@ -34,10 +43,10 @@ import type { RepositoryIngestionService } from "./repositoryIngestionService.js
 const API_BASE = "https://api.github.com";
 const GITHUB_API_VERSION = "2022-11-28";
 
-export const MAX_TREE_PATHS = 400;
-export const MAX_KEY_FILES = 12;
-export const MAX_FILE_CHARS = 16_000;
-export const MAX_TOTAL_CHARS = 120_000;
+export const MAX_TREE_PATHS = MAX_REPOSITORY_TREE_PATHS;
+export const MAX_KEY_FILES = MAX_REPOSITORY_KEY_FILES;
+export const MAX_FILE_CHARS = MAX_REPOSITORY_FILE_CHARS;
+export const MAX_TOTAL_CHARS = MAX_REPOSITORY_SAMPLE_CHARS;
 
 /**
  * Refusals a human can act on. `code` follows the existing error-shape
@@ -96,12 +105,15 @@ const RepositoryArchitectureAnalysis = z
   .strict();
 export type RepositoryArchitectureAnalysisT = z.infer<typeof RepositoryArchitectureAnalysis>;
 
-interface GitHubBindingRow {
+interface RepositoryBindingRow {
   id: string;
+  binding_type: "github" | "local_runner";
   repository_id: string;
-  github_installation_id: string;
-  github_owner: string;
-  github_name: string;
+  runner_id: string;
+  repository_display_name: string;
+  github_installation_id: string | null;
+  github_owner: string | null;
+  github_name: string | null;
   default_branch: string;
 }
 
@@ -117,68 +129,25 @@ interface TreeEntry {
   size?: number;
 }
 
+export interface RepositoryAnalysisTarget {
+  project_id: string;
+  project: ProjectPolicyRow;
+  binding: RepositoryBindingRow;
+}
+
 /**
  * Fixed key-file priority. Lower score = fetched first. Anything unmatched is
  * never fetched — the tree listing alone represents it.
  */
 export function keyFileScore(path: string): number | null {
-  const depth = path.split("/").length - 1;
-  const base = path.slice(path.lastIndexOf("/") + 1).toLowerCase();
-  const depthPenalty = depth * 10;
-  if (/^readme(\.(md|rst|txt|adoc))?$/.test(base)) return 0 + depthPenalty;
-  if (
-    [
-      "package.json",
-      "pyproject.toml",
-      "cargo.toml",
-      "go.mod",
-      "pom.xml",
-      "build.gradle",
-      "gemfile",
-      "composer.json",
-      "mix.exs",
-    ].includes(base)
-  ) {
-    return 1 + depthPenalty;
-  }
-  if (
-    [
-      "pnpm-workspace.yaml",
-      "lerna.json",
-      "turbo.json",
-      "nx.json",
-      "tsconfig.base.json",
-      "tsconfig.json",
-      "dockerfile",
-      "docker-compose.yml",
-      "docker-compose.yaml",
-      "makefile",
-    ].includes(base)
-  ) {
-    return 2 + depthPenalty;
-  }
-  if (/^(architecture|design|contributing)\.md$/.test(base)) return 2 + depthPenalty;
-  if (/^(main|index|app|server|cli)\.(ts|tsx|js|mjs|py|go|rs|rb|java)$/.test(base)) {
-    return 3 + depthPenalty;
-  }
-  return null;
+  return repositoryKeyFileScore(path);
 }
 
 /** Deterministic selection of at most MAX_KEY_FILES fetch-worthy blobs. */
 export function selectKeyFiles(
   tree: ReadonlyArray<{ path: string; size: number }>,
 ): Array<{ path: string; size: number }> {
-  return tree
-    .map((entry) => ({ entry, score: keyFileScore(entry.path) }))
-    .filter(
-      (candidate): candidate is { entry: { path: string; size: number }; score: number } =>
-        candidate.score !== null && candidate.entry.size <= 512 * 1024,
-    )
-    .sort(
-      (left, right) => left.score - right.score || left.entry.path.localeCompare(right.entry.path),
-    )
-    .slice(0, MAX_KEY_FILES)
-    .map((candidate) => candidate.entry);
+  return selectRepositoryKeyFiles(tree);
 }
 
 export class RepositoryAnalysisService {
@@ -201,30 +170,8 @@ export class RepositoryAnalysisService {
     this.http = deps.http ?? fetch;
   }
 
-  async analyze(projectId: string, actor: { actor_id: string }): Promise<RepositoryAnalysisResult> {
-    // 1. Preconditions, cheapest first, each with its own honest refusal.
-    const github = this.deps.github;
-    if (!github || !github.isConfigured()) {
-      throw new RepositoryAnalysisError(
-        "github_not_configured",
-        "Repository analysis reads the repository through the GitHub App, which is not configured on this deployment.",
-        503,
-      );
-    }
-    let adapter: LlmAdapter;
-    try {
-      adapter = this.deps.createAdapter();
-    } catch (error) {
-      throw new RepositoryAnalysisError(
-        "model_not_configured",
-        `Repository analysis needs a configured model provider: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-        503,
-      );
-    }
-
-    const { project, binding } = await this.deps.transactions.transaction(async (tx) => {
+  async target(projectId: string): Promise<RepositoryAnalysisTarget> {
+    return this.deps.transactions.transaction(async (tx) => {
       const projects = await tx.query<ProjectPolicyRow>(
         `SELECT assignment_policy_ref, verification_policy_ref, budget_policy_ref
          FROM projects WHERE id = $1`,
@@ -238,30 +185,131 @@ export class RepositoryAnalysisService {
           404,
         );
       }
-      const bindings = await tx.query<GitHubBindingRow & { binding_type: string }>(
-        `SELECT id, binding_type, repository_id, github_installation_id,
-                github_owner, github_name, default_branch
+      const bindings = await tx.query<RepositoryBindingRow>(
+        `SELECT id, binding_type, repository_id, runner_id, repository_display_name,
+                github_installation_id, github_owner, github_name, default_branch
          FROM repository_bindings
          WHERE project_id = $1 AND status = 'connected'
          ORDER BY created_at, id`,
         [projectId],
       );
-      const githubBinding = bindings.rows.find((row) => row.binding_type === "github");
-      if (!githubBinding) {
-        if (bindings.rows.length === 0) {
-          throw new RepositoryAnalysisError(
-            "no_repository",
-            "This project has no connected repository to analyze. Connect a repository first.",
-          );
-        }
+      const binding =
+        bindings.rows.find((row) => row.binding_type === "github") ?? bindings.rows[0];
+      if (!binding) {
         throw new RepositoryAnalysisError(
-          "no_github_repository",
-          "This project's connected repository is not GitHub-backed, and analysis currently reads repositories through the GitHub App only.",
+          "no_repository",
+          "This project has no connected repository to analyze. Connect a repository first.",
         );
       }
-      return { project: projectRow, binding: githubBinding };
+      return { project_id: projectId, project: projectRow, binding };
+    });
+  }
+
+  async analyze(projectId: string, actor: { actor_id: string }): Promise<RepositoryAnalysisResult> {
+    const target = await this.target(projectId);
+    if (target.binding.binding_type === "local_runner") {
+      throw new RepositoryAnalysisError(
+        "local_inspection_required",
+        "The connected local helper must inspect this repository before analysis can continue.",
+      );
+    }
+    return this.analyzeTarget(target, actor);
+  }
+
+  async analyzeTarget(
+    target: RepositoryAnalysisTarget,
+    actor: { actor_id: string },
+    localInspection?: RepositoryInspectionT,
+  ): Promise<RepositoryAnalysisResult> {
+    let adapter: LlmAdapter;
+    try {
+      adapter = this.deps.createAdapter();
+    } catch (error) {
+      throw new RepositoryAnalysisError(
+        "model_not_configured",
+        `Repository analysis needs a configured model provider: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        503,
+      );
+    }
+
+    const sample =
+      target.binding.binding_type === "github"
+        ? await this.githubInspection(target.binding)
+        : this.localInspection(target.binding, localInspection);
+    if (sample.totalFiles === 0) {
+      throw new RepositoryAnalysisError(
+        "repository_empty",
+        `${sample.displayName} has no committed files at ${sample.headSha.slice(0, 12)}, so there is nothing to analyze.`,
+      );
+    }
+
+    const analysis = await this.runModel(adapter, {
+      projectId: target.project_id,
+      repositoryLabel: sample.displayName,
+      defaultBranch: sample.defaultBranch,
+      headSha: sample.headSha,
+      totalFiles: sample.totalFiles,
+      treeTruncated: sample.treeTruncated,
+      treeListing: sample.treeListing,
+      files: sample.files,
     });
 
+    const documentBytes = Buffer.from(analysis.architecture_document, "utf8");
+    const contentHash = createHash("sha256").update(documentBytes).digest("hex");
+    const result = await this.deps.ingestion.ingest({
+      project_id: target.project_id,
+      repository_binding_id: target.binding.id,
+      repository_revision: sample.headSha,
+      architecture: {
+        title: analysis.title,
+        summary: analysis.summary,
+        artifact: {
+          storage_ref: `artifact://${target.project_id}/architecture/${sample.headSha}`,
+          content_hash: contentHash,
+          byte_size: documentBytes.byteLength,
+          media_type: "text/markdown",
+        },
+      },
+      repository_facts: analysis.repository_facts.filter(
+        (fact) => fact.key.trim().length > 0 && fact.value.trim().length > 0,
+      ),
+      constraints: analysis.constraints.filter((entry) => entry.trim().length > 0),
+      // A directive is an auto-approved human instruction; a model inference
+      // must never enter memory pre-approved, so this stays empty.
+      directives: [],
+      assignment_policy_ref: target.project.assignment_policy_ref,
+      verification_policy_ref: target.project.verification_policy_ref,
+      budget_policy_ref: target.project.budget_policy_ref,
+      created_by: { actor_type: "human", actor_id: actor.actor_id },
+    });
+    return {
+      architecture_revision_id: result.architecture_revision_id,
+      architecture_revision: result.architecture_revision,
+      replayed: result.replayed,
+      title: analysis.title,
+      summary: analysis.summary,
+      repository_revision: sample.headSha,
+      model: { provider: adapter.provider, model: adapter.model },
+    };
+  }
+
+  private async githubInspection(binding: RepositoryBindingRow) {
+    const github = this.deps.github;
+    if (!github || !github.isConfigured()) {
+      throw new RepositoryAnalysisError(
+        "github_not_configured",
+        "Repository analysis reads this repository through the GitHub App, which is not configured on this deployment.",
+        503,
+      );
+    }
+    if (!binding.github_installation_id || !binding.github_owner || !binding.github_name) {
+      throw new RepositoryAnalysisError(
+        "repository_identity_invalid",
+        "The connected GitHub repository is missing installation or repository identity.",
+      );
+    }
     const repositoryGithubId = Number(binding.repository_id);
     if (!Number.isInteger(repositoryGithubId) || repositoryGithubId <= 0) {
       throw new RepositoryAnalysisError(
@@ -269,9 +317,6 @@ export class RepositoryAnalysisService {
         `The connected repository binding does not carry a numeric GitHub repository id (${binding.repository_id}), so a repository-scoped token cannot be minted for it.`,
       );
     }
-
-    // 2. Bounded repository sample, read-only (`contents: read`), through the
-    //    existing installation-token broker.
     const token = await github.installationToken(
       binding.github_installation_id,
       GITHUB_TOKEN_SCOPES.readRepositoryContents(repositoryGithubId),
@@ -298,13 +343,6 @@ export class RepositoryAnalysisService {
           typeof entry.path === "string" && entry.type === "blob",
       )
       .map((entry) => ({ path: entry.path, size: entry.size ?? 0 }));
-    if (blobs.length === 0) {
-      throw new RepositoryAnalysisError(
-        "repository_empty",
-        `${binding.github_owner}/${binding.github_name} has no files at ${headSha.slice(0, 12)}, so there is nothing to analyze.`,
-      );
-    }
-
     let budget = MAX_TOTAL_CHARS;
     const treeListing = blobs
       .slice(0, MAX_TREE_PATHS)
@@ -312,7 +350,6 @@ export class RepositoryAnalysisService {
       .join("\n")
       .slice(0, Math.floor(MAX_TOTAL_CHARS / 4));
     budget -= treeListing.length;
-
     const files: Array<{ path: string; content: string; truncated: boolean }> = [];
     for (const file of selectKeyFiles(blobs)) {
       if (budget <= 0) break;
@@ -326,60 +363,35 @@ export class RepositoryAnalysisService {
       });
       budget -= Math.min(content.length, cap);
     }
-
-    // 3. One structured model call over the bounded sample.
-    const analysis = await this.runModel(adapter, {
-      projectId,
-      owner: binding.github_owner,
-      name: binding.github_name,
+    return {
+      displayName: `${binding.github_owner}/${binding.github_name}`,
       defaultBranch: binding.default_branch,
       headSha,
       totalFiles: blobs.length,
       treeTruncated: blobs.length > MAX_TREE_PATHS || treeResponse.truncated === true,
       treeListing,
       files,
-    });
+    };
+  }
 
-    // 4. Record through the EXISTING ingestion seed — replay-stable identity,
-    //    same memory-entry semantics as the manual ingest route. Policy refs
-    //    are the project's current ones: analysis records evidence, it does
-    //    not change policy.
-    const documentBytes = Buffer.from(analysis.architecture_document, "utf8");
-    const contentHash = createHash("sha256").update(documentBytes).digest("hex");
-    const result = await this.deps.ingestion.ingest({
-      project_id: projectId,
-      repository_binding_id: binding.id,
-      repository_revision: headSha,
-      architecture: {
-        title: analysis.title,
-        summary: analysis.summary,
-        artifact: {
-          storage_ref: `artifact://${projectId}/architecture/${headSha}`,
-          content_hash: contentHash,
-          byte_size: documentBytes.byteLength,
-          media_type: "text/markdown",
-        },
-      },
-      repository_facts: analysis.repository_facts.filter(
-        (fact) => fact.key.trim().length > 0 && fact.value.trim().length > 0,
-      ),
-      constraints: analysis.constraints.filter((entry) => entry.trim().length > 0),
-      // A directive is an auto-approved human instruction; a model inference
-      // must never enter memory pre-approved, so this stays empty.
-      directives: [],
-      assignment_policy_ref: project.assignment_policy_ref,
-      verification_policy_ref: project.verification_policy_ref,
-      budget_policy_ref: project.budget_policy_ref,
-      created_by: { actor_type: "human", actor_id: actor.actor_id },
-    });
+  private localInspection(
+    binding: RepositoryBindingRow,
+    inspection: RepositoryInspectionT | undefined,
+  ) {
+    if (!inspection || inspection.repository_id !== binding.repository_id) {
+      throw new RepositoryAnalysisError(
+        "local_inspection_invalid",
+        "The local helper did not return an inspection for this project's repository.",
+      );
+    }
     return {
-      architecture_revision_id: result.architecture_revision_id,
-      architecture_revision: result.architecture_revision,
-      replayed: result.replayed,
-      title: analysis.title,
-      summary: analysis.summary,
-      repository_revision: headSha,
-      model: { provider: adapter.provider, model: adapter.model },
+      displayName: inspection.repository_display_name,
+      defaultBranch: inspection.default_branch,
+      headSha: inspection.observed_head,
+      totalFiles: inspection.total_files,
+      treeTruncated: inspection.tree_truncated,
+      treeListing: inspection.tree_paths.join("\n"),
+      files: inspection.files,
     };
   }
 
@@ -387,8 +399,7 @@ export class RepositoryAnalysisService {
     adapter: LlmAdapter,
     input: {
       projectId: string;
-      owner: string;
-      name: string;
+      repositoryLabel: string;
       defaultBranch: string;
       headSha: string;
       totalFiles: number;
@@ -404,7 +415,7 @@ export class RepositoryAnalysisService {
       )
       .join("\n\n");
     const prompt = [
-      `Analyze the software repository ${input.owner}/${input.name} (branch ${input.defaultBranch}, commit ${input.headSha}).`,
+      `Analyze the software repository ${input.repositoryLabel} (branch ${input.defaultBranch}, commit ${input.headSha}).`,
       `You are given its file tree${input.treeTruncated ? ` (first ${MAX_TREE_PATHS} of ${input.totalFiles} files)` : ""} and the content of up to ${MAX_KEY_FILES} key files (READMEs, manifests, entry points; long files truncated).`,
       "Produce:",
       "- title: a short name for this architecture snapshot;",

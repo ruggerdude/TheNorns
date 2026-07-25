@@ -21,9 +21,16 @@ import {
 import { basename, join, relative, resolve, sep } from "node:path";
 import { platform } from "node:process";
 import type {
+  RepositoryInspectionT,
   RunnerWorkspaceEntryT,
   RunnerWorkspaceRequestT,
   RunnerWorkspaceResponseT,
+} from "@norns/contracts";
+import {
+  MAX_REPOSITORY_FILE_CHARS,
+  MAX_REPOSITORY_SAMPLE_CHARS,
+  MAX_REPOSITORY_TREE_PATHS,
+  selectRepositoryKeyFiles,
 } from "@norns/contracts";
 
 interface WorkspaceRecord {
@@ -220,6 +227,29 @@ export class WorkspaceRegistry {
           workspaces: [...this.listConfigured()],
         };
       }
+      if (request.operation === "catalog") {
+        return {
+          request_id: request.request_id,
+          operation: "catalog",
+          status: "ok",
+          repositories: this.catalog(),
+        };
+      }
+      if (request.operation === "inspect") {
+        const inspection = this.inspect(request.repository_id ?? "");
+        return inspection
+          ? {
+              request_id: request.request_id,
+              operation: "inspect",
+              status: "ok",
+              inspection,
+            }
+          : {
+              request_id: request.request_id,
+              operation: "inspect",
+              status: "not_found",
+            };
+      }
       const workspace = this.workspace(request.workspace_id ?? "");
       if (!workspace)
         return {
@@ -292,6 +322,118 @@ export class WorkspaceRegistry {
     if (!repository) return [];
     const workspace = this.workspace(repository.workspace_id);
     return workspace ? [workspace.root_path, repository.repository_path] : [];
+  }
+
+  /**
+   * Reads a bounded snapshot from the repository's committed HEAD. Untracked
+   * files and working-tree edits are deliberately excluded, and no physical
+   * path is included in the relay response.
+   */
+  private inspect(repositoryId: string): RepositoryInspectionT | null {
+    const path = this.repositoryPath(repositoryId);
+    if (!path) return null;
+    const sensitivePaths = this.sensitivePaths(repositoryId).flatMap((sensitivePath) => [
+      sensitivePath,
+      ...(sensitivePath.startsWith("/private/") ? [sensitivePath.slice("/private".length)] : []),
+    ]);
+    const repository = this.state.repositories.find(
+      (entry) => entry.repository_id === repositoryId,
+    );
+    if (!repository) return null;
+    const workspace = this.workspace(repository.workspace_id);
+    if (!workspace) return null;
+    const metadata = this.gitMetadata(path, 3_000);
+    if (!metadata) return null;
+
+    const rawTree = execFileSync("git", ["-C", path, "ls-tree", "-r", "-z", "--long", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 10_000,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    const blobs = rawTree
+      .split("\0")
+      .filter(Boolean)
+      .flatMap((line) => {
+        const match = line.match(/^\d+\s+blob\s+[a-f0-9]+\s+(\d+|-)\t(.+)$/s);
+        if (!match) return [];
+        const filePath = match[2] ?? "";
+        const size = Number(match[1]);
+        if (
+          !Number.isFinite(size) ||
+          filePath.startsWith("/") ||
+          filePath.includes("\\") ||
+          filePath
+            .split("/")
+            .some((segment) => segment.length === 0 || segment === "." || segment === "..")
+        ) {
+          return [];
+        }
+        return [{ path: filePath, size }];
+      });
+    if (blobs.length === 0) return null;
+
+    let budget = MAX_REPOSITORY_SAMPLE_CHARS;
+    const tree_paths: string[] = [];
+    for (const blob of blobs.slice(0, MAX_REPOSITORY_TREE_PATHS)) {
+      const cost = blob.path.length + 1;
+      if (cost > budget) break;
+      tree_paths.push(blob.path);
+      budget -= cost;
+    }
+    const files: RepositoryInspectionT["files"] = [];
+    for (const file of selectRepositoryKeyFiles(blobs)) {
+      if (budget <= file.path.length) break;
+      const raw = execFileSync("git", ["-C", path, "show", `HEAD:${file.path}`], {
+        encoding: "buffer",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 3_000,
+        maxBuffer: 1024 * 1024,
+      });
+      // NUL is a reliable cheap binary signal. Binary key files are skipped.
+      if (raw.includes(0)) continue;
+      const content = sensitivePaths.reduce(
+        (safe, sensitivePath) => safe.replaceAll(sensitivePath, "[LOCAL_PATH]"),
+        raw.toString("utf8"),
+      );
+      const cap = Math.min(MAX_REPOSITORY_FILE_CHARS, Math.max(0, budget - file.path.length));
+      if (cap === 0) break;
+      files.push({
+        path: file.path,
+        content: content.slice(0, cap),
+        truncated: content.length > cap,
+      });
+      budget -= file.path.length + Math.min(content.length, cap);
+    }
+
+    return {
+      repository_id: repositoryId,
+      repository_display_name: safeLabel(workspace.label, basename(path)),
+      default_branch: metadata.defaultBranch,
+      observed_head: metadata.head,
+      total_files: blobs.length,
+      tree_truncated: blobs.length > tree_paths.length,
+      tree_paths,
+      files,
+    };
+  }
+
+  private catalog(): NonNullable<RunnerWorkspaceResponseT["repositories"]> {
+    const repositories: NonNullable<RunnerWorkspaceResponseT["repositories"]> = [];
+    for (const record of [...this.state.repositories]) {
+      const path = this.repositoryPath(record.repository_id);
+      if (!path) continue;
+      const metadata = this.gitMetadata(path, 3_000);
+      if (!metadata) continue;
+      repositories.push({
+        workspace_id: record.workspace_id,
+        repository_id: record.repository_id,
+        repository_display_name: safeLabel(basename(path), "Repository"),
+        default_branch: metadata.defaultBranch,
+        observed_head: metadata.head,
+      });
+    }
+    return repositories.slice(0, 200);
   }
 
   private browse(workspace: WorkspaceRecord, path: string): RunnerWorkspaceEntryT[] {

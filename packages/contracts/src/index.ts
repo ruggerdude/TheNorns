@@ -11,6 +11,7 @@ export * from "./verification.js";
 export * from "./wire.js";
 export * from "./review.js";
 export * from "./models.js";
+export * from "./repositoryInspection.js";
 export * from "./v2/index.js";
 
 // EXECUTION E3 — proxied model inference over the runner relay.

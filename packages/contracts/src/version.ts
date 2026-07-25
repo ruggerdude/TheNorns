@@ -1,6 +1,6 @@
 // Frozen at Phase 0B. Any breaking change to a schema in this package bumps
 // the major version and requires architecture-lead approval (STAFFING.md).
-export const CONTRACTS_VERSION = "1.4.0"; // 1.4: EXECUTION E3 proxied model inference (additive)
+export const CONTRACTS_VERSION = "1.5.0"; // 1.5: bounded local repository inspection (additive)
 export const PROTOCOL_VERSION = 1;
 
 // V2 is introduced alongside the frozen legacy surface. Consumers opt into
