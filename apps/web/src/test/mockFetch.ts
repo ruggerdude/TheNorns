@@ -100,6 +100,9 @@ export class MockFetch {
   patch(pattern: string | RegExp, handler: MockResponseInit | MockHandler): this {
     return this.route("PATCH", pattern, handler);
   }
+  put(pattern: string | RegExp, handler: MockResponseInit | MockHandler): this {
+    return this.route("PUT", pattern, handler);
+  }
   del(pattern: string | RegExp, handler: MockResponseInit | MockHandler): this {
     return this.route("DELETE", pattern, handler);
   }

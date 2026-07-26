@@ -146,10 +146,12 @@ export function Debates({
   projectId,
   onUnauthorized,
   onBack,
+  embedded = false,
 }: {
   projectId: string;
   onUnauthorized: () => void;
   onBack?: () => void;
+  embedded?: boolean;
 }): React.ReactElement {
   const [view, setView] = useState<View>({ kind: "list" });
   const [debates, setDebates] = useState<DebateDto[] | null>(null);
@@ -221,7 +223,10 @@ export function Debates({
   }
 
   return (
-    <section className="debates-page" aria-labelledby="debates-heading">
+    <section
+      className={`debates-page ${embedded ? "is-embedded" : ""}`}
+      aria-labelledby="debates-heading"
+    >
       <div className="debates-head">
         <div>
           <div className="eyebrow">Structured deliberation</div>

@@ -186,6 +186,7 @@ export interface PhaseExecutionKickoffReport {
 
 export interface PhasePlanningRunDto {
   id: string;
+  project_id?: string;
   mode?: PhaseRunMode;
   objective?: string;
   pm?: PhaseParticipantSelection | null;
@@ -201,6 +202,9 @@ export interface PhasePlanningRunDto {
   result: PhasePlanningRunResult | null;
   error: string | null;
   execution: PhaseExecutionKickoffReport | null;
+  total_cost_usd?: number;
+  created_at?: string;
+  updated_at?: string;
 }
 
 /** One planned phase with its staffing recommendation, ready for display. */

@@ -300,11 +300,11 @@ describe("relational Graph read model", () => {
     // Auto-approved quick runs do not emit the client-side approval callback.
     // Returning to Overview must therefore refresh the durable latest run.
     await user.click(screen.getByRole("button", { name: "Overview" }));
-    const resumePanel = await screen.findByTestId("project-resume");
+    const resumePanel = await screen.findByTestId("overview-dashboard");
     expect(screen.queryByTestId("overview-no-plan-pointer")).not.toBeInTheDocument();
     expect(within(resumePanel).getByTestId("overview-phase-count")).toHaveTextContent("1");
     expect(within(resumePanel).getByTestId("overview-attention-count")).toHaveTextContent("1");
-    expect(screen.getByTestId("next-step")).toHaveTextContent("Retry coding start in Phase");
+    expect(screen.getByTestId("next-step")).toHaveTextContent("Retry coding start in Work");
     expect(screen.getByTestId("relational-overview-phase")).toHaveTextContent(
       "Correct the workspace empty-state copy",
     );
@@ -317,7 +317,7 @@ describe("relational Graph read model", () => {
     expect(knowledge).toHaveTextContent("approved · coding needs restart");
     expect(knowledge).not.toHaveTextContent("No phase selected");
 
-    const tracking = screen.getByTestId("tracking-settings");
+    const tracking = screen.getByTestId("project-timeline");
     expect(
       within(tracking).getByText("Correct the workspace empty-state copy"),
     ).toBeInTheDocument();
@@ -326,7 +326,7 @@ describe("relational Graph read model", () => {
     await user.click(screen.getByRole("button", { name: "Graph" }));
     expect(await screen.findByText("Correct empty-state copy")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Phase" }));
+    await user.click(screen.getByRole("button", { name: "Work" }));
     expect(await screen.findByRole("heading", { name: "Coding needs a restart" })).toBeVisible();
     expect(
       mock.calls.filter(

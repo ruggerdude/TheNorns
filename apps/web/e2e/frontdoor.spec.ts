@@ -276,7 +276,7 @@ async function expectWorkspaceNavigation(page: Page) {
   await expect(phase).toBeVisible();
   await phase.click();
   await expect(phase).toHaveAttribute("aria-current", "page");
-  await expect(page.getByTestId("workspace-tab-phase")).toBeVisible();
+  await expect(page.getByTestId("workspace-tab-work")).toBeVisible();
 }
 
 async function clickUntilVisible(trigger: Locator, result: Locator) {

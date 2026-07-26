@@ -10,7 +10,7 @@ describe("project debate navigation", () => {
 
   afterEach(() => mock.restore());
 
-  it("opens the project-scoped debate workspace and returns to the graph", async () => {
+  it("opens debates as a project subpage and switches directly back to the graph", async () => {
     seedAuth();
     mock = new MockFetch();
     mock.get("/api/projects", { body: [projectAlpha] });
@@ -28,8 +28,8 @@ describe("project debate navigation", () => {
     expect(await screen.findByRole("heading", { name: "Debates" })).toBeVisible();
     expect(screen.getByText("No debates yet")).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "Back to project" }));
-    // The Graph tab selection survives the round-trip through Debates.
+    expect(screen.queryByRole("button", { name: "Back to project" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Graph" }));
     expect(await screen.findByTestId("graph-version")).toBeVisible();
   });
 });

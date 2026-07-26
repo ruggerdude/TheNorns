@@ -1,11 +1,11 @@
 // FRONT DOOR P1d: the workspace shell reorganized into a normal top-width
-// page (header + Overview | Plan | Graph tab bar), replacing the graph
+// page (header + Overview | Work | Graph | Debates | Settings), replacing the graph
 // canvas as the dominant panel with everything else crammed into a sidebar.
 // Purely a layout change — every section moved is the same JSX/logic that
 // existed before; this suite covers the new composition itself: Overview is
-// the default tab, Plan/Graph are reachable and hold the right content, and
-// new work consistently routes into the canonical Phase composer.
-import { render, screen } from "@testing-library/react";
+// the default project dashboard, Work/Graph are reachable and hold the right
+// content, and Debates remains inside the workspace shell.
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "./App";
@@ -18,7 +18,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
   afterEach(() => mock.restore());
 
-  it("defaults to the Overview tab, which holds Project Resume and Tracking but not the graph canvas", async () => {
+  it("defaults to the Overview dashboard and history, but not the graph canvas", async () => {
     setToken("present");
     mock = new MockFetch();
     mock.get("/api/projects", { body: [projectAlpha] });
@@ -39,6 +39,38 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
         update_interval_seconds: 300,
       },
     });
+    mock.get(`/api/v2/projects/${projectAlpha.id}/planning-runs`, {
+      body: {
+        planning_runs: [
+          {
+            id: "planning-run-old",
+            mode: "planned",
+            objective: "Improve the notification delivery pipeline",
+            status: "approved",
+            round: 2,
+            max_rounds: 3,
+            review_rounds_total: 3,
+            rounds_completed: 2,
+            worker_providers: "both",
+            decision: null,
+            transcript: [
+              {
+                round: 2,
+                role: "reviewer",
+                provider: "openai",
+                model: "gpt-5.6-sol",
+                summary: "The delivery plan is ready to execute.",
+                finding_counts: null,
+              },
+            ],
+            result: null,
+            error: null,
+            execution: null,
+            created_at: "2026-07-20T12:00:00.000Z",
+          },
+        ],
+      },
+    });
     mock.get("/api/v2/attention", { status: 404, body: {} });
     mock.install();
 
@@ -49,8 +81,9 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     // Overview is the default tab, and it's the one already marked "on".
     expect(await screen.findByRole("button", { name: "Overview" })).toHaveClass("on");
-    expect(screen.getByTestId("project-resume")).toBeInTheDocument();
-    expect(screen.getByTestId("tracking-settings")).toBeInTheDocument();
+    expect(screen.getByTestId("overview-dashboard")).toBeInTheDocument();
+    expect(screen.getByTestId("work-history")).toBeInTheDocument();
+    expect(screen.getByText("Improve the notification delivery pipeline")).toBeInTheDocument();
     // The graph canvas is NOT the dominant panel anymore — it isn't even
     // mounted until the Graph tab is selected.
     expect(screen.queryByTestId("graph-canvas")).not.toBeInTheDocument();
@@ -79,7 +112,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     expect(screen.getByRole("button", { name: "Graph" })).toHaveClass("on");
   });
 
-  it("routes new work from both Overview and legacy Plan into the Phase composer", async () => {
+  it("routes new work from Overview into the Work composer without a Plan tab", async () => {
     setToken("present");
     mock = new MockFetch();
     mock.get("/api/projects", { body: [projectAlpha] });
@@ -112,25 +145,16 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     );
 
     const pointer = await screen.findByTestId("overview-no-plan-pointer");
-    expect(pointer).toHaveTextContent(/no plan yet/i);
-    expect(pointer).toHaveTextContent(/start work in phase/i);
+    expect(pointer).toHaveTextContent(/no work planned yet/i);
+    expect(pointer).toHaveTextContent(/start in work/i);
 
     await user.click(pointer);
-    expect(await screen.findByRole("button", { name: "Phase" })).toHaveClass("on");
+    expect(await screen.findByRole("button", { name: "Work" })).toHaveClass("on");
     expect(screen.getByTestId("phase-goal")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Plan" }));
-    expect(await screen.findByTestId("plan-phase-pointer")).toHaveTextContent(
-      /single place to make a quick change or prepare reviewed, planned work/i,
-    );
-    expect(screen.queryByTestId("next-phase-objective")).not.toBeInTheDocument();
-
-    await user.click(screen.getByTestId("plan-open-phase"));
-    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
-    expect(screen.getByTestId("phase-goal")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Plan" })).not.toBeInTheDocument();
   });
 
-  it("opens a fresh quick composer from Plan instead of the cancelled phase history", async () => {
+  it("opens a fresh quick composer from Work instead of the cancelled phase history", async () => {
     setToken("present");
     const project = {
       ...projectAlpha,
@@ -279,15 +303,14 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     expect(await screen.findByRole("heading", { name: "Coding stopped" })).toBeVisible();
     expect(screen.getByTestId("phase-new-work")).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "Plan" }));
-    await user.click(await screen.findByTestId("plan-open-phase"));
+    await user.click(await screen.findByTestId("phase-start-quick"));
 
     expect(await screen.findByTestId("phase-goal")).toHaveValue("");
     expect(screen.getByTestId("phase-mode-quick")).toHaveAttribute("aria-pressed", "true");
     expect(screen.queryByRole("heading", { name: "Coding stopped" })).not.toBeInTheDocument();
   });
 
-  it("Debates keeps its existing full-page-swap behavior, reachable from the tab row", async () => {
+  it("keeps Debates inside the workspace as a subpage", async () => {
     setToken("present");
     mock = new MockFetch();
     mock.get("/api/projects", { body: [projectAlpha] });
@@ -306,8 +329,53 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     await user.click(screen.getByRole("button", { name: "Debates" }));
 
     expect(await screen.findByRole("heading", { name: "Debates" })).toBeVisible();
-    // The tab bar itself isn't shown while Debates has taken over the page
-    // (matches its pre-existing full-page behavior).
-    expect(screen.queryByRole("button", { name: "Overview" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Overview" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Debates" })).toHaveClass("on");
+  });
+
+  it("edits the durable project rules file from the Settings subpage", async () => {
+    setToken("present");
+    mock = new MockFetch();
+    mock.get("/api/projects", { body: [projectAlpha] });
+    mock.get(`/api/projects/${projectAlpha.id}/graph`, { body: fullyAllocatedGraph });
+    mock.get(`/api/v2/projects/${projectAlpha.id}/resume`, { status: 404, body: {} });
+    mock.get(`/api/v2/projects/${projectAlpha.id}/rules`, {
+      body: { filename: "NORN.md", content: "", version: 0, updated_at: null },
+    });
+    mock.put(`/api/v2/projects/${projectAlpha.id}/rules`, (_url, init) => ({
+      body: {
+        filename: "NORN.md",
+        content: (JSON.parse(String(init?.body)) as { content: string }).content,
+        version: 1,
+        updated_at: "2026-07-25T12:00:00.000Z",
+      },
+    }));
+    mock.get("/api/v2/attention", { status: 404, body: {} });
+    mock.install();
+
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
+    );
+    const nav = screen.getByRole("navigation", { name: "Workspace sections" });
+    await user.click(within(nav).getByRole("button", { name: "Settings" }));
+    await user.type(
+      await screen.findByLabelText("Project rules"),
+      "# Rules\n\n- Preserve API compatibility.",
+    );
+    await user.click(screen.getByRole("button", { name: "Save rules" }));
+
+    await waitFor(() =>
+      expect(
+        mock.calls.find(
+          (call) =>
+            call.method === "PUT" && call.url === `/api/v2/projects/${projectAlpha.id}/rules`,
+        ),
+      ).toMatchObject({
+        body: { content: "# Rules\n\n- Preserve API compatibility." },
+      }),
+    );
+    expect(screen.getByText("v1")).toBeVisible();
   });
 });

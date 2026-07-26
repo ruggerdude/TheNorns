@@ -177,6 +177,7 @@ import {
   type ProjectResumeService,
   ProjectSettingsValidationError,
 } from "./projects/projectResumeService.js";
+import { ProjectRulesNotFoundError, ProjectRulesService } from "./projects/projectRulesService.js";
 import {
   Phase3RequiredError,
   ProjectArchiveConflictError,
@@ -4477,6 +4478,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (options.planningRuns) {
       const { transactions: planningTransactions } = options.planningRuns;
       const planningRunService = new PlanningRunService(planningTransactions);
+      const projectRulesService = new ProjectRulesService(planningTransactions, now);
       const resolvePlanningModels = async (
         projectId: string,
         run?: {
@@ -4607,6 +4609,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         // terminal-review state (converged/cap_reached) is a conflict.
         if (error instanceof PlanningRunDecisionError) {
           reply.code(409).send({ error: error.code, message: error.message });
+          return;
+        }
+        throw error;
+      };
+
+      const projectRulesError = (reply: FastifyReply, error: unknown): void => {
+        if (error instanceof ProjectRulesNotFoundError) {
+          reply.code(404).send({ error: "project_not_found", message: error.message });
           return;
         }
         throw error;
@@ -4771,6 +4781,47 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           });
         } catch (error) {
           planningRunError(reply, error);
+        }
+      });
+
+      app.get("/api/v2/projects/:id/planning-runs", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        try {
+          reply
+            .header("Cache-Control", "no-store")
+            .send({ planning_runs: await planningRunService.list(id) });
+        } catch (error) {
+          planningRunError(reply, error);
+        }
+      });
+
+      app.get("/api/v2/projects/:id/rules", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        try {
+          reply.header("Cache-Control", "no-store").send(await projectRulesService.get(id));
+        } catch (error) {
+          projectRulesError(reply, error);
+        }
+      });
+
+      app.put("/api/v2/projects/:id/rules", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return reply.code(401).send({ error: "unauthorized" });
+        const { id } = req.params as { id: string };
+        const body = z
+          .object({ content: z.string().max(100_000) })
+          .strict()
+          .safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        try {
+          const rules = await projectRulesService.save(id, user.id, body.data.content);
+          stores.audit(user.id, "project.rules_updated", `${id}:${rules.version}`, now());
+          reply.send(rules);
+        } catch (error) {
+          projectRulesError(reply, error);
         }
       });
 

@@ -2,9 +2,9 @@ import { pmModelOption } from "@norns/contracts";
 // TheNorns web app: sole point of entry. Login gates everything; Projects is
 // the landing view (list/create); opening a project shows its workspace.
 //
-// PhaseTab is the canonical entry point for new quick changes and planned
-// work. The Plan tab keeps only the recovery UI for durable legacy planning
-// runs and strategy reviews so existing work is never abandoned. The older
+// Work (implemented by PhaseTab) is the canonical entry point for new quick
+// changes and planned work. Overview keeps recovery UI for durable legacy
+// planning runs and strategy reviews so existing work is never abandoned. The older
 // synchronous `${base}/plan` + `/plan/load` + PlanReview.tsx flow has no
 // remaining caller here; PlanReview.tsx stays for its direct component tests.
 //
@@ -35,6 +35,7 @@ import {
 import { RunLog } from "./RunLog";
 import { StartPhaseControl } from "./StartPhaseControl";
 import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
+import { WorkspaceSettings } from "./WorkspaceSettings";
 import {
   ApiError,
   type AuthSession,
@@ -69,6 +70,7 @@ import {
   Spinner,
   TextArea,
 } from "./ui";
+import { type UpdatePreferences, resolveUpdatePreferences } from "./workspacePreferences";
 
 const GraphCanvas = lazy(() =>
   import("./GraphCanvas").then(({ GraphCanvas }) => ({ default: GraphCanvas })),
@@ -172,6 +174,14 @@ interface ProjectResumeDto {
     decisions_waiting: number;
   };
   update_interval_seconds?: number;
+  active_memory_entries?: number;
+  recent_completions?: Array<{
+    task_id: string;
+    title: string;
+    completed_at: string;
+    pull_request_url?: string | null;
+    published_branch?: string | null;
+  }>;
 }
 
 /** EXECUTION E13 — real accrued spend and the real approved/reserved budget
@@ -766,7 +776,6 @@ function ProjectGraph({
   const [monitoredPhaseId, setMonitoredPhaseId] = useState<string | null>(null);
   const [phaseExecution, setPhaseExecution] = useState<PhaseExecutionDto | null>(null);
   const [executionError, setExecutionError] = useState<string | null>(null);
-  const [showDebates, setShowDebates] = useState(false);
   const [phaseJourneyRunId, setPhaseJourneyRunId] = useState<string | null>(
     isCanonicalPlanningJourney ? (project.focus_planning_run_id ?? null) : null,
   );
@@ -779,13 +788,19 @@ function ProjectGraph({
   // canvas was the dominant panel before this, everything else crammed into
   // a narrow sidebar. Purely a layout change: every section below is the
   // exact same JSX/logic that existed already, just grouped under a tab.
-  const [workspaceTab, setWorkspaceTab] = useState<"overview" | "plan" | "phase" | "graph">(
-    isCanonicalPlanningJourney && project.focus_planning_run_id ? "phase" : "overview",
+  type WorkspaceTab = "overview" | "work" | "graph" | "debates" | "settings";
+  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>(
+    isCanonicalPlanningJourney && project.focus_planning_run_id ? "work" : "overview",
+  );
+  const [planningHistory, setPlanningHistory] = useState<PhasePlanningRunDto[] | null>(null);
+  const [lastWorkspaceUpdateAt, setLastWorkspaceUpdateAt] = useState<Date | null>(null);
+  const [updatePreferences, setUpdatePreferences] = useState<UpdatePreferences>(() =>
+    resolveUpdatePreferences(project.id),
   );
   const focusedTaskId = project.focus_task_id ?? null;
 
   // ------------------------------------------------------------------
-  // Legacy Plan-tab recovery state. New work is composed in PhaseTab; these
+  // Legacy planning recovery state. New work is composed in Work; these
   // values remain only so a pre-existing planning run can still be inspected
   // and materialized without abandoning durable work.
   // ------------------------------------------------------------------
@@ -803,9 +818,6 @@ function ProjectGraph({
   // the phase-detail view's Q&A/decision thread).
   const [phaseAttention, setPhaseAttention] = useState<AttentionItemDto[]>([]);
   const [phaseAttentionBusy, setPhaseAttentionBusy] = useState<string | null>(null);
-  // FRONT DOOR P5: tracking update-interval control.
-  const [intervalSaving, setIntervalSaving] = useState(false);
-
   // Last-known-*good* approval state (never "pending"): what we revert to when
   // an in-flight mutation fails, so the banner is never left stuck at pending.
   const lastGoodApprovalRef = useRef<ApprovalState>({ kind: "never" });
@@ -891,7 +903,9 @@ function ProjectGraph({
   const [resumeError, setResumeError] = useState<string | null>(null);
   const loadResume = useCallback(async () => {
     try {
-      setResume(await getJson<ProjectResumeDto>(`/api/v2/projects/${project.id}/resume`));
+      const next = await getJson<ProjectResumeDto>(`/api/v2/projects/${project.id}/resume`);
+      setResume(next);
+      setLastWorkspaceUpdateAt(new Date());
     } catch (err) {
       if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
       else if (!(err instanceof ApiError && err.status === 404)) {
@@ -903,6 +917,22 @@ function ProjectGraph({
   useEffect(() => {
     void loadResume();
   }, [loadResume]);
+
+  const loadPlanningHistory = useCallback(async () => {
+    try {
+      const response = await getJson<{ planning_runs: PhasePlanningRunDto[] }>(
+        `/api/v2/projects/${project.id}/planning-runs`,
+      );
+      setPlanningHistory(response.planning_runs);
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+      else if (!(err instanceof ApiError && err.status === 404)) setPlanningHistory([]);
+    }
+  }, [project.id, onLogout]);
+
+  useEffect(() => {
+    void loadPlanningHistory();
+  }, [loadPlanningHistory]);
 
   const loadLatestRelationalPlanningRun = useCallback(async () => {
     try {
@@ -918,7 +948,7 @@ function ProjectGraph({
   }, [project.id, onLogout]);
 
   const selectWorkspaceTab = useCallback(
-    (nextTab: "overview" | "plan" | "phase" | "graph") => {
+    (nextTab: WorkspaceTab) => {
       setWorkspaceTab(nextTab);
       if (draftOnly && !graph) void loadLatestRelationalPlanningRun();
     },
@@ -932,7 +962,7 @@ function ProjectGraph({
     let cancelled = false;
     if (isCanonicalPlanningJourney && project.focus_planning_run_id) {
       setPhaseJourneyRunId(project.focus_planning_run_id);
-      setWorkspaceTab("phase");
+      setWorkspaceTab("work");
       void getJson<PhasePlanningRunDto>(
         `/api/v2/projects/${project.id}/planning-runs/${project.focus_planning_run_id}`,
       )
@@ -968,7 +998,7 @@ function ProjectGraph({
         ].includes(planning_run.status);
         if (planningNeedsAttention) {
           setPhaseJourneyRunId(planning_run.id);
-          setWorkspaceTab("phase");
+          setWorkspaceTab("work");
           return;
         }
         if (planning_run.status !== "approved") return;
@@ -978,7 +1008,7 @@ function ProjectGraph({
         // phase rows, where an unrelated active phase could mask it.
         if (planning_run.mode === "quick" && planning_run.execution?.started !== true) {
           setPhaseJourneyRunId(planning_run.id);
-          setWorkspaceTab("phase");
+          setWorkspaceTab("work");
           return;
         }
 
@@ -996,7 +1026,7 @@ function ProjectGraph({
           );
         if (needsKickoffRecovery) {
           setPhaseJourneyRunId(planning_run.id);
-          setWorkspaceTab("phase");
+          setWorkspaceTab("work");
         }
       })
       .catch((err) => {
@@ -1018,14 +1048,15 @@ function ProjectGraph({
     void loadLatestRelationalPlanningRun();
   }, [draftOnly, graph, loadLatestRelationalPlanningRun]);
 
-  // FRONT DOOR P5 (tracking): poll cadence honors the persisted
-  // update_interval_seconds once known; falls back to a 15s default until
-  // the first resume response arrives.
+  // Workspace updates use the user's global cadence unless this project has
+  // a local override. Active runs still use the faster execution poll below.
   useEffect(() => {
-    const seconds = resume?.update_interval_seconds ?? 15;
-    const timer = window.setInterval(() => void loadResume(), Math.max(5, seconds) * 1000);
+    const timer = window.setInterval(
+      () => void loadResume(),
+      updatePreferences.intervalSeconds * 1000,
+    );
     return () => window.clearInterval(timer);
-  }, [resume?.update_interval_seconds, loadResume]);
+  }, [updatePreferences.intervalSeconds, loadResume]);
 
   useEffect(() => {
     if (project.focus_phase_id) {
@@ -1100,11 +1131,11 @@ function ProjectGraph({
   useEffect(() => {
     if (!monitoredPhaseId) return;
     void loadPhaseExecution();
-    const idleMs = Math.max(5, resume?.update_interval_seconds ?? 15) * 1000;
+    const idleMs = updatePreferences.intervalSeconds * 1000;
     const pollMs = phaseHasActiveRun ? PHASE_ACTIVE_POLL_MS : idleMs;
     const timer = window.setInterval(() => void loadPhaseExecution(), pollMs);
     return () => window.clearInterval(timer);
-  }, [monitoredPhaseId, loadPhaseExecution, phaseHasActiveRun, resume?.update_interval_seconds]);
+  }, [monitoredPhaseId, loadPhaseExecution, phaseHasActiveRun, updatePreferences.intervalSeconds]);
 
   const pollPlanningRun = useCallback(async () => {
     if (!activePlanningRunId) return;
@@ -1302,14 +1333,14 @@ function ProjectGraph({
         ? "planning failed"
         : status.replaceAll("_", " ");
     const nextAction = kickoffNeedsAttention
-      ? "Retry coding start in Phase"
+      ? "Retry coding start in Work"
       : failed
-        ? "Review the planning failure in Phase"
+        ? "Review the planning failure in Work"
         : run.status === "converged" || run.status === "cap_reached"
-          ? "Review the plan in Phase"
+          ? "Review the plan in Work"
           : status === "active"
-            ? "Monitor coding in Phase"
-            : "Continue this work in Phase";
+            ? "Monitor coding in Work"
+            : "Continue this work in Work";
 
     return {
       id: `planning-run:${run.id}`,
@@ -1401,25 +1432,6 @@ function ProjectGraph({
       }
     },
     [onLogout, loadProjectAttention, loadPhaseExecution, loadResume],
-  );
-
-  // FRONT DOOR P5 (tracking): update-interval control, PATCHed to the
-  // project settings and honored by the resume poll cadence below.
-  const updateInterval = useCallback(
-    async (seconds: 60 | 300 | 900) => {
-      setIntervalSaving(true);
-      try {
-        await patchJson(`/api/v2/projects/${project.id}/settings`, {
-          update_interval_seconds: seconds,
-        });
-        await loadResume();
-      } catch (err) {
-        if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
-      } finally {
-        setIntervalSaving(false);
-      }
-    },
-    [project.id, onLogout, loadResume],
   );
 
   // ADR-1: approval is a POST that persists server-side; on success the server
@@ -1646,16 +1658,6 @@ function ProjectGraph({
 
   const selectedNode = displayGraph?.nodes.find((n) => n.id === selected) ?? null;
 
-  if (showDebates) {
-    return (
-      <Debates
-        projectId={project.id}
-        onUnauthorized={() => onLogout("Session expired. Sign in again.")}
-        onBack={() => setShowDebates(false)}
-      />
-    );
-  }
-
   // UI-6: the "Dashboard" entry is intentionally not rendered for a real
   // project — it fetched a hardcoded global demo session's data (now moved to
   // its own /api/demo/dashboard surface by Agent C). A durable per-project
@@ -1719,10 +1721,8 @@ function ProjectGraph({
           ) : null}
         </div>
 
-        {/* FRONT DOOR P1d: Overview | Plan | Graph | Debates | Settings — the
-         *  approved mockup's workspace tab bar. Debates and Settings keep
-         *  their pre-existing behavior (a full-page swap / the Account
-         *  modal) unchanged; they're just reachable from this row now. */}
+        {/* Project navigation keeps optional planning inside Overview and
+         * treats Work and Debates as first-class workspace subpages. */}
         <nav className="workspace-tabs" aria-label="Workspace sections">
           <button
             type="button"
@@ -1734,19 +1734,11 @@ function ProjectGraph({
           </button>
           <button
             type="button"
-            className={workspaceTab === "plan" ? "on" : ""}
-            aria-current={workspaceTab === "plan" ? "page" : undefined}
-            onClick={() => selectWorkspaceTab("plan")}
+            className={workspaceTab === "work" ? "on" : ""}
+            aria-current={workspaceTab === "work" ? "page" : undefined}
+            onClick={() => selectWorkspaceTab("work")}
           >
-            Plan
-          </button>
-          <button
-            type="button"
-            className={workspaceTab === "phase" ? "on" : ""}
-            aria-current={workspaceTab === "phase" ? "page" : undefined}
-            onClick={() => selectWorkspaceTab("phase")}
-          >
-            Phase
+            Work
           </button>
           <button
             type="button"
@@ -1756,10 +1748,20 @@ function ProjectGraph({
           >
             Graph
           </button>
-          <button type="button" onClick={() => setShowDebates(true)}>
+          <button
+            type="button"
+            className={workspaceTab === "debates" ? "on" : ""}
+            aria-current={workspaceTab === "debates" ? "page" : undefined}
+            onClick={() => selectWorkspaceTab("debates")}
+          >
             Debates
           </button>
-          <button type="button" onClick={() => onOpenAccount()}>
+          <button
+            type="button"
+            className={workspaceTab === "settings" ? "on" : ""}
+            aria-current={workspaceTab === "settings" ? "page" : undefined}
+            onClick={() => selectWorkspaceTab("settings")}
+          >
             Settings
           </button>
         </nav>
@@ -1777,18 +1779,34 @@ function ProjectGraph({
                 type="button"
                 className="card workspace-empty-pointer"
                 data-testid="overview-no-plan-pointer"
-                onClick={() => setWorkspaceTab("phase")}
+                onClick={() => setWorkspaceTab("work")}
               >
-                <strong>No plan yet</strong>
-                <span>Start work in Phase →</span>
+                <strong>No work planned yet</strong>
+                <span>Start in Work →</span>
               </button>
             ) : null}
 
             {resume ? (
-              <details className="card side-section" open data-testid="project-resume">
-                <summary>Project Resume</summary>
+              <section className="card project-overview-dashboard" data-testid="overview-dashboard">
+                <div className="section-head">
+                  <div>
+                    <div className="eyebrow">Project dashboard</div>
+                    <h2>Overview</h2>
+                  </div>
+                  <span className="muted workspace-updated-at">
+                    {lastWorkspaceUpdateAt
+                      ? `Updated ${lastWorkspaceUpdateAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+                      : "Loading current status…"}
+                  </span>
+                </div>
                 <div className="side-body form-stack">
-                  <div className="stat-strip">
+                  <div className="stat-strip overview-stat-grid">
+                    <div className="stat">
+                      <strong data-testid="overview-progress">
+                        {resume.progress?.overall_percent_complete ?? 0}%
+                      </strong>
+                      <span>COMPLETE</span>
+                    </div>
                     <div className="stat">
                       <strong data-testid="overview-phase-count">
                         {resume.phases.length > 0
@@ -1807,6 +1825,46 @@ function ProjectGraph({
                       </strong>
                       <span>NEEDS ATTENTION</span>
                     </div>
+                    <div className="stat">
+                      <strong data-testid="overview-active-agents">
+                        {resume.progress?.agents_active ?? resume.attention.active_runs}
+                      </strong>
+                      <span>ACTIVE AGENTS</span>
+                    </div>
+                  </div>
+                  <div
+                    className={`workspace-update-digest digest-${updatePreferences.detailLevel}`}
+                    data-testid="workspace-update-digest"
+                  >
+                    <div>
+                      <span className="eyebrow">Periodic update</span>
+                      <strong>
+                        {updatePreferences.detailLevel === "attention"
+                          ? projectNeedsAttention
+                            ? "This project needs your attention"
+                            : "No blockers or decisions need you"
+                          : `${resume.progress?.overall_percent_complete ?? 0}% complete across ${
+                              resume.phases.length || (relationalPhaseFallback ? 1 : 0)
+                            } phase${
+                              resume.phases.length === 1 || relationalPhaseFallback ? "" : "s"
+                            }`}
+                      </strong>
+                    </div>
+                    {updatePreferences.detailLevel === "detailed" ? (
+                      <p>
+                        {resume.attention.active_runs} active run
+                        {resume.attention.active_runs === 1 ? "" : "s"} ·{" "}
+                        {resume.recent_completions?.length ?? 0} recent completion
+                        {(resume.recent_completions?.length ?? 0) === 1 ? "" : "s"} ·{" "}
+                        {resume.active_memory_entries ?? 0} saved project context items
+                      </p>
+                    ) : updatePreferences.detailLevel === "summary" ? (
+                      <p>{relationalPhaseFallback?.nextAction ?? resume.next_recommended_action}</p>
+                    ) : null}
+                    <span className="muted">
+                      Every {Math.round(updatePreferences.intervalSeconds / 60)} minute
+                      {updatePreferences.intervalSeconds === 60 ? "" : "s"}
+                    </span>
                   </div>
                   {resume.architecture ? (
                     <div data-testid="resume-architecture">
@@ -1840,9 +1898,20 @@ function ProjectGraph({
                   {/* FRONT DOOR P1b: the mini-Gantt strip on the workspace phase
                    *  board — compact per-phase gates + progress at a glance. */}
                   {ganttPhases.length > 0 ? (
-                    <div data-testid="workspace-mini-gantt">
-                      <Gantt phases={ganttPhases} mini />
-                    </div>
+                    <>
+                      <div data-testid="workspace-mini-gantt">
+                        <Gantt phases={ganttPhases} mini />
+                      </div>
+                      <div className="overview-project-timeline" data-testid="project-timeline">
+                        <div className="section-head">
+                          <div>
+                            <div className="eyebrow">Schedule</div>
+                            <h3>Project timeline</h3>
+                          </div>
+                        </div>
+                        <Gantt phases={ganttPhases} />
+                      </div>
+                    </>
                   ) : null}
                   {resume.phases.map((phase) => (
                     <div className="project-row" key={phase.id}>
@@ -1890,9 +1959,9 @@ function ProjectGraph({
                       <Button
                         className="btn-small"
                         variant={relationalPhaseFallback.needsAttention ? "primary" : "default"}
-                        onClick={() => setWorkspaceTab("phase")}
+                        onClick={() => setWorkspaceTab("work")}
                       >
-                        Open in Phase
+                        Open in Work
                       </Button>
                     </div>
                   ) : null}
@@ -1929,7 +1998,7 @@ function ProjectGraph({
                         tasks complete · updates every{" "}
                         {phaseHasActiveRun
                           ? "5 seconds"
-                          : `${Math.max(5, resume?.update_interval_seconds ?? 15)} seconds`}
+                          : `${updatePreferences.intervalSeconds} seconds`}
                       </p>
                       {/* EXECUTION E13 — live cost for the whole phase. */}
                       <CostLine
@@ -2005,7 +2074,7 @@ function ProjectGraph({
 
                   {resumeError ? <Alert testId="resume-error">{resumeError}</Alert> : null}
                 </div>
-              </details>
+              </section>
             ) : null}
 
             <KnowledgeStatusPanel
@@ -2023,46 +2092,102 @@ function ProjectGraph({
               onUnauthorized={handleWorkspaceUnauthorized}
             />
 
-            {resume ? (
-              <details className="card side-section" open data-testid="tracking-settings">
-                <summary>Tracking</summary>
-                <div className="side-body">
-                  {/* FRONT DOOR P1b: the full Gantt — one bar per phase on a
-                   *  shared axis, gate diamonds (plan-approval / blocked-decision
-                   *  / passed), and a Today line. See Gantt.tsx for the ordinal-
-                   *  placement rationale (the resume DTO has no phase
-                   *  timestamps yet). */}
-                  <Gantt phases={ganttPhases} />
-                  <p className="muted" style={{ fontSize: 12, marginTop: 14 }}>
-                    How often the workspace polls for progress. Faster refresh costs a little more
-                    background traffic; slower saves it.
-                  </p>
-                  <fieldset className="interval-picker" aria-label="Update interval">
-                    {[60, 300, 900].map((seconds) => (
-                      <Button
-                        key={seconds}
-                        className="btn-small"
-                        variant={resume.update_interval_seconds === seconds ? "primary" : "default"}
-                        disabled={intervalSaving}
-                        onClick={() => void updateInterval(seconds as 60 | 300 | 900)}
-                      >
-                        {seconds < 3600 ? `${Math.round(seconds / 60)}m` : `${seconds / 3600}h`}
-                      </Button>
-                    ))}
-                  </fieldset>
+            <section className="card work-history-card" data-testid="work-history">
+              <div className="section-head">
+                <div>
+                  <div className="eyebrow">Past conversations</div>
+                  <h2>Work history</h2>
                 </div>
-              </details>
-            ) : null}
+                <span className="muted">
+                  {planningHistory ? `${planningHistory.length} total` : "Loading…"}
+                </span>
+              </div>
+              {!planningHistory ? <Spinner label="Loading work history…" /> : null}
+              {planningHistory?.length === 0 ? (
+                <div className="history-empty">
+                  <strong>No previous work conversations</strong>
+                  <span>New work started here will remain available on this overview.</span>
+                </div>
+              ) : null}
+              <div className="work-history-list">
+                {planningHistory?.map((run) => {
+                  const latestMessage = run.transcript.at(-1);
+                  return (
+                    <article className="work-history-item" key={run.id}>
+                      <div className="work-history-main">
+                        <div className="work-history-meta">
+                          <Badge
+                            tone={
+                              run.status === "failed" || run.status === "rejected"
+                                ? "danger"
+                                : run.status === "approved"
+                                  ? "success"
+                                  : "info"
+                            }
+                          >
+                            {run.status.replaceAll("_", " ")}
+                          </Badge>
+                          <span>{run.mode === "quick" ? "Quick change" : "Planned work"}</span>
+                          {run.created_at ? (
+                            <time dateTime={run.created_at}>
+                              {new Date(run.created_at).toLocaleDateString()}
+                            </time>
+                          ) : null}
+                        </div>
+                        <h3>{run.objective?.trim() || "Untitled work conversation"}</h3>
+                        <p>
+                          {latestMessage?.summary ??
+                            (run.error
+                              ? run.error
+                              : `${run.transcript.length} planning message${
+                                  run.transcript.length === 1 ? "" : "s"
+                                } recorded`)}
+                        </p>
+                      </div>
+                      <Button
+                        className="btn-small"
+                        variant={
+                          [
+                            "queued",
+                            "drafting",
+                            "reviewing",
+                            "revising",
+                            "converged",
+                            "cap_reached",
+                          ].includes(run.status)
+                            ? "primary"
+                            : "default"
+                        }
+                        onClick={() => {
+                          setPhaseJourneyRunId(run.id);
+                          setWorkspaceTab("work");
+                        }}
+                      >
+                        {[
+                          "queued",
+                          "drafting",
+                          "reviewing",
+                          "revising",
+                          "converged",
+                          "cap_reached",
+                        ].includes(run.status)
+                          ? "Continue"
+                          : "Open"}
+                      </Button>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
           </div>
         ) : null}
 
-        {workspaceTab === "plan" ? (
-          <div className="workspace-tab-panel" data-testid="workspace-tab-plan">
-            {/* The Plan tab preserves recovery for legacy planning runs and
-             * strategy reviews. Phase is the canonical composer for all new
-             * quick changes and planned work. */}
+        {workspaceTab === "overview" && (activePlanningRunId || strategyReview) ? (
+          <div className="workspace-tab-panel overview-plan-recovery" data-testid="overview-plan">
+            {/* Optional legacy planning recovery belongs on Overview so an
+             * empty Plan tab never occupies permanent navigation. */}
             <details className="card side-section" open data-testid="planning-section">
-              <summary>Plan</summary>
+              <summary>Plan in progress</summary>
               <div className="side-body form-stack">
                 {activePlanningRunId ? (
                   <section className="card planning-run-status" data-testid="planning-run-status">
@@ -2100,26 +2225,7 @@ function ProjectGraph({
                       <Spinner label="Coordinator and reviewer are drafting…" />
                     ) : null}
                   </section>
-                ) : strategyReview ? null : (
-                  <section className="card planning-run-status" data-testid="plan-phase-pointer">
-                    <div className="eyebrow">New work</div>
-                    <h3>Start in Phase</h3>
-                    <p className="muted">
-                      Phase is the single place to make a quick change or prepare reviewed, planned
-                      work.
-                    </p>
-                    <Button
-                      variant="primary"
-                      data-testid="plan-open-phase"
-                      onClick={() => {
-                        setPhaseComposerRequested(true);
-                        setWorkspaceTab("phase");
-                      }}
-                    >
-                      Create work in Phase →
-                    </Button>
-                  </section>
-                )}
+                ) : null}
                 {planningRunError ? (
                   <Alert testId="planning-run-error">{planningRunError}</Alert>
                 ) : null}
@@ -2144,12 +2250,12 @@ function ProjectGraph({
           </div>
         ) : null}
 
-        {/* PHASE TAB (P2): goal -> planning run with reviewer rounds ->
+        {/* WORK TAB: goal -> planning run with reviewer rounds ->
          *  human decision (approve/modify/reject with staffing) -> execution
          *  status. Self-contained in PhaseTab.tsx; all its fetches go through
          *  phaseTabApi.ts (the integrator's single reconciliation point). */}
-        {workspaceTab === "phase" ? (
-          <div className="workspace-tab-panel" data-testid="workspace-tab-phase">
+        {workspaceTab === "work" ? (
+          <div className="workspace-tab-panel" data-testid="workspace-tab-work">
             <PhaseTab
               projectId={project.id}
               initialRunId={phaseJourneyRunId}
@@ -2159,17 +2265,39 @@ function ProjectGraph({
               onRunStarted={(runId) => {
                 setPhaseJourneyRunId(runId);
                 setPhaseComposerRequested(false);
+                void loadPlanningHistory();
               }}
               onJourneyChanged={() => {
                 void loadResume();
                 void loadLatestRelationalPlanningRun();
                 void loadPhaseExecution();
+                void loadPlanningHistory();
               }}
               onOpenRecoveryDetails={(phaseId) => {
                 setMonitoredPhaseId(phaseId);
                 setWorkspaceTab("overview");
                 if (phaseId === monitoredPhaseId) void loadPhaseExecution();
               }}
+              onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+            />
+          </div>
+        ) : null}
+
+        {workspaceTab === "debates" ? (
+          <div className="workspace-tab-panel" data-testid="workspace-tab-debates">
+            <Debates
+              embedded
+              projectId={project.id}
+              onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+            />
+          </div>
+        ) : null}
+
+        {workspaceTab === "settings" ? (
+          <div className="workspace-tab-panel" data-testid="workspace-tab-settings">
+            <WorkspaceSettings
+              projectId={project.id}
+              onPreferencesChanged={setUpdatePreferences}
               onUnauthorized={() => onLogout("Session expired. Sign in again.")}
             />
           </div>

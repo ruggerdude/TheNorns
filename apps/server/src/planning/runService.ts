@@ -374,6 +374,25 @@ export class PlanningRunService {
     });
   }
 
+  /** Every durable planning/work conversation for the project, newest first. */
+  async list(projectId: string): Promise<PlanningRunDto[]> {
+    return this.transactions.transaction(async (tx) => {
+      const project = await tx.query<{ id: string }>("SELECT id FROM projects WHERE id = $1", [
+        projectId,
+      ]);
+      if (!project.rows[0]) {
+        throw new PlanningRunConflictError("project_not_found", `unknown project "${projectId}"`);
+      }
+      const result = await tx.query<PlanningRunRow>(
+        `SELECT * FROM planning_runs
+         WHERE project_id = $1
+         ORDER BY created_at DESC, id DESC`,
+        [projectId],
+      );
+      return result.rows.map(rowToDto);
+    });
+  }
+
   // ---------------------------------------------------------------------
   // PHASE TAB P1: human decision on a terminal-review run.
   //   approve — records the decision (with optional staffing overrides,

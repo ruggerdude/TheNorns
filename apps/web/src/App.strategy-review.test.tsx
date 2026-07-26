@@ -163,7 +163,7 @@ describe("FRONT DOOR P1: planning run -> phase -> strategy review", () => {
     );
     // FRONT DOOR P1d: the planning-run status card lives under the "Plan"
     // tab now.
-    await user.click(await screen.findByRole("button", { name: "Plan" }));
+    await user.click(await screen.findByRole("button", { name: "Overview" }));
     expect(await screen.findByTestId("planning-run-status")).toHaveTextContent(/converged/i);
 
     await user.click(screen.getByRole("button", { name: /create phase from this run/i }));
@@ -210,7 +210,7 @@ describe("FRONT DOOR P1: planning run -> phase -> strategy review", () => {
     await user.click(
       await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
     );
-    await user.click(await screen.findByRole("button", { name: "Plan" }));
+    await user.click(await screen.findByRole("button", { name: "Overview" }));
     await screen.findByTestId("planning-run-status");
     await user.click(screen.getByRole("button", { name: /create phase from this run/i }));
     await screen.findByTestId("strategy-review-section");

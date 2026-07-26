@@ -1,7 +1,6 @@
-// FRONT DOOR P5 (tracking): the workspace's update-interval control PATCHes
-// GET/PATCH /api/v2/projects/:id/settings, and the resume poll cadence
-// honors whatever interval the resume response reports.
-import { screen, waitFor } from "@testing-library/react";
+// Workspace update preferences: global defaults can be changed from project
+// Settings and the active workspace immediately honors the resolved cadence.
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderAppAndOpenProject, seedAuth } from "./test/appHarness";
@@ -11,7 +10,14 @@ import { MockFetch } from "./test/mockFetch";
 describe("FRONT DOOR P5: tracking update interval", () => {
   let mock: MockFetch;
 
-  beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }));
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      window.localStorage.clear();
+    } catch {
+      // Storage can be unavailable in the Node test process.
+    }
+  });
   afterEach(() => {
     mock.restore();
     vi.useRealTimers();
@@ -34,44 +40,39 @@ describe("FRONT DOOR P5: tracking update interval", () => {
     };
   }
 
-  it("PATCHes the chosen interval and polls resume at that cadence", async () => {
+  it("saves the global interval and polls resume at that cadence", async () => {
     seedAuth();
     mock = new MockFetch();
     mock.get("/api/projects", { body: [projectAlpha] });
     mock.get(`/api/projects/${projectAlpha.id}/graph`, { body: fullyAllocatedGraph });
     mock.get("/api/v2/attention", { status: 404, body: {} });
-    let interval = 300;
     let resumeCalls = 0;
     mock.get(`/api/v2/projects/${projectAlpha.id}/resume`, () => {
       resumeCalls += 1;
-      return { body: resumeBody(interval) };
+      return { body: resumeBody(300) };
     });
-    mock.patch(`/api/v2/projects/${projectAlpha.id}/settings`, (_url, init) => {
-      const body = JSON.parse(String(init?.body)) as { update_interval_seconds: number };
-      interval = body.update_interval_seconds;
-      return { body: { update_interval_seconds: interval } };
+    mock.get(`/api/v2/projects/${projectAlpha.id}/rules`, {
+      body: { filename: "NORN.md", content: "", version: 0, updated_at: null },
     });
     mock.install();
 
     const { user } = await renderAppAndOpenProject(projectAlpha.name);
-    // FRONT DOOR P1b: the Tracking section now opens by default (it also
-    // hosts the Gantt).
-    await screen.findByTestId("tracking-settings");
-    await user.click(screen.getByRole("button", { name: "1m" }));
+    const workspaceNav = screen.getByRole("navigation", { name: "Workspace sections" });
+    await user.click(within(workspaceNav).getByRole("button", { name: "Settings" }));
+    await screen.findByTestId("workspace-settings");
+    await user.selectOptions(screen.getByLabelText("Default timing"), "60");
+    await user.click(screen.getByRole("button", { name: "Save update preferences" }));
+    expect(screen.getByText("Update preferences saved")).toBeVisible();
 
+    await user.click(within(workspaceNav).getByRole("button", { name: "Overview" }));
     await waitFor(() =>
-      expect(
-        mock.calls.find(
-          (call) =>
-            call.method === "PATCH" && call.url === `/api/v2/projects/${projectAlpha.id}/settings`,
-        ),
-      ).toMatchObject({ body: { update_interval_seconds: 60 } }),
+      expect(screen.getByTestId("workspace-update-digest")).toHaveTextContent("Every 1 minute"),
     );
 
-    const callsAfterPatch = resumeCalls;
+    const callsAfterSave = resumeCalls;
     // The poll cadence now honors the just-saved 60s interval, not the
     // previous 300s one.
     await vi.advanceTimersByTimeAsync(61_000);
-    await waitFor(() => expect(resumeCalls).toBeGreaterThan(callsAfterPatch));
+    await waitFor(() => expect(resumeCalls).toBeGreaterThan(callsAfterSave));
   });
 });

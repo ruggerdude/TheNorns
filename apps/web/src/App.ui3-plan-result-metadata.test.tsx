@@ -130,7 +130,7 @@ describe("UI-3 (rewritten for P1c): plan metadata reaches the human, via the dur
     );
     // FRONT DOOR P1d: the planning-run status / StrategyReview live under
     // the "Plan" tab now.
-    await user.click(await screen.findByRole("button", { name: "Plan" }));
+    await user.click(await screen.findByRole("button", { name: "Overview" }));
     return { user };
   }
 

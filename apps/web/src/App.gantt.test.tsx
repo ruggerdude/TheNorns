@@ -149,9 +149,9 @@ describe("FRONT DOOR P1b: workspace Gantt wiring", () => {
     );
     expect(miniGantt).toHaveAttribute("data-mini", "true");
 
-    // Full Gantt in Tracking: named rows, gates, and the blocked phase's red
+    // Full Gantt in the project dashboard: named rows, gates, and the blocked phase's red
     // gate carrying the real decision title (not a placeholder).
-    const trackingSection = await screen.findByTestId("tracking-settings");
+    const trackingSection = await screen.findByTestId("project-timeline");
     const fullGantt = within(trackingSection).getByTestId("gantt");
     expect(fullGantt).toHaveAttribute("data-mini", "false");
     expect(within(fullGantt).getByText("Schema & ingest")).toBeInTheDocument();

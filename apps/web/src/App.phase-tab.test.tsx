@@ -187,8 +187,8 @@ async function openPhaseTab(): Promise<UserEvent> {
       name: new RegExp(`^${projectAlpha.name}$`, "i"),
     }),
   );
-  await user.click(await screen.findByRole("button", { name: "Phase" }));
-  await screen.findByTestId("workspace-tab-phase");
+  await user.click(await screen.findByRole("button", { name: "Work" }));
+  await screen.findByTestId("workspace-tab-work");
   return user;
 }
 
@@ -221,7 +221,7 @@ describe("PHASE TAB (P2)", () => {
     expect(screen.getByTestId("phase-identity-line")).toHaveTextContent(
       "PM: Project default · Agent: Recommended automatically · Reviewer: Automatic cross-provider",
     );
-    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
 
   it("keeps PM choices separate while only offering runner-enabled execution agents", async () => {
@@ -381,7 +381,7 @@ describe("PHASE TAB (P2)", () => {
       }),
     );
     expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
 
     firstOpen.unmount();
     mock.restore();
@@ -397,7 +397,7 @@ describe("PHASE TAB (P2)", () => {
       }),
     );
     expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
 
   it("opens a new project's approval decision directly and restores that same decision after refresh", async () => {
@@ -418,7 +418,7 @@ describe("PHASE TAB (P2)", () => {
       }),
     );
     expect(await screen.findByTestId("phase-decision-panel")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
 
     firstOpen.unmount();
     mock.restore();
@@ -434,7 +434,7 @@ describe("PHASE TAB (P2)", () => {
       }),
     );
     expect(await screen.findByTestId("phase-decision-panel")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
 
   it("restores a new project's active planning run from the durable latest-run endpoint", async () => {
@@ -451,7 +451,7 @@ describe("PHASE TAB (P2)", () => {
       }),
     );
     expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
 
   it("restores an approved new project whose coding kickoff still needs recovery", async () => {
@@ -493,7 +493,7 @@ describe("PHASE TAB (P2)", () => {
     );
 
     expect(await screen.findByTestId("phase-retry-execution")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
 
   it("restores a quick kickoff refusal and does not mistake another active phase for its progress", async () => {
@@ -544,7 +544,7 @@ describe("PHASE TAB (P2)", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Coding needs a restart" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Phase" })).toHaveClass("on");
+    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
     expect(screen.getByTestId("phase-execution-kickoff-note")).toHaveTextContent(
       "quick change is recorded, but coding did not start",
     );

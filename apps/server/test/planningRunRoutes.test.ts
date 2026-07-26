@@ -21,7 +21,7 @@ interface InjectedResponse {
 async function inject(
   server: NornsServer,
   token: string,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PUT",
   url: string,
   body?: unknown,
   headers: Record<string, string> = {},
@@ -54,6 +54,15 @@ describe.sequential("durable planning run HTTP API", () => {
     const transactions = new PGliteTransactionRunner(pg);
     const users = new UserStore();
     token = testAdminToken(users);
+    const actor = users.list()[0];
+    if (!actor) throw new Error("test admin was not created");
+    await pg.query(
+      `INSERT INTO users (
+         id, username, display_name, email, name, password_hash,
+         password_hash_scheme, role, status
+       ) VALUES ($1, $2, $3, $2, $3, $4, 'legacy-scrypt-v0', 'admin', 'active')`,
+      [actor.id, actor.email, actor.name ?? actor.email, `${"a".repeat(32)}:${"b".repeat(128)}`],
+    );
     const pmAdapter = new FakeAdapter("anthropic");
     const reviewerAdapter = new FakeAdapter("openai");
     pmAdapter.enqueue({
@@ -164,6 +173,89 @@ describe.sequential("durable planning run HTTP API", () => {
     expect(res.statusCode).toBe(202);
     const body = res.json() as { planning_run_id: string };
     expect(typeof body.planning_run_id).toBe("string");
+  });
+
+  it("lists every durable work conversation newest first", async () => {
+    const first = await inject(
+      server,
+      token,
+      "POST",
+      `/api/v2/projects/${projectId}/planning-runs`,
+      { objective: "first objective", max_rounds: 2 },
+    );
+    const second = await inject(
+      server,
+      token,
+      "POST",
+      `/api/v2/projects/${projectId}/planning-runs`,
+      { objective: "second objective", max_rounds: 2 },
+    );
+    expect(first.statusCode).toBe(202);
+    expect(second.statusCode).toBe(202);
+    const firstId = (first.json() as { planning_run_id: string }).planning_run_id;
+    const secondId = (second.json() as { planning_run_id: string }).planning_run_id;
+    await pg.query("UPDATE planning_runs SET created_at = $2 WHERE id = $1", [
+      firstId,
+      "2026-01-01T00:00:00.000Z",
+    ]);
+    await pg.query("UPDATE planning_runs SET created_at = $2 WHERE id = $1", [
+      secondId,
+      "2026-01-02T00:00:00.000Z",
+    ]);
+
+    const response = await inject(
+      server,
+      token,
+      "GET",
+      `/api/v2/projects/${projectId}/planning-runs`,
+    );
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { planning_runs: Array<{ objective: string }> };
+    expect(body.planning_runs.map((run) => run.objective)).toEqual([
+      "second objective",
+      "first objective",
+    ]);
+  });
+
+  it("creates and versions the project's NORN.md rules directive", async () => {
+    const empty = await inject(server, token, "GET", `/api/v2/projects/${projectId}/rules`);
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toMatchObject({ filename: "NORN.md", content: "", version: 0 });
+
+    const first = await inject(server, token, "PUT", `/api/v2/projects/${projectId}/rules`, {
+      content: "# Rules\r\n\r\n- Run the full test suite.",
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({
+      filename: "NORN.md",
+      content: "# Rules\n\n- Run the full test suite.",
+      version: 1,
+    });
+
+    const second = await inject(server, token, "PUT", `/api/v2/projects/${projectId}/rules`, {
+      content: "# Rules\n\n- Preserve API compatibility.",
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toMatchObject({ version: 2 });
+
+    const directives = await pg.query<{ content: string; status: string; version: number }>(
+      `SELECT content, status, version FROM project_memory_entries
+       WHERE project_id = $1 AND provenance = 'project_rules_file'
+       ORDER BY version`,
+      [projectId],
+    );
+    expect(directives.rows).toEqual([
+      {
+        content: "# Rules\n\n- Run the full test suite.",
+        status: "obsolete",
+        version: 1,
+      },
+      {
+        content: "# Rules\n\n- Preserve API compatibility.",
+        status: "active",
+        version: 2,
+      },
+    ]);
   });
 
   it("404s GET for an unknown run and rejects unauthenticated reads", async () => {
