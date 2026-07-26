@@ -405,6 +405,7 @@ export function makeUsageEvent(
   inputTokens: number,
   outputTokens: number,
   source: UsageSourceT,
+  cache: { readTokens?: number; writeTokens?: number } = {},
 ): UsageEventT {
   const entry = registry[model];
   if (!entry) throw new Error(`model ${model} not in registry`);
@@ -418,6 +419,8 @@ export function makeUsageEvent(
     run_id: attribution.runId ?? null,
     input_tokens: inputTokens,
     output_tokens: outputTokens,
+    cache_read_tokens: cache.readTokens ?? 0,
+    cache_write_tokens: cache.writeTokens ?? 0,
     estimated_cost_usd: estimateCostUsd(entry, inputTokens, outputTokens),
     actual_cost_usd: null, // reconciled post-hoc where the provider exposes it
     usage_source: source,

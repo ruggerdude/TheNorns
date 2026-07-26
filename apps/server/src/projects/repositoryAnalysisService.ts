@@ -277,6 +277,7 @@ export class RepositoryAnalysisService {
 
     const analysis = await this.runModel(adapter, {
       projectId: target.project_id,
+      initiatedByUserId: actor.actor_id,
       repositoryLabel: sample.displayName,
       defaultBranch: sample.defaultBranch,
       headSha: sample.headSha,
@@ -437,6 +438,7 @@ export class RepositoryAnalysisService {
     adapter: LlmAdapter,
     input: {
       projectId: string;
+      initiatedByUserId: string;
       repositoryLabel: string;
       defaultBranch: string;
       headSha: string;
@@ -469,7 +471,12 @@ export class RepositoryAnalysisService {
       fileSections,
     ].join("\n");
     const { value } = await adapter.completeStructured(
-      { projectId: input.projectId, prompt, maxTokens: 8_192 },
+      {
+        projectId: input.projectId,
+        initiatedByUserId: input.initiatedByUserId,
+        prompt,
+        maxTokens: 8_192,
+      },
       RepositoryArchitectureAnalysis,
       "RepositoryArchitectureAnalysis",
     );

@@ -203,6 +203,7 @@ describe.sequential("phase tab: planning run decisions (service + worker)", () =
 
     expect(staffingInputs).toMatchObject([
       {
+        initiatedByUserId: "admin-1",
         pm: {
           provider: "anthropic",
           model: pm.model,
@@ -590,6 +591,21 @@ describe.sequential("phase tab: HTTP surface (production option shape)", () => {
       worker_providers: "anthropic",
       decision: null,
     });
+    const attribution = await pg.query<{
+      requested_by: string | null;
+      initiated_by_user_id: string | null;
+    }>(
+      `SELECT requested_by, initiated_by_user_id
+       FROM planning_runs
+       WHERE id=$1`,
+      [runId],
+    );
+    expect(attribution.rows[0]).toEqual({
+      requested_by: adminId,
+      initiated_by_user_id: adminId,
+    });
+    expect(pmAdapter.requests[0]?.initiatedByUserId).toBe(adminId);
+    expect(reviewerAdapter.requests[0]?.initiatedByUserId).toBe(adminId);
   });
 
   it("exposes runner-backed execution capability and rejects an unavailable agent before PM spend", async () => {

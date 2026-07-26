@@ -13,6 +13,7 @@ import {
   numeric,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -1847,6 +1848,41 @@ export const phase2Users = pgTable(
   ],
 );
 
+/** Explicit project collaboration membership introduced after the frozen V2 schema. */
+export const projectMembers = pgTable(
+  "project_members",
+  {
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    status: text("status").notNull().default("active"),
+    addedByUserId: text("added_by_user_id").references(() => phase2Users.id, {
+      onDelete: "restrict",
+    }),
+    addedAt: timestamp("added_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+    removedByUserId: text("removed_by_user_id").references(() => phase2Users.id, {
+      onDelete: "restrict",
+    }),
+    removedAt: timestamp("removed_at", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    primaryKey({ columns: [table.projectId, table.userId] }),
+    index("project_members_user_status_idx").on(table.userId, table.status, table.projectId),
+    index("project_members_project_status_idx").on(table.projectId, table.status, table.userId),
+    check("project_members_status_check", sql`${table.status} IN ('active', 'removed')`),
+    check(
+      "project_members_removal_shape_check",
+      sql`(${table.status} = 'active'
+          AND ${table.removedAt} IS NULL
+          AND ${table.removedByUserId} IS NULL)
+        OR (${table.status} = 'removed' AND ${table.removedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+
 export const phase2Sessions = pgTable(
   "sessions",
   {
@@ -2465,6 +2501,7 @@ export const shadowReadComparisons = pgTable(
       mode: "string",
     }).notNull(),
     observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(),
+    recordedOrder: bigint("recorded_order", { mode: "number" }).generatedAlwaysAsIdentity(),
   },
   (table) => [
     index("shadow_read_comparisons_scope_time_idx").on(
@@ -2473,6 +2510,7 @@ export const shadowReadComparisons = pgTable(
       table.observedAt,
     ),
     index("shadow_read_comparisons_mismatch_idx").on(table.migrationRunId, table.matched),
+    uniqueIndex("shadow_read_comparisons_recorded_order_unique").on(table.recordedOrder),
     index("shadow_read_comparisons_provenance_idx").on(
       table.migrationRunId,
       table.scopeType,
@@ -3442,6 +3480,683 @@ export const debateEvents = pgTable(
   ],
 );
 
+/** Immutable, effective-dated provider/model pricing used by canonical telemetry. */
+export const aiPricingProfiles = pgTable(
+  "ai_pricing_profiles",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(1),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    pricingVersion: text("pricing_version").notNull(),
+    currency: text("currency").notNull(),
+    inputPerMillion: numeric("input_per_million", { precision: 24, scale: 9 }).notNull(),
+    outputPerMillion: numeric("output_per_million", { precision: 24, scale: 9 }).notNull(),
+    cacheReadPerMillion: numeric("cache_read_per_million", { precision: 24, scale: 9 }),
+    cacheWritePerMillion: numeric("cache_write_per_million", { precision: 24, scale: 9 }),
+    source: text("source").notNull(),
+    effectiveFrom: timestamp("effective_from", { withTimezone: true, mode: "string" }).notNull(),
+    effectiveTo: timestamp("effective_to", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("ai_pricing_profiles_version_unique").on(
+      table.provider,
+      table.model,
+      table.pricingVersion,
+    ),
+    uniqueIndex("ai_pricing_profiles_effective_from_unique").on(
+      table.provider,
+      table.model,
+      table.effectiveFrom,
+    ),
+    index("ai_pricing_profiles_effective_lookup_idx").on(
+      table.provider,
+      table.model,
+      table.effectiveFrom,
+    ),
+    check("ai_pricing_profiles_schema_version_check", sql`${table.schemaVersion} = 1`),
+    check("ai_pricing_profiles_currency_check", sql`${table.currency} ~ '^[A-Z]{3}$'`),
+    check(
+      "ai_pricing_profiles_identity_check",
+      sql`length(trim(${table.provider})) > 0
+        AND length(trim(${table.model})) > 0
+        AND length(trim(${table.pricingVersion})) > 0
+        AND length(trim(${table.source})) > 0`,
+    ),
+    check(
+      "ai_pricing_profiles_price_check",
+      sql`${table.inputPerMillion} >= 0
+        AND ${table.outputPerMillion} >= 0
+        AND (${table.cacheReadPerMillion} IS NULL OR ${table.cacheReadPerMillion} >= 0)
+        AND (${table.cacheWritePerMillion} IS NULL OR ${table.cacheWritePerMillion} >= 0)`,
+    ),
+    check(
+      "ai_pricing_profiles_effective_range_check",
+      sql`${table.effectiveTo} IS NULL OR ${table.effectiveTo} > ${table.effectiveFrom}`,
+    ),
+  ],
+);
+
+/** Append-only request lifecycle ledger; adjustments are signed delta events. */
+export const aiUsageEvents = pgTable(
+  "ai_usage_events",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(1),
+    requestId: text("request_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    eventType: text("event_type").notNull(),
+    status: text("status").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "string" }).notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    providerRequestId: text("provider_request_id"),
+    endpoint: text("endpoint").notNull(),
+    requestType: text("request_type").notNull(),
+    retryGroupId: text("retry_group_id"),
+    retryAttempt: integer("retry_attempt").notNull().default(0),
+    initiatedByUserId: text("initiated_by_user_id").references(() => phase2Users.id, {
+      onDelete: "restrict",
+    }),
+    projectId: text("project_id").references(() => projects.id, { onDelete: "restrict" }),
+    phaseId: text("phase_id").references(() => phases.id, { onDelete: "restrict" }),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "restrict" }),
+    runId: text("run_id").references(() => agentRuns.id, { onDelete: "restrict" }),
+    usageSource: text("usage_source").notNull(),
+    confidence: numeric("confidence", { precision: 5, scale: 4 }).notNull(),
+    pricingProfileId: text("pricing_profile_id").references(() => aiPricingProfiles.id, {
+      onDelete: "restrict",
+    }),
+    inputTokens: bigint("input_tokens", { mode: "number" }),
+    outputTokens: bigint("output_tokens", { mode: "number" }),
+    cacheReadTokens: bigint("cache_read_tokens", { mode: "number" }),
+    cacheWriteTokens: bigint("cache_write_tokens", { mode: "number" }),
+    costUsd: numeric("cost_usd", { precision: 24, scale: 9 }),
+    costClassification: text("cost_classification").notNull(),
+    latencyMs: integer("latency_ms"),
+    httpStatus: integer("http_status"),
+    errorCode: text("error_code"),
+    errorCategory: text("error_category"),
+    errorMessageRedacted: text("error_message_redacted"),
+    sanitizedError: jsonb("sanitized_error"),
+    adjustsEventId: text("adjusts_event_id").references((): AnyPgColumn => aiUsageEvents.id, {
+      onDelete: "restrict",
+    }),
+  },
+  (table) => [
+    uniqueIndex("ai_usage_events_request_sequence_unique").on(table.requestId, table.sequence),
+    index("ai_usage_events_request_time_idx").on(table.requestId, table.sequence),
+    index("ai_usage_events_project_time_idx").on(table.projectId, table.occurredAt),
+    index("ai_usage_events_user_time_idx").on(table.initiatedByUserId, table.occurredAt),
+    index("ai_usage_events_phase_time_idx").on(table.phaseId, table.occurredAt),
+    index("ai_usage_events_provider_model_time_idx").on(
+      table.provider,
+      table.model,
+      table.occurredAt,
+    ),
+    index("ai_usage_events_status_time_idx").on(table.status, table.occurredAt),
+    index("ai_usage_events_run_source_idx")
+      .on(table.runId, table.requestType)
+      .where(sql`${table.runId} IS NOT NULL`),
+    foreignKey({
+      name: "ai_usage_events_phase_scope_fk",
+      columns: [table.projectId, table.phaseId],
+      foreignColumns: [phases.projectId, phases.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "ai_usage_events_task_scope_fk",
+      columns: [table.projectId, table.phaseId, table.taskId],
+      foreignColumns: [tasks.projectId, tasks.phaseId, tasks.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "ai_usage_events_run_scope_fk",
+      columns: [table.projectId, table.phaseId, table.taskId, table.runId],
+      foreignColumns: [agentRuns.projectId, agentRuns.phaseId, agentRuns.taskId, agentRuns.id],
+    }).onDelete("restrict"),
+    check("ai_usage_events_schema_version_check", sql`${table.schemaVersion} = 1`),
+    check("ai_usage_events_sequence_check", sql`${table.sequence} > 0`),
+    check(
+      "ai_usage_events_event_type_check",
+      sql`${table.eventType} IN (
+        'request_started','usage_observed','request_completed','request_failed','adjustment'
+      )`,
+    ),
+    check(
+      "ai_usage_events_status_shape_check",
+      sql`(${table.eventType} = 'request_started' AND ${table.status} = 'started')
+        OR (${table.eventType} = 'usage_observed' AND ${table.status} = 'in_progress')
+        OR (${table.eventType} = 'request_completed' AND ${table.status} = 'succeeded')
+        OR (${table.eventType} = 'request_failed' AND ${table.status} = 'failed')
+        OR (${table.eventType} = 'adjustment' AND ${table.status} = 'adjusted')`,
+    ),
+    check(
+      "ai_usage_events_identity_check",
+      sql`length(trim(${table.requestId})) > 0
+        AND length(trim(${table.provider})) > 0
+        AND length(trim(${table.model})) > 0
+        AND length(trim(${table.endpoint})) > 0
+        AND length(trim(${table.requestType})) > 0
+        AND (${table.providerRequestId} IS NULL OR length(trim(${table.providerRequestId})) > 0)
+        AND (${table.retryGroupId} IS NULL OR length(trim(${table.retryGroupId})) > 0)`,
+    ),
+    check(
+      "ai_usage_events_scope_shape_check",
+      sql`(${table.phaseId} IS NULL OR ${table.projectId} IS NOT NULL)
+        AND (${table.taskId} IS NULL OR ${table.phaseId} IS NOT NULL)
+        AND (${table.runId} IS NULL OR ${table.taskId} IS NOT NULL)`,
+    ),
+    check(
+      "ai_usage_events_retry_shape_check",
+      sql`${table.retryAttempt} >= 0
+        AND (${table.retryAttempt} = 0 OR ${table.retryGroupId} IS NOT NULL)`,
+    ),
+    check(
+      "ai_usage_events_usage_source_check",
+      sql`${table.usageSource} IN (
+        'provider_api','runtime_report','subscription_credit','estimate',
+        'backfill','manual_adjustment','unavailable'
+      )`,
+    ),
+    check(
+      "ai_usage_events_confidence_check",
+      sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`,
+    ),
+    check(
+      "ai_usage_events_cost_classification_check",
+      sql`${table.costClassification} IN (
+        'actual','estimated','subscription_consumption','unavailable'
+      )`,
+    ),
+    check(
+      "ai_usage_events_token_shape_check",
+      sql`(
+          ${table.eventType} = 'usage_observed'
+          AND ${table.inputTokens} IS NOT NULL AND ${table.inputTokens} >= 0
+        AND ${table.outputTokens} IS NOT NULL AND ${table.outputTokens} >= 0
+        AND ${table.cacheReadTokens} IS NOT NULL AND ${table.cacheReadTokens} >= 0
+        AND ${table.cacheWriteTokens} IS NOT NULL AND ${table.cacheWriteTokens} >= 0
+        AND ${table.cacheReadTokens} + ${table.cacheWriteTokens} <= ${table.inputTokens}
+        AND ${table.adjustsEventId} IS NULL
+        ) OR (
+          ${table.eventType} = 'adjustment'
+          AND ${table.adjustsEventId} IS NOT NULL
+          AND (
+            COALESCE(${table.inputTokens}, 0) <> 0
+            OR COALESCE(${table.outputTokens}, 0) <> 0
+            OR COALESCE(${table.cacheReadTokens}, 0) <> 0
+            OR COALESCE(${table.cacheWriteTokens}, 0) <> 0
+            OR COALESCE(${table.costUsd}, 0) <> 0
+          )
+        ) OR (
+          ${table.eventType} IN ('request_started','request_completed','request_failed')
+          AND ${table.inputTokens} IS NULL
+          AND ${table.outputTokens} IS NULL
+          AND ${table.cacheReadTokens} IS NULL
+          AND ${table.cacheWriteTokens} IS NULL
+          AND ${table.costUsd} IS NULL
+          AND ${table.adjustsEventId} IS NULL
+        )`,
+    ),
+    check(
+      "ai_usage_events_cost_shape_check",
+      sql`(
+          ${table.eventType} IN ('request_started','request_completed','request_failed')
+          AND ${table.costClassification} = 'unavailable'
+          AND ${table.costUsd} IS NULL
+        ) OR (
+          ${table.eventType} IN ('usage_observed','adjustment')
+          AND (
+            (
+              ${table.costClassification} IN ('subscription_consumption','unavailable')
+              AND ${table.costUsd} IS NULL
+            ) OR (
+              ${table.costClassification} IN ('actual','estimated')
+              AND (
+                (
+                  ${table.eventType} = 'usage_observed'
+                  AND ${table.costUsd} IS NOT NULL
+                  AND ${table.costUsd} >= 0
+                )
+                OR ${table.eventType} = 'adjustment'
+              )
+            )
+          )
+        )`,
+    ),
+    check(
+      "ai_usage_events_error_shape_check",
+      sql`(
+          ${table.eventType} = 'request_failed'
+          AND (
+            ${table.errorCode} IS NOT NULL
+            OR ${table.errorCategory} IS NOT NULL
+            OR ${table.errorMessageRedacted} IS NOT NULL
+            OR ${table.sanitizedError} IS NOT NULL
+          )
+        ) OR (
+          ${table.eventType} <> 'request_failed'
+          AND ${table.errorCode} IS NULL
+          AND ${table.errorCategory} IS NULL
+          AND ${table.errorMessageRedacted} IS NULL
+          AND ${table.sanitizedError} IS NULL
+        )`,
+    ),
+    check(
+      "ai_usage_events_latency_http_check",
+      sql`(${table.latencyMs} IS NULL OR ${table.latencyMs} >= 0)
+        AND (${table.httpStatus} IS NULL OR ${table.httpStatus} BETWEEN 100 AND 599)`,
+    ),
+    check(
+      "ai_usage_events_sanitized_error_check",
+      sql`${table.sanitizedError} IS NULL OR jsonb_typeof(${table.sanitizedError}) = 'object'`,
+    ),
+  ],
+);
+
+/** Configurable UTC period budget over canonical request usage facts. */
+export const usageBudgetPolicies = pgTable(
+  "usage_budget_policies",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(1),
+    scopeType: text("scope_type").notNull(),
+    scopeUserId: text("scope_user_id").references(() => phase2Users.id, {
+      onDelete: "restrict",
+    }),
+    scopeProjectId: text("scope_project_id").references(() => projects.id, {
+      onDelete: "restrict",
+    }),
+    period: text("period").notNull(),
+    provider: text("provider"),
+    model: text("model"),
+    limitUsd: numeric("limit_usd", { precision: 24, scale: 9 }),
+    limitTokens: bigint("limit_tokens", { mode: "number" }),
+    thresholdPercentages: smallint("threshold_percentages")
+      .array()
+      .notNull()
+      .default(sql`ARRAY[50,75,90,100]::smallint[]`),
+    status: text("status").notNull().default("active"),
+    createdByUserId: text("created_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("usage_budget_policies_one_active_scope_idx")
+      .on(
+        table.scopeType,
+        sql`COALESCE(${table.scopeUserId}, '')`,
+        sql`COALESCE(${table.scopeProjectId}, '')`,
+        table.period,
+        sql`COALESCE(${table.provider}, '')`,
+        sql`COALESCE(${table.model}, '')`,
+      )
+      .where(sql`${table.status} = 'active'`),
+    index("usage_budget_policies_user_status_idx").on(
+      table.scopeUserId,
+      table.status,
+      table.period,
+    ),
+    index("usage_budget_policies_project_status_idx").on(
+      table.scopeProjectId,
+      table.status,
+      table.period,
+    ),
+    check("usage_budget_policies_schema_version_check", sql`${table.schemaVersion} = 1`),
+    check(
+      "usage_budget_policies_scope_type_check",
+      sql`${table.scopeType} IN ('global','user','project')`,
+    ),
+    check(
+      "usage_budget_policies_scope_shape_check",
+      sql`(${table.scopeType} = 'global'
+          AND ${table.scopeUserId} IS NULL
+          AND ${table.scopeProjectId} IS NULL)
+        OR (${table.scopeType} = 'user'
+          AND ${table.scopeUserId} IS NOT NULL
+          AND ${table.scopeProjectId} IS NULL)
+        OR (${table.scopeType} = 'project'
+          AND ${table.scopeUserId} IS NULL
+          AND ${table.scopeProjectId} IS NOT NULL)`,
+    ),
+    check(
+      "usage_budget_policies_period_check",
+      sql`${table.period} IN ('daily','weekly','monthly')`,
+    ),
+    check(
+      "usage_budget_policies_provider_check",
+      sql`${table.provider} IS NULL OR length(trim(${table.provider})) > 0`,
+    ),
+    check(
+      "usage_budget_policies_model_check",
+      sql`${table.model} IS NULL OR length(trim(${table.model})) > 0`,
+    ),
+    check(
+      "usage_budget_policies_model_scope_check",
+      sql`${table.model} IS NULL OR ${table.provider} IS NOT NULL`,
+    ),
+    check(
+      "usage_budget_policies_limit_check",
+      sql`(${table.limitUsd} IS NULL OR ${table.limitUsd} > 0)
+        AND (${table.limitTokens} IS NULL OR ${table.limitTokens} > 0)
+        AND (${table.limitUsd} IS NOT NULL OR ${table.limitTokens} IS NOT NULL)`,
+    ),
+    check(
+      "usage_budget_policies_thresholds_check",
+      sql`norns_valid_usage_budget_thresholds(${table.thresholdPercentages})`,
+    ),
+    check("usage_budget_policies_status_check", sql`${table.status} IN ('active','disabled')`),
+  ],
+);
+
+/** One notification-ready record per policy/period/threshold/metric crossing. */
+export const usageBudgetThresholdNotifications = pgTable(
+  "usage_budget_threshold_notifications",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(1),
+    policyId: text("policy_id")
+      .notNull()
+      .references(() => usageBudgetPolicies.id, { onDelete: "restrict" }),
+    periodStart: timestamp("period_start", { withTimezone: true, mode: "string" }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true, mode: "string" }).notNull(),
+    thresholdPercentage: smallint("threshold_percentage").notNull(),
+    metric: text("metric").notNull(),
+    consumedUsd: numeric("consumed_usd", { precision: 24, scale: 9 }).notNull(),
+    consumedTokens: bigint("consumed_tokens", { mode: "number" }).notNull(),
+    unpricedRequests: integer("unpriced_requests").notNull().default(0),
+    limitUsd: numeric("limit_usd", { precision: 24, scale: 9 }),
+    limitTokens: bigint("limit_tokens", { mode: "number" }),
+    deliveryStatus: text("delivery_status").notNull().default("ready"),
+    createdAt: createdAt(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true, mode: "string" }),
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    uniqueIndex("usage_budget_threshold_notifications_dedupe").on(
+      table.policyId,
+      table.periodStart,
+      table.thresholdPercentage,
+      table.metric,
+    ),
+    index("usage_budget_threshold_notifications_ready_idx")
+      .on(table.deliveryStatus, table.createdAt)
+      .where(sql`${table.deliveryStatus} = 'ready'`),
+    index("usage_budget_threshold_notifications_policy_period_idx").on(
+      table.policyId,
+      table.periodStart,
+      table.thresholdPercentage,
+    ),
+    check(
+      "usage_budget_threshold_notifications_schema_version_check",
+      sql`${table.schemaVersion} = 1`,
+    ),
+    check(
+      "usage_budget_threshold_notifications_period_check",
+      sql`${table.periodEnd} > ${table.periodStart}`,
+    ),
+    check(
+      "usage_budget_threshold_notifications_threshold_check",
+      sql`${table.thresholdPercentage} BETWEEN 1 AND 100`,
+    ),
+    check(
+      "usage_budget_threshold_notifications_metric_check",
+      sql`${table.metric} IN ('usd','tokens')`,
+    ),
+    check(
+      "usage_budget_threshold_notifications_consumption_check",
+      sql`${table.consumedUsd} >= 0
+        AND ${table.consumedTokens} >= 0
+        AND ${table.unpricedRequests} >= 0`,
+    ),
+    check(
+      "usage_budget_threshold_notifications_limit_check",
+      sql`(${table.metric} = 'usd' AND ${table.limitUsd} IS NOT NULL AND ${table.limitUsd} > 0)
+        OR (${table.metric} = 'tokens'
+          AND ${table.limitTokens} IS NOT NULL
+          AND ${table.limitTokens} > 0)`,
+    ),
+    check(
+      "usage_budget_threshold_notifications_delivery_status_check",
+      sql`${table.deliveryStatus} IN ('ready','delivered','dismissed')`,
+    ),
+    check(
+      "usage_budget_threshold_notifications_delivery_check",
+      sql`(${table.deliveryStatus} = 'ready'
+          AND ${table.deliveredAt} IS NULL
+          AND ${table.dismissedAt} IS NULL)
+        OR (${table.deliveryStatus} = 'delivered'
+          AND ${table.deliveredAt} IS NOT NULL
+          AND ${table.dismissedAt} IS NULL)
+        OR (${table.deliveryStatus} = 'dismissed' AND ${table.dismissedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+
+/** Immutable provider plan or quota snapshot used for cycle calibration. */
+export const aiProviderUsagePlans = pgTable(
+  "ai_provider_usage_plans",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(1),
+    provider: text("provider").notNull(),
+    planName: text("plan_name").notNull(),
+    allowanceUnit: text("allowance_unit").notNull(),
+    allowanceAmount: numeric("allowance_amount", { precision: 30, scale: 9 }).notNull(),
+    allowanceUsdEquivalent: numeric("allowance_usd_equivalent", {
+      precision: 24,
+      scale: 9,
+    }),
+    effectiveFrom: timestamp("effective_from", {
+      withTimezone: true,
+      mode: "string",
+    }).notNull(),
+    effectiveTo: timestamp("effective_to", { withTimezone: true, mode: "string" }),
+    source: text("source").notNull(),
+    createdByUserId: text("created_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("ai_provider_usage_plans_provider_id_unique").on(table.id, table.provider),
+    index("ai_provider_usage_plans_provider_effective_idx").on(
+      table.provider,
+      table.effectiveFrom,
+      table.createdAt,
+    ),
+    check("ai_provider_usage_plans_schema_version_check", sql`${table.schemaVersion} = 1`),
+    check("ai_provider_usage_plans_provider_check", sql`length(trim(${table.provider})) > 0`),
+    check("ai_provider_usage_plans_name_check", sql`length(trim(${table.planName})) > 0`),
+    check(
+      "ai_provider_usage_plans_allowance_unit_check",
+      sql`${table.allowanceUnit} IN ('tokens','requests','credits','usd_equivalent')`,
+    ),
+    check(
+      "ai_provider_usage_plans_allowance_check",
+      sql`${table.allowanceAmount} > 0
+        AND (${table.allowanceUsdEquivalent} IS NULL
+          OR ${table.allowanceUsdEquivalent} > 0)`,
+    ),
+    check(
+      "ai_provider_usage_plans_effective_range_check",
+      sql`${table.effectiveTo} IS NULL OR ${table.effectiveTo} > ${table.effectiveFrom}`,
+    ),
+    check("ai_provider_usage_plans_source_check", sql`length(trim(${table.source})) > 0`),
+  ],
+);
+
+/** Append-only provider reading paired with the canonical cycle-to-date facts. */
+export const aiUsageCalibrationObservations = pgTable(
+  "ai_usage_calibration_observations",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(1),
+    planId: text("plan_id").notNull(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    subscriptionTier: text("subscription_tier").notNull(),
+    cyclePeriod: text("cycle_period").notNull(),
+    resetAt: timestamp("reset_at", { withTimezone: true, mode: "string" }).notNull(),
+    cycleStart: timestamp("cycle_start", { withTimezone: true, mode: "string" }).notNull(),
+    cycleEnd: timestamp("cycle_end", { withTimezone: true, mode: "string" }).notNull(),
+    observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(),
+    providerReadingKind: text("provider_reading_kind").notNull(),
+    providerReadingUnit: text("provider_reading_unit").notNull(),
+    providerReadingValue: numeric("provider_reading_value", {
+      precision: 30,
+      scale: 9,
+    }).notNull(),
+    displayedPercentage: numeric("displayed_percentage", {
+      precision: 7,
+      scale: 4,
+    }).notNull(),
+    tokensUsedSinceReset: bigint("tokens_used_since_reset", { mode: "number" }).notNull(),
+    impliedMaxTokens: numeric("implied_max_tokens", {
+      precision: 30,
+      scale: 9,
+    }).notNull(),
+    providerReadingUsdEquivalent: numeric("provider_reading_usd_equivalent", {
+      precision: 24,
+      scale: 9,
+    }),
+    canonicalRequests: integer("canonical_requests").notNull(),
+    canonicalInputTokens: bigint("canonical_input_tokens", { mode: "number" }).notNull(),
+    canonicalOutputTokens: bigint("canonical_output_tokens", { mode: "number" }).notNull(),
+    canonicalCacheReadTokens: bigint("canonical_cache_read_tokens", {
+      mode: "number",
+    }).notNull(),
+    canonicalCacheWriteTokens: bigint("canonical_cache_write_tokens", {
+      mode: "number",
+    }).notNull(),
+    canonicalKnownCostUsd: numeric("canonical_known_cost_usd", {
+      precision: 24,
+      scale: 9,
+    }),
+    canonicalUnpricedRequests: integer("canonical_unpriced_requests").notNull().default(0),
+    confidence: numeric("confidence", { precision: 5, scale: 4 }).notNull(),
+    source: text("source").notNull(),
+    evidenceNote: text("evidence_note"),
+    recordedByUserId: text("recorded_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    recordedAt: timestamp("recorded_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    foreignKey({
+      name: "ai_usage_calibration_observations_plan_fk",
+      columns: [table.planId, table.provider],
+      foreignColumns: [aiProviderUsagePlans.id, aiProviderUsagePlans.provider],
+    }).onDelete("restrict"),
+    index("ai_usage_calibration_provider_cycle_idx").on(
+      table.provider,
+      table.model,
+      table.subscriptionTier,
+      table.resetAt,
+      table.observedAt,
+    ),
+    index("ai_usage_calibration_plan_time_idx").on(table.planId, table.observedAt),
+    check(
+      "ai_usage_calibration_observations_schema_version_check",
+      sql`${table.schemaVersion} = 1`,
+    ),
+    check(
+      "ai_usage_calibration_observations_provider_check",
+      sql`length(trim(${table.provider})) > 0
+        AND length(trim(${table.model})) > 0
+        AND length(trim(${table.subscriptionTier})) > 0`,
+    ),
+    check(
+      "ai_usage_calibration_observations_period_check",
+      sql`${table.cyclePeriod} IN ('weekly','monthly')`,
+    ),
+    check(
+      "ai_usage_calibration_observations_cycle_check",
+      sql`${table.cycleEnd} > ${table.cycleStart}
+        AND ${table.resetAt} = ${table.cycleStart}
+        AND ${table.observedAt} >= ${table.cycleStart}
+        AND ${table.observedAt} <= ${table.cycleEnd}`,
+    ),
+    check(
+      "ai_usage_calibration_observations_reading_kind_check",
+      sql`${table.providerReadingKind} IN ('used','remaining','utilization_percent')`,
+    ),
+    check(
+      "ai_usage_calibration_observations_reading_unit_check",
+      sql`${table.providerReadingUnit} IN ('tokens','requests','credits','usd_equivalent','percent')`,
+    ),
+    check(
+      "ai_usage_calibration_observations_reading_shape_check",
+      sql`${table.providerReadingValue} >= 0
+        AND ${table.displayedPercentage} > 0
+        AND ${table.displayedPercentage} <= 100
+        AND ${table.tokensUsedSinceReset} >= 0
+        AND ${table.impliedMaxTokens} >= 0
+        AND (
+          (${table.providerReadingKind} = 'utilization_percent'
+            AND ${table.providerReadingUnit} = 'percent'
+            AND ${table.providerReadingValue} <= 100)
+          OR
+          (${table.providerReadingKind} IN ('used','remaining')
+            AND ${table.providerReadingUnit} <> 'percent')
+        )`,
+    ),
+    check(
+      "ai_usage_calibration_observations_nonnegative_check",
+      sql`(${table.providerReadingUsdEquivalent} IS NULL
+          OR ${table.providerReadingUsdEquivalent} >= 0)
+        AND ${table.canonicalRequests} >= 0
+        AND ${table.canonicalInputTokens} >= 0
+        AND ${table.canonicalOutputTokens} >= 0
+        AND ${table.canonicalCacheReadTokens} >= 0
+        AND ${table.canonicalCacheWriteTokens} >= 0
+        AND (${table.canonicalKnownCostUsd} IS NULL
+          OR ${table.canonicalKnownCostUsd} >= 0)
+        AND ${table.canonicalUnpricedRequests} >= 0`,
+    ),
+    check(
+      "ai_usage_calibration_observations_confidence_check",
+      sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`,
+    ),
+    check(
+      "ai_usage_calibration_observations_source_check",
+      sql`${table.source} IN ('provider_api','runtime_report','manual','import')`,
+    ),
+    check(
+      "ai_usage_calibration_observations_evidence_check",
+      sql`${table.evidenceNote} IS NULL OR length(trim(${table.evidenceNote})) > 0`,
+    ),
+  ],
+);
+
+/** Singleton administrator-owned NORN.md applied to every future task briefing. */
+export const globalRuleSettings = pgTable(
+  "global_rule_settings",
+  {
+    id: text("id").primaryKey(),
+    filename: text("filename").notNull(),
+    content: text("content").notNull().default(""),
+    version: integer("version").notNull(),
+    updatedBy: text("updated_by").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    check("global_rule_settings_singleton_check", sql`${table.id} = 'global'`),
+    check("global_rule_settings_filename_check", sql`${table.filename} = 'NORN.md'`),
+    check("global_rule_settings_version_check", sql`${table.version} > 0`),
+    check("global_rule_settings_updated_by_check", sql`length(trim(${table.updatedBy})) > 0`),
+  ],
+);
+
 export const phase2PreservationSchema = {
   archiveEncryptionKeyRegistry,
   credentialHmacKeyRegistry,
@@ -3484,4 +4199,12 @@ export const phase2PreservationSchema = {
   debateReservations,
   debateUsageEvents,
   debateEvents,
+  projectMembers,
+  aiPricingProfiles,
+  aiUsageEvents,
+  usageBudgetPolicies,
+  usageBudgetThresholdNotifications,
+  aiProviderUsagePlans,
+  aiUsageCalibrationObservations,
+  globalRuleSettings,
 };

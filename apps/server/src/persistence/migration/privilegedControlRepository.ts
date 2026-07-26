@@ -246,7 +246,7 @@ async function assertCurrentGreenIdentityEvidence(
        SELECT operation, matched,
               row_number() OVER (
                 PARTITION BY operation
-                ORDER BY observed_at DESC, id DESC
+                ORDER BY observed_at DESC, recorded_order DESC
               ) AS observation_rank
        FROM shadow_read_comparisons
        WHERE migration_run_id = $1

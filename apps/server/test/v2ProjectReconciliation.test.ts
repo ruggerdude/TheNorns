@@ -47,9 +47,18 @@ describe("Phase 2 legacy project reconciliation", () => {
   });
 
   it("uses a dedicated fixture to detect a tampered approval content hash", () => {
-    const report = reconcileLegacyProject(fixture("tampered-approval-hash"), {
+    const source = fixture("tampered-approval-hash");
+    const rawAssignment = (
+      source.graph as { nodes: { assignment: Record<string, unknown> | null }[] }
+    ).nodes[0]?.assignment;
+    expect(rawAssignment).not.toHaveProperty("reasoning_effort");
+
+    const analysis = analyzeLegacyProject(source, {
       attributable_user_ids: new Set(["user-known"]),
     });
+    expect(analysis.graph?.nodes[0]?.assignment).toHaveProperty("reasoning_effort", null);
+
+    const report = analysis.report;
     const resultCodes = report.findings.map((entry) => entry.code);
     expect(resultCodes).toContain("approval_content_hash_mismatch");
     expect(resultCodes).not.toContain("approval_actor_unattributable");

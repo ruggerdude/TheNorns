@@ -64,6 +64,7 @@ function facts(overrides: Partial<ProxiedRunFacts> = {}): ProxiedRunFacts {
     project_id: "project-1",
     phase_id: "phase-1",
     task_id: "task-1",
+    initiated_by_user_id: "user-1",
     runner_id: "runner-1",
     runner_generation: 3,
     active: true,
@@ -160,6 +161,7 @@ describe("EXECUTION E3 inference proxy authorization", () => {
     expect(meter.events).toHaveLength(1);
     expect(meter.events[0]?.run.project_id).toBe("project-1");
     expect(meter.events[0]?.usage.input_tokens).toBe(100);
+    expect(adapter.requests[0]?.initiatedByUserId).toBe("user-1");
 
     // The hold is resolved: no reservation is left dangling, and the settled
     // amount is the real cost rather than the conservative estimate.
@@ -412,6 +414,13 @@ describe.sequential("EXECUTION E3 inference proxy against real persistence", () 
     `);
     await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
     await pg.exec(`
+      INSERT INTO users (
+        id, username, display_name, email, name, password_hash,
+        password_hash_scheme, role, status
+      ) VALUES (
+        'admin-1','admin@example.test','Admin','admin@example.test','Admin',
+        'hash','scrypt-v1','admin','active'
+      );
       INSERT INTO projects (
         id, name, description, status, assignment_policy_ref,
         verification_policy_ref, budget_policy_ref
@@ -426,8 +435,11 @@ describe.sequential("EXECUTION E3 inference proxy against real persistence", () 
         'verification','healthy','human','admin-1');
       UPDATE projects SET primary_repository_binding_id = 'binding-1' WHERE id = 'project-1';
       INSERT INTO phases (
-        id, project_id, objective_summary, priority, status, approved_budget_usd
-      ) VALUES ('phase-1','project-1','Implement vertical slice',1,'awaiting_approval',20);
+        id, project_id, objective_summary, priority, status, approved_budget_usd,
+        initiated_by_user_id
+      ) VALUES (
+        'phase-1','project-1','Implement vertical slice',1,'awaiting_approval',20,'admin-1'
+      );
       INSERT INTO strategy_versions (
         id, project_id, phase_id, version, status, objective, content,
         convergence, review_rounds, content_hash
@@ -507,6 +519,7 @@ describe.sequential("EXECUTION E3 inference proxy against real persistence", () 
       project_id: "project-1",
       phase_id: "phase-1",
       task_id: "task-1",
+      initiated_by_user_id: "admin-1",
       runner_id: "runner-1",
       runner_generation: 3,
       active: true,

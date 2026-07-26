@@ -1,5 +1,5 @@
 // FRONT DOOR P1d: the workspace shell reorganized into a normal top-width
-// page (header + Overview | Work | Graph | Debates | Settings), replacing the graph
+// page (header + Overview | Work | Graph | Members | Debates | Settings), replacing the graph
 // canvas as the dominant panel with everything else crammed into a sidebar.
 // Purely a layout change — every section moved is the same JSX/logic that
 // existed before; this suite covers the new composition itself: Overview is
@@ -81,12 +81,73 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     // Overview is the default tab, and it's the one already marked "on".
     expect(await screen.findByRole("button", { name: "Overview" })).toHaveClass("on");
+    expect(screen.getByRole("button", { name: "Usage" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Members" })).toBeInTheDocument();
     expect(screen.getByTestId("overview-dashboard")).toBeInTheDocument();
     expect(screen.getByTestId("work-history")).toBeInTheDocument();
     expect(screen.getByText("Improve the notification delivery pipeline")).toBeInTheDocument();
     // The graph canvas is NOT the dominant panel anymore — it isn't even
     // mounted until the Graph tab is selected.
     expect(screen.queryByTestId("graph-canvas")).not.toBeInTheDocument();
+  });
+
+  it("opens project usage as a top-level overlay and returns to the same workspace", async () => {
+    setToken("present");
+    mock = new MockFetch();
+    mock.get("/api/projects", { body: [projectAlpha] });
+    mock.get(`/api/projects/${projectAlpha.id}/graph`, { body: fullyAllocatedGraph });
+    mock.get(`/api/v2/projects/${projectAlpha.id}/resume`, { status: 404, body: {} });
+    mock.get("/api/v2/attention", { status: 404, body: {} });
+    mock.get(`/api/usage/projects/${projectAlpha.id}/summary`, {
+      body: {
+        requests: 1,
+        succeeded_requests: 1,
+        failed_requests: 0,
+        in_progress_requests: 0,
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        cost_usd: 0.01,
+        known_cost_usd: 0.01,
+        priced_requests: 1,
+        unpriced_requests: 0,
+        average_latency_ms: 200,
+        average_output_tokens: 20,
+        average_known_cost_usd: 0.01,
+      },
+    });
+    mock.get(`/api/usage/projects/${projectAlpha.id}/timeseries?interval=day`, {
+      body: { interval: "day", points: [] },
+    });
+    mock.get(`/api/usage/projects/${projectAlpha.id}/events?limit=100`, {
+      body: { events: [], limit: 100, offset: 0, has_more: false },
+    });
+    mock.get(new RegExp(`/api/usage/projects/${projectAlpha.id}/breakdown(?:\\?.*)?$`), {
+      body: { breakdowns: [] },
+    });
+    mock.install();
+
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
+    );
+    await user.click(screen.getByRole("button", { name: "Usage" }));
+
+    expect(await screen.findByRole("heading", { name: "Project usage" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: projectAlpha.name })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    const workspaceNav = await screen.findByRole("navigation", { name: "Workspace sections" });
+    expect(workspaceNav).toBeVisible();
+    expect(within(workspaceNav).getByRole("button", { name: "Overview" })).toHaveClass("on");
+    expect(within(workspaceNav).getByRole("button", { name: "Members" })).toBeInTheDocument();
+    expect(within(workspaceNav).getByRole("button", { name: "Debates" })).toBeInTheDocument();
+    expect(within(workspaceNav).getByRole("button", { name: "Settings" })).toBeInTheDocument();
   });
 
   it("shows the graph canvas (full functionality preserved) only after switching to the Graph tab", async () => {

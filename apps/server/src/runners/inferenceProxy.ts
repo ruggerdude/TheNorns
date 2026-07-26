@@ -64,6 +64,8 @@ export interface ProxiedRunFacts {
   project_id: string;
   phase_id: string;
   task_id: string;
+  /** Proven human initiator propagated from the planning lineage, when known. */
+  initiated_by_user_id: string | null;
   /** The runner this run was dispatched to. */
   runner_id: string;
   /** The generation it was dispatched at, from the durable command record. */
@@ -337,6 +339,9 @@ export class InferenceProxy {
     try {
       const result = await adapter.complete({
         projectId: run.project_id,
+        initiatedByUserId: run.initiated_by_user_id,
+        phaseId: run.phase_id,
+        taskId: run.task_id,
         nodeId: run.task_id,
         runId: run.run_id,
         prompt: request.prompt,
@@ -412,13 +417,15 @@ export class SqlProxiedRunLookup implements ProxiedRunLookup {
         project_id: string;
         phase_id: string;
         task_id: string;
+        initiated_by_user_id: string | null;
         state: string;
         runner_id: string | null;
         superseded_at: string | null;
         runner_generation: number;
         revoked_through_generation: number | null;
       }>(
-        `SELECT run.id, run.project_id, run.phase_id, run.task_id, run.state,
+        `SELECT run.id, run.project_id, run.phase_id, run.task_id,
+                run.initiated_by_user_id, run.state,
                 run.runner_id, run.superseded_at,
                 command.runner_generation,
                 revocation.revoked_through_generation
@@ -440,6 +447,7 @@ export class SqlProxiedRunLookup implements ProxiedRunLookup {
         project_id: row.project_id,
         phase_id: row.phase_id,
         task_id: row.task_id,
+        initiated_by_user_id: row.initiated_by_user_id,
         runner_id: row.runner_id,
         runner_generation: generation,
         active:

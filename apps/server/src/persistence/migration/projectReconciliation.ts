@@ -4,6 +4,7 @@ import { canonicalJson, canonicalSha256 } from "./canonicalJson.js";
 import {
   type LegacyAllocationApprovalT,
   type LegacyGraphNodeT,
+  type LegacyGraphSnapshotInputT,
   type LegacyGraphSnapshotT,
   type LegacyProjectSnapshotT,
   parseLegacyProjectPayloads,
@@ -122,7 +123,7 @@ function graphEdges(graph: LegacyGraphSnapshotT): Set<string> {
   );
 }
 
-function legacyAllocationFingerprint(graph: LegacyGraphSnapshotT): string {
+function legacyAllocationFingerprint(graph: LegacyGraphSnapshotInputT): string {
   const canonical = JSON.stringify(
     [...graph.nodes]
       .sort((left, right) => left.id.localeCompare(right.id))
@@ -131,7 +132,7 @@ function legacyAllocationFingerprint(graph: LegacyGraphSnapshotT): string {
   return sha256Text(canonical);
 }
 
-function legacyAllocationContentHash(graph: LegacyGraphSnapshotT): string | null {
+function legacyAllocationContentHash(graph: LegacyGraphSnapshotInputT): string | null {
   if (graph.nodes.some((node) => node.assignment === null)) return null;
   const totalUsd =
     Math.round(
@@ -439,8 +440,8 @@ export function analyzeLegacyProject(
     }
   }
 
-  if (parsed.approval !== null && usableGraph !== null) {
-    const currentFingerprint = legacyAllocationFingerprint(usableGraph);
+  if (parsed.approval !== null && usableGraph !== null && parsed.graph_source !== null) {
+    const currentFingerprint = legacyAllocationFingerprint(parsed.graph_source);
     if (parsed.approval.graph_version !== usableGraph.version) {
       findings.push(
         finding({
@@ -471,7 +472,7 @@ export function analyzeLegacyProject(
         }),
       );
     }
-    const currentContentHash = legacyAllocationContentHash(usableGraph);
+    const currentContentHash = legacyAllocationContentHash(parsed.graph_source);
     if (currentContentHash === null || parsed.approval.content_hash !== currentContentHash) {
       findings.push(
         finding({

@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
   ACTIONS_EXECUTION_MIGRATION_NAME,
+  AI_USAGE_TELEMETRY_MIGRATION_NAME,
   ATTACHMENTS_MIGRATION_NAME,
   CODEX_REASONING_EFFORT_MIGRATION_NAME,
   DEBATE_WORKFLOW_MIGRATION_NAME,
@@ -27,10 +28,14 @@ import {
   PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
   PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME,
   PLANNING_RUNS_MIGRATION_NAME,
+  PROJECT_ACCESS_ATTRIBUTION_MIGRATION_NAME,
   QC_COMMUNICATION_MIGRATION_NAME,
   QUICK_CHANGES_MIGRATION_NAME,
   RUN_PUBLICATION_MIGRATION_NAME,
+  SHADOW_EVIDENCE_ORDER_MIGRATION_NAME,
   TASK_CONTEXT_MIGRATION_NAME,
+  USAGE_CALIBRATION_ANALYTICS_MIGRATION_NAME,
+  USAGE_INTELLIGENCE_POLICIES_MIGRATION_NAME,
   type V2MigrationDatabase,
   WORKSPACE_CONNECTIONS_MIGRATION_NAME,
   runCurrentV2Migrations,
@@ -243,6 +248,11 @@ describe.sequential("Phase 2 preservation schema", () => {
       { name: KNOWLEDGE_PACKAGES_MIGRATION_NAME, applied: false },
       { name: CODEX_REASONING_EFFORT_MIGRATION_NAME, applied: false },
       { name: GLOBAL_RULES_MIGRATION_NAME, applied: false },
+      { name: AI_USAGE_TELEMETRY_MIGRATION_NAME, applied: false },
+      { name: PROJECT_ACCESS_ATTRIBUTION_MIGRATION_NAME, applied: false },
+      { name: USAGE_INTELLIGENCE_POLICIES_MIGRATION_NAME, applied: false },
+      { name: USAGE_CALIBRATION_ANALYTICS_MIGRATION_NAME, applied: false },
+      { name: SHADOW_EVIDENCE_ORDER_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -282,6 +292,11 @@ describe.sequential("Phase 2 preservation schema", () => {
       KNOWLEDGE_PACKAGES_MIGRATION_NAME,
       CODEX_REASONING_EFFORT_MIGRATION_NAME,
       GLOBAL_RULES_MIGRATION_NAME,
+      AI_USAGE_TELEMETRY_MIGRATION_NAME,
+      PROJECT_ACCESS_ATTRIBUTION_MIGRATION_NAME,
+      USAGE_INTELLIGENCE_POLICIES_MIGRATION_NAME,
+      USAGE_CALIBRATION_ANALYTICS_MIGRATION_NAME,
+      SHADOW_EVIDENCE_ORDER_MIGRATION_NAME,
     ]);
   });
 
@@ -302,6 +317,18 @@ describe.sequential("Phase 2 preservation schema", () => {
       ["sessions", "source_record_id"],
       ["migration_runs", "source_manifest_hash"],
       ["legacy_id_mappings", "source_metadata"],
+      ["agent_profiles", "reasoning_effort"],
+      ["global_rule_settings", "content"],
+      ["ai_pricing_profiles", "cache_write_per_million"],
+      ["ai_usage_events", "adjusts_event_id"],
+      ["projects", "owner_user_id"],
+      ["project_members", "removed_at"],
+      ["planning_runs", "initiated_by_user_id"],
+      ["usage_budget_policies", "threshold_percentages"],
+      ["usage_budget_threshold_notifications", "delivery_status"],
+      ["ai_provider_usage_plans", "allowance_usd_equivalent"],
+      ["ai_usage_calibration_observations", "implied_max_tokens"],
+      ["shadow_read_comparisons", "recorded_order"],
     ] as const;
     for (const [tableName, columnName] of requiredColumns) {
       const result = await pg.query<{ count: number }>(

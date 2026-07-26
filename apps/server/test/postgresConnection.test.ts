@@ -89,7 +89,7 @@ describe("PostgreSQL connection security", () => {
 });
 
 describe("PostgreSQL runtime schema compatibility", () => {
-  it("accepts the quick-change and knowledge-package schema", async () => {
+  it("accepts the complete current runtime schema", async () => {
     const compatible = {
       query: async () => ({
         rows: [
@@ -99,6 +99,14 @@ describe("PostgreSQL runtime schema compatibility", () => {
             agent_execution_registrations: "agent_execution_registrations",
             agent_handoffs: "agent_handoffs",
             knowledge_deltas: "knowledge_deltas",
+            agent_reasoning_effort: true,
+            global_rule_settings: "global_rule_settings",
+            ai_usage_events: "ai_usage_events",
+            project_owner_user_id: true,
+            project_members: "project_members",
+            usage_budget_policies: "usage_budget_policies",
+            ai_usage_calibration_observations: "ai_usage_calibration_observations",
+            shadow_read_recorded_order: true,
           },
         ],
       }),
@@ -117,6 +125,14 @@ describe("PostgreSQL runtime schema compatibility", () => {
             agent_execution_registrations: "agent_execution_registrations",
             agent_handoffs: null,
             knowledge_deltas: "knowledge_deltas",
+            agent_reasoning_effort: false,
+            global_rule_settings: "global_rule_settings",
+            ai_usage_events: null,
+            project_owner_user_id: true,
+            project_members: null,
+            usage_budget_policies: "usage_budget_policies",
+            ai_usage_calibration_observations: null,
+            shadow_read_recorded_order: false,
           },
         ],
       }),
@@ -126,7 +142,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
       code: "runtime_schema_outdated",
       message:
         "database migrations are required before startup; missing: " +
-        "planning_runs.mode, knowledge_packages, agent_handoffs",
+        "planning_runs.mode, knowledge_packages, agent_handoffs, " +
+        "agent_profiles.reasoning_effort, ai_usage_events, project_members, " +
+        "ai_usage_calibration_observations, shadow_read_comparisons.recorded_order",
     });
   });
 });

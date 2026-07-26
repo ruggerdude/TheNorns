@@ -54,7 +54,7 @@ describe.sequential("durable debate worker", () => {
       command_id: "command-create-debate",
       kind: "create_debate",
       command_family: "debate",
-      actor: { actor_type: "human", actor_id: "user-1" },
+      actor: { actor_type: "human", actor_id: "debate-author" },
       idempotency_key: "create-debate",
       correlation_id: "correlation-create",
       causation_id: null,
@@ -153,7 +153,22 @@ describe.sequential("durable debate worker", () => {
       "debate_run_finalizing",
       "debate_run_completed",
     ]);
+    const persistedInitiator = await pg.query<{ actor_type: string; actor_id: string | null }>(
+      `SELECT actor_type, actor_id
+       FROM debate_events
+       WHERE debate_run_id = $1
+         AND event_type = 'debate_run_queued'`,
+      [run.id],
+    );
+    expect(persistedInitiator.rows[0]).toEqual({
+      actor_type: "human",
+      actor_id: "user-1",
+    });
     expect(adapter.requests).toHaveLength(2);
+    expect(adapter.requests.map((request) => request.initiatedByUserId)).toEqual([
+      "user-1",
+      "user-1",
+    ]);
 
     const rerun = await service.start({
       schema_version: 2,
@@ -291,6 +306,7 @@ describe.sequential("durable debate worker", () => {
     const callsBeforeAmbiguousRetry = adapter.requests.length;
     expect(await worker.tick()).toBe("failed");
     expect(adapter.requests).toHaveLength(callsBeforeAmbiguousRetry + 1);
+    expect(adapter.requests.at(-1)?.initiatedByUserId).toBe("user-1");
     expect(await worker.tick()).toBe("idle");
     expect(adapter.requests).toHaveLength(callsBeforeAmbiguousRetry + 1);
     const retryQuarantined = await service.getRun("project-debate", debate.id, ambiguous.id);

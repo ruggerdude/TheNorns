@@ -24,6 +24,7 @@ import { Gantt, type GanttPhase } from "./Gantt";
 import { KnowledgeStatusPanel } from "./KnowledgeStatusPanel";
 import { Login, type LoginMode } from "./Login";
 import { PhaseTab } from "./PhaseTab";
+import { ProjectMembers } from "./ProjectMembers";
 import {
   AttentionDecisionForm,
   type AttentionItemDto,
@@ -75,6 +76,7 @@ import { type UpdatePreferences, resolveUpdatePreferences } from "./workspacePre
 const GraphCanvas = lazy(() =>
   import("./GraphCanvas").then(({ GraphCanvas }) => ({ default: GraphCanvas })),
 );
+const UsageHub = lazy(() => import("./UsageHub").then(({ UsageHub }) => ({ default: UsageHub })));
 
 interface Assignment {
   provider: string;
@@ -739,6 +741,7 @@ function ProjectGraph({
   user,
   onOpenAccount,
   onOpenAdmin,
+  onOpenUsage,
 }: {
   project: ProjectSummary;
   onBack: () => void;
@@ -749,6 +752,7 @@ function ProjectGraph({
   user: CurrentUser | null;
   onOpenAccount: () => void;
   onOpenAdmin: () => void;
+  onOpenUsage: () => void;
 }): React.ReactElement {
   const { theme } = useTheme();
   const base = `/api/projects/${project.id}`;
@@ -788,7 +792,7 @@ function ProjectGraph({
   // canvas was the dominant panel before this, everything else crammed into
   // a narrow sidebar. Purely a layout change: every section below is the
   // exact same JSX/logic that existed already, just grouped under a tab.
-  type WorkspaceTab = "overview" | "work" | "graph" | "debates" | "settings";
+  type WorkspaceTab = "overview" | "work" | "graph" | "members" | "debates" | "settings";
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>(
     isCanonicalPlanningJourney && project.focus_planning_run_id ? "work" : "overview",
   );
@@ -1683,6 +1687,11 @@ function ProjectGraph({
           <Button className="btn-small" variant="ghost" onClick={() => onOpenAccount()}>
             Settings
           </Button>
+          {user ? (
+            <Button className="btn-small" variant="ghost" onClick={onOpenUsage}>
+              Usage
+            </Button>
+          ) : null}
           {user?.role === "admin" ? (
             <Button className="btn-small" variant="ghost" onClick={onOpenAdmin}>
               Admin
@@ -1722,7 +1731,7 @@ function ProjectGraph({
         </div>
 
         {/* Project navigation keeps optional planning inside Overview and
-         * treats Work and Debates as first-class workspace subpages. */}
+         * treats Work, Members, and Debates as first-class workspace subpages. */}
         <nav className="workspace-tabs" aria-label="Workspace sections">
           <button
             type="button"
@@ -1747,6 +1756,14 @@ function ProjectGraph({
             onClick={() => selectWorkspaceTab("graph")}
           >
             Graph
+          </button>
+          <button
+            type="button"
+            className={workspaceTab === "members" ? "on" : ""}
+            aria-current={workspaceTab === "members" ? "page" : undefined}
+            onClick={() => selectWorkspaceTab("members")}
+          >
+            Members
           </button>
           <button
             type="button"
@@ -2684,6 +2701,15 @@ function ProjectGraph({
             ) : null}
           </div>
         ) : null}
+
+        {workspaceTab === "members" ? (
+          <div className="workspace-tab-panel" data-testid="workspace-tab-members">
+            <ProjectMembers
+              projectId={project.id}
+              onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+            />
+          </div>
+        ) : null}
       </main>
     </div>
   );
@@ -2711,6 +2737,7 @@ export function App(): React.ReactElement {
     requestedSettingsTab === "connections" ? "connections" : "profile",
   );
   const [showAdmin, setShowAdmin] = useState(false);
+  const [showUsage, setShowUsage] = useState(false);
 
   useEffect(() => {
     // An invite link always wins, regardless of bootstrap state — no need to
@@ -2764,6 +2791,7 @@ export function App(): React.ReactElement {
     setOpenProjects([]);
     setShowAccount(false);
     setShowAdmin(false);
+    setShowUsage(false);
   }, []);
 
   const openProject = useCallback((project: ProjectSummary) => {
@@ -2811,7 +2839,18 @@ export function App(): React.ReactElement {
   return (
     <>
       <ThemeToggle />
-      {!activeProject ? (
+      {showUsage && user ? (
+        <Suspense fallback={<Spinner label="Loading usage intelligence…" />}>
+          <UsageHub
+            user={user}
+            {...(activeProject
+              ? { project: { id: activeProject.id, name: activeProject.name } }
+              : {})}
+            onClose={() => setShowUsage(false)}
+            onUnauthorized={() => logout("Session expired. Sign in again.")}
+          />
+        </Suspense>
+      ) : !activeProject ? (
         <Projects
           onOpenProject={openProject}
           openProjects={openProjects}
@@ -2821,6 +2860,7 @@ export function App(): React.ReactElement {
           user={user}
           onOpenAccount={openAccount}
           onOpenAdmin={() => setShowAdmin(true)}
+          onOpenUsage={() => setShowUsage(true)}
         />
       ) : (
         <ProjectGraph
@@ -2833,6 +2873,7 @@ export function App(): React.ReactElement {
           user={user}
           onOpenAccount={openAccount}
           onOpenAdmin={() => setShowAdmin(true)}
+          onOpenUsage={() => setShowUsage(true)}
         />
       )}
       {showAccount && user ? (

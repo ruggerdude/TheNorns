@@ -89,6 +89,14 @@ interface RuntimeSchemaPosture {
   agent_execution_registrations: string | null;
   agent_handoffs: string | null;
   knowledge_deltas: string | null;
+  agent_reasoning_effort: boolean;
+  global_rule_settings: string | null;
+  ai_usage_events: string | null;
+  project_owner_user_id: boolean;
+  project_members: string | null;
+  usage_budget_policies: string | null;
+  ai_usage_calibration_observations: string | null;
+  shadow_read_recorded_order: boolean;
 }
 
 /**
@@ -110,7 +118,34 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
             to_regclass('public.agent_execution_registrations')::text
               AS agent_execution_registrations,
             to_regclass('public.agent_handoffs')::text AS agent_handoffs,
-            to_regclass('public.knowledge_deltas')::text AS knowledge_deltas`,
+            to_regclass('public.knowledge_deltas')::text AS knowledge_deltas,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='agent_profiles'
+                 AND column_name='reasoning_effort'
+            ) AS agent_reasoning_effort,
+            to_regclass('public.global_rule_settings')::text AS global_rule_settings,
+            to_regclass('public.ai_usage_events')::text AS ai_usage_events,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='projects'
+                 AND column_name='owner_user_id'
+            ) AS project_owner_user_id,
+            to_regclass('public.project_members')::text AS project_members,
+            to_regclass('public.usage_budget_policies')::text AS usage_budget_policies,
+            to_regclass('public.ai_usage_calibration_observations')::text
+              AS ai_usage_calibration_observations,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='shadow_read_comparisons'
+                 AND column_name='recorded_order'
+            ) AS shadow_read_recorded_order`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -119,6 +154,14 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.agent_execution_registrations ? ["agent_execution_registrations"] : []),
     ...(!posture?.agent_handoffs ? ["agent_handoffs"] : []),
     ...(!posture?.knowledge_deltas ? ["knowledge_deltas"] : []),
+    ...(!posture?.agent_reasoning_effort ? ["agent_profiles.reasoning_effort"] : []),
+    ...(!posture?.global_rule_settings ? ["global_rule_settings"] : []),
+    ...(!posture?.ai_usage_events ? ["ai_usage_events"] : []),
+    ...(!posture?.project_owner_user_id ? ["projects.owner_user_id"] : []),
+    ...(!posture?.project_members ? ["project_members"] : []),
+    ...(!posture?.usage_budget_policies ? ["usage_budget_policies"] : []),
+    ...(!posture?.ai_usage_calibration_observations ? ["ai_usage_calibration_observations"] : []),
+    ...(!posture?.shadow_read_recorded_order ? ["shadow_read_comparisons.recorded_order"] : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

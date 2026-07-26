@@ -27,6 +27,13 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     `);
     await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
     await pg.exec(`
+      INSERT INTO users (
+        id, username, display_name, email, name, password_hash,
+        password_hash_scheme, role, status
+      ) VALUES (
+        'admin-1','admin@example.test','Admin','admin@example.test','Admin',
+        'hash','scrypt-v1','admin','active'
+      );
       INSERT INTO projects (
         id, name, description, status, assignment_policy_ref,
         verification_policy_ref, budget_policy_ref
@@ -41,8 +48,11 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
         'verification','healthy','human','admin-1');
       UPDATE projects SET primary_repository_binding_id = 'binding-1' WHERE id = 'project-1';
       INSERT INTO phases (
-        id, project_id, objective_summary, priority, status, approved_budget_usd
-      ) VALUES ('phase-1','project-1','Implement vertical slice',1,'awaiting_approval',20);
+        id, project_id, objective_summary, priority, status, approved_budget_usd,
+        initiated_by_user_id
+      ) VALUES (
+        'phase-1','project-1','Implement vertical slice',1,'awaiting_approval',20,'admin-1'
+      );
       INSERT INTO strategy_versions (
         id, project_id, phase_id, version, status, objective, content,
         convergence, review_rounds, content_hash
@@ -463,6 +473,19 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     expect(row?.reservation_status).toBe("settled");
     expect(row?.resolution_outcome).toBe("partial_usage");
     expect(Number(row?.settled_usd)).toBeCloseTo(0.27, 6);
+
+    const canonical = await pg.query<{
+      event_type: string;
+      initiated_by_user_id: string | null;
+    }>(
+      `SELECT event_type, initiated_by_user_id
+       FROM ai_usage_events
+       WHERE run_id=$1
+       ORDER BY sequence`,
+      [scheduled.run_id],
+    );
+    expect(canonical.rows).toHaveLength(3);
+    expect(canonical.rows.every((event) => event.initiated_by_user_id === "admin-1")).toBe(true);
   });
 
   it("dead-letters exhausted delivery, blocks work, and releases its reservation", async () => {

@@ -1,0 +1,155 @@
+.usage-page {
+  display: grid;
+  gap: 20px;
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.usage-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.usage-heading h1 {
+  margin: 2px 0 6px;
+}
+
+.usage-eyebrow {
+  margin: 0;
+  color: var(--accent, #5f69ff);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.usage-filters {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr)) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 16px;
+}
+
+.usage-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.usage-stat {
+  display: grid;
+  gap: 6px;
+  padding: 18px;
+}
+
+.usage-stat > span,
+.usage-stat > small {
+  color: var(--text-muted, #687083);
+}
+
+.usage-stat > strong {
+  font-size: clamp(1.45rem, 3vw, 2rem);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-section {
+  min-width: 0;
+  padding: 18px;
+}
+
+.usage-chart-wrap,
+.usage-table-wrap {
+  overflow-x: auto;
+}
+
+.usage-chart {
+  display: block;
+  width: 100%;
+  min-width: 320px;
+  max-height: 220px;
+}
+
+.usage-axis {
+  stroke: var(--border, #d8dce5);
+}
+
+.usage-bar {
+  fill: var(--accent, #5f69ff);
+}
+
+.usage-chart-label {
+  fill: var(--text-muted, #687083);
+  font-size: 9px;
+}
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.usage-table th,
+.usage-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border, #d8dce5);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.usage-table th {
+  color: var(--text-muted, #687083);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.usage-model {
+  display: block;
+  color: var(--text-muted, #687083);
+}
+
+.usage-failed {
+  color: var(--danger, #bc2e3b);
+  font-weight: 700;
+}
+
+.usage-error-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+}
+
+.usage-empty {
+  padding: 24px;
+  color: var(--text-muted, #687083);
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .usage-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .usage-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .usage-page {
+    padding: 16px;
+  }
+
+  .usage-heading {
+    flex-direction: column;
+  }
+
+  .usage-filters,
+  .usage-summary {
+    grid-template-columns: 1fr;
+  }
+}

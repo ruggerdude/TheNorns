@@ -68,6 +68,7 @@ export const LegacyGraphSnapshot = z
   })
   .strict();
 export type LegacyGraphSnapshotT = z.infer<typeof LegacyGraphSnapshot>;
+export type LegacyGraphSnapshotInputT = z.input<typeof LegacyGraphSnapshot>;
 
 export const LegacyAllocationApproval = z
   .object({
@@ -83,6 +84,7 @@ export type LegacyAllocationApprovalT = z.infer<typeof LegacyAllocationApproval>
 export type ParsedLegacyProjectPayloads = {
   plan: PlanContractT | null;
   graph: LegacyGraphSnapshotT | null;
+  graph_source: LegacyGraphSnapshotInputT | null;
   approval: LegacyAllocationApprovalT | null;
   plan_valid: boolean;
   graph_valid: boolean;
@@ -100,6 +102,10 @@ export function parseLegacyProjectPayloads(
   return {
     plan: planResult?.ok === true ? planResult.plan : null,
     graph: graphResult?.success === true ? graphResult.data : null,
+    // Keep the validated input alongside the normalized graph. Historical
+    // approval hashes were produced before newer assignment defaults existed.
+    graph_source:
+      graphResult?.success === true ? (source.graph as LegacyGraphSnapshotInputT) : null,
     approval: approvalResult?.success === true ? approvalResult.data : null,
     plan_valid: source.plan === null || planResult?.ok === true,
     graph_valid: source.graph === null || graphResult?.success === true,

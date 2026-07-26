@@ -269,13 +269,13 @@ async function prepare(page: Page, mode: "github" | "local" | "new") {
 async function expectWorkspaceNavigation(page: Page) {
   const navigation = page.getByRole("navigation", { name: "Workspace sections" });
   const overview = navigation.getByRole("button", { name: /overview/i });
-  const phase = navigation.getByRole("button", { name: /phase/i });
+  const work = navigation.getByRole("button", { name: /work$/i });
 
   await expect(navigation).toBeVisible();
   await expect(overview).toHaveAttribute("aria-current", "page");
-  await expect(phase).toBeVisible();
-  await phase.click();
-  await expect(phase).toHaveAttribute("aria-current", "page");
+  await expect(work).toBeVisible();
+  await work.click();
+  await expect(work).toHaveAttribute("aria-current", "page");
   await expect(page.getByTestId("workspace-tab-work")).toBeVisible();
 }
 
@@ -410,7 +410,7 @@ test("New project goes from one brief to the first coding task", async ({ page }
   expect(observed.planningDecisions).toEqual([expect.objectContaining({ decision: "approve" })]);
 });
 
-test("Workspace uses a centered responsive shell, current navigation, and one Phase composer", async ({
+test("Workspace uses a centered responsive shell, current navigation, and one Work composer", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
@@ -430,10 +430,10 @@ test("Workspace uses a centered responsive shell, current navigation, and one Ph
   );
 
   const workspaceNavigation = page.getByRole("navigation", { name: "Workspace sections" });
-  const phaseTab = workspaceNavigation.getByRole("button", { name: /phase/i });
-  await phaseTab.click();
-  await expect(phaseTab).toHaveAttribute("aria-current", "page");
-  expect(await phaseTab.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe(
+  const workTab = workspaceNavigation.getByRole("button", { name: /work$/i });
+  await workTab.click();
+  await expect(workTab).toHaveAttribute("aria-current", "page");
+  expect(await workTab.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe(
     "rgba(0, 0, 0, 0)",
   );
 

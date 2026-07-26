@@ -229,9 +229,9 @@ export interface CreatePlanningRunInput {
   maxRounds?: number;
   mode?: PlanningRunMode;
   /**
-   * Authenticated human initiating the run. Required for quick changes
-   * because their approval and strategy materialization happen
-   * autonomously, after the request has returned.
+   * Authenticated human initiating the run. HTTP creation supplies this for
+   * both planned and quick work so every later model call can retain the
+   * original requester through asynchronous materialization and execution.
    */
   requestedBy?: string;
   pm?: PlanningParticipantSelection;
@@ -329,11 +329,11 @@ export class PlanningRunService {
         `INSERT INTO planning_runs (
            id, project_id, status, round, max_rounds, objective, transcript,
            result, total_cost_usd, error, created_at, updated_at, attachment_ids,
-           worker_providers, mode, requested_by, pm_provider, pm_model,
+           worker_providers, mode, requested_by, initiated_by_user_id, pm_provider, pm_model,
            pm_reasoning_effort, agent_provider, agent_model, agent_reasoning_effort
          ) VALUES (
            $1,$2,'queued',0,$3,$4,'[]'::jsonb,NULL,0,NULL,$5,$5,$6::jsonb,$7,
-           $8,$9,$10,$11,$12,$13,$14,$15
+           $8,$9,$9,$10,$11,$12,$13,$14,$15
          )`,
         [
           id,

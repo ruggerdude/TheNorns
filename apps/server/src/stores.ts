@@ -60,6 +60,12 @@ export type IngestOutcome = "accepted" | "duplicate" | "out_of_order";
 
 export class RelayStores {
   private state: StoreState;
+  /**
+   * Relay snapshots can grow very large after long runner sessions. The
+   * persistence flusher polls every second, so serializing an unchanged store
+   * on every tick creates avoidable CPU and garbage-collection stalls.
+   */
+  private serializedSnapshot: string | null = null;
 
   constructor(initial?: StoreState) {
     this.state = initial ?? {
@@ -75,17 +81,25 @@ export class RelayStores {
 
   /** Serialize durable state; the restart test recovers a server from this. */
   snapshot(): string {
-    return JSON.stringify(this.state);
+    this.serializedSnapshot ??= JSON.stringify(this.state);
+    return this.serializedSnapshot;
   }
 
   static restore(json: string): RelayStores {
-    return new RelayStores(JSON.parse(json) as StoreState);
+    const stores = new RelayStores(JSON.parse(json) as StoreState);
+    stores.serializedSnapshot = json;
+    return stores;
+  }
+
+  private changed(): void {
+    this.serializedSnapshot = null;
   }
 
   // -- audit ----------------------------------------------------------------
 
   audit(actor: string, action: string, detail: string, now: Date): void {
     this.state.audit.push({ at: now.toISOString(), actor, action, detail });
+    this.changed();
   }
 
   auditEntries(): readonly AuditEntry[] {
@@ -96,12 +110,14 @@ export class RelayStores {
 
   createPairing(code: string, expiresAt: Date): void {
     this.state.pairings[code] = { code, expires_at: expiresAt.toISOString() };
+    this.changed();
   }
 
   consumePairing(code: string, now: Date): boolean {
     const record = this.state.pairings[code];
     if (!record) return false;
     delete this.state.pairings[code];
+    this.changed();
     return Date.parse(record.expires_at) > now.getTime();
   }
 
@@ -114,6 +130,7 @@ export class RelayStores {
       last_seen_at: null,
     };
     this.state.runners[runnerId] = record;
+    this.changed();
     return record;
   }
 
@@ -142,6 +159,7 @@ export class RelayStores {
       last_seen_at: null,
     };
     this.state.runners[runnerId] = record;
+    this.changed();
     return record.generation;
   }
 
@@ -162,6 +180,7 @@ export class RelayStores {
     const record = this.state.runners[runnerId];
     if (!record || record.generation !== generation) return null;
     record.public_key_pem = publicKeyPem;
+    this.changed();
     return record;
   }
 
@@ -175,7 +194,10 @@ export class RelayStores {
 
   markSeen(runnerId: string, now: Date): void {
     const record = this.state.runners[runnerId];
-    if (record) record.last_seen_at = now.toISOString();
+    if (record) {
+      record.last_seen_at = now.toISOString();
+      this.changed();
+    }
   }
 
   /**
@@ -186,6 +208,7 @@ export class RelayStores {
     const record = this.state.runners[runnerId];
     if (!record) throw new Error(`unknown runner ${runnerId}`);
     record.generation += 1;
+    this.changed();
     return record.generation;
   }
 
@@ -199,6 +222,7 @@ export class RelayStores {
       superseded_terminal: null,
     };
     this.state.commands[envelope.command_id] = record;
+    this.changed();
     return record;
   }
 
@@ -215,12 +239,16 @@ export class RelayStores {
     if (!record) return undefined;
     if (record.state === to) return record; // idempotent replayed ack
     if (TERMINAL_COMMAND_STATES.has(record.state)) {
-      if (TERMINAL_COMMAND_STATES.has(to)) record.superseded_terminal = to;
+      if (TERMINAL_COMMAND_STATES.has(to) && record.superseded_terminal !== to) {
+        record.superseded_terminal = to;
+        this.changed();
+      }
       return record;
     }
     if (!canCommandTransition(record.state, to)) return record;
     record.state = to;
     record.updated_at = now.toISOString();
+    this.changed();
     return record;
   }
 
@@ -259,6 +287,7 @@ export class RelayStores {
     log.push(event);
     this.state.eventsByRunner[event.runner_id] = log;
     this.state.watermark[event.runner_id] = event.event_seq;
+    this.changed();
     return "accepted";
   }
 
@@ -273,6 +302,8 @@ export class RelayStores {
   }
 
   setKillSwitch(engaged: boolean): void {
+    if (this.state.killSwitch === engaged) return;
     this.state.killSwitch = engaged;
+    this.changed();
   }
 }

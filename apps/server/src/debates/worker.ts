@@ -45,6 +45,8 @@ interface ClaimedJob {
   jobId: string;
   leaseToken: string;
   turnAttemptId: string;
+  attemptNumber: number;
+  initiatedByUserId: string | null;
   debate: z.infer<typeof V2Debate>;
   run: z.infer<typeof V2DebateRun>;
   round: z.infer<typeof V2DebateRound>;
@@ -147,10 +149,13 @@ export class DebateWorker {
           prompt: prompt.prompt,
           maxTokens: prompt.maxTokens,
           projectId: claim.debate.project_id,
+          initiatedByUserId: claim.initiatedByUserId,
           debateId: claim.debate.id,
           debateRunId: claim.run.id,
           debateTurnId: claim.turn.id,
           debateTurnAttemptId: claim.turnAttemptId,
+          telemetryRetryGroupId: claim.turn.id,
+          telemetryRetryAttempt: claim.attemptNumber - 1,
           signal: abortController.signal,
           structuredOutputPrepared: true,
         },
@@ -780,23 +785,38 @@ export class DebateWorker {
     leaseToken: string;
   }): Promise<ClaimedJob> {
     return this.transactions.transaction(async (tx) => {
-      const [debateResult, runResult, turnResult, actorResult] = await Promise.all([
-        tx.query<Record<string, unknown>>("SELECT * FROM debates WHERE id = $1", [
-          claimed.debate_id,
-        ]),
-        tx.query<Record<string, unknown>>("SELECT * FROM debate_runs WHERE id = $1", [
-          claimed.debate_run_id,
-        ]),
-        tx.query<Record<string, unknown>>(
-          "SELECT * FROM debate_turns WHERE designated_attempt_id = $1",
-          [claimed.turn_attempt_id],
-        ),
-        tx.query<Record<string, unknown>>(
-          `SELECT a.* FROM debate_actors a JOIN debate_turns t ON t.actor_id = a.id
-           WHERE t.designated_attempt_id = $1`,
-          [claimed.turn_attempt_id],
-        ),
-      ]);
+      const [debateResult, runResult, turnResult, actorResult, attemptResult, initiatorResult] =
+        await Promise.all([
+          tx.query<Record<string, unknown>>("SELECT * FROM debates WHERE id = $1", [
+            claimed.debate_id,
+          ]),
+          tx.query<Record<string, unknown>>("SELECT * FROM debate_runs WHERE id = $1", [
+            claimed.debate_run_id,
+          ]),
+          tx.query<Record<string, unknown>>(
+            "SELECT * FROM debate_turns WHERE designated_attempt_id = $1",
+            [claimed.turn_attempt_id],
+          ),
+          tx.query<Record<string, unknown>>(
+            `SELECT a.* FROM debate_actors a JOIN debate_turns t ON t.actor_id = a.id
+             WHERE t.designated_attempt_id = $1`,
+            [claimed.turn_attempt_id],
+          ),
+          tx.query<{ attempt_number: number }>(
+            "SELECT attempt_number FROM debate_turn_attempts WHERE id = $1",
+            [claimed.turn_attempt_id],
+          ),
+          tx.query<{ actor_id: string | null }>(
+            `SELECT actor_id
+             FROM debate_events
+             WHERE debate_run_id = $1
+               AND event_type = 'debate_run_queued'
+               AND actor_type = 'human'
+             ORDER BY sequence
+             LIMIT 1`,
+            [claimed.debate_run_id],
+          ),
+        ]);
       const rawTurn = turnResult.rows[0];
       if (!rawTurn) throw new Error("claimed debate turn disappeared");
       const roundResult = await tx.query<Record<string, unknown>>(
@@ -919,6 +939,8 @@ export class DebateWorker {
         jobId: claimed.id,
         leaseToken: claimed.leaseToken,
         turnAttemptId: claimed.turn_attempt_id,
+        attemptNumber: Number(attemptResult.rows[0]?.attempt_number ?? 1),
+        initiatedByUserId: initiatorResult.rows[0]?.actor_id ?? null,
         debate,
         run,
         round,

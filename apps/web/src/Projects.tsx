@@ -474,6 +474,7 @@ export function Projects({
   user,
   onOpenAccount,
   onOpenAdmin,
+  onOpenUsage,
 }: {
   onOpenProject: (p: ProjectSummary) => void;
   openProjects: ProjectSummary[];
@@ -483,6 +484,7 @@ export function Projects({
   user: CurrentUser | null;
   onOpenAccount: (tab?: SettingsTab) => void;
   onOpenAdmin: () => void;
+  onOpenUsage?: () => void;
 }): React.ReactElement {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1457,6 +1459,11 @@ export function Projects({
           <Button variant="ghost" className="btn-small" onClick={() => onOpenAccount()}>
             Settings
           </Button>
+          {user && onOpenUsage ? (
+            <Button variant="ghost" className="btn-small" onClick={onOpenUsage}>
+              Usage
+            </Button>
+          ) : null}
           {user?.role === "admin" ? (
             <Button variant="ghost" className="btn-small" onClick={onOpenAdmin}>
               Admin

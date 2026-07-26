@@ -129,13 +129,16 @@ export class AnthropicAdapter implements LlmAdapter {
   }
 
   private usageOf(response: Anthropic.Message, request: CompletionRequest) {
+    const cacheReadTokens = response.usage.cache_read_input_tokens ?? 0;
+    const cacheWriteTokens = response.usage.cache_creation_input_tokens ?? 0;
     return makeUsageEvent(
       this.model,
       this.registry,
       { projectId: request.projectId, nodeId: request.nodeId, runId: request.runId },
-      response.usage.input_tokens,
+      response.usage.input_tokens + cacheReadTokens + cacheWriteTokens,
       response.usage.output_tokens,
       "provider_api",
+      { readTokens: cacheReadTokens, writeTokens: cacheWriteTokens },
     );
   }
 

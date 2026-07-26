@@ -262,6 +262,66 @@ describe.sequential("Phase 2 fenced identity cutover", () => {
     await expectCutoverCode("current_green_evidence_required");
   });
 
+  it("uses durable insertion order when current evidence shares one timestamp", async () => {
+    await recordGreenEvidence();
+    const green = buildShadowReadComparison({
+      migration_run_id: RUN_ID,
+      scope_type: "identity",
+      scope_key: "*",
+      operation: "expired-revoked-rejection",
+      legacy: { satisfied: true },
+      relational: { satisfied: true },
+      observed_at: "2026-07-16T18:00:00Z",
+    });
+    const mismatch = buildShadowReadComparison({
+      migration_run_id: RUN_ID,
+      scope_type: "identity",
+      scope_key: "*",
+      operation: "expired-revoked-rejection",
+      legacy: { satisfied: true },
+      relational: { satisfied: false },
+      observed_at: "2026-07-16T18:00:00Z",
+    });
+    await pg.transaction(async (tx) => {
+      for (const comparison of [green, mismatch]) {
+        await tx.query(
+          `INSERT INTO shadow_read_comparisons (
+             id, migration_run_id, scope_type, scope_key, operation,
+             legacy_hash, relational_hash, matched, differences,
+             source_key, source_manifest_hash, source_exact_hash,
+             source_updated_at, observed_at
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,
+             'users',$10,$11,'2026-07-16T18:00:00Z','2026-07-16T18:00:00Z'
+           )`,
+          [
+            comparison.id,
+            comparison.migration_run_id,
+            comparison.scope_type,
+            comparison.scope_key,
+            comparison.operation,
+            comparison.legacy_hash,
+            comparison.relational_hash,
+            comparison.matched,
+            JSON.stringify(comparison.differences),
+            MANIFEST_HASH,
+            "0".repeat(64),
+          ],
+        );
+      }
+    });
+    const tied = await pg.query<{ matched: boolean; recorded_order: number }>(
+      `SELECT matched, recorded_order
+       FROM shadow_read_comparisons
+       WHERE operation='expired-revoked-rejection'
+       ORDER BY recorded_order DESC
+       LIMIT 2`,
+    );
+    expect(tied.rows[0]?.matched).toBe(false);
+    expect(tied.rows[0]?.recorded_order).toBeGreaterThan(tied.rows[1]?.recorded_order ?? 0);
+    await expectCutoverCode("current_green_evidence_required");
+  });
+
   it("requires the succeeded restore step and verified checkpoint", async () => {
     await recordGreenEvidence();
     await pg.query(

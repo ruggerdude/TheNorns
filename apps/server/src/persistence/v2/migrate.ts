@@ -219,6 +219,36 @@ export const GLOBAL_RULES_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const AI_USAGE_TELEMETRY_MIGRATION_NAME = "0030_ai_usage_telemetry";
+export const AI_USAGE_TELEMETRY_MIGRATION_URL = new URL(
+  "../../../drizzle/0030_ai_usage_telemetry.sql",
+  import.meta.url,
+);
+
+export const PROJECT_ACCESS_ATTRIBUTION_MIGRATION_NAME = "0031_project_access_attribution";
+export const PROJECT_ACCESS_ATTRIBUTION_MIGRATION_URL = new URL(
+  "../../../drizzle/0031_project_access_attribution.sql",
+  import.meta.url,
+);
+
+export const USAGE_INTELLIGENCE_POLICIES_MIGRATION_NAME = "0032_usage_intelligence_policies";
+export const USAGE_INTELLIGENCE_POLICIES_MIGRATION_URL = new URL(
+  "../../../drizzle/0032_usage_intelligence_policies.sql",
+  import.meta.url,
+);
+
+export const USAGE_CALIBRATION_ANALYTICS_MIGRATION_NAME = "0033_usage_calibration_analytics";
+export const USAGE_CALIBRATION_ANALYTICS_MIGRATION_URL = new URL(
+  "../../../drizzle/0033_usage_calibration_analytics.sql",
+  import.meta.url,
+);
+
+export const SHADOW_EVIDENCE_ORDER_MIGRATION_NAME = "0034_shadow_evidence_order";
+export const SHADOW_EVIDENCE_ORDER_MIGRATION_URL = new URL(
+  "../../../drizzle/0034_shadow_evidence_order.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -365,6 +395,26 @@ export async function loadCodexReasoningEffortMigrationSql(): Promise<string> {
 
 export async function loadGlobalRulesMigrationSql(): Promise<string> {
   return readFile(GLOBAL_RULES_MIGRATION_URL, "utf8");
+}
+
+export async function loadAiUsageTelemetryMigrationSql(): Promise<string> {
+  return readFile(AI_USAGE_TELEMETRY_MIGRATION_URL, "utf8");
+}
+
+export async function loadProjectAccessAttributionMigrationSql(): Promise<string> {
+  return readFile(PROJECT_ACCESS_ATTRIBUTION_MIGRATION_URL, "utf8");
+}
+
+export async function loadUsageIntelligencePoliciesMigrationSql(): Promise<string> {
+  return readFile(USAGE_INTELLIGENCE_POLICIES_MIGRATION_URL, "utf8");
+}
+
+export async function loadUsageCalibrationAnalyticsMigrationSql(): Promise<string> {
+  return readFile(USAGE_CALIBRATION_ANALYTICS_MIGRATION_URL, "utf8");
+}
+
+export async function loadShadowEvidenceOrderMigrationSql(): Promise<string> {
+  return readFile(SHADOW_EVIDENCE_ORDER_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -590,6 +640,26 @@ export async function runCurrentV2Migrations(
     {
       name: GLOBAL_RULES_MIGRATION_NAME,
       sql: await loadGlobalRulesMigrationSql(),
+    },
+    {
+      name: AI_USAGE_TELEMETRY_MIGRATION_NAME,
+      sql: await loadAiUsageTelemetryMigrationSql(),
+    },
+    {
+      name: PROJECT_ACCESS_ATTRIBUTION_MIGRATION_NAME,
+      sql: await loadProjectAccessAttributionMigrationSql(),
+    },
+    {
+      name: USAGE_INTELLIGENCE_POLICIES_MIGRATION_NAME,
+      sql: await loadUsageIntelligencePoliciesMigrationSql(),
+    },
+    {
+      name: USAGE_CALIBRATION_ANALYTICS_MIGRATION_NAME,
+      sql: await loadUsageCalibrationAnalyticsMigrationSql(),
+    },
+    {
+      name: SHADOW_EVIDENCE_ORDER_MIGRATION_NAME,
+      sql: await loadShadowEvidenceOrderMigrationSql(),
     },
   ]);
 }

@@ -62,6 +62,7 @@ import {
   assertRestrictedRuntimeDatabase,
   postgresPoolConfig,
 } from "./persistence/postgresConnection.js";
+import { SqlAiUsageTelemetryRepository } from "./persistence/v2/aiUsageTelemetry.js";
 import { NodePgTransactionRunner, type V2TransactionRunner } from "./persistence/v2/database.js";
 import { ExecutionKickoffService } from "./planning/executionKickoff.js";
 import type { ApprovedPlanExecutionKickoff } from "./planning/runService.js";
@@ -95,6 +96,7 @@ import {
   RelationalCompositionConflictError,
 } from "./startup/relationalCompositionBridge.js";
 import { RelayStores } from "./stores.js";
+import { AiInvocationTelemetry } from "./usage-intelligence/telemetry.js";
 import { UserStore } from "./users/store.js";
 
 // The scripted demo walkthrough that drives the DEMO dashboard's example view
@@ -228,6 +230,9 @@ if (databaseUrl) {
       mode: "runtime",
       role: "norns_app",
     });
+    const canonicalTelemetry = new AiInvocationTelemetry(
+      new SqlAiUsageTelemetryRepository(runtimeTransactions),
+    );
     const knowledgeService = new KnowledgeSystemService(runtimeTransactions);
     knowledgeOptions = { service: knowledgeService };
     // GitHub manifest credentials are durable PostgreSQL data and may be used
@@ -292,10 +297,12 @@ if (databaseUrl) {
       createAdapter: () => {
         const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
         if (!apiKey) throw new Error("Anthropic is not configured for repository analysis");
-        return new AnthropicAdapter({
-          apiKey,
-          model: process.env.NORNS_REPOSITORY_ANALYSIS_MODEL?.trim() || "claude-sonnet-5",
-        });
+        return canonicalTelemetry.wrapAdapter(
+          new AnthropicAdapter({
+            apiKey,
+            model: process.env.NORNS_REPOSITORY_ANALYSIS_MODEL?.trim() || "claude-sonnet-5",
+          }),
+        );
       },
     });
     phase4Services = {
@@ -424,12 +431,12 @@ if (databaseUrl) {
         if (provider === "anthropic") {
           const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
           if (!apiKey) throw new Error("Anthropic is not configured for debate execution");
-          return new AnthropicAdapter({ apiKey, model });
+          return canonicalTelemetry.wrapAdapter(new AnthropicAdapter({ apiKey, model }));
         }
         if (provider === "openai") {
           const apiKey = process.env.OPENAI_API_KEY?.trim();
           if (!apiKey) throw new Error("OpenAI is not configured for debate execution");
-          return new OpenAiAdapter({ apiKey, model });
+          return canonicalTelemetry.wrapAdapter(new OpenAiAdapter({ apiKey, model }));
         }
         throw new Error(`unsupported debate provider: ${provider}`);
       },

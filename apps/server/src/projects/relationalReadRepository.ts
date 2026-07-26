@@ -298,6 +298,7 @@ export async function insertProjectCore(
     pmModel: PmModelT | null;
     reviewerProvider: ProviderName;
     createdAt: string;
+    ownerUserId?: string;
     onboardingScenario?: string | null;
   },
 ): Promise<void> {
@@ -305,8 +306,12 @@ export async function insertProjectCore(
     `INSERT INTO projects (
        id, name, description, status, assignment_policy_ref,
        verification_policy_ref, budget_policy_ref, onboarding_scenario,
-       created_at, updated_at
-     ) VALUES ($1,$2,$3,'initializing',$4,$5,$6,$7,$8,$8)
+       owner_user_id, created_at, updated_at
+     ) VALUES (
+       $1,$2,$3,'initializing',$4,$5,$6,$7,
+       (SELECT id FROM users WHERE id=$8),
+       $9,$9
+     )
      ON CONFLICT (id) DO NOTHING`,
     [
       input.projectId,
@@ -316,9 +321,27 @@ export async function insertProjectCore(
       "verification-policy:default-v1",
       "budget-policy:default-v1",
       input.onboardingScenario ?? null,
+      input.ownerUserId ?? null,
       input.createdAt,
     ],
   );
+  if (input.ownerUserId) {
+    await sql.query(
+      `INSERT INTO project_members (
+         project_id, user_id, status, added_by_user_id, added_at
+       )
+       SELECT id, owner_user_id, 'active', owner_user_id, $3
+       FROM projects
+       WHERE id=$1 AND owner_user_id=$2
+       ON CONFLICT (project_id, user_id) DO UPDATE
+       SET status='active',
+           added_by_user_id=EXCLUDED.added_by_user_id,
+           added_at=EXCLUDED.added_at,
+           removed_by_user_id=NULL,
+           removed_at=NULL`,
+      [input.projectId, input.ownerUserId, input.createdAt],
+    );
+  }
   await sql.query(
     `INSERT INTO project_planning_preferences (
        project_id, pm_provider, pm_model, reviewer_provider, source,
@@ -660,6 +683,7 @@ export class RelationalProjectReadRepository implements ProjectRepository {
         pmModel: input.pmModel ?? null,
         reviewerProvider,
         createdAt,
+        ...(input.ownerUserId ? { ownerUserId: input.ownerUserId } : {}),
       });
 
       if (input.sourceType && input.sourceLocation) {
