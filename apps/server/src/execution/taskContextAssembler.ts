@@ -150,6 +150,10 @@ interface MemoryRow {
   confidence: number | string;
 }
 
+interface GlobalRulesRow {
+  content: string;
+}
+
 interface DependencyRow {
   id: string;
   title: string;
@@ -242,6 +246,7 @@ interface ContextModel {
   assignment: AssignmentRow | null;
   architecture: ArchitectureRow;
   facts: RepositoryFact[];
+  globalRules: string | null;
   directives: MemoryItem[];
   dependencies: DependencyOutcome[];
   /** Set once dependency detail has been degraded to title+state. */
@@ -443,7 +448,7 @@ function renderRepository(model: ContextModel): string {
 }
 
 function renderDirectives(model: ContextModel): string | null {
-  if (model.directives.length === 0) return null;
+  if (model.globalRules === null && model.directives.length === 0) return null;
   const directives = model.directives.filter((item) => item.category === "directive");
   const constraints = model.directives.filter((item) => item.category === "constraint");
   const lines = [
@@ -451,8 +456,23 @@ function renderDirectives(model: ContextModel): string | null {
     "",
     "These are binding. They override your defaults and any habit from other projects.",
   ];
+  if (model.globalRules !== null) {
+    lines.push(
+      "",
+      "### Global NORN.md",
+      "",
+      model.globalRules,
+      "",
+      "Project-specific instructions below take precedence when they are more specific.",
+    );
+  }
   if (directives.length > 0) {
-    lines.push("", "### Directives", "", bullets(directives.map((item) => item.content.trim())));
+    lines.push(
+      "",
+      model.globalRules === null ? "### Directives" : "### Project directives",
+      "",
+      bullets(directives.map((item) => item.content.trim())),
+    );
   }
   if (constraints.length > 0) {
     lines.push("", "### Constraints", "", bullets(constraints.map((item) => item.content.trim())));
@@ -783,6 +803,12 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
     // Render policy facts first (they are the useful ones) while keeping the
     // trimming order above: renderRepository partitions on `policy`.
 
+    const globalRulesResult = await tx.query<GlobalRulesRow>(
+      `SELECT content FROM global_rule_settings
+        WHERE id = 'global' AND length(trim(content)) > 0`,
+    );
+    const globalRules = globalRulesResult.rows[0]?.content.trim() || null;
+
     const directiveResult = await tx.query<MemoryRow>(
       `SELECT id, category, content, confidence FROM project_memory_entries
         WHERE project_id = $1 AND status = 'active'
@@ -855,6 +881,7 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
       assignment,
       architecture,
       facts,
+      globalRules,
       directives,
       dependencies,
       dependenciesCompact: false,

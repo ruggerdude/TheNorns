@@ -161,6 +161,7 @@ import { type AttentionService, DecisionResolutionError } from "./projects/atten
 // remoteRepositoryPort.
 import { GitHubActivationPort } from "./projects/githubActivationPort.js";
 import { GitHubRemoteRepositoryPort } from "./projects/githubRemoteRepositoryPort.js";
+import { GlobalRulesService } from "./projects/globalRulesService.js";
 import {
   PhaseWorkflowConflictError,
   type PhaseWorkflowService,
@@ -587,6 +588,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     options.planningRuns?.transactions ??
     options.onboarding?.transactions ??
     options.attachments?.transactions;
+  const globalRulesService = runtimeTransactionsForInference
+    ? new GlobalRulesService(runtimeTransactionsForInference, now)
+    : null;
   const inferenceProxy: InferenceProxy | null =
     options.inferenceProxy ??
     (runtimeTransactionsForInference
@@ -1293,6 +1297,36 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       }
       reply.code(404).send({ error: "not_found" });
     }
+  });
+
+  app.get("/api/v2/admin/rules", async (req, reply) => {
+    if (!(await requireAdmin(req, reply))) return;
+    if (!globalRulesService) {
+      return reply.code(503).send({
+        error: "global_rules_unavailable",
+        message: "Global rules require the relational database runtime.",
+      });
+    }
+    reply.header("Cache-Control", "no-store").send(await globalRulesService.get());
+  });
+
+  app.put("/api/v2/admin/rules", async (req, reply) => {
+    const admin = await requireAdmin(req, reply);
+    if (!admin) return;
+    if (!globalRulesService) {
+      return reply.code(503).send({
+        error: "global_rules_unavailable",
+        message: "Global rules require the relational database runtime.",
+      });
+    }
+    const body = z
+      .object({ content: z.string().max(100_000) })
+      .strict()
+      .safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: "bad_request" });
+    const rules = await globalRulesService.save(admin.id, body.data.content);
+    stores.audit(admin.id, "global.rules_updated", `${rules.version}`, now());
+    reply.send(rules);
   });
 
   if (options.phase7) {

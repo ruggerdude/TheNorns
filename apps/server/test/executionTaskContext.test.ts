@@ -263,6 +263,34 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
     expect(prompt).toContain("Define the ref contract");
   });
 
+  it("includes global NORN.md before more specific project directives", async () => {
+    await pg.query(
+      `INSERT INTO global_rule_settings (
+         id, filename, content, version, updated_by, updated_at
+       ) VALUES ('global', 'NORN.md', $1, 1, $2, '2026-01-02T00:00:00Z')`,
+      ["Always send progress updates.", USER],
+    );
+    await seedMemory(
+      "memory-project-directive",
+      "directive",
+      "For this project, send updates every minute.",
+      "2026-01-03T00:00:00Z",
+    );
+
+    const store = new TaskContextStore(transactions);
+    const refs = await assembler().assembleForTask(TASK);
+    const directiveRef = refs.find((ref) => ref.storage_ref.includes(TASK_CONTEXT_ROUTE_PREFIX));
+    const documents = await Promise.all(
+      refs.map(async (ref) => (await store.content(ref.artifact_id))?.bytes.toString("utf8") ?? ""),
+    );
+    expect(directiveRef).toBeDefined();
+    const prompt = documents.join("\n\n");
+    expect(prompt).toContain("### Global NORN.md");
+    expect(prompt.indexOf("Always send progress updates.")).toBeLessThan(
+      prompt.indexOf("For this project, send updates every minute."),
+    );
+  });
+
   it("omits sections with nothing to say rather than emitting empty documents", async () => {
     // No directives, no approved memory, and the upstream edge removed.
     await pg.exec("DELETE FROM task_dependencies");

@@ -160,6 +160,47 @@ export function WorkspaceSettings({
 
   return (
     <div className="workspace-settings-grid" data-testid="workspace-settings">
+      <section className="card workspace-settings-card" aria-labelledby="updates-heading">
+        <div className="section-head">
+          <div>
+            <div className="eyebrow">Progress updates</div>
+            <h2 id="updates-heading">Timing and content</h2>
+          </div>
+        </div>
+        <p className="muted">
+          Set the normal update cadence once, then override it only for projects that need different
+          attention.
+        </p>
+        <div className="settings-preference-group">
+          <h3>Global default</h3>
+          <PreferenceFields value={globalDraft} onChange={setGlobalDraft} prefix="Default" />
+        </div>
+        <div className="settings-preference-group">
+          <label className="debate-toggle">
+            <input
+              type="checkbox"
+              checked={inheritGlobal}
+              onChange={(event) => {
+                setInheritGlobal(event.target.checked);
+                setPreferencesSaved(false);
+              }}
+            />
+            Use the global default for this project
+          </label>
+          {!inheritGlobal ? (
+            <PreferenceFields value={projectDraft} onChange={setProjectDraft} prefix="Project" />
+          ) : null}
+        </div>
+        <div className="settings-save-row">
+          <span className="muted">
+            {preferencesSaved ? "Update preferences saved" : "Changes apply to workspace updates"}
+          </span>
+          <Button variant="primary" onClick={savePreferences}>
+            Save update preferences
+          </Button>
+        </div>
+      </section>
+
       <section className="card workspace-settings-card" aria-labelledby="project-rules-heading">
         <div className="section-head">
           <div>
@@ -201,47 +242,6 @@ export function WorkspaceSettings({
             </div>
           </>
         )}
-      </section>
-
-      <section className="card workspace-settings-card" aria-labelledby="updates-heading">
-        <div className="section-head">
-          <div>
-            <div className="eyebrow">Progress updates</div>
-            <h2 id="updates-heading">Timing and content</h2>
-          </div>
-        </div>
-        <p className="muted">
-          Set the normal update cadence once, then override it only for projects that need different
-          attention.
-        </p>
-        <div className="settings-preference-group">
-          <h3>Global default</h3>
-          <PreferenceFields value={globalDraft} onChange={setGlobalDraft} prefix="Default" />
-        </div>
-        <div className="settings-preference-group">
-          <label className="debate-toggle">
-            <input
-              type="checkbox"
-              checked={inheritGlobal}
-              onChange={(event) => {
-                setInheritGlobal(event.target.checked);
-                setPreferencesSaved(false);
-              }}
-            />
-            Use the global default for this project
-          </label>
-          {!inheritGlobal ? (
-            <PreferenceFields value={projectDraft} onChange={setProjectDraft} prefix="Project" />
-          ) : null}
-        </div>
-        <div className="settings-save-row">
-          <span className="muted">
-            {preferencesSaved ? "Update preferences saved" : "Changes apply to workspace updates"}
-          </span>
-          <Button variant="primary" onClick={savePreferences}>
-            Save update preferences
-          </Button>
-        </div>
       </section>
       {error ? <Alert>{error}</Alert> : null}
     </div>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
-import { Alert, Badge, Button, Field, Input, Select } from "./ui";
+import { Alert, Badge, Button, Field, Input, Select, TextArea } from "./ui";
 
 interface UserSummary {
   id: string;
@@ -11,8 +11,15 @@ interface UserSummary {
   created_at: string;
 }
 
+interface GlobalRulesDto {
+  filename: "NORN.md";
+  content: string;
+  version: number;
+  updated_at: string | null;
+}
+
 async function adminRequest<T>(
-  method: "GET" | "POST" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<T> {
@@ -69,6 +76,9 @@ export function Admin({
   onUnauthorized: () => void;
 }): React.ReactElement {
   const [users, setUsers] = useState<UserSummary[] | null>(null);
+  const [globalRules, setGlobalRules] = useState<GlobalRulesDto | null>(null);
+  const [globalRulesDraft, setGlobalRulesDraft] = useState("");
+  const [globalRulesSaving, setGlobalRulesSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [addEmail, setAddEmail] = useState("");
@@ -94,7 +104,13 @@ export function Admin({
   const refresh = useCallback(async () => {
     try {
       setError(null);
-      setUsers(await adminRequest<UserSummary[]>("GET", "/api/admin/users"));
+      const [nextUsers, nextRules] = await Promise.all([
+        adminRequest<UserSummary[]>("GET", "/api/admin/users"),
+        adminRequest<GlobalRulesDto>("GET", "/api/v2/admin/rules"),
+      ]);
+      setUsers(nextUsers);
+      setGlobalRules(nextRules);
+      setGlobalRulesDraft(nextRules.content);
     } catch (e) {
       fail(e);
     }
@@ -165,17 +181,78 @@ export function Admin({
     [fail, refresh],
   );
 
+  const saveGlobalRules = useCallback(async () => {
+    setGlobalRulesSaving(true);
+    setError(null);
+    try {
+      const next = await adminRequest<GlobalRulesDto>("PUT", "/api/v2/admin/rules", {
+        content: globalRulesDraft,
+      });
+      setGlobalRules(next);
+      setGlobalRulesDraft(next.content);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setGlobalRulesSaving(false);
+    }
+  }, [fail, globalRulesDraft]);
+
   return (
     <div className="modal-overlay">
       <button type="button" className="modal-backdrop" aria-label="Dismiss" onClick={onClose} />
       <div className="modal modal-wide card" data-testid="admin-panel">
         <div className="section-head">
-          <h2>User administration</h2>
+          <h2>Administration</h2>
           <Button variant="ghost" className="btn-small" onClick={onClose}>
             Close
           </Button>
         </div>
         {error ? <Alert testId="admin-error">{error}</Alert> : null}
+
+        <section className="admin-global-rules" aria-labelledby="global-rules-heading">
+          <div className="section-head">
+            <div>
+              <div className="eyebrow">Global agent rules</div>
+              <h3 id="global-rules-heading">{globalRules?.filename ?? "NORN.md"}</h3>
+            </div>
+            {globalRules?.version ? (
+              <span className="mono muted">v{globalRules.version}</span>
+            ) : null}
+          </div>
+          <p className="muted">
+            These instructions are included in every project briefing. A project’s own NORN.md can
+            add more specific rules.
+          </p>
+          {globalRules ? (
+            <>
+              <TextArea
+                className="global-rules-editor"
+                aria-label="Global NORN.md"
+                value={globalRulesDraft}
+                placeholder="# Global rules&#10;&#10;- Share a concise progress update every five minutes."
+                onChange={(event) => setGlobalRulesDraft(event.target.value)}
+              />
+              <div className="settings-save-row">
+                <span className="muted">
+                  {globalRules.updated_at
+                    ? `Last saved ${new Date(globalRules.updated_at).toLocaleString()}`
+                    : "No global rules yet"}
+                </span>
+                <Button
+                  variant="primary"
+                  disabled={
+                    globalRulesSaving || globalRulesDraft.trim() === globalRules.content.trim()
+                  }
+                  onClick={() => void saveGlobalRules()}
+                >
+                  {globalRulesSaving ? "Saving…" : "Save global rules"}
+                </Button>
+              </div>
+            </>
+          ) : (
+            <p className="muted">Loading global rules…</p>
+          )}
+        </section>
 
         <div className="admin-layout">
           <section>

@@ -213,6 +213,11 @@ export const CODEX_REASONING_EFFORT_MIGRATION_URL = new URL(
   "../../../drizzle/0028_codex_reasoning_effort.sql",
   import.meta.url,
 );
+export const GLOBAL_RULES_MIGRATION_NAME = "0029_global_rules";
+export const GLOBAL_RULES_MIGRATION_URL = new URL(
+  "../../../drizzle/0029_global_rules.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -356,6 +361,10 @@ export async function loadKnowledgePackagesMigrationSql(): Promise<string> {
 
 export async function loadCodexReasoningEffortMigrationSql(): Promise<string> {
   return readFile(CODEX_REASONING_EFFORT_MIGRATION_URL, "utf8");
+}
+
+export async function loadGlobalRulesMigrationSql(): Promise<string> {
+  return readFile(GLOBAL_RULES_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -577,6 +586,10 @@ export async function runCurrentV2Migrations(
     {
       name: CODEX_REASONING_EFFORT_MIGRATION_NAME,
       sql: await loadCodexReasoningEffortMigrationSql(),
+    },
+    {
+      name: GLOBAL_RULES_MIGRATION_NAME,
+      sql: await loadGlobalRulesMigrationSql(),
     },
   ]);
 }

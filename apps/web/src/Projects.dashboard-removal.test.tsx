@@ -52,6 +52,16 @@ describe("project dashboard entry and removal", () => {
     );
   }
 
+  it("starts with project content and keeps New project in the top header", async () => {
+    setup();
+    await screen.findByRole("link", { name: "Enter Alpha" });
+
+    expect(screen.queryByText("Keep every project in motion.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Portfolio command center")).not.toBeInTheDocument();
+    const createButton = screen.getByRole("button", { name: "+ New project" });
+    expect(createButton.closest("header")).toHaveClass("topbar");
+  });
+
   it("enters a project from the full dashboard row by click or keyboard", async () => {
     setup();
     const alphaRow = await screen.findByRole("link", { name: "Enter Alpha" });

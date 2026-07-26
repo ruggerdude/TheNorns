@@ -1436,6 +1436,16 @@ export function Projects({
           <span className="topbar-location">Portfolio</span>
         </div>
         <div className="header-actions">
+          <Button
+            variant="primary"
+            className="btn-small header-new-project"
+            onClick={() => {
+              setIdempotencyKey(globalThis.crypto.randomUUID());
+              setDialog(true);
+            }}
+          >
+            + New project
+          </Button>
           {user ? (
             <span className="user-chip" title={user.email}>
               <span className="user-avatar">
@@ -1459,27 +1469,6 @@ export function Projects({
       </header>
       <ProjectTabs projects={openProjects} onSelect={onOpenProject} onClose={onCloseProject} />
       <main className="page project-dashboard">
-        <div className="dashboard-hero">
-          <div>
-            <div className="eyebrow">Portfolio command center</div>
-            <h1>Keep every project in motion.</h1>
-            <p>
-              Jump straight into the work you need, then scan progress, decisions, and delivery
-              health without chasing updates.
-            </p>
-          </div>
-          <div className="dashboard-actions">
-            <Button
-              variant="primary"
-              onClick={() => {
-                setIdempotencyKey(globalThis.crypto.randomUUID());
-                setDialog(true);
-              }}
-            >
-              + New project
-            </Button>
-          </div>
-        </div>
         {error ? <Alert testId="projects-error">{error}</Alert> : null}
         <div className="dashboard-focus-grid">
           <section

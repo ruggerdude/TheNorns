@@ -39,6 +39,7 @@ describe.sequential("durable planning run HTTP API", () => {
   let pg: PGlite;
   let server: NornsServer;
   let token: string;
+  let memberToken: string;
   let projectId: string;
 
   beforeEach(async () => {
@@ -54,6 +55,12 @@ describe.sequential("durable planning run HTTP API", () => {
     const transactions = new PGliteTransactionRunner(pg);
     const users = new UserStore();
     token = testAdminToken(users);
+    users.createActive({
+      email: "test-member@example.com",
+      password: "test-password-2",
+      role: "member",
+    });
+    memberToken = users.login("test-member@example.com", "test-password-2").token;
     const actor = users.list()[0];
     if (!actor) throw new Error("test admin was not created");
     await pg.query(
@@ -256,6 +263,64 @@ describe.sequential("durable planning run HTTP API", () => {
         version: 2,
       },
     ]);
+  });
+
+  it("lets an administrator manage the global NORN.md", async () => {
+    const empty = await inject(server, token, "GET", "/api/v2/admin/rules");
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toMatchObject({ filename: "NORN.md", content: "", version: 0 });
+
+    const first = await inject(server, token, "PUT", "/api/v2/admin/rules", {
+      content: "# Global rules\r\n\r\n- Report blockers early.",
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({
+      filename: "NORN.md",
+      content: "# Global rules\n\n- Report blockers early.",
+      version: 1,
+    });
+
+    const second = await inject(server, token, "PUT", "/api/v2/admin/rules", {
+      content: "# Global rules\n\n- Keep updates concise.",
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toMatchObject({ version: 2 });
+  });
+
+  it("rejects anonymous and non-administrator access to the global NORN.md", async () => {
+    const anonymousRead = await server.app.inject({
+      method: "GET",
+      url: "/api/v2/admin/rules",
+    });
+    expect(anonymousRead.statusCode).toBe(401);
+
+    const anonymousWrite = await server.app.inject({
+      method: "PUT",
+      url: "/api/v2/admin/rules",
+      payload: { content: "anonymous change" },
+    });
+    expect(anonymousWrite.statusCode).toBe(401);
+
+    const memberRead = await inject(server, memberToken, "GET", "/api/v2/admin/rules");
+    expect(memberRead.statusCode).toBe(403);
+
+    const memberWrite = await inject(server, memberToken, "PUT", "/api/v2/admin/rules", {
+      content: "member change",
+    });
+    expect(memberWrite.statusCode).toBe(403);
+  });
+
+  it("rejects a global NORN.md larger than the configured limit", async () => {
+    const oversized = await inject(server, token, "PUT", "/api/v2/admin/rules", {
+      content: "x".repeat(100_001),
+    });
+    expect(oversized.statusCode).toBe(400);
+    expect(oversized.json()).toMatchObject({ error: "bad_request" });
+
+    const stored = await pg.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM global_rule_settings",
+    );
+    expect(stored.rows[0]?.count).toBe(0);
   });
 
   it("404s GET for an unknown run and rejects unauthenticated reads", async () => {

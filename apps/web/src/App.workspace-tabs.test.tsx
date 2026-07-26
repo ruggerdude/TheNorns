@@ -360,6 +360,12 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     );
     const nav = screen.getByRole("navigation", { name: "Workspace sections" });
     await user.click(within(nav).getByRole("button", { name: "Settings" }));
+    const settings = await screen.findByTestId("workspace-settings");
+    expect(
+      within(settings)
+        .getAllByRole("heading", { level: 2 })
+        .map((heading) => heading.textContent),
+    ).toEqual(["Timing and content", "NORN.md"]);
     await user.type(
       await screen.findByLabelText("Project rules"),
       "# Rules\n\n- Preserve API compatibility.",

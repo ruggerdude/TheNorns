@@ -30,6 +30,9 @@ describe("Admin panel", () => {
 
   beforeEach(() => {
     mock = new MockFetch();
+    mock.get("/api/v2/admin/rules", {
+      body: { filename: "NORN.md", content: "", version: 0, updated_at: null },
+    });
   });
 
   test("loads and lists the current roster", async () => {
@@ -40,6 +43,32 @@ describe("Admin panel", () => {
     const list = await screen.findByTestId("user-list");
     expect(list).toHaveTextContent("admin@x.com");
     expect(list).toHaveTextContent("member@x.com");
+  });
+
+  test("loads and saves the global NORN.md", async () => {
+    mock.get("/api/admin/users", { body: makeRoster() });
+    mock.put("/api/v2/admin/rules", (_url, init) => {
+      const body = JSON.parse(init?.body as string);
+      expect(body).toEqual({ content: "# Global rules\n\n- Keep updates concise." });
+      return {
+        body: {
+          filename: "NORN.md",
+          content: body.content,
+          version: 1,
+          updated_at: "2026-07-26T01:00:00.000Z",
+        },
+      };
+    });
+    mock.install();
+
+    const user = userEvent.setup();
+    render(<Admin onClose={vi.fn()} onUnauthorized={vi.fn()} />);
+    const editor = await screen.findByRole("textbox", { name: "Global NORN.md" });
+    await user.type(editor, "# Global rules\n\n- Keep updates concise.");
+    await user.click(screen.getByRole("button", { name: "Save global rules" }));
+
+    expect(await screen.findByText("v1")).toBeVisible();
+    expect(editor).toHaveValue("# Global rules\n\n- Keep updates concise.");
   });
 
   test("adding a user posts the form and refreshes the roster", async () => {

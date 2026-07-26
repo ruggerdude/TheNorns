@@ -2388,6 +2388,27 @@ button:disabled {
   gap: 1.4rem;
   align-items: start;
 }
+
+.admin-global-rules {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0 1.5rem;
+  padding: 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--raised) 70%, transparent);
+}
+
+.admin-global-rules h3,
+.admin-global-rules p {
+  margin: 0;
+}
+
+.global-rules-editor {
+  min-height: 240px;
+  font-family: "DM Mono", monospace;
+  line-height: 1.65;
+}
 .user-list {
   list-style: none;
   padding: 0;
@@ -5756,7 +5777,7 @@ body {
 
 .workspace-settings-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(340px, 0.8fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
 }
 
@@ -5802,13 +5823,8 @@ body {
 }
 
 @media (max-width: 900px) {
-  .overview-stat-grid,
-  .workspace-settings-grid {
+  .overview-stat-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .workspace-settings-card:first-child {
-    grid-column: 1 / -1;
   }
 }
 
@@ -5842,5 +5858,25 @@ body {
   .settings-save-row {
     align-items: stretch;
     flex-direction: column;
+  }
+}
+
+/* Portfolio efficiency follow-up: creation lives in the global header and
+   the dashboard begins immediately with actionable project content. */
+.project-dashboard {
+  padding-top: clamp(0.85rem, 2vw, 1.35rem);
+}
+
+.header-new-project {
+  margin-right: 0.45rem;
+}
+
+.workspace-settings-card {
+  width: 100%;
+}
+
+@media (max-width: 760px) {
+  .topbar .header-actions .btn.header-new-project {
+    display: inline-flex;
   }
 }
