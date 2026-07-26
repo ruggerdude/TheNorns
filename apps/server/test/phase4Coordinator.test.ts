@@ -64,9 +64,9 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
         'M','medium','["implementation"]'::jsonb,'[]'::jsonb,'[]'::jsonb,
         '["commit"]'::jsonb,'environment','verification','pending',0);
       INSERT INTO agent_profiles (
-        id, provider, runtime, model, roles, capabilities, context_limit_tokens,
+        id, provider, runtime, model, reasoning_effort, roles, capabilities, context_limit_tokens,
         security_restrictions, status, active_workload, cost_metadata
-      ) VALUES ('agent-1','openai','codex','gpt-5-codex','["implementation"]'::jsonb,
+      ) VALUES ('agent-1','openai','codex','gpt-5-codex','high','["implementation"]'::jsonb,
         '["typescript"]'::jsonb,200000,'[]'::jsonb,'available',0,
         '{"billing_mode":"subscription"}'::jsonb);
       INSERT INTO agent_assignments (
@@ -119,6 +119,7 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     expect(result.command.command_id).toBe(`dispatch:${result.dispatch_job_id}`);
     expect(result.command.runner_repository_id).toBe("repository-1");
     expect(result.command.execution_mode).toBe("planned");
+    expect(result.command.reasoning_effort).toBe("high");
     expect(result.command.max_charge_usd).toBe(10);
     const state = await pg.query<{
       task_state: string;

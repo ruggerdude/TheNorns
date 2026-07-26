@@ -186,11 +186,18 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
           `staffing override references unknown plan node "${entry.node_id}" — the approved plan has no task for it`,
         );
       }
-      if (current.provider === entry.provider && current.model === entry.model) continue;
+      if (
+        current.provider === entry.provider &&
+        current.model === entry.model &&
+        current.reasoning_effort === (entry.reasoning_effort ?? null)
+      ) {
+        continue;
+      }
       edits.push({
         assignment_id: assignmentId,
         provider: entry.provider,
         model: entry.model,
+        reasoning_effort: entry.reasoning_effort ?? null,
       });
     }
     return edits;

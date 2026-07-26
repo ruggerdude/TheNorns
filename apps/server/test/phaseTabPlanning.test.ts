@@ -163,6 +163,68 @@ describe.sequential("phase tab: planning run decisions (service + worker)", () =
     expect(staffingInputs[0]?.workerProviders).toBe("openai");
   });
 
+  it("asks the PM to recommend the quick-change agent and effort", async () => {
+    pm.enqueue(plan(["copy-fix"]));
+    const staffingInputs: PlanningStaffingInput[] = [];
+    const worker = makeWorker({
+      buildStaffingProposal: async (input) => {
+        staffingInputs.push(input);
+        return {
+          summary: "Use Codex with high effort for this focused but risky edit.",
+          recommendations: [
+            {
+              node_id: "copy-fix",
+              provider: "openai",
+              model: "gpt-5.6-terra",
+              reasoning_effort: "high",
+              worker_count: 1,
+              reviewer_model: "claude-sonnet-5",
+              budget_usd: 25,
+              rationale: "The PM selected the best implementation agent for this task.",
+            },
+          ],
+        };
+      },
+    });
+    const created = await service.create("project-1", {
+      objective: "Correct the empty-state grammar",
+      mode: "quick",
+      requestedBy: "admin-1",
+      pm: {
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        reasoning_effort: "xhigh",
+      },
+      workerProviders: "both",
+    });
+
+    await worker.runNow(created.id);
+    const run = await service.get("project-1", created.id);
+
+    expect(staffingInputs).toMatchObject([
+      {
+        pm: {
+          provider: "anthropic",
+          model: pm.model,
+        },
+        workerProviders: "both",
+      },
+    ]);
+    expect(run.pm).toEqual({
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "xhigh",
+    });
+    expect(run.result?.staffing_proposal?.recommendations).toMatchObject([
+      {
+        node_id: "copy-fix",
+        provider: "openai",
+        model: "gpt-5.6-terra",
+        reasoning_effort: "high",
+      },
+    ]);
+  });
+
   it("durably approves and kicks off a quick change once without reviewer or browser follow-up", async () => {
     pm.enqueue(plan(["copy-fix"]));
     const kickoffCalls: unknown[] = [];
@@ -344,6 +406,7 @@ describe("phase tab: allocation implementation-provider constraint", () => {
           node_id: "api",
           provider,
           model,
+          reasoning_effort: provider === "openai" ? "high" : null,
           worker_count: 1,
           reviewer_model: reviewerModel,
           budget_usd: 25,

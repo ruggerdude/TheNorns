@@ -144,12 +144,26 @@ describe("project manager model selection", () => {
   it("submits Sol with OpenAI as PM and flips review to Anthropic", async () => {
     const select = await openCreateDialog();
     await userEvent.selectOptions(select, "gpt-5.6-sol");
+    expect(screen.getByTestId("pm-effort")).toHaveValue("medium");
+    await userEvent.selectOptions(screen.getByTestId("pm-effort"), "xhigh");
 
     expect(screen.getByText(/GPT-5.6 Sol will lead planning.*Anthropic/i)).toBeInTheDocument();
     expect(await submit("Sol project")).toMatchObject({
       body: {
         pm_provider: "openai",
         pm_model: "gpt-5.6-sol",
+      },
+    });
+    expect(
+      mock.calls.find(
+        (call) =>
+          call.method === "POST" && call.url === "/api/v2/projects/proj_created/planning-runs",
+      )?.body,
+    ).toMatchObject({
+      pm: {
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        reasoning_effort: "xhigh",
       },
     });
   });

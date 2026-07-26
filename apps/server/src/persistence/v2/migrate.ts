@@ -208,6 +208,11 @@ export const KNOWLEDGE_PACKAGES_MIGRATION_URL = new URL(
   "../../../drizzle/0027_knowledge_packages.sql",
   import.meta.url,
 );
+export const CODEX_REASONING_EFFORT_MIGRATION_NAME = "0028_codex_reasoning_effort";
+export const CODEX_REASONING_EFFORT_MIGRATION_URL = new URL(
+  "../../../drizzle/0028_codex_reasoning_effort.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -347,6 +352,10 @@ export async function loadQuickChangesMigrationSql(): Promise<string> {
 
 export async function loadKnowledgePackagesMigrationSql(): Promise<string> {
   return readFile(KNOWLEDGE_PACKAGES_MIGRATION_URL, "utf8");
+}
+
+export async function loadCodexReasoningEffortMigrationSql(): Promise<string> {
+  return readFile(CODEX_REASONING_EFFORT_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -564,6 +573,10 @@ export async function runCurrentV2Migrations(
     {
       name: KNOWLEDGE_PACKAGES_MIGRATION_NAME,
       sql: await loadKnowledgePackagesMigrationSql(),
+    },
+    {
+      name: CODEX_REASONING_EFFORT_MIGRATION_NAME,
+      sql: await loadCodexReasoningEffortMigrationSql(),
     },
   ]);
 }

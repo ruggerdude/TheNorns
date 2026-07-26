@@ -1,4 +1,6 @@
 import {
+  type CodexReasoningEffortT,
+  DEFAULT_CODEX_REASONING_EFFORT,
   DEFAULT_PM_MODEL,
   PM_MODEL_OPTIONS,
   type PmModelT,
@@ -496,6 +498,7 @@ export function Projects({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [pmModel, setPmModel] = useState<PmModelT>(DEFAULT_PM_MODEL.anthropic);
+  const [pmEffort, setPmEffort] = useState<CodexReasoningEffortT>(DEFAULT_CODEX_REASONING_EFFORT);
   const pmProvider = providerForPmModel(pmModel);
   const selectedModel = pmModelOption(pmModel);
   const reviewerProviderPreview = pmProvider === "anthropic" ? "openai" : "anthropic";
@@ -938,6 +941,11 @@ export function Projects({
               objective,
               max_rounds: 3,
               attachment_ids: [],
+              pm: {
+                provider: pmProvider,
+                model: pmModel,
+                ...(pmProvider === "openai" ? { reasoning_effort: pmEffort } : {}),
+              },
             },
           );
           proceedAfterCreate({
@@ -953,7 +961,7 @@ export function Projects({
         else setAdoptionError(error instanceof Error ? error.message : String(error));
       }
     },
-    [onUnauthorized, proceedAfterCreate],
+    [onUnauthorized, pmEffort, pmModel, pmProvider, proceedAfterCreate],
   );
 
   const applyReviewerPreference = useCallback(
@@ -1003,6 +1011,11 @@ export function Projects({
             objective,
             max_rounds: roundsCount,
             attachment_ids: attachmentIds,
+            pm: {
+              provider: pmProvider,
+              model: pmModel,
+              ...(pmProvider === "openai" ? { reasoning_effort: pmEffort } : {}),
+            },
           },
         );
         proceedAfterCreate({
@@ -1037,7 +1050,7 @@ export function Projects({
         setPlanningStarting(false);
       }
     },
-    [onUnauthorized, proceedAfterCreate, roundsCount],
+    [onUnauthorized, pmEffort, pmModel, pmProvider, proceedAfterCreate, roundsCount],
   );
 
   const prepareNewLocalProject = useCallback(
@@ -2575,6 +2588,26 @@ export function Projects({
                               {selectedModel?.description}
                             </span>
                           </Field>
+                          {pmProvider === "openai" ? (
+                            <Field label="Coordinator Codex effort">
+                              <Select
+                                data-testid="pm-effort"
+                                value={pmEffort}
+                                onChange={(event) =>
+                                  setPmEffort(event.target.value as CodexReasoningEffortT)
+                                }
+                              >
+                                <option value="minimal">Minimal</option>
+                                <option value="low">Low</option>
+                                <option value="medium">Medium</option>
+                                <option value="high">High</option>
+                                <option value="xhigh">Extra high</option>
+                              </Select>
+                              <span className="field-help">
+                                Controls reasoning depth for this Codex planning run.
+                              </span>
+                            </Field>
+                          ) : null}
                           <Field label="Reviewer model">
                             <Select
                               data-testid="reviewer-model"

@@ -3,7 +3,7 @@
 // overrides persist — Auto Allocate never clobbers them. Allocation approval
 // is budget approval and records the content hash of exactly what was shown.
 import { createHash } from "node:crypto";
-import type { ApprovalT } from "@norns/contracts";
+import { type ApprovalT, CodexReasoningEffort } from "@norns/contracts";
 import { z } from "zod";
 import { newId } from "../ids.js";
 import type { GraphNode, WorkflowGraph } from "./graph.js";
@@ -14,6 +14,7 @@ export type AllocationStrategyT = z.infer<typeof AllocationStrategy>;
 export const NodeAssignment = z.object({
   provider: z.enum(["anthropic", "openai"]),
   model: z.string().min(1),
+  reasoning_effort: CodexReasoningEffort.nullable().default(null),
   role: z.literal("implementation"),
   worker_count: z.number().int().min(1).max(3), // design cap 3; pilot cap 2
   reviewer_model: z.string().min(1),
@@ -23,8 +24,12 @@ export const NodeAssignment = z.object({
 });
 export type NodeAssignmentT = z.infer<typeof NodeAssignment>;
 
-export type PmAssignmentRecommendation = Omit<NodeAssignmentT, "role" | "source"> & {
+export type PmAssignmentRecommendation = Omit<
+  NodeAssignmentT,
+  "role" | "source" | "reasoning_effort"
+> & {
   node_id: string;
+  reasoning_effort?: NodeAssignmentT["reasoning_effort"] | undefined;
 };
 
 // Base budgets by complexity; risk scales them (independent axes, REVIEW-002)

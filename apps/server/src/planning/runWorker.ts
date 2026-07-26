@@ -14,7 +14,7 @@
 // instead of the blanket "reconcile at boot" sweep used here.
 import { randomUUID } from "node:crypto";
 import type { ImagePart, LlmAdapter, ProviderName } from "@norns/adapters";
-import { PlanContract, type PlanContractT } from "@norns/contracts";
+import { type CodexReasoningEffortT, PlanContract, type PlanContractT } from "@norns/contracts";
 import type { ReviewFindingT, UsageEventT } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import type {
@@ -31,10 +31,18 @@ import type {
 import type { PlanningRoundEvent, PlanningRoundHook } from "./session.js";
 import { planContentHash, runPlanning, runQuickPlanning } from "./session.js";
 
-export type PlanningAdapterFactory = (provider: ProviderName, model: string) => LlmAdapter;
+export type PlanningAdapterFactory = (
+  provider: ProviderName,
+  model: string,
+  reasoningEffort?: CodexReasoningEffortT,
+) => LlmAdapter;
 
 export interface ResolvedPlanningModels {
-  pm: { provider: ProviderName; model: string };
+  pm: {
+    provider: ProviderName;
+    model: string;
+    reasoning_effort?: CodexReasoningEffortT;
+  };
   reviewer: { provider: ProviderName; model: string };
 }
 
@@ -42,6 +50,7 @@ export interface PlanningStaffingInput {
   projectId: string;
   objective: string;
   plan: PlanContractT;
+  pm: ResolvedPlanningModels["pm"];
   /** PHASE TAB P1: the run's implementation-provider constraint. */
   workerProviders: WorkerProviderSelection;
 }
@@ -62,7 +71,11 @@ export interface PlanningRunWorkerOptions {
     projectId: string,
     run?: {
       mode: PlanningRunMode;
-      pm: { provider: ProviderName; model: string } | null;
+      pm: {
+        provider: ProviderName;
+        model: string;
+        reasoning_effort?: CodexReasoningEffortT;
+      } | null;
     },
   ) => Promise<ResolvedPlanningModels>;
   /**
@@ -93,8 +106,10 @@ interface ClaimedPlanningRunRow {
   requested_by: string | null;
   pm_provider: ProviderName | null;
   pm_model: string | null;
+  pm_reasoning_effort: CodexReasoningEffortT | null;
   agent_provider: ProviderName | null;
   agent_model: string | null;
+  agent_reasoning_effort: CodexReasoningEffortT | null;
   objective: string;
   max_rounds: number;
   lease_token: string;
@@ -314,8 +329,9 @@ export class PlanningRunWorker {
              planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids,
              planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript,
              planning_runs.mode, planning_runs.requested_by,
-             planning_runs.pm_provider, planning_runs.pm_model,
-             planning_runs.agent_provider, planning_runs.agent_model`
+             planning_runs.pm_provider, planning_runs.pm_model, planning_runs.pm_reasoning_effort,
+             planning_runs.agent_provider, planning_runs.agent_model,
+             planning_runs.agent_reasoning_effort`
         : `WITH next_run AS (
              SELECT id FROM planning_runs WHERE status = 'queued'
              ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1
@@ -326,8 +342,9 @@ export class PlanningRunWorker {
              planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids,
              planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript,
              planning_runs.mode, planning_runs.requested_by,
-             planning_runs.pm_provider, planning_runs.pm_model,
-             planning_runs.agent_provider, planning_runs.agent_model`;
+             planning_runs.pm_provider, planning_runs.pm_model, planning_runs.pm_reasoning_effort,
+             planning_runs.agent_provider, planning_runs.agent_model,
+             planning_runs.agent_reasoning_effort`;
       const params = runId
         ? [leaseToken, leasedUntil, now.toISOString(), runId]
         : [leaseToken, leasedUntil, now.toISOString()];
@@ -340,7 +357,11 @@ export class PlanningRunWorker {
     const quick = claim.mode === "quick";
     const pmOverride =
       claim.pm_provider && claim.pm_model
-        ? { provider: claim.pm_provider, model: claim.pm_model }
+        ? {
+            provider: claim.pm_provider,
+            model: claim.pm_model,
+            ...(claim.pm_reasoning_effort ? { reasoning_effort: claim.pm_reasoning_effort } : {}),
+          }
         : null;
     let models: ResolvedPlanningModels;
     try {
@@ -353,7 +374,7 @@ export class PlanningRunWorker {
       return;
     }
 
-    const pm = this.createAdapter(models.pm.provider, models.pm.model);
+    const pm = this.createAdapter(models.pm.provider, models.pm.model, models.pm.reasoning_effort);
     const reviewer = quick
       ? null
       : this.createAdapter(models.reviewer.provider, models.reviewer.model);
@@ -395,21 +416,35 @@ export class PlanningRunWorker {
           summary: "Prepared one executable quick-change task.",
           finding_counts: null,
         });
-        const agent =
-          claim.agent_provider && claim.agent_model
-            ? { provider: claim.agent_provider, model: claim.agent_model }
-            : models.pm;
-        const staffingProposal: PlanningStaffingProposalDto = {
-          summary: `Quick change assigned to ${agent.provider}:${agent.model}.`,
-          recommendations: result.finalPlan.modules.map((module) => ({
-            node_id: module.id,
-            provider: agent.provider,
-            model: agent.model,
-            worker_count: 1,
-            budget_usd: 25,
-            rationale: "Single accountable agent for a focused quick change.",
-          })),
-        };
+        let staffingProposal: PlanningStaffingProposalDto | null = null;
+        if (claim.agent_provider && claim.agent_model) {
+          staffingProposal = {
+            summary: `Quick change assigned to ${claim.agent_provider}:${claim.agent_model}.`,
+            recommendations: result.finalPlan.modules.map((module) => ({
+              node_id: module.id,
+              provider: claim.agent_provider,
+              model: claim.agent_model,
+              reasoning_effort: claim.agent_reasoning_effort,
+              worker_count: 1,
+              budget_usd: 25,
+              rationale: "Agent explicitly selected for this quick change.",
+            })),
+          };
+        } else if (this.options.buildStaffingProposal) {
+          try {
+            staffingProposal = await this.options.buildStaffingProposal({
+              projectId: claim.project_id,
+              objective: claim.objective,
+              plan: result.finalPlan,
+              pm: models.pm,
+              workerProviders: claim.worker_providers ?? "both",
+            });
+          } catch {
+            // The quick change remains durable even if an allocation call
+            // fails. The bridge's explicit fallback keeps execution truthful.
+            staffingProposal = null;
+          }
+        }
         const resultDto: PlanningRunResultDto = {
           plan: result.finalPlan,
           content_hash: planContentHash(result.finalPlan),
@@ -450,6 +485,7 @@ export class PlanningRunWorker {
             node_id: module.id,
             provider: claim.agent_provider,
             model: claim.agent_model,
+            reasoning_effort: claim.agent_reasoning_effort,
             worker_count: 1,
             budget_usd: 25,
             rationale: "Agent explicitly selected for this run.",
@@ -461,6 +497,7 @@ export class PlanningRunWorker {
             projectId: claim.project_id,
             objective: claim.objective,
             plan: result.finalPlan,
+            pm: models.pm,
             workerProviders: claim.worker_providers ?? "both",
           });
         } catch {

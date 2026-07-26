@@ -178,7 +178,15 @@ function createV2Executor(
       // credential lazily, at the moment they execute. Minting is per-run and
       // memoized per runtime instance, so a resumed or retried turn inside one
       // run reuses one credential rather than accumulating rows.
-      ["codex", (model: string, context) => new CodexRuntime({ model, ...gateway(context.runId) })],
+      [
+        "codex",
+        (model: string, context) =>
+          new CodexRuntime({
+            model,
+            ...(context.reasoningEffort ? { reasoningEffort: context.reasoningEffort } : {}),
+            ...gateway(context.runId),
+          }),
+      ],
       [
         "claude-code",
         (model: string, context) => new ClaudeCodeRuntime({ model, ...gateway(context.runId) }),

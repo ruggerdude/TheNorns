@@ -24,6 +24,7 @@
 //   4. GET /api/v2/projects/:id/execution-status (project-scoped, no runId)
 //        -> { project_id, phases: [{ phase_id, name, state,
 //        percent_complete, est_completion, notes }] }.
+import type { CodexReasoningEffortT } from "@norns/contracts";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,7 @@ export type PhaseRunMode = "planned" | "quick";
 export type PhaseParticipantSelection = {
   provider: "anthropic" | "openai";
   model: string;
+  reasoning_effort?: CodexReasoningEffortT;
 };
 
 export interface ExecutionModelCapability {
@@ -139,6 +141,7 @@ export interface PhaseStaffingRecommendation {
   node_id: string;
   provider: "anthropic" | "openai";
   model: string;
+  reasoning_effort?: CodexReasoningEffortT | null;
   worker_count: number;
   reviewer_model?: string;
   budget_usd?: number;
@@ -214,7 +217,9 @@ export interface PhasePlanStaffedPhase {
   description?: string | null;
   provider: "anthropic" | "openai";
   model: string;
+  reasoning_effort: CodexReasoningEffortT | null;
   worker_count: number;
+  rationale?: string;
 }
 
 /**
@@ -235,7 +240,9 @@ export function planPhasesFromRun(run: PhasePlanningRunDto): PhasePlanStaffedPha
       description: module?.description ?? null,
       provider: rec.provider,
       model: rec.model,
+      reasoning_effort: rec.reasoning_effort ?? null,
       worker_count: rec.worker_count,
+      rationale: rec.rationale,
     };
   });
 }
@@ -244,6 +251,7 @@ export interface PlanningRunStaffingOverride {
   node_id: string;
   provider: "anthropic" | "openai";
   model: string;
+  reasoning_effort?: CodexReasoningEffortT | null;
 }
 
 export interface PlanningRunDecisionBody {

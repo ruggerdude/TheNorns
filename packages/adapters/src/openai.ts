@@ -1,3 +1,4 @@
+import type { CodexReasoningEffortT } from "@norns/contracts";
 // OpenAI adapter over the official SDK — same interface, same taxonomy, same
 // conformance suite as the Anthropic adapter.
 import OpenAI from "openai";
@@ -18,6 +19,7 @@ import {
 export interface OpenAiAdapterOptions {
   apiKey: string;
   model: string;
+  reasoningEffort?: CodexReasoningEffortT;
   baseURL?: string;
   registry?: Record<string, ModelEntry>;
 }
@@ -27,9 +29,11 @@ export class OpenAiAdapter implements LlmAdapter {
   readonly model: string;
   private readonly client: OpenAI;
   private readonly registry: Record<string, ModelEntry>;
+  private readonly reasoningEffort: CodexReasoningEffortT | undefined;
 
   constructor(options: OpenAiAdapterOptions) {
     this.model = options.model;
+    this.reasoningEffort = options.reasoningEffort;
     this.registry = options.registry ?? DEFAULT_MODEL_REGISTRY;
     this.client = new OpenAI({
       apiKey: options.apiKey,
@@ -94,6 +98,9 @@ export class OpenAiAdapter implements LlmAdapter {
           input: this.buildInput(request),
           ...(request.system !== undefined ? { instructions: request.system } : {}),
           ...(request.maxTokens !== undefined ? { max_output_tokens: request.maxTokens } : {}),
+          ...(this.reasoningEffort !== undefined
+            ? { reasoning: { effort: this.reasoningEffort } }
+            : {}),
         },
         request.signal !== undefined ? { signal: request.signal } : {},
       );

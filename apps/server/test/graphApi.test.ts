@@ -235,6 +235,7 @@ describe("project graph API", () => {
           node_id: module.id,
           provider,
           model: provider === "anthropic" ? "claude-sonnet-5" : "gpt-5.6-terra",
+          reasoning_effort: provider === "openai" ? "high" : null,
           worker_count: module.parallelization.safe && module.estimated_complexity === "L" ? 2 : 1,
           reviewer_model: provider === "anthropic" ? "gpt-5.6-terra" : "claude-sonnet-5",
           budget_usd: 25 + index,

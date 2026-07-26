@@ -21,6 +21,8 @@
 // verbatim — no new approval semantics.
 import { createHash } from "node:crypto";
 import {
+  CodexReasoningEffort,
+  type CodexReasoningEffortT,
   type PlanContractT,
   type PlanModuleT,
   type V2StrategyAssignmentProposalT,
@@ -60,8 +62,15 @@ function crossProvider(provider: string): string {
   return provider;
 }
 
-function deterministicProfileId(provider: string, model: string): string {
-  return `agent-profile:${sha256(JSON.stringify([provider, provider, model])).slice(0, 32)}`;
+function deterministicProfileId(
+  provider: string,
+  model: string,
+  reasoningEffort: CodexReasoningEffortT | null = null,
+): string {
+  const identity = reasoningEffort
+    ? [provider, provider, model, reasoningEffort]
+    : [provider, provider, model];
+  return `agent-profile:${sha256(JSON.stringify(identity)).slice(0, 32)}`;
 }
 
 export type StrategyBridgeErrorCode =
@@ -101,6 +110,7 @@ export interface StaffingAssignmentEdit {
   assignment_id: string;
   provider?: string | undefined;
   model?: string | undefined;
+  reasoning_effort?: CodexReasoningEffortT | null | undefined;
   /** Set the reviewer provider/model. Both are required together to resolve a
    *  reviewer profile; omit `reviewer_model` (or set clear_reviewer) to drop
    *  the reviewer. */
@@ -161,6 +171,7 @@ export interface StrategyReviewStaffingDto {
   required_roles: string[];
   provider: string | null;
   model: string | null;
+  reasoning_effort: CodexReasoningEffortT | null;
   reviewer_provider: string | null;
   reviewer_model: string | null;
   budget_limit_usd: number;
@@ -254,6 +265,7 @@ interface StaffingRecommendation {
   node_id: string;
   provider: string;
   model: string;
+  reasoning_effort: CodexReasoningEffortT | null;
   reviewer_model: string;
   budget_usd: number;
   rationale: string;
@@ -262,6 +274,7 @@ interface StaffingRecommendation {
 interface ResolvedProfile {
   provider: string;
   model: string;
+  reasoning_effort: CodexReasoningEffortT | null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -297,6 +310,11 @@ function readStaffingRecommendations(result: unknown): Map<string, StaffingRecom
       node_id: nodeId,
       provider,
       model,
+      reasoning_effort:
+        typeof record.reasoning_effort === "string" &&
+        CodexReasoningEffort.safeParse(record.reasoning_effort).success
+          ? (record.reasoning_effort as CodexReasoningEffortT)
+          : null,
       reviewer_model: typeof record.reviewer_model === "string" ? record.reviewer_model : "",
       budget_usd: typeof record.budget_usd === "number" ? record.budget_usd : 0,
       rationale: typeof record.rationale === "string" ? record.rationale : "",
@@ -463,8 +481,18 @@ export class StrategyBridgeService {
         const currentPair = profileToPair.get(assignment.agent_profile_id) ?? null;
         const provider = edit.provider ?? currentPair?.provider ?? "anthropic";
         const model = edit.model ?? currentPair?.model ?? "";
-        const profileId = deterministicProfileId(provider, model);
-        requiredProfiles.set(profileId, { provider, model });
+        const reasoningEffort =
+          provider === "openai"
+            ? edit.reasoning_effort !== undefined
+              ? edit.reasoning_effort
+              : (currentPair?.reasoning_effort ?? null)
+            : null;
+        const profileId = deterministicProfileId(provider, model, reasoningEffort);
+        requiredProfiles.set(profileId, {
+          provider,
+          model,
+          reasoning_effort: reasoningEffort,
+        });
 
         let reviewerProfileId = assignment.reviewer_agent_profile_id;
         if (edit.clear_reviewer) {
@@ -475,6 +503,7 @@ export class StrategyBridgeService {
           requiredProfiles.set(reviewerProfileId, {
             provider: reviewerProvider,
             model: edit.reviewer_model,
+            reasoning_effort: null,
           });
         }
 
@@ -718,10 +747,12 @@ export class StrategyBridgeService {
         const providerModelId = deterministicProfileId(
           recommendation.provider,
           recommendation.model,
+          recommendation.reasoning_effort,
         );
         requiredProfiles.set(providerModelId, {
           provider: recommendation.provider,
           model: recommendation.model,
+          reasoning_effort: recommendation.reasoning_effort,
         });
         let reviewerProfileId: string | null = null;
         if (recommendation.reviewer_model) {
@@ -733,6 +764,7 @@ export class StrategyBridgeService {
           requiredProfiles.set(reviewerProfileId, {
             provider: reviewerProvider,
             model: recommendation.reviewer_model,
+            reasoning_effort: null,
           });
         }
         return {
@@ -749,7 +781,11 @@ export class StrategyBridgeService {
       // No recommendation for this module (staffing was null/partial). Assign a
       // placeholder the user edits before approving; falls back to the model
       // that drafted the plan.
-      const profileId = deterministicProfileId(fallback.provider, fallback.model);
+      const profileId = deterministicProfileId(
+        fallback.provider,
+        fallback.model,
+        fallback.reasoning_effort,
+      );
       requiredProfiles.set(profileId, fallback);
       return {
         local_id: assignmentLocalId(module.id),
@@ -899,10 +935,10 @@ export class StrategyBridgeService {
       for (const [id, pair] of profiles) {
         await tx.query(
           `INSERT INTO agent_profiles (
-             id, schema_version, provider, runtime, model, roles, capabilities,
+             id, schema_version, provider, runtime, model, reasoning_effort, roles, capabilities,
              context_limit_tokens, security_restrictions, status, active_workload,
              cost_metadata
-           ) VALUES ($1,2,$2,$3,$4,$5::jsonb,'[]'::jsonb,$6,'[]'::jsonb,'available',0,$7::jsonb)
+           ) VALUES ($1,2,$2,$3,$4,$5,$6::jsonb,'[]'::jsonb,$7,'[]'::jsonb,'available',0,$8::jsonb)
            ON CONFLICT (id) DO NOTHING`,
           [
             id,
@@ -917,6 +953,7 @@ export class StrategyBridgeService {
             // an Actions job as well as on a laptop.
             agenticRuntimeForProvider(pair.provider) ?? pair.provider,
             pair.model,
+            pair.reasoning_effort,
             JSON.stringify(["implementation", "review"]),
             DEFAULT_CONTEXT_LIMIT_TOKENS,
             JSON.stringify({
@@ -950,6 +987,7 @@ export class StrategyBridgeService {
         required_roles: task?.required_roles ?? [],
         provider: impl?.provider ?? null,
         model: impl?.model ?? null,
+        reasoning_effort: impl?.reasoning_effort ?? null,
         reviewer_provider: reviewer?.provider ?? null,
         reviewer_model: reviewer?.model ?? null,
         budget_limit_usd: assignment.budget_limit_usd,
@@ -974,12 +1012,24 @@ export class StrategyBridgeService {
     ];
     if (ids.length === 0) return new Map();
     const run = async (tx: V2SqlExecutor) => {
-      const result = await tx.query<{ id: string; provider: string; model: string }>(
-        "SELECT id, provider, model FROM agent_profiles WHERE id = ANY($1::text[])",
+      const result = await tx.query<{
+        id: string;
+        provider: string;
+        model: string;
+        reasoning_effort: CodexReasoningEffortT | null;
+      }>(
+        "SELECT id, provider, model, reasoning_effort FROM agent_profiles WHERE id = ANY($1::text[])",
         [ids],
       );
       return new Map(
-        result.rows.map((row) => [row.id, { provider: row.provider, model: row.model }]),
+        result.rows.map((row) => [
+          row.id,
+          {
+            provider: row.provider,
+            model: row.model,
+            reasoning_effort: row.reasoning_effort,
+          },
+        ]),
       );
     };
     return executor ? run(executor) : this.transactions.transaction(run);
@@ -1068,10 +1118,10 @@ function fallbackImplementer(transcript: unknown[]): ResolvedProfile {
       typeof entry.provider === "string" &&
       typeof entry.model === "string"
     ) {
-      return { provider: entry.provider, model: entry.model };
+      return { provider: entry.provider, model: entry.model, reasoning_effort: null };
     }
   }
-  return { provider: "anthropic", model: "unstaffed" };
+  return { provider: "anthropic", model: "unstaffed", reasoning_effort: null };
 }
 
 function successMeasures(plan: PlanContractT): string[] {

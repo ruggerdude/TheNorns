@@ -1,3 +1,4 @@
+import type { CodexReasoningEffortT } from "@norns/contracts";
 // Codex runtime via the official @openai/codex-sdk (NORN-012 verified:
 // run(input, {signal}) cancels the turn, resumeThread() resumes sessions,
 // workingDirectory + sandboxMode are thread options).
@@ -37,6 +38,7 @@ export class CodexRuntime implements CodingRuntime {
   constructor(
     private readonly options: {
       model?: string;
+      reasoningEffort?: CodexReasoningEffortT;
       resumeThreadId?: string;
       /** EXECUTION E9 — resolves the per-run gateway credential, lazily. */
       gateway?: GatewayCredentialProvider;
@@ -69,6 +71,9 @@ export class CodexRuntime implements CodingRuntime {
         workingDirectory: request.worktreePath,
         skipGitRepoCheck: false,
         ...(this.options.model !== undefined ? { model: this.options.model } : {}),
+        ...(this.options.reasoningEffort !== undefined
+          ? { modelReasoningEffort: this.options.reasoningEffort }
+          : {}),
       };
       const thread = this.options.resumeThreadId
         ? codex.resumeThread(this.options.resumeThreadId, threadOptions)

@@ -1,5 +1,5 @@
 import type { LlmAdapter, ProviderName, SelectableModelCatalogEntry } from "@norns/adapters";
-import type { UsageEventT } from "@norns/contracts";
+import { CodexReasoningEffort, type UsageEventT } from "@norns/contracts";
 import { z } from "zod";
 import type { PmAssignmentRecommendation } from "../graph/allocation.js";
 import type { GraphSnapshot } from "../graph/graph.js";
@@ -9,6 +9,7 @@ const Recommendation = z
     node_id: z.string().min(1),
     provider: z.enum(["anthropic", "openai"]),
     model: z.string().min(1),
+    reasoning_effort: CodexReasoningEffort.nullable(),
     worker_count: z.number().int().min(1).max(3),
     reviewer_model: z.string().min(1),
     budget_usd: z.number().finite().positive().max(1_000_000),
@@ -108,6 +109,7 @@ export async function recommendProjectAllocation(options: {
     `Staff the project "${options.projectName}" for its current workflow graph.`,
     `Objective: ${options.objective}`,
     "Choose the best implementation provider/model, worker count, cross-provider reviewer, and USD budget for every node.",
+    "For every OpenAI implementation model, choose a Codex reasoning_effort from minimal, low, medium, high, or xhigh based on task complexity and risk. Use null for Anthropic implementation models.",
     "Use only the approved models listed below. Prefer the least expensive model that can reliably handle the work, but spend for capability where complexity or risk warrants it.",
     "Use more than one worker only when parallel_safe is true and the work is genuinely divisible. Never use the implementation provider as the reviewer provider.",
     ...constraintLine,
@@ -162,6 +164,12 @@ export async function recommendProjectAllocation(options: {
       throw new AllocationRecommendationError(
         "model_unavailable",
         `The project manager selected unavailable implementation model ${recommendation.provider}/${recommendation.model}.`,
+      );
+    }
+    if (recommendation.provider === "anthropic" && recommendation.reasoning_effort !== null) {
+      throw new AllocationRecommendationError(
+        "model_unavailable",
+        `Node "${recommendation.node_id}" set Codex reasoning effort for a non-OpenAI implementation model.`,
       );
     }
     const reviewer = modelById.get(recommendation.reviewer_model);

@@ -23,6 +23,8 @@ import {
 } from "@norns/adapters";
 import {
   AnthropicPmModel,
+  CodexReasoningEffort,
+  type CodexReasoningEffortT,
   type CommandEnvelopeT,
   CommandPayload,
   type CommandStateT,
@@ -441,7 +443,12 @@ export interface ServerOptions {
   /** Live planning (Tier 3): append real provider usage to the cost ledger. */
   recordUsage?: (events: UsageEventT[]) => void;
   /** Test/deployment seam for constructing an adapter for an exact provider model. */
-  createPlanningAdapter?: (provider: ProviderName, model: string, apiKey: string) => LlmAdapter;
+  createPlanningAdapter?: (
+    provider: ProviderName,
+    model: string,
+    apiKey: string,
+    reasoningEffort?: CodexReasoningEffortT,
+  ) => LlmAdapter;
   /**
    * EXECUTION E3 — proxied model inference for runners that hold no provider
    * credentials. Supplying one overrides the default composition below; the
@@ -537,7 +544,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const executionModelCatalog = () => executionModelCatalogFromEnvironment(integrationEnvironment);
   const configuredExecutionModels = () =>
     executionModelCatalog().filter((entry) => entry.available);
-  const buildPlanningAdapter = (provider: ProviderName, model: string): LlmAdapter => {
+  const buildPlanningAdapter = (
+    provider: ProviderName,
+    model: string,
+    reasoningEffort?: CodexReasoningEffortT,
+  ): LlmAdapter => {
     const apiKey =
       provider === "anthropic"
         ? integrationEnvironment.ANTHROPIC_API_KEY
@@ -549,11 +560,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       );
     }
     if (options.createPlanningAdapter) {
-      return options.createPlanningAdapter(provider, model, apiKey);
+      return options.createPlanningAdapter(provider, model, apiKey, reasoningEffort);
     }
     return provider === "anthropic"
       ? new AnthropicAdapter({ apiKey, model })
-      : new OpenAiAdapter({ apiKey, model });
+      : new OpenAiAdapter({ apiKey, model, ...(reasoningEffort ? { reasoningEffort } : {}) });
   };
 
   // === EXECUTION E3 (proxied model inference) ==============================
@@ -4483,7 +4494,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         projectId: string,
         run?: {
           mode: "planned" | "quick";
-          pm: { provider: ProviderName; model: string } | null;
+          pm: {
+            provider: ProviderName;
+            model: string;
+            reasoning_effort?: CodexReasoningEffortT;
+          } | null;
         },
       ) => {
         const [projectPm, persistedReviewer] = await Promise.all([
@@ -4491,6 +4506,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           planningRunService.reviewerSelectionOf(projectId),
         ]);
         const pmSelection = run?.pm ?? projectPm;
+        const pmReasoningEffort = run?.pm?.reasoning_effort;
         if (run?.mode === "quick") {
           const pmModel =
             pmSelection.model ??
@@ -4498,7 +4514,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               ? PLANNING_RUN_DEFAULT_PM_MODEL
               : DEFAULT_PM_MODEL.openai);
           return {
-            pm: { provider: pmSelection.provider, model: pmModel },
+            pm: {
+              provider: pmSelection.provider,
+              model: pmModel,
+              ...(pmReasoningEffort ? { reasoning_effort: pmReasoningEffort } : {}),
+            },
             // Quick changes never instantiate or call this reviewer. Keeping a
             // complete pair preserves the worker's shared resolution shape.
             reviewer: { provider: pmSelection.provider, model: pmModel },
@@ -4511,7 +4531,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         // openai). Project PM selection, persisted reviewer settings, and the
         // NORNS_* env vars all still win — these apply only when nothing else
         // resolved a model.
-        return resolvePlanningParticipants({
+        const resolved = resolvePlanningParticipants({
           pmSelection,
           persistedReviewer:
             persistedReviewer?.provider === pmSelection.provider ? null : persistedReviewer,
@@ -4522,6 +4542,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           },
           defaultReviewerModel: { openai: PLANNING_RUN_DEFAULT_REVIEWER_MODEL },
         });
+        return {
+          ...resolved,
+          pm: {
+            ...resolved.pm,
+            ...(pmReasoningEffort ? { reasoning_effort: pmReasoningEffort } : {}),
+          },
+        };
       };
       const planningWorker = new PlanningRunWorker(planningTransactions, buildPlanningAdapter, {
         resolveModels: resolvePlanningModels,
@@ -4541,20 +4568,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           projectId,
           objective,
           plan,
+          pm,
           workerProviders,
         }): Promise<PlanningStaffingProposalDto | null> => {
-          const [pmSelection, summary] = await Promise.all([
-            projects.pmSelectionOf(projectId),
-            projects.summary(projectId),
-          ]);
-          const pmModel =
-            pmSelection.model ??
-            (pmSelection.provider === "anthropic"
-              ? (integrationEnvironment.NORNS_PM_MODEL ?? DEFAULT_PM_MODEL.anthropic)
-              : (integrationEnvironment.NORNS_OPENAI_MODEL ?? DEFAULT_PM_MODEL.openai));
-          const pm = buildPlanningAdapter(pmSelection.provider, pmModel);
+          const summary = await projects.summary(projectId);
+          const staffingPm = buildPlanningAdapter(pm.provider, pm.model, pm.reasoning_effort);
           const recommendation = await recommendProjectAllocation({
-            pm,
+            pm: staffingPm,
             projectId,
             projectName: summary.name,
             objective,
@@ -4626,8 +4646,18 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         .object({
           provider: z.enum(["anthropic", "openai"]),
           model: z.string().trim().min(1).max(200),
+          reasoning_effort: CodexReasoningEffort.optional(),
         })
-        .strict();
+        .strict()
+        .superRefine((participant, context) => {
+          if (participant.provider !== "openai" && participant.reasoning_effort !== undefined) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["reasoning_effort"],
+              message: "reasoning effort is available only for OpenAI/Codex models",
+            });
+          }
+        });
 
       const CreatePlanningRunBody = z
         .object({
@@ -4730,26 +4760,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             });
           }
 
-          let agent = body.data.agent;
-          if (mode === "quick" && !agent) {
-            const projectPm = body.data.pm ?? (await projects.pmSelectionOf(id));
-            const pmModel =
-              projectPm.model ??
-              (projectPm.provider === "anthropic"
-                ? PLANNING_RUN_DEFAULT_PM_MODEL
-                : DEFAULT_PM_MODEL.openai);
-            const preferred = availableExecutionModels.find(
-              (model) => model.provider === projectPm.provider && model.model === pmModel,
-            );
-            const selected = preferred ?? availableExecutionModels[0];
-            if (!selected) {
-              return reply.code(422).send({
-                error: "agent_model_unavailable",
-                message: `No execution agent is available. Configure ${RUNNER_ALLOWED_MODELS_ENV} before starting work.`,
-              });
-            }
-            agent = { provider: selected.provider, model: selected.model };
-          }
+          const agent = body.data.agent;
 
           const run = await planningRunService.create(id, {
             objective: body.data.objective,
@@ -4920,8 +4931,18 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                   node_id: z.string().trim().min(1),
                   provider: z.enum(["anthropic", "openai"]),
                   model: z.string().trim().min(1).max(200),
+                  reasoning_effort: CodexReasoningEffort.nullable().optional(),
                 })
-                .strict(),
+                .strict()
+                .superRefine((entry, context) => {
+                  if (entry.provider !== "openai" && entry.reasoning_effort != null) {
+                    context.addIssue({
+                      code: z.ZodIssueCode.custom,
+                      path: ["reasoning_effort"],
+                      message: "reasoning effort is available only for OpenAI/Codex models",
+                    });
+                  }
+                }),
             )
             .max(200)
             .optional(),
@@ -4938,6 +4959,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             `model "${entry.model}" belongs to provider "${registered.provider}", ` +
             `not "${entry.provider}" (node "${entry.node_id}")`
           );
+        }
+        if (entry.provider !== "openai" && entry.reasoning_effort != null) {
+          return `reasoning effort is available only for OpenAI/Codex models (node "${entry.node_id}")`;
         }
         return executionModelUnavailableMessage(
           entry.provider,

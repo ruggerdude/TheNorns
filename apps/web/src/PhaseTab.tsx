@@ -1,4 +1,8 @@
-import { PM_MODEL_OPTIONS } from "@norns/contracts";
+import {
+  type CodexReasoningEffortT,
+  DEFAULT_CODEX_REASONING_EFFORT,
+  PM_MODEL_OPTIONS,
+} from "@norns/contracts";
 // PHASE TAB (P2): one flow from "describe the goal" to "watch execution".
 //   a. Goal input (textarea + image attachments)
 //   b. Setup selectors (agents, review rounds) + fixed PM/Reviewer identity
@@ -51,6 +55,17 @@ const PROVIDER_GROUP_LABEL: Record<Provider, string> = {
   openai: "OpenAI",
 };
 
+const CODEX_EFFORT_OPTIONS: readonly {
+  value: CodexReasoningEffortT;
+  label: string;
+}[] = [
+  { value: "minimal", label: "Minimal" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra high" },
+];
+
 const PM_PARTICIPANT_OPTIONS = (Object.keys(PM_MODEL_OPTIONS) as Provider[]).flatMap((provider) =>
   PM_MODEL_OPTIONS[provider].map((model) => ({
     value: `${provider}:${model.id}`,
@@ -95,9 +110,18 @@ interface DesignatedAttempt {
 function participantFor(
   value: string,
   options: readonly ParticipantOption[],
+  reasoningEffort?: CodexReasoningEffortT,
 ): PhaseParticipantSelection | undefined {
   const option = options.find((candidate) => candidate.value === value);
-  return option ? { provider: option.provider, model: option.model } : undefined;
+  return option
+    ? {
+        provider: option.provider,
+        model: option.model,
+        ...(option.provider === "openai" && reasoningEffort
+          ? { reasoning_effort: reasoningEffort }
+          : {}),
+      }
+    : undefined;
 }
 
 function participantLabel(
@@ -106,6 +130,10 @@ function participantLabel(
   options: readonly ParticipantOption[],
 ): string {
   return options.find((candidate) => candidate.value === value)?.label ?? fallback;
+}
+
+function effortLabel(effort: CodexReasoningEffortT | null | undefined): string {
+  return CODEX_EFFORT_OPTIONS.find((option) => option.value === effort)?.label ?? "Medium";
 }
 
 function executionScopeForRun(
@@ -265,7 +293,11 @@ export function PhaseTab({
   const [agents, setAgents] = useState<WorkerProviders>("both");
   const [reviewRounds, setReviewRounds] = useState(2);
   const [pmSelection, setPmSelection] = useState("");
+  const [pmEffort, setPmEffort] = useState<CodexReasoningEffortT>(DEFAULT_CODEX_REASONING_EFFORT);
   const [agentSelection, setAgentSelection] = useState("");
+  const [agentEffort, setAgentEffort] = useState<CodexReasoningEffortT>(
+    DEFAULT_CODEX_REASONING_EFFORT,
+  );
   const [customizeTeam, setCustomizeTeam] = useState(false);
   const [executionModels, setExecutionModels] = useState<ExecutionModelCapability[] | null>(null);
   const [executionCapabilityError, setExecutionCapabilityError] = useState<string | null>(null);
@@ -283,6 +315,9 @@ export function PhaseTab({
   const [error, setError] = useState<string | null>(null);
   // d — decision panel
   const [staffingDrafts, setStaffingDrafts] = useState<Record<string, string>>({});
+  const [staffingEffortDrafts, setStaffingEffortDrafts] = useState<
+    Record<string, CodexReasoningEffortT>
+  >({});
   const [modifyOpen, setModifyOpen] = useState(false);
   const [direction, setDirection] = useState("");
   const [confirmingReject, setConfirmingReject] = useState(false);
@@ -379,8 +414,8 @@ export function PhaseTab({
     setStarting(true);
     setError(null);
     try {
-      const pm = participantFor(pmSelection, PM_PARTICIPANT_OPTIONS);
-      const agent = participantFor(agentSelection, executionParticipantOptions);
+      const pm = participantFor(pmSelection, PM_PARTICIPANT_OPTIONS, pmEffort);
+      const agent = participantFor(agentSelection, executionParticipantOptions, agentEffort);
       const workerProviders = agent?.provider ?? agents;
       const created = await startPhasePlanningRun(projectId, {
         objective: goal.trim(),
@@ -395,6 +430,7 @@ export function PhaseTab({
       setRunId(created.planning_run_id);
       setRun(null);
       setStaffingDrafts({});
+      setStaffingEffortDrafts({});
       setModifyOpen(false);
       setDirection("");
       setConfirmingReject(false);
@@ -415,7 +451,9 @@ export function PhaseTab({
     reviewRounds,
     agents,
     pmSelection,
+    pmEffort,
     agentSelection,
+    agentEffort,
     executionParticipantOptions,
     projectId,
     fail,
@@ -485,6 +523,10 @@ export function PhaseTab({
 
   const staffingValue = (phase: PhasePlanStaffedPhase): string =>
     staffingDrafts[phase.node_id] ?? `${phase.provider}:${phase.model}`;
+  const staffingProvider = (phase: PhasePlanStaffedPhase): Provider =>
+    staffingValue(phase).split(":", 1)[0] as Provider;
+  const staffingEffortValue = (phase: PhasePlanStaffedPhase): CodexReasoningEffortT =>
+    staffingEffortDrafts[phase.node_id] ?? phase.reasoning_effort ?? DEFAULT_CODEX_REASONING_EFFORT;
 
   const decide = useCallback(
     async (body: Parameters<typeof postPlanningRunDecision>[2]) => {
@@ -547,6 +589,7 @@ export function PhaseTab({
         node_id: phase.node_id,
         provider: provider as Provider,
         model: modelParts.join(":"),
+        reasoning_effort: provider === "openai" ? staffingEffortValue(phase) : null,
       };
     });
     return decide({ decision: "approve", staffing });
@@ -562,6 +605,7 @@ export function PhaseTab({
       setRun(null);
       setError(null);
       setStaffingDrafts({});
+      setStaffingEffortDrafts({});
       setModifyOpen(false);
       setDirection("");
       setConfirmingReject(false);
@@ -817,8 +861,8 @@ export function PhaseTab({
               onClick={() => setCustomizeTeam((current) => !current)}
             >
               <span>
-                <strong>Choose PM and agent</strong>
-                <small>Optional · project defaults are ready</small>
+                <strong>Override PM or agent</strong>
+                <small>Optional · AI staffing is ready by default</small>
               </span>
               <span aria-hidden="true">{customizeTeam ? "−" : "+"}</span>
             </button>
@@ -844,6 +888,22 @@ export function PhaseTab({
                     ))}
                   </Select>
                 </Field>
+                {participantFor(pmSelection, PM_PARTICIPANT_OPTIONS)?.provider === "openai" ? (
+                  <Field label="PM Codex effort">
+                    <Select
+                      data-testid="phase-pm-effort"
+                      value={pmEffort}
+                      disabled={starting}
+                      onChange={(event) => setPmEffort(event.target.value as CodexReasoningEffortT)}
+                    >
+                      {CODEX_EFFORT_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                ) : null}
                 <Field label="Agent">
                   <Select
                     data-testid="phase-agent"
@@ -851,9 +911,7 @@ export function PhaseTab({
                     disabled={starting || executionModels === null}
                     onChange={(event) => setAgentSelection(event.target.value)}
                   >
-                    <option value="">
-                      {mode === "quick" ? "Available default" : "Recommended automatically"}
-                    </option>
+                    <option value="">AI recommendation for each task</option>
                     {(Object.keys(PM_MODEL_OPTIONS) as Provider[]).map((provider) => (
                       <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
                         {executionParticipantOptions
@@ -867,17 +925,42 @@ export function PhaseTab({
                     ))}
                   </Select>
                 </Field>
+                {participantFor(agentSelection, executionParticipantOptions)?.provider ===
+                "openai" ? (
+                  <Field label="Agent Codex effort">
+                    <Select
+                      data-testid="phase-agent-effort"
+                      value={agentEffort}
+                      disabled={starting}
+                      onChange={(event) =>
+                        setAgentEffort(event.target.value as CodexReasoningEffortT)
+                      }
+                    >
+                      {CODEX_EFFORT_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                ) : null}
               </div>
             ) : null}
 
             <p className="muted phase-identity-line" data-testid="phase-identity-line">
-              PM: {participantLabel(pmSelection, "Project default", PM_PARTICIPANT_OPTIONS)} ·
-              Agent:{" "}
+              PM: {participantLabel(pmSelection, "Project default", PM_PARTICIPANT_OPTIONS)}
+              {participantFor(pmSelection, PM_PARTICIPANT_OPTIONS)?.provider === "openai"
+                ? ` (${effortLabel(pmEffort)} effort)`
+                : ""}{" "}
+              · Agent:{" "}
               {participantLabel(
                 agentSelection,
-                mode === "quick" ? "Available default" : "Recommended automatically",
+                "AI recommendation for each task",
                 executionParticipantOptions,
               )}
+              {participantFor(agentSelection, executionParticipantOptions)?.provider === "openai"
+                ? ` (${effortLabel(agentEffort)} effort)`
+                : ""}
               {mode === "planned" ? " · Reviewer: Automatic cross-provider" : " · No reviewer"}
             </p>
             {executionCapabilityError ? (
@@ -1088,11 +1171,32 @@ export function PhaseTab({
                       </span>
                       <h4>{phase.name ?? phase.node_id}</h4>
                     </div>
-                    <Badge tone="info">
-                      {phase.worker_count} worker{phase.worker_count === 1 ? "" : "s"}
-                    </Badge>
+                    <div className="phase-plan-badges">
+                      <Badge tone="success">AI pick</Badge>
+                      <Badge tone="info">
+                        {phase.worker_count} worker{phase.worker_count === 1 ? "" : "s"}
+                      </Badge>
+                    </div>
                   </div>
                   {phase.description ? <p className="muted">{phase.description}</p> : null}
+                  <div
+                    className="phase-agent-recommendation"
+                    data-testid={`phase-agent-recommendation-${phase.node_id}`}
+                  >
+                    <strong>
+                      {participantLabel(
+                        `${phase.provider}:${phase.model}`,
+                        phase.model,
+                        executionParticipantOptions,
+                      )}
+                    </strong>
+                    {phase.provider === "openai" ? (
+                      <span>{effortLabel(phase.reasoning_effort)} effort</span>
+                    ) : null}
+                  </div>
+                  {phase.rationale ? (
+                    <p className="phase-agent-rationale">{phase.rationale}</p>
+                  ) : null}
                 </article>
               ))}
             </div>
@@ -1114,29 +1218,52 @@ export function PhaseTab({
                   <div className="phase-staffing-grid">
                     {planPhases.map((phase) => (
                       <Field key={phase.node_id} label={phase.name ?? phase.node_id}>
-                        <Select
-                          data-testid={`phase-staffing-${phase.node_id}`}
-                          value={staffingValue(phase)}
-                          disabled={decisionBusy}
-                          onChange={(event) =>
-                            setStaffingDrafts((current) => ({
-                              ...current,
-                              [phase.node_id]: event.target.value,
-                            }))
-                          }
-                        >
-                          {activeProviders.map((provider) => (
-                            <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
-                              {executionParticipantOptions
-                                .filter((option) => option.provider === provider)
-                                .map((option) => (
-                                  <option key={option.model} value={option.value}>
-                                    {option.label}
-                                  </option>
-                                ))}
-                            </optgroup>
-                          ))}
-                        </Select>
+                        <div className="phase-staffing-controls">
+                          <Select
+                            aria-label={`${phase.name ?? phase.node_id} agent model`}
+                            data-testid={`phase-staffing-${phase.node_id}`}
+                            value={staffingValue(phase)}
+                            disabled={decisionBusy}
+                            onChange={(event) =>
+                              setStaffingDrafts((current) => ({
+                                ...current,
+                                [phase.node_id]: event.target.value,
+                              }))
+                            }
+                          >
+                            {activeProviders.map((provider) => (
+                              <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
+                                {executionParticipantOptions
+                                  .filter((option) => option.provider === provider)
+                                  .map((option) => (
+                                    <option key={option.model} value={option.value}>
+                                      {option.label}
+                                    </option>
+                                  ))}
+                              </optgroup>
+                            ))}
+                          </Select>
+                          {staffingProvider(phase) === "openai" ? (
+                            <Select
+                              aria-label={`${phase.name ?? phase.node_id} Codex effort`}
+                              data-testid={`phase-staffing-effort-${phase.node_id}`}
+                              value={staffingEffortValue(phase)}
+                              disabled={decisionBusy}
+                              onChange={(event) =>
+                                setStaffingEffortDrafts((current) => ({
+                                  ...current,
+                                  [phase.node_id]: event.target.value as CodexReasoningEffortT,
+                                }))
+                              }
+                            >
+                              {CODEX_EFFORT_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label} effort
+                                </option>
+                              ))}
+                            </Select>
+                          ) : null}
+                        </div>
                       </Field>
                     ))}
                   </div>
@@ -1271,6 +1398,29 @@ export function PhaseTab({
                         : "Approved"}
               </Badge>
             </div>
+            {planPhases.length > 0 ? (
+              <div
+                className="phase-execution-team"
+                data-testid="phase-execution-team"
+                aria-label="Assigned implementation team"
+              >
+                {planPhases.map((phase) => (
+                  <div key={phase.node_id}>
+                    <span>{phase.name ?? phase.node_id}</span>
+                    <strong>
+                      {participantLabel(
+                        `${phase.provider}:${phase.model}`,
+                        phase.model,
+                        executionParticipantOptions,
+                      )}
+                      {phase.provider === "openai"
+                        ? ` · ${effortLabel(phase.reasoning_effort)} effort`
+                        : ""}
+                    </strong>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <output
               className={
                 executionNeedsAttention

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CodexReasoningEffort } from "../models.js";
 import {
   V2Actor,
   V2EntityId,
@@ -464,6 +465,7 @@ export const V2DispatchCommand = z
     runtime: V2NonEmptyString,
     provider: V2NonEmptyString,
     model: V2NonEmptyString,
+    reasoning_effort: CodexReasoningEffort.optional(),
     context_refs: z.array(V2ContentAddressedReference).min(1),
     budget_reservation_id: V2EntityId,
     max_charge_usd: z.number().nonnegative(),

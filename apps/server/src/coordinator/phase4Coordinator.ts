@@ -1,5 +1,6 @@
 import { conservativeMaxChargeUsd, snapshotModelPricing } from "@norns/adapters";
 import {
+  type CodexReasoningEffortT,
   type V2ActorT,
   V2ContentAddressedReference,
   type V2ContentAddressedReferenceT,
@@ -143,6 +144,7 @@ interface SchedulingRow {
   provider: string;
   runtime: string;
   model: string;
+  reasoning_effort: CodexReasoningEffortT | null;
   repository_binding_id: string | null;
   runner_repository_id: string | null;
   repository_binding_type: "local_runner" | "github" | null;
@@ -193,7 +195,7 @@ export class Phase4Coordinator {
                 t.title AS task_title, t.verification_policy_ref,
                 p.status AS phase_status, p.approved_budget_usd,
                 a.status AS assignment_status, a.budget_limit_usd, a.agent_profile_id,
-                profile.provider, profile.runtime, profile.model,
+                profile.provider, profile.runtime, profile.model, profile.reasoning_effort,
                 project.primary_repository_binding_id AS repository_binding_id,
                 project.max_concurrent_tasks, profile.max_concurrent_runs,
                 profile.active_workload,
@@ -531,6 +533,7 @@ export class Phase4Coordinator {
         runtime: resolveDispatchRuntime(row.runtime, row.provider),
         provider: row.provider,
         model: row.model,
+        ...(row.reasoning_effort ? { reasoning_effort: row.reasoning_effort } : {}),
         context_refs: contextRefs,
         budget_reservation_id: reservationId,
         max_charge_usd: maxCharge,

@@ -64,6 +64,19 @@ describe("FRONT DOOR P4 image content — Anthropic", () => {
 });
 
 describe("FRONT DOOR P4 image content — OpenAI", () => {
+  it("forwards an explicit Codex reasoning effort to the Responses API", async () => {
+    const from = mock.requests.length;
+    const adapter = new OpenAiAdapter({
+      apiKey: "mock-key",
+      model: "mock-openai",
+      reasoningEffort: "xhigh",
+      baseURL: `${mock.url}/v1`,
+    });
+    await adapter.complete({ prompt: "reason deeply", ...attribution });
+    const body = lastBody((url) => url.endsWith("/responses"), from);
+    expect(body.reasoning).toEqual({ effort: "xhigh" });
+  });
+
   it("sends prompt text plus data-URI input_image parts", async () => {
     const from = mock.requests.length;
     await openai().complete({ prompt: "review these", images: [PNG, JPEG], ...attribution });

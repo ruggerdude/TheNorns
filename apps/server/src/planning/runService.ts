@@ -4,6 +4,7 @@
 // preference — the loop itself is untouched execution logic; see
 // ./runWorker.ts for the part that actually drives runPlanning().
 import type { ProviderName } from "@norns/adapters";
+import type { CodexReasoningEffortT } from "@norns/contracts";
 import { newId } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import type { PersistedReviewerSelection } from "./reviewerSelection.js";
@@ -30,6 +31,7 @@ export type PlanningRunMode = "planned" | "quick";
 export interface PlanningParticipantSelection {
   provider: ProviderName;
   model: string;
+  reasoning_effort?: CodexReasoningEffortT | undefined;
 }
 
 /** Statuses a human decision may be recorded against. */
@@ -77,6 +79,7 @@ export interface ApprovedStaffingEntryDto {
   node_id: string;
   provider: ProviderName;
   model: string;
+  reasoning_effort?: CodexReasoningEffortT | null | undefined;
 }
 
 /** PHASE TAB P1: the latest human decision recorded on a run. */
@@ -146,8 +149,10 @@ interface PlanningRunRow {
   mode: PlanningRunMode;
   pm_provider: ProviderName | null;
   pm_model: string | null;
+  pm_reasoning_effort: CodexReasoningEffortT | null;
   agent_provider: ProviderName | null;
   agent_model: string | null;
+  agent_reasoning_effort: CodexReasoningEffortT | null;
   status: PlanningRunStatus;
   round: number;
   max_rounds: number;
@@ -181,10 +186,21 @@ function rowToDto(row: PlanningRunRow): PlanningRunDto {
     id: row.id,
     project_id: row.project_id,
     mode: row.mode ?? "planned",
-    pm: row.pm_provider && row.pm_model ? { provider: row.pm_provider, model: row.pm_model } : null,
+    pm:
+      row.pm_provider && row.pm_model
+        ? {
+            provider: row.pm_provider,
+            model: row.pm_model,
+            ...(row.pm_reasoning_effort ? { reasoning_effort: row.pm_reasoning_effort } : {}),
+          }
+        : null,
     agent:
       row.agent_provider && row.agent_model
-        ? { provider: row.agent_provider, model: row.agent_model }
+        ? {
+            provider: row.agent_provider,
+            model: row.agent_model,
+            ...(row.agent_reasoning_effort ? { reasoning_effort: row.agent_reasoning_effort } : {}),
+          }
         : null,
     status: row.status,
     round: row.round,
@@ -314,10 +330,10 @@ export class PlanningRunService {
            id, project_id, status, round, max_rounds, objective, transcript,
            result, total_cost_usd, error, created_at, updated_at, attachment_ids,
            worker_providers, mode, requested_by, pm_provider, pm_model,
-           agent_provider, agent_model
+           pm_reasoning_effort, agent_provider, agent_model, agent_reasoning_effort
          ) VALUES (
            $1,$2,'queued',0,$3,$4,'[]'::jsonb,NULL,0,NULL,$5,$5,$6::jsonb,$7,
-           $8,$9,$10,$11,$12,$13
+           $8,$9,$10,$11,$12,$13,$14,$15
          )`,
         [
           id,
@@ -331,8 +347,10 @@ export class PlanningRunService {
           input.requestedBy ?? null,
           input.pm?.provider ?? null,
           input.pm?.model ?? null,
+          input.pm?.reasoning_effort ?? null,
           input.agent?.provider ?? null,
           input.agent?.model ?? null,
+          input.agent?.reasoning_effort ?? null,
         ],
       );
       const row = await this.loadRow(tx, projectId, id);

@@ -3,6 +3,14 @@ import { z } from "zod";
 export const PmProvider = z.enum(["anthropic", "openai"]);
 export type PmProviderT = z.infer<typeof PmProvider>;
 
+/**
+ * Reasoning levels supported by the Codex SDK. `medium` is the product
+ * default when no explicit override or PM recommendation is recorded.
+ */
+export const CodexReasoningEffort = z.enum(["minimal", "low", "medium", "high", "xhigh"]);
+export type CodexReasoningEffortT = z.infer<typeof CodexReasoningEffort>;
+export const DEFAULT_CODEX_REASONING_EFFORT: CodexReasoningEffortT = "medium";
+
 export const AnthropicPmModel = z.enum([
   "claude-fable-5",
   "claude-opus-4-8",

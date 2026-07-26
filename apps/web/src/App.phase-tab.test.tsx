@@ -93,6 +93,7 @@ const convergedRun = makeRun({
           node_id: "p2",
           provider: "openai",
           model: "gpt-5.6-terra",
+          reasoning_effort: "high",
           worker_count: 1,
           reviewer_model: "claude-sonnet-5",
           budget_usd: 15,
@@ -212,14 +213,14 @@ describe("PHASE TAB (P2)", () => {
     expect(screen.getByTestId("phase-mode-quick")).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByTestId("phase-quick-summary")).toHaveTextContent("no reviewer");
     expect(screen.getByTestId("phase-identity-line")).toHaveTextContent(
-      "PM: Project default · Agent: Available default · No reviewer",
+      "PM: Project default · Agent: AI recommendation for each task · No reviewer",
     );
 
     await user.click(screen.getByTestId("phase-mode-planned"));
     expect(screen.getByTestId("phase-agents")).toHaveValue("both");
     expect(screen.getByTestId("phase-rounds")).toHaveValue("2");
     expect(screen.getByTestId("phase-identity-line")).toHaveTextContent(
-      "PM: Project default · Agent: Recommended automatically · Reviewer: Automatic cross-provider",
+      "PM: Project default · Agent: AI recommendation for each task · Reviewer: Automatic cross-provider",
     );
     expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
@@ -262,6 +263,12 @@ describe("PHASE TAB (P2)", () => {
     expect([...agent.options].map((option) => option.value)).not.toContain(
       "anthropic:claude-sonnet-5",
     );
+    await user.selectOptions(pm, "openai:gpt-5.6-terra");
+    await user.selectOptions(agent, "openai:gpt-5.6-terra");
+    expect(screen.getByTestId("phase-pm-effort")).toHaveValue("medium");
+    expect(screen.getByTestId("phase-agent-effort")).toHaveValue("medium");
+    await user.selectOptions(screen.getByTestId("phase-agent-effort"), "xhigh");
+    expect(screen.getByTestId("phase-agent-effort")).toHaveValue("xhigh");
   });
 
   it("runs a quick change without a reviewer and honors optional PM and agent identities", async () => {
@@ -358,10 +365,93 @@ describe("PHASE TAB (P2)", () => {
       mode: "quick",
       review_rounds: 0,
       worker_providers: "anthropic",
-      pm: { provider: "openai", model: "gpt-5.6-terra" },
+      pm: { provider: "openai", model: "gpt-5.6-terra", reasoning_effort: "medium" },
       agent: { provider: "anthropic", model: "claude-haiku-4-5-20251001" },
     });
     expect(postCalls(mock, "/decision")[0]?.body).toEqual({ decision: "approve" });
+    expect(screen.getByTestId("phase-execution-team")).toHaveTextContent("Claude Haiku 4.5");
+  });
+
+  it("shows the PM's quick-change agent and Codex effort when staffing is left to AI", async () => {
+    setToken("present");
+    const quickReady = makeRun({
+      mode: "quick",
+      status: "converged",
+      round: 0,
+      rounds_completed: 0,
+      review_rounds_total: 0,
+      result: {
+        plan: {
+          modules: [
+            {
+              id: "quick-change",
+              title: "Repair the import path",
+              description: "Apply the focused code correction.",
+            },
+          ],
+        },
+        content_hash: "q".repeat(64),
+        total_cost_usd: 0.08,
+        staffing_proposal: {
+          summary: "Use Codex for the focused change.",
+          recommendations: [
+            {
+              node_id: "quick-change",
+              provider: "openai",
+              model: "gpt-5.6-terra",
+              reasoning_effort: "high",
+              worker_count: 1,
+              rationale: "The isolated fix benefits from careful repository reasoning.",
+            },
+          ],
+        },
+      },
+    });
+    mock = workspaceMocks();
+    mock.post(runsUrl, { body: { planning_run_id: "run-1" } });
+    mock.get(runUrl, { body: quickReady });
+    mock.post(`${runUrl}/decision`, {
+      body: {
+        ...quickReady,
+        status: "approved",
+        decision: {
+          decision: "approve",
+          direction: null,
+          staffing: null,
+          decided_at: "2026-07-25T12:00:00.000Z",
+        },
+        execution: { started: true, detail: "One task dispatched." },
+      },
+    });
+    mock.get(`/api/v2/projects/${projectId}/execution-status`, {
+      body: {
+        project_id: projectId,
+        phases: [
+          {
+            phase_id: "quick-change",
+            name: "Repair the import path",
+            state: "active",
+            percent_complete: 0,
+            est_completion: null,
+            notes: "Implementation is in progress.",
+          },
+        ],
+      },
+    });
+    mock.install();
+
+    const user = await openPhaseTab();
+    await user.type(screen.getByTestId("phase-goal"), "Repair the import path");
+    await user.click(screen.getByTestId("phase-start"));
+
+    expect(await screen.findByTestId("phase-execution-panel")).toBeInTheDocument();
+    expect(postCalls(mock, "/planning-runs")[0]?.body).toMatchObject({
+      mode: "quick",
+      worker_providers: "both",
+    });
+    expect(postCalls(mock, "/planning-runs")[0]?.body).not.toHaveProperty("agent");
+    expect(screen.getByTestId("phase-execution-team")).toHaveTextContent("GPT-5.6 Terra");
+    expect(screen.getByTestId("phase-execution-team")).toHaveTextContent("High effort");
   });
 
   it("opens an adopted project's in-flight plan directly and restores it from the durable latest run after refresh", async () => {
@@ -639,19 +729,35 @@ describe("PHASE TAB (P2)", () => {
       "REST surface and persistence.",
     );
     expect(screen.getByTestId("phase-plan-card-p2")).toHaveTextContent("Web UI");
+    expect(screen.getByTestId("phase-agent-recommendation-p1")).toHaveTextContent(
+      "Claude Sonnet 5",
+    );
+    expect(screen.getByTestId("phase-agent-recommendation-p2")).toHaveTextContent("GPT-5.6 Terra");
+    expect(screen.getByTestId("phase-agent-recommendation-p2")).toHaveTextContent("High effort");
     // Dropdowns initialized from the recommendation.
     expect(screen.getByTestId("phase-staffing-p1")).toHaveValue("anthropic:claude-sonnet-5");
     expect(screen.getByTestId("phase-staffing-p2")).toHaveValue("openai:gpt-5.6-terra");
 
     await user.selectOptions(screen.getByTestId("phase-staffing-p1"), "openai:gpt-5.6-sol");
+    await user.selectOptions(screen.getByTestId("phase-staffing-effort-p1"), "xhigh");
     await user.click(screen.getByTestId("phase-approve"));
 
     await waitFor(() => expect(postCalls(mock, "/decision")).toHaveLength(1));
     expect(postCalls(mock, "/decision")[0]?.body).toEqual({
       decision: "approve",
       staffing: [
-        { node_id: "p1", provider: "openai", model: "gpt-5.6-sol" },
-        { node_id: "p2", provider: "openai", model: "gpt-5.6-terra" },
+        {
+          node_id: "p1",
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          reasoning_effort: "xhigh",
+        },
+        {
+          node_id: "p2",
+          provider: "openai",
+          model: "gpt-5.6-terra",
+          reasoning_effort: "high",
+        },
       ],
     });
 

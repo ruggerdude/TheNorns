@@ -116,6 +116,71 @@
   background: color-mix(in srgb, var(--raised) 52%, transparent);
 }
 
+.phase-plan-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+.phase-agent-recommendation {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-left: 2.35rem;
+}
+
+.phase-agent-recommendation strong {
+  font-size: 0.78rem;
+}
+
+.phase-agent-recommendation span {
+  padding: 0.2rem 0.45rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 999px;
+  color: var(--accent2);
+  font: 600 0.63rem "DM Mono", monospace;
+}
+
+.phase-agent-rationale {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.phase-staffing-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(8.5rem, 0.45fr);
+  gap: 0.5rem;
+}
+
+.phase-staffing-controls > :only-child {
+  grid-column: 1 / -1;
+}
+
+.phase-execution-team {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--raised) 68%, transparent);
+}
+
+.phase-execution-team > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.75rem;
+}
+
+.phase-execution-team span {
+  color: var(--muted);
+}
+
+.phase-execution-team strong {
+  text-align: right;
+}
+
 .phase-quick-starting {
   border-color: color-mix(in srgb, var(--success) 38%, var(--line));
   background: linear-gradient(
@@ -143,5 +208,21 @@
 
   .phase-next-actions > button {
     width: 100%;
+  }
+
+  .phase-agent-recommendation {
+    margin-left: 0;
+  }
+
+  .phase-staffing-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .phase-execution-team > div {
+    display: grid;
+  }
+
+  .phase-execution-team strong {
+    text-align: left;
   }
 }

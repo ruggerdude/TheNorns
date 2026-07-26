@@ -73,6 +73,7 @@ function allocation() {
         node_id: "api",
         provider: "anthropic",
         model: "claude-sonnet-5",
+        reasoning_effort: null,
         worker_count: 1,
         reviewer_model: "gpt-5.6-terra",
         budget_usd: 25,

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
+  type CodexReasoningEffortT,
   type EventPayloadT,
   type V2ContentAddressedReferenceT,
   V2DispatchCommand,
@@ -595,6 +596,7 @@ export interface RunnerRuntimeContext {
   runId: string;
   taskId: string;
   maxOutputTokens: number;
+  reasoningEffort?: CodexReasoningEffortT;
   /**
    * EXECUTION E11 — the runtime session a previous job left behind, when the
    * coordinator is resuming rather than starting fresh.
@@ -705,6 +707,7 @@ export class V2RunnerExecutor {
             runId: command.run_id,
             taskId: command.task_id,
             maxOutputTokens: command.max_output_tokens,
+            ...(command.reasoning_effort ? { reasoningEffort: command.reasoning_effort } : {}),
           })
         : runtimeProvider;
     let scratch: string | undefined;
