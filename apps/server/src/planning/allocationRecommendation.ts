@@ -1,5 +1,9 @@
 import type { LlmAdapter, ProviderName, SelectableModelCatalogEntry } from "@norns/adapters";
-import { CodexReasoningEffort, type UsageEventT } from "@norns/contracts";
+import {
+  CodexReasoningEffort,
+  DEFAULT_CODEX_REASONING_EFFORT,
+  type UsageEventT,
+} from "@norns/contracts";
 import { z } from "zod";
 import type { PmAssignmentRecommendation } from "../graph/allocation.js";
 import type { GraphSnapshot } from "../graph/graph.js";
@@ -194,6 +198,10 @@ export async function recommendProjectAllocation(options: {
     }
     return {
       ...recommendation,
+      reasoning_effort:
+        recommendation.provider === "openai"
+          ? (recommendation.reasoning_effort ?? DEFAULT_CODEX_REASONING_EFFORT)
+          : null,
       budget_usd: Math.round(recommendation.budget_usd * 100) / 100,
     };
   });

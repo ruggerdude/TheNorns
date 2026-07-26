@@ -139,4 +139,47 @@ describe("project-manager allocation recommendation", () => {
       }),
     ).rejects.toMatchObject({ code: "parallelism" });
   });
+
+  it("normalizes an omitted OpenAI effort to the product default", async () => {
+    const pm = new FakeAdapter("anthropic", "claude-sonnet-5");
+    pm.enqueue({
+      summary: "Use the default Codex effort for the release worker.",
+      recommendations: [
+        {
+          node_id: "api",
+          provider: "anthropic",
+          model: "claude-sonnet-5",
+          reasoning_effort: null,
+          worker_count: 1,
+          reviewer_model: "gpt-5.6-terra",
+          budget_usd: 90,
+          rationale: "One Claude worker with independent review.",
+        },
+        {
+          node_id: "release",
+          provider: "openai",
+          model: "gpt-5.6-terra",
+          reasoning_effort: null,
+          worker_count: 1,
+          reviewer_model: "claude-sonnet-5",
+          budget_usd: 40,
+          rationale: "Use the product default when the PM omits Codex effort.",
+        },
+      ],
+    });
+
+    const result = await recommendProjectAllocation({
+      pm,
+      projectId: "project-1",
+      projectName: "Secure app",
+      objective: plan.objective,
+      graph: WorkflowGraph.fromPlan(plan).snapshot(),
+      models,
+    });
+
+    expect(result.recommendations.find((item) => item.node_id === "release")).toMatchObject({
+      provider: "openai",
+      reasoning_effort: "medium",
+    });
+  });
 });

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, scryptSync } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 import { canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
@@ -79,6 +79,13 @@ function runProcess(executable: string, args: string[], input?: Buffer): Promise
 
 function quoteIdentifier(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
+}
+
+function currentMigrationNames(): string[] {
+  return readdirSync(new URL("../drizzle/", import.meta.url))
+    .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+    .sort()
+    .map((name) => name.replace(/\.sql$/, ""));
 }
 
 function dockerPostgresArgs(parsed: URL, command: "pg_dump" | "pg_restore"): string[] {
@@ -322,19 +329,17 @@ postgresDescribe("Phase 2 production-shaped PostgreSQL exit checkpoint", () => {
           JSON.stringify(snapshots.relay),
         ],
       );
-      await expect(runCurrentV2Migrations(migrationDatabase(migrationPool))).resolves.toEqual([
-        expect.objectContaining({ name: "0001_refoundation_v2", applied: true }),
-        expect.objectContaining({ name: "0002_preservation_migration", applied: true }),
-        expect.objectContaining({ name: "0003_phase3_source_bindings", applied: true }),
-        expect.objectContaining({ name: "0004_phase5_attention", applied: true }),
-        expect.objectContaining({ name: "0005_phase6_coordination", applied: true }),
-        expect.objectContaining({ name: "0006_phase7_hardening", applied: true }),
-        expect.objectContaining({ name: "0007_phase8_cutover_completion", applied: true }),
-        expect.objectContaining({ name: "0008_workspace_connections", applied: true }),
-        expect.objectContaining({ name: "0009_qc_communication_decisions", applied: true }),
-        expect.objectContaining({ name: "0010_github_app_manifest", applied: true }),
-        expect.objectContaining({ name: "0011_debate_workflow", applied: true }),
-      ]);
+      const migrationResults = await runCurrentV2Migrations(migrationDatabase(migrationPool));
+      expect(migrationResults.map((result) => result.name)).toEqual(currentMigrationNames());
+      expect(migrationResults).not.toHaveLength(0);
+      for (const result of migrationResults) {
+        expect(result).toEqual(
+          expect.objectContaining({
+            applied: true,
+            checksum: expect.stringMatching(/^[a-f0-9]{64}$/),
+          }),
+        );
+      }
 
       await adminPool.query(
         `CREATE DATABASE ${quoteIdentifier(bootstrapDatabase)} OWNER ${quoteIdentifier(migrationRole)} TEMPLATE template0`,

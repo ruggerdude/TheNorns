@@ -13,9 +13,12 @@ import type { CodexReasoningEffortT } from "@norns/contracts";
 //
 // WITHOUT a gateway it behaves exactly as before (NORN-027), so a laptop
 // runner with its own key is unaffected.
-import { Codex } from "@openai/codex-sdk";
+import { Codex, type CodexOptions } from "@openai/codex-sdk";
 import { type GatewayCredentialProvider, gatewayEnvironment } from "../modelGateway.js";
 import type { CodingRuntime, RuntimeRunRequest, RuntimeRunResult, RuntimeUsage } from "./types.js";
+
+type CodexClient = Pick<Codex, "resumeThread" | "startThread">;
+type CodexClientFactory = (options?: CodexOptions) => CodexClient;
 
 export class CodexRuntime implements CodingRuntime {
   readonly name = "codex";
@@ -44,6 +47,8 @@ export class CodexRuntime implements CodingRuntime {
       gateway?: GatewayCredentialProvider;
       /** Injectable for tests. Defaults to `process.env`. */
       baseEnv?: NodeJS.ProcessEnv;
+      /** Injectable client seam for verifying SDK option propagation without spawning Codex. */
+      createClient?: CodexClientFactory;
     } = {},
   ) {}
 
@@ -56,8 +61,10 @@ export class CodexRuntime implements CodingRuntime {
     try {
       // EXECUTION E9 — minted immediately before the turn, never held.
       const credential = this.options.gateway ? await this.options.gateway() : null;
+      const createClient: CodexClientFactory =
+        this.options.createClient ?? ((options) => new Codex(options));
       const codex = credential
-        ? new Codex({
+        ? createClient({
             baseUrl: credential.openai_base_url,
             apiKey: credential.token,
             // `env` REPLACES the child environment in this SDK, so the real
@@ -66,7 +73,7 @@ export class CodexRuntime implements CodingRuntime {
             // meter Norns has.
             env: gatewayEnvironment(this.options.baseEnv ?? process.env, {}),
           })
-        : new Codex();
+        : createClient();
       const threadOptions = {
         workingDirectory: request.worktreePath,
         skipGitRepoCheck: false,
