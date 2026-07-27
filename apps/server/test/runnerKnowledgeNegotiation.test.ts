@@ -9,21 +9,38 @@ import { Phase4EventProcessor } from "../src/coordinator/phase4EventProcessor.js
 import { Phase4RecoveryMonitor } from "../src/coordinator/phase4RecoveryMonitor.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
-import { type NornsServer, buildServer } from "../src/server.js";
+import { ProjectStore } from "../src/projects/store.js";
+import { type NornsServer, type ServerOptions, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
 import { UserStore } from "../src/users/store.js";
-import { listen, waitFor } from "./helpers.js";
+import { listen, testAdminToken, waitFor } from "./helpers.js";
 
 describe.sequential("runner knowledge capability negotiation", () => {
   let server: NornsServer;
   let stores: RelayStores;
   let url: string;
+  let token: string;
   let pg: PGlite | null = null;
   const sockets = new Set<WebSocket>();
+  const phase3Routes = {
+    sourceBindings: {},
+    ingestion: {},
+    phases: {},
+    strategies: {},
+    bridge: {},
+    resume: {},
+  } as unknown as NonNullable<ServerOptions["phase3"]>;
 
   beforeEach(async () => {
     stores = new RelayStores();
-    server = await buildServer({ stores, users: new UserStore() });
+    const users = new UserStore();
+    token = testAdminToken(users);
+    server = await buildServer({
+      stores,
+      users,
+      projects: new ProjectStore(),
+      phase3: phase3Routes,
+    });
     url = await listen(server);
   });
 
@@ -50,6 +67,8 @@ describe.sequential("runner knowledge capability negotiation", () => {
     server = await buildServer({
       stores,
       users: new UserStore(),
+      projects: new ProjectStore(),
+      phase3: phase3Routes,
       phase4: {
         coordinator: new Phase4Coordinator(transactions),
         completion: new Phase4CompletionService(transactions),
@@ -123,6 +142,24 @@ describe.sequential("runner knowledge capability negotiation", () => {
         "knowledge_transport",
       ]),
     ).resolves.toEqual([]);
+  });
+
+  it("reports a legacy folder picker as outdated instead of sending unsupported inventory requests", async () => {
+    const legacy = pair("runner-legacy-picker");
+    await reconcile("runner-legacy-picker", legacy.privateKey, legacy.generation, [
+      "workspace_picker",
+    ]);
+
+    const response = await fetch(`${url}/api/runners/helper/repositories`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      state: "degraded",
+      runner_id: "runner-legacy-picker",
+      repositories: [],
+    });
   });
 
   it("advertises the side channel only when both peers have durable support", async () => {

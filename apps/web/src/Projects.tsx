@@ -246,6 +246,7 @@ interface RunnerSnapshotDto {
   generation: number;
   connected: boolean;
   workspace_picker_ready: boolean;
+  workspace_repository_inventory_ready: boolean;
   last_seen_at: string;
 }
 

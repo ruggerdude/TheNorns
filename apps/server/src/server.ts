@@ -592,7 +592,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // at this exact generation (see /ws/runner below).
   const reconciledRunners = new Map<
     string,
-    { socket: WsLike; generation: number; workspacePicker: boolean }
+    {
+      socket: WsLike;
+      generation: number;
+      workspacePicker: boolean;
+      workspaceRepositoryInventory: boolean;
+    }
   >();
   const sessionSockets = new Map<WsLike, SessionSocketBinding>();
   const loginThrottle = new LoginAttemptThrottle();
@@ -2378,6 +2383,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           runnerSockets.has(runner.runner_id) && reconciled?.generation === runner.generation,
         workspace_picker_ready:
           reconciled?.generation === runner.generation && reconciled.workspacePicker,
+        workspace_repository_inventory_ready:
+          reconciled?.generation === runner.generation && reconciled.workspaceRepositoryInventory,
         last_seen_at: runner.last_seen_at,
       };
     });
@@ -3999,7 +4006,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         throw error;
       };
 
-      const workspaceFailure = (reply: FastifyReply, error: unknown): FastifyReply => {
+      const workspaceFailure = (
+        reply: FastifyReply,
+        error: unknown,
+        timeoutMessage = "The local helper did not respond in time. Update or restart it, then try again.",
+      ): FastifyReply => {
         const code = error instanceof WorkspaceBrokerError ? error.code : "runner_unavailable";
         return reply.code(code === "request_limit" ? 429 : code === "timeout" ? 504 : 409).send({
           error: code,
@@ -4007,7 +4018,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             code === "runner_upgrade_required"
               ? "Update the local helper before choosing a folder."
               : code === "timeout"
-                ? "The folder chooser timed out. Try again."
+                ? timeoutMessage
                 : "The local helper is not available.",
         });
       };
@@ -4034,7 +4045,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         ) {
           return workspaceFailure(reply, new WorkspaceBrokerError("runner_unavailable"));
         }
-        if (!reconciled.workspacePicker) {
+        if (!reconciled.workspacePicker || !reconciled.workspaceRepositoryInventory) {
           return workspaceFailure(reply, new WorkspaceBrokerError("runner_upgrade_required"));
         }
         try {
@@ -4071,7 +4082,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             repository: { runner_id: runnerId, ...response.repository },
           });
         } catch (error) {
-          return workspaceFailure(reply, error);
+          return workspaceFailure(reply, error, "The folder chooser timed out. Try again.");
         }
       };
 
@@ -4159,6 +4170,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           reconciled.socket !== runnerSockets.get(selection.runner_id) ||
           reconciled.generation !== selection.runner_generation ||
           !reconciled.workspacePicker ||
+          !reconciled.workspaceRepositoryInventory ||
           currentRunner.generation !== selection.runner_generation
         ) {
           workspaceSelections.release(body.data.selection_token, reserved.reservation_id);
@@ -4278,6 +4290,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           reconciled.socket !== runnerSockets.get(selection.runner_id) ||
           reconciled.generation !== selection.runner_generation ||
           !reconciled.workspacePicker ||
+          !reconciled.workspaceRepositoryInventory ||
           currentRunner.generation !== selection.runner_generation
         ) {
           workspaceSelections.release(body.data.selection_token, reserved.reservation_id);
@@ -4386,12 +4399,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               !runner ||
               !reconciled ||
               reconciled.socket !== runnerSockets.get(target.binding.runner_id) ||
-              reconciled.generation !== runner.generation
+              reconciled.generation !== runner.generation ||
+              !reconciled.workspaceRepositoryInventory
             ) {
               return reply.code(409).send({
                 error: "local_helper_unavailable",
                 message:
-                  "Open the Norns helper on the computer that owns this repository, then retry analysis.",
+                  "Update or open the Norns helper on the computer that owns this repository, then retry analysis.",
               });
             }
             const response = await workspaceBroker.request(
@@ -6634,6 +6648,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           socket,
           generation: runner.generation,
           workspacePicker: body.capabilities.includes("workspace_picker"),
+          workspaceRepositoryInventory: body.capabilities.includes(
+            "workspace_repository_inventory",
+          ),
         });
         stores.markSeen(authedRunnerId, now());
         stores.audit(`runner:${authedRunnerId}`, "runner.connected", "", now());

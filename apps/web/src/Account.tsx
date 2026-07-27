@@ -683,7 +683,9 @@ export function Account({
                                 >
                                   {connectionBusy === "local-setup"
                                     ? "Preparing…"
-                                    : "Set up local helper"}
+                                    : localSources.state === "degraded"
+                                      ? "Update local helper"
+                                      : "Set up local helper"}
                                 </Button>
                               </div>
                               {localInstallCommand ? (

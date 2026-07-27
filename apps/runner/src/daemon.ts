@@ -266,7 +266,12 @@ export class RunnerDaemon {
                 generation: state.state.generation,
                 // EXECUTION E3 adds model_proxy. Advertised unconditionally:
                 // it costs nothing if the server does not offer it.
-                capabilities: ["workspace_picker", "model_proxy", "knowledge_transport"],
+                capabilities: [
+                  "workspace_picker",
+                  "workspace_repository_inventory",
+                  "model_proxy",
+                  "knowledge_transport",
+                ],
                 last_event_seq_sent: state.state.seq,
                 recently_executed_command_ids: state.executedIds(),
               },

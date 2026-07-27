@@ -23,6 +23,18 @@ describe("runner capability negotiation", () => {
     expect(parsed.capabilities).toEqual([]);
   });
 
+  it("negotiates the repository inventory separately from the legacy folder picker", () => {
+    const parsed = ReconcileRequest.parse({
+      protocol: 1,
+      runner_id: "runner-current",
+      generation: 1,
+      capabilities: ["workspace_picker", "workspace_repository_inventory"],
+      last_event_seq_sent: 0,
+      recently_executed_command_ids: [],
+    });
+    expect(parsed.capabilities).toContain("workspace_repository_inventory");
+  });
+
   it("keeps knowledge transport off for legacy servers and accepts explicit negotiation", () => {
     const legacy = ReconcileResponse.parse({
       protocol: 1,

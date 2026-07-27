@@ -17,7 +17,9 @@ while [ "$#" -gt 0 ]; do
     --uninstall)
       if [ "$(uname -s)" = "Darwin" ]; then
         launchctl bootout "gui/$(id -u)/com.thenorns.runner" >/dev/null 2>&1 || true
+        launchctl bootout "gui/$(id -u)/app.thenorns.runner" >/dev/null 2>&1 || true
         rm -f "$HOME/Library/LaunchAgents/com.thenorns.runner.plist"
+        rm -f "$HOME/Library/LaunchAgents/app.thenorns.runner.plist"
       else
         systemctl --user disable --now com.thenorns.runner >/dev/null 2>&1 || true
         rm -f "$HOME/.config/systemd/user/com.thenorns.runner.service"
@@ -72,6 +74,12 @@ if [ "$(uname -s)" = "Darwin" ]; then
   SERVICE="$HOME/Library/LaunchAgents/com.thenorns.runner.plist"
   mkdir -p "$HOME/Library/LaunchAgents"
   launchctl bootout "gui/$(id -u)/com.thenorns.runner" >/dev/null 2>&1 || true
+  # Early helper builds used app.thenorns.runner and a different source tree.
+  # Stop and remove that login item before starting the current helper; leaving
+  # both installed makes two daemons with one runner identity supersede each
+  # other's relay socket after the next login.
+  launchctl bootout "gui/$(id -u)/app.thenorns.runner" >/dev/null 2>&1 || true
+  rm -f "$HOME/Library/LaunchAgents/app.thenorns.runner.plist"
   sed \
     -e "s|__NODE__|$(command -v node)|g" \
     -e "s|__CLI__|$CLI|g" \

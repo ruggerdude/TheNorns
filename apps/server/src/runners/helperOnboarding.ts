@@ -4,13 +4,19 @@ export interface HelperRunnerSnapshot {
   generation: number;
   connected: boolean;
   workspace_picker_ready: boolean;
+  workspace_repository_inventory_ready: boolean;
   last_seen_at: string | null;
 }
 
 export type HelperConnectionState = "connected" | "degraded" | "disconnected" | "not_installed";
 
 export function helperStatus(runners: readonly HelperRunnerSnapshot[]) {
-  const ready = runners.find((runner) => runner.connected && runner.workspace_picker_ready);
+  const ready = runners.find(
+    (runner) =>
+      runner.connected &&
+      runner.workspace_picker_ready &&
+      runner.workspace_repository_inventory_ready,
+  );
   if (ready) {
     return {
       state: "connected" as const,
@@ -25,7 +31,8 @@ export function helperStatus(runners: readonly HelperRunnerSnapshot[]) {
       state: "degraded" as const,
       runner_id: outdated.runner_id,
       runners,
-      message: "The local helper needs an update before it can choose folders.",
+      message:
+        "The local helper is out of date. Re-run helper setup in Connections before choosing a folder.",
     };
   }
   if (runners.length > 0) {
