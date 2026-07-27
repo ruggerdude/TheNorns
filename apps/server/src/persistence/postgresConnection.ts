@@ -97,6 +97,7 @@ interface RuntimeSchemaPosture {
   usage_budget_policies: string | null;
   ai_usage_calibration_observations: string | null;
   shadow_read_recorded_order: boolean;
+  conversation_domain_complete: boolean;
 }
 
 /**
@@ -145,7 +146,22 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                WHERE table_schema='public'
                  AND table_name='shadow_read_comparisons'
                  AND column_name='recorded_order'
-            ) AS shadow_read_recorded_order`,
+            ) AS shadow_read_recorded_order,
+            (
+              SELECT count(*) = 9
+                FROM unnest(ARRAY[
+                  'work_items',
+                  'work_conversations',
+                  'work_messages',
+                  'work_message_attachment_refs',
+                  'conversation_turn_attempts',
+                  'conversation_actions',
+                  'work_plan_versions',
+                  'conversation_handoffs',
+                  'conversation_summaries'
+                ]) AS required_table(name)
+               WHERE to_regclass('public.' || required_table.name) IS NOT NULL
+            ) AS conversation_domain_complete`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -162,6 +178,7 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.usage_budget_policies ? ["usage_budget_policies"] : []),
     ...(!posture?.ai_usage_calibration_observations ? ["ai_usage_calibration_observations"] : []),
     ...(!posture?.shadow_read_recorded_order ? ["shadow_read_comparisons.recorded_order"] : []),
+    ...(!posture?.conversation_domain_complete ? ["conversation domain tables"] : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

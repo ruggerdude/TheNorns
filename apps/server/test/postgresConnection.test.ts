@@ -107,6 +107,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             usage_budget_policies: "usage_budget_policies",
             ai_usage_calibration_observations: "ai_usage_calibration_observations",
             shadow_read_recorded_order: true,
+            conversation_domain_complete: true,
           },
         ],
       }),
@@ -133,6 +134,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             usage_budget_policies: "usage_budget_policies",
             ai_usage_calibration_observations: null,
             shadow_read_recorded_order: false,
+            conversation_domain_complete: false,
           },
         ],
       }),
@@ -144,7 +146,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "database migrations are required before startup; missing: " +
         "planning_runs.mode, knowledge_packages, agent_handoffs, " +
         "agent_profiles.reasoning_effort, ai_usage_events, project_members, " +
-        "ai_usage_calibration_observations, shadow_read_comparisons.recorded_order",
+        "ai_usage_calibration_observations, shadow_read_comparisons.recorded_order, " +
+        "conversation domain tables",
     });
   });
 });

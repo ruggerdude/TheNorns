@@ -1,9 +1,12 @@
 import { V2StartPhaseCommand } from "@norns/contracts";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { PostgresConversationRepository } from "../src/conversations/repository.js";
+import { ConversationService } from "../src/conversations/service.js";
+import { canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
 import { executeV2ApplicationCommand } from "../src/persistence/v2/application.js";
 import { NodePgTransactionRunner } from "../src/persistence/v2/database.js";
-import { type V2MigrationDatabase, runPhase1V2Migration } from "../src/persistence/v2/migrate.js";
+import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import { SqlV2ApplicationTransaction } from "../src/persistence/v2/sqlRepositories.js";
 
 const databaseUrl = process.env.V2_POSTGRES_TEST_URL;
@@ -17,6 +20,11 @@ postgresDescribe("V2 real PostgreSQL concurrency evidence", () => {
   let databaseUser: string;
   let runtimeRoleMembershipAdded = false;
   let schemaName: string;
+  let conversationService: ConversationService;
+  let conversationWorkItemId: string;
+  let conversationId: string;
+  let conversationMessageId: string;
+  let conversationIdSequence = 0;
 
   beforeAll(async () => {
     if (!databaseUrl) return;
@@ -73,12 +81,72 @@ postgresDescribe("V2 real PostgreSQL concurrency evidence", () => {
       },
       transaction: (work) => privilegedRunner.transaction(work),
     };
-    await runPhase1V2Migration(migrationDatabase);
+    await applicationPool.query(`
+      CREATE TABLE norns_state (
+        key TEXT PRIMARY KEY,
+        snapshot JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    await runCurrentV2Migrations(migrationDatabase);
     await applicationPool.query(`
       INSERT INTO projection_checkpoints (
         projection_name, partition_key, version
       ) VALUES ('concurrency-probe', 'shared', 1);
+      INSERT INTO users (
+        id, username, display_name, email, password_hash, password_hash_scheme,
+        role, status
+      ) VALUES (
+        'conversation-concurrency-user', 'conversation-concurrency@example.com',
+        'Conversation Concurrency', 'conversation-concurrency@example.com',
+        'hash', 'scrypt-v1', 'member', 'active'
+      );
+      INSERT INTO projects (
+        id, name, status, assignment_policy_ref, verification_policy_ref,
+        budget_policy_ref, owner_user_id
+      ) VALUES (
+        'conversation-concurrency-project', 'Conversation concurrency', 'active',
+        'assignment/default', 'verification/default', 'budget/default',
+        'conversation-concurrency-user'
+      );
     `);
+    conversationService = new ConversationService(
+      new PostgresConversationRepository(runtimeRunner),
+      {
+        newId: (prefix) => `${prefix}-real-pg-${++conversationIdSequence}`,
+      },
+    );
+    const workItem = await conversationService.createWorkItem(
+      { id: "conversation-concurrency-user" },
+      {
+        project_id: "conversation-concurrency-project",
+        title: "Concurrency proof",
+        objective: "Prove ordering and action idempotency on real PostgreSQL.",
+      },
+    );
+    conversationWorkItemId = workItem.id;
+    const conversation = await conversationService.createConversation(
+      { id: "conversation-concurrency-user" },
+      {
+        project_id: "conversation-concurrency-project",
+        work_item_id: workItem.id,
+        kind: "planning",
+        provider: "openai",
+        model: "gpt-5.6-sol",
+      },
+    );
+    conversationId = conversation.id;
+    const message = await conversationService.submitUserMessage(
+      { id: "conversation-concurrency-user" },
+      {
+        project_id: "conversation-concurrency-project",
+        work_item_id: workItem.id,
+        conversation_id: conversation.id,
+        client_message_id: "real-pg-initial-message",
+        parts: [{ type: "text", format: "plain", text: "Plan this work." }],
+      },
+    );
+    conversationMessageId = message.id;
   }, 30_000);
 
   afterAll(async () => {
@@ -348,5 +416,214 @@ postgresDescribe("V2 real PostgreSQL concurrency evidence", () => {
        ) AS present`,
     );
     expect(rolledBack.rows[0]?.present).toBe(false);
+  });
+
+  it("serializes conversation ordering and confirmation idempotency across real connections", async () => {
+    const actor = { id: "conversation-concurrency-user" };
+    const submitted = await Promise.all(
+      ["first concurrent message", "second concurrent message"].map((text, index) =>
+        conversationService.submitUserMessage(actor, {
+          project_id: "conversation-concurrency-project",
+          work_item_id: conversationWorkItemId,
+          conversation_id: conversationId,
+          client_message_id: `real-pg-concurrent-message-${index}`,
+          parts: [{ type: "text", format: "plain", text }],
+        }),
+      ),
+    );
+    expect(submitted.map((message) => message.sequence).sort()).toEqual([2, 3]);
+
+    const action = await conversationService.proposeAction(actor, {
+      project_id: "conversation-concurrency-project",
+      work_item_id: conversationWorkItemId,
+      conversation_id: conversationId,
+      source_message_id: conversationMessageId,
+      action_type: "send_plan_to_qc",
+      payload: { parameters: { plan_version_id: "real-pg-plan" } },
+    });
+    const confirmation = {
+      project_id: "conversation-concurrency-project",
+      work_item_id: conversationWorkItemId,
+      conversation_id: conversationId,
+      action_id: action.id,
+      idempotency_key: "real-pg-same-action-key",
+    };
+    const [confirmed, replayed] = await Promise.all([
+      conversationService.confirmAction(actor, confirmation),
+      conversationService.confirmAction(actor, confirmation),
+    ]);
+    expect(replayed).toEqual(confirmed);
+    expect(confirmed.confirmation_request_fingerprint).toBe(
+      canonicalSha256({
+        action_id: action.id,
+        action_type: action.action_type,
+        payload_hash: action.payload_hash,
+      }),
+    );
+
+    const competingActions = await Promise.all(
+      ["pause_work" as const, "resume_work" as const].map((actionType) =>
+        conversationService.proposeAction(actor, {
+          project_id: "conversation-concurrency-project",
+          work_item_id: conversationWorkItemId,
+          conversation_id: conversationId,
+          source_message_id: conversationMessageId,
+          action_type: actionType,
+          payload: { parameters: {} },
+        }),
+      ),
+    );
+    const competing = await Promise.allSettled(
+      competingActions.map((candidate) =>
+        conversationService.confirmAction(actor, {
+          project_id: "conversation-concurrency-project",
+          work_item_id: conversationWorkItemId,
+          conversation_id: conversationId,
+          action_id: candidate.id,
+          idempotency_key: "real-pg-competing-action-key",
+        }),
+      ),
+    );
+    expect(competing.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(competing.find((result) => result.status === "rejected")).toMatchObject({
+      status: "rejected",
+      reason: { code: "idempotency_conflict", httpStatus: 409 },
+    });
+  });
+
+  it("serializes attachment reference creation against concurrent tombstoning", async () => {
+    const attachmentId = "real-pg-conversation-attachment";
+    const attachmentSha = "a".repeat(64);
+    await runtimeRunner.transaction(async (tx) => {
+      await tx.query("INSERT INTO attachment_blobs (sha256, content) VALUES ($1, $2)", [
+        attachmentSha,
+        Buffer.from([0x01]),
+      ]);
+      await tx.query(
+        `INSERT INTO attachments (
+           id, project_id, sha256, mime, bytes, purpose
+         ) VALUES ($1, 'conversation-concurrency-project', $2, 'image/png', 1, 'objective')`,
+        [attachmentId, attachmentSha],
+      );
+    });
+
+    let releaseReference = (): void => {};
+    let markReferenceInserted = (): void => {};
+    let markDeleteStarted = (): void => {};
+    const referenceInserted = new Promise<void>((resolve) => {
+      markReferenceInserted = resolve;
+    });
+    const deleteStarted = new Promise<void>((resolve) => {
+      markDeleteStarted = resolve;
+    });
+    const referenceRelease = new Promise<void>((resolve) => {
+      releaseReference = resolve;
+    });
+    let deleteBackendPid = 0;
+
+    const reference = runtimeRunner.transaction(async (tx) => {
+      await tx.query(
+        `INSERT INTO work_messages (
+           id, project_id, work_item_id, conversation_id, initiated_by_user_id,
+           actor_type, actor_id, role, visibility_status, sequence, parts,
+           client_message_id, request_fingerprint
+         ) VALUES (
+           'real-pg-attachment-message','conversation-concurrency-project',$1,$2,
+           'conversation-concurrency-user','human','conversation-concurrency-user',
+           'user','complete',1000,$3::jsonb,'real-pg-attachment-client',$4
+         )`,
+        [
+          conversationWorkItemId,
+          conversationId,
+          JSON.stringify([
+            {
+              type: "attachment",
+              attachment_id: attachmentId,
+              name: "evidence.png",
+              media_type: "image/png",
+            },
+          ]),
+          canonicalSha256({
+            client_message_id: "real-pg-attachment-client",
+            parts: [
+              {
+                type: "attachment",
+                attachment_id: attachmentId,
+                name: "evidence.png",
+                media_type: "image/png",
+              },
+            ],
+          }),
+        ],
+      );
+      await tx.query(
+        `INSERT INTO work_message_attachment_refs (
+           project_id, work_item_id, conversation_id, message_id,
+           attachment_id, created_by_user_id
+         ) VALUES (
+           'conversation-concurrency-project',$1,$2,
+           'real-pg-attachment-message',$3,'conversation-concurrency-user'
+         )`,
+        [conversationWorkItemId, conversationId, attachmentId],
+      );
+      markReferenceInserted();
+      await referenceRelease;
+    });
+    await referenceInserted;
+
+    const tombstone = runtimeRunner.transaction(async (tx) => {
+      const identity = await tx.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      deleteBackendPid = identity.rows[0]?.pid ?? 0;
+      markDeleteStarted();
+      await tx.query("UPDATE attachments SET deleted_at=now() WHERE id=$1", [attachmentId]);
+    });
+    const tombstoneSettlement = Promise.allSettled([tombstone]);
+    await deleteStarted;
+
+    let waiting:
+      | {
+          blockers: number[];
+          wait_event_type: string | null;
+        }
+      | undefined;
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      const activity = await administrationPool.query<{
+        blockers: number[];
+        wait_event_type: string | null;
+      }>(
+        `SELECT pg_blocking_pids(pid) AS blockers, wait_event_type
+           FROM pg_stat_activity
+          WHERE pid = $1`,
+        [deleteBackendPid],
+      );
+      const observed = activity.rows[0];
+      if (observed?.wait_event_type === "Lock" && observed.blockers.length > 0) {
+        waiting = observed;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(waiting).toMatchObject({ wait_event_type: "Lock" });
+
+    releaseReference();
+    await reference;
+    const [tombstoneResult] = await tombstoneSettlement;
+    expect(tombstoneResult).toMatchObject({ status: "rejected" });
+    expect(tombstoneResult?.status === "rejected" ? String(tombstoneResult.reason) : "").toMatch(
+      /conversation-referenced attachments cannot be deleted/,
+    );
+
+    const durable = await applicationPool.query<{ deleted_at: Date | null; refs: string }>(
+      `SELECT attachment.deleted_at,
+              count(ref.message_id)::text AS refs
+         FROM attachments attachment
+         LEFT JOIN work_message_attachment_refs ref
+           ON ref.project_id=attachment.project_id
+          AND ref.attachment_id=attachment.id
+        WHERE attachment.id=$1
+        GROUP BY attachment.deleted_at`,
+      [attachmentId],
+    );
+    expect(durable.rows[0]).toEqual({ deleted_at: null, refs: "1" });
   });
 });

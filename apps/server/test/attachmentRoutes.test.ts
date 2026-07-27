@@ -52,6 +52,7 @@ describe.sequential("attachment HTTP API (FRONT DOOR P4)", () => {
   let server: NornsServer;
   let token: string;
   let projectId: string;
+  let projects: ProjectStore;
 
   async function inject(
     method: "GET" | "POST" | "DELETE",
@@ -104,10 +105,21 @@ describe.sequential("attachment HTTP API (FRONT DOOR P4)", () => {
     const transactions = new PGliteTransactionRunner(pg);
     const users = new UserStore();
     token = testAdminToken(users);
+    projects = new ProjectStore();
+    projects.ensureRelationalMirror({
+      id: projectId,
+      name: "Att project",
+      description: "Attachment route test",
+      pmProvider: "openai",
+      pmModel: "gpt-5.6-sol",
+      createdAt: new Date().toISOString(),
+      sourceLocation: "github.com/example/attachments",
+      onboardingScenario: "existing_repo",
+    });
     server = await buildServer({
       stores: new RelayStores(),
       users,
-      projects: new ProjectStore(),
+      projects,
       attachments: { transactions },
     });
   }, 30_000);
@@ -254,6 +266,81 @@ describe.sequential("attachment HTTP API (FRONT DOOR P4)", () => {
   it("404s a delete/get of an unknown attachment", async () => {
     expect((await inject("GET", `${base()}/att_missing`)).statusCode).toBe(404);
     expect((await inject("DELETE", `${base()}/att_missing`)).statusCode).toBe(404);
+  });
+
+  it("archives a project without deleting referenced conversation evidence or returning 500", async () => {
+    const uploaded = await post(base(), { mime: "image/png", base64: pngBase64(7, 5) });
+    const attachmentId = (uploaded.json() as { id: string }).id;
+    await pg.transaction(async (tx) => {
+      await tx.query(
+        `INSERT INTO users (
+         id, username, display_name, email, password_hash, password_hash_scheme,
+         role, status
+       ) VALUES (
+         'attachment-evidence-user', 'attachment-evidence@example.com',
+         'Attachment Evidence', 'attachment-evidence@example.com', 'hash',
+         'scrypt-v1', 'member', 'active'
+       )`,
+      );
+      await tx.query(
+        `INSERT INTO work_items (
+         id, project_id, created_by_user_id, title, objective
+       ) VALUES (
+         'attachment-evidence-work', $1, 'attachment-evidence-user',
+         'Archive evidence', 'Retain referenced images'
+       )`,
+        [projectId],
+      );
+      await tx.query(
+        `INSERT INTO work_conversations (
+         id, project_id, work_item_id, created_by_user_id, kind, provider, model
+       ) VALUES (
+         'attachment-evidence-conversation', $1, 'attachment-evidence-work',
+         'attachment-evidence-user', 'planning', 'openai', 'gpt-5.6-sol'
+       )`,
+        [projectId],
+      );
+      await tx.query(
+        `INSERT INTO work_messages (
+         id, project_id, work_item_id, conversation_id, initiated_by_user_id,
+         actor_type, actor_id, role, sequence, parts, client_message_id,
+         request_fingerprint
+       ) VALUES (
+         'attachment-evidence-message', $1, 'attachment-evidence-work',
+         'attachment-evidence-conversation', 'attachment-evidence-user',
+         'human', 'attachment-evidence-user', 'user', 1,
+         jsonb_build_array(jsonb_build_object(
+           'type','attachment','attachment_id',$2::text,
+           'name','evidence.png','media_type','image/png'
+         )),
+         'attachment-evidence-client', repeat('a',64)
+       )`,
+        [projectId, attachmentId],
+      );
+      await tx.query(
+        `INSERT INTO work_message_attachment_refs (
+         project_id, work_item_id, conversation_id, message_id,
+         attachment_id, created_by_user_id
+       ) VALUES (
+         $1, 'attachment-evidence-work', 'attachment-evidence-conversation',
+         'attachment-evidence-message', $2, 'attachment-evidence-user'
+       )`,
+        [projectId, attachmentId],
+      );
+    });
+
+    const deleteReferenced = await inject("DELETE", `${base()}/${attachmentId}`);
+    expect(deleteReferenced.statusCode).toBe(409);
+    expect(deleteReferenced.json()).toMatchObject({ error: "attachment_in_use" });
+
+    const archived = await inject("DELETE", `/api/projects/${projectId}`);
+    expect(archived.statusCode).toBe(204);
+    const retained = await pg.query<{ deleted_at: string | null }>(
+      "SELECT deleted_at FROM attachments WHERE id=$1",
+      [attachmentId],
+    );
+    expect(retained.rows[0]?.deleted_at).toBeNull();
+    expect(() => projects.summary(projectId)).toThrow(/unknown project/);
   });
 
   it("enforces the 8-per-objective cap with 409", async () => {

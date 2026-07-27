@@ -5567,7 +5567,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 ? 413
                 : error.code === "invalid_image"
                   ? 400
-                  : 409; // objective_limit | project_quota
+                  : 409; // objective_limit | project_quota | attachment_in_use
           reply.code(status).send({ error: error.code, message: error.message });
           return;
         }

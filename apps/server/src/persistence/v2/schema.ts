@@ -4157,6 +4157,870 @@ export const globalRuleSettings = pgTable(
   ],
 );
 
+const conversationPlanningRuns = pgTable("planning_runs", {
+  id: text("id").notNull(),
+  projectId: text("project_id").notNull(),
+});
+
+const conversationAttachments = pgTable("attachments", {
+  id: text("id").notNull(),
+  projectId: text("project_id").notNull(),
+});
+
+export const workItems = pgTable(
+  "work_items",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "restrict" }),
+    createdByUserId: text("created_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    title: text("title").notNull(),
+    objective: text("objective").notNull(),
+    status: text("status").notNull().default("planning"),
+    planningRunId: text("planning_run_id"),
+    phaseId: text("phase_id"),
+    approvedPlanVersionId: text("approved_plan_version_id"),
+    aggregateVersion: aggregateVersion(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    executionStartedAt: timestamp("execution_started_at", {
+      withTimezone: true,
+      mode: "string",
+    }),
+    completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    foreignKey({
+      name: "work_items_planning_run_scope_fk",
+      columns: [table.projectId, table.planningRunId],
+      foreignColumns: [conversationPlanningRuns.projectId, conversationPlanningRuns.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "work_items_phase_scope_fk",
+      columns: [table.projectId, table.phaseId],
+      foreignColumns: [phases.projectId, phases.id],
+    }).onDelete("restrict"),
+    lazyForeignKey(
+      "work_items_approved_plan_scope_fk",
+      (): AnyPgColumn[] => [table.projectId, table.id, table.approvedPlanVersionId],
+      (): AnyPgColumn[] => [
+        workPlanVersions.projectId,
+        workPlanVersions.workItemId,
+        workPlanVersions.id,
+      ],
+    ).onDelete("restrict"),
+    uniqueIndex("work_items_project_identity_unique").on(table.projectId, table.id),
+    uniqueIndex("work_items_planning_run_unique")
+      .on(table.projectId, table.planningRunId)
+      .where(sql`${table.planningRunId} IS NOT NULL`),
+    index("work_items_project_status_time_idx").on(
+      table.projectId,
+      table.status,
+      table.createdAt,
+      table.id,
+    ),
+    index("work_items_user_time_idx").on(table.createdByUserId, table.createdAt, table.id),
+    index("work_items_phase_idx")
+      .on(table.projectId, table.phaseId)
+      .where(sql`${table.phaseId} IS NOT NULL`),
+    check("work_items_schema_version_check", sql`${table.schemaVersion} = 2`),
+    check(
+      "work_items_title_objective_check",
+      sql`length(trim(${table.title})) > 0 AND length(trim(${table.objective})) > 0`,
+    ),
+    check("work_items_aggregate_version_check", sql`${table.aggregateVersion} > 0`),
+    check(
+      "work_items_status_check",
+      sql`${table.status} IN (
+        'planning','in_qc','awaiting_approval','executing','blocked','completed','cancelled'
+      )`,
+    ),
+    check(
+      "work_items_completion_shape_check",
+      sql`(${table.status} = 'completed') = (${table.completedAt} IS NOT NULL)`,
+    ),
+    check(
+      "work_items_execution_shape_check",
+      sql`(${table.status} NOT IN ('executing','blocked','completed')
+          OR (${table.phaseId} IS NOT NULL AND ${table.executionStartedAt} IS NOT NULL))
+        AND (${table.executionStartedAt} IS NULL OR ${table.phaseId} IS NOT NULL)`,
+    ),
+  ],
+);
+
+export const workConversations = pgTable(
+  "work_conversations",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    createdByUserId: text("created_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    kind: text("kind").notNull(),
+    status: text("status").notNull().default("active"),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    nextMessageSequence: bigint("next_message_sequence", { mode: "number" }).notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    archivedAt: timestamp("archived_at", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    foreignKey({
+      name: "work_conversations_work_item_scope_fk",
+      columns: [table.projectId, table.workItemId],
+      foreignColumns: [workItems.projectId, workItems.id],
+    }).onDelete("restrict"),
+    uniqueIndex("work_conversations_project_work_identity_unique").on(
+      table.projectId,
+      table.workItemId,
+      table.id,
+    ),
+    index("work_conversations_project_time_idx").on(table.projectId, table.createdAt, table.id),
+    index("work_conversations_work_item_status_idx").on(
+      table.workItemId,
+      table.status,
+      table.kind,
+      table.createdAt,
+      table.id,
+    ),
+    index("work_conversations_user_time_idx").on(table.createdByUserId, table.createdAt, table.id),
+    uniqueIndex("work_conversations_one_active_primary_kind")
+      .on(table.workItemId, table.kind)
+      .where(sql`${table.status} = 'active' AND ${table.kind} IN ('planning','execution_pm')`),
+    check("work_conversations_schema_version_check", sql`${table.schemaVersion} = 2`),
+    check(
+      "work_conversations_kind_check",
+      sql`${table.kind} IN ('planning','execution_pm','task')`,
+    ),
+    check(
+      "work_conversations_status_check",
+      sql`${table.status} IN ('active','archived','closed')`,
+    ),
+    check(
+      "work_conversations_archive_shape_check",
+      sql`(${table.status} = 'archived') = (${table.archivedAt} IS NOT NULL)`,
+    ),
+    check(
+      "work_conversations_provider_model_check",
+      sql`length(trim(${table.provider})) > 0 AND length(trim(${table.model})) > 0`,
+    ),
+    check("work_conversations_next_message_sequence_check", sql`${table.nextMessageSequence} > 0`),
+  ],
+);
+
+export const workMessages = pgTable(
+  "work_messages",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    initiatedByUserId: text("initiated_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    actorType: text("actor_type").notNull(),
+    actorId: text("actor_id"),
+    role: text("role").notNull(),
+    visibilityStatus: text("visibility_status").notNull().default("complete"),
+    sequence: bigint("sequence", { mode: "number" }).notNull(),
+    parts: jsonb("parts").notNull(),
+    clientMessageId: text("client_message_id"),
+    requestFingerprint: text("request_fingerprint"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    foreignKey({
+      name: "work_messages_conversation_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId],
+      foreignColumns: [
+        workConversations.projectId,
+        workConversations.workItemId,
+        workConversations.id,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex("work_messages_project_work_conversation_identity_unique").on(
+      table.projectId,
+      table.workItemId,
+      table.conversationId,
+      table.id,
+    ),
+    uniqueIndex("work_messages_sequence_unique").on(table.conversationId, table.sequence),
+    uniqueIndex("work_messages_user_submission_unique")
+      .on(table.conversationId, table.initiatedByUserId, table.clientMessageId)
+      .where(sql`${table.role} = 'user'`),
+    index("work_messages_conversation_order_idx").on(table.conversationId, table.sequence),
+    index("work_messages_project_time_idx").on(table.projectId, table.createdAt, table.id),
+    index("work_messages_user_time_idx").on(table.initiatedByUserId, table.createdAt, table.id),
+    check("work_messages_schema_version_check", sql`${table.schemaVersion} = 2`),
+    check("work_messages_role_check", sql`${table.role} IN ('user','assistant','system')`),
+    check(
+      "work_messages_visibility_status_check",
+      sql`${table.visibilityStatus} IN ('streaming','complete','interrupted')`,
+    ),
+    check(
+      "work_messages_parts_shape_check",
+      sql`jsonb_typeof(${table.parts}) = 'array'
+        AND jsonb_array_length(${table.parts}) > 0`,
+    ),
+    check(
+      "work_messages_submission_shape_check",
+      sql`(
+          ${table.role} = 'user'
+          AND ${table.visibilityStatus} = 'complete'
+          AND ${table.actorType} = 'human'
+          AND ${table.actorId} = ${table.initiatedByUserId}
+          AND ${table.clientMessageId} IS NOT NULL
+          AND ${table.requestFingerprint} ~ '^[a-f0-9]{64}$'
+        ) OR (
+          ${table.role} <> 'user'
+          AND ${table.clientMessageId} IS NULL
+          AND ${table.requestFingerprint} IS NULL
+        )`,
+    ),
+    check(
+      "work_messages_visibility_shape_check",
+      sql`${table.visibilityStatus} <> 'streaming' OR ${table.role} = 'assistant'`,
+    ),
+    check(
+      "work_messages_human_actor_check",
+      sql`${table.actorType} <> 'human' OR ${table.actorId} IS NOT NULL`,
+    ),
+  ],
+);
+
+export const workMessageAttachmentRefs = pgTable(
+  "work_message_attachment_refs",
+  {
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    messageId: text("message_id").notNull(),
+    attachmentId: text("attachment_id").notNull(),
+    createdByUserId: text("created_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.messageId, table.attachmentId] }),
+    foreignKey({
+      name: "work_message_attachment_refs_message_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.messageId],
+      foreignColumns: [
+        workMessages.projectId,
+        workMessages.workItemId,
+        workMessages.conversationId,
+        workMessages.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "work_message_attachment_refs_attachment_scope_fk",
+      columns: [table.projectId, table.attachmentId],
+      foreignColumns: [conversationAttachments.projectId, conversationAttachments.id],
+    }).onDelete("restrict"),
+    index("work_message_attachment_refs_attachment_idx").on(
+      table.projectId,
+      table.attachmentId,
+      table.messageId,
+    ),
+    index("work_message_attachment_refs_user_time_idx").on(
+      table.createdByUserId,
+      table.createdAt,
+      table.messageId,
+    ),
+    check("work_message_attachment_refs_schema_version_check", sql`${table.schemaVersion} = 2`),
+  ],
+);
+
+export const conversationTurnAttempts = pgTable(
+  "conversation_turn_attempts",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    initiatedByUserId: text("initiated_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    actorType: text("actor_type").notNull(),
+    actorId: text("actor_id"),
+    triggeringMessageId: text("triggering_message_id").notNull(),
+    outputMessageId: text("output_message_id"),
+    attemptNumber: integer("attempt_number").notNull(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    providerRequestId: text("provider_request_id"),
+    usageRequestId: text("usage_request_id").notNull(),
+    providerFinishReason: text("provider_finish_reason"),
+    status: text("status").notNull().default("pending"),
+    contextManifest: jsonb("context_manifest").notNull(),
+    contextHash: text("context_hash").notNull(),
+    usageStatus: text("usage_status").notNull().default("pending"),
+    inputTokens: bigint("input_tokens", { mode: "number" }),
+    outputTokens: bigint("output_tokens", { mode: "number" }),
+    cacheReadTokens: bigint("cache_read_tokens", { mode: "number" }),
+    cacheWriteTokens: bigint("cache_write_tokens", { mode: "number" }),
+    costUsd: numeric("cost_usd", { precision: 24, scale: 9 }),
+    failureCode: text("failure_code"),
+    failureMessageRedacted: text("failure_message_redacted"),
+    sanitizedFailure: jsonb("sanitized_failure"),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }).notNull(),
+    settledAt: timestamp("settled_at", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    foreignKey({
+      name: "conversation_turn_attempts_conversation_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId],
+      foreignColumns: [
+        workConversations.projectId,
+        workConversations.workItemId,
+        workConversations.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_turn_attempts_trigger_message_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.triggeringMessageId],
+      foreignColumns: [
+        workMessages.projectId,
+        workMessages.workItemId,
+        workMessages.conversationId,
+        workMessages.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_turn_attempts_output_message_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.outputMessageId],
+      foreignColumns: [
+        workMessages.projectId,
+        workMessages.workItemId,
+        workMessages.conversationId,
+        workMessages.id,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex("conversation_turn_attempts_retry_unique").on(
+      table.conversationId,
+      table.triggeringMessageId,
+      table.attemptNumber,
+    ),
+    uniqueIndex("conversation_turn_attempts_provider_request_unique")
+      .on(table.provider, table.providerRequestId)
+      .where(sql`${table.providerRequestId} IS NOT NULL`),
+    index("conversation_turn_attempts_conversation_time_idx").on(
+      table.conversationId,
+      table.createdAt,
+      table.id,
+    ),
+    index("conversation_turn_attempts_project_time_idx").on(
+      table.projectId,
+      table.createdAt,
+      table.id,
+    ),
+    index("conversation_turn_attempts_user_time_idx").on(
+      table.initiatedByUserId,
+      table.createdAt,
+      table.id,
+    ),
+    uniqueIndex("conversation_turn_attempts_usage_request_unique").on(table.usageRequestId),
+    check("conversation_turn_attempts_schema_version_check", sql`${table.schemaVersion} = 2`),
+    check(
+      "conversation_turn_attempts_status_check",
+      sql`${table.status} IN ('pending','streaming','succeeded','failed','cancelled')`,
+    ),
+    check(
+      "conversation_turn_attempts_usage_status_check",
+      sql`${table.usageStatus} IN ('pending','exact','unavailable')`,
+    ),
+    check(
+      "conversation_turn_attempts_terminal_shape_check",
+      sql`(${table.status} IN ('succeeded','failed','cancelled'))
+        = (${table.settledAt} IS NOT NULL)`,
+    ),
+    check(
+      "conversation_turn_attempts_actor_check",
+      sql`${table.actorType} IN ('human','coordinator','agent','runner','system','legacy')
+        AND (${table.actorType} <> 'human' OR ${table.actorId} IS NOT NULL)`,
+    ),
+    check("conversation_turn_attempts_attempt_number_check", sql`${table.attemptNumber} > 0`),
+    check(
+      "conversation_turn_attempts_provider_model_check",
+      sql`length(trim(${table.provider})) > 0
+        AND length(trim(${table.model})) > 0
+        AND length(trim(${table.usageRequestId})) > 0`,
+    ),
+    check(
+      "conversation_turn_attempts_optional_provider_fields_check",
+      sql`(${table.providerRequestId} IS NULL OR length(trim(${table.providerRequestId})) > 0)
+        AND (${table.providerFinishReason} IS NULL
+          OR length(trim(${table.providerFinishReason})) > 0)`,
+    ),
+    check(
+      "conversation_turn_attempts_context_shape_check",
+      sql`jsonb_typeof(${table.contextManifest}) = 'object'
+        AND jsonb_typeof(${table.contextManifest}->'entries') = 'array'
+        AND jsonb_typeof(${table.contextManifest}->'estimated_tokens') = 'number'
+        AND ${table.contextHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "conversation_turn_attempts_usage_shape_check",
+      sql`(
+          ${table.usageStatus} = 'exact'
+          AND ${table.inputTokens} IS NOT NULL
+          AND ${table.outputTokens} IS NOT NULL
+          AND ${table.cacheReadTokens} IS NOT NULL
+          AND ${table.cacheWriteTokens} IS NOT NULL
+        ) OR (
+          ${table.usageStatus} <> 'exact'
+          AND ${table.inputTokens} IS NULL
+          AND ${table.outputTokens} IS NULL
+          AND ${table.cacheReadTokens} IS NULL
+          AND ${table.cacheWriteTokens} IS NULL
+          AND ${table.costUsd} IS NULL
+        )`,
+    ),
+    check(
+      "conversation_turn_attempts_token_cost_nonnegative_check",
+      sql`(${table.inputTokens} IS NULL OR ${table.inputTokens} >= 0)
+        AND (${table.outputTokens} IS NULL OR ${table.outputTokens} >= 0)
+        AND (${table.cacheReadTokens} IS NULL OR ${table.cacheReadTokens} >= 0)
+        AND (${table.cacheWriteTokens} IS NULL OR ${table.cacheWriteTokens} >= 0)
+        AND (${table.costUsd} IS NULL OR ${table.costUsd} >= 0)`,
+    ),
+    check(
+      "conversation_turn_attempts_terminal_usage_check",
+      sql`${table.status} NOT IN ('succeeded','failed','cancelled')
+        OR ${table.usageStatus} <> 'pending'`,
+    ),
+    check(
+      "conversation_turn_attempts_failure_shape_check",
+      sql`(
+          ${table.status} = 'failed' AND ${table.failureCode} IS NOT NULL
+        ) OR (
+          ${table.status} <> 'failed'
+          AND ${table.failureCode} IS NULL
+          AND ${table.failureMessageRedacted} IS NULL
+          AND ${table.sanitizedFailure} IS NULL
+        )`,
+    ),
+    check(
+      "conversation_turn_attempts_success_shape_check",
+      sql`${table.status} <> 'succeeded'
+        OR (${table.outputMessageId} IS NOT NULL
+          AND ${table.providerFinishReason} IS NOT NULL)`,
+    ),
+    check(
+      "conversation_turn_attempts_sanitized_failure_check",
+      sql`${table.sanitizedFailure} IS NULL
+        OR jsonb_typeof(${table.sanitizedFailure}) = 'object'`,
+    ),
+  ],
+);
+
+export const conversationActions = pgTable(
+  "conversation_actions",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    initiatedByUserId: text("initiated_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    actorType: text("actor_type").notNull(),
+    actorId: text("actor_id"),
+    sourceMessageId: text("source_message_id").notNull(),
+    actionType: text("action_type").notNull(),
+    payload: jsonb("payload").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    status: text("status").notNull().default("proposed"),
+    confirmedByUserId: text("confirmed_by_user_id").references(() => phase2Users.id, {
+      onDelete: "restrict",
+    }),
+    confirmationIdempotencyKey: text("confirmation_idempotency_key"),
+    confirmationRequestFingerprint: text("confirmation_request_fingerprint"),
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true, mode: "string" }),
+    recordedAt: timestamp("recorded_at", { withTimezone: true, mode: "string" }),
+    sentAt: timestamp("sent_at", { withTimezone: true, mode: "string" }),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true, mode: "string" }),
+    appliedAt: timestamp("applied_at", { withTimezone: true, mode: "string" }),
+    failureCode: text("failure_code"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    foreignKey({
+      name: "conversation_actions_source_message_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.sourceMessageId],
+      foreignColumns: [
+        workMessages.projectId,
+        workMessages.workItemId,
+        workMessages.conversationId,
+        workMessages.id,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex("conversation_actions_confirmation_idempotency_unique")
+      .on(table.conversationId, table.confirmedByUserId, table.confirmationIdempotencyKey)
+      .where(sql`${table.confirmationIdempotencyKey} IS NOT NULL`),
+    index("conversation_actions_conversation_status_idx").on(
+      table.conversationId,
+      table.status,
+      table.createdAt,
+      table.id,
+    ),
+    index("conversation_actions_project_status_idx").on(
+      table.projectId,
+      table.status,
+      table.createdAt,
+      table.id,
+    ),
+    index("conversation_actions_user_time_idx").on(
+      table.initiatedByUserId,
+      table.createdAt,
+      table.id,
+    ),
+    check("conversation_actions_schema_version_check", sql`${table.schemaVersion} = 2`),
+    check(
+      "conversation_actions_status_check",
+      sql`${table.status} IN (
+        'proposed','confirmed','recorded','sent','agent_acknowledged',
+        'applied','rejected','failed'
+      )`,
+    ),
+    check(
+      "conversation_actions_type_check",
+      sql`${table.actionType} IN (
+        'save_plan_candidate','send_plan_to_qc','request_plan_changes',
+        'approve_plan','reject_plan','pause_work','resume_work','redirect_agent',
+        'create_mockup','approve_mockup','revise_mockup','reject_mockup'
+      )`,
+    ),
+    check(
+      "conversation_actions_actor_check",
+      sql`${table.actorType} IN ('human','coordinator','agent','runner','system','legacy')
+        AND (${table.actorType} <> 'human' OR ${table.actorId} IS NOT NULL)`,
+    ),
+    check(
+      "conversation_actions_payload_shape_check",
+      sql`jsonb_typeof(${table.payload}) = 'object'
+        AND ${table.payloadHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "conversation_actions_confirmation_shape_check",
+      sql`(
+          ${table.status} IN (
+            'confirmed','recorded','sent','agent_acknowledged','applied','failed'
+          )
+          AND ${table.confirmedByUserId} IS NOT NULL
+          AND ${table.confirmationIdempotencyKey} IS NOT NULL
+          AND ${table.confirmationRequestFingerprint} ~ '^[a-f0-9]{64}$'
+          AND ${table.confirmedAt} IS NOT NULL
+        ) OR (
+          ${table.status} IN ('proposed','rejected')
+          AND ${table.confirmedByUserId} IS NULL
+          AND ${table.confirmationIdempotencyKey} IS NULL
+          AND ${table.confirmationRequestFingerprint} IS NULL
+          AND ${table.confirmedAt} IS NULL
+        )`,
+    ),
+    check(
+      "conversation_actions_failure_shape_check",
+      sql`(${table.status} = 'failed') = (${table.failureCode} IS NOT NULL)`,
+    ),
+    check(
+      "conversation_actions_delivery_shape_check",
+      sql`(
+          ${table.status} IN ('proposed','confirmed','rejected')
+          AND ${table.recordedAt} IS NULL
+          AND ${table.sentAt} IS NULL
+          AND ${table.acknowledgedAt} IS NULL
+          AND ${table.appliedAt} IS NULL
+        ) OR (
+          ${table.status} = 'recorded'
+          AND ${table.recordedAt} IS NOT NULL
+          AND ${table.sentAt} IS NULL
+          AND ${table.acknowledgedAt} IS NULL
+          AND ${table.appliedAt} IS NULL
+        ) OR (
+          ${table.status} = 'sent'
+          AND ${table.recordedAt} IS NOT NULL
+          AND ${table.sentAt} IS NOT NULL
+          AND ${table.acknowledgedAt} IS NULL
+          AND ${table.appliedAt} IS NULL
+        ) OR (
+          ${table.status} = 'agent_acknowledged'
+          AND ${table.recordedAt} IS NOT NULL
+          AND ${table.sentAt} IS NOT NULL
+          AND ${table.acknowledgedAt} IS NOT NULL
+          AND ${table.appliedAt} IS NULL
+        ) OR (
+          ${table.status} = 'applied'
+          AND ${table.recordedAt} IS NOT NULL
+          AND ${table.sentAt} IS NOT NULL
+          AND ${table.acknowledgedAt} IS NOT NULL
+          AND ${table.appliedAt} IS NOT NULL
+        ) OR (
+          ${table.status} = 'failed'
+          AND ${table.appliedAt} IS NULL
+          AND (${table.sentAt} IS NULL OR ${table.recordedAt} IS NOT NULL)
+          AND (${table.acknowledgedAt} IS NULL OR ${table.sentAt} IS NOT NULL)
+        )`,
+    ),
+  ],
+);
+
+export const workPlanVersions = pgTable(
+  "work_plan_versions",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    createdByUserId: text("created_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    version: integer("version").notNull(),
+    status: text("status").notNull(),
+    plan: jsonb("plan").notNull(),
+    contentHash: text("content_hash").notNull(),
+    supersedesPlanVersionId: text("supersedes_plan_version_id"),
+    diffFromPrevious: jsonb("diff_from_previous"),
+    approvedByUserId: text("approved_by_user_id").references(() => phase2Users.id, {
+      onDelete: "restrict",
+    }),
+    approvedAt: timestamp("approved_at", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    foreignKey({
+      name: "work_plan_versions_conversation_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId],
+      foreignColumns: [
+        workConversations.projectId,
+        workConversations.workItemId,
+        workConversations.id,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex("work_plan_versions_version_unique").on(table.workItemId, table.version),
+    uniqueIndex("work_plan_versions_one_approved_per_work_item")
+      .on(table.workItemId)
+      .where(sql`${table.status} = 'approved'`),
+    uniqueIndex("work_plan_versions_identity_unique").on(
+      table.projectId,
+      table.workItemId,
+      table.id,
+    ),
+    lazyForeignKey(
+      "work_plan_versions_supersedes_scope_fk",
+      (): AnyPgColumn[] => [table.projectId, table.workItemId, table.supersedesPlanVersionId],
+      (): AnyPgColumn[] => [
+        workPlanVersions.projectId,
+        workPlanVersions.workItemId,
+        workPlanVersions.id,
+      ],
+    ).onDelete("restrict"),
+    index("work_plan_versions_work_item_time_idx").on(table.workItemId, table.version),
+    index("work_plan_versions_project_status_idx").on(
+      table.projectId,
+      table.status,
+      table.createdAt,
+      table.id,
+    ),
+    index("work_plan_versions_user_time_idx").on(table.createdByUserId, table.createdAt, table.id),
+    check("work_plan_versions_schema_version_check", sql`${table.schemaVersion} = 2`),
+    check(
+      "work_plan_versions_status_check",
+      sql`${table.status} IN (
+        'candidate','in_qc','changes_requested','approved','rejected','superseded'
+      )`,
+    ),
+    check("work_plan_versions_version_check", sql`${table.version} > 0`),
+    check(
+      "work_plan_versions_content_shape_check",
+      sql`jsonb_typeof(${table.plan}) = 'object'
+        AND ${table.contentHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "work_plan_versions_diff_shape_check",
+      sql`(
+          ${table.version} = 1
+          AND ${table.supersedesPlanVersionId} IS NULL
+          AND ${table.diffFromPrevious} IS NULL
+        ) OR (
+          ${table.version} > 1
+          AND ${table.supersedesPlanVersionId} IS NOT NULL
+          AND jsonb_typeof(${table.diffFromPrevious}) = 'object'
+        )`,
+    ),
+    check(
+      "work_plan_versions_approval_shape_check",
+      sql`(
+          ${table.status} = 'approved'
+          AND ${table.approvedByUserId} IS NOT NULL
+          AND ${table.approvedAt} IS NOT NULL
+        ) OR (
+          ${table.status} <> 'approved'
+          AND ${table.approvedByUserId} IS NULL
+          AND ${table.approvedAt} IS NULL
+        )`,
+    ),
+  ],
+);
+
+export const conversationHandoffs = pgTable(
+  "conversation_handoffs",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    sourceConversationId: text("source_conversation_id").notNull(),
+    targetConversationId: text("target_conversation_id").notNull(),
+    approvedPlanVersionId: text("approved_plan_version_id").notNull(),
+    createdByUserId: text("created_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    kind: text("kind").notNull(),
+    package: jsonb("package").notNull(),
+    contentHash: text("content_hash").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    foreignKey({
+      name: "conversation_handoffs_source_scope_fk",
+      columns: [table.projectId, table.workItemId, table.sourceConversationId],
+      foreignColumns: [
+        workConversations.projectId,
+        workConversations.workItemId,
+        workConversations.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_handoffs_approved_plan_scope_fk",
+      columns: [table.projectId, table.workItemId, table.approvedPlanVersionId],
+      foreignColumns: [
+        workPlanVersions.projectId,
+        workPlanVersions.workItemId,
+        workPlanVersions.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_handoffs_target_scope_fk",
+      columns: [table.projectId, table.workItemId, table.targetConversationId],
+      foreignColumns: [
+        workConversations.projectId,
+        workConversations.workItemId,
+        workConversations.id,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex("conversation_handoffs_transition_unique").on(
+      table.sourceConversationId,
+      table.targetConversationId,
+      table.kind,
+    ),
+    uniqueIndex("conversation_handoffs_approved_plan_unique").on(table.approvedPlanVersionId),
+    index("conversation_handoffs_work_item_time_idx").on(
+      table.workItemId,
+      table.createdAt,
+      table.id,
+    ),
+    index("conversation_handoffs_project_time_idx").on(table.projectId, table.createdAt, table.id),
+    index("conversation_handoffs_user_time_idx").on(
+      table.createdByUserId,
+      table.createdAt,
+      table.id,
+    ),
+    check("conversation_handoffs_schema_version_check", sql`${table.schemaVersion} = 2`),
+    check("conversation_handoffs_kind_check", sql`${table.kind} = 'planning_to_execution'`),
+    check(
+      "conversation_handoffs_distinct_conversations_check",
+      sql`${table.sourceConversationId} <> ${table.targetConversationId}`,
+    ),
+    check(
+      "conversation_handoffs_package_shape_check",
+      sql`jsonb_typeof(${table.package}) = 'object'
+        AND ${table.contentHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
+
+export const conversationSummaries = pgTable(
+  "conversation_summaries",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    createdByUserId: text("created_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    version: integer("version").notNull(),
+    fromMessageSequence: bigint("from_message_sequence", { mode: "number" }).notNull(),
+    throughMessageSequence: bigint("through_message_sequence", { mode: "number" }).notNull(),
+    summary: jsonb("summary").notNull(),
+    contentHash: text("content_hash").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    foreignKey({
+      name: "conversation_summaries_conversation_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId],
+      foreignColumns: [
+        workConversations.projectId,
+        workConversations.workItemId,
+        workConversations.id,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex("conversation_summaries_version_unique").on(table.conversationId, table.version),
+    index("conversation_summaries_conversation_version_idx").on(
+      table.conversationId,
+      table.version,
+    ),
+    index("conversation_summaries_project_time_idx").on(table.projectId, table.createdAt, table.id),
+    index("conversation_summaries_user_time_idx").on(
+      table.createdByUserId,
+      table.createdAt,
+      table.id,
+    ),
+    check("conversation_summaries_schema_version_check", sql`${table.schemaVersion} = 2`),
+    check(
+      "conversation_summaries_range_check",
+      sql`${table.throughMessageSequence} >= ${table.fromMessageSequence}`,
+    ),
+    check("conversation_summaries_version_check", sql`${table.version} > 0`),
+    check(
+      "conversation_summaries_content_shape_check",
+      sql`jsonb_typeof(${table.summary}) = 'object'
+        AND ${table.contentHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
+
+export const conversationDomainSchema = {
+  workItems,
+  workConversations,
+  workMessages,
+  workMessageAttachmentRefs,
+  conversationTurnAttempts,
+  conversationActions,
+  workPlanVersions,
+  conversationHandoffs,
+  conversationSummaries,
+};
+
 export const phase2PreservationSchema = {
   archiveEncryptionKeyRegistry,
   credentialHmacKeyRegistry,
@@ -4207,4 +5071,5 @@ export const phase2PreservationSchema = {
   aiProviderUsagePlans,
   aiUsageCalibrationObservations,
   globalRuleSettings,
+  ...conversationDomainSchema,
 };

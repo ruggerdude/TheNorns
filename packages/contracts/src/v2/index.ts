@@ -13,3 +13,4 @@ export * from "./attention.js";
 export * from "./coordination.js";
 export * from "./debate.js";
 export * from "./knowledge.js";
+export * from "./conversation.js";

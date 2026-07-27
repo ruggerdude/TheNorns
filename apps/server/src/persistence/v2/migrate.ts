@@ -249,6 +249,12 @@ export const SHADOW_EVIDENCE_ORDER_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const CONVERSATION_DOMAIN_MIGRATION_NAME = "0035_conversation_domain";
+export const CONVERSATION_DOMAIN_MIGRATION_URL = new URL(
+  "../../../drizzle/0035_conversation_domain.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -415,6 +421,10 @@ export async function loadUsageCalibrationAnalyticsMigrationSql(): Promise<strin
 
 export async function loadShadowEvidenceOrderMigrationSql(): Promise<string> {
   return readFile(SHADOW_EVIDENCE_ORDER_MIGRATION_URL, "utf8");
+}
+
+export async function loadConversationDomainMigrationSql(): Promise<string> {
+  return readFile(CONVERSATION_DOMAIN_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -660,6 +670,10 @@ export async function runCurrentV2Migrations(
     {
       name: SHADOW_EVIDENCE_ORDER_MIGRATION_NAME,
       sql: await loadShadowEvidenceOrderMigrationSql(),
+    },
+    {
+      name: CONVERSATION_DOMAIN_MIGRATION_NAME,
+      sql: await loadConversationDomainMigrationSql(),
     },
   ]);
 }

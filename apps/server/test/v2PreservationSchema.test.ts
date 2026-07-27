@@ -8,6 +8,7 @@ import {
   AI_USAGE_TELEMETRY_MIGRATION_NAME,
   ATTACHMENTS_MIGRATION_NAME,
   CODEX_REASONING_EFFORT_MIGRATION_NAME,
+  CONVERSATION_DOMAIN_MIGRATION_NAME,
   DEBATE_WORKFLOW_MIGRATION_NAME,
   DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
   FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
@@ -253,6 +254,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       { name: USAGE_INTELLIGENCE_POLICIES_MIGRATION_NAME, applied: false },
       { name: USAGE_CALIBRATION_ANALYTICS_MIGRATION_NAME, applied: false },
       { name: SHADOW_EVIDENCE_ORDER_MIGRATION_NAME, applied: false },
+      { name: CONVERSATION_DOMAIN_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -297,6 +299,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       USAGE_INTELLIGENCE_POLICIES_MIGRATION_NAME,
       USAGE_CALIBRATION_ANALYTICS_MIGRATION_NAME,
       SHADOW_EVIDENCE_ORDER_MIGRATION_NAME,
+      CONVERSATION_DOMAIN_MIGRATION_NAME,
     ]);
   });
 

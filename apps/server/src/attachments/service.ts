@@ -30,7 +30,8 @@ export type AttachmentValidationCode =
   | "payload_too_large"
   | "invalid_image"
   | "objective_limit"
-  | "project_quota";
+  | "project_quota"
+  | "attachment_in_use";
 
 export class AttachmentValidationError extends Error {
   constructor(
@@ -330,24 +331,42 @@ export class AttachmentService {
   /** Tombstone one attachment, then remove metadata/blob content only when no
    *  live attachment still references the content-addressed bytes. */
   async delete(projectId: string, attachmentId: string): Promise<void> {
-    await this.transactions.transaction(async (tx) => {
-      // RETURNING (rather than affectedRows) keeps the count identical across
-      // the PGlite test runtime and production node-postgres.
-      const result = await tx.query<{ id: string; sha256: string }>(
-        `UPDATE attachments SET deleted_at = $3
-          WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL
-          RETURNING id, sha256`,
-        [attachmentId, projectId, this.now().toISOString()],
-      );
-      if (result.rows.length === 0) {
-        throw new AttachmentLookupError(
-          "attachment_not_found",
-          `unknown attachment "${attachmentId}" for project "${projectId}"`,
+    try {
+      await this.transactions.transaction(async (tx) => {
+        // RETURNING (rather than affectedRows) keeps the count identical across
+        // the PGlite test runtime and production node-postgres.
+        const result = await tx.query<{ id: string; sha256: string }>(
+          `UPDATE attachments SET deleted_at = $3
+            WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL
+            RETURNING id, sha256`,
+          [attachmentId, projectId, this.now().toISOString()],
+        );
+        if (result.rows.length === 0) {
+          throw new AttachmentLookupError(
+            "attachment_not_found",
+            `unknown attachment "${attachmentId}" for project "${projectId}"`,
+          );
+        }
+        const sha256 = result.rows[0]?.sha256;
+        if (sha256) await this.blobStore.deleteIfUnreferenced(tx, sha256);
+      });
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "55000" &&
+        "message" in error &&
+        typeof error.message === "string" &&
+        error.message.includes("conversation-referenced attachments cannot be deleted")
+      ) {
+        throw new AttachmentValidationError(
+          "attachment_in_use",
+          `attachment "${attachmentId}" is retained as conversation evidence`,
         );
       }
-      const sha256 = result.rows[0]?.sha256;
-      if (sha256) await this.blobStore.deleteIfUnreferenced(tx, sha256);
-    });
+      throw error;
+    }
   }
 
   /** Cleanup hook for project archival: soft-delete every live attachment on
@@ -356,7 +375,14 @@ export class AttachmentService {
     return this.transactions.transaction(async (tx) => {
       const result = await tx.query<{ id: string; sha256: string }>(
         `UPDATE attachments SET deleted_at = $2
-          WHERE project_id = $1 AND deleted_at IS NULL
+          WHERE project_id = $1
+            AND deleted_at IS NULL
+            AND NOT EXISTS (
+              SELECT 1
+                FROM work_message_attachment_refs evidence
+               WHERE evidence.project_id = attachments.project_id
+                 AND evidence.attachment_id = attachments.id
+            )
           RETURNING id, sha256`,
         [projectId, this.now().toISOString()],
       );
