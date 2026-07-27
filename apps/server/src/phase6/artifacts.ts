@@ -7,6 +7,7 @@ import {
   type V2ProjectArtifactQuotaReceiptT,
 } from "@norns/contracts";
 import { sniffImage } from "../attachments/imageMeta.js";
+import { canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 
 export const DEFAULT_PROJECT_ARTIFACT_QUOTA_BYTES = 100 * 1024 * 1024;
@@ -18,6 +19,7 @@ export type Phase6ArtifactErrorCode =
   | "content_hash_mismatch"
   | "invalid_content"
   | "invalid_dimensions"
+  | "idempotency_conflict"
   | "project_quota"
   | "size_mismatch"
   | "unsupported_media_type";
@@ -59,6 +61,7 @@ export interface StoredPhase6Artifact {
   created_at: string;
   evidence: V2EvidenceRefT;
   quota: V2ProjectArtifactQuotaReceiptT;
+  replayed: boolean;
 }
 
 export interface Phase6ArtifactContent {
@@ -138,7 +141,11 @@ function dimensions(
   return { width: detected.width, height: detected.height };
 }
 
-function stored(row: ArtifactRow, quota: V2ProjectArtifactQuotaReceiptT): StoredPhase6Artifact {
+function stored(
+  row: ArtifactRow,
+  quota: V2ProjectArtifactQuotaReceiptT,
+  replayed: boolean,
+): StoredPhase6Artifact {
   const byteSize = Number(row.byte_size);
   return {
     id: row.id,
@@ -158,6 +165,7 @@ function stored(row: ArtifactRow, quota: V2ProjectArtifactQuotaReceiptT): Stored
       label: row.label,
     },
     quota,
+    replayed,
   };
 }
 
@@ -206,6 +214,26 @@ export class Phase6ArtifactService {
     }
     const imageDimensions = dimensions(metadata.media_type, bytes, input.expected_dimensions);
     const kind = kindForPurpose(metadata.purpose);
+    const normalizedLabel = input.label.trim();
+    const claimActorType = input.provenance.actor_type;
+    const claimActorId = input.provenance.actor_id ?? "system";
+    const requestFingerprint = canonicalSha256({
+      metadata: {
+        project_id: metadata.project_id,
+        work_item_id: metadata.work_item_id,
+        conversation_id: metadata.conversation_id,
+        media_type: metadata.media_type,
+        purpose: metadata.purpose,
+        content_hash: metadata.content_hash,
+        byte_size: metadata.byte_size,
+      },
+      label: normalizedLabel,
+      provenance: input.provenance,
+      expected_dimensions: input.expected_dimensions ?? null,
+      phase_id: input.phase_id ?? null,
+      task_id: input.task_id ?? null,
+      run_id: input.run_id ?? null,
+    });
 
     const project = await tx.query<{ id: string }>(
       "SELECT id FROM projects WHERE id=$1 FOR UPDATE",
@@ -215,6 +243,22 @@ export class Phase6ArtifactService {
       throw new Phase6ArtifactError(
         "artifact_not_found",
         `unknown project "${metadata.project_id}"`,
+      );
+    }
+    const claim = (
+      await tx.query<{ request_fingerprint: string; resource_id: string }>(
+        `SELECT request_fingerprint,resource_id
+           FROM phase6_idempotency_claims
+          WHERE project_id=$1 AND operation='artifact_put'
+            AND actor_type=$2 AND actor_id=$3 AND idempotency_key=$4
+          FOR SHARE`,
+        [metadata.project_id, claimActorType, claimActorId, metadata.idempotency_key],
+      )
+    ).rows[0];
+    if (claim && claim.request_fingerprint !== requestFingerprint) {
+      throw new Phase6ArtifactError(
+        "idempotency_conflict",
+        "artifact idempotency key was already claimed by different immutable content",
       );
     }
     const conversation = await tx.query<{ id: string }>(
@@ -231,6 +275,12 @@ export class Phase6ArtifactService {
     }
 
     const id = artifactId(metadata.project_id, metadata.purpose, hash);
+    if (claim && claim.resource_id !== id) {
+      throw new Phase6ArtifactError(
+        "idempotency_conflict",
+        "artifact idempotency claim points to a different immutable artifact",
+      );
+    }
     const existing = (
       await tx.query<ArtifactRow>(
         `SELECT artifact.id,artifact.project_id,artifact.kind,artifact.label,
@@ -280,7 +330,23 @@ export class Phase6ArtifactService {
           "project content hash is already bound to a different immutable artifact purpose",
         );
       }
-      const result = stored(existing, quota);
+      if (!claim) {
+        await tx.query(
+          `INSERT INTO phase6_idempotency_claims (
+             project_id,operation,actor_type,actor_id,idempotency_key,
+             request_fingerprint,resource_id
+           ) VALUES ($1,'artifact_put',$2,$3,$4,$5,$6)`,
+          [
+            metadata.project_id,
+            claimActorType,
+            claimActorId,
+            metadata.idempotency_key,
+            requestFingerprint,
+            id,
+          ],
+        );
+      }
+      const result = stored(existing, quota, Boolean(claim));
       result.width = imageDimensions.width;
       result.height = imageDimensions.height;
       return result;
@@ -306,7 +372,7 @@ export class Phase6ArtifactService {
         input.task_id ?? null,
         input.run_id ?? null,
         kind,
-        input.label.trim(),
+        normalizedLabel,
         metadata.media_type,
         `db://artifact/${id}`,
         hash,
@@ -321,9 +387,23 @@ export class Phase6ArtifactService {
        ) VALUES ($1,$2,$3,$4,$5)`,
       [id, metadata.project_id, bytes, hash, bytes.byteLength],
     );
+    await tx.query(
+      `INSERT INTO phase6_idempotency_claims (
+         project_id,operation,actor_type,actor_id,idempotency_key,
+         request_fingerprint,resource_id
+       ) VALUES ($1,'artifact_put',$2,$3,$4,$5,$6)`,
+      [
+        metadata.project_id,
+        claimActorType,
+        claimActorId,
+        metadata.idempotency_key,
+        requestFingerprint,
+        id,
+      ],
+    );
     const row = inserted.rows[0];
     if (!row) throw new Error("artifact insert returned no row");
-    const result = stored(row, quota);
+    const result = stored(row, quota, false);
     result.width = imageDimensions.width;
     result.height = imageDimensions.height;
     return result;

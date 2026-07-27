@@ -114,7 +114,7 @@ export class Phase6VisualEvidenceCollectionWorker {
     await this.transactions.transaction(async (tx) => {
       const candidate = (
         await tx.query<EligibleCollection>(
-          `SELECT run.project_id,version.work_item_id,version.conversation_id,
+          `SELECT run.project_id,supplement.work_item_id,supplement.conversation_id,
                   run.phase_id,run.task_id,run.id AS run_id,
                   version.id AS approved_mockup_version_id,
                   run.repository_binding_id,verification.id AS verification_result_id,
@@ -122,7 +122,13 @@ export class Phase6VisualEvidenceCollectionWorker {
                   observation.id AS deployment_observation_id,
                   run.published_commit_sha AS commit_sha
              FROM agent_runs run
-             JOIN conversation_mockup_versions version ON version.task_id=run.task_id
+             JOIN conversation_task_package_supplements supplement
+               ON supplement.project_id=run.project_id AND supplement.task_id=run.task_id
+              AND supplement.supplement ? 'implementation_visual_evidence_requirement'
+              AND supplement.supplement#>>'{implementation_visual_evidence_requirement,approved_mockup_version_id}'
+                    =supplement.source_mockup_version_id
+             JOIN conversation_mockup_versions version
+               ON version.id=supplement.source_mockup_version_id
              JOIN conversation_mockup_decisions decision
                ON decision.mockup_version_id=version.id AND decision.decision='approved'
              JOIN LATERAL (

@@ -3,7 +3,7 @@ import { Pool, type PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { NodePgTransactionRunner } from "../src/persistence/v2/database.js";
 import {
-  PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
+  PHASE6_ACCEPTANCE_CORRECTIONS_MIGRATION_NAME,
   type V2MigrationDatabase,
   runCurrentV2Migrations,
 } from "../src/persistence/v2/migrate.js";
@@ -131,7 +131,7 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
     `);
     const applied = await runCurrentV2Migrations(migrationDatabase);
     expect(applied.at(-1)).toMatchObject({
-      name: PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
+      name: PHASE6_ACCEPTANCE_CORRECTIONS_MIGRATION_NAME,
       applied: true,
     });
     await applicationPool.query(`
@@ -214,7 +214,7 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
     };
     const replay = await runCurrentV2Migrations(migrationDatabase);
     expect(replay.at(-1)).toMatchObject({
-      name: PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
+      name: PHASE6_ACCEPTANCE_CORRECTIONS_MIGRATION_NAME,
       applied: false,
     });
 
@@ -345,6 +345,43 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
       requested_bytes: bytes.byteLength,
       allowed: true,
     });
+    const exactKeyReplay = await put("mockup_manifest", "artifact-first");
+    expect(exactKeyReplay).toMatchObject({ id: manifest.id, replayed: true });
+    await expect(
+      artifacts.put({
+        metadata: {
+          project_id: "phase6-pg-project",
+          work_item_id: "phase6-pg-work",
+          conversation_id: "phase6-pg-conversation",
+          media_type: "application/json",
+          purpose: "mockup_manifest",
+          content_hash: createHash("sha256")
+            .update(Buffer.from('{"phase":7}', "utf8"))
+            .digest("hex"),
+          byte_size: Buffer.byteLength('{"phase":7}'),
+          idempotency_key: "artifact-first",
+        },
+        content: Buffer.from('{"phase":7}', "utf8"),
+        label: "mockup_manifest",
+        provenance: { actor_type: "system", actor_id: "phase6-acceptance" },
+      }),
+    ).rejects.toMatchObject({ code: "idempotency_conflict" });
+    const independentActor = await artifacts.put({
+      metadata: {
+        project_id: "phase6-pg-project",
+        work_item_id: "phase6-pg-work",
+        conversation_id: "phase6-pg-conversation",
+        media_type: "application/json",
+        purpose: "mockup_manifest",
+        content_hash: contentHash,
+        byte_size: bytes.byteLength,
+        idempotency_key: "artifact-first",
+      },
+      content: bytes,
+      label: "mockup_manifest",
+      provenance: { actor_type: "system", actor_id: "phase6-independent-actor" },
+    });
+    expect(independentActor).toMatchObject({ id: manifest.id, replayed: false });
     const comparison = await put("visual_comparison", "artifact-second");
     expect(comparison.id).not.toBe(manifest.id);
     expect(comparison.quota).toMatchObject({
@@ -419,7 +456,57 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
     await expect(
       deployments.create({ ...createInput, commit_sha: "c".repeat(40) }),
     ).rejects.toMatchObject({ code: "deployment_conflict" });
+    for (const changed of [
+      { phase_id: "phase6-pg-phase" },
+      { started_at: "2026-07-27T13:00:01.000Z" },
+      { source_id: "phase6-pg-other-user" },
+    ]) {
+      await expect(deployments.create({ ...createInput, ...changed })).rejects.toMatchObject({
+        code: "deployment_conflict",
+      });
+    }
 
+    const observedAt = "2026-07-27T13:01:00.000Z";
+    const evidenceBytes = Buffer.from(
+      JSON.stringify({
+        schema_version: 2,
+        kind: "deployment_observation",
+        delivery_record_id: created.id,
+        project_id: createInput.project_id,
+        provider_id: createInput.provider_id,
+        provider_deployment_id: createInput.provider_deployment_id,
+        commit_sha: createInput.commit_sha,
+        environment: createInput.environment,
+        service: createInput.service,
+        sequence: 2,
+        status: "deploying",
+        source_type: "human",
+        source_id: "phase6-pg-user",
+        provider_event_id: null,
+        public_url: null,
+        health_url: null,
+        health_status_code: null,
+        observed_at: observedAt,
+      }),
+      "utf8",
+    );
+    const observationEvidence = (
+      await new Phase6ArtifactService(transactions).put({
+        metadata: {
+          project_id: "phase6-pg-project",
+          work_item_id: "phase6-pg-work",
+          conversation_id: "phase6-pg-conversation",
+          media_type: "application/json",
+          purpose: "deployment_evidence",
+          content_hash: createHash("sha256").update(evidenceBytes).digest("hex"),
+          byte_size: evidenceBytes.byteLength,
+          idempotency_key: "observation-evidence",
+        },
+        content: evidenceBytes,
+        label: "Deployment observation evidence",
+        provenance: { actor_type: "system", actor_id: "phase6-acceptance" },
+      })
+    ).evidence;
     const observationInput = {
       project_id: "phase6-pg-project",
       delivery_record_id: created.id,
@@ -428,10 +515,19 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
       public_url: null,
       health_url: null,
       health_status_code: null,
-      evidence: null,
-      observed_at: "2026-07-27T13:01:00.000Z",
+      evidence: observationEvidence,
+      observed_at: observedAt,
       idempotency_key: "manual-observation-1",
     };
+    await expect(
+      deployments.recordHumanObservation(
+        {
+          ...observationInput,
+          evidence: { ...observationEvidence, label: "Caller supplied mismatch" },
+        },
+        "phase6-pg-user",
+      ),
+    ).rejects.toMatchObject({ code: "observation_conflict" });
     const first = await deployments.recordHumanObservation(observationInput, "phase6-pg-user");
     expect(first).toMatchObject({
       replayed: false,
@@ -451,17 +547,37 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
       ),
     ).rejects.toMatchObject({ code: "observation_conflict" });
     await expect(
+      deployments.recordHumanObservation(
+        { ...observationInput, observed_at: "2026-07-27T13:01:01.000Z" },
+        "phase6-pg-user",
+      ),
+    ).rejects.toMatchObject({ code: "observation_conflict" });
+    const independentObservation = await deployments.recordHumanObservation(
+      {
+        ...observationInput,
+        expected_sequence: 3,
+        evidence: null,
+        observed_at: "2026-07-27T13:02:00.000Z",
+      },
+      "phase6-pg-other-user",
+    );
+    expect(independentObservation).toMatchObject({
+      replayed: false,
+      observation: { source_id: "phase6-pg-other-user", sequence: 3 },
+    });
+    await expect(
       deployments.observations("phase6-pg-other-project", created.id),
     ).rejects.toMatchObject({ code: "deployment_not_found" });
   });
 
   it("reports unknown budget truthfully while keeping empty authoritative sections available", async () => {
-    const dashboard = await new Phase6DashboardService(
+    const dashboards = new Phase6DashboardService(
       transactions,
       new Phase6MockupService(transactions),
       new Phase6DeploymentService(transactions),
       () => new Date("2026-07-27T13:30:00.000Z"),
-    ).read("phase6-pg-other-project");
+    );
+    const dashboard = await dashboards.read("phase6-pg-other-project");
     expect(dashboard.budget).toMatchObject({
       availability: "unavailable",
       source: "usage_ledger_and_approved_plan",
@@ -482,6 +598,60 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
     expect(dashboard.conversations).toMatchObject({
       availability: "available",
       data: [expect.objectContaining({ id: "phase6-pg-other-conversation" })],
+    });
+
+    await applicationPool.query(`
+      INSERT INTO phases (
+        id,project_id,objective_summary,priority,status,approved_budget_usd,initiated_by_user_id
+      ) VALUES (
+        'phase6-pg-unapproved-phase','phase6-pg-other-project','Unapproved budget',
+        1,'proposed',999,'phase6-pg-user'
+      );
+    `);
+    expect((await dashboards.read("phase6-pg-other-project")).budget).toMatchObject({
+      availability: "unavailable",
+      reason_code: "no_authoritative_budget_source",
+      data: null,
+    });
+
+    await applicationPool.query(`
+      INSERT INTO ai_usage_events (
+        id,request_id,sequence,event_type,status,occurred_at,provider,model,endpoint,
+        request_type,initiated_by_user_id,project_id,usage_source,confidence,
+        input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,
+        cost_usd,cost_classification
+      ) VALUES
+        (
+          'phase6-pg-priced-start','phase6-pg-priced-request',1,'request_started',
+          'started','2026-07-27T13:19:00Z','openai','gpt-5.6','responses',
+          'conversation','phase6-pg-user','phase6-pg-other-project','provider_api',1,
+          NULL,NULL,NULL,NULL,NULL,'unavailable'
+        ),
+        (
+          'phase6-pg-priced-usage','phase6-pg-priced-request',2,'usage_observed',
+          'in_progress','2026-07-27T13:20:00Z','openai','gpt-5.6','responses',
+          'conversation','phase6-pg-user','phase6-pg-other-project','provider_api',1,
+          100,25,0,0,0.25,'actual'
+        ),
+        (
+          'phase6-pg-unpriced-start','phase6-pg-unpriced-request',1,'request_started',
+          'started','2026-07-27T13:20:30Z','openai','gpt-5.6','responses',
+          'conversation','phase6-pg-user','phase6-pg-other-project','provider_api',1,
+          NULL,NULL,NULL,NULL,NULL,'unavailable'
+        ),
+        (
+          'phase6-pg-unpriced-usage','phase6-pg-unpriced-request',2,'usage_observed',
+          'in_progress','2026-07-27T13:21:00Z','openai','gpt-5.6','responses',
+          'conversation','phase6-pg-user','phase6-pg-other-project','provider_api',1,
+          100,25,0,0,NULL,'unavailable'
+        );
+    `);
+    expect((await dashboards.read("phase6-pg-other-project")).budget).toMatchObject({
+      availability: "unavailable",
+      source: "usage_ledger_and_approved_plan",
+      reason_code: "incomplete_usage_pricing",
+      retryable: false,
+      data: null,
     });
   });
 

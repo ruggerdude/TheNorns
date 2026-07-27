@@ -194,6 +194,13 @@ describe("Norns Actions workflow template", () => {
     expect(rendered).toContain("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}");
   });
 
+  it("checks out the requested evidence commit instead of a moving default-branch head", () => {
+    const rendered = renderNornsAgentWorkflow(TEMPLATE);
+    expect(rendered).toContain("norns_expected_commit:");
+    expect(rendered).toContain("ref: ${{ inputs.norns_expected_commit || github.sha }}");
+    expect(rendered).toContain("fetch-depth: 0");
+  });
+
   it("bakes the relay origin in rather than accepting it as a dispatch input", () => {
     const rendered = renderNornsAgentWorkflow(TEMPLATE);
     expect(rendered).toContain('NORNS_SERVER: "https://norns.example"');
@@ -505,6 +512,7 @@ describe("workflow dispatch", () => {
     expect(dispatch?.body).toEqual({
       ref: "main",
       inputs: {
+        norns_expected_commit: "",
         norns_job_id: "dispatch-job:run:task-1:1",
         norns_runner_id: "actions:project-1",
         norns_run_id: "run:task-1:1",
@@ -513,6 +521,28 @@ describe("workflow dispatch", () => {
     expect(tokenRequests()[0]?.body).toEqual({
       repository_ids: [REPOSITORY.repository_github_id],
       permissions: { actions: "write" },
+    });
+  });
+
+  it("keeps workflow discovery on the default branch while pinning visual collection checkout", async () => {
+    const expectedCommit = "a".repeat(40);
+    const { actions, requests } = await harness((request) =>
+      request.url === dispatchUrl ? noContent() : undefined,
+    );
+    await actions.dispatchWorkflow(REPOSITORY, {
+      norns_job_id: "visual-dispatch:1",
+      norns_runner_id: "actions:visual",
+      norns_run_id: "visual-run:1",
+      norns_expected_commit: expectedCommit,
+    });
+    expect(requests.find((entry) => entry.url === dispatchUrl)?.body).toEqual({
+      ref: REPOSITORY.default_branch,
+      inputs: {
+        norns_job_id: "visual-dispatch:1",
+        norns_runner_id: "actions:visual",
+        norns_run_id: "visual-run:1",
+        norns_expected_commit: expectedCommit,
+      },
     });
   });
 
@@ -809,6 +839,59 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
     expect(stores.runner(scheduled.actions.runner_id)?.public_key_pem).toBe("");
     expect(dispatched[0]?.inputs.norns_job_id).toBe(scheduled.dispatch_job_id);
     expect(dispatched[0]?.inputs.norns_runner_id).toBe(scheduled.actions.runner_id);
+  });
+
+  it("dispatches the persisted visual collection commit even after the default branch advances", async () => {
+    const { coordinator } = await build();
+    await seed("connected");
+    await coordinator.prepareContinuation("project-1");
+    const collectionCommit = "c".repeat(40);
+    await pg.query("UPDATE repository_bindings SET observed_head=$2 WHERE id=$1", [
+      "binding-1",
+      "d".repeat(40),
+    ]);
+    await pg.exec(`
+      INSERT INTO agent_runs (
+        id,project_id,phase_id,task_id,assignment_id,attempt,state,is_designated,
+        repository_binding_id,expected_revision,lifecycle_version
+      ) VALUES (
+        'visual-run','project-1','phase-1','task-1','assignment-1',1,'created',false,
+        'binding-1',repeat('b',40),0
+      );
+      INSERT INTO commands (
+        command_id,dispatch_job_id,project_id,phase_id,task_id,run_id,runner_id,
+        runner_generation,kind,envelope,status,correlation_id
+      ) VALUES (
+        'visual-command','visual-job','project-1','phase-1','task-1','visual-run',
+        'actions:visual-run',1,'collect_visual_evidence',
+        jsonb_build_object(
+          'expires_at',(now() + interval '15 minutes')::text,
+          'payload',jsonb_build_object('commit_sha',repeat('c',40))
+        ),
+        'queued','visual-correlation'
+      );
+      INSERT INTO dispatch_jobs (
+        id,project_id,phase_id,task_id,run_id,command_id,runner_id,status
+      ) VALUES (
+        'visual-job','project-1','phase-1','task-1','visual-run','visual-command',
+        'actions:visual-run','awaiting_enrollment'
+      );
+    `);
+    await coordinator.launchContinuation({
+      project_id: "project-1",
+      repository_binding_id: "binding-1",
+      dispatch_job_id: "visual-job",
+      run_id: "visual-run",
+      runner_id: "actions:visual-run",
+      runner_generation: 1,
+    });
+
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]?.inputs).toMatchObject({
+      norns_job_id: "visual-job",
+      norns_run_id: "visual-run",
+      norns_expected_commit: collectionCommit,
+    });
   });
 
   it("EXECUTION E5 — two dispatches for two different tasks never share a runner identity", async () => {

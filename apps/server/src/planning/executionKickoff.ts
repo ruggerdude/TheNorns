@@ -1,4 +1,8 @@
-import { v2MaterializedTaskId } from "@norns/contracts";
+import {
+  V2ApprovedMockupTaskSupplementContent,
+  V2MockupManifest,
+  v2MaterializedTaskId,
+} from "@norns/contracts";
 import {
   PhaseLaunchError,
   type PhaseLaunchResult,
@@ -41,6 +45,7 @@ import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonic
 // is already `active`, the kickoff refuses before mutating anything rather
 // than forcing a second executing phase.
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
+import { implementationVisualEvidenceRequirement } from "../phase6/mockups.js";
 import {
   type StaffingAssignmentEdit,
   type StrategyBridgeService,
@@ -190,11 +195,12 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
         work_item_id: string;
         conversation_id: string;
         module_id: string;
+        approved_plan_version_id: string;
         package: unknown;
         canonical_package: string;
         content_hash: string;
       }>(
-        `SELECT id, work_item_id, conversation_id, module_id, package,
+        `SELECT id, work_item_id, conversation_id, module_id, approved_plan_version_id, package,
                 canonical_package, content_hash
            FROM conversation_task_packages
           WHERE project_id=$1 AND handoff_id=$2
@@ -276,6 +282,188 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
           bound.context_document_id !== contextDocumentId
         ) {
           throw new Error(`task package ${taskPackage.id} has a conflicting task binding`);
+        }
+        const lockedTask = await tx.query<{ id: string }>(
+          `SELECT id FROM tasks
+            WHERE id=$1 AND project_id=$2 AND phase_id=$3
+            FOR UPDATE`,
+          [taskId, projectId, phaseId],
+        );
+        if (!lockedTask.rows[0]) {
+          throw new Error(`task package ${taskPackage.id} has no materialized task fence`);
+        }
+        const planningMockups = await tx.query<{
+          version_id: string;
+          canonical_manifest: string;
+          manifest_artifact_id: string;
+          manifest_artifact_hash: string;
+          decision_id: string;
+          action_id: string;
+          decided_by_user_id: string;
+          decided_at: string | Date;
+        }>(
+          `SELECT version.id AS version_id,version.canonical_manifest,
+                  version.manifest_artifact_id,version.manifest_artifact_hash,
+                  decision.id AS decision_id,decision.action_id,
+                  decision.decided_by_user_id,decision.created_at AS decided_at
+             FROM conversation_handoffs handoff
+             JOIN conversation_mockup_versions version
+               ON version.project_id=handoff.project_id
+              AND version.work_item_id=handoff.work_item_id
+              AND version.conversation_id=handoff.source_conversation_id
+             JOIN conversation_mockup_requests root_request
+               ON root_request.id=version.root_request_id
+             JOIN conversation_actions root_action ON root_action.id=root_request.action_id
+             JOIN conversation_mockup_decisions decision
+               ON decision.mockup_version_id=version.id AND decision.decision='approved'
+            WHERE handoff.id=$1 AND handoff.project_id=$2
+              AND root_action.payload->'parameters'->>'plan_version_id'
+                    =$3
+              AND root_action.payload->'parameters'->>'module_id'=$4
+            ORDER BY decision.created_at,version.id`,
+          [handoffId, projectId, taskPackage.approved_plan_version_id, taskPackage.module_id],
+        );
+        for (const [mockupIndex, mockup] of planningMockups.rows.entries()) {
+          const manifest = V2MockupManifest.parse(JSON.parse(mockup.canonical_manifest));
+          const decidedAt =
+            mockup.decided_at instanceof Date ? mockup.decided_at.toISOString() : mockup.decided_at;
+          const supplement = V2ApprovedMockupTaskSupplementContent.parse({
+            schema_version: 2,
+            kind: "approved_mockup",
+            mockup_version_id: mockup.version_id,
+            manifest_artifact_id: mockup.manifest_artifact_id,
+            manifest_artifact_hash: mockup.manifest_artifact_hash,
+            approval: {
+              decision_id: mockup.decision_id,
+              action_id: mockup.action_id,
+              decided_by_user_id: mockup.decided_by_user_id,
+              decided_at: decidedAt,
+            },
+            brief: manifest.brief,
+            target: manifest.target,
+            interaction_notes: manifest.interaction_notes,
+            renderer_profile: manifest.renderer_profile,
+            screenshots: manifest.screenshots,
+            implementation_visual_evidence_requirement: implementationVisualEvidenceRequirement(
+              mockup.version_id,
+            ),
+          });
+          const canonicalSupplement = canonicalJson(supplement);
+          const supplementHash = canonicalSha256(supplement);
+          const supplementBytes = Buffer.from(canonicalSupplement, "utf8");
+          const contextDocumentId = taskContextDocumentId(
+            projectId,
+            "approved_mockup",
+            supplementHash,
+          );
+          const existingSupplement = (
+            await tx.query<{
+              project_id: string;
+              work_item_id: string;
+              conversation_id: string;
+              task_id: string;
+              base_package_id: string;
+              ordinal: number | string;
+              source_mockup_version_id: string;
+              content_hash: string;
+              context_document_id: string;
+            }>(
+              `SELECT project_id,work_item_id,conversation_id,task_id,base_package_id,
+                      ordinal,source_mockup_version_id,content_hash,context_document_id
+                 FROM conversation_task_package_supplements
+                WHERE approval_decision_id=$1
+                FOR SHARE`,
+              [mockup.decision_id],
+            )
+          ).rows[0];
+          const exactStoredSupplement = (stored: typeof existingSupplement): boolean =>
+            Boolean(
+              stored &&
+                stored.project_id === projectId &&
+                stored.work_item_id === taskPackage.work_item_id &&
+                stored.conversation_id === taskPackage.conversation_id &&
+                stored.task_id === taskId &&
+                stored.base_package_id === taskPackage.id &&
+                Number(stored.ordinal) === mockupIndex + 1 &&
+                stored.source_mockup_version_id === mockup.version_id &&
+                stored.content_hash === supplementHash &&
+                stored.context_document_id === contextDocumentId,
+            );
+          if (existingSupplement) {
+            if (!exactStoredSupplement(existingSupplement)) {
+              throw new Error(
+                `approved mockup ${mockup.version_id} has a conflicting task supplement`,
+              );
+            }
+            continue;
+          }
+          await tx.query(
+            `INSERT INTO task_context_blobs (sha256,content)
+             VALUES ($1,$2) ON CONFLICT (sha256) DO NOTHING`,
+            [supplementHash, supplementBytes],
+          );
+          await tx.query(
+            `INSERT INTO task_context_documents (
+               id,project_id,section,sha256,byte_size,media_type
+             ) VALUES ($1,$2,'approved_mockup',$3,$4,'application/json')
+             ON CONFLICT (id) DO NOTHING`,
+            [contextDocumentId, projectId, supplementHash, supplementBytes.byteLength],
+          );
+          await tx.query(
+            `INSERT INTO conversation_task_package_supplements (
+               id,project_id,work_item_id,conversation_id,task_id,base_package_id,
+               ordinal,source_mockup_version_id,approval_decision_id,
+               manifest_artifact_id,manifest_artifact_hash,supplement,
+               canonical_supplement,content_hash,context_document_id,
+               context_byte_size,context_media_type,created_at
+             ) VALUES (
+               $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,
+               'application/json',$17
+             )`,
+            [
+              `mockup-supplement:${mockup.decision_id}`,
+              projectId,
+              taskPackage.work_item_id,
+              taskPackage.conversation_id,
+              taskId,
+              taskPackage.id,
+              mockupIndex + 1,
+              mockup.version_id,
+              mockup.decision_id,
+              mockup.manifest_artifact_id,
+              mockup.manifest_artifact_hash,
+              JSON.stringify(supplement),
+              canonicalSupplement,
+              supplementHash,
+              contextDocumentId,
+              supplementBytes.byteLength,
+              decidedAt,
+            ],
+          );
+          const storedSupplement = (
+            await tx.query<{
+              project_id: string;
+              work_item_id: string;
+              conversation_id: string;
+              task_id: string;
+              base_package_id: string;
+              ordinal: number | string;
+              source_mockup_version_id: string;
+              content_hash: string;
+              context_document_id: string;
+            }>(
+              `SELECT project_id,work_item_id,conversation_id,task_id,base_package_id,
+                      ordinal,source_mockup_version_id,content_hash,context_document_id
+                 FROM conversation_task_package_supplements
+                WHERE approval_decision_id=$1`,
+              [mockup.decision_id],
+            )
+          ).rows[0];
+          if (!exactStoredSupplement(storedSupplement)) {
+            throw new Error(
+              `approved mockup ${mockup.version_id} has a conflicting task supplement`,
+            );
+          }
         }
       }
       const taskCount = Number(

@@ -1,6 +1,6 @@
 import { V2ProjectDashboard, type V2ProjectDashboardT } from "@norns/contracts";
 import { useCallback, useEffect, useState } from "react";
-import { ArtifactImage, artifactContentPath } from "./ArtifactImage";
+import { ArtifactImage, openAuthenticatedArtifact } from "./ArtifactImage";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Badge, Button, Spinner } from "./ui";
 import "./ProjectOperationsDashboard.css";
@@ -163,14 +163,15 @@ export function ProjectOperationsDashboard({
             ) : (
               <ul className="operations-list">
                 {dashboard.active_work.data.map(
-                  ({ work_item: workItem, phase_progress: progress }) => (
+                  ({ work_item: workItem, phase_progress: progress, deep_link: deepLink }) => (
                     <li key={workItem.id}>
-                      <a
-                        href={`/projects/${encodeURIComponent(projectId)}/work`}
-                        aria-label={`Open work item ${workItem.title}`}
-                      >
+                      {deepLink ? (
+                        <a href={deepLink} aria-label={`Open work item ${workItem.title}`}>
+                          <strong>{workItem.title}</strong>
+                        </a>
+                      ) : (
                         <strong>{workItem.title}</strong>
-                      </a>
+                      )}
                       <span>{workItem.status.replaceAll("_", " ")}</span>
                       {progress ? (
                         <>
@@ -224,7 +225,13 @@ export function ProjectOperationsDashboard({
                 {dashboard.needs_attention.data.map((item) => (
                   <li key={item.key}>
                     <div>
-                      <strong>{item.title}</strong>
+                      {item.deep_link ? (
+                        <a href={item.deep_link}>
+                          <strong>{item.title}</strong>
+                        </a>
+                      ) : (
+                        <strong>{item.title}</strong>
+                      )}
                       <Badge tone={item.severity === "critical" ? "danger" : "warn"}>
                         {item.source_type.replaceAll("_", " ")}
                       </Badge>
@@ -258,14 +265,18 @@ export function ProjectOperationsDashboard({
               <ul className="operations-list">
                 {dashboard.open_decisions.data.map((decision) => (
                   <li key={decision.id}>
-                    <a
-                      href={`/projects/${encodeURIComponent(projectId)}/work/${encodeURIComponent(
-                        decision.conversation_id,
-                      )}`}
-                    >
-                      <strong>{decision.question}</strong>
-                    </a>
-                    <small>{decision.status.replaceAll("_", " ")}</small>
+                    {decision.deep_link ? (
+                      <a href={decision.deep_link}>
+                        <strong>{decision.title}</strong>
+                      </a>
+                    ) : (
+                      <strong>{decision.title}</strong>
+                    )}
+                    <p>{decision.detail}</p>
+                    <small>
+                      {decision.source_type.replaceAll("_", " ")} ·{" "}
+                      {decision.status.replaceAll("_", " ")}
+                    </small>
                   </li>
                 ))}
               </ul>
@@ -310,24 +321,33 @@ export function ProjectOperationsDashboard({
             <EmptyState>No deployment observations are recorded.</EmptyState>
           ) : (
             <ul className="operations-list">
-              {dashboard.recent_deployments.data.map((deployment) => (
-                <li key={deployment.id}>
-                  <div>
-                    <strong>{deployment.service}</strong>
-                    <Badge tone={deployment.status === "succeeded" ? "success" : "info"}>
-                      {deployment.status}
-                    </Badge>
-                  </div>
-                  <code title={deployment.commit_sha}>{deployment.commit_sha.slice(0, 12)}</code>
-                  {deployment.public_url ? (
-                    <a href={deployment.public_url} target="_blank" rel="noreferrer">
-                      Open live application
-                    </a>
-                  ) : (
-                    <small>No public URL is recorded.</small>
-                  )}
-                </li>
-              ))}
+              {dashboard.recent_deployments.data.map((deploymentEntry) => {
+                const deployment = deploymentEntry.deployment;
+                return (
+                  <li key={deployment.id}>
+                    <div>
+                      {deploymentEntry.deep_link ? (
+                        <a href={deploymentEntry.deep_link}>
+                          <strong>{deployment.service}</strong>
+                        </a>
+                      ) : (
+                        <strong>{deployment.service}</strong>
+                      )}
+                      <Badge tone={deployment.status === "succeeded" ? "success" : "info"}>
+                        {deployment.status}
+                      </Badge>
+                    </div>
+                    <code title={deployment.commit_sha}>{deployment.commit_sha.slice(0, 12)}</code>
+                    {deployment.public_url ? (
+                      <a href={deployment.public_url} target="_blank" rel="noreferrer">
+                        Open live application
+                      </a>
+                    ) : (
+                      <small>No public URL is recorded.</small>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
           {dashboard.recent_verification.availability === "unavailable" ? (
@@ -341,7 +361,13 @@ export function ProjectOperationsDashboard({
               {dashboard.recent_verification.data.map((verification) => (
                 <li key={verification.id}>
                   <div>
-                    <strong>Task {verification.task_id}</strong>
+                    {verification.deep_link ? (
+                      <a href={verification.deep_link}>
+                        <strong>Task {verification.task_id}</strong>
+                      </a>
+                    ) : (
+                      <strong>Task {verification.task_id}</strong>
+                    )}
                     <Badge tone={verification.passed ? "success" : "danger"}>
                       {verification.passed ? "Passed" : "Failed"}
                     </Badge>
@@ -434,7 +460,13 @@ export function ProjectOperationsDashboard({
                     alt={`Approved mockup version ${mockup.version} desktop`}
                     onUnauthorized={onUnauthorized}
                   />
-                  <strong>Mockup v{mockup.version}</strong>
+                  <a
+                    href={`/projects/${encodeURIComponent(projectId)}/work/${encodeURIComponent(
+                      mockup.conversation_id,
+                    )}`}
+                  >
+                    <strong>Mockup v{mockup.version}</strong>
+                  </a>
                   <code title={mockup.manifest.content_hash}>
                     {mockup.manifest.content_hash.slice(0, 12)}
                   </code>
@@ -452,13 +484,22 @@ export function ProjectOperationsDashboard({
             <ul className="operations-list">
               {dashboard.recent_artifacts.data.map((summary) => (
                 <li key={summary.artifact.artifact_id}>
-                  <a
-                    href={artifactContentPath(projectId, summary.artifact.artifact_id)}
-                    target="_blank"
-                    rel="noreferrer"
+                  <button
+                    type="button"
+                    className="operations-artifact-link"
+                    onClick={() => {
+                      setError(null);
+                      void openAuthenticatedArtifact(
+                        projectId,
+                        summary.artifact.artifact_id,
+                        onUnauthorized,
+                      ).catch((caught: unknown) =>
+                        setError(caught instanceof Error ? caught.message : String(caught)),
+                      );
+                    }}
                   >
                     <strong>{summary.artifact.label}</strong>
-                  </a>
+                  </button>
                   <span>{summary.kind.replaceAll("_", " ")}</span>
                   <code title={summary.artifact.content_hash}>
                     {summary.artifact.content_hash.slice(0, 12)}

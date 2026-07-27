@@ -42,7 +42,7 @@ interface ClaimedDelivery {
   work_item_id: string;
   conversation_id: string;
   initiated_by_user_id: string;
-  phase_id: string;
+  phase_id: string | null;
   target_run_id: string | null;
   payload: unknown;
   runner_id: string | null;
@@ -672,7 +672,7 @@ export interface CheckpointAction {
   work_item_id: string;
   conversation_id: string;
   initiated_by_user_id: string;
-  phase_id: string;
+  phase_id: string | null;
   payload: unknown;
   target_run_id: string | null;
 }
@@ -743,7 +743,15 @@ export class ConversationActionCheckpointWorker {
         )
       ).rows[0];
       if (!row) return null;
-      if (!row.phase_id) throw new Error("execution checkpoint action has no phase");
+      const planningSafeMockupAction = [
+        "create_mockup",
+        "approve_mockup",
+        "revise_mockup",
+        "reject_mockup",
+      ].includes(row.action_type);
+      if (!row.phase_id && !planningSafeMockupAction) {
+        throw new Error("execution checkpoint action has no phase");
+      }
       const leased = await tx.query<{ id: string }>(
         `UPDATE conversation_action_delivery_intents
             SET status='leased',lease_owner=$2,lease_expires_at=now()+interval '30 seconds',
@@ -862,6 +870,8 @@ export class ConversationActionCheckpointWorker {
           return { action_id: claimed.action_id, state: "phase6_queued" as const };
         }
 
+        const phaseId = claimed.phase_id;
+        if (!phaseId) throw new Error("execution checkpoint action has no phase");
         let resourceType: "project" | "task" | "plan_change" = "project";
         let resourceId = claimed.work_item_id;
         if (claimed.action_type === "record_human_decision") {
@@ -881,7 +891,7 @@ export class ConversationActionCheckpointWorker {
             [
               decisionPointId,
               claimed.project_id,
-              claimed.phase_id,
+              phaseId,
               parameters.task_id ?? null,
               parameters.task_id ? "task" : "work_item",
               parameters.task_id ?? claimed.work_item_id,
@@ -901,7 +911,7 @@ export class ConversationActionCheckpointWorker {
             [
               approvalId,
               claimed.project_id,
-              claimed.phase_id,
+              phaseId,
               decisionPointId,
               claimed.initiated_by_user_id,
               decisionHash,
@@ -916,7 +926,7 @@ export class ConversationActionCheckpointWorker {
             [
               decisionId,
               claimed.project_id,
-              claimed.phase_id,
+              phaseId,
               decisionPointId,
               parameters.decision_point,
               parameters.rationale,
@@ -940,7 +950,7 @@ export class ConversationActionCheckpointWorker {
             if (task && task.state !== "blocked") {
               await transitionV2TaskLifecycle(lifecycle, {
                 project_id: claimed.project_id,
-                phase_id: claimed.phase_id,
+                phase_id: phaseId,
                 task_id: taskId,
                 expected_aggregate_version: task.aggregate_version,
                 to: "blocked",
@@ -1097,7 +1107,7 @@ export class ConversationActionCheckpointWorker {
                     : "ready";
               await transitionV2TaskLifecycle(lifecycle, {
                 project_id: claimed.project_id,
-                phase_id: claimed.phase_id,
+                phase_id: phaseId,
                 task_id: taskId,
                 expected_aggregate_version: task.aggregate_version,
                 to: target,

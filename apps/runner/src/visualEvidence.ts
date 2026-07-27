@@ -110,9 +110,20 @@ function parseScreenshot(
   if (typeof object.content_hash !== "string" || !/^[a-f0-9]{64}$/.test(object.content_hash)) {
     throw new Error(`${expectedViewport} visual evidence requires a SHA-256 content hash`);
   }
+  const expectedPath =
+    expectedViewport === "desktop"
+      ? ".norns/visual-evidence/desktop-1440x1024.png"
+      : ".norns/visual-evidence/mobile-390x844.png";
+  const repositoryPath = safeRepositoryPath(
+    object.path,
+    `${expectedViewport} visual evidence path`,
+  );
+  if (repositoryPath !== expectedPath) {
+    throw new Error(`${expectedViewport} visual evidence path must be ${expectedPath}`);
+  }
   return {
     viewport: expectedViewport,
-    path: safeRepositoryPath(object.path, `${expectedViewport} visual evidence path`),
+    path: repositoryPath,
     content_hash: object.content_hash,
   };
 }

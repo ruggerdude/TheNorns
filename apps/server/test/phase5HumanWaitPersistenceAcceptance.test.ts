@@ -581,6 +581,64 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
        ) VALUES ($1,$2,$3,$4,'planning','active','anthropic','claude-sonnet-5')`,
       [planningConversationId, projectId, workItemId, ownerId],
     );
+    await pg.query(
+      `INSERT INTO work_plan_versions (
+         id,project_id,work_item_id,conversation_id,created_by_user_id,
+         version,status,plan,content_hash
+       ) VALUES (
+         'plan-phase6-planning',$1,$2,$3,$4,1,'candidate',$5::jsonb,$6
+       )`,
+      [
+        projectId,
+        workItemId,
+        planningConversationId,
+        ownerId,
+        JSON.stringify({
+          plan: {
+            objective: "Review the responsive project overview",
+            assumptions: ["The planning conversation is the source of truth."],
+            modules: [
+              {
+                id: "overview-module",
+                title: "Project overview",
+                description: "Implement the approved responsive overview.",
+                deliverables: ["Responsive overview"],
+                acceptance: [
+                  {
+                    id: "overview-acceptance",
+                    statement: "The overview matches the approved mockup.",
+                    verification_type: "test",
+                    verification: "pnpm test",
+                  },
+                ],
+                dependencies: [],
+                estimated_complexity: "M",
+                risk: "medium",
+              },
+            ],
+            risks: [
+              {
+                description: "Responsive behavior may drift.",
+                mitigation: "Review both fixed viewports.",
+              },
+            ],
+            out_of_scope: ["Unrelated pages"],
+          },
+          staffing: [
+            {
+              module_id: "overview-module",
+              agent_role: "implementation",
+              provider: "openai",
+              model: "gpt-5.6-sol",
+            },
+          ],
+          verification_requirements: ["pnpm test"],
+          open_decisions: [],
+          estimated_budget: { currency: "USD", amount: 10 },
+        }),
+        "e".repeat(64),
+      ],
+    );
     const steering = new ConversationHumanSteeringService(transactions, {
       newId: (prefix) => `${prefix}-planning-mockup`,
     });
@@ -593,6 +651,8 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
         action_type: "create_mockup",
         payload: {
           parameters: {
+            plan_version_id: "plan-phase6-planning",
+            module_id: "overview-module",
             brief: "Show the responsive project overview before implementation.",
             target: "responsive",
             artifact_refs: [],

@@ -30,7 +30,9 @@ import type {
   V2CreateExecutionActionProposalInputT,
   V2CreateHumanWaitAnswerProposalInputT,
   V2HumanWaitT,
+  V2ImplementationVisualEvidenceT,
   V2RequestPlanChangesParametersT,
+  V2VisualComparisonReceiptT,
   V2WorkConversationT,
   V2WorkMessagePartT,
   V2WorkMessageT,
@@ -40,6 +42,8 @@ import {
   V2ConversationMockupVersion,
   V2CreateExecutionActionProposalInput,
   V2CreateHumanWaitAnswerProposalInput,
+  V2ImplementationVisualEvidence,
+  V2VisualComparisonReceipt,
 } from "@norns/contracts";
 import type { ChatRequestOptions, CreateUIMessage, UIMessage, UIMessageChunk } from "ai";
 import {
@@ -139,6 +143,7 @@ type HumanWaitUpdateData = HumanWaitData & {
 };
 
 type MockupData = ReferenceData;
+type ImplementationVisualEvidenceData = ReferenceData;
 
 type NornsDataParts = {
   artifact: ArtifactData;
@@ -149,6 +154,7 @@ type NornsDataParts = {
   "human-wait": HumanWaitData;
   "human-wait-update": HumanWaitUpdateData;
   mockup: MockupData;
+  "implementation-visual-evidence": ImplementationVisualEvidenceData;
   attempt: AttemptData;
   usage: UsageData;
   "message-status": MessageStatusData;
@@ -496,6 +502,16 @@ function messagePartToUi(
           },
         },
       ];
+    case "implementation_visual_evidence":
+      return [
+        {
+          type: "data-implementation-visual-evidence",
+          data: {
+            id: part.visual_evidence_id,
+            label: "Verified implementation visual evidence",
+          },
+        },
+      ];
   }
 }
 
@@ -727,7 +743,7 @@ function MockupReviewControls({
       (action) =>
         ["approve_mockup", "revise_mockup", "reject_mockup"].includes(action.action_type) &&
         action.payload.parameters.mockup_version_id === mockup.id &&
-        action.status !== "rejected",
+        ["proposed", "confirmed", "recorded", "sent", "agent_acknowledged"].includes(action.status),
     ) ?? null;
   if (pendingAction) {
     return (
@@ -756,12 +772,25 @@ function MockupReviewControls({
         <Button
           className="btn-small"
           variant="primary"
-          disabled={context.executionProposalBusy || mockup.task_id === null}
-          title={mockup.task_id === null ? "Approval requires a task-scoped mockup." : undefined}
+          disabled={
+            context.executionProposalBusy ||
+            (mockup.task_id === null &&
+              (mockup.plan_version_id === null || mockup.module_id === null))
+          }
+          title={
+            mockup.task_id === null && mockup.module_id === null
+              ? "Approval requires a task or plan-module scoped mockup."
+              : undefined
+          }
           onClick={() =>
             void context.prepareExecutionAction("approve_mockup", {
               ...exactReference,
-              task_id: mockup.task_id,
+              ...(mockup.task_id
+                ? { task_id: mockup.task_id }
+                : {
+                    plan_version_id: mockup.plan_version_id,
+                    module_id: mockup.module_id,
+                  }),
             })
           }
         >
@@ -979,6 +1008,176 @@ function MockupPreview({ data }: DataMessagePartProps<MockupData>): React.ReactE
         </section>
       ) : null}
       <MockupReviewControls mockup={mockup} context={context} />
+    </article>
+  );
+}
+
+function ImplementationVisualEvidencePreview({
+  data,
+}: DataMessagePartProps<ImplementationVisualEvidenceData>): React.ReactElement {
+  const context = useContext(ConversationActionContext);
+  const [evidence, setEvidence] = useState<V2ImplementationVisualEvidenceT | null>(null);
+  const [comparison, setComparison] = useState<V2VisualComparisonReceiptT | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!context) return;
+    let cancelled = false;
+    const load = async () => {
+      const response = await fetch(
+        `/api/v2/projects/${encodeURIComponent(context.projectId)}/work-items/${encodeURIComponent(
+          context.workItemId,
+        )}/conversations/${encodeURIComponent(context.conversationId)}/visual-evidence/${encodeURIComponent(
+          data.id,
+        )}`,
+        { credentials: "include", headers: authHeaders() },
+      );
+      if (response.status === 401) throw new UnauthorizedError();
+      if (!response.ok)
+        throw new ApiError(`Visual evidence is unavailable (${response.status}).`, response.status);
+      const parsed = V2ImplementationVisualEvidence.parse(await response.json());
+      if (cancelled) return;
+      setEvidence(parsed);
+      if (!parsed.comparison_artifact) return;
+      const comparisonResponse = await fetch(
+        `/api/v2/projects/${encodeURIComponent(context.projectId)}/artifacts/${encodeURIComponent(
+          parsed.comparison_artifact.artifact_id,
+        )}/content`,
+        { credentials: "include", headers: authHeaders() },
+      );
+      if (comparisonResponse.status === 401) throw new UnauthorizedError();
+      if (!comparisonResponse.ok) {
+        throw new ApiError(
+          `Visual comparison is unavailable (${comparisonResponse.status}).`,
+          comparisonResponse.status,
+        );
+      }
+      const receipt = V2VisualComparisonReceipt.parse(await comparisonResponse.json());
+      if (!cancelled) setComparison(receipt);
+    };
+    void load().catch((caught: unknown) => {
+      if (cancelled) return;
+      if (caught instanceof UnauthorizedError) context.onUnauthorized();
+      else setError(caught instanceof Error ? caught.message : String(caught));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [context, data.id]);
+
+  if (!context) return <ReferenceCard data={data} />;
+  if (error) {
+    return (
+      <output className="conversation-reference-card">
+        <strong>Implementation visual evidence unavailable</strong>
+        <p>{error}</p>
+        <code>{data.id}</code>
+      </output>
+    );
+  }
+  if (!evidence) {
+    return (
+      <article className="conversation-reference-card" aria-busy="true">
+        <strong>Loading implementation visual evidence…</strong>
+      </article>
+    );
+  }
+  return (
+    <article
+      className="conversation-mockup-card conversation-implementation-evidence"
+      data-testid="implementation-visual-evidence"
+    >
+      <header>
+        <div>
+          <span className="eyebrow">Verified delivered implementation</span>
+          <h3>Approved mockup vs delivered UI</h3>
+        </div>
+        <Badge tone="success">Commit verified</Badge>
+      </header>
+      <dl className="conversation-mockup-evidence">
+        <div>
+          <dt>Commit SHA</dt>
+          <dd>
+            <code title={evidence.commit_sha}>{evidence.commit_sha}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>Approved mockup</dt>
+          <dd>
+            <code>{evidence.approved_mockup_version_id}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>Comparison receipt</dt>
+          <dd>
+            {evidence.comparison_artifact ? (
+              <code title={evidence.comparison_artifact.content_hash}>
+                {evidence.comparison_artifact.artifact_id} ·{" "}
+                {evidence.comparison_artifact.content_hash.slice(0, 12)}
+              </code>
+            ) : (
+              <span>Unavailable</span>
+            )}
+          </dd>
+        </div>
+      </dl>
+      {comparison ? (
+        <div
+          className="conversation-mockup-comparison"
+          aria-label="Approved and delivered comparison"
+        >
+          {comparison.comparisons.map((pair) => {
+            const delivered = evidence.screenshots.find(
+              (screenshot) => screenshot.viewport === pair.viewport,
+            );
+            return (
+              <section key={pair.viewport}>
+                <strong>
+                  {pair.viewport}
+                  {delivered ? ` · ${delivered.width} × ${delivered.height}` : " · unavailable"}
+                </strong>
+                <div className="conversation-mockup-screenshots">
+                  <figure>
+                    <ArtifactImage
+                      projectId={context.projectId}
+                      artifactId={pair.mockup_artifact_id}
+                      alt={`Approved ${pair.viewport} mockup`}
+                      onUnauthorized={context.onUnauthorized}
+                    />
+                    <figcaption>
+                      <span>Approved</span>
+                      <code title={pair.mockup_artifact_hash}>
+                        {pair.mockup_artifact_id} · {pair.mockup_artifact_hash.slice(0, 12)}
+                      </code>
+                    </figcaption>
+                  </figure>
+                  <figure>
+                    {delivered ? (
+                      <ArtifactImage
+                        projectId={context.projectId}
+                        artifactId={pair.implementation_artifact_id}
+                        alt={`Delivered ${pair.viewport} implementation`}
+                        onUnauthorized={context.onUnauthorized}
+                      />
+                    ) : (
+                      <output>Delivered capture unavailable</output>
+                    )}
+                    <figcaption>
+                      <span>Delivered</span>
+                      <code title={pair.implementation_artifact_hash}>
+                        {pair.implementation_artifact_id} ·{" "}
+                        {pair.implementation_artifact_hash.slice(0, 12)}
+                      </code>
+                    </figcaption>
+                  </figure>
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      ) : (
+        <output className="muted">The approved-vs-delivered comparison is unavailable.</output>
+      )}
     </article>
   );
 }
@@ -1658,6 +1857,7 @@ function UserMessage(): React.ReactElement {
                 "human-wait": HumanWaitPreview,
                 "human-wait-update": HumanWaitUpdatePreview,
                 mockup: MockupPreview,
+                "implementation-visual-evidence": ImplementationVisualEvidencePreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -1689,6 +1889,7 @@ function AssistantMessage(): React.ReactElement {
                 "human-wait": HumanWaitPreview,
                 "human-wait-update": HumanWaitUpdatePreview,
                 mockup: MockupPreview,
+                "implementation-visual-evidence": ImplementationVisualEvidencePreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -1722,6 +1923,7 @@ function SystemMessage(): React.ReactElement {
                 "human-wait": HumanWaitPreview,
                 "human-wait-update": HumanWaitUpdatePreview,
                 mockup: MockupPreview,
+                "implementation-visual-evidence": ImplementationVisualEvidencePreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -2746,19 +2948,23 @@ function ConversationThread({
   const isPlanning = detail.conversation.kind === "planning";
   const isExecution = detail.conversation.kind === "execution_pm";
   const isReadOnly = detail.conversation.status !== "active";
-  const latestPlan = detail.plan_versions.at(-1);
+  const latestPlan = [...detail.plan_versions]
+    .filter((version) =>
+      ["candidate", "in_qc", "changes_requested", "approved"].includes(version.status),
+    )
+    .sort((left, right) => right.version - left.version)[0];
   const taskOptions = Array.from(
     new Map(
-      [
-        ...(latestPlan?.plan.plan.modules.map((module) => ({
-          id: module.id,
-          label: `${module.title} · ${module.id}`,
-        })) ?? []),
-        ...(detail.handoff?.package.task_ids.map((taskId) => ({
-          id: taskId,
-          label: taskId,
-        })) ?? []),
-      ].map((option) => [option.id, option]),
+      (isPlanning
+        ? (latestPlan?.plan.plan.modules.map((module) => ({
+            id: module.id,
+            label: `${module.title} · ${module.id}`,
+          })) ?? [])
+        : (detail.handoff?.package.task_ids.map((taskId) => ({
+            id: taskId,
+            label: taskId,
+          })) ?? [])
+      ).map((option) => [option.id, option]),
     ).values(),
   );
   const artifactOptions = Array.from(
@@ -2810,7 +3016,8 @@ function ConversationThread({
           ) : null}
           {(isPlanning || isExecution) && !isReadOnly ? (
             <MockupRequestComposer
-              taskOptions={isExecution ? taskOptions : []}
+              taskOptions={taskOptions}
+              planningPlanVersionId={isPlanning ? (latestPlan?.id ?? null) : null}
               artifactOptions={artifactOptions}
               busy={executionProposalBusy}
               error={executionProposalError}

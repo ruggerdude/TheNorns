@@ -58,6 +58,7 @@ export interface MockupSelectorOption {
 
 export function MockupRequestComposer({
   taskOptions,
+  planningPlanVersionId = null,
   artifactOptions,
   busy,
   error,
@@ -65,6 +66,7 @@ export function MockupRequestComposer({
   onPrepare,
 }: {
   taskOptions: MockupSelectorOption[];
+  planningPlanVersionId?: string | null;
   artifactOptions: MockupSelectorOption[];
   busy: boolean;
   error: string | null;
@@ -91,7 +93,11 @@ export function MockupRequestComposer({
             void onPrepare({
               brief: brief.trim(),
               target,
-              ...(taskId ? { task_id: taskId } : {}),
+              ...(taskId
+                ? planningPlanVersionId
+                  ? { plan_version_id: planningPlanVersionId, module_id: taskId }
+                  : { task_id: taskId }
+                : {}),
               artifact_refs: [...artifactIds],
             }).then((created) => {
               if (!created) return;
@@ -113,14 +119,17 @@ export function MockupRequestComposer({
               onChange={(event) => setBrief(event.target.value)}
             />
           </Field>
-          <Field label="Task (optional)">
+          <Field label={planningPlanVersionId ? "Plan module" : "Task"}>
             <Select
               aria-label="Mockup task"
               value={taskId}
               disabled={busy}
+              required
               onChange={(event) => setTaskId(event.target.value)}
             >
-              <option value="">Whole work item</option>
+              <option value="">
+                {planningPlanVersionId ? "Select a plan module" : "Select a task"}
+              </option>
               {taskOptions.map((option) => (
                 <option key={option.id} value={option.id}>
                   {option.label}
@@ -172,9 +181,21 @@ export function MockupRequestComposer({
               {error}
             </output>
           ) : null}
-          <Button type="submit" variant="primary" disabled={busy || Boolean(disabledReason)}>
+          <Button
+            type="submit"
+            variant="primary"
+            disabled={
+              busy || Boolean(disabledReason) || taskOptions.length === 0 || taskId.length === 0
+            }
+          >
             {busy ? "Preparing mockup…" : "Prepare mockup request"}
           </Button>
+          {taskOptions.length === 0 ? (
+            <p className="muted">
+              No approvable {planningPlanVersionId ? "plan module" : "task package"} target is
+              available yet.
+            </p>
+          ) : null}
         </form>
       ) : null}
     </details>

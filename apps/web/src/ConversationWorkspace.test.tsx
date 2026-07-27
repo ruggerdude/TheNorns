@@ -99,6 +99,8 @@ function mockupVersion(
     work_item_id: workItemId,
     conversation_id: conversationId,
     task_id: "core-api",
+    plan_version_id: null,
+    module_id: null,
     created_by_action_id: `mockup-action-${version}`,
     version,
     status: "candidate",
@@ -637,6 +639,168 @@ describe("conversation workspace", () => {
     expect(
       screen.getAllByText("Approval remains an explicit project action.").length,
     ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("renders the exact approved and delivered visual evidence for the verified commit", async () => {
+    const execution = executionConversation();
+    const executionWorkItem: V2WorkItemT = {
+      ...workItem,
+      status: "executing",
+      phase_id: "phase-1",
+      execution_started_at: now,
+    };
+    const commitSha = "1".repeat(40);
+    const captureProfile = {
+      renderer: "playwright" as const,
+      browser_name: "chromium",
+      browser_version: "130.0.0",
+      font_revision: "2".repeat(64),
+      pixel_ratio: 1 as const,
+      network: "application_only" as const,
+      locale: "en-US" as const,
+      timezone: "UTC" as const,
+      fixed_clock: now,
+    };
+    const evidence = {
+      schema_version: 2,
+      id: "visual-evidence-1",
+      project_id: projectId,
+      work_item_id: workItemId,
+      conversation_id: execution.id,
+      phase_id: "phase-1",
+      task_id: "task-1",
+      run_id: "run-1",
+      approved_mockup_version_id: "mockup-version-approved",
+      repository_binding_id: "repository-main",
+      verification_result_id: "verification-1",
+      deployment_record_id: "deployment-1",
+      deployment_observation_id: "observation-1",
+      commit_sha: commitSha,
+      capture_profile: captureProfile,
+      screenshots: [
+        {
+          viewport: "desktop",
+          artifact: {
+            artifact_id: "delivered-desktop",
+            content_hash: "3".repeat(64),
+            media_type: "image/png",
+            label: "Delivered desktop",
+          },
+          width: 1440,
+          height: 1024,
+          capture_profile: captureProfile,
+        },
+        {
+          viewport: "mobile",
+          artifact: {
+            artifact_id: "delivered-mobile",
+            content_hash: "4".repeat(64),
+            media_type: "image/png",
+            label: "Delivered mobile",
+          },
+          width: 390,
+          height: 844,
+          capture_profile: captureProfile,
+        },
+      ],
+      comparison_artifact: {
+        artifact_id: "comparison-1",
+        content_hash: "5".repeat(64),
+        media_type: "application/json",
+        label: "Approved and delivered comparison",
+      },
+      verified_at: now,
+      created_at: now,
+    };
+    const comparison = {
+      schema_version: 2,
+      kind: "visual_comparison",
+      implementation_visual_evidence_id: evidence.id,
+      approved_mockup_version_id: evidence.approved_mockup_version_id,
+      commit_sha: commitSha,
+      comparisons: [
+        {
+          viewport: "desktop",
+          mockup_artifact_id: "approved-desktop",
+          mockup_artifact_hash: "6".repeat(64),
+          implementation_artifact_id: "delivered-desktop",
+          implementation_artifact_hash: "3".repeat(64),
+        },
+        {
+          viewport: "mobile",
+          mockup_artifact_id: "approved-mobile",
+          mockup_artifact_hash: "7".repeat(64),
+          implementation_artifact_id: "delivered-mobile",
+          implementation_artifact_hash: "4".repeat(64),
+        },
+      ],
+    };
+    const history = [
+      message({
+        id: "message-implementation-visual-evidence",
+        role: "assistant",
+        sequence: 1,
+        conversation_id: execution.id,
+        parts: [
+          {
+            type: "implementation_visual_evidence",
+            visual_evidence_id: evidence.id,
+          },
+        ],
+      }),
+    ];
+    const NativeURL = URL;
+    class ObjectURL extends NativeURL {
+      static createObjectURL(): string {
+        return "blob:norns-visual-evidence";
+      }
+
+      static revokeObjectURL(): void {}
+    }
+    vi.stubGlobal("URL", ObjectURL);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [{ work_item: executionWorkItem, conversations: [execution] }],
+          });
+        }
+        if (url.endsWith(`/conversations/${execution.id}`)) {
+          return detailResponse(history, null, null, {
+            workItem: executionWorkItem,
+            conversation: execution,
+          });
+        }
+        if (url.endsWith(`/visual-evidence/${evidence.id}`)) return Response.json(evidence);
+        if (url.endsWith(`/artifacts/${evidence.comparison_artifact.artifact_id}/content`)) {
+          return Response.json(comparison);
+        }
+        if (url.includes("/artifacts/") && url.endsWith("/content")) {
+          return new Response(new Blob(["png"], { type: "image/png" }));
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    const view = render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={execution.id}
+        onConversationSelected={() => undefined}
+        onUnsupported={() => undefined}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    const card = await screen.findByTestId("implementation-visual-evidence");
+    expect(card).toHaveTextContent(commitSha);
+    expect(await screen.findByAltText("Approved desktop mockup")).toBeInTheDocument();
+    expect(await screen.findByAltText("Delivered desktop implementation")).toBeInTheDocument();
+    expect(await screen.findByAltText("Approved mobile mockup")).toBeInTheDocument();
+    expect(await screen.findByAltText("Delivered mobile implementation")).toBeInTheDocument();
+    view.unmount();
   });
 
   it("hydrates exact Plan Contract, QC, and explicit action cards from durable detail", async () => {

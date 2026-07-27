@@ -5920,6 +5920,49 @@ export const artifactBlobs = pgTable(
   ],
 );
 
+export const phase6IdempotencyClaims = pgTable(
+  "phase6_idempotency_claims",
+  {
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "restrict" }),
+    operation: text("operation").notNull(),
+    actorType: text("actor_type").notNull(),
+    actorId: text("actor_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    resourceId: text("resource_id").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    primaryKey({
+      name: "phase6_idempotency_claims_pkey",
+      columns: [
+        table.projectId,
+        table.operation,
+        table.actorType,
+        table.actorId,
+        table.idempotencyKey,
+      ],
+    }),
+    check(
+      "phase6_idempotency_claims_operation_check",
+      sql`${table.operation} IN ('artifact_put','deployment_create','deployment_observation')`,
+    ),
+    check("phase6_idempotency_claims_actor_type_check", sql`length(trim(${table.actorType}))>0`),
+    check("phase6_idempotency_claims_actor_id_check", sql`length(trim(${table.actorId}))>0`),
+    check(
+      "phase6_idempotency_claims_idempotency_key_check",
+      sql`length(trim(${table.idempotencyKey}))>0`,
+    ),
+    check(
+      "phase6_idempotency_claims_request_fingerprint_check",
+      sql`${table.requestFingerprint} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check("phase6_idempotency_claims_resource_id_check", sql`length(trim(${table.resourceId}))>0`),
+  ],
+);
+
 export const conversationMockupVersions = pgTable(
   "conversation_mockup_versions",
   {
@@ -6626,19 +6669,9 @@ export const implementationVisualEvidence = pgTable(
       table.id,
     ),
     foreignKey({
-      name: "implementation_visual_evidence_mockup_scope_fk",
-      columns: [
-        table.projectId,
-        table.workItemId,
-        table.conversationId,
-        table.approvedMockupVersionId,
-      ],
-      foreignColumns: [
-        conversationMockupVersions.projectId,
-        conversationMockupVersions.workItemId,
-        conversationMockupVersions.conversationId,
-        conversationMockupVersions.id,
-      ],
+      name: "implementation_visual_evidence_mockup_project_fk",
+      columns: [table.projectId, table.approvedMockupVersionId],
+      foreignColumns: [conversationMockupVersions.projectId, conversationMockupVersions.id],
     }).onDelete("restrict"),
     foreignKey({
       name: "implementation_visual_evidence_run_scope_fk",
@@ -6774,19 +6807,9 @@ export const implementationVisualEvidenceCollections = pgTable(
       table.id,
     ),
     foreignKey({
-      name: "implementation_visual_evidence_collections_mockup_scope_fk",
-      columns: [
-        table.projectId,
-        table.workItemId,
-        table.conversationId,
-        table.approvedMockupVersionId,
-      ],
-      foreignColumns: [
-        conversationMockupVersions.projectId,
-        conversationMockupVersions.workItemId,
-        conversationMockupVersions.conversationId,
-        conversationMockupVersions.id,
-      ],
+      name: "implementation_visual_evidence_collections_mockup_project_fk",
+      columns: [table.projectId, table.approvedMockupVersionId],
+      foreignColumns: [conversationMockupVersions.projectId, conversationMockupVersions.id],
     }).onDelete("restrict"),
     foreignKey({
       name: "implementation_visual_evidence_collections_run_scope_fk",
@@ -7211,6 +7234,7 @@ export const conversationDomainSchema = {
   conversationExecutionPlanChangeRequests,
   conversationMockupRequests,
   artifactBlobs,
+  phase6IdempotencyClaims,
   conversationMockupVersions,
   conversationMockupVersionArtifacts,
   conversationMockupDecisions,

@@ -1157,10 +1157,60 @@ export class ConversationHumanSteeringService {
       }
       return;
     }
-    if (
-      ["pause_work", "resume_work", "record_human_decision", "create_mockup"].includes(actionType)
-    ) {
+    if (["pause_work", "resume_work", "record_human_decision"].includes(actionType)) {
       await requireTask(parameters.task_id);
+    }
+    if (actionType === "create_mockup") {
+      const conversation = (
+        await tx.query<{ kind: string }>(
+          `SELECT kind FROM work_conversations
+            WHERE project_id=$1 AND work_item_id=$2 AND id=$3`,
+          [scope.projectId, scope.workItemId, scope.conversationId],
+        )
+      ).rows[0];
+      if (conversation?.kind === "planning") {
+        const target = await tx.query<{ id: string }>(
+          `SELECT version.id
+             FROM work_plan_versions version
+            WHERE version.project_id=$1 AND version.work_item_id=$2
+              AND version.conversation_id=$3 AND version.id=$4
+              AND version.status IN ('candidate','in_qc','changes_requested','approved')
+              AND EXISTS (
+                SELECT 1
+                  FROM jsonb_array_elements(version.plan->'plan'->'modules') module
+                 WHERE module->>'id'=$5
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM work_plan_versions newer
+                 WHERE newer.project_id=version.project_id
+                   AND newer.work_item_id=version.work_item_id
+                   AND newer.conversation_id=version.conversation_id
+                   AND newer.version>version.version
+                   AND newer.status IN ('candidate','in_qc','changes_requested','approved')
+              )`,
+          [
+            scope.projectId,
+            scope.workItemId,
+            scope.conversationId,
+            parameters.plan_version_id,
+            parameters.module_id,
+          ],
+        );
+        if (!target.rows[0] || parameters.task_id != null) {
+          throw new ConversationPersistenceError(
+            "action_not_found",
+            "planning mockup target is outside the latest applicable plan",
+          );
+        }
+      } else {
+        if (parameters.task_id == null) {
+          throw new ConversationPersistenceError(
+            "action_not_found",
+            "execution mockups require an exact task-package target",
+          );
+        }
+        await requireTask(parameters.task_id);
+      }
     }
     if (actionType === "propose_plan_change" || actionType === "approve_plan_change") {
       const plan = await tx.query<{ id: string }>(

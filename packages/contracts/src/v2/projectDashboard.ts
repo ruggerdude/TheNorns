@@ -342,6 +342,8 @@ const activeWork = z.array(
   z
     .object({
       work_item: V2WorkItem,
+      conversation_id: V2EntityId.nullable(),
+      deep_link: V2NonEmptyString.nullable(),
       phase_progress: z
         .object({
           phase_id: V2EntityId,
@@ -364,6 +366,15 @@ const activeWork = z.array(
     .strict(),
 );
 
+const dashboardDeployment = z
+  .object({
+    deployment: V2ProjectDeployment,
+    work_item_id: V2EntityId.nullable(),
+    conversation_id: V2EntityId.nullable(),
+    deep_link: V2NonEmptyString.nullable(),
+  })
+  .strict();
+
 const needsAttention = z.array(
   z
     .object({
@@ -378,9 +389,14 @@ const needsAttention = z.array(
         "visual_evidence",
       ]),
       source_id: V2EntityId,
+      work_item_id: V2EntityId.nullable(),
+      conversation_id: V2EntityId.nullable(),
+      phase_id: V2EntityId.nullable(),
+      task_id: V2EntityId.nullable(),
       title: V2NonEmptyString,
       summary: V2NonEmptyString,
       severity: z.enum(["critical", "high", "normal", "low"]),
+      deep_link: V2NonEmptyString.nullable(),
       occurred_at: V2IsoDateTime,
     })
     .strict(),
@@ -389,12 +405,17 @@ const needsAttention = z.array(
 const openDecisions = z.array(
   z
     .object({
-      id: V2EntityId,
+      id: V2NonEmptyString,
       project_id: V2EntityId,
-      work_item_id: V2EntityId,
-      conversation_id: V2EntityId,
-      question: V2NonEmptyString,
-      status: V2NonEmptyString,
+      work_item_id: V2EntityId.nullable(),
+      phase_id: V2EntityId.nullable(),
+      conversation_id: V2EntityId.nullable(),
+      source_type: z.enum(["human_wait", "decision_point", "blocked_work_item", "blocked_task"]),
+      source_id: V2EntityId,
+      title: V2NonEmptyString,
+      detail: V2NonEmptyString,
+      status: z.enum(["awaiting_human", "open", "blocked"]),
+      deep_link: V2NonEmptyString.nullable(),
       created_at: V2IsoDateTime,
     })
     .strict(),
@@ -436,9 +457,12 @@ const recentVerification = z.array(
       phase_id: V2EntityId,
       task_id: V2EntityId,
       run_id: V2EntityId,
+      work_item_id: V2EntityId.nullable(),
+      conversation_id: V2EntityId.nullable(),
       commit_sha: V2GitCommitSha,
       passed: z.boolean(),
       evidence: z.array(V2EvidenceRef),
+      deep_link: V2NonEmptyString.nullable(),
       created_at: V2IsoDateTime,
     })
     .strict(),
@@ -477,7 +501,7 @@ export const V2ProjectDashboard = z
     needs_attention: dashboardSection("attention_projection", needsAttention),
     open_decisions: dashboardSection("human_waits_and_decisions", openDecisions),
     budget: dashboardSection("usage_ledger_and_approved_plan", budget),
-    recent_deployments: dashboardSection("deployment_observations", z.array(V2ProjectDeployment)),
+    recent_deployments: dashboardSection("deployment_observations", z.array(dashboardDeployment)),
     recent_verification: dashboardSection("verification_results", recentVerification),
     conversations: dashboardSection("work_conversations", z.array(V2WorkConversation)),
     approved_mockups: dashboardSection("mockup_decisions", z.array(V2ConversationMockupVersion)),
@@ -516,10 +540,10 @@ export const V2ProjectDashboard = z
     }
     if (dashboard.recent_deployments.availability === "available") {
       for (const [index, deployment] of dashboard.recent_deployments.data.entries()) {
-        if (deployment.project_id !== dashboard.project_id) {
+        if (deployment.deployment.project_id !== dashboard.project_id) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
-            path: ["recent_deployments", "data", index, "project_id"],
+            path: ["recent_deployments", "data", index, "deployment", "project_id"],
             message: "dashboard deployments must belong to the requested project",
           });
         }

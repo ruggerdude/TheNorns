@@ -192,6 +192,13 @@ export const V2MessageMockupPart = z
   })
   .strict();
 
+export const V2MessageImplementationVisualEvidencePart = z
+  .object({
+    type: z.literal("implementation_visual_evidence"),
+    visual_evidence_id: V2EntityId,
+  })
+  .strict();
+
 /**
  * Deliberately excludes reasoning/thought parts. Durable conversation history
  * contains only content shown to the user.
@@ -208,6 +215,7 @@ export const V2WorkMessagePart = z.discriminatedUnion("type", [
   V2MessageHumanWaitPart,
   V2MessageHumanWaitUpdatePart,
   V2MessageMockupPart,
+  V2MessageImplementationVisualEvidencePart,
 ]);
 export type V2WorkMessagePartT = z.infer<typeof V2WorkMessagePart>;
 
@@ -655,6 +663,8 @@ export const V2CreateMockupParameters = z
     brief: boundedDirection,
     target: z.enum(["desktop", "mobile", "responsive"]),
     task_id: V2EntityId.nullable().optional(),
+    plan_version_id: V2EntityId.nullable().optional(),
+    module_id: V2EntityId.nullable().optional(),
     artifact_refs: z.array(V2EntityId).max(32),
   })
   .strict()
@@ -666,16 +676,52 @@ export const V2CreateMockupParameters = z
         message: "mockup artifact references must be distinct",
       });
     }
+    const hasPlan = parameters.plan_version_id != null || parameters.module_id != null;
+    const hasTask = parameters.task_id != null;
+    if (hasPlan && (parameters.plan_version_id == null || parameters.module_id == null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["module_id"],
+        message: "planning mockup targets require both plan_version_id and module_id",
+      });
+    }
+    if (hasTask && hasPlan) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["task_id"],
+        message: "mockup targets either an execution task or a planning module, not both",
+      });
+    }
   });
 
 export const V2ApproveMockupParameters = z
   .object({
     mockup_version_id: V2EntityId,
-    task_id: V2EntityId,
+    task_id: V2EntityId.nullable().optional(),
+    plan_version_id: V2EntityId.nullable().optional(),
+    module_id: V2EntityId.nullable().optional(),
     manifest_artifact_id: V2EntityId,
     manifest_artifact_hash: V2Sha256Hex,
   })
-  .strict();
+  .strict()
+  .superRefine((parameters, ctx) => {
+    const hasTask = parameters.task_id != null;
+    const hasPlan = parameters.plan_version_id != null || parameters.module_id != null;
+    if (hasPlan && (parameters.plan_version_id == null || parameters.module_id == null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["module_id"],
+        message: "planning mockup approvals require both plan_version_id and module_id",
+      });
+    }
+    if (hasTask === hasPlan) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["task_id"],
+        message: "approval must identify exactly one execution task or planning module target",
+      });
+    }
+  });
 
 export const V2ReviseMockupParameters = z
   .object({
@@ -842,6 +888,8 @@ export const V2MockupManifest = z
     root_request_id: V2EntityId,
     request_id: V2EntityId,
     task_id: V2EntityId.nullable(),
+    plan_version_id: V2EntityId.nullable().default(null),
+    module_id: V2EntityId.nullable().default(null),
     version: V2PositiveVersion,
     brief: boundedDirection,
     target: z.enum(["desktop", "mobile", "responsive"]),
@@ -877,6 +925,8 @@ export const V2ConversationMockupVersion = z
     work_item_id: V2EntityId,
     conversation_id: V2EntityId,
     task_id: V2EntityId.nullable(),
+    plan_version_id: V2EntityId.nullable().default(null),
+    module_id: V2EntityId.nullable().default(null),
     created_by_action_id: V2EntityId,
     version: V2PositiveVersion,
     status: V2ConversationMockupVersionStatus,
@@ -989,6 +1039,121 @@ export const V2ApprovedMockupTaskSupplementContent = z
       V2MockupScreenshot.extend({ viewport: z.literal("desktop") }).strict(),
       V2MockupScreenshot.extend({ viewport: z.literal("mobile") }).strict(),
     ]),
+    implementation_visual_evidence_requirement: z
+      .object({
+        manifest_path: z.literal(".norns/visual-evidence.json"),
+        producer: z.literal("playwright"),
+        approved_mockup_version_id: V2EntityId,
+        required_captures: z.tuple([
+          z
+            .object({
+              viewport: z.literal("desktop"),
+              width: z.literal(1440),
+              height: z.literal(1024),
+              media_type: z.literal("image/png"),
+            })
+            .strict(),
+          z
+            .object({
+              viewport: z.literal("mobile"),
+              width: z.literal(390),
+              height: z.literal(844),
+              media_type: z.literal("image/png"),
+            })
+            .strict(),
+        ]),
+        capture_profile: z
+          .object({
+            renderer: z.literal("playwright"),
+            pixel_ratio: z.literal(1),
+            network: z.literal("application_only"),
+            locale: z.literal("en-US"),
+            timezone: z.literal("UTC"),
+          })
+          .strict(),
+        manifest_schema: z
+          .object({
+            root_keys: z.tuple([
+              z.literal("schema_version"),
+              z.literal("approved_mockup_version_id"),
+              z.literal("capture_profile"),
+              z.literal("screenshots"),
+            ]),
+            capture_profile_keys: z.tuple([
+              z.literal("renderer"),
+              z.literal("browser_name"),
+              z.literal("browser_version"),
+              z.literal("font_revision"),
+              z.literal("pixel_ratio"),
+              z.literal("network"),
+              z.literal("locale"),
+              z.literal("timezone"),
+              z.literal("fixed_clock"),
+            ]),
+            screenshot_keys: z.tuple([
+              z.literal("viewport"),
+              z.literal("path"),
+              z.literal("content_hash"),
+            ]),
+            manifest_template: z
+              .object({
+                schema_version: z.literal(2),
+                approved_mockup_version_id: V2EntityId,
+                capture_profile: z
+                  .object({
+                    renderer: z.literal("playwright"),
+                    browser_name: z.literal("<non-empty Playwright browser name>"),
+                    browser_version: z.literal("<non-empty Playwright browser version>"),
+                    font_revision: z.literal(
+                      "<64 lowercase hex SHA-256 of the exact loaded font profile>",
+                    ),
+                    pixel_ratio: z.literal(1),
+                    network: z.literal("application_only"),
+                    locale: z.literal("en-US"),
+                    timezone: z.literal("UTC"),
+                    fixed_clock: z.literal("<one ISO-8601 UTC instant frozen for both captures>"),
+                  })
+                  .strict(),
+                screenshots: z.tuple([
+                  z
+                    .object({
+                      viewport: z.literal("desktop"),
+                      path: z.literal(".norns/visual-evidence/desktop-1440x1024.png"),
+                      content_hash: z.literal("<64 lowercase hex SHA-256 of this PNG's bytes>"),
+                    })
+                    .strict(),
+                  z
+                    .object({
+                      viewport: z.literal("mobile"),
+                      path: z.literal(".norns/visual-evidence/mobile-390x844.png"),
+                      content_hash: z.literal("<64 lowercase hex SHA-256 of this PNG's bytes>"),
+                    })
+                    .strict(),
+                ]),
+              })
+              .strict(),
+          })
+          .strict(),
+        production_rules: z.tuple([
+          z.literal(
+            "Use Playwright to capture the implemented application at exactly 1440x1024 and 390x844 with deviceScaleFactor 1.",
+          ),
+          z.literal(
+            "Replace every angle-bracket placeholder in the template with the observed value; do not add or omit manifest keys.",
+          ),
+          z.literal(
+            "Compute each content_hash from the exact PNG file bytes using lowercase SHA-256.",
+          ),
+          z.literal(
+            "Commit the manifest and both ordinary, non-symlink PNG files in the same implementation commit before verification and deployment.",
+          ),
+        ]),
+        commit_policy: z.literal(
+          "manifest_and_pngs_must_be_regular_files_in_the_verified_implementation_commit",
+        ),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((content, ctx) => {
@@ -1002,6 +1167,17 @@ export const V2ApprovedMockupTaskSupplementContent = z
         code: z.ZodIssueCode.custom,
         path: ["screenshots"],
         message: "manifest, desktop, and mobile supplement artifacts must be distinct",
+      });
+    }
+    if (
+      content.implementation_visual_evidence_requirement &&
+      content.implementation_visual_evidence_requirement.approved_mockup_version_id !==
+        content.mockup_version_id
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["implementation_visual_evidence_requirement", "approved_mockup_version_id"],
+        message: "visual evidence production must target this exact approved mockup version",
       });
     }
   });

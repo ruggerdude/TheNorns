@@ -526,6 +526,31 @@ export class ActionsExecutionRepository {
     });
   }
 
+  expectedCommitForDispatch(dispatchJobId: string): Promise<string | null> {
+    return this.transactions.transaction(async (sql) => {
+      const row = (
+        await sql.query<{ kind: string; commit_sha: string | null }>(
+          `SELECT command.kind,
+                  CASE WHEN command.kind='collect_visual_evidence'
+                       THEN command.envelope->'payload'->>'commit_sha'
+                       ELSE NULL END AS commit_sha
+             FROM dispatch_jobs job
+             JOIN commands command ON command.command_id=job.command_id
+            WHERE job.id=$1`,
+          [dispatchJobId],
+        )
+      ).rows[0];
+      if (!row || row.kind !== "collect_visual_evidence") return null;
+      if (!row.commit_sha || !/^([a-f0-9]{40}|[a-f0-9]{64})$/.test(row.commit_sha)) {
+        throw new ActionsExecutionError(
+          "actions_dispatch_failed",
+          "visual evidence command does not contain an exact full commit SHA",
+        );
+      }
+      return row.commit_sha;
+    });
+  }
+
   recoverableLaunch(): Promise<{
     project_id: string;
     repository_binding_id: string;
@@ -1286,10 +1311,12 @@ export class ActionsExecutionCoordinator {
         this.launchOwner,
         this.launchLeaseMs,
       );
+      const expectedCommit = await this.repository.expectedCommitForDispatch(input.dispatch_job_id);
       await this.actions.dispatchWorkflow(repositoryRef(binding), {
         norns_job_id: input.dispatch_job_id,
         norns_runner_id: input.runner_id,
         norns_run_id: input.run_id,
+        ...(expectedCommit ? { norns_expected_commit: expectedCommit } : {}),
       });
       await this.repository.markDispatched(input.dispatch_job_id, null, this.launchOwner);
       const correlated = await this.actions

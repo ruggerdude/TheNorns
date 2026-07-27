@@ -7,6 +7,33 @@ export function artifactContentPath(projectId: string, artifactId: string): stri
   )}/content`;
 }
 
+export async function openAuthenticatedArtifact(
+  projectId: string,
+  artifactId: string,
+  onUnauthorized?: () => void,
+): Promise<void> {
+  const opened = window.open("about:blank", "_blank");
+  try {
+    const response = await fetch(artifactContentPath(projectId, artifactId), {
+      credentials: "include",
+      headers: authHeaders(),
+    });
+    if (response.status === 401) {
+      onUnauthorized?.();
+      throw new UnauthorizedError();
+    }
+    if (!response.ok) throw new Error(`artifact unavailable: ${response.status}`);
+    const objectUrl = URL.createObjectURL(await response.blob());
+    if (!opened) throw new Error("The browser blocked the artifact tab.");
+    opened.opener = null;
+    opened.location.href = objectUrl;
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  } catch (error) {
+    opened?.close();
+    throw error;
+  }
+}
+
 export function ArtifactImage({
   projectId,
   artifactId,
@@ -22,6 +49,7 @@ export function ArtifactImage({
 }): React.ReactElement {
   const [source, setSource] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
   const path = artifactContentPath(projectId, artifactId);
 
   useEffect(() => {
@@ -56,9 +84,21 @@ export function ArtifactImage({
 
   if (failed) {
     return (
-      <a className="artifact-image-fallback" href={path} target="_blank" rel="noreferrer">
-        Open {alt}
-      </a>
+      <span className="artifact-image-fallback">
+        <button
+          type="button"
+          onClick={() => {
+            setOpenError(null);
+            void openAuthenticatedArtifact(projectId, artifactId, onUnauthorized).catch(
+              (error: unknown) =>
+                setOpenError(error instanceof Error ? error.message : String(error)),
+            );
+          }}
+        >
+          Open {alt}
+        </button>
+        {openError ? <span role="alert">{openError}</span> : null}
+      </span>
     );
   }
   if (!source) {

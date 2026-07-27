@@ -6,8 +6,10 @@ import {
   type V2WorkPlanContractT,
 } from "@norns/contracts";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { ConversationActionCheckpointWorker } from "../src/conversations/actionDelivery.js";
 import { ConversationContextAssembler } from "../src/conversations/contextAssembler.js";
 import { ExecutionConversationService } from "../src/conversations/executionConversation.js";
+import { ConversationHumanSteeringService } from "../src/conversations/humanSteering.js";
 import { ConversationPlanChangeProposalService } from "../src/conversations/planChangeProposal.js";
 import { ConversationPlanProposalService } from "../src/conversations/planProposal.js";
 import {
@@ -23,6 +25,12 @@ import { RelationalTaskContextAssembler, TaskContextStore } from "../src/executi
 import { canonicalJson, canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
+import {
+  Phase6MockupService,
+  Phase6MockupWorker,
+  Phase6VisualEvidenceService,
+  renderDeterministicMockup,
+} from "../src/phase6/index.js";
 import { ExecutionKickoffService } from "../src/planning/executionKickoff.js";
 import type { ReviewOnlyPlanningResult } from "../src/planning/reviewOnlySession.js";
 import type { ApprovedPlanExecutionKickoffInput } from "../src/planning/runService.js";
@@ -1531,6 +1539,97 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     const ready = await reviewReady(scope, plan(), "production-package");
     if (ready.qc.effect.kind !== "qc_started") throw new Error("expected QC kickoff");
     const productionPlanningRunId = ready.qc.effect.planning_run_id;
+    let mockupSequence = 0;
+    const steering = new ConversationHumanSteeringService(transactions, {
+      newId: (prefix) => `${prefix}-production-planning-${++mockupSequence}`,
+    });
+    const mockups = new Phase6MockupService(transactions);
+    const createMockup = await steering.proposeAction(
+      owner.id,
+      {
+        projectId,
+        workItemId: scope.workItemId,
+        conversationId: scope.conversationId,
+      },
+      {
+        idempotency_key: "production-planning-mockup-create",
+        message: "Render the exact conversation API module before implementation.",
+        action_type: "create_mockup",
+        payload: {
+          parameters: {
+            plan_version_id: ready.saved.id,
+            module_id: "conversation-api",
+            brief: "Show the approved conversation API module at both fixed viewports.",
+            target: "responsive",
+            artifact_refs: [],
+          },
+        },
+      },
+    );
+    await steering.confirm(
+      owner.id,
+      confirmation(scope, createMockup.action.id, "production-planning-mockup-create-confirm"),
+    );
+    await expect(
+      new ConversationActionCheckpointWorker(transactions, {
+        workerId: "production-planning-mockup-checkpoint",
+      }).tick(),
+    ).resolves.toEqual({
+      action_id: createMockup.action.id,
+      state: "phase6_queued",
+    });
+    const mockupRenderer = new Phase6MockupWorker(transactions, mockups, {
+      workerId: "production-planning-mockup-renderer",
+    });
+    const renderedMockup = await mockupRenderer.tick();
+    expect(renderedMockup).toMatchObject({ status: "rendered" });
+    if (!renderedMockup?.version_id) throw new Error("planning mockup did not render");
+    const planningMockup = await mockups.version(
+      projectId,
+      scope.conversationId,
+      renderedMockup.version_id,
+    );
+    expect(planningMockup).toMatchObject({
+      plan_version_id: ready.saved.id,
+      module_id: "conversation-api",
+      task_id: null,
+      status: "candidate",
+    });
+    const approveMockup = await steering.proposeAction(
+      owner.id,
+      {
+        projectId,
+        workItemId: scope.workItemId,
+        conversationId: scope.conversationId,
+      },
+      {
+        idempotency_key: "production-planning-mockup-approve",
+        message: "Approve the exact planning mockup for implementation.",
+        action_type: "approve_mockup",
+        payload: {
+          parameters: {
+            mockup_version_id: planningMockup.id,
+            plan_version_id: ready.saved.id,
+            module_id: "conversation-api",
+            manifest_artifact_id: planningMockup.manifest.artifact_id,
+            manifest_artifact_hash: planningMockup.manifest.content_hash,
+          },
+        },
+      },
+    );
+    await steering.confirm(
+      owner.id,
+      confirmation(scope, approveMockup.action.id, "production-planning-mockup-approve-confirm"),
+    );
+    await expect(
+      new ConversationActionCheckpointWorker(transactions, {
+        workerId: "production-planning-mockup-approval",
+        phase6: mockups,
+      }).tick(),
+    ).resolves.toEqual({
+      action_id: approveMockup.action.id,
+      state: "applied",
+    });
     failKickoffSettlement = true;
     await expect(
       workflow.confirm(
@@ -1614,17 +1713,26 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         canonical_package: string;
         package_hash: string;
         task_id: string;
+        work_item_id: string;
+        execution_conversation_id: string;
         context_document_id: string;
         served_bytes: Buffer | Uint8Array;
         run_id: string;
         run_package_hash: string;
+        command_id: string;
+        dispatch_job_id: string;
+        runner_id: string;
+        runner_generation: number | string;
         envelope: Record<string, unknown>;
       }>(
         `SELECT package.id AS package_id, package.package,
                 package.canonical_package, package.content_hash AS package_hash,
+                package.work_item_id,package.conversation_id AS execution_conversation_id,
                 binding.task_id, binding.context_document_id,
                 blob.content AS served_bytes,
                 package_run.run_id, package_run.content_hash AS run_package_hash,
+                command.command_id, command.dispatch_job_id,
+                command.runner_id, command.runner_generation,
                 command.envelope
            FROM conversation_task_packages package
            JOIN conversation_task_package_bindings binding
@@ -1667,6 +1775,29 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       content_hash: scope.attachmentHash,
     });
     expect(evidence.run_package_hash).toBe(evidence.package_hash);
+    const supplement = (
+      await pg.query<{
+        source_mockup_version_id: string;
+        task_id: string;
+        base_package_id: string;
+        supplement: unknown;
+      }>(
+        `SELECT source_mockup_version_id,task_id,base_package_id,supplement
+           FROM conversation_task_package_supplements
+          WHERE source_mockup_version_id=$1`,
+        [planningMockup.id],
+      )
+    ).rows[0];
+    expect(supplement).toMatchObject({
+      source_mockup_version_id: planningMockup.id,
+      task_id: evidence.task_id,
+      base_package_id: evidence.package_id,
+      supplement: {
+        implementation_visual_evidence_requirement: {
+          approved_mockup_version_id: planningMockup.id,
+        },
+      },
+    });
     const envelope = evidence.envelope as {
       context_refs: Array<{
         artifact_id: string;
@@ -1689,6 +1820,222 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       envelope.context_refs.find(
         (reference) => reference.artifact_id === evidence.context_document_id,
       ),
+    );
+
+    const implementationCommit = "f".repeat(40);
+    const verifiedAt = "2026-07-27T16:10:00.000Z";
+    await pg.exec("SET session_replication_role='replica'");
+    try {
+      await pg.query(
+        `UPDATE agent_runs
+            SET state='succeeded',lifecycle_version=1,verification_status='passed',
+                published_commit_sha=$2,publication_outcome='pushed',
+                published_at='2026-07-27T16:08:00Z',finished_at='2026-07-27T16:08:00Z'
+          WHERE id=$1`,
+        [evidence.run_id, implementationCommit],
+      );
+      await pg.query(
+        `INSERT INTO artifacts (
+           id,project_id,phase_id,task_id,run_id,kind,label,media_type,storage_ref,
+           content_hash,byte_size,provenance_actor_type,provenance_actor_id,redaction_status
+         ) VALUES (
+           'production-planning-deployment-evidence',$1,$2,$3,$4,
+           'deployment_evidence','Production planning deployment receipt',
+           'application/json','artifact://production-planning-deployment-evidence',
+           encode(sha256(convert_to('{"integrated":true}','UTF8')),'hex'),
+           octet_length(convert_to('{"integrated":true}','UTF8')),
+           'system','production-planning-test','not_required'
+         )`,
+        [projectId, afterRecovery.rows[0]?.phase_id, evidence.task_id, evidence.run_id],
+      );
+      await pg.query(
+        `INSERT INTO artifact_blobs (
+           artifact_id,project_id,content,content_hash,byte_size
+         ) VALUES (
+           'production-planning-deployment-evidence',$1,
+           convert_to('{"integrated":true}','UTF8'),
+           encode(sha256(convert_to('{"integrated":true}','UTF8')),'hex'),
+           octet_length(convert_to('{"integrated":true}','UTF8'))
+         )`,
+        [projectId],
+      );
+      await pg.query(
+        `INSERT INTO verification_results (
+           id,project_id,phase_id,task_id,run_id,repository_binding_id,commit_sha,
+           verification_policy_ref,passed,command_results,evidence,produced_by_runner_id
+         ) VALUES (
+           'production-planning-verification',$1,$2,$3,$4,
+           'conversation-package-binding',$5,'verification/strict',true,
+           '[]'::jsonb,'[]'::jsonb,$6
+         )`,
+        [
+          projectId,
+          afterRecovery.rows[0]?.phase_id,
+          evidence.task_id,
+          evidence.run_id,
+          implementationCommit,
+          evidence.runner_id,
+        ],
+      );
+      await pg.query(
+        `INSERT INTO project_delivery_records (
+           id,project_id,phase_id,task_id,run_id,repository_binding_id,
+           environment,service,commit_sha,provider_id,provider_deployment_id,
+           status,current_observation_sequence,public_url,health_url,
+           health_status_code,evidence_artifact_id,evidence_artifact_hash,
+           started_at,completed_at
+         ) VALUES (
+           'production-planning-delivery',$1,$2,$3,$4,'conversation-package-binding',
+           'production','web',$5,'railway','production-planning-deployment',
+           'succeeded',1,'https://production-planning.example.test',
+           'https://production-planning.example.test/health',200,
+           'production-planning-deployment-evidence',
+           encode(sha256(convert_to('{"integrated":true}','UTF8')),'hex'),
+           '2026-07-27T16:08:30Z','2026-07-27T16:09:00Z'
+         )`,
+        [
+          projectId,
+          afterRecovery.rows[0]?.phase_id,
+          evidence.task_id,
+          evidence.run_id,
+          implementationCommit,
+        ],
+      );
+      await pg.query(
+        `INSERT INTO project_delivery_observations (
+           id,delivery_record_id,project_id,sequence,status,source_type,source_id,
+           public_url,health_url,health_status_code,evidence_artifact_id,
+           evidence_artifact_hash,observed_at
+         ) VALUES (
+           'production-planning-observation','production-planning-delivery',$1,1,
+           'succeeded','system','production-planning-test',
+           'https://production-planning.example.test',
+           'https://production-planning.example.test/health',200,
+           'production-planning-deployment-evidence',
+           encode(sha256(convert_to('{"integrated":true}','UTF8')),'hex'),
+           '2026-07-27T16:09:00Z'
+         )`,
+        [projectId],
+      );
+      await pg.query(
+        `INSERT INTO implementation_visual_evidence_collections (
+           id,project_id,work_item_id,conversation_id,phase_id,task_id,run_id,
+           approved_mockup_version_id,repository_binding_id,verification_result_id,
+           deployment_record_id,deployment_observation_id,commit_sha,status,
+           command_id,dispatch_job_id,runner_id,runner_generation
+         ) VALUES (
+           'production-planning-collection',$1,$2,$3,$4,$5,$6,$7,
+           'conversation-package-binding','production-planning-verification',
+           'production-planning-delivery','production-planning-observation',$8,
+           'delivered',$9,$10,$11,$12
+         )`,
+        [
+          projectId,
+          evidence.work_item_id,
+          evidence.execution_conversation_id,
+          afterRecovery.rows[0]?.phase_id,
+          evidence.task_id,
+          evidence.run_id,
+          planningMockup.id,
+          implementationCommit,
+          evidence.command_id,
+          evidence.dispatch_job_id,
+          evidence.runner_id,
+          Number(evidence.runner_generation),
+        ],
+      );
+    } finally {
+      await pg.exec("SET session_replication_role='origin'");
+    }
+    const visibleBefore = await pg.query<{ count: number | string }>(
+      `SELECT count(*) AS count FROM work_messages
+        WHERE conversation_id=$1
+          AND parts @> $2::jsonb`,
+      [
+        evidence.execution_conversation_id,
+        JSON.stringify([{ type: "implementation_visual_evidence" }]),
+      ],
+    );
+    expect(Number(visibleBefore.rows[0]?.count)).toBe(0);
+    const implementation = renderDeterministicMockup({
+      schema_version: 1,
+      title: "Delivered conversation API",
+      summary: "The exact approved module is implemented and deployed.",
+      target: "responsive",
+      sections: [
+        {
+          heading: "Conversation API",
+          body: "Approved plan, implementation, verification, and deployment are aligned.",
+          emphasis: "primary",
+        },
+      ],
+      interaction_notes: ["Compare both fixed viewports."],
+      source_artifact_ids: [],
+    });
+    const visual = await new Phase6VisualEvidenceService(transactions).recordWithReplay({
+      project_id: projectId,
+      work_item_id: evidence.work_item_id,
+      conversation_id: evidence.execution_conversation_id,
+      phase_id: afterRecovery.rows[0]?.phase_id ?? "",
+      task_id: evidence.task_id,
+      run_id: evidence.run_id,
+      approved_mockup_version_id: planningMockup.id,
+      repository_binding_id: "conversation-package-binding",
+      verification_result_id: "production-planning-verification",
+      deployment_record_id: "production-planning-delivery",
+      deployment_observation_id: "production-planning-observation",
+      commit_sha: implementationCommit,
+      capture_profile: {
+        renderer: "playwright",
+        browser_name: "chromium",
+        browser_version: "130",
+        font_revision: "a".repeat(64),
+        pixel_ratio: 1,
+        network: "application_only",
+        locale: "en-US",
+        timezone: "UTC",
+        fixed_clock: verifiedAt,
+      },
+      verified_at: verifiedAt,
+      runner_id: evidence.runner_id,
+      desktop_png: implementation.desktop,
+      mobile_png: implementation.mobile,
+    });
+    expect(visual).toMatchObject({
+      replayed: false,
+      evidence: {
+        approved_mockup_version_id: planningMockup.id,
+        commit_sha: implementationCommit,
+        comparison_artifact: { media_type: "application/json" },
+        screenshots: [{ viewport: "desktop" }, { viewport: "mobile" }],
+      },
+    });
+    const visibleAfter = await pg.query<{
+      count: number | string;
+      parts: unknown;
+    }>(
+      `SELECT count(*) OVER () AS count,parts
+         FROM work_messages
+        WHERE conversation_id=$1
+          AND parts @> $2::jsonb`,
+      [
+        evidence.execution_conversation_id,
+        JSON.stringify([
+          {
+            type: "implementation_visual_evidence",
+            visual_evidence_id: visual.evidence.id,
+          },
+        ]),
+      ],
+    );
+    expect(Number(visibleAfter.rows[0]?.count)).toBe(1);
+    expect(visibleAfter.rows[0]?.parts).toEqual(
+      expect.arrayContaining([
+        {
+          type: "implementation_visual_evidence",
+          visual_evidence_id: visual.evidence.id,
+        },
+      ]),
     );
 
     const summaryVersions = await pg.query<{

@@ -54,7 +54,9 @@ import {
 // `npm install --global @norns/runner`, which could never have worked — the
 // package is private and unpublished. Every already-installed v1/v2 file is
 // upgraded in place, because every one of them is currently broken.
-export const NORNS_WORKFLOW_VERSION = 3;
+// v4 pins immutable evidence collection to the exact deployed commit while
+// preserving GitHub's dispatch SHA for normal launch_run jobs.
+export const NORNS_WORKFLOW_VERSION = 4;
 
 /** Canonical path. Committing here requires the App's `workflows` permission. */
 export const NORNS_WORKFLOW_PATH = ".github/workflows/norns-agent.yml";
@@ -176,6 +178,11 @@ on:
         description: The Norns agent run identifier (for traceability).
         required: true
         type: string
+      norns_expected_commit:
+        description: Exact full commit SHA for immutable evidence collection; empty for normal launches.
+        required: false
+        default: ""
+        type: string
 
 # Least privilege (ONBOARDING O4 item 4). GITHUB_TOKEN is provided to the job
 # automatically and is already scoped to this repository, so commits, pushes,
@@ -204,6 +211,10 @@ jobs:
         with:
           # Full history: the runner verifies the exact expected revision.
           fetch-depth: 0
+          # Evidence collection must inspect the deployed commit even when the
+          # default branch advanced (including a managed-workflow install).
+          # Normal launch_run dispatches keep GitHub's exact dispatch SHA.
+          ref: \${{ inputs.norns_expected_commit || github.sha }}
           # Leaves GITHUB_TOKEN configured as the git credential for this
           # repository, which is what makes pushes work with no broker.
           persist-credentials: true

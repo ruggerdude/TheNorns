@@ -31,6 +31,7 @@ import {
   PHASE2_PRESERVATION_MIGRATION_NAME,
   PHASE3_SOURCE_BINDINGS_MIGRATION_NAME,
   PHASE5_ATTENTION_MIGRATION_NAME,
+  PHASE6_ACCEPTANCE_CORRECTIONS_MIGRATION_NAME,
   PHASE6_COORDINATION_MIGRATION_NAME,
   PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
   PHASE7_HARDENING_MIGRATION_NAME,
@@ -426,6 +427,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       { name: CONVERSATION_HUMAN_STEERING_MIGRATION_NAME, applied: false },
       { name: CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME, applied: false },
       { name: PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME, applied: false },
+      { name: PHASE6_ACCEPTANCE_CORRECTIONS_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -477,6 +479,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       CONVERSATION_HUMAN_STEERING_MIGRATION_NAME,
       CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME,
       PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
+      PHASE6_ACCEPTANCE_CORRECTIONS_MIGRATION_NAME,
     ]);
   });
 
@@ -1022,6 +1025,32 @@ describe.sequential("Phase 2 preservation schema", () => {
           'phase6-delivery-user','approved','phase6-visual-manifest',
           encode(sha256(convert_to('{}','UTF8')),'hex')
         );
+        INSERT INTO conversation_task_packages (
+          id,project_id,work_item_id,conversation_id,handoff_id,
+          approved_plan_version_id,module_id,package,canonical_package,content_hash
+        ) VALUES (
+          'phase6-visual-package','phase6-delivery-project','phase6-visual-work',
+          'phase6-visual-conversation','phase6-visual-handoff','phase6-visual-plan',
+          'phase6-visual-module','{}'::jsonb,'{}',
+          encode(sha256(convert_to('{}','UTF8')),'hex')
+        );
+        INSERT INTO conversation_task_package_supplements (
+          id,project_id,work_item_id,conversation_id,task_id,base_package_id,ordinal,
+          source_mockup_version_id,approval_decision_id,manifest_artifact_id,
+          manifest_artifact_hash,supplement,canonical_supplement,content_hash,
+          context_document_id,context_byte_size,context_media_type
+        ) VALUES (
+          'phase6-visual-supplement','phase6-delivery-project','phase6-visual-work',
+          'phase6-visual-conversation','phase6-visual-task','phase6-visual-package',1,
+          'phase6-visual-version','phase6-visual-decision','phase6-visual-manifest',
+          encode(sha256(convert_to('{}','UTF8')),'hex'),
+          '{"implementation_visual_evidence_requirement":{"approved_mockup_version_id":"phase6-visual-version"}}'::jsonb,
+          '{"implementation_visual_evidence_requirement":{"approved_mockup_version_id":"phase6-visual-version"}}',
+          encode(sha256(convert_to(
+            '{"implementation_visual_evidence_requirement":{"approved_mockup_version_id":"phase6-visual-version"}}',
+            'UTF8'
+          )),'hex'),'phase6-visual-supplement-context',123,'application/json'
+        );
         INSERT INTO verification_results (
           id,project_id,phase_id,task_id,run_id,repository_binding_id,commit_sha,
           verification_policy_ref,passed,command_results,evidence,produced_by_runner_id
@@ -1204,17 +1233,29 @@ describe.sequential("Phase 2 preservation schema", () => {
     try {
       await pg.exec(`
         INSERT INTO work_items (
-          id,project_id,created_by_user_id,title,objective
-        ) VALUES (
-          'phase6-collection-work','phase6-delivery-project','phase6-delivery-user',
-          'Collection work','Collect exact delivered screenshots'
-        );
+          id,project_id,created_by_user_id,title,objective,status,phase_id,execution_started_at
+        ) VALUES
+          (
+            'phase6-visual-work','phase6-delivery-project','phase6-delivery-user',
+            'Visual work','Deliver the first task in the shared phase',
+            'executing','phase6-visual-phase','2026-07-27T12:00:00Z'
+          ),
+          (
+            'phase6-collection-work','phase6-delivery-project','phase6-delivery-user',
+            'Collection work','Collect exact delivered screenshots',
+            'executing','phase6-visual-phase','2026-07-27T12:00:00Z'
+          );
         INSERT INTO work_conversations (
           id,project_id,work_item_id,created_by_user_id,kind,provider,model
-        ) VALUES (
-          'phase6-collection-conversation','phase6-delivery-project',
-          'phase6-collection-work','phase6-delivery-user','task','openai','gpt-5.6'
-        );
+        ) VALUES
+          (
+            'phase6-visual-conversation','phase6-delivery-project',
+            'phase6-visual-work','phase6-delivery-user','execution_pm','openai','gpt-5.6'
+          ),
+          (
+            'phase6-collection-conversation','phase6-delivery-project',
+            'phase6-collection-work','phase6-delivery-user','execution_pm','openai','gpt-5.6'
+          );
         INSERT INTO tasks (
           id,project_id,phase_id,objective_id,strategy_version_id,title,description,
           deliverables,acceptance_criteria,complexity,risk,required_roles,
@@ -1227,6 +1268,13 @@ describe.sequential("Phase 2 preservation schema", () => {
           '[]'::jsonb,'[]'::jsonb,'[]'::jsonb,'[]'::jsonb,
           'environment','verification','pending',0
         );
+        UPDATE tasks
+           SET state='completed',
+               lifecycle_version=1,
+               review_evidence='[{"kind":"verification"}]'::jsonb,
+               completion_evidence='[{"kind":"delivery"}]'::jsonb,
+               completed_at='2026-07-27T12:01:00Z'
+         WHERE id='phase6-visual-task';
         INSERT INTO agent_runs (
           id,project_id,phase_id,task_id,assignment_id,attempt,state,is_designated,
           repository_binding_id,expected_revision,lifecycle_version,
@@ -1257,6 +1305,49 @@ describe.sequential("Phase 2 preservation schema", () => {
           'phase6-collection-conversation','phase6-collection-version',
           'phase6-collection-approve-action','phase6-delivery-user','approved',
           'phase6-collection-manifest',encode(sha256(convert_to('{}','UTF8')),'hex')
+        );
+        INSERT INTO conversation_task_packages (
+          id,project_id,work_item_id,conversation_id,handoff_id,
+          approved_plan_version_id,module_id,package,canonical_package,content_hash
+        ) VALUES (
+          'phase6-collection-package','phase6-delivery-project','phase6-collection-work',
+          'phase6-collection-conversation','phase6-collection-handoff',
+          'phase6-collection-plan','phase6-collection-module','{}'::jsonb,'{}',
+          encode(sha256(convert_to('{}','UTF8')),'hex')
+        );
+        INSERT INTO conversation_task_package_bindings (
+          package_id,project_id,work_item_id,conversation_id,handoff_id,phase_id,
+          task_id,content_hash,context_document_id
+        ) VALUES
+          (
+            'phase6-visual-package','phase6-delivery-project','phase6-visual-work',
+            'phase6-visual-conversation','phase6-visual-handoff','phase6-visual-phase',
+            'phase6-visual-task',encode(sha256(convert_to('{}','UTF8')),'hex'),
+            'phase6-visual-context'
+          ),
+          (
+            'phase6-collection-package','phase6-delivery-project','phase6-collection-work',
+            'phase6-collection-conversation','phase6-collection-handoff','phase6-visual-phase',
+            'phase6-collection-task',encode(sha256(convert_to('{}','UTF8')),'hex'),
+            'phase6-collection-context'
+          );
+        INSERT INTO conversation_task_package_supplements (
+          id,project_id,work_item_id,conversation_id,task_id,base_package_id,ordinal,
+          source_mockup_version_id,approval_decision_id,manifest_artifact_id,
+          manifest_artifact_hash,supplement,canonical_supplement,content_hash,
+          context_document_id,context_byte_size,context_media_type
+        ) VALUES (
+          'phase6-collection-supplement','phase6-delivery-project','phase6-collection-work',
+          'phase6-collection-conversation','phase6-collection-task',
+          'phase6-collection-package',1,'phase6-collection-version',
+          'phase6-collection-decision','phase6-collection-manifest',
+          encode(sha256(convert_to('{}','UTF8')),'hex'),
+          '{"implementation_visual_evidence_requirement":{"approved_mockup_version_id":"phase6-collection-version"}}'::jsonb,
+          '{"implementation_visual_evidence_requirement":{"approved_mockup_version_id":"phase6-collection-version"}}',
+          encode(sha256(convert_to(
+            '{"implementation_visual_evidence_requirement":{"approved_mockup_version_id":"phase6-collection-version"}}',
+            'UTF8'
+          )),'hex'),'phase6-collection-supplement-context',127,'application/json'
         );
         INSERT INTO verification_results (
           id,project_id,phase_id,task_id,run_id,repository_binding_id,commit_sha,
@@ -1443,20 +1534,76 @@ describe.sequential("Phase 2 preservation schema", () => {
         }),
       ]),
     });
-    expect(dashboard.recent_verification).toMatchObject({ availability: "available" });
-    expect(dashboard.budget).toMatchObject({
+    expect(dashboard.active_work).toMatchObject({
       availability: "available",
-      data: {
-        current_spend_usd: null,
-        projected_budget_usd: 0,
-        projection_source: "plan_only",
-      },
+      data: expect.arrayContaining([
+        expect.objectContaining({
+          work_item: expect.objectContaining({ id: "phase6-visual-work" }),
+          conversation_id: "phase6-visual-conversation",
+          deep_link: "/projects/phase6-delivery-project/work/phase6-visual-conversation",
+          phase_progress: {
+            phase_id: "phase6-visual-phase",
+            tasks_completed: 1,
+            tasks_total: 1,
+            percent_complete: 100,
+          },
+        }),
+        expect.objectContaining({
+          work_item: expect.objectContaining({ id: "phase6-collection-work" }),
+          conversation_id: "phase6-collection-conversation",
+          deep_link: "/projects/phase6-delivery-project/work/phase6-collection-conversation",
+          phase_progress: {
+            phase_id: "phase6-visual-phase",
+            tasks_completed: 0,
+            tasks_total: 1,
+            percent_complete: 0,
+          },
+        }),
+      ]),
+    });
+    expect(dashboard.recent_verification).toMatchObject({
+      availability: "available",
+      data: expect.arrayContaining([
+        expect.objectContaining({
+          id: "phase6-visual-verification",
+          work_item_id: "phase6-visual-work",
+          conversation_id: "phase6-visual-conversation",
+          deep_link: "/projects/phase6-delivery-project/work/phase6-visual-conversation",
+        }),
+        expect.objectContaining({
+          id: "phase6-collection-verification",
+          work_item_id: "phase6-collection-work",
+          conversation_id: "phase6-collection-conversation",
+          deep_link: "/projects/phase6-delivery-project/work/phase6-collection-conversation",
+        }),
+      ]),
+    });
+    expect(dashboard.budget).toMatchObject({
+      availability: "unavailable",
+      data: null,
+      reason_code: "no_authoritative_budget_source",
     });
     expect(dashboard.approved_mockups).toMatchObject({
       availability: "unavailable",
       reason_code: "source_unavailable",
     });
-    expect(dashboard.recent_deployments).toMatchObject({ availability: "available" });
+    expect(dashboard.recent_deployments).toMatchObject({
+      availability: "available",
+      data: expect.arrayContaining([
+        expect.objectContaining({
+          deployment: expect.objectContaining({ id: "phase6-visual-delivery" }),
+          work_item_id: "phase6-visual-work",
+          conversation_id: "phase6-visual-conversation",
+          deep_link: "/projects/phase6-delivery-project/work/phase6-visual-conversation",
+        }),
+        expect.objectContaining({
+          deployment: expect.objectContaining({ id: "phase6-collection-delivery" }),
+          work_item_id: "phase6-collection-work",
+          conversation_id: "phase6-collection-conversation",
+          deep_link: "/projects/phase6-delivery-project/work/phase6-collection-conversation",
+        }),
+      ]),
+    });
 
     await pg.exec("SET session_replication_role='replica'");
     try {
@@ -1499,6 +1646,24 @@ describe.sequential("Phase 2 preservation schema", () => {
             encode(sha256(decode('89504e470d0a1a0a00','hex')),'hex'),390,844,
             '{}'::jsonb
           );
+        INSERT INTO conversation_task_package_supplements (
+          id,project_id,work_item_id,conversation_id,task_id,base_package_id,ordinal,
+          source_mockup_version_id,approval_decision_id,manifest_artifact_id,
+          manifest_artifact_hash,supplement,canonical_supplement,content_hash,
+          context_document_id,context_byte_size,context_media_type
+        ) VALUES (
+          'phase6-z-success-supplement','phase6-delivery-project','phase6-collection-work',
+          'phase6-collection-conversation','phase6-collection-task',
+          'phase6-collection-package',2,'phase6-z-success-version',
+          'phase6-z-success-decision','phase6-z-success-manifest',
+          encode(sha256(convert_to('{}','UTF8')),'hex'),
+          '{"implementation_visual_evidence_requirement":{"approved_mockup_version_id":"phase6-z-success-version"}}'::jsonb,
+          '{"implementation_visual_evidence_requirement":{"approved_mockup_version_id":"phase6-z-success-version"}}',
+          encode(sha256(convert_to(
+            '{"implementation_visual_evidence_requirement":{"approved_mockup_version_id":"phase6-z-success-version"}}',
+            'UTF8'
+          )),'hex'),'phase6-z-success-supplement-context',126,'application/json'
+        );
       `);
     } finally {
       await pg.exec("SET session_replication_role='origin'");
@@ -1606,6 +1771,21 @@ describe.sequential("Phase 2 preservation schema", () => {
         desktop_png: Buffer.concat([implementation.desktop, Buffer.from([0])]),
       }),
     ).rejects.toMatchObject({ code: "evidence_conflict" });
+    await expect(
+      visualEvidence.record({
+        ...evidenceInput,
+        capture_profile: {
+          ...evidenceInput.capture_profile,
+          browser_version: "131",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "evidence_conflict" });
+    await expect(
+      visualEvidence.record({
+        ...evidenceInput,
+        verified_at: "2026-07-27T13:02:31.000Z",
+      }),
+    ).rejects.toMatchObject({ code: "evidence_conflict" });
 
     const comparison = await pg.query<{ payload: unknown }>(
       `SELECT convert_from(blob.content,'UTF8')::jsonb AS payload
@@ -1679,6 +1859,27 @@ describe.sequential("Phase 2 preservation schema", () => {
     };
     await pg.exec("SET session_replication_role='replica'");
     try {
+      await pg.exec(`
+        INSERT INTO tasks (
+          id,project_id,phase_id,objective_id,strategy_version_id,title,description,
+          deliverables,acceptance_criteria,complexity,risk,required_roles,
+          required_capabilities,required_inputs,expected_outputs,environment_policy_ref,
+          verification_policy_ref,state,lifecycle_version
+        ) VALUES (
+          'phase6-supplement-task','phase6-delivery-project','phase6-visual-phase',
+          'phase6-visual-objective','phase6-visual-strategy','Supplement task',
+          'Supplement task','[]'::jsonb,'[]'::jsonb,'M','medium','[]'::jsonb,
+          '[]'::jsonb,'[]'::jsonb,'[]'::jsonb,'environment','verification','pending',0
+        );
+        INSERT INTO agent_runs (
+          id,project_id,phase_id,task_id,assignment_id,attempt,state,is_designated,
+          repository_binding_id,expected_revision,lifecycle_version
+        ) VALUES (
+          'phase6-supplement-run','phase6-delivery-project','phase6-visual-phase',
+          'phase6-supplement-task','phase6-supplement-assignment',1,'created',false,
+          'phase6-delivery-binding',repeat('c',40),0
+        );
+      `);
       await pg.query(
         `INSERT INTO task_context_blobs (sha256,content)
          VALUES ($1,convert_to('{}','UTF8'))`,
@@ -1711,7 +1912,7 @@ describe.sequential("Phase 2 preservation schema", () => {
          ) VALUES (
            'phase6-package','phase6-delivery-project','phase6-visual-work',
            'phase6-visual-conversation','phase6-handoff','phase6-visual-phase',
-           'phase6-visual-task',$1,'phase6-supplement-context'
+           'phase6-supplement-task',$1,'phase6-supplement-context'
          )`,
         [contentHash],
       );
@@ -1723,8 +1924,8 @@ describe.sequential("Phase 2 preservation schema", () => {
            context_document_id,context_byte_size,context_media_type
          ) VALUES (
            'phase6-supplement','phase6-delivery-project','phase6-visual-work',
-           'phase6-visual-conversation','phase6-visual-task','phase6-package',1,
-           'phase6-visual-version','phase6-visual-decision','phase6-visual-manifest',
+           'phase6-visual-conversation','phase6-supplement-task','phase6-package',1,
+           'phase6-supplement-version','phase6-supplement-decision','phase6-visual-manifest',
            $2,'{}'::jsonb,'{}',$1,'phase6-supplement-context',2,'application/json'
          )`,
         [contentHash, contentHash],
@@ -1735,8 +1936,8 @@ describe.sequential("Phase 2 preservation schema", () => {
            runner_generation,kind,envelope,status,correlation_id
          ) VALUES (
            'phase6-supplement-command','phase6-supplement-job',
-           'phase6-delivery-project','phase6-visual-phase','phase6-visual-task',
-           'phase6-visual-run','phase6-delivery-runner',1,'launch_run',$1::jsonb,
+           'phase6-delivery-project','phase6-visual-phase','phase6-supplement-task',
+           'phase6-supplement-run','phase6-delivery-runner',1,'launch_run',$1::jsonb,
            'queued','phase6-supplement-correlation'
          )`,
         [
@@ -1745,7 +1946,7 @@ describe.sequential("Phase 2 preservation schema", () => {
             task_package_supplements: [
               {
                 supplement_id: "phase6-supplement",
-                task_id: "phase6-visual-task",
+                task_id: "phase6-supplement-task",
                 base_package_id: "phase6-package",
                 ordinal: 1,
                 content_hash: contentHash,
@@ -1765,8 +1966,8 @@ describe.sequential("Phase 2 preservation schema", () => {
            command_id,run_id,supplement_id,project_id,phase_id,task_id,base_package_id,
            ordinal,content_hash,context_document_id,context_ref
          ) VALUES (
-           'phase6-supplement-command','phase6-visual-run','phase6-supplement',
-           'phase6-delivery-project','phase6-visual-phase','phase6-visual-task',
+           'phase6-supplement-command','phase6-supplement-run','phase6-supplement',
+           'phase6-delivery-project','phase6-visual-phase','phase6-supplement-task',
            'phase6-package',1,$1,'phase6-supplement-context',$2::jsonb
          )`,
         [
@@ -1781,8 +1982,8 @@ describe.sequential("Phase 2 preservation schema", () => {
          command_id,run_id,supplement_id,project_id,phase_id,task_id,base_package_id,
          ordinal,content_hash,context_document_id,context_ref
        ) VALUES (
-         'phase6-supplement-command','phase6-visual-run','phase6-supplement',
-         'phase6-delivery-project','phase6-visual-phase','phase6-visual-task',
+         'phase6-supplement-command','phase6-supplement-run','phase6-supplement',
+         'phase6-delivery-project','phase6-visual-phase','phase6-supplement-task',
          'phase6-package',1,$1,'phase6-supplement-context',$2::jsonb
        )`,
       [contentHash, JSON.stringify(contextRef)],
@@ -1792,7 +1993,7 @@ describe.sequential("Phase 2 preservation schema", () => {
          id,project_id,phase_id,task_id,run_id,command_id,runner_id,status
        ) VALUES (
          'phase6-supplement-job','phase6-delivery-project','phase6-visual-phase',
-         'phase6-visual-task','phase6-visual-run','phase6-supplement-command',
+         'phase6-supplement-task','phase6-supplement-run','phase6-supplement-command',
          'phase6-delivery-runner','queued'
        )`,
     );
@@ -1820,7 +2021,7 @@ describe.sequential("Phase 2 preservation schema", () => {
            context_document_id,context_byte_size,context_media_type
          ) VALUES (
            'phase6-late-supplement','phase6-delivery-project','phase6-visual-work',
-           'phase6-visual-conversation','phase6-visual-task','phase6-package',2,
+           'phase6-visual-conversation','phase6-supplement-task','phase6-package',2,
            'phase6-visual-version','phase6-late-decision','phase6-visual-manifest',
            $2,'{}'::jsonb,'{}',$1,'phase6-supplement-context',2,'application/json'
          )`,

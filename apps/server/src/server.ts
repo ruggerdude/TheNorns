@@ -6967,7 +6967,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             ? 404
             : error.code === "unsupported_media_type"
               ? 415
-              : error.code === "project_quota"
+              : error.code === "project_quota" || error.code === "idempotency_conflict"
                 ? 409
                 : 400;
         reply.code(status).send({ error: error.code, message: error.message });
@@ -7037,12 +7037,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             label,
             provenance: { actor_type: "human", actor_id: user.id },
           });
-          stores.audit(
-            user.email,
-            "phase6.artifact.created",
-            `${projectId}:${storedArtifact.id}`,
-            now(),
-          );
+          if (!storedArtifact.replayed) {
+            stores.audit(
+              user.email,
+              "phase6.artifact.created",
+              `${projectId}:${storedArtifact.id}`,
+              now(),
+            );
+          }
           return reply.code(201).send(storedArtifact);
         } catch (error) {
           phase6Error(reply, error);
@@ -7130,14 +7132,16 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             project_id: projectId,
             source_id: user.id,
           });
-          const created = await phase6Deployments.create(parsed);
-          stores.audit(
-            user.email,
-            "phase6.deployment.observed",
-            `${projectId}:${created.id}:pending`,
-            now(),
-          );
-          return reply.code(201).send(created);
+          const result = await phase6Deployments.createWithReplay(parsed);
+          if (!result.replayed) {
+            stores.audit(
+              user.email,
+              "phase6.deployment.observed",
+              `${projectId}:${result.deployment.id}:pending`,
+              now(),
+            );
+          }
+          return reply.code(result.replayed ? 200 : 201).send(result.deployment);
         } catch (error) {
           phase6Error(reply, error);
         }
@@ -7158,6 +7162,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               project_id: projectId,
               delivery_record_id: deploymentId,
             });
+            const replay = await phase6Deployments.replayHumanObservation(input, user.id);
+            if (replay) return reply.code(200).send(replay);
             if (input.status === "succeeded" && input.health_url) {
               const probe = await probePublicHttpsUrl(input.health_url);
               if (
@@ -7227,6 +7233,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           return reply.code(401).send({ error: "unauthorized" });
         }
         try {
+          const replay = await phase6Deployments.replayProviderObservation(input);
+          if (replay) return reply.code(200).send(replay);
           if (input.status === "succeeded" && input.health_url) {
             const probe = await probePublicHttpsUrl(input.health_url);
             if (
@@ -7310,6 +7318,37 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   }
 
   if (phase6VisualEvidence) {
+    app.get(
+      "/api/v2/projects/:projectId/work-items/:workItemId/conversations/:conversationId/visual-evidence/:visualEvidenceId",
+      async (request, reply) => {
+        if (!(await requireSession(request, reply))) return;
+        const { projectId, workItemId, conversationId, visualEvidenceId } = request.params as {
+          projectId: string;
+          workItemId: string;
+          conversationId: string;
+          visualEvidenceId: string;
+        };
+        try {
+          return reply
+            .header("Cache-Control", "no-store")
+            .send(
+              await phase6VisualEvidence.getForConversation(
+                projectId,
+                workItemId,
+                conversationId,
+                visualEvidenceId,
+              ),
+            );
+        } catch (error) {
+          if (error instanceof Phase6VisualEvidenceError) {
+            return reply
+              .code(error.code === "evidence_not_found" ? 404 : 409)
+              .send({ error: error.code, message: error.message });
+          }
+          throw error;
+        }
+      },
+    );
     const base64 = z
       .string()
       .min(1)
@@ -7364,7 +7403,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         const { projectId } = request.params as { projectId: string };
         try {
           const body = RunnerVisualEvidenceEnvelope.parse(request.body);
-          const evidence = await phase6VisualEvidence.record({
+          const result = await phase6VisualEvidence.recordWithReplay({
             project_id: projectId,
             work_item_id: body.work_item_id,
             conversation_id: body.conversation_id,
@@ -7383,13 +7422,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             desktop_png: Buffer.from(body.desktop_png_base64, "base64"),
             mobile_png: Buffer.from(body.mobile_png_base64, "base64"),
           });
-          stores.audit(
-            `runner:${auth.runner_id}`,
-            "phase6.visual_evidence.recorded",
-            `${projectId}:${evidence.id}`,
-            now(),
-          );
-          return reply.code(201).send(evidence);
+          if (!result.replayed) {
+            stores.audit(
+              `runner:${auth.runner_id}`,
+              "phase6.visual_evidence.recorded",
+              `${projectId}:${result.evidence.id}`,
+              now(),
+            );
+          }
+          return reply.code(result.replayed ? 200 : 201).send(result.evidence);
         } catch (error) {
           if (error instanceof z.ZodError) {
             return reply.code(400).send({ error: "bad_request", issues: error.issues });

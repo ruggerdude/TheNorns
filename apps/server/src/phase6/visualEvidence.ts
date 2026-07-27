@@ -88,6 +88,13 @@ export class Phase6VisualEvidenceService {
   record(
     inputValue: RecordImplementationVisualEvidenceInput,
   ): Promise<V2ImplementationVisualEvidenceT> {
+    return this.recordWithReplay(inputValue).then((result) => result.evidence);
+  }
+
+  recordWithReplay(inputValue: RecordImplementationVisualEvidenceInput): Promise<{
+    evidence: V2ImplementationVisualEvidenceT;
+    replayed: boolean;
+  }> {
     const { desktop_png: desktopValue, mobile_png: mobileValue, ...metadataValue } = inputValue;
     const input = VisualEvidenceMetadata.parse(metadataValue);
     const desktop = Buffer.from(desktopValue);
@@ -130,35 +137,75 @@ export class Phase6VisualEvidenceService {
           "the authenticated runner does not own the exact run and repository binding",
         );
       }
+      const collectionFence = await tx.query<{ id: string }>(
+        `SELECT id FROM implementation_visual_evidence_collections
+          WHERE project_id=$1 AND run_id=$2 AND approved_mockup_version_id=$3
+            AND verification_result_id=$4 AND deployment_record_id=$5
+            AND deployment_observation_id=$6 AND runner_id=$7
+            AND status IN ('awaiting_runner','delivered','completed')
+          FOR UPDATE`,
+        [
+          input.project_id,
+          input.run_id,
+          input.approved_mockup_version_id,
+          input.verification_result_id,
+          input.deployment_record_id,
+          input.deployment_observation_id,
+          input.runner_id,
+        ],
+      );
+      if (!collectionFence.rows[0]) {
+        throw new Phase6VisualEvidenceError(
+          "evidence_conflict",
+          "visual evidence has no exact runner collection fence",
+        );
+      }
       const existing = await this.read(tx, input.project_id, evidenceId);
       if (existing) {
         if (
+          existing.project_id !== input.project_id ||
+          existing.work_item_id !== input.work_item_id ||
+          existing.conversation_id !== input.conversation_id ||
+          existing.phase_id !== input.phase_id ||
+          existing.task_id !== input.task_id ||
+          existing.run_id !== input.run_id ||
+          existing.approved_mockup_version_id !== input.approved_mockup_version_id ||
+          existing.repository_binding_id !== input.repository_binding_id ||
           existing.commit_sha !== input.commit_sha ||
           existing.verification_result_id !== input.verification_result_id ||
           existing.deployment_record_id !== input.deployment_record_id ||
           existing.deployment_observation_id !== input.deployment_observation_id ||
+          canonicalJson(existing.capture_profile) !== canonicalJson(input.capture_profile) ||
+          existing.verified_at !== new Date(input.verified_at).toISOString() ||
           existing.screenshots[0].artifact.content_hash !== sha256(desktop) ||
           existing.screenshots[1].artifact.content_hash !== sha256(mobile)
         ) {
           throw new Phase6VisualEvidenceError(
             "evidence_conflict",
-            "visual evidence replay changed immutable commit, deployment, or screenshot bytes",
+            "visual evidence replay changed immutable scope, provenance, capture, or bytes",
           );
         }
+        await this.appendVisibleMessage(tx, existing);
         await this.completeCollection(tx, input, existing.id);
-        return existing;
+        return { evidence: existing, replayed: true };
       }
 
       const mockupArtifacts = (
         await tx.query<MockupArtifactRow>(
-          `SELECT version.task_id,artifact.viewport,artifact.artifact_id,artifact.artifact_hash
+          `SELECT supplement.task_id,artifact.viewport,artifact.artifact_id,
+                  artifact.artifact_hash
              FROM conversation_mockup_versions version
              JOIN conversation_mockup_decisions decision
                ON decision.mockup_version_id=version.id AND decision.decision='approved'
+             JOIN conversation_task_package_supplements supplement
+               ON supplement.source_mockup_version_id=version.id
+              AND supplement.project_id=version.project_id
              JOIN conversation_mockup_version_artifacts artifact
                ON artifact.mockup_version_id=version.id
             WHERE version.id=$1 AND version.project_id=$2
-              AND version.work_item_id=$3 AND version.conversation_id=$4
+              AND version.work_item_id=$3
+              AND supplement.conversation_id=$4
+              AND supplement.task_id=$5
             ORDER BY CASE artifact.viewport WHEN 'desktop' THEN 0 ELSE 1 END
             FOR SHARE OF version,decision,artifact`,
           [
@@ -166,6 +213,7 @@ export class Phase6VisualEvidenceService {
             input.project_id,
             input.work_item_id,
             input.conversation_id,
+            input.task_id,
           ],
         )
       ).rows;
@@ -357,8 +405,9 @@ export class Phase6VisualEvidenceService {
         verified_at: input.verified_at,
         created_at: createdAt instanceof Date ? createdAt.toISOString() : createdAt,
       });
+      await this.appendVisibleMessage(tx, result);
       await this.completeCollection(tx, input, result.id);
-      return result;
+      return { evidence: result, replayed: false };
     });
   }
 
@@ -369,6 +418,24 @@ export class Phase6VisualEvidenceService {
         throw new Phase6VisualEvidenceError(
           "evidence_not_found",
           `unknown visual evidence "${evidenceId}"`,
+        );
+      }
+      return found;
+    });
+  }
+
+  getForConversation(
+    projectId: string,
+    workItemId: string,
+    conversationId: string,
+    evidenceId: string,
+  ): Promise<V2ImplementationVisualEvidenceT> {
+    return this.transactions.transaction(async (tx) => {
+      const found = await this.read(tx, projectId, evidenceId);
+      if (!found || found.work_item_id !== workItemId || found.conversation_id !== conversationId) {
+        throw new Phase6VisualEvidenceError(
+          "evidence_not_found",
+          `unknown visual evidence "${evidenceId}" in this work conversation`,
         );
       }
       return found;
@@ -504,6 +571,69 @@ export class Phase6VisualEvidenceService {
         input.runner_id,
         evidenceId,
       ],
+    );
+  }
+
+  private async appendVisibleMessage(
+    tx: V2SqlExecutor,
+    evidence: V2ImplementationVisualEvidenceT,
+  ): Promise<void> {
+    const messageId = `message:visual-evidence:${evidence.id}`;
+    const existing = await tx.query<{ id: string }>(
+      `SELECT id FROM work_messages
+        WHERE id=$1 AND project_id=$2 AND work_item_id=$3 AND conversation_id=$4`,
+      [messageId, evidence.project_id, evidence.work_item_id, evidence.conversation_id],
+    );
+    if (existing.rows[0]) return;
+    const conversation = (
+      await tx.query<{
+        created_by_user_id: string;
+        next_message_sequence: number | string;
+      }>(
+        `SELECT created_by_user_id,next_message_sequence
+           FROM work_conversations
+          WHERE id=$1 AND project_id=$2 AND work_item_id=$3
+            AND kind='execution_pm'
+          FOR UPDATE`,
+        [evidence.conversation_id, evidence.project_id, evidence.work_item_id],
+      )
+    ).rows[0];
+    if (!conversation) {
+      throw new Phase6VisualEvidenceError(
+        "evidence_conflict",
+        "delivered visual evidence has no linked execution PM conversation",
+      );
+    }
+    await tx.query(
+      `INSERT INTO work_messages (
+         id,project_id,work_item_id,conversation_id,initiated_by_user_id,
+         actor_type,actor_id,role,visibility_status,sequence,parts
+       ) VALUES ($1,$2,$3,$4,$5,'coordinator',NULL,'assistant','complete',$6,$7::jsonb)`,
+      [
+        messageId,
+        evidence.project_id,
+        evidence.work_item_id,
+        evidence.conversation_id,
+        conversation.created_by_user_id,
+        Number(conversation.next_message_sequence),
+        JSON.stringify([
+          {
+            type: "text",
+            format: "markdown",
+            text: `Implementation visual evidence is verified for commit \`${evidence.commit_sha}\`.`,
+          },
+          {
+            type: "implementation_visual_evidence",
+            visual_evidence_id: evidence.id,
+          },
+        ]),
+      ],
+    );
+    await tx.query(
+      `UPDATE work_conversations
+          SET next_message_sequence=next_message_sequence+1,updated_at=now()
+        WHERE id=$1`,
+      [evidence.conversation_id],
     );
   }
 }

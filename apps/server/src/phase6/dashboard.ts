@@ -23,6 +23,11 @@ function json<T>(value: unknown, fallback: T): T {
   }
 }
 
+function workDeepLink(projectId: string, conversationId: string | null): string {
+  const workRoot = `/projects/${encodeURIComponent(projectId)}/work`;
+  return conversationId ? `${workRoot}/${encodeURIComponent(conversationId)}` : workRoot;
+}
+
 function available<S extends string, T>(source: S, observedAt: string, data: T) {
   return { availability: "available" as const, source, observed_at: observedAt, data };
 }
@@ -76,6 +81,7 @@ interface WorkRow {
   completed_at: string | Date | null;
   tasks_completed: number | string;
   tasks_total: number | string;
+  conversation_id: string | null;
 }
 
 interface ConversationRow {
@@ -120,7 +126,7 @@ export class Phase6DashboardService {
       section("attention_projection", generatedAt, () => this.needsAttention(projectId)),
       section("human_waits_and_decisions", generatedAt, () => this.openDecisions(projectId)),
       section("usage_ledger_and_approved_plan", generatedAt, () => this.budget(projectId)),
-      section("deployment_observations", generatedAt, () => this.deployments.list(projectId)),
+      section("deployment_observations", generatedAt, () => this.recentDeployments(projectId)),
       section("verification_results", generatedAt, () => this.verification(projectId)),
       section("work_conversations", generatedAt, () => this.conversations(projectId)),
       section("mockup_decisions", generatedAt, () => this.approvedMockups(projectId)),
@@ -152,13 +158,34 @@ export class Phase6DashboardService {
     return this.query(async (tx) => {
       const rows = await tx.query<WorkRow>(
         `SELECT item.*,
-                count(task.id)::int AS tasks_total,
-                count(task.id) FILTER (WHERE task.state='completed')::int AS tasks_completed
+                (
+                  SELECT count(*)::int
+                    FROM conversation_task_package_bindings binding
+                    JOIN tasks task
+                      ON task.project_id=binding.project_id AND task.id=binding.task_id
+                   WHERE binding.project_id=item.project_id
+                     AND binding.work_item_id=item.id
+                ) AS tasks_total,
+                (
+                  SELECT count(*)::int
+                    FROM conversation_task_package_bindings binding
+                    JOIN tasks task
+                      ON task.project_id=binding.project_id AND task.id=binding.task_id
+                   WHERE binding.project_id=item.project_id
+                     AND binding.work_item_id=item.id
+                     AND task.state='completed'
+                ) AS tasks_completed,
+                (
+                  SELECT conversation.id
+                    FROM work_conversations conversation
+                   WHERE conversation.project_id=item.project_id
+                     AND conversation.work_item_id=item.id
+                   ORDER BY (conversation.kind='execution_pm') DESC,
+                            conversation.updated_at DESC,conversation.id
+                   LIMIT 1
+                ) AS conversation_id
            FROM work_items item
-           LEFT JOIN tasks task
-             ON task.project_id=item.project_id AND task.phase_id=item.phase_id
           WHERE item.project_id=$1 AND item.status NOT IN ('completed','cancelled')
-          GROUP BY item.id
           ORDER BY item.updated_at DESC,item.id`,
         [projectId],
       );
@@ -183,6 +210,8 @@ export class Phase6DashboardService {
             execution_started_at: row.execution_started_at ? iso(row.execution_started_at) : null,
             completed_at: row.completed_at ? iso(row.completed_at) : null,
           }),
+          conversation_id: row.conversation_id,
+          deep_link: row.conversation_id ? workDeepLink(projectId, row.conversation_id) : null,
           phase_progress:
             row.phase_id === null
               ? null
@@ -194,6 +223,43 @@ export class Phase6DashboardService {
                 },
         };
       });
+    });
+  }
+
+  private async recentDeployments(projectId: string) {
+    const deployments = await this.deployments.list(projectId);
+    const taskIds = deployments.flatMap((deployment) =>
+      deployment.task_id ? [deployment.task_id] : [],
+    );
+    const scopes =
+      taskIds.length === 0
+        ? []
+        : await this.query(async (tx) => {
+            const rows = await tx.query<{
+              task_id: string;
+              work_item_id: string;
+              conversation_id: string;
+            }>(
+              `SELECT task_id,work_item_id,conversation_id
+                 FROM conversation_task_package_bindings
+                WHERE project_id=$1 AND task_id=ANY($2::text[])
+                ORDER BY task_id,package_id`,
+              [projectId, taskIds],
+            );
+            return rows.rows;
+          });
+    const scopeByTask = new Map<string, { work_item_id: string; conversation_id: string }>();
+    for (const scope of scopes) {
+      if (!scopeByTask.has(scope.task_id)) scopeByTask.set(scope.task_id, scope);
+    }
+    return deployments.map((deployment) => {
+      const scope = deployment.task_id ? scopeByTask.get(deployment.task_id) : undefined;
+      return {
+        deployment,
+        work_item_id: scope?.work_item_id ?? null,
+        conversation_id: scope?.conversation_id ?? null,
+        deep_link: scope ? workDeepLink(projectId, scope.conversation_id) : null,
+      };
     });
   }
 
@@ -209,29 +275,76 @@ export class Phase6DashboardService {
           | "deployment"
           | "visual_evidence";
         source_id: string;
+        work_item_id: string | null;
+        conversation_id: string | null;
+        phase_id: string | null;
+        task_id: string | null;
         title: string;
         summary: string;
         severity: "critical" | "high" | "normal" | "low";
+        deep_link: string | null;
         occurred_at: string | Date;
       }>(
         `SELECT 'human-wait:'||wait.id AS key,'human_wait'::text AS source_type,
-                wait.id AS source_id,'Agent needs a decision' AS title,
-                wait.question AS summary,'high'::text AS severity,wait.created_at AS occurred_at
+                wait.id AS source_id,wait.work_item_id,wait.conversation_id,
+                wait.phase_id,wait.task_id,'Agent needs a decision' AS title,
+                wait.question AS summary,'high'::text AS severity,
+                '/projects/'||wait.project_id||'/work/'||wait.conversation_id AS deep_link,
+                wait.created_at AS occurred_at
            FROM human_waits wait
           WHERE wait.project_id=$1 AND wait.status='awaiting_human'
          UNION ALL
          SELECT 'decision:'||decision.id,'decision',decision.id,
-                'Open project decision',decision.question,decision.urgency,decision.created_at
+                item.id,conversation.id,decision.phase_id,decision.task_id,
+                'Open project decision',decision.question,decision.urgency,
+                CASE WHEN conversation.id IS NULL THEN '/projects/'||decision.project_id||'/work'
+                     ELSE '/projects/'||decision.project_id||'/work/'||conversation.id END,
+                decision.created_at
            FROM decision_points decision
+           LEFT JOIN LATERAL (
+             SELECT binding.work_item_id,binding.conversation_id
+               FROM conversation_task_package_bindings binding
+              WHERE binding.project_id=decision.project_id
+                AND binding.task_id=decision.task_id
+              ORDER BY binding.package_id LIMIT 1
+           ) task_scope ON true
+           LEFT JOIN work_items item
+             ON item.project_id=decision.project_id
+            AND item.id=CASE
+              WHEN decision.scope_entity_type='work_item' THEN decision.scope_entity_id
+              ELSE task_scope.work_item_id
+            END
+           LEFT JOIN LATERAL (
+             SELECT id FROM work_conversations candidate
+              WHERE candidate.project_id=decision.project_id
+                AND candidate.work_item_id=item.id
+                AND (task_scope.conversation_id IS NULL
+                     OR candidate.id=task_scope.conversation_id)
+              ORDER BY (candidate.kind='execution_pm') DESC,candidate.updated_at DESC,candidate.id
+              LIMIT 1
+           ) conversation ON true
           WHERE decision.project_id=$1 AND decision.status='open'
          UNION ALL
          SELECT 'blocked-work:'||item.id,'blocker',item.id,
-                'Work is blocked',item.title,'high',item.updated_at
+                item.id,conversation.id,item.phase_id,NULL,
+                'Work is blocked',item.title,'high',
+                CASE WHEN conversation.id IS NULL THEN '/projects/'||item.project_id||'/work'
+                     ELSE '/projects/'||item.project_id||'/work/'||conversation.id END,
+                item.updated_at
            FROM work_items item
+           LEFT JOIN LATERAL (
+             SELECT id FROM work_conversations candidate
+              WHERE candidate.project_id=item.project_id AND candidate.work_item_id=item.id
+              ORDER BY (candidate.kind='execution_pm') DESC,candidate.updated_at DESC,candidate.id
+              LIMIT 1
+           ) conversation ON true
           WHERE item.project_id=$1 AND item.status='blocked'
          UNION ALL
          SELECT 'mockup:'||version.id,'mockup',version.id,
-                'Mockup needs review',version.brief,'normal',version.created_at
+                version.work_item_id,version.conversation_id,NULL,version.task_id,
+                'Mockup needs review',version.brief,'normal',
+                '/projects/'||version.project_id||'/work/'||version.conversation_id,
+                version.created_at
            FROM conversation_mockup_versions version
           WHERE version.project_id=$1
             AND NOT EXISTS (
@@ -240,15 +353,35 @@ export class Phase6DashboardService {
             )
          UNION ALL
          SELECT 'deployment:'||delivery.id,'deployment',delivery.id,
+                item.id,conversation.id,delivery.phase_id,delivery.task_id,
                 'Deployment failed',delivery.service||' in '||delivery.environment,
-                'critical',delivery.updated_at
+                'critical',
+                CASE WHEN conversation.id IS NULL THEN '/projects/'||delivery.project_id||'/work'
+                     ELSE '/projects/'||delivery.project_id||'/work/'||conversation.id END,
+                delivery.updated_at
            FROM project_delivery_records delivery
+           LEFT JOIN LATERAL (
+             SELECT binding.work_item_id,binding.conversation_id
+               FROM conversation_task_package_bindings binding
+              WHERE binding.project_id=delivery.project_id
+                AND binding.task_id=delivery.task_id
+              ORDER BY binding.package_id LIMIT 1
+           ) delivery_scope ON true
+           LEFT JOIN work_items item
+             ON item.project_id=delivery.project_id AND item.id=delivery_scope.work_item_id
+           LEFT JOIN work_conversations conversation
+             ON conversation.project_id=delivery.project_id
+            AND conversation.id=delivery_scope.conversation_id
           WHERE delivery.project_id=$1 AND delivery.status='failed'
          UNION ALL
          SELECT 'visual-evidence:'||collection.id,'visual_evidence',collection.id,
+                collection.work_item_id,collection.conversation_id,
+                collection.phase_id,collection.task_id,
                 'Implementation screenshots need attention',
                 COALESCE(collection.last_error,'Screenshot collection failed'),
-                'high',collection.updated_at
+                'high',
+                '/projects/'||collection.project_id||'/work/'||collection.conversation_id,
+                collection.updated_at
            FROM implementation_visual_evidence_collections collection
           WHERE collection.project_id=$1 AND collection.status='failed'
           ORDER BY occurred_at DESC,key`,
@@ -257,6 +390,7 @@ export class Phase6DashboardService {
       return result.rows.map((row) => ({
         project_id: projectId,
         ...row,
+        deep_link: workDeepLink(projectId, row.conversation_id),
         occurred_at: iso(row.occurred_at),
       }));
     });
@@ -267,37 +401,134 @@ export class Phase6DashboardService {
       const result = await tx.query<{
         id: string;
         project_id: string;
-        work_item_id: string;
-        conversation_id: string;
-        question: string;
-        status: string;
+        work_item_id: string | null;
+        phase_id: string | null;
+        conversation_id: string | null;
+        source_type: "human_wait" | "decision_point" | "blocked_work_item" | "blocked_task";
+        source_id: string;
+        title: string;
+        detail: string;
+        status: "awaiting_human" | "open" | "blocked";
+        deep_link: string | null;
         created_at: string | Date;
       }>(
-        `SELECT id,project_id,work_item_id,conversation_id,question,status,created_at
-           FROM human_waits
-          WHERE project_id=$1 AND status IN ('awaiting_human','answered','continuation_queued')
+        `SELECT 'human-wait:'||wait.id AS id,wait.project_id,wait.work_item_id,
+                wait.phase_id,wait.conversation_id,'human_wait'::text AS source_type,
+                wait.id AS source_id,wait.decision_point AS title,wait.question AS detail,
+                'awaiting_human'::text AS status,
+                '/projects/'||wait.project_id||'/work/'||wait.conversation_id AS deep_link,
+                wait.created_at
+           FROM human_waits wait
+          WHERE wait.project_id=$1 AND wait.status='awaiting_human'
+         UNION ALL
+         SELECT 'decision-point:'||decision.id,decision.project_id,item.id,
+                decision.phase_id,conversation.id,'decision_point',decision.id,
+                decision.question,decision.context,'open',
+                CASE WHEN conversation.id IS NULL THEN '/projects/'||decision.project_id||'/work'
+                     ELSE '/projects/'||decision.project_id||'/work/'||conversation.id END,
+                decision.created_at
+           FROM decision_points decision
+           LEFT JOIN LATERAL (
+             SELECT binding.work_item_id,binding.conversation_id
+               FROM conversation_task_package_bindings binding
+              WHERE binding.project_id=decision.project_id
+                AND binding.task_id=decision.task_id
+              ORDER BY binding.package_id LIMIT 1
+           ) task_scope ON true
+           LEFT JOIN work_items item
+             ON item.project_id=decision.project_id
+            AND item.id=CASE
+              WHEN decision.scope_entity_type='work_item' THEN decision.scope_entity_id
+              ELSE task_scope.work_item_id
+            END
+           LEFT JOIN LATERAL (
+             SELECT id FROM work_conversations candidate
+              WHERE candidate.project_id=decision.project_id
+                AND candidate.work_item_id=item.id
+                AND (task_scope.conversation_id IS NULL
+                     OR candidate.id=task_scope.conversation_id)
+              ORDER BY (candidate.kind='execution_pm') DESC,candidate.updated_at DESC,candidate.id
+              LIMIT 1
+           ) conversation ON true
+          WHERE decision.project_id=$1 AND decision.status='open'
+         UNION ALL
+         SELECT 'blocked-work:'||item.id,item.project_id,item.id,item.phase_id,
+                conversation.id,'blocked_work_item',item.id,item.title,item.objective,
+                'blocked',
+                CASE WHEN conversation.id IS NULL THEN '/projects/'||item.project_id||'/work'
+                     ELSE '/projects/'||item.project_id||'/work/'||conversation.id END,
+                item.updated_at
+           FROM work_items item
+           LEFT JOIN LATERAL (
+             SELECT id FROM work_conversations candidate
+              WHERE candidate.project_id=item.project_id AND candidate.work_item_id=item.id
+              ORDER BY (candidate.kind='execution_pm') DESC,candidate.updated_at DESC,candidate.id
+              LIMIT 1
+           ) conversation ON true
+          WHERE item.project_id=$1 AND item.status='blocked'
+         UNION ALL
+         SELECT 'blocked-task:'||task.id,task.project_id,item.id,task.phase_id,
+                conversation.id,'blocked_task',task.id,task.title,task.description,
+                'blocked',
+                CASE WHEN conversation.id IS NULL THEN '/projects/'||task.project_id||'/work'
+                     ELSE '/projects/'||task.project_id||'/work/'||conversation.id END,
+                task.updated_at
+           FROM tasks task
+           JOIN conversation_task_package_bindings binding
+             ON binding.project_id=task.project_id AND binding.task_id=task.id
+           JOIN work_items item
+             ON item.project_id=binding.project_id AND item.id=binding.work_item_id
+           LEFT JOIN LATERAL (
+             SELECT id FROM work_conversations candidate
+              WHERE candidate.project_id=item.project_id
+                AND candidate.id=binding.conversation_id
+              LIMIT 1
+           ) conversation ON true
+          WHERE task.project_id=$1 AND task.state='blocked'
           ORDER BY created_at DESC,id`,
         [projectId],
       );
-      return result.rows.map((row) => ({ ...row, created_at: iso(row.created_at) }));
+      return result.rows.map((row) => ({
+        ...row,
+        deep_link: workDeepLink(projectId, row.conversation_id),
+        created_at: iso(row.created_at),
+      }));
     });
   }
 
   private budget(projectId: string) {
     return this.query(async (tx) => {
-      const usage = await tx.query<{ spend: number | string | null; entries: number | string }>(
-        `SELECT sum(cost_usd) AS spend,count(*) AS entries
+      const usage = await tx.query<{
+        spend: number | string | null;
+        entries: number | string;
+        priced_entries: number | string;
+      }>(
+        `SELECT sum(cost_usd) AS spend,count(*) AS entries,
+                count(cost_usd) AS priced_entries
            FROM ai_usage_events
-          WHERE project_id=$1 AND cost_usd IS NOT NULL`,
+          WHERE project_id=$1
+            AND event_type IN ('usage_observed','adjustment')`,
         [projectId],
       );
       const plan = await tx.query<{ budget: number | string | null; phases: number | string }>(
         `SELECT sum(approved_budget_usd) AS budget,
                 count(approved_budget_usd) AS phases
-           FROM phases WHERE project_id=$1`,
+           FROM phases
+          WHERE project_id=$1 AND approved_strategy_version_id IS NOT NULL`,
         [projectId],
       );
-      const hasUsage = Number(usage.rows[0]?.entries ?? 0) > 0;
+      const usageEntries = Number(usage.rows[0]?.entries ?? 0);
+      const pricedUsageEntries = Number(usage.rows[0]?.priced_entries ?? 0);
+      if (pricedUsageEntries !== usageEntries) {
+        throw new DashboardSectionUnavailableError(
+          "incomplete_usage_pricing",
+          false,
+          `${usageEntries - pricedUsageEntries} usage ledger entr${
+            usageEntries - pricedUsageEntries === 1 ? "y is" : "ies are"
+          } missing authoritative cost.`,
+        );
+      }
+      const hasUsage = pricedUsageEntries > 0;
       const hasPlan = Number(plan.rows[0]?.phases ?? 0) > 0;
       if (!hasUsage && !hasPlan) {
         throw new DashboardSectionUnavailableError(
@@ -328,20 +559,39 @@ export class Phase6DashboardService {
         phase_id: string;
         task_id: string;
         run_id: string;
+        work_item_id: string | null;
+        conversation_id: string | null;
         commit_sha: string;
         passed: boolean;
         evidence: unknown;
         created_at: string | Date;
       }>(
-        `SELECT id,project_id,phase_id,task_id,run_id,commit_sha,passed,evidence,created_at
-           FROM verification_results
-          WHERE project_id=$1
-          ORDER BY created_at DESC,id DESC LIMIT 20`,
+        `SELECT verification.id,verification.project_id,verification.phase_id,
+                verification.task_id,verification.run_id,item.id AS work_item_id,
+                conversation.id AS conversation_id,verification.commit_sha,
+                verification.passed,verification.evidence,verification.created_at
+           FROM verification_results verification
+           LEFT JOIN LATERAL (
+             SELECT binding.work_item_id,binding.conversation_id
+               FROM conversation_task_package_bindings binding
+              WHERE binding.project_id=verification.project_id
+                AND binding.task_id=verification.task_id
+              ORDER BY binding.package_id LIMIT 1
+           ) verification_scope ON true
+           LEFT JOIN work_items item
+             ON item.project_id=verification.project_id
+            AND item.id=verification_scope.work_item_id
+           LEFT JOIN work_conversations conversation
+             ON conversation.project_id=verification.project_id
+            AND conversation.id=verification_scope.conversation_id
+          WHERE verification.project_id=$1
+          ORDER BY verification.created_at DESC,verification.id DESC LIMIT 20`,
         [projectId],
       );
       return result.rows.map((row) => ({
         ...row,
         evidence: V2EvidenceRef.array().parse(json(row.evidence, [])),
+        deep_link: workDeepLink(projectId, row.conversation_id),
         created_at: iso(row.created_at),
       }));
     });
@@ -352,7 +602,7 @@ export class Phase6DashboardService {
       const result = await tx.query<ConversationRow>(
         `SELECT * FROM work_conversations
           WHERE project_id=$1
-          ORDER BY updated_at DESC,id DESC LIMIT 50`,
+          ORDER BY updated_at DESC,id DESC`,
         [projectId],
       );
       return result.rows.map((row) =>

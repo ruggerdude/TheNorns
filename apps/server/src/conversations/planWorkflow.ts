@@ -803,6 +803,7 @@ export class ConversationPlanWorkflowService {
       }
     }
 
+    await this.lockWork(tx, input.project_id, input.work_item_id);
     const conversation = await this.assertConversation(
       tx,
       input.project_id,
@@ -1359,6 +1360,47 @@ export class ConversationPlanWorkflowService {
         return artifact;
       }),
     };
+    const approvedPlanningMockupArtifacts = await tx.query<{
+      id: string;
+      content_hash: string;
+      kind: string;
+    }>(
+      `SELECT artifact.id,artifact.content_hash,artifact.kind
+         FROM conversation_mockup_versions mockup
+         JOIN conversation_mockup_requests root_request
+           ON root_request.id=mockup.root_request_id
+         JOIN conversation_actions root_action ON root_action.id=root_request.action_id
+         JOIN conversation_mockup_decisions decision
+           ON decision.mockup_version_id=mockup.id AND decision.decision='approved'
+         JOIN LATERAL (
+           SELECT mockup.manifest_artifact_id AS artifact_id
+           UNION ALL
+           SELECT screenshot.artifact_id
+             FROM conversation_mockup_version_artifacts screenshot
+            WHERE screenshot.mockup_version_id=mockup.id
+         ) exact_artifact ON true
+         JOIN artifacts artifact ON artifact.id=exact_artifact.artifact_id
+        WHERE mockup.project_id=$1 AND mockup.work_item_id=$2
+          AND mockup.conversation_id=$3
+          AND root_action.payload->'parameters'->>'plan_version_id'=$4
+          AND EXISTS (
+            SELECT 1
+              FROM jsonb_array_elements($5::jsonb->'plan'->'modules') module
+             WHERE module->>'id'=root_action.payload->'parameters'->>'module_id'
+          )
+        ORDER BY mockup.id,artifact.id`,
+      [
+        action.project_id,
+        action.work_item_id,
+        action.conversation_id,
+        version.id,
+        JSON.stringify(version.plan),
+      ],
+    );
+    const handoffArtifacts = [...artifactRows.rows, ...approvedPlanningMockupArtifacts.rows].filter(
+      (artifact, index, all) =>
+        all.findIndex((candidate) => candidate.id === artifact.id) === index,
+    );
     const bindingRules = [
       ...(globalRule?.content.trim() ? [globalRule.content] : []),
       ...projectRules.rows.map((rule) => rule.content).filter((content) => content.trim()),
@@ -1418,7 +1460,7 @@ export class ConversationPlanWorkflowService {
           dispositions: reviewContract.dispositions,
         }),
       },
-      ...artifactRows.rows.map((artifact) => ({
+      ...handoffArtifacts.map((artifact) => ({
         kind: "artifact" as const,
         ref: artifact.id,
         content_hash: artifact.content_hash,
@@ -1445,7 +1487,7 @@ export class ConversationPlanWorkflowService {
       task_sequence: version.plan.plan.modules.map((module) => module.id),
       staffing: version.plan.staffing,
       budget: version.plan.estimated_budget,
-      required_mockup_artifact_ids: artifactRows.rows
+      required_mockup_artifact_ids: handoffArtifacts
         .filter((artifact) => artifact.kind === "mockup")
         .map((artifact) => artifact.id),
       acceptance_evidence: [
@@ -1457,7 +1499,7 @@ export class ConversationPlanWorkflowService {
           ),
         ),
       ],
-      artifact_ids: artifactRows.rows.map((artifact) => artifact.id),
+      artifact_ids: handoffArtifacts.map((artifact) => artifact.id),
       phase_ids: [
         ...new Set(
           artifactRows.rows.flatMap((artifact) =>
@@ -1516,7 +1558,7 @@ export class ConversationPlanWorkflowService {
         })),
         risks: version.plan.plan.risks.map((risk) => risk.description),
         open_questions: [...version.plan.open_decisions],
-        artifact_ids: artifactRows.rows.map((artifact) => artifact.id),
+        artifact_ids: handoffArtifacts.map((artifact) => artifact.id),
       };
       const nextSummaryVersion = Number(
         (
@@ -1626,7 +1668,7 @@ export class ConversationPlanWorkflowService {
         budget: version.plan.estimated_budget,
         binding_rules: bindingRules,
         human_decisions: handoffPackage.human_decisions,
-        artifact_ids: artifactRows.rows.map((artifact) => artifact.id),
+        artifact_ids: handoffArtifacts.map((artifact) => artifact.id),
         repository_binding_ids: repositories.rows.map((repository) => repository.id),
         context_manifest: handoffPackage.context_manifest,
       };

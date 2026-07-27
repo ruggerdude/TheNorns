@@ -269,8 +269,19 @@ export class GitHubActionsService {
    */
   async dispatchWorkflow(
     repository: ActionsRepositoryRef,
-    inputs: { norns_job_id: string; norns_runner_id: string; norns_run_id: string },
+    inputs: {
+      norns_job_id: string;
+      norns_runner_id: string;
+      norns_run_id: string;
+      norns_expected_commit?: string;
+    },
   ): Promise<void> {
+    if (
+      inputs.norns_expected_commit !== undefined &&
+      !/^([a-f0-9]{40}|[a-f0-9]{64})$/.test(inputs.norns_expected_commit)
+    ) {
+      throw new Error("visual evidence workflow requires a full lowercase Git commit SHA");
+    }
     const token = await this.github.installationToken(
       repository.installation_id,
       GITHUB_TOKEN_SCOPES.dispatchWorkflow(repository.repository_github_id),
@@ -281,7 +292,10 @@ export class GitHubActionsService {
       token,
       {
         method: "POST",
-        body: { ref: repository.default_branch, inputs },
+        body: {
+          ref: repository.default_branch,
+          inputs: { ...inputs, norns_expected_commit: inputs.norns_expected_commit ?? "" },
+        },
         allowStatuses: [204],
       },
     );

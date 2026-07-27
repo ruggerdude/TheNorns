@@ -35,11 +35,11 @@ describe("Phase 6 runner visual evidence", () => {
     await execFileAsync("git", ["init", "-q", repository]);
     await execFileAsync("git", ["-C", repository, "config", "user.name", "Norns Test"]);
     await execFileAsync("git", ["-C", repository, "config", "user.email", "test@norns.invalid"]);
-    await mkdir(resolve(repository, ".norns"), { recursive: true });
+    await mkdir(resolve(repository, ".norns/visual-evidence"), { recursive: true });
     const desktop = png(1440, 1024);
     const mobile = png(390, 844);
-    await writeFile(resolve(repository, ".norns/desktop.png"), desktop);
-    await writeFile(resolve(repository, ".norns/mobile.png"), mobile);
+    await writeFile(resolve(repository, ".norns/visual-evidence/desktop-1440x1024.png"), desktop);
+    await writeFile(resolve(repository, ".norns/visual-evidence/mobile-390x844.png"), mobile);
     await writeFile(
       resolve(repository, ".norns/visual-evidence.json"),
       JSON.stringify({
@@ -57,8 +57,16 @@ describe("Phase 6 runner visual evidence", () => {
           fixed_clock: "2026-07-27T12:00:00.000Z",
         },
         screenshots: [
-          { viewport: "desktop", path: ".norns/desktop.png", content_hash: hash(desktop) },
-          { viewport: "mobile", path: ".norns/mobile.png", content_hash: hash(mobile) },
+          {
+            viewport: "desktop",
+            path: ".norns/visual-evidence/desktop-1440x1024.png",
+            content_hash: hash(desktop),
+          },
+          {
+            viewport: "mobile",
+            path: ".norns/visual-evidence/mobile-390x844.png",
+            content_hash: hash(mobile),
+          },
         ],
       }),
     );
@@ -89,11 +97,11 @@ describe("Phase 6 runner visual evidence", () => {
     await execFileAsync("git", ["init", "-q", repository]);
     await execFileAsync("git", ["-C", repository, "config", "user.name", "Norns Test"]);
     await execFileAsync("git", ["-C", repository, "config", "user.email", "test@norns.invalid"]);
-    await mkdir(resolve(repository, ".norns"), { recursive: true });
+    await mkdir(resolve(repository, ".norns/visual-evidence"), { recursive: true });
     const desktop = png(1440, 1024);
     const mobile = png(390, 844);
-    await writeFile(resolve(repository, ".norns/desktop.png"), desktop);
-    await writeFile(resolve(repository, ".norns/mobile.png"), mobile);
+    await writeFile(resolve(repository, ".norns/visual-evidence/desktop-1440x1024.png"), desktop);
+    await writeFile(resolve(repository, ".norns/visual-evidence/mobile-390x844.png"), mobile);
     await writeFile(
       resolve(repository, ".norns/visual-evidence.json"),
       JSON.stringify({
@@ -111,8 +119,16 @@ describe("Phase 6 runner visual evidence", () => {
           fixed_clock: "2026-07-27T12:00:00.000Z",
         },
         screenshots: [
-          { viewport: "desktop", path: ".norns/desktop.png", content_hash: hash(desktop) },
-          { viewport: "mobile", path: ".norns/mobile.png", content_hash: hash(mobile) },
+          {
+            viewport: "desktop",
+            path: ".norns/visual-evidence/desktop-1440x1024.png",
+            content_hash: hash(desktop),
+          },
+          {
+            viewport: "mobile",
+            path: ".norns/visual-evidence/mobile-390x844.png",
+            content_hash: hash(mobile),
+          },
         ],
       }),
     );
@@ -121,8 +137,11 @@ describe("Phase 6 runner visual evidence", () => {
     const commit = (
       await execFileAsync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" })
     ).stdout.trim();
-    await rm(resolve(repository, ".norns/mobile.png"));
-    await symlink("desktop.png", resolve(repository, ".norns/mobile.png"));
+    await rm(resolve(repository, ".norns/visual-evidence/mobile-390x844.png"));
+    await symlink(
+      "desktop-1440x1024.png",
+      resolve(repository, ".norns/visual-evidence/mobile-390x844.png"),
+    );
 
     await expect(
       readRunnerVisualEvidence({ worktree_path: repository, expected_commit: commit }),

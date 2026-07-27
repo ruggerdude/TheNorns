@@ -44,7 +44,7 @@ export interface Phase6CheckpointAction {
   work_item_id: string;
   conversation_id: string;
   initiated_by_user_id: string;
-  phase_id: string;
+  phase_id: string | null;
 }
 
 export interface Phase6CheckpointResult {
@@ -61,6 +61,8 @@ interface MockupRequestRow {
   action_id: string;
   initiated_by_user_id: string;
   task_id: string | null;
+  plan_version_id: string | null;
+  module_id: string | null;
   phase_id: string | null;
   root_request_id: string;
   source_mockup_version_id: string | null;
@@ -79,6 +81,8 @@ interface MockupVersionRow {
   work_item_id: string;
   conversation_id: string;
   task_id: string | null;
+  plan_version_id: string | null;
+  module_id: string | null;
   created_by_action_id: string;
   version: number;
   brief: string;
@@ -143,6 +147,8 @@ function mapVersion(
     work_item_id: row.work_item_id,
     conversation_id: row.conversation_id,
     task_id: row.task_id,
+    plan_version_id: row.plan_version_id,
+    module_id: row.module_id,
     created_by_action_id: row.created_by_action_id,
     version: Number(row.version),
     status: versionStatus(row),
@@ -187,6 +193,74 @@ function decisionIdFor(actionId: string): string {
 
 function supplementIdFor(decisionId: string): string {
   return `mockup-supplement:${decisionId}`;
+}
+
+export function implementationVisualEvidenceRequirement(approvedMockupVersionId: string) {
+  return {
+    manifest_path: ".norns/visual-evidence.json",
+    producer: "playwright",
+    approved_mockup_version_id: approvedMockupVersionId,
+    required_captures: [
+      { viewport: "desktop", width: 1440, height: 1024, media_type: "image/png" },
+      { viewport: "mobile", width: 390, height: 844, media_type: "image/png" },
+    ],
+    capture_profile: {
+      renderer: "playwright",
+      pixel_ratio: 1,
+      network: "application_only",
+      locale: "en-US",
+      timezone: "UTC",
+    },
+    manifest_schema: {
+      root_keys: ["schema_version", "approved_mockup_version_id", "capture_profile", "screenshots"],
+      capture_profile_keys: [
+        "renderer",
+        "browser_name",
+        "browser_version",
+        "font_revision",
+        "pixel_ratio",
+        "network",
+        "locale",
+        "timezone",
+        "fixed_clock",
+      ],
+      screenshot_keys: ["viewport", "path", "content_hash"],
+      manifest_template: {
+        schema_version: 2,
+        approved_mockup_version_id: approvedMockupVersionId,
+        capture_profile: {
+          renderer: "playwright",
+          browser_name: "<non-empty Playwright browser name>",
+          browser_version: "<non-empty Playwright browser version>",
+          font_revision: "<64 lowercase hex SHA-256 of the exact loaded font profile>",
+          pixel_ratio: 1,
+          network: "application_only",
+          locale: "en-US",
+          timezone: "UTC",
+          fixed_clock: "<one ISO-8601 UTC instant frozen for both captures>",
+        },
+        screenshots: [
+          {
+            viewport: "desktop",
+            path: ".norns/visual-evidence/desktop-1440x1024.png",
+            content_hash: "<64 lowercase hex SHA-256 of this PNG's bytes>",
+          },
+          {
+            viewport: "mobile",
+            path: ".norns/visual-evidence/mobile-390x844.png",
+            content_hash: "<64 lowercase hex SHA-256 of this PNG's bytes>",
+          },
+        ],
+      },
+    },
+    production_rules: [
+      "Use Playwright to capture the implemented application at exactly 1440x1024 and 390x844 with deviceScaleFactor 1.",
+      "Replace every angle-bracket placeholder in the template with the observed value; do not add or omit manifest keys.",
+      "Compute each content_hash from the exact PNG file bytes using lowercase SHA-256.",
+      "Commit the manifest and both ordinary, non-symlink PNG files in the same implementation commit before verification and deployment.",
+    ],
+    commit_policy: "manifest_and_pngs_must_be_regular_files_in_the_verified_implementation_commit",
+  } as const;
 }
 
 export class Phase6MockupService {
@@ -242,6 +316,9 @@ export class Phase6MockupService {
 
     const versionId = String(parameters.mockup_version_id ?? "");
     const version = await this.lockExactVersion(tx, action, versionId, parameters);
+    if (action.action_type === "approve_mockup" && version.task_id === null) {
+      await this.assertPlanningApprovalCurrent(tx, action, version, parameters);
+    }
     const decisionId = decisionIdFor(action.action_id);
     const decision =
       action.action_type === "approve_mockup"
@@ -274,14 +351,32 @@ export class Phase6MockupService {
     );
 
     if (decision === "approved") {
-      if (!version.task_id || parameters.task_id !== version.task_id) {
+      const executionTarget =
+        version.task_id !== null &&
+        parameters.task_id === version.task_id &&
+        parameters.plan_version_id == null &&
+        parameters.module_id == null;
+      const planningTarget =
+        version.task_id === null &&
+        version.plan_version_id !== null &&
+        version.module_id !== null &&
+        parameters.task_id == null &&
+        parameters.plan_version_id === version.plan_version_id &&
+        parameters.module_id === version.module_id;
+      if (!executionTarget && !planningTarget) {
         throw new Phase6MockupError(
           "action_conflict",
-          "approval does not identify the mockup version's exact task",
+          "approval does not identify the mockup version's exact task or planning module",
         );
       }
-      await this.insertApprovalSupplement(tx, action, version, decisionId, decidedAt);
-      return { state: "applied", resource_type: "task", resource_id: version.task_id };
+      if (executionTarget) {
+        await this.insertApprovalSupplement(tx, action, version, decisionId, decidedAt);
+      }
+      return {
+        state: "applied",
+        resource_type: executionTarget ? "task" : "project",
+        resource_id: executionTarget ? (version.task_id as string) : action.work_item_id,
+      };
     }
     if (decision === "revision_requested") {
       const source = (
@@ -368,7 +463,11 @@ export class Phase6MockupService {
   private versionSelect(): string {
     return `SELECT version.id,version.root_request_id,version.request_id,
                    version.project_id,version.work_item_id,version.conversation_id,
-                   version.task_id,version.created_by_action_id,version.version,
+                   version.task_id,
+                   NULLIF(root_action.payload->'parameters'->>'plan_version_id','')
+                     AS plan_version_id,
+                   NULLIF(root_action.payload->'parameters'->>'module_id','') AS module_id,
+                   version.created_by_action_id,version.version,
                    version.brief,version.target,version.interaction_notes,
                    version.manifest_artifact_id,version.manifest_artifact_hash,
                    version.canonical_manifest,version.renderer_profile,
@@ -379,6 +478,10 @@ export class Phase6MockupService {
                       WHERE successor.supersedes_mockup_version_id=version.id
                    ) AS has_successor
               FROM conversation_mockup_versions version
+              JOIN conversation_mockup_requests root_request
+                ON root_request.id=version.root_request_id
+              JOIN conversation_actions root_action
+                ON root_action.id=root_request.action_id
               LEFT JOIN conversation_mockup_decisions decision
                 ON decision.mockup_version_id=version.id`;
   }
@@ -446,6 +549,82 @@ export class Phase6MockupService {
     return version;
   }
 
+  private async assertPlanningApprovalCurrent(
+    tx: V2SqlExecutor,
+    action: Phase6CheckpointAction,
+    version: MockupVersionRow,
+    parameters: Record<string, unknown>,
+  ): Promise<void> {
+    const work = (
+      await tx.query<{ status: string }>(
+        `SELECT status FROM work_items
+          WHERE project_id=$1 AND id=$2 FOR UPDATE`,
+        [action.project_id, action.work_item_id],
+      )
+    ).rows[0];
+    const conversation = (
+      await tx.query<{ status: string; kind: string }>(
+        `SELECT status,kind FROM work_conversations
+          WHERE project_id=$1 AND work_item_id=$2 AND id=$3 FOR UPDATE`,
+        [action.project_id, action.work_item_id, action.conversation_id],
+      )
+    ).rows[0];
+    const currentPlan = (
+      await tx.query<{ id: string }>(
+        `SELECT plan.id
+           FROM work_plan_versions plan
+          WHERE plan.project_id=$1 AND plan.work_item_id=$2
+            AND plan.conversation_id=$3
+            AND plan.status IN ('candidate','in_qc','changes_requested','approved')
+          ORDER BY plan.version DESC
+          LIMIT 1
+          FOR UPDATE`,
+        [action.project_id, action.work_item_id, action.conversation_id],
+      )
+    ).rows[0];
+    const targetPlanId = String(parameters.plan_version_id ?? "");
+    const targetModuleId = String(parameters.module_id ?? "");
+    const target = await tx.query<{ id: string }>(
+      `SELECT id FROM work_plan_versions
+        WHERE id=$1 AND project_id=$2 AND work_item_id=$3 AND conversation_id=$4
+          AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements(plan->'plan'->'modules') module
+             WHERE module->>'id'=$5
+          )`,
+      [
+        targetPlanId,
+        action.project_id,
+        action.work_item_id,
+        action.conversation_id,
+        targetModuleId,
+      ],
+    );
+    const transition = await tx.query<{ id: string }>(
+      `SELECT id FROM conversation_handoffs
+        WHERE project_id=$1 AND work_item_id=$2 AND source_conversation_id=$3
+        LIMIT 1`,
+      [action.project_id, action.work_item_id, action.conversation_id],
+    );
+    if (
+      !work ||
+      !conversation ||
+      conversation.kind !== "planning" ||
+      conversation.status !== "active" ||
+      !["planning", "in_qc", "awaiting_approval"].includes(work.status) ||
+      !currentPlan ||
+      currentPlan.id !== targetPlanId ||
+      version.plan_version_id !== targetPlanId ||
+      version.module_id !== targetModuleId ||
+      !target.rows[0] ||
+      transition.rows[0]
+    ) {
+      throw new Phase6MockupError(
+        "action_conflict",
+        "planning mockup approval is stale because its plan/module is no longer current",
+      );
+    }
+  }
+
   private async insertApprovalSupplement(
     tx: V2SqlExecutor,
     action: Phase6CheckpointAction,
@@ -491,6 +670,9 @@ export class Phase6MockupService {
       interaction_notes: projected.interaction_notes,
       renderer_profile: projected.renderer_profile,
       screenshots: projected.screenshots,
+      implementation_visual_evidence_requirement: implementationVisualEvidenceRequirement(
+        version.id,
+      ),
     };
     const canonical = canonicalJson(supplement);
     const bytes = Buffer.from(canonical, "utf8");
@@ -579,12 +761,18 @@ export class Phase6MockupWorker {
           `SELECT request.id,request.project_id,request.work_item_id,
                   request.conversation_id,request.action_id,
                   action.initiated_by_user_id,request.task_id,
+                  NULLIF(root_action.payload->'parameters'->>'plan_version_id','')
+                    AS plan_version_id,
+                  NULLIF(root_action.payload->'parameters'->>'module_id','') AS module_id,
                   task.phase_id,
                   request.root_request_id,request.source_mockup_version_id,
                   request.brief,request.target,request.artifact_refs,
                   request.revision_direction,request.attempts
              FROM conversation_mockup_requests request
              JOIN conversation_actions action ON action.id=request.action_id
+             JOIN conversation_mockup_requests root_request
+               ON root_request.id=request.root_request_id
+             JOIN conversation_actions root_action ON root_action.id=root_request.action_id
              LEFT JOIN tasks task ON task.id=request.task_id
             WHERE request.status='queued' AND request.available_at<=now()
             ORDER BY request.available_at,request.created_at,request.id
@@ -786,6 +974,8 @@ export class Phase6MockupWorker {
         root_request_id: request.root_request_id,
         request_id: request.id,
         task_id: request.task_id,
+        plan_version_id: request.plan_version_id,
+        module_id: request.module_id,
         version: versionNumber,
         brief: request.brief,
         target: request.target,
