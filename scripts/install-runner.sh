@@ -36,7 +36,7 @@ case "$SERVER_URL" in http://*|https://*) ;; *) printf '%s\n' "--server URL is r
 case "$RUNNER_ID" in *[!A-Za-z0-9._-]*) printf '%s\n' "Invalid helper id" >&2; exit 1 ;; esac
 command -v git >/dev/null 2>&1 || { printf '%s\n' "Git is required." >&2; exit 1; }
 command -v node >/dev/null 2>&1 || { printf '%s\n' "Node.js 24 or newer is required." >&2; exit 1; }
-[ "$(node -p 'Number(process.versions.node.split(\".\")[0])')" -ge 24 ] ||
+[ "$(node -p 'Number(process.versions.node.split(".")[0])')" -ge 24 ] ||
   { printf '%s\n' "Node.js 24 or newer is required." >&2; exit 1; }
 
 SRC_DIR="$ROOT_DIR/helper"

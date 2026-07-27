@@ -1,5 +1,14 @@
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { type HelperRunnerSnapshot, helperStatus } from "../src/runners/helperOnboarding.js";
+
+const installerPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../scripts/install-runner.sh",
+);
 
 function runner(overrides: Partial<HelperRunnerSnapshot> = {}): HelperRunnerSnapshot {
   return {
@@ -27,5 +36,13 @@ describe("local helper capability status", () => {
       runner_id: "runner-1",
       message: expect.stringMatching(/out of date/i),
     });
+  });
+});
+
+describe("local helper installer", () => {
+  it("runs the shipped Node version check as valid JavaScript", () => {
+    const versionCheck = `[ "$(node -p 'Number(process.versions.node.split(".")[0])')" -ge 24 ]`;
+    expect(readFileSync(installerPath, "utf8")).toContain(versionCheck);
+    expect(() => execFileSync("sh", ["-c", versionCheck])).not.toThrow();
   });
 });
