@@ -1458,8 +1458,8 @@ export function Projects({
       );
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
+    <div className={dialog ? "full-page-view project-setup-view" : "app-shell"}>
+      <header className="topbar" hidden={dialog}>
         <div className="topbar-main">
           <Brand />
           <span className="topbar-location">Portfolio</span>
@@ -1474,8 +1474,10 @@ export function Projects({
           />
         ) : null}
       </header>
-      <ProjectTabs projects={openProjects} onSelect={onOpenProject} onClose={onCloseProject} />
-      <main className="page project-dashboard">
+      {!dialog ? (
+        <ProjectTabs projects={openProjects} onSelect={onOpenProject} onClose={onCloseProject} />
+      ) : null}
+      <main className="page project-dashboard" hidden={dialog}>
         {error ? <Alert testId="projects-error">{error}</Alert> : null}
         <div className="dashboard-focus-grid">
           <section
@@ -1689,9 +1691,10 @@ export function Projects({
               </div>
               <span className="muted" aria-live="polite">
                 {attentionPolling.error ? "Refresh failed · data from " : "Updated "}
-                {new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(
-                  new Date(attention.generated_at),
-                )}
+                {new Intl.DateTimeFormat(undefined, {
+                  hour: "numeric",
+                  minute: "2-digit",
+                }).format(new Date(attention.generated_at))}
               </span>
             </div>
             <div className="attention-summary" aria-label="Portfolio attention summary">
@@ -2101,10 +2104,50 @@ export function Projects({
 
       {dialog ? (
         <main className="page wizard-page" aria-label="New project">
+          <header className="full-page-header project-setup-header">
+            <div className="full-page-header-title">
+              <Brand />
+              <span>New project</span>
+            </div>
+            <Button variant="ghost" className="btn-small" onClick={closeWizard}>
+              ← Dashboard
+            </Button>
+          </header>
+          <aside className="project-setup-guide" aria-label="Project setup guide">
+            <div className="eyebrow">Guided setup</div>
+            <h1>Start with the essentials.</h1>
+            <p>
+              Tell The Norns where the work lives and what success looks like. You stay in control
+              before any coding begins.
+            </p>
+            <ol>
+              <li>
+                <span>01</span>
+                <div>
+                  <strong>Choose the project</strong>
+                  <small>Start fresh or bring in existing work.</small>
+                </div>
+              </li>
+              <li>
+                <span>02</span>
+                <div>
+                  <strong>Pick the workspace</strong>
+                  <small>Connect GitHub or an approved local repository.</small>
+                </div>
+              </li>
+              <li>
+                <span>03</span>
+                <div>
+                  <strong>Set the first outcome</strong>
+                  <small>Describe the brief and review the setup before launch.</small>
+                </div>
+              </li>
+            </ol>
+          </aside>
           <section className="wizard-shell card">
             <div className="section-head">
               <div>
-                <div className="eyebrow">New project</div>
+                <div className="eyebrow">Project setup</div>
                 <h2>Let's set the brief</h2>
                 <p className="muted">
                   {wizardStep === "attach"
@@ -2118,9 +2161,6 @@ export function Projects({
                       : "Start fresh or bring an existing codebase into The Norns. Nothing runs until you approve the plan."}
                 </p>
               </div>
-              <Button variant="ghost" className="btn-small" onClick={closeWizard}>
-                ×
-              </Button>
             </div>
             {wizardStep === "attach" && draftProject ? (
               <div className="form-stack wizard-attach-step" data-testid="wizard-attach-step">

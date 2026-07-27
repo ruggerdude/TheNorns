@@ -66,6 +66,22 @@ describe("project dashboard entry and removal", () => {
     expect(createButton.closest("header")).toBeNull();
   });
 
+  it("opens project setup as a dedicated page and returns to the dashboard", async () => {
+    setup();
+    await screen.findByRole("link", { name: "Enter Alpha" });
+
+    await userEvent.click(screen.getByRole("button", { name: "+ New project" }));
+
+    expect(screen.getByRole("main", { name: "New project" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "Project setup guide" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Quick access" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Enter Alpha" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "← Dashboard" }));
+    expect(await screen.findByRole("heading", { name: "Quick access" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Enter Alpha" })).toBeInTheDocument();
+  });
+
   it("enters a project from the full dashboard row by click or keyboard", async () => {
     setup();
     const alphaRow = await screen.findByRole("link", { name: "Enter Alpha" });
