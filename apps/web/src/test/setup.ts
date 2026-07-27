@@ -28,6 +28,10 @@ if (typeof globalThis.matchMedia === "undefined") {
   })) as unknown as typeof matchMedia;
 }
 
+if (typeof HTMLElement.prototype.scrollTo === "undefined") {
+  HTMLElement.prototype.scrollTo = () => undefined;
+}
+
 afterEach(() => {
   cleanup();
   sessionStorage.clear();

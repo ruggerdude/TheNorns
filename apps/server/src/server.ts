@@ -14,6 +14,7 @@ import websocket from "@fastify/websocket";
 import {
   AdapterError,
   AnthropicAdapter,
+  type ConversationLlmAdapter,
   DEFAULT_MODEL_REGISTRY,
   type LlmAdapter,
   OpenAiAdapter,
@@ -61,6 +62,15 @@ import {
   AttachmentValidationError,
 } from "./attachments/index.js";
 import { bearerToken, verifyRunnerSignature } from "./auth.js";
+import {
+  ConversationContextAssembler,
+  ConversationService,
+  ConversationTurnError,
+  ConversationTurnRepository,
+  ConversationTurnService,
+  PostgresConversationRepository,
+  registerConversationRoutes,
+} from "./conversations/index.js";
 // ONBOARDING O4: Actions-hosted execution.
 import {
   type ActionsEnrollmentService,
@@ -860,6 +870,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // EXECUTION E12 — declared here, assigned far below where PhaseLaunchService
   // is constructed, so the onClose hook can clear it alongside its siblings.
   let phaseQueueDrainTimer: ReturnType<typeof setInterval> | undefined;
+  let conversationTurns: ConversationTurnService | null = null;
   if (options.phase4) {
     const dispatcher = new Phase4Dispatcher(
       options.phase4.dispatch,
@@ -917,6 +928,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (phase4RecoveryTimer) clearInterval(phase4RecoveryTimer);
     if (phaseQueueDrainTimer) clearInterval(phaseQueueDrainTimer);
     if (usageBudgetEvaluationTimer) clearInterval(usageBudgetEvaluationTimer);
+    conversationTurns?.abortAll();
     workspaceBroker.close();
   });
 
@@ -3019,6 +3031,72 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const attachmentService = options.attachments
     ? new AttachmentService(options.attachments.transactions)
     : null;
+  if (
+    projects !== undefined &&
+    attachmentService &&
+    runtimeTransactionsForInference &&
+    canonicalTelemetry
+  ) {
+    const conversationRepository = new PostgresConversationRepository(
+      runtimeTransactionsForInference,
+    );
+    const conversationService = new ConversationService(conversationRepository);
+    const conversationAttempts = new ConversationTurnRepository(runtimeTransactionsForInference);
+    conversationTurns = new ConversationTurnService(
+      conversationService,
+      new ConversationContextAssembler(runtimeTransactionsForInference),
+      conversationAttempts,
+      attachmentService,
+      canonicalTelemetry,
+      (provider, model): ConversationLlmAdapter => {
+        const apiKey =
+          provider === "anthropic"
+            ? integrationEnvironment.ANTHROPIC_API_KEY
+            : integrationEnvironment.OPENAI_API_KEY;
+        if (!apiKey?.trim()) {
+          throw new ConversationTurnError(
+            "models_unavailable",
+            `${provider} is not configured for planning conversations`,
+            503,
+          );
+        }
+        const adapter =
+          options.createPlanningAdapter?.(provider, model, apiKey) ??
+          (provider === "anthropic"
+            ? new AnthropicAdapter({ apiKey, model })
+            : new OpenAiAdapter({ apiKey, model }));
+        if (!adapter.streamConversation) {
+          throw new ConversationTurnError(
+            "streaming_unavailable",
+            `${provider}:${model} does not support streaming conversations`,
+            503,
+          );
+        }
+        // Intentionally raw: ConversationTurnService owns the one canonical
+        // request trace so attempt and usage identities cannot be double-driven.
+        return adapter as ConversationLlmAdapter;
+      },
+      { now },
+    );
+    await conversationAttempts.reconcileOrphans();
+    registerConversationRoutes(app, {
+      requireUser: requireSessionUser,
+      conversations: conversationService,
+      turns: conversationTurns,
+      attempts: conversationAttempts,
+      pinForProject: async (projectId) => {
+        const selected = await projects.pmSelectionOf(projectId);
+        return {
+          provider: selected.provider,
+          model:
+            selected.model ??
+            (selected.provider === "anthropic"
+              ? (integrationEnvironment.NORNS_PM_MODEL ?? DEFAULT_PM_MODEL.anthropic)
+              : (integrationEnvironment.NORNS_OPENAI_MODEL ?? DEFAULT_PM_MODEL.openai)),
+        };
+      },
+    });
+  }
   if (projects !== undefined) {
     const projectError = (reply: FastifyReply, error: unknown): void => {
       if (error instanceof ProjectNotFoundError) {

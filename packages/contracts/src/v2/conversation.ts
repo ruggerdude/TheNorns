@@ -12,6 +12,12 @@ import {
 const schemaVersion = z.literal(2);
 const nullableDate = V2IsoDateTime.nullable();
 const nonNegativeInteger = z.number().int().nonnegative();
+const visibleContentString = z
+  .string()
+  .refine(
+    (value) => /\S/u.test(value.replace(/(?:\u200B|\u200C|\u200D|\u2060|\uFEFF)/gu, "")),
+    "visible content cannot be blank or zero-width-only",
+  );
 
 export const V2WorkItemStatus = z.enum([
   "planning",
@@ -103,14 +109,14 @@ export const V2MessageTextPart = z
   .object({
     type: z.literal("text"),
     format: z.enum(["plain", "markdown"]),
-    text: V2NonEmptyString,
+    text: visibleContentString,
   })
   .strict();
 
 export const V2MessageCodePart = z
   .object({
     type: z.literal("code"),
-    code: V2NonEmptyString,
+    code: visibleContentString,
     language: V2NonEmptyString.nullable(),
   })
   .strict();
@@ -253,6 +259,7 @@ export type V2WorkMessageAttachmentRefT = z.infer<typeof V2WorkMessageAttachment
 export const V2ConversationContextEntry = z
   .object({
     kind: z.enum([
+      "prompt",
       "global_rules",
       "project_rules",
       "project_knowledge",

@@ -8,7 +8,12 @@ import { z } from "zod";
 import { AnthropicAdapter } from "../src/anthropic.js";
 import { OpenAiAdapter } from "../src/openai.js";
 import { DEFAULT_MODEL_REGISTRY, estimateCostUsd } from "../src/registry.js";
-import { AdapterError, type LlmAdapter } from "../src/types.js";
+import {
+  AdapterError,
+  type ConversationLlmAdapter,
+  type ConversationStreamEvent,
+  type LlmAdapter,
+} from "../src/types.js";
 import { type MockProvider, startMockProvider } from "./mockProvider.js";
 
 let mock: MockProvider;
@@ -146,5 +151,47 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
     );
     expect(error).toBeInstanceOf(AdapterError);
     expect((error as AdapterError).kind).toBe("cancelled");
+  });
+
+  it("streams only visible text and settles exact usage", async () => {
+    const adapter = make() as ConversationLlmAdapter;
+    const stream = await adapter.streamConversation({
+      system: "You are the project PM.",
+      messages: [
+        { role: "user", content: "first" },
+        { role: "assistant", content: "visible history" },
+        { role: "user", content: "say hello" },
+      ],
+      ...attribution,
+    });
+    const events: ConversationStreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+    expect(events[0]).toEqual({
+      type: "response_started",
+      provider_execution_id: name === "anthropic" ? "msg_mock" : "resp_mock",
+    });
+    expect(
+      events
+        .filter((event) => event.type === "text_delta")
+        .map((event) => event.delta)
+        .join(""),
+    ).toBe("hello from the mock provider");
+    expect(events.at(-1)).toMatchObject({
+      type: "finish",
+      result: {
+        provider_execution_id: name === "anthropic" ? "msg_mock" : "resp_mock",
+        usage: {
+          input_tokens: 120,
+          output_tokens: 45,
+          usage_source: "provider_api",
+        },
+      },
+    });
+    expect(
+      events.some((event) => {
+        const type = String(event.type);
+        return type.includes("reasoning") || type.includes("thinking");
+      }),
+    ).toBe(false);
   });
 });

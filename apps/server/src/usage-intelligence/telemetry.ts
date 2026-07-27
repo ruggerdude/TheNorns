@@ -1,7 +1,10 @@
 import {
   AdapterError,
+  type CompletionAttribution,
   type CompletionRequest,
   type CompletionResult,
+  type ConversationRequest,
+  type ConversationStreamEvent,
   type LlmAdapter,
   type StructuredResult,
 } from "@norns/adapters";
@@ -474,7 +477,7 @@ function observation(usage: UsageEventT, providerRequestId?: string): AiUsageObs
   };
 }
 
-function scope(request: CompletionRequest): AiInvocationScope {
+function scope(request: CompletionAttribution): AiInvocationScope {
   return {
     initiatedByUserId: request.initiatedByUserId ?? null,
     projectId: request.projectId,
@@ -510,6 +513,88 @@ class TelemetryLlmAdapter implements LlmAdapter {
     );
   }
 
+  async streamConversation(
+    request: ConversationRequest,
+  ): Promise<AsyncIterable<ConversationStreamEvent>> {
+    const startedAt = Date.now();
+    const trace = await this.telemetry.start({
+      ...(request.telemetryRequestId ? { requestId: request.telemetryRequestId } : {}),
+      provider: this.provider,
+      model: this.model,
+      endpoint: endpointFor(this.provider),
+      requestType: "conversation_turn",
+      retryGroupId: request.telemetryRetryGroupId ?? null,
+      retryAttempt: request.telemetryRetryAttempt ?? 0,
+      ...scope(request),
+    });
+    const adapter = this.adapter;
+    return (async function* meteredConversationStream() {
+      let terminal = false;
+      let failed = false;
+      try {
+        if (!adapter.streamConversation) {
+          throw new AdapterError(
+            "invalid_request",
+            "adapter does not support streaming conversations",
+          );
+        }
+        const stream = await adapter.streamConversation(request);
+        for await (const event of stream) {
+          if (event.type === "finish") {
+            await trace.observe(
+              observation(event.result.usage, event.result.provider_execution_id),
+            );
+            await trace.complete({
+              latencyMs: event.result.latency_ms ?? Math.max(0, Date.now() - startedAt),
+              providerRequestId: event.result.provider_execution_id,
+            });
+            terminal = true;
+          }
+          yield event;
+        }
+        if (!terminal) {
+          throw new AdapterError(
+            "invalid_response",
+            "provider stream ended without terminal usage",
+          );
+        }
+      } catch (error) {
+        failed = true;
+        const adapterError = error instanceof AdapterError ? error : null;
+        const metadata = adapterError?.metadata;
+        if (metadata?.usage) {
+          await trace.observe(observation(metadata.usage, metadata.provider_execution_id));
+        }
+        await trace.fail({
+          code: adapterError?.kind ?? "unexpected",
+          category: adapterError ? "adapter_error" : "unexpected_error",
+          messageRedacted: adapterError
+            ? `provider stream failed (${adapterError.kind})`
+            : "provider stream failed unexpectedly",
+          latencyMs: metadata?.latency_ms ?? Math.max(0, Date.now() - startedAt),
+          providerRequestId: metadata?.provider_execution_id,
+          sanitized: adapterError
+            ? {
+                retryable: adapterError.retryable,
+                request_dispatched: metadata?.request_dispatched ?? null,
+              }
+            : null,
+        });
+        throw error;
+      } finally {
+        if (!terminal && !failed) {
+          await trace.fail({
+            code: "cancelled",
+            category: "adapter_error",
+            messageRedacted: "provider stream cancelled",
+            latencyMs: Math.max(0, Date.now() - startedAt),
+            sanitized: { retryable: false, request_dispatched: null },
+          });
+        }
+      }
+    })();
+  }
+
   private async invoke<T extends CompletionResult | StructuredResult<unknown>>(
     request: CompletionRequest,
     requestType: string,
@@ -517,6 +602,7 @@ class TelemetryLlmAdapter implements LlmAdapter {
   ): Promise<T> {
     const startedAt = Date.now();
     const trace = await this.telemetry.start({
+      ...(request.telemetryRequestId ? { requestId: request.telemetryRequestId } : {}),
       provider: this.provider,
       model: this.model,
       endpoint: endpointFor(this.provider),

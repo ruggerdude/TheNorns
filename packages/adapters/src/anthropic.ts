@@ -5,8 +5,11 @@ import type { z } from "zod";
 import { DEFAULT_MODEL_REGISTRY, type ModelEntry, makeUsageEvent } from "./registry.js";
 import {
   AdapterError,
+  type CompletionAttribution,
   type CompletionRequest,
   type CompletionResult,
+  type ConversationRequest,
+  type ConversationStreamEvent,
   type LlmAdapter,
   type ProviderCompletionMetadata,
   type StructuredResult,
@@ -86,6 +89,69 @@ export class AnthropicAdapter implements LlmAdapter {
     };
   }
 
+  async streamConversation(
+    request: ConversationRequest,
+  ): Promise<AsyncIterable<ConversationStreamEvent>> {
+    const adapter = this;
+    return (async function* streamVisibleConversation() {
+      const startedAt = Date.now();
+      let dispatched = false;
+      let providerExecutionId: string | null = null;
+      try {
+        const stream = adapter.client.messages.stream(
+          {
+            model: adapter.model,
+            max_tokens: request.maxTokens ?? 16_000,
+            ...(request.system !== undefined ? { system: request.system } : {}),
+            messages: adapter.conversationMessages(request),
+          },
+          request.signal !== undefined ? { signal: request.signal } : {},
+        );
+        dispatched = true;
+        for await (const event of stream) {
+          if (event.type === "message_start") {
+            providerExecutionId = event.message.id;
+            yield {
+              type: "response_started",
+              provider_execution_id: event.message.id,
+            };
+            continue;
+          }
+          if (
+            event.type === "content_block_delta" &&
+            event.delta.type === "text_delta" &&
+            event.delta.text.length > 0
+          ) {
+            yield { type: "text_delta", delta: event.delta.text };
+          }
+        }
+        const response = await stream.finalMessage();
+        const executionId = providerExecutionId ?? response.id;
+        yield {
+          type: "finish",
+          result: {
+            text: adapter.textOf(response),
+            usage: adapter.usageOf(response, request),
+            provider_execution_id: executionId,
+            finish_reason: response.stop_reason ?? "end_turn",
+            latency_ms: Math.max(0, Date.now() - startedAt),
+          },
+        };
+      } catch (error) {
+        const mapped = adapter.mapError(error);
+        if (mapped.metadata || !dispatched) throw mapped;
+        throw new AdapterError(mapped.kind, mapped.message, {
+          cause: mapped,
+          metadata: {
+            ...(providerExecutionId ? { provider_execution_id: providerExecutionId } : {}),
+            latency_ms: Math.max(0, Date.now() - startedAt),
+            request_dispatched: true,
+          },
+        });
+      }
+    })();
+  }
+
   private async call(request: CompletionRequest): Promise<Anthropic.Message> {
     try {
       return await this.client.messages.create(
@@ -121,6 +187,35 @@ export class AnthropicAdapter implements LlmAdapter {
     ];
   }
 
+  private conversationMessages(request: ConversationRequest): Anthropic.MessageParam[] {
+    if (request.messages.length === 0) {
+      throw new AdapterError("invalid_request", "conversation requires at least one message");
+    }
+    boundedImageParts(
+      request.messages.flatMap((message) =>
+        typeof message.content === "string"
+          ? []
+          : message.content.filter(
+              (part): part is import("./types.js").ImagePart => part.type === "image",
+            ),
+      ),
+    );
+    return request.messages.map((message): Anthropic.MessageParam => {
+      if (typeof message.content === "string") {
+        return { role: message.role, content: message.content };
+      }
+      const content: Anthropic.ContentBlockParam[] = message.content.map((part) =>
+        part.type === "text"
+          ? { type: "text", text: part.text }
+          : {
+              type: "image",
+              source: { type: "base64", media_type: part.mime, data: part.base64 },
+            },
+      );
+      return { role: message.role, content };
+    });
+  }
+
   private textOf(response: Anthropic.Message): string {
     return response.content
       .filter((block): block is Anthropic.TextBlock => block.type === "text")
@@ -128,7 +223,7 @@ export class AnthropicAdapter implements LlmAdapter {
       .join("");
   }
 
-  private usageOf(response: Anthropic.Message, request: CompletionRequest) {
+  private usageOf(response: Anthropic.Message, request: CompletionAttribution) {
     const cacheReadTokens = response.usage.cache_read_input_tokens ?? 0;
     const cacheWriteTokens = response.usage.cache_creation_input_tokens ?? 0;
     return makeUsageEvent(

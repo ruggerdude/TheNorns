@@ -6,8 +6,11 @@ import type { z } from "zod";
 import { DEFAULT_MODEL_REGISTRY, type ModelEntry, makeUsageEvent } from "./registry.js";
 import {
   AdapterError,
+  type CompletionAttribution,
   type CompletionRequest,
   type CompletionResult,
+  type ConversationRequest,
+  type ConversationStreamEvent,
   type LlmAdapter,
   type ProviderCompletionMetadata,
   type StructuredResult,
@@ -90,6 +93,124 @@ export class OpenAiAdapter implements LlmAdapter {
     };
   }
 
+  async streamConversation(
+    request: ConversationRequest,
+  ): Promise<AsyncIterable<ConversationStreamEvent>> {
+    const adapter = this;
+    return (async function* streamVisibleConversation() {
+      const startedAt = Date.now();
+      let providerExecutionId: string | null = null;
+      try {
+        const stream = await adapter.client.responses.create(
+          {
+            model: adapter.model,
+            input: adapter.buildConversationInput(request),
+            stream: true,
+            ...(request.system !== undefined ? { instructions: request.system } : {}),
+            ...(request.maxTokens !== undefined ? { max_output_tokens: request.maxTokens } : {}),
+            ...(adapter.reasoningEffort !== undefined
+              ? { reasoning: { effort: adapter.reasoningEffort } }
+              : {}),
+          },
+          request.signal !== undefined ? { signal: request.signal } : {},
+        );
+        for await (const event of stream) {
+          if (event.type === "response.created") {
+            providerExecutionId = event.response.id;
+            yield {
+              type: "response_started",
+              provider_execution_id: event.response.id,
+            };
+            continue;
+          }
+          if (event.type === "response.output_text.delta") {
+            if (event.delta.length > 0) yield { type: "text_delta", delta: event.delta };
+            continue;
+          }
+          if (event.type === "response.completed" || event.type === "response.incomplete") {
+            const response = event.response;
+            const executionId = providerExecutionId ?? response.id;
+            if (providerExecutionId === null) {
+              providerExecutionId = executionId;
+              yield { type: "response_started", provider_execution_id: executionId };
+            }
+            if (!response.usage) {
+              throw new AdapterError(
+                "invalid_response",
+                "OpenAI stream completed without exact usage",
+                {
+                  metadata: {
+                    provider_execution_id: executionId,
+                    ...(response.status ? { finish_reason: response.status } : {}),
+                    latency_ms: Math.max(0, Date.now() - startedAt),
+                    request_dispatched: true,
+                  },
+                },
+              );
+            }
+            const finishReason =
+              response.incomplete_details?.reason ?? response.status ?? "completed";
+            yield {
+              type: "finish",
+              result: {
+                text: response.output_text,
+                usage: adapter.usageOf(response, request),
+                provider_execution_id: executionId,
+                finish_reason: finishReason,
+                latency_ms: Math.max(0, Date.now() - startedAt),
+              },
+            };
+            return;
+          }
+          if (event.type === "response.failed") {
+            const response = event.response;
+            const executionId = providerExecutionId ?? response.id;
+            if (providerExecutionId === null) {
+              providerExecutionId = executionId;
+              yield { type: "response_started", provider_execution_id: executionId };
+            }
+            throw new AdapterError("server", response.error?.message ?? "OpenAI response failed", {
+              metadata: {
+                provider_execution_id: executionId,
+                ...(response.status ? { finish_reason: response.status } : {}),
+                latency_ms: Math.max(0, Date.now() - startedAt),
+                ...(response.usage ? { usage: adapter.usageOf(response, request) } : {}),
+                request_dispatched: true,
+              },
+            });
+          }
+          if (event.type === "error") {
+            throw new AdapterError("server", event.message, {
+              metadata: {
+                ...(providerExecutionId ? { provider_execution_id: providerExecutionId } : {}),
+                latency_ms: Math.max(0, Date.now() - startedAt),
+                request_dispatched: true,
+              },
+            });
+          }
+        }
+        throw new AdapterError("invalid_response", "OpenAI stream ended without a terminal event", {
+          metadata: {
+            ...(providerExecutionId ? { provider_execution_id: providerExecutionId } : {}),
+            latency_ms: Math.max(0, Date.now() - startedAt),
+            request_dispatched: providerExecutionId !== null,
+          },
+        });
+      } catch (error) {
+        const mapped = adapter.mapError(error);
+        if (mapped.metadata || providerExecutionId === null) throw mapped;
+        throw new AdapterError(mapped.kind, mapped.message, {
+          cause: mapped,
+          metadata: {
+            provider_execution_id: providerExecutionId,
+            latency_ms: Math.max(0, Date.now() - startedAt),
+            request_dispatched: true,
+          },
+        });
+      }
+    })();
+  }
+
   private async call(request: CompletionRequest): Promise<OpenAI.Responses.Response> {
     try {
       return await this.client.responses.create(
@@ -134,11 +255,50 @@ export class OpenAiAdapter implements LlmAdapter {
     ];
   }
 
+  private buildConversationInput(request: ConversationRequest): OpenAI.Responses.ResponseInput {
+    if (request.messages.length === 0) {
+      throw new AdapterError("invalid_request", "conversation requires at least one message");
+    }
+    boundedImageParts(
+      request.messages.flatMap((message) =>
+        typeof message.content === "string"
+          ? []
+          : message.content.filter(
+              (part): part is import("./types.js").ImagePart => part.type === "image",
+            ),
+      ),
+    );
+    return request.messages.map((message) => {
+      if (typeof message.content === "string") {
+        return { role: message.role, content: message.content };
+      }
+      if (message.role === "assistant") {
+        const text = message.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("");
+        return { role: "assistant", content: text };
+      }
+      return {
+        role: "user",
+        content: message.content.map((part) =>
+          part.type === "text"
+            ? ({ type: "input_text", text: part.text } as const)
+            : ({
+                type: "input_image",
+                image_url: `data:${part.mime};base64,${part.base64}`,
+                detail: "auto",
+              } as const),
+        ),
+      };
+    });
+  }
+
   private textOf(response: OpenAI.Responses.Response): string {
     return response.output_text;
   }
 
-  private usageOf(response: OpenAI.Responses.Response, request: CompletionRequest) {
+  private usageOf(response: OpenAI.Responses.Response, request: CompletionAttribution) {
     const cacheReadTokens = response.usage?.input_tokens_details.cached_tokens ?? 0;
     const cacheWriteTokens = response.usage?.input_tokens_details.cache_write_tokens ?? 0;
     return makeUsageEvent(

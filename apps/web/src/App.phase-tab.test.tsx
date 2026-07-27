@@ -209,7 +209,7 @@ describe("PHASE TAB (P2)", () => {
 
     const user = await openPhaseTab();
 
-    expect(screen.getByTestId("phase-goal")).toBeInTheDocument();
+    expect(await screen.findByTestId("phase-goal")).toBeInTheDocument();
     expect(screen.getByTestId("phase-mode-quick")).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByTestId("phase-quick-summary")).toHaveTextContent("no reviewer");
     expect(screen.getByTestId("phase-identity-line")).toHaveTextContent(

@@ -96,6 +96,26 @@ describe("V2 conversation contracts", () => {
         visibility_status: "streaming",
       }).success,
     ).toBe(false);
+    for (const invisible of ["   \n\t", "\u200b\u200d\u2060\ufeff"]) {
+      expect(
+        V2WorkMessage.safeParse({
+          ...base,
+          parts: [{ type: "text", format: "markdown", text: invisible }],
+        }).success,
+      ).toBe(false);
+      expect(
+        V2WorkMessage.safeParse({
+          ...base,
+          parts: [{ type: "code", language: null, code: invisible }],
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      V2WorkMessage.parse({
+        ...base,
+        parts: [{ type: "text", format: "markdown", text: "  Visible" }],
+      }).parts,
+    ).toEqual([{ type: "text", format: "markdown", text: "  Visible" }]);
   });
 
   it("allows only visible assistant output to be mutable in flight", () => {

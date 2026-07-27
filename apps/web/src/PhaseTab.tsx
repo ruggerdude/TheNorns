@@ -12,7 +12,7 @@ import {
 //   e. Execution status table once approved (fast/idle poll cadence)
 // ALL fetches go through phaseTabApi.ts (single reconciliation point for the
 // integrator); this file renders and holds state only.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AttachmentInput } from "./AttachmentInput";
 import "./PhaseTab.css";
 import { UnauthorizedError } from "./auth";
@@ -38,6 +38,12 @@ import {
   startPhasePlanningRun,
 } from "./phaseTabApi";
 import { Alert, Badge, Button, Field, Select, Spinner, TextArea } from "./ui";
+
+const ConversationWorkspace = lazy(() =>
+  import("./ConversationWorkspace").then(({ ConversationWorkspace }) => ({
+    default: ConversationWorkspace,
+  })),
+);
 
 const RUN_ACTIVE_POLL_MS = 3_000;
 const RUN_IDLE_POLL_MS = 15_000;
@@ -265,7 +271,23 @@ function runStatusLabel(run: PhasePlanningRunDto): string {
   }
 }
 
-export function PhaseTab({
+export interface PhaseTabProps {
+  projectId: string;
+  initialRunId?: string | null;
+  initialConversationId?: string | null;
+  initialNewConversation?: boolean;
+  designatedExecution?: PhaseDesignatedExecutionSnapshot | null;
+  composerRequested?: boolean;
+  onComposerOpened?: () => void;
+  onRunStarted?: (runId: string) => void;
+  onJourneyChanged?: () => void;
+  onOpenRecoveryDetails?: (phaseId: string) => void;
+  onConversationSelected?: (conversationId: string, replace?: boolean) => void;
+  onNewConversation?: () => void;
+  onUnauthorized: () => void;
+}
+
+function LegacyPhaseTab({
   projectId,
   initialRunId = null,
   designatedExecution = null,
@@ -275,17 +297,7 @@ export function PhaseTab({
   onJourneyChanged,
   onOpenRecoveryDetails,
   onUnauthorized,
-}: {
-  projectId: string;
-  initialRunId?: string | null;
-  designatedExecution?: PhaseDesignatedExecutionSnapshot | null;
-  composerRequested?: boolean;
-  onComposerOpened?: () => void;
-  onRunStarted?: (runId: string) => void;
-  onJourneyChanged?: () => void;
-  onOpenRecoveryDetails?: (phaseId: string) => void;
-  onUnauthorized: () => void;
-}): React.ReactElement {
+}: PhaseTabProps): React.ReactElement {
   // a/b — setup form
   const [goal, setGoal] = useState("");
   const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
@@ -1645,5 +1657,42 @@ export function PhaseTab({
         </section>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Conversation-first Work surface. The legacy phase journey remains a
+ * compatibility fallback only for deployments that have not yet installed
+ * the conversation routes; all assistant-ui and AI SDK code stays behind the
+ * dynamic import so the application entry bundle remains unchanged.
+ */
+export function PhaseTab(props: PhaseTabProps): React.ReactElement {
+  const [conversationUnsupported, setConversationUnsupported] = useState(false);
+
+  if (conversationUnsupported) return <LegacyPhaseTab {...props} />;
+
+  return (
+    <Suspense
+      fallback={
+        <section
+          className="card side-section phase-state-card phase-run-recovering"
+          aria-label="Loading conversation workspace"
+        >
+          <div className="side-body">
+            <Spinner label="Loading conversations…" />
+          </div>
+        </section>
+      }
+    >
+      <ConversationWorkspace
+        projectId={props.projectId}
+        initialConversationId={props.initialConversationId}
+        initialNewConversation={props.initialNewConversation}
+        onConversationSelected={props.onConversationSelected}
+        onNewConversation={props.onNewConversation}
+        onUnsupported={() => setConversationUnsupported(true)}
+        onUnauthorized={props.onUnauthorized}
+      />
+    </Suspense>
   );
 }

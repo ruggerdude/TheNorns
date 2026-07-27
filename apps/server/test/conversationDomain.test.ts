@@ -177,7 +177,7 @@ describe.sequential("conversation-first durable domain", () => {
     ).resolves.toBeUndefined();
     const replay = await runCurrentV2Migrations(asMigrationDatabase(pg));
     expect(replay.at(-1)).toMatchObject({
-      name: "0035_conversation_domain",
+      name: "0036_conversation_stream_lifecycle",
       applied: false,
     });
   });
@@ -366,6 +366,19 @@ describe.sequential("conversation-first durable domain", () => {
         [workItemId, conversationId, hiddenSequence.rows[0]?.sequence],
       ),
     ).rejects.toThrow(/not user-visible/);
+    await expect(
+      pg.query(
+        `INSERT INTO work_messages (
+           id, project_id, work_item_id, conversation_id, initiated_by_user_id,
+           actor_type, actor_id, role, visibility_status, sequence, parts
+         ) VALUES (
+           'zero-width-message','conversation-project',$1,$2,'conversation-member',
+           'agent','pm-1','assistant','complete',1000,
+           '[{"type":"text","format":"markdown","text":"\u200b\u2060"}]'::jsonb
+         )`,
+        [workItemId, conversationId],
+      ),
+    ).rejects.toThrow(/zero-width-only/);
   });
 
   it("normalizes attachment references and retains conversation evidence", async () => {

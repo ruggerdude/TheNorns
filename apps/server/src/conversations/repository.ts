@@ -24,6 +24,8 @@ export type ConversationPersistenceErrorCode =
   | "work_item_not_found"
   | "conversation_not_found"
   | "conversation_inactive"
+  | "turn_in_progress"
+  | "historical_retry_forbidden"
   | "conversation_kind_forbidden"
   | "approved_plan_required"
   | "action_not_found"
@@ -269,8 +271,12 @@ export interface InsertConversationAction {
 export interface ConversationRepository {
   assertProjectAccess(projectId: string, userId: string): Promise<void>;
   insertWorkItem(input: InsertWorkItem): Promise<V2WorkItemT>;
+  findWorkItem(projectId: string, workItemId: string): Promise<V2WorkItemT | null>;
+  listWorkItems(projectId: string): Promise<V2WorkItemT[]>;
   lockWorkItem(projectId: string, workItemId: string): Promise<V2WorkItemT | null>;
   insertConversation(input: InsertConversation): Promise<V2WorkConversationT>;
+  findConversation(projectId: string, conversationId: string): Promise<V2WorkConversationT | null>;
+  listConversations(projectId: string, workItemId?: string): Promise<V2WorkConversationT[]>;
   lockConversation(
     projectId: string,
     workItemId: string,
@@ -281,6 +287,7 @@ export interface ConversationRepository {
     userId: string,
     clientMessageId: string,
   ): Promise<V2WorkMessageT | null>;
+  hasActiveTurnAttempt(conversationId: string): Promise<boolean>;
   insertUserMessage(input: InsertUserMessage): Promise<V2WorkMessageT>;
   listMessages(
     projectId: string,
@@ -364,6 +371,27 @@ class SqlConversationRepository implements ConversationRepository {
     return workItem(row);
   }
 
+  async findWorkItem(projectId: string, workItemId: string): Promise<V2WorkItemT | null> {
+    const result = await this.sql.query<WorkItemRow>(
+      `SELECT ${workItemColumns}
+         FROM work_items
+        WHERE project_id=$1 AND id=$2`,
+      [projectId, workItemId],
+    );
+    return result.rows[0] ? workItem(result.rows[0]) : null;
+  }
+
+  async listWorkItems(projectId: string): Promise<V2WorkItemT[]> {
+    const result = await this.sql.query<WorkItemRow>(
+      `SELECT ${workItemColumns}
+         FROM work_items
+        WHERE project_id=$1
+        ORDER BY updated_at DESC, created_at DESC, id DESC`,
+      [projectId],
+    );
+    return result.rows.map(workItem);
+  }
+
   async lockWorkItem(projectId: string, workItemId: string): Promise<V2WorkItemT | null> {
     const result = await this.sql.query<WorkItemRow>(
       `SELECT ${workItemColumns}
@@ -408,6 +436,30 @@ class SqlConversationRepository implements ConversationRepository {
     return conversation(row);
   }
 
+  async findConversation(
+    projectId: string,
+    conversationId: string,
+  ): Promise<V2WorkConversationT | null> {
+    const result = await this.sql.query<ConversationRow>(
+      `SELECT ${conversationColumns}
+         FROM work_conversations
+        WHERE project_id=$1 AND id=$2`,
+      [projectId, conversationId],
+    );
+    return result.rows[0] ? conversation(result.rows[0]) : null;
+  }
+
+  async listConversations(projectId: string, workItemId?: string): Promise<V2WorkConversationT[]> {
+    const result = await this.sql.query<ConversationRow>(
+      `SELECT ${conversationColumns}
+         FROM work_conversations
+        WHERE project_id=$1 AND ($2::text IS NULL OR work_item_id=$2)
+        ORDER BY updated_at DESC, created_at DESC, id DESC`,
+      [projectId, workItemId ?? null],
+    );
+    return result.rows.map(conversation);
+  }
+
   async lockConversation(
     projectId: string,
     workItemId: string,
@@ -438,6 +490,19 @@ class SqlConversationRepository implements ConversationRepository {
       [conversationId, userId, clientMessageId],
     );
     return result.rows[0] ? message(result.rows[0]) : null;
+  }
+
+  async hasActiveTurnAttempt(conversationId: string): Promise<boolean> {
+    const result = await this.sql.query<{ active: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM conversation_turn_attempts
+          WHERE conversation_id=$1
+            AND status IN ('pending','streaming')
+       ) AS active`,
+      [conversationId],
+    );
+    return result.rows[0]?.active ?? false;
   }
 
   async insertUserMessage(input: InsertUserMessage): Promise<V2WorkMessageT> {

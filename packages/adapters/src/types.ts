@@ -54,6 +54,12 @@ export interface CompletionAttribution {
   telemetryRetryGroupId?: string | null | undefined;
   /** Zero is the initial attempt; positive values are retries. */
   telemetryRetryAttempt?: number | undefined;
+  /**
+   * Caller-stable canonical telemetry request identity. Conversation turns
+   * allocate this before their attempt row so the database can prove both
+   * records describe the same provider request.
+   */
+  telemetryRequestId?: string | undefined;
 }
 
 export interface CompletionRequest extends CompletionAttribution {
@@ -72,6 +78,45 @@ export interface CompletionRequest extends CompletionAttribution {
    */
   images?: readonly ImagePart[];
 }
+
+/**
+ * A provider-neutral, visible conversation turn. System instructions remain a
+ * separate request field so providers that distinguish system/developer input
+ * keep doing so; conversation history contains only user and assistant turns.
+ */
+export interface ConversationMessage {
+  role: "user" | "assistant";
+  content: MessageContent;
+}
+
+export interface ConversationRequest extends CompletionAttribution {
+  system?: string;
+  messages: readonly ConversationMessage[];
+  maxTokens?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Streaming exposes only provider-visible response material. Provider
+ * reasoning/thinking events are deliberately absent from this union and can
+ * therefore never be persisted accidentally by a caller.
+ */
+export type ConversationStreamEvent =
+  | {
+      type: "response_started";
+      provider_execution_id: string;
+    }
+  | {
+      type: "text_delta";
+      delta: string;
+    }
+  | {
+      type: "finish";
+      result: CompletionResult & {
+        provider_execution_id: string;
+        finish_reason: string;
+      };
+    };
 
 export function prepareStructuredOutputPrompt<T>(
   prompt: string,
@@ -120,6 +165,14 @@ export interface LlmAdapter {
     schema: z.ZodType<T>,
     schemaName: string,
   ): Promise<StructuredResult<T>>;
+  streamConversation?(
+    request: ConversationRequest,
+  ): Promise<AsyncIterable<ConversationStreamEvent>>;
+}
+
+/** The stricter boundary required by persistent conversational call sites. */
+export interface ConversationLlmAdapter extends LlmAdapter {
+  streamConversation(request: ConversationRequest): Promise<AsyncIterable<ConversationStreamEvent>>;
 }
 
 /** Provider-neutral full schema instruction used when native schema mode is unavailable. */

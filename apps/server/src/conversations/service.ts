@@ -35,6 +35,16 @@ export interface ConversationServiceOptions {
   newId?: (prefix: string) => string;
 }
 
+export interface PlanningConversationPin {
+  provider: string;
+  model: string;
+}
+
+export interface WorkItemWithConversations {
+  work_item: V2WorkItemT;
+  conversations: V2WorkConversationT[];
+}
+
 export class ConversationService {
   private readonly makeId: (prefix: string) => string;
 
@@ -60,6 +70,36 @@ export class ConversationService {
     });
   }
 
+  createPlanningWorkspace(
+    actor: ConversationActor,
+    candidate: V2CreateWorkItemInputT,
+    pin: PlanningConversationPin,
+  ): Promise<{ work_item: V2WorkItemT; conversation: V2WorkConversationT }> {
+    const input = V2CreateWorkItemInput.parse(candidate);
+    const workItemId = this.makeId("work");
+    const conversationInput = V2CreateWorkConversationInput.parse({
+      project_id: input.project_id,
+      work_item_id: workItemId,
+      kind: "planning",
+      provider: pin.provider,
+      model: pin.model,
+    });
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(input.project_id, actor.id);
+      const work_item = await repository.insertWorkItem({
+        id: workItemId,
+        actorUserId: actor.id,
+        input,
+      });
+      const conversation = await repository.insertConversation({
+        id: this.makeId("conversation"),
+        actorUserId: actor.id,
+        input: conversationInput,
+      });
+      return { work_item, conversation };
+    });
+  }
+
   createConversation(
     actor: ConversationActor,
     candidate: V2CreateWorkConversationInputT,
@@ -78,6 +118,84 @@ export class ConversationService {
         actorUserId: actor.id,
         input,
       });
+    });
+  }
+
+  createPinnedPlanningConversation(
+    actor: ConversationActor,
+    projectId: string,
+    workItemId: string,
+    pin: PlanningConversationPin,
+  ): Promise<V2WorkConversationT> {
+    return this.createConversation(actor, {
+      project_id: projectId,
+      work_item_id: workItemId,
+      kind: "planning",
+      provider: pin.provider,
+      model: pin.model,
+    });
+  }
+
+  listWorkItems(actor: ConversationActor, projectId: string): Promise<WorkItemWithConversations[]> {
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(projectId, actor.id);
+      const [items, conversations] = await Promise.all([
+        repository.listWorkItems(projectId),
+        repository.listConversations(projectId),
+      ]);
+      const byWorkItem = new Map<string, V2WorkConversationT[]>();
+      for (const conversation of conversations) {
+        const listed = byWorkItem.get(conversation.work_item_id) ?? [];
+        listed.push(conversation);
+        byWorkItem.set(conversation.work_item_id, listed);
+      }
+      return items.map((work_item) => ({
+        work_item,
+        conversations: byWorkItem.get(work_item.id) ?? [],
+      }));
+    });
+  }
+
+  listConversations(
+    actor: ConversationActor,
+    projectId: string,
+    workItemId: string,
+  ): Promise<V2WorkConversationT[]> {
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(projectId, actor.id);
+      const workItem = await repository.findWorkItem(projectId, workItemId);
+      if (!workItem) {
+        throw new ConversationPersistenceError(
+          "work_item_not_found",
+          `unknown work item "${workItemId}" in project "${projectId}"`,
+        );
+      }
+      return repository.listConversations(projectId, workItemId);
+    });
+  }
+
+  getConversation(
+    actor: ConversationActor,
+    projectId: string,
+    conversationId: string,
+  ): Promise<{ work_item: V2WorkItemT; conversation: V2WorkConversationT }> {
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(projectId, actor.id);
+      const conversation = await repository.findConversation(projectId, conversationId);
+      if (!conversation) {
+        throw new ConversationPersistenceError(
+          "conversation_not_found",
+          `unknown conversation "${conversationId}" in project "${projectId}"`,
+        );
+      }
+      const work_item = await repository.findWorkItem(projectId, conversation.work_item_id);
+      if (!work_item) {
+        throw new ConversationPersistenceError(
+          "work_item_not_found",
+          `conversation "${conversationId}" has no work item in project "${projectId}"`,
+        );
+      }
+      return { work_item, conversation };
     });
   }
 
@@ -149,6 +267,12 @@ export class ConversationService {
         throw new ConversationPersistenceError(
           "conversation_inactive",
           `conversation "${input.conversation_id}" is ${locked.status}`,
+        );
+      }
+      if (await repository.hasActiveTurnAttempt(input.conversation_id)) {
+        throw new ConversationPersistenceError(
+          "turn_in_progress",
+          "wait for or stop the active response before sending another message",
         );
       }
 

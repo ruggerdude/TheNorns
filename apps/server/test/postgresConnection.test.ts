@@ -108,6 +108,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             ai_usage_calibration_observations: "ai_usage_calibration_observations",
             shadow_read_recorded_order: true,
             conversation_domain_complete: true,
+            conversation_stream_lifecycle: "conversation_stream_lifecycle_v1",
           },
         ],
       }),
@@ -135,6 +136,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             ai_usage_calibration_observations: null,
             shadow_read_recorded_order: false,
             conversation_domain_complete: false,
+            conversation_stream_lifecycle: null,
           },
         ],
       }),
@@ -147,7 +149,42 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "planning_runs.mode, knowledge_packages, agent_handoffs, " +
         "agent_profiles.reasoning_effort, ai_usage_events, project_members, " +
         "ai_usage_calibration_observations, shadow_read_comparisons.recorded_order, " +
-        "conversation domain tables",
+        "conversation domain tables, conversation_stream_lifecycle_v1",
     });
+  });
+
+  it("fails closed on a 0035-only conversation schema without the 0036 marker", async () => {
+    const phase1ConversationOnly = {
+      query: async () => ({
+        rows: [
+          {
+            planning_mode: true,
+            knowledge_packages: "knowledge_packages",
+            agent_execution_registrations: "agent_execution_registrations",
+            agent_handoffs: "agent_handoffs",
+            knowledge_deltas: "knowledge_deltas",
+            agent_reasoning_effort: true,
+            global_rule_settings: "global_rule_settings",
+            ai_usage_events: "ai_usage_events",
+            project_owner_user_id: true,
+            project_members: "project_members",
+            usage_budget_policies: "usage_budget_policies",
+            ai_usage_calibration_observations: "ai_usage_calibration_observations",
+            shadow_read_recorded_order: true,
+            conversation_domain_complete: true,
+            conversation_stream_lifecycle: null,
+          },
+        ],
+      }),
+    };
+
+    await expect(assertCurrentRuntimeSchema(phase1ConversationOnly as never)).rejects.toMatchObject(
+      {
+        code: "runtime_schema_outdated",
+        message:
+          "database migrations are required before startup; missing: " +
+          "conversation_stream_lifecycle_v1",
+      },
+    );
   });
 });

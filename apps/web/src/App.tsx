@@ -78,6 +78,41 @@ const GraphCanvas = lazy(() =>
 );
 const UsageHub = lazy(() => import("./UsageHub").then(({ UsageHub }) => ({ default: UsageHub })));
 
+export interface WorkConversationRoute {
+  projectId: string;
+  conversationId: string | null;
+}
+
+export function projectIdFromLocation(): string | null {
+  if (typeof window === "undefined") return null;
+  const match = /^\/projects\/([^/]+)(?:\/work(?:\/[^/]+)?)?\/?$/.exec(window.location.pathname);
+  if (!match?.[1]) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+export function workConversationRouteFromLocation(): WorkConversationRoute | null {
+  if (typeof window === "undefined") return null;
+  const match = /^\/projects\/([^/]+)\/work(?:\/([^/]+))?\/?$/.exec(window.location.pathname);
+  if (!match?.[1]) return null;
+  try {
+    return {
+      projectId: decodeURIComponent(match[1]),
+      conversationId: match[2] ? decodeURIComponent(match[2]) : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function workConversationPath(projectId: string, conversationId?: string | null): string {
+  const base = `/projects/${encodeURIComponent(projectId)}/work`;
+  return conversationId ? `${base}/${encodeURIComponent(conversationId)}` : base;
+}
+
 interface Assignment {
   provider: string;
   model: string;
@@ -742,6 +777,11 @@ function ProjectGraph({
   onOpenAccount,
   onOpenAdmin,
   onOpenUsage,
+  initialWorkRoute,
+  initialConversationId,
+  onConversationSelected,
+  onNewConversation,
+  onConversationRouteCleared,
 }: {
   project: ProjectSummary;
   onBack: () => void;
@@ -753,6 +793,11 @@ function ProjectGraph({
   onOpenAccount: () => void;
   onOpenAdmin: () => void;
   onOpenUsage: () => void;
+  initialWorkRoute?: boolean;
+  initialConversationId?: string | null;
+  onConversationSelected?: (conversationId: string, replace?: boolean) => void;
+  onNewConversation?: () => void;
+  onConversationRouteCleared?: () => void;
 }): React.ReactElement {
   const { theme } = useTheme();
   const base = `/api/projects/${project.id}`;
@@ -794,8 +839,14 @@ function ProjectGraph({
   // exact same JSX/logic that existed already, just grouped under a tab.
   type WorkspaceTab = "overview" | "work" | "graph" | "members" | "debates" | "settings";
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>(
-    isCanonicalPlanningJourney && project.focus_planning_run_id ? "work" : "overview",
+    initialWorkRoute ||
+      initialConversationId ||
+      (isCanonicalPlanningJourney && project.focus_planning_run_id)
+      ? "work"
+      : "overview",
   );
+  const previousInitialWorkRoute = useRef(initialWorkRoute);
+  const suppressRouteExitReset = useRef(false);
   const [planningHistory, setPlanningHistory] = useState<PhasePlanningRunDto[] | null>(null);
   const [lastWorkspaceUpdateAt, setLastWorkspaceUpdateAt] = useState<Date | null>(null);
   const [updatePreferences, setUpdatePreferences] = useState<UpdatePreferences>(() =>
@@ -954,10 +1005,24 @@ function ProjectGraph({
   const selectWorkspaceTab = useCallback(
     (nextTab: WorkspaceTab) => {
       setWorkspaceTab(nextTab);
+      if (nextTab !== "work") {
+        suppressRouteExitReset.current = true;
+        onConversationRouteCleared?.();
+      }
       if (draftOnly && !graph) void loadLatestRelationalPlanningRun();
     },
-    [draftOnly, graph, loadLatestRelationalPlanningRun],
+    [draftOnly, graph, loadLatestRelationalPlanningRun, onConversationRouteCleared],
   );
+
+  useEffect(() => {
+    if (initialWorkRoute || initialConversationId) {
+      setWorkspaceTab("work");
+    } else if (previousInitialWorkRoute.current) {
+      if (suppressRouteExitReset.current) suppressRouteExitReset.current = false;
+      else setWorkspaceTab("overview");
+    }
+    previousInitialWorkRoute.current = initialWorkRoute;
+  }, [initialConversationId, initialWorkRoute]);
 
   // New and adopted projects hand us a transient run id so the first open is
   // immediate. A refresh loses that hint, so recover a still-running,
@@ -2276,6 +2341,8 @@ function ProjectGraph({
             <PhaseTab
               projectId={project.id}
               initialRunId={phaseJourneyRunId}
+              initialConversationId={initialConversationId}
+              initialNewConversation={Boolean(initialWorkRoute && !initialConversationId)}
               designatedExecution={phaseExecution}
               composerRequested={phaseComposerRequested}
               onComposerOpened={() => setPhaseComposerRequested(true)}
@@ -2295,6 +2362,8 @@ function ProjectGraph({
                 setWorkspaceTab("overview");
                 if (phaseId === monitoredPhaseId) void loadPhaseExecution();
               }}
+              onConversationSelected={onConversationSelected}
+              onNewConversation={onNewConversation}
               onUnauthorized={() => onLogout("Session expired. Sign in again.")}
             />
           </div>
@@ -2720,6 +2789,12 @@ export function App(): React.ReactElement {
   const [authError, setAuthError] = useState<string | null>(null);
   const [activeProject, setActiveProject] = useState<ProjectSummary | null>(null);
   const [openProjects, setOpenProjects] = useState<ProjectSummary[]>([]);
+  const [workConversationRoute, setWorkConversationRoute] = useState<WorkConversationRoute | null>(
+    () => workConversationRouteFromLocation(),
+  );
+  const [routedProjectId, setRoutedProjectId] = useState<string | null>(() =>
+    projectIdFromLocation(),
+  );
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [needsBootstrap, setNeedsBootstrap] = useState(false);
   const [inviteToken] = useState<string | null>(() => consumeInviteToken());
@@ -2774,6 +2849,63 @@ export function App(): React.ReactElement {
     };
   }, [token]);
 
+  useEffect(() => {
+    const handlePopState = () => {
+      const route = workConversationRouteFromLocation();
+      const projectId = projectIdFromLocation();
+      setWorkConversationRoute(route);
+      setRoutedProjectId(projectId);
+      if (!projectId && window.location.pathname === "/") setActiveProject(null);
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (!token || !routedProjectId) return;
+    if (activeProject?.id === routedProjectId) return;
+    let cancelled = false;
+    fetch(`/api/projects/${encodeURIComponent(routedProjectId)}`, {
+      credentials: "include",
+      headers: authHeaders(),
+    })
+      .then(async (response) => {
+        if (response.status === 401) throw new UnauthorizedError();
+        const payload = (await response.json().catch(() => ({}))) as ProjectSummary & {
+          message?: string;
+        };
+        if (!response.ok) {
+          throw new ApiError(
+            payload.message ?? `request failed: ${response.status}`,
+            response.status,
+          );
+        }
+        if (cancelled) return;
+        setOpenProjects((current) =>
+          current.some((project) => project.id === payload.id)
+            ? current.map((project) => (project.id === payload.id ? payload : project))
+            : [...current, payload],
+        );
+        setActiveProject(payload);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        if (error instanceof UnauthorizedError) {
+          clearToken();
+          setTok(null);
+          setUser(null);
+          setAuthError("Session expired. Sign in again.");
+          return;
+        }
+        setAuthError(
+          error instanceof Error ? error.message : "The project link could not be opened.",
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProject?.id, routedProjectId, token]);
+
   const authenticated = useCallback((session: AuthSession) => {
     setToken(session.token);
     setUser(session.user);
@@ -2801,11 +2933,47 @@ export function App(): React.ReactElement {
         : [...current, project],
     );
     setActiveProject(project);
+    setWorkConversationRoute(null);
+    setRoutedProjectId(project.id);
+    window.history.pushState(null, "", `/projects/${encodeURIComponent(project.id)}`);
   }, []);
 
-  const closeProject = useCallback((id: string) => {
-    setOpenProjects((current) => current.filter((project) => project.id !== id));
-    setActiveProject((active) => (active?.id === id ? null : active));
+  const closeProject = useCallback(
+    (id: string) => {
+      setOpenProjects((current) => current.filter((project) => project.id !== id));
+      if (activeProject?.id === id) {
+        setActiveProject(null);
+        setWorkConversationRoute(null);
+        setRoutedProjectId(null);
+        window.history.pushState(null, "", "/");
+      }
+    },
+    [activeProject?.id],
+  );
+
+  const openConversation = useCallback(
+    (projectId: string, conversationId: string, replace = false) => {
+      const route = { projectId, conversationId };
+      setWorkConversationRoute(route);
+      setRoutedProjectId(projectId);
+      const path = workConversationPath(projectId, conversationId);
+      if (replace) window.history.replaceState(null, "", path);
+      else if (window.location.pathname !== path) window.history.pushState(null, "", path);
+    },
+    [],
+  );
+
+  const openNewConversation = useCallback((projectId: string) => {
+    setWorkConversationRoute({ projectId, conversationId: null });
+    setRoutedProjectId(projectId);
+    window.history.replaceState(null, "", workConversationPath(projectId));
+  }, []);
+
+  const clearConversationRoute = useCallback((projectId: string) => {
+    setWorkConversationRoute(null);
+    setRoutedProjectId(projectId);
+    const path = `/projects/${encodeURIComponent(projectId)}`;
+    if (window.location.pathname !== path) window.history.pushState(null, "", path);
   }, []);
 
   const openAccount = useCallback((tab: SettingsTab = "profile") => {
@@ -2865,7 +3033,12 @@ export function App(): React.ReactElement {
       ) : (
         <ProjectGraph
           project={activeProject}
-          onBack={() => setActiveProject(null)}
+          onBack={() => {
+            setActiveProject(null);
+            setWorkConversationRoute(null);
+            setRoutedProjectId(null);
+            window.history.pushState(null, "", "/");
+          }}
           openProjects={openProjects}
           onOpenProject={openProject}
           onCloseProject={closeProject}
@@ -2874,6 +3047,17 @@ export function App(): React.ReactElement {
           onOpenAccount={openAccount}
           onOpenAdmin={() => setShowAdmin(true)}
           onOpenUsage={() => setShowUsage(true)}
+          initialWorkRoute={workConversationRoute?.projectId === activeProject.id}
+          initialConversationId={
+            workConversationRoute?.projectId === activeProject.id
+              ? workConversationRoute.conversationId
+              : null
+          }
+          onConversationSelected={(conversationId, replace) =>
+            openConversation(activeProject.id, conversationId, replace)
+          }
+          onNewConversation={() => openNewConversation(activeProject.id)}
+          onConversationRouteCleared={() => clearConversationRoute(activeProject.id)}
         />
       )}
       {showAccount && user ? (

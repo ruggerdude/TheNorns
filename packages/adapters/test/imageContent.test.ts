@@ -138,4 +138,32 @@ describe("FRONT DOOR P4 per-request image cap", () => {
     const result = await openai().complete({ prompt: "ok", images: eight, ...attribution });
     expect(result.text).toContain("hello from the mock provider");
   });
+
+  it.each([
+    ["Anthropic", anthropic],
+    ["OpenAI", openai],
+  ])("enforces the same cap across conversation history (%s)", async (_name, make) => {
+    const from = mock.requests.length;
+    const stream = await make().streamConversation({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "first" }, ...nine.slice(0, 5)] },
+        { role: "assistant", content: "visible answer" },
+        { role: "user", content: [{ type: "text", text: "second" }, ...nine.slice(5)] },
+      ],
+      ...attribution,
+    });
+    const error = await (async () => {
+      try {
+        for await (const _event of stream) {
+          // Validation must happen before the provider dispatches any event.
+        }
+        return null;
+      } catch (failure) {
+        return failure;
+      }
+    })();
+    expect(error).toBeInstanceOf(AdapterError);
+    expect(error).toMatchObject({ kind: "invalid_request", retryable: false });
+    expect(mock.requests).toHaveLength(from);
+  });
 });

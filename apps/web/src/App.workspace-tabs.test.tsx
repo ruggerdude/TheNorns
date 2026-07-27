@@ -211,7 +211,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     await user.click(pointer);
     expect(await screen.findByRole("button", { name: "Work" })).toHaveClass("on");
-    expect(screen.getByTestId("phase-goal")).toBeInTheDocument();
+    expect(await screen.findByTestId("phase-goal")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Plan" })).not.toBeInTheDocument();
   });
 
