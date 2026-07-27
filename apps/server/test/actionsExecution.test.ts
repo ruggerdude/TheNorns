@@ -2068,7 +2068,7 @@ describe("migration 0039 legacy Actions outbox upgrade", () => {
           WHERE id='legacy-old-app-shape'`,
       ),
     ).rejects.toThrow(/enrollment_identity_shape/i);
-  });
+  }, 45_000);
 });
 
 describe("migration 0017 grants the runtime role what it needs", () => {

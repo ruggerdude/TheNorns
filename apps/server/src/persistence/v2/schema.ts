@@ -4541,6 +4541,10 @@ export const conversationTurnAttempts = pgTable(
       table.id,
     ),
     uniqueIndex("conversation_turn_attempts_usage_request_unique").on(table.usageRequestId),
+    uniqueIndex("conversation_turn_attempts_id_usage_request_unique").on(
+      table.id,
+      table.usageRequestId,
+    ),
     check("conversation_turn_attempts_schema_version_check", sql`${table.schemaVersion} = 2`),
     check(
       "conversation_turn_attempts_status_check",
@@ -4631,6 +4635,87 @@ export const conversationTurnAttempts = pgTable(
       "conversation_turn_attempts_sanitized_failure_check",
       sql`${table.sanitizedFailure} IS NULL
         OR jsonb_typeof(${table.sanitizedFailure}) = 'object'`,
+    ),
+  ],
+);
+
+export const conversationInferenceReservations = pgTable(
+  "conversation_inference_reservations",
+  {
+    reservationKey: text("reservation_key")
+      .primaryKey()
+      .references(() => conversationTurnAttempts.id, { onDelete: "restrict" }),
+    usageRequestId: text("usage_request_id").notNull().unique(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    initiatedByUserId: text("initiated_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    maxInputTokens: bigint("max_input_tokens", { mode: "number" }).notNull(),
+    maxOutputTokens: bigint("max_output_tokens", { mode: "number" }).notNull(),
+    maxChargeUsd: numeric("max_charge_usd", { precision: 24, scale: 9 }).notNull(),
+    actualTokens: bigint("actual_tokens", { mode: "number" }).notNull().default(0),
+    actualChargeUsd: numeric("actual_charge_usd", { precision: 24, scale: 9 })
+      .notNull()
+      .default("0"),
+    status: text("status").notNull().default("active"),
+    dispatchStartedAt: timestamp("dispatch_started_at", {
+      withTimezone: true,
+      mode: "string",
+    }),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    foreignKey({
+      name: "conversation_inference_reservations_conversation_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId],
+      foreignColumns: [
+        workConversations.projectId,
+        workConversations.workItemId,
+        workConversations.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_inference_reservations_attempt_identity_fk",
+      columns: [table.reservationKey, table.usageRequestId],
+      foreignColumns: [conversationTurnAttempts.id, conversationTurnAttempts.usageRequestId],
+    }).onDelete("restrict"),
+    index("conversation_inference_reservations_policy_hold_idx").on(
+      table.status,
+      table.createdAt,
+      table.projectId,
+      table.initiatedByUserId,
+      table.provider,
+      table.model,
+    ),
+    check(
+      "conversation_inference_reservations_token_quote_check",
+      sql`${table.maxInputTokens} >= 0 AND ${table.maxOutputTokens} > 0`,
+    ),
+    check(
+      "conversation_inference_reservations_charge_check",
+      sql`${table.maxChargeUsd} >= 0
+        AND ${table.actualTokens} >= 0 AND ${table.actualChargeUsd} >= 0`,
+    ),
+    check(
+      "conversation_inference_reservations_status_check",
+      sql`${table.status} IN ('active','settled','released','retained_ambiguous')`,
+    ),
+    check(
+      "conversation_inference_reservations_shape_check",
+      sql`(${table.status}='active' AND ${table.resolvedAt} IS NULL
+          AND ${table.actualTokens}=0 AND ${table.actualChargeUsd}=0)
+        OR (${table.status}='released' AND ${table.resolvedAt} IS NOT NULL
+          AND ${table.actualTokens}=0 AND ${table.actualChargeUsd}=0)
+        OR (${table.status}='settled' AND ${table.resolvedAt} IS NOT NULL)
+        OR (${table.status}='retained_ambiguous' AND ${table.resolvedAt} IS NOT NULL
+          AND ${table.actualTokens}=${table.maxInputTokens}+${table.maxOutputTokens}
+          AND ${table.actualChargeUsd}=${table.maxChargeUsd})`,
     ),
   ],
 );

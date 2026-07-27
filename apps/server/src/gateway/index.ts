@@ -29,6 +29,12 @@ export {
   type GatewayRefusalCode,
   type GatewayResult,
   type GatewaySurface,
+  type ConversationGatewayAdmission,
+  type ConversationGatewayLease,
+  type ConversationInferenceBudget,
+  type ConversationInferenceQuote,
+  type ConversationInferenceReservation,
+  type ConversationInferenceScope,
   type ProviderGatewayOptions,
 } from "./providerGateway.js";
 export {

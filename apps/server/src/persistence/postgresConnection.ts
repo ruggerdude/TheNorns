@@ -103,6 +103,7 @@ interface RuntimeSchemaPosture {
   conversation_execution_handoff: string | null;
   conversation_human_steering: string | null;
   conversation_mockups_dashboard: string | null;
+  conversation_inference_reservations: string | null;
 }
 
 /**
@@ -176,7 +177,9 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
             to_regclass('public.conversation_human_steering_v1')::text
               AS conversation_human_steering,
             to_regclass('public.conversation_mockups_dashboard_v1')::text
-              AS conversation_mockups_dashboard`,
+              AS conversation_mockups_dashboard,
+            to_regclass('public.conversation_inference_reservations')::text
+              AS conversation_inference_reservations`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -199,6 +202,9 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.conversation_execution_handoff ? ["conversation_execution_handoff_v1"] : []),
     ...(!posture?.conversation_human_steering ? ["conversation_human_steering_v1"] : []),
     ...(!posture?.conversation_mockups_dashboard ? ["conversation_mockups_dashboard_v1"] : []),
+    ...(!posture?.conversation_inference_reservations
+      ? ["conversation_inference_reservations"]
+      : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

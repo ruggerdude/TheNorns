@@ -4,11 +4,14 @@ import {
   type ConversationLlmAdapter,
   type ConversationRequest,
   type ConversationStreamEvent,
+  DEFAULT_MODEL_REGISTRY,
   FakeAdapter,
 } from "@norns/adapters";
+import type { AiUsageLifecycleEventInputT, UsageEventT } from "@norns/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AttachmentService } from "../src/attachments/service.js";
 import { ConversationContextAssembler } from "../src/conversations/contextAssembler.js";
+import { SqlConversationInferenceBudget } from "../src/conversations/inferenceBudget.js";
 import {
   CONVERSATIONAL_PM_INSTRUCTIONS,
   CONVERSATIONAL_PM_PROMPT_VERSION,
@@ -16,9 +19,17 @@ import {
 import { PostgresConversationRepository } from "../src/conversations/repository.js";
 import { ConversationService } from "../src/conversations/service.js";
 import { ConversationTurnRepository } from "../src/conversations/turnRepository.js";
-import { ConversationTurnService } from "../src/conversations/turnService.js";
+import {
+  type ConversationProviderGateway,
+  ConversationTurnService,
+} from "../src/conversations/turnService.js";
+import { ProviderGateway } from "../src/gateway/providerGateway.js";
+import { estimateGatewayInputTokens } from "../src/gateway/request.js";
 import { canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
-import { SqlAiUsageTelemetryRepository } from "../src/persistence/v2/aiUsageTelemetry.js";
+import {
+  type AiUsageTelemetryRepository,
+  SqlAiUsageTelemetryRepository,
+} from "../src/persistence/v2/aiUsageTelemetry.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import { AiInvocationTelemetry } from "../src/usage-intelligence/telemetry.js";
@@ -37,6 +48,24 @@ function pngBase64(width = 3, height = 2): string {
   return Buffer.concat([signature, ihdrLength, ihdr, dimensions, trailer]).toString("base64");
 }
 
+function exactUsage(id: string): UsageEventT {
+  return {
+    id,
+    provider: "openai",
+    model: "mock-openai",
+    project_id: "stream-project",
+    node_id: null,
+    run_id: null,
+    input_tokens: 21,
+    output_tokens: 7,
+    estimated_cost_usd: 0.000112,
+    actual_cost_usd: 0.000112,
+    usage_source: "provider_api",
+    pricing_version: "mock-1",
+    occurred_at: "2026-07-27T12:00:00.000Z",
+  };
+}
+
 describe.sequential("persistent planning conversation streaming", () => {
   let pg: PGlite;
   let conversations: ConversationService;
@@ -46,6 +75,7 @@ describe.sequential("persistent planning conversation streaming", () => {
   let contexts: ConversationContextAssembler;
   let attachments: AttachmentService;
   let telemetry: AiInvocationTelemetry;
+  let gateway: ProviderGateway;
   let fake: FakeAdapter;
   let currentAdapter: ConversationLlmAdapter;
   let workItemId: string;
@@ -97,6 +127,30 @@ describe.sequential("persistent planning conversation streaming", () => {
       new SqlAiUsageTelemetryRepository(transactions),
       () => new Date("2026-07-27T12:00:00.000Z"),
     );
+    gateway = new ProviderGateway({
+      runs: { lookup: async () => null },
+      credentials: {} as never,
+      apiKey: () => "test-provider-key",
+      allowedModels: [],
+      conversationAllowedModels: ["openai/mock-openai"],
+      conversationBudget: new SqlConversationInferenceBudget(
+        transactions,
+        () => new Date("2026-07-27T12:00:00.000Z"),
+      ),
+      registry: {
+        ...DEFAULT_MODEL_REGISTRY,
+        "mock-openai": {
+          provider: "openai",
+          label: "Mock OpenAI",
+          selectable: true,
+          supports_structured_output: true,
+          input_per_mtok: 2,
+          output_per_mtok: 10,
+          pricing_version: "mock-1",
+          pricing_is_estimate: true,
+        },
+      },
+    });
     fake = new FakeAdapter("openai", "mock-openai");
     currentAdapter = fake as ConversationLlmAdapter;
     turnService = new ConversationTurnService(
@@ -106,6 +160,7 @@ describe.sequential("persistent planning conversation streaming", () => {
       attachments,
       telemetry,
       () => currentAdapter,
+      gateway,
       {
         newId: (prefix) => `${prefix}-turn-${++idSequence}`,
         now: () => new Date("2026-07-27T12:00:00.000Z"),
@@ -287,6 +342,22 @@ describe.sequential("persistent planning conversation streaming", () => {
       }),
     ).rejects.toMatchObject({ code: "turn_not_retryable" });
     expect(fake.requests).toHaveLength(1);
+    const chargedOnce = await pg.query<{ reservations: number; usage_events: number }>(
+      `SELECT
+         (SELECT count(*)::int
+            FROM conversation_inference_reservations reservation
+            JOIN conversation_turn_attempts attempt
+              ON attempt.id=reservation.reservation_key
+           WHERE attempt.triggering_message_id=$1) AS reservations,
+         (SELECT count(*)::int
+            FROM ai_usage_events usage
+            JOIN conversation_turn_attempts attempt
+              ON attempt.usage_request_id=usage.request_id
+           WHERE attempt.triggering_message_id=$1
+             AND usage.event_type='usage_observed') AS usage_events`,
+      [triggerId],
+    );
+    expect(chargedOnce.rows).toEqual([{ reservations: 1, usage_events: 1 }]);
 
     latestTriggerId = (
       await conversations.submitUserMessage(owner, {
@@ -308,6 +379,49 @@ describe.sequential("persistent planning conversation streaming", () => {
       }),
     ).rejects.toMatchObject({ code: "historical_retry_forbidden" });
     expect(fake.requests).toHaveLength(1);
+  });
+
+  it("makes the gateway lease the only dispatch boundary and rechecks the immutable pin", async () => {
+    const workspace = await conversations.createPlanningWorkspace(
+      owner,
+      {
+        project_id: "stream-project",
+        title: "Gateway dispatch boundary",
+        objective: "Prove the adapter cannot bypass its admitted provider/model pin.",
+      },
+      { provider: "openai", model: "mock-openai" },
+    );
+    const trigger = await conversations.submitUserMessage(owner, {
+      project_id: "stream-project",
+      work_item_id: workspace.work_item.id,
+      conversation_id: workspace.conversation.id,
+      client_message_id: "stream-gateway-pin",
+      parts: [{ type: "text", format: "plain", text: "Use the pinned model." }],
+    });
+    const wrongAdapter = new FakeAdapter("anthropic", "mock-anthropic");
+    currentAdapter = wrongAdapter as ConversationLlmAdapter;
+    const prepared = await turnService.prepare({
+      actor: owner,
+      projectId: "stream-project",
+      workItemId: workspace.work_item.id,
+      conversationId: workspace.conversation.id,
+      triggeringMessageId: trigger.id,
+    });
+
+    await expect(
+      prepared.run({
+        started: () => undefined,
+        text: () => undefined,
+        finished: () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    expect(wrongAdapter.requests).toHaveLength(0);
+    await expect(
+      pg.query<{ status: string }>(
+        "SELECT status FROM conversation_inference_reservations WHERE reservation_key=$1",
+        [prepared.attempt.id],
+      ),
+    ).resolves.toMatchObject({ rows: [{ status: "released" }] });
   });
 
   it("retries only the latest user turn without replaying interrupted assistant output", async () => {
@@ -652,6 +766,7 @@ describe.sequential("persistent planning conversation streaming", () => {
       attachments,
       telemetry,
       () => new FakeAdapter("openai", "mock-openai"),
+      gateway,
       {
         newId: (prefix) => `${prefix}-race-${++idSequence}`,
         now: () => new Date("2026-07-27T12:00:00.000Z"),
@@ -712,8 +827,23 @@ describe.sequential("persistent planning conversation streaming", () => {
       conversationId,
       triggeringMessageId: trigger.id,
     });
-    await expect(attempts.reconcileOrphans()).resolves.toBe(1);
     prepared.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(
+      pg.query<{ status: string }>(
+        `SELECT status FROM conversation_inference_reservations
+          WHERE reservation_key=$1`,
+        [prepared.attempt.id],
+      ),
+    ).resolves.toMatchObject({ rows: [{ status: "released" }] });
+    await pg.query(
+      `UPDATE conversation_inference_reservations
+          SET status='active',resolved_at=NULL,updated_at=now()
+        WHERE reservation_key=$1`,
+      [prepared.attempt.id],
+    );
+    await expect(attempts.reconcileOrphans()).resolves.toBe(1);
+    await expect(gateway.reconcileConversationReservations()).resolves.toBe(1);
     const stored = await attempts.latestForTrigger(
       "stream-project",
       workItemId,
@@ -735,6 +865,13 @@ describe.sequential("persistent planning conversation streaming", () => {
       { event_type: "request_started", error_category: null },
       { event_type: "request_failed", error_category: "conversation_recovery" },
     ]);
+    await expect(
+      pg.query<{ status: string }>(
+        `SELECT status FROM conversation_inference_reservations
+          WHERE reservation_key=$1`,
+        [prepared.attempt.id],
+      ),
+    ).resolves.toMatchObject({ rows: [{ status: "released" }] });
   });
 
   it("streams uploaded attachment bytes through the durable message reference", async () => {
@@ -812,5 +949,704 @@ describe.sequential("persistent planning conversation streaming", () => {
         created_by_user_id: owner.id,
       },
     ]);
+  });
+
+  it("settles exact provider usage on failure and cancellation while retaining ambiguous spend", async () => {
+    const failedTrigger = await conversations.submitUserMessage(owner, {
+      project_id: "stream-project",
+      work_item_id: workItemId,
+      conversation_id: conversationId,
+      client_message_id: "stream-client-exact-failure",
+      parts: [{ type: "text", format: "plain", text: "Fail after exact usage." }],
+    });
+    const failedUsage = exactUsage("usage-exact-failure");
+    const exactFailure = new FakeAdapter("openai", "mock-openai");
+    exactFailure.streamConversation = async () =>
+      (async function* failWithUsage() {
+        yield { type: "response_started" as const, provider_execution_id: "exact-failure" };
+        throw new AdapterError("invalid_response", "bad terminal payload", {
+          metadata: {
+            provider_execution_id: "exact-failure",
+            request_dispatched: true,
+            usage: failedUsage,
+          },
+        });
+      })();
+    currentAdapter = exactFailure as ConversationLlmAdapter;
+    const failed = await turnService.prepare({
+      actor: owner,
+      projectId: "stream-project",
+      workItemId,
+      conversationId,
+      triggeringMessageId: failedTrigger.id,
+    });
+    await expect(
+      failed.run({
+        started: () => undefined,
+        text: () => undefined,
+        finished: () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
+
+    const cancelledTrigger = await conversations.submitUserMessage(owner, {
+      project_id: "stream-project",
+      work_item_id: workItemId,
+      conversation_id: conversationId,
+      client_message_id: "stream-client-exact-cancel",
+      parts: [{ type: "text", format: "plain", text: "Cancel after exact usage." }],
+    });
+    const cancelledUsage = exactUsage("usage-exact-cancel");
+    const exactCancellation = new FakeAdapter("openai", "mock-openai");
+    let capturedMaxTokens: number | undefined;
+    exactCancellation.streamConversation = async (request) =>
+      (async function* cancelWithUsage() {
+        capturedMaxTokens = request.maxTokens;
+        yield { type: "response_started" as const, provider_execution_id: "exact-cancel" };
+        await new Promise<void>((resolve) => {
+          if (request.signal?.aborted) resolve();
+          else request.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        throw new AdapterError("cancelled", "cancelled", {
+          metadata: {
+            provider_execution_id: "exact-cancel",
+            request_dispatched: true,
+            usage: cancelledUsage,
+          },
+        });
+      })();
+    currentAdapter = exactCancellation as ConversationLlmAdapter;
+    const cancelled = await turnService.prepare({
+      actor: owner,
+      projectId: "stream-project",
+      workItemId,
+      conversationId,
+      triggeringMessageId: cancelledTrigger.id,
+    });
+    let started: (() => void) | undefined;
+    const didStart = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const cancellation = cancelled.run({
+      started: () => started?.(),
+      text: () => undefined,
+      finished: () => undefined,
+    });
+    await didStart;
+    expect(capturedMaxTokens).toBe(16_000);
+    await turnService.stop(owner, "stream-project", conversationId, cancelled.attempt.id);
+    await expect(cancellation).rejects.toMatchObject({ code: "cancelled" });
+
+    const undispatchedTrigger = await conversations.submitUserMessage(owner, {
+      project_id: "stream-project",
+      work_item_id: workItemId,
+      conversation_id: conversationId,
+      client_message_id: "stream-client-undispatched-failure",
+      parts: [{ type: "text", format: "plain", text: "Fail before dispatch." }],
+    });
+    const undispatched = new FakeAdapter("openai", "mock-openai");
+    undispatched.streamConversation = async () => {
+      throw new AdapterError("network", "connection refused", {
+        metadata: { request_dispatched: false },
+      });
+    };
+    currentAdapter = undispatched as ConversationLlmAdapter;
+    const notSent = await turnService.prepare({
+      actor: owner,
+      projectId: "stream-project",
+      workItemId,
+      conversationId,
+      triggeringMessageId: undispatchedTrigger.id,
+    });
+    await expect(
+      notSent.run({
+        started: () => undefined,
+        text: () => undefined,
+        finished: () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: "network" });
+
+    const rows = await pg.query<{
+      reservation_key: string;
+      status: string;
+      actual_charge_usd: string;
+    }>(
+      `SELECT reservation_key,status,actual_charge_usd
+         FROM conversation_inference_reservations
+        WHERE reservation_key=ANY($1::text[])
+        ORDER BY reservation_key`,
+      [[failed.attempt.id, cancelled.attempt.id]],
+    );
+    expect(rows.rows).toEqual([
+      {
+        reservation_key: failed.attempt.id,
+        status: "settled",
+        actual_charge_usd: "0.000112000",
+      },
+      {
+        reservation_key: cancelled.attempt.id,
+        status: "settled",
+        actual_charge_usd: "0.000112000",
+      },
+    ]);
+    const ambiguous = await pg.query<{ status: string }>(
+      `SELECT reservation.status FROM conversation_inference_reservations reservation
+        JOIN conversation_turn_attempts attempt
+          ON attempt.id=reservation.reservation_key
+       WHERE attempt.provider_request_id='waiting-provider-request'`,
+    );
+    expect(ambiguous.rows).toEqual([{ status: "retained_ambiguous" }]);
+    await expect(
+      pg.query<{ status: string }>(
+        "SELECT status FROM conversation_inference_reservations WHERE reservation_key=$1",
+        [notSent.attempt.id],
+      ),
+    ).resolves.toMatchObject({ rows: [{ status: "released" }] });
+
+    await pg.query(
+      `UPDATE conversation_inference_reservations
+          SET status='active',actual_charge_usd=0,actual_tokens=0,resolved_at=NULL
+        WHERE reservation_key=$1`,
+      [failed.attempt.id],
+    );
+    await expect(gateway.reconcileConversationReservations()).resolves.toBe(1);
+    await expect(
+      pg.query<{ status: string; actual_charge_usd: string }>(
+        `SELECT status,actual_charge_usd
+           FROM conversation_inference_reservations WHERE reservation_key=$1`,
+        [failed.attempt.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ status: "settled", actual_charge_usd: "0.000112000" }],
+    });
+  });
+
+  it("uses settled reservations until queued canonical telemetry recovers without double charging", async () => {
+    await pg.exec(`
+      INSERT INTO users (
+        id,username,display_name,email,name,password_hash,password_hash_scheme,role,status
+      ) VALUES (
+        'telemetry-owner','telemetry-owner@example.com','Telemetry Owner',
+        'telemetry-owner@example.com','Telemetry Owner','hash','scrypt-v1','member','active'
+      );
+      INSERT INTO projects (
+        id,name,status,assignment_policy_ref,verification_policy_ref,budget_policy_ref,owner_user_id
+      ) VALUES (
+        'telemetry-project','Telemetry Project','active','assignment/default',
+        'verification/default','budget/default','telemetry-owner'
+      );
+    `);
+    const durableRepository = new SqlAiUsageTelemetryRepository(transactions);
+    let rejectUsagePersistence = true;
+    const flakyRepository: AiUsageTelemetryRepository = {
+      createPricingProfile: (input) => durableRepository.createPricingProfile(input),
+      findEffectivePricingProfile: (provider, model, occurredAt, pricingVersion) =>
+        durableRepository.findEffectivePricingProfile(provider, model, occurredAt, pricingVersion),
+      appendEvent: (input: AiUsageLifecycleEventInputT, stableEventId?: string) => {
+        if (rejectUsagePersistence && input.event_type === "usage_observed") {
+          return Promise.reject(new Error("fault-injected canonical telemetry outage"));
+        }
+        return durableRepository.appendEvent(input, stableEventId);
+      },
+      requestEvents: (requestId) => durableRepository.requestEvents(requestId),
+    };
+    const flakyTelemetries: AiInvocationTelemetry[] = [];
+    let faultAdapter: ConversationLlmAdapter = new FakeAdapter(
+      "openai",
+      "mock-openai",
+    ) as ConversationLlmAdapter;
+    let gatewayStreams = 0;
+    const dispatchingGateway: ConversationProviderGateway = {
+      reserveConversation: async (scope, caps) => {
+        const admission = await gateway.reserveConversation(scope, caps);
+        if (admission.kind === "refused") return admission;
+        const lease = admission.lease;
+        return {
+          ...admission,
+          lease: {
+            stream: async (adapter, request) => {
+              gatewayStreams += 1;
+              return lease.stream(adapter, request);
+            },
+            settle: (usage) => lease.settle(usage),
+            release: () => lease.release(),
+            retainAmbiguous: () => lease.retainAmbiguous(),
+          },
+        };
+      },
+    };
+    const faultService = () => {
+      const invocationTelemetry = new AiInvocationTelemetry(
+        flakyRepository,
+        () => new Date("2026-07-27T12:00:00.000Z"),
+        {
+          maxRetryAttempts: 100,
+          retryBaseDelayMs: 10_000,
+          onHealthChange: () => undefined,
+        },
+      );
+      flakyTelemetries.push(invocationTelemetry);
+      return new ConversationTurnService(
+        conversations,
+        contexts,
+        attempts,
+        attachments,
+        invocationTelemetry,
+        () => faultAdapter,
+        dispatchingGateway,
+        {
+          newId: (prefix) => `${prefix}-telemetry-${++idSequence}`,
+          now: () => new Date("2026-07-27T12:00:00.000Z"),
+        },
+      );
+    };
+    let faultTurnService = faultService();
+    const telemetryOwner = { id: "telemetry-owner" };
+    const workspace = (title: string) =>
+      conversations.createPlanningWorkspace(
+        telemetryOwner,
+        {
+          project_id: "telemetry-project",
+          title,
+          objective: `${title} with bounded canonical usage.`,
+        },
+        { provider: "openai", model: "mock-openai" },
+      );
+    const runCallbacks = {
+      started: () => undefined,
+      text: () => undefined,
+      finished: () => undefined,
+    };
+
+    const succeededWorkspace = await workspace("Queued success");
+    const succeededTrigger = await conversations.submitUserMessage(telemetryOwner, {
+      project_id: "telemetry-project",
+      work_item_id: succeededWorkspace.work_item.id,
+      conversation_id: succeededWorkspace.conversation.id,
+      client_message_id: "telemetry-success",
+      parts: [{ type: "text", format: "plain", text: "Succeed with queued telemetry." }],
+    });
+    const succeededAdapter = new FakeAdapter("openai", "mock-openai");
+    succeededAdapter.enqueue("Exact success");
+    faultAdapter = succeededAdapter as ConversationLlmAdapter;
+    const succeeded = await faultTurnService.prepare({
+      actor: telemetryOwner,
+      projectId: "telemetry-project",
+      workItemId: succeededWorkspace.work_item.id,
+      conversationId: succeededWorkspace.conversation.id,
+      triggeringMessageId: succeededTrigger.id,
+    });
+    await succeeded.run(runCallbacks);
+
+    const failedWorkspace = await workspace("Queued exact failure");
+    const failedTrigger = await conversations.submitUserMessage(telemetryOwner, {
+      project_id: "telemetry-project",
+      work_item_id: failedWorkspace.work_item.id,
+      conversation_id: failedWorkspace.conversation.id,
+      client_message_id: "telemetry-failure",
+      parts: [{ type: "text", format: "plain", text: "Fail with exact usage." }],
+    });
+    const failedUsage = exactUsage("telemetry-failed-usage");
+    const failedAdapter = new FakeAdapter("openai", "mock-openai");
+    failedAdapter.streamConversation = async () =>
+      (async function* exactFailure() {
+        yield {
+          type: "response_started" as const,
+          provider_execution_id: "telemetry-failed-provider",
+        };
+        throw new AdapterError("invalid_response", "fault-injected exact failure", {
+          metadata: {
+            provider_execution_id: "telemetry-failed-provider",
+            request_dispatched: true,
+            usage: failedUsage,
+          },
+        });
+      })();
+    faultAdapter = failedAdapter as ConversationLlmAdapter;
+    faultTurnService = faultService();
+    const failed = await faultTurnService.prepare({
+      actor: telemetryOwner,
+      projectId: "telemetry-project",
+      workItemId: failedWorkspace.work_item.id,
+      conversationId: failedWorkspace.conversation.id,
+      triggeringMessageId: failedTrigger.id,
+    });
+    await expect(failed.run(runCallbacks)).rejects.toMatchObject({ code: "invalid_response" });
+
+    const cancelledWorkspace = await workspace("Queued exact cancellation");
+    const cancelledTrigger = await conversations.submitUserMessage(telemetryOwner, {
+      project_id: "telemetry-project",
+      work_item_id: cancelledWorkspace.work_item.id,
+      conversation_id: cancelledWorkspace.conversation.id,
+      client_message_id: "telemetry-cancel",
+      parts: [{ type: "text", format: "plain", text: "Cancel with exact usage." }],
+    });
+    const cancelledUsage = exactUsage("telemetry-cancelled-usage");
+    const cancelledAdapter = new FakeAdapter("openai", "mock-openai");
+    cancelledAdapter.streamConversation = async (request) =>
+      (async function* exactCancellation() {
+        yield {
+          type: "response_started" as const,
+          provider_execution_id: "telemetry-cancelled-provider",
+        };
+        await new Promise<void>((resolve) => {
+          if (request.signal?.aborted) resolve();
+          else request.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        throw new AdapterError("cancelled", "fault-injected exact cancellation", {
+          metadata: {
+            provider_execution_id: "telemetry-cancelled-provider",
+            request_dispatched: true,
+            usage: cancelledUsage,
+          },
+        });
+      })();
+    faultAdapter = cancelledAdapter as ConversationLlmAdapter;
+    faultTurnService = faultService();
+    const cancelled = await faultTurnService.prepare({
+      actor: telemetryOwner,
+      projectId: "telemetry-project",
+      workItemId: cancelledWorkspace.work_item.id,
+      conversationId: cancelledWorkspace.conversation.id,
+      triggeringMessageId: cancelledTrigger.id,
+    });
+    let started: (() => void) | undefined;
+    const didStart = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const cancellation = cancelled.run({
+      ...runCallbacks,
+      started: () => started?.(),
+    });
+    await didStart;
+    await faultTurnService.stop(
+      telemetryOwner,
+      "telemetry-project",
+      cancelledWorkspace.conversation.id,
+      cancelled.attempt.id,
+    );
+    await expect(cancellation).rejects.toMatchObject({ code: "cancelled" });
+    expect(gatewayStreams).toBe(3);
+
+    await pg.query(
+      `UPDATE conversation_inference_reservations
+          SET status='active',actual_charge_usd=0,actual_tokens=0,resolved_at=NULL
+        WHERE reservation_key=$1`,
+      [failed.attempt.id],
+    );
+    await gateway.reconcileConversationReservations();
+    await expect(
+      pg.query<{ status: string; actual_tokens: number }>(
+        `SELECT status,actual_tokens::int AS actual_tokens
+           FROM conversation_inference_reservations WHERE reservation_key=$1`,
+        [failed.attempt.id],
+      ),
+    ).resolves.toMatchObject({ rows: [{ status: "settled", actual_tokens: 28 }] });
+
+    const fallback = await pg.query<{ actual_tokens: number; canonical_usage: number }>(
+      `SELECT
+         COALESCE(sum(reservation.actual_tokens),0)::int AS actual_tokens,
+         (
+           SELECT count(*)::int
+             FROM ai_usage_events usage
+            WHERE usage.project_id='telemetry-project'
+              AND usage.event_type='usage_observed'
+         ) AS canonical_usage
+         FROM conversation_inference_reservations reservation
+        WHERE reservation.project_id='telemetry-project'
+          AND reservation.status='settled'`,
+    );
+    expect(fallback.rows).toEqual([{ actual_tokens: 206, canonical_usage: 0 }]);
+
+    const boundedWorkspace = await workspace("Fallback bounded admission");
+    const boundedTrigger = await conversations.submitUserMessage(telemetryOwner, {
+      project_id: "telemetry-project",
+      work_item_id: boundedWorkspace.work_item.id,
+      conversation_id: boundedWorkspace.conversation.id,
+      client_message_id: "telemetry-bounded",
+      parts: [{ type: "text", format: "plain", text: "Respect recovered usage exactly once." }],
+    });
+    const assembled = await contexts.assemble(
+      "telemetry-project",
+      boundedWorkspace.work_item.id,
+      boundedWorkspace.conversation.id,
+      boundedTrigger.id,
+    );
+    const quotedTokens =
+      estimateGatewayInputTokens(
+        new TextEncoder().encode(
+          JSON.stringify({
+            system: assembled.system,
+            messages: assembled.messages,
+            maxTokens: 16_000,
+          }),
+        ).byteLength,
+      ) + 16_000;
+    await pg.query(
+      `INSERT INTO usage_budget_policies (
+         id,scope_type,scope_project_id,period,provider,model,limit_tokens,
+         threshold_percentages,status,created_by_user_id
+       ) VALUES (
+         'telemetry-fallback-cap','project','telemetry-project','daily',
+         'openai','mock-openai',$1,ARRAY[100]::smallint[],'active','telemetry-owner'
+       )`,
+      [quotedTokens + 205],
+    );
+    const boundedAdapter = new FakeAdapter("openai", "mock-openai");
+    boundedAdapter.enqueue("Must stay behind the cap");
+    faultAdapter = boundedAdapter as ConversationLlmAdapter;
+    faultTurnService = faultService();
+    await expect(
+      faultTurnService.prepare({
+        actor: telemetryOwner,
+        projectId: "telemetry-project",
+        workItemId: boundedWorkspace.work_item.id,
+        conversationId: boundedWorkspace.conversation.id,
+        triggeringMessageId: boundedTrigger.id,
+      }),
+    ).rejects.toMatchObject({ code: "budget_exhausted" });
+    expect(boundedAdapter.requests).toHaveLength(0);
+
+    rejectUsagePersistence = false;
+    const recoveredEvents = await Promise.all(
+      flakyTelemetries.map((invocationTelemetry) => invocationTelemetry.reconcile()),
+    );
+    expect(recoveredEvents.reduce((total, count) => total + count, 0)).toBeGreaterThanOrEqual(1);
+    await expect(
+      pg.query<{ count: number }>(
+        `SELECT count(*)::int AS count
+           FROM ai_usage_events
+          WHERE project_id='telemetry-project' AND event_type='usage_observed'`,
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 3 }] });
+    await expect(
+      faultTurnService.prepare({
+        actor: telemetryOwner,
+        projectId: "telemetry-project",
+        workItemId: boundedWorkspace.work_item.id,
+        conversationId: boundedWorkspace.conversation.id,
+        triggeringMessageId: boundedTrigger.id,
+        allowRetry: true,
+      }),
+    ).rejects.toMatchObject({ code: "budget_exhausted" });
+    await pg.query("UPDATE usage_budget_policies SET limit_tokens=$2 WHERE id=$1", [
+      "telemetry-fallback-cap",
+      quotedTokens + 206,
+    ]);
+
+    const recovered = await faultTurnService.prepare({
+      actor: telemetryOwner,
+      projectId: "telemetry-project",
+      workItemId: boundedWorkspace.work_item.id,
+      conversationId: boundedWorkspace.conversation.id,
+      triggeringMessageId: boundedTrigger.id,
+      allowRetry: true,
+    });
+    expect(boundedAdapter.requests).toHaveLength(0);
+    recovered.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(
+      pg.query<{ count: number }>(
+        `SELECT count(*)::int AS count
+           FROM conversation_inference_reservations reservation
+          WHERE reservation.project_id='telemetry-project'
+            AND reservation.status='settled'
+            AND NOT EXISTS (
+              SELECT 1
+                FROM ai_usage_events usage
+               WHERE usage.request_id=reservation.usage_request_id
+                 AND usage.event_type='usage_observed'
+            )`,
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+  });
+
+  it("denies an applicable policy cap before the provider and keeps gateway allowlisting fail-closed", async () => {
+    const unpriced = await telemetry.start({
+      requestId: "stream-unpriced-history",
+      provider: "openai",
+      model: "mock-openai",
+      endpoint: "/v1/responses",
+      requestType: "conversation_turn",
+      initiatedByUserId: owner.id,
+      projectId: "stream-project",
+    });
+    await unpriced.observe({
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: null,
+      costClassification: "unavailable",
+      usageSource: "provider_api",
+      confidence: 1,
+      providerRequestId: "stream-unpriced-provider",
+    });
+    await unpriced.complete({ providerRequestId: "stream-unpriced-provider" });
+    await pg.exec(`
+      INSERT INTO usage_budget_policies (
+        id,scope_type,scope_project_id,period,provider,model,limit_usd,
+        threshold_percentages,status,created_by_user_id
+      ) VALUES (
+        'stream-hard-cap','project','stream-project','daily','openai','mock-openai',
+        100,ARRAY[100]::smallint[],'active','stream-owner'
+      )
+    `);
+    const trigger = await conversations.submitUserMessage(owner, {
+      project_id: "stream-project",
+      work_item_id: workItemId,
+      conversation_id: conversationId,
+      client_message_id: "stream-client-budget-denied",
+      parts: [{ type: "text", format: "plain", text: "This must not reach the provider." }],
+    });
+    const deniedAdapter = new FakeAdapter("openai", "mock-openai");
+    currentAdapter = deniedAdapter as ConversationLlmAdapter;
+    await expect(
+      turnService.prepare({
+        actor: owner,
+        projectId: "stream-project",
+        workItemId,
+        conversationId,
+        triggeringMessageId: trigger.id,
+      }),
+    ).rejects.toMatchObject({ code: "budget_exhausted", httpStatus: 402 });
+    expect(deniedAdapter.requests).toHaveLength(0);
+    await pg.exec("UPDATE usage_budget_policies SET status='disabled' WHERE id='stream-hard-cap'");
+
+    const noAllowlist = new ProviderGateway({
+      runs: { lookup: async () => null },
+      credentials: {} as never,
+      apiKey: () => "test-provider-key",
+      conversationAllowedModels: [],
+      conversationBudget: new SqlConversationInferenceBudget(transactions),
+      registry: {
+        "mock-openai": {
+          provider: "openai",
+          label: "Mock OpenAI",
+          selectable: true,
+          supports_structured_output: true,
+          input_per_mtok: 2,
+          output_per_mtok: 10,
+          pricing_version: "mock-1",
+          pricing_is_estimate: true,
+        },
+      },
+    });
+    await expect(
+      noAllowlist.reserveConversation(
+        {
+          reservationKey: "never-reserved",
+          usageRequestId: "never-reserved",
+          projectId: "stream-project",
+          workItemId,
+          conversationId,
+          initiatedByUserId: owner.id,
+          provider: "openai",
+          model: "mock-openai",
+        },
+        { maxInputTokens: 1_000, maxOutputTokens: 16_000 },
+      ),
+    ).resolves.toMatchObject({ kind: "refused", code: "model_unavailable" });
+  });
+
+  it("atomically enforces every applicable user and project policy without duplicate holds", async () => {
+    await pg.exec(`
+      INSERT INTO users (
+        id,username,display_name,email,name,password_hash,password_hash_scheme,role,status
+      ) VALUES (
+        'budget-owner','budget-owner@example.com','Budget Owner',
+        'budget-owner@example.com','Budget Owner','hash','scrypt-v1','member','active'
+      );
+      INSERT INTO projects (
+        id,name,status,assignment_policy_ref,verification_policy_ref,budget_policy_ref,owner_user_id
+      ) VALUES (
+        'budget-project','Budget Project','active','assignment/default',
+        'verification/default','budget/default','budget-owner'
+      );
+      INSERT INTO usage_budget_policies (
+        id,scope_type,scope_user_id,scope_project_id,period,provider,model,limit_usd,
+        threshold_percentages,status,created_by_user_id
+      ) VALUES
+        (
+          'budget-user-cap','user','budget-owner',NULL,'daily','openai','mock-openai',
+          0.20,ARRAY[100]::smallint[],'active','budget-owner'
+        ),
+        (
+          'budget-project-cap','project',NULL,'budget-project','daily','openai','mock-openai',
+          0.20,ARRAY[100]::smallint[],'active','budget-owner'
+        )
+    `);
+    const budgetOwner = { id: "budget-owner" };
+    const first = await conversations.createPlanningWorkspace(
+      budgetOwner,
+      { project_id: "budget-project", title: "First", objective: "First bounded call." },
+      { provider: "openai", model: "mock-openai" },
+    );
+    const second = await conversations.createPlanningWorkspace(
+      budgetOwner,
+      { project_id: "budget-project", title: "Second", objective: "Second bounded call." },
+      { provider: "openai", model: "mock-openai" },
+    );
+    const firstTrigger = await conversations.submitUserMessage(budgetOwner, {
+      project_id: "budget-project",
+      work_item_id: first.work_item.id,
+      conversation_id: first.conversation.id,
+      client_message_id: "budget-first",
+      parts: [{ type: "text", format: "plain", text: "Reserve one." }],
+    });
+    const secondTrigger = await conversations.submitUserMessage(budgetOwner, {
+      project_id: "budget-project",
+      work_item_id: second.work_item.id,
+      conversation_id: second.conversation.id,
+      client_message_id: "budget-second",
+      parts: [{ type: "text", format: "plain", text: "Reserve two." }],
+    });
+    currentAdapter = new FakeAdapter("openai", "mock-openai") as ConversationLlmAdapter;
+    const results = await Promise.allSettled([
+      turnService.prepare({
+        actor: budgetOwner,
+        projectId: "budget-project",
+        workItemId: first.work_item.id,
+        conversationId: first.conversation.id,
+        triggeringMessageId: firstTrigger.id,
+      }),
+      turnService.prepare({
+        actor: budgetOwner,
+        projectId: "budget-project",
+        workItemId: second.work_item.id,
+        conversationId: second.conversation.id,
+        triggeringMessageId: secondTrigger.id,
+      }),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const prepared = results.find(
+      (result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof turnService.prepare>>> =>
+        result.status === "fulfilled",
+    )?.value;
+    if (!prepared) throw new Error("one bounded preparation must succeed");
+    const active = await pg.query<{ count: number }>(
+      `SELECT count(*)::int AS count
+         FROM conversation_inference_reservations
+        WHERE project_id='budget-project' AND status='active'`,
+    );
+    expect(active.rows[0]?.count).toBe(1);
+    await expect(
+      turnService.prepare({
+        actor: budgetOwner,
+        projectId: "budget-project",
+        workItemId: prepared.attempt.work_item_id,
+        conversationId: prepared.attempt.conversation_id,
+        triggeringMessageId: prepared.attempt.triggering_message_id,
+      }),
+    ).rejects.toMatchObject({ code: "message_already_processed" });
+    await expect(
+      pg.query<{ count: number }>(
+        `SELECT count(*)::int AS count
+           FROM conversation_inference_reservations
+          WHERE project_id='budget-project'`,
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 1 }] });
+    await attempts.reconcileOrphans();
+    await gateway.reconcileConversationReservations();
   });
 });

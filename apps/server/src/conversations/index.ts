@@ -5,6 +5,7 @@ export * from "./contextAssembler.js";
 export * from "./prompt.js";
 export * from "./turnRepository.js";
 export * from "./turnService.js";
+export * from "./inferenceBudget.js";
 export * from "./planWorkflow.js";
 export * from "./planProposal.js";
 export * from "./planChangeProposal.js";

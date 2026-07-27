@@ -81,6 +81,7 @@ import {
   ConversationTurnService,
   ExecutionConversationService,
   PostgresConversationRepository,
+  SqlConversationInferenceBudget,
   registerConversationPlanRoutes,
   registerConversationRoutes,
 } from "./conversations/index.js";
@@ -770,6 +771,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           meter: new SqlInferenceMeter(runtimeTransactionsForInference, options.recordUsage),
           allowedModels: parseRunnerAllowedModels(
             integrationEnvironment[RUNNER_ALLOWED_MODELS_ENV],
+          ),
+          conversationAllowedModels: configuredDebateModels().map(
+            (entry) => `${entry.provider}/${entry.model}`,
+          ),
+          conversationBudget: new SqlConversationInferenceBudget(
+            runtimeTransactionsForInference,
+            now,
           ),
           // The raw provider key is read here and used in exactly one place —
           // the outbound request's auth header. It is never audited, never put
@@ -3370,7 +3378,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     projects !== undefined &&
     attachmentService &&
     runtimeTransactionsForInference &&
-    canonicalTelemetry
+    canonicalTelemetry &&
+    modelGateway
   ) {
     const conversationRepository = new PostgresConversationRepository(
       runtimeTransactionsForInference,
@@ -3420,9 +3429,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         // request trace so attempt and usage identities cannot be double-driven.
         return adapter as ConversationLlmAdapter;
       },
+      modelGateway,
       { now },
     );
     await conversationAttempts.reconcileOrphans();
+    await modelGateway.reconcileConversationReservations();
     registerConversationRoutes(app, {
       requireUser: requireSessionUser,
       conversations: conversationService,

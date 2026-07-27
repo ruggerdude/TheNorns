@@ -34,6 +34,10 @@
 // hold is taken BEFORE the request goes out and resolved after the stream
 // ends, so two concurrent streams cannot each observe the same "remaining".
 import {
+  AdapterError,
+  type ConversationLlmAdapter,
+  type ConversationRequest,
+  type ConversationStreamEvent,
   DEFAULT_MODEL_REGISTRY,
   type ModelEntry,
   type ProviderName,
@@ -290,6 +294,10 @@ export interface ProviderGatewayOptions {
   telemetry?: AiInvocationTelemetry | undefined;
   /** `provider/model` pairs runners may spend on. Empty means NONE. */
   allowedModels?: Iterable<string> | undefined;
+  /** Selectable `provider/model` pairs trusted conversation PM calls may spend on. */
+  conversationAllowedModels?: Iterable<string> | undefined;
+  /** Canonical policy-backed reservation path for trusted conversation PM calls. */
+  conversationBudget?: ConversationInferenceBudget | undefined;
   registry?: Record<string, ModelEntry> | undefined;
   audit?: ((actor: string, action: string, detail: string) => void) | undefined;
   /** Injectable for tests. Defaults to global fetch. */
@@ -298,6 +306,65 @@ export interface ProviderGatewayOptions {
   /** Surfaces, injectable so a test can point them at a local upstream. */
   surfaces?: Readonly<Record<GatewayProvider, GatewaySurface>> | undefined;
 }
+
+export interface ConversationInferenceScope {
+  reservationKey: string;
+  usageRequestId: string;
+  projectId: string;
+  workItemId: string;
+  conversationId: string;
+  initiatedByUserId: string;
+  provider: ProviderName;
+  model: string;
+}
+
+export interface ConversationInferenceQuote {
+  maxInputTokens: number;
+  maxOutputTokens: number;
+  maxChargeUsd: number;
+}
+
+export interface ConversationInferenceReservation {
+  markDispatching(): Promise<void>;
+  settle(usage: UsageEventT): Promise<void>;
+  release(): Promise<void>;
+  retainAmbiguous(): Promise<void>;
+}
+
+/**
+ * Single-use trusted-server dispatch boundary for one admitted conversation
+ * request. Provider/model pinning and the durable dispatch marker live here so
+ * a conversation call cannot bypass the gateway after admission.
+ */
+export interface ConversationGatewayLease {
+  stream(
+    adapter: ConversationLlmAdapter,
+    request: ConversationRequest,
+  ): Promise<AsyncIterable<ConversationStreamEvent>>;
+  settle(usage: UsageEventT): Promise<void>;
+  release(): Promise<void>;
+  retainAmbiguous(): Promise<void>;
+}
+
+export interface ConversationInferenceBudget {
+  reserve(
+    scope: ConversationInferenceScope,
+    quote: ConversationInferenceQuote,
+  ): Promise<ConversationInferenceReservation | null>;
+  reconcile(): Promise<number>;
+}
+
+export type ConversationGatewayAdmission =
+  | {
+      kind: "reserved";
+      lease: ConversationGatewayLease;
+      quote: ConversationInferenceQuote;
+    }
+  | {
+      kind: "refused";
+      code: "model_unavailable" | "budget_exhausted" | "gateway_unavailable";
+      message: string;
+    };
 
 export interface GatewayForwardInput {
   provider: GatewayProvider;
@@ -345,6 +412,7 @@ export type GatewayResult =
 export class ProviderGateway {
   private readonly registry: Record<string, ModelEntry>;
   private readonly allowed: ReadonlySet<string>;
+  private readonly conversationAllowed: ReadonlySet<string>;
   private readonly surfaces: Readonly<Record<GatewayProvider, GatewaySurface>>;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => Date;
@@ -352,9 +420,139 @@ export class ProviderGateway {
   constructor(private readonly options: ProviderGatewayOptions) {
     this.registry = options.registry ?? DEFAULT_MODEL_REGISTRY;
     this.allowed = new Set(options.allowedModels ?? []);
+    this.conversationAllowed = new Set(
+      options.conversationAllowedModels ?? options.allowedModels ?? [],
+    );
     this.surfaces = options.surfaces ?? SURFACES;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.now = options.now ?? (() => new Date());
+  }
+
+  /**
+   * Trusted-server admission for a provider-neutral conversation stream.
+   *
+   * ConversationTurnService still owns provider-neutral event handling, but
+   * only the returned gateway lease can invoke the adapter. The lease follows
+   * deployment allowlisting, a conservative priced ceiling, and the canonical
+   * usage-policy reservation.
+   */
+  async reserveConversation(
+    scope: ConversationInferenceScope,
+    caps: { maxInputTokens: number; maxOutputTokens: number },
+  ): Promise<ConversationGatewayAdmission> {
+    const selection = `${scope.provider}/${scope.model}`;
+    const entry = this.registry[scope.model];
+    if (
+      !this.conversationAllowed.has(selection) ||
+      !entry ||
+      entry.provider !== scope.provider ||
+      !entry.selectable
+    ) {
+      return {
+        kind: "refused",
+        code: "model_unavailable",
+        message: "the pinned conversation model is not available through the provider gateway",
+      };
+    }
+    let quote: ConversationInferenceQuote;
+    try {
+      quote = {
+        ...caps,
+        maxChargeUsd: conservativeMaxChargeUsd(
+          snapshotModelPricing(scope.provider, scope.model, this.registry),
+          {
+            max_input_tokens: caps.maxInputTokens,
+            max_output_tokens: caps.maxOutputTokens,
+          },
+        ),
+      };
+    } catch {
+      return {
+        kind: "refused",
+        code: "model_unavailable",
+        message: "the pinned conversation model has no usable pricing",
+      };
+    }
+    if (!this.options.apiKey(scope.provider)) {
+      return {
+        kind: "refused",
+        code: "gateway_unavailable",
+        message: "the pinned conversation provider is not configured",
+      };
+    }
+    if (!this.options.conversationBudget) {
+      return {
+        kind: "refused",
+        code: "budget_exhausted",
+        message: "conversation budget enforcement is unavailable",
+      };
+    }
+    try {
+      const reservation = await this.options.conversationBudget.reserve(scope, quote);
+      if (!reservation) {
+        return {
+          kind: "refused",
+          code: "budget_exhausted",
+          message: "an applicable usage budget cannot cover this conversation turn",
+        };
+      }
+      this.options.audit?.(
+        `user:${scope.initiatedByUserId}`,
+        "gateway.conversation_reserved",
+        `${selection} conversation=${scope.conversationId} max_usd=${quote.maxChargeUsd}`,
+      );
+      return { kind: "reserved", lease: this.conversationLease(scope, reservation), quote };
+    } catch {
+      return {
+        kind: "refused",
+        code: "budget_exhausted",
+        message: "conversation budget state could not be verified",
+      };
+    }
+  }
+
+  reconcileConversationReservations(): Promise<number> {
+    if (!this.options.conversationBudget) return Promise.resolve(0);
+    return this.options.conversationBudget.reconcile();
+  }
+
+  private conversationLease(
+    scope: ConversationInferenceScope,
+    reservation: ConversationInferenceReservation,
+  ): ConversationGatewayLease {
+    let streamStarted = false;
+    let resolved = false;
+    return {
+      stream: async (adapter, request) => {
+        if (streamStarted || resolved) {
+          throw new AdapterError("invalid_request", "conversation gateway lease is not active", {
+            metadata: { request_dispatched: false },
+          });
+        }
+        if (adapter.provider !== scope.provider || adapter.model !== scope.model) {
+          throw new AdapterError(
+            "invalid_request",
+            "conversation adapter does not match the gateway provider/model pin",
+            { metadata: { request_dispatched: false } },
+          );
+        }
+        streamStarted = true;
+        await reservation.markDispatching();
+        return adapter.streamConversation(request);
+      },
+      settle: async (usage) => {
+        resolved = true;
+        await reservation.settle(usage);
+      },
+      release: async () => {
+        resolved = true;
+        await reservation.release();
+      },
+      retainAmbiguous: async () => {
+        resolved = true;
+        await reservation.retainAmbiguous();
+      },
+    };
   }
 
   private refuse(

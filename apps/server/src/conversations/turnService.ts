@@ -8,6 +8,8 @@ import {
 } from "@norns/adapters";
 import type { UsageEventT, V2ConversationTurnAttemptT } from "@norns/contracts";
 import type { AttachmentService } from "../attachments/service.js";
+import type { ConversationGatewayLease, ProviderGateway } from "../gateway/providerGateway.js";
+import { estimateGatewayInputTokens } from "../gateway/request.js";
 import { newId } from "../ids.js";
 import type {
   AiInvocationTelemetry,
@@ -22,6 +24,9 @@ export type ConversationAdapterFactory = (
   provider: ProviderName,
   model: string,
 ) => ConversationLlmAdapter;
+export type ConversationProviderGateway = Pick<ProviderGateway, "reserveConversation">;
+
+const CONVERSATION_MAX_OUTPUT_TOKENS = 16_000;
 
 export interface PrepareConversationTurn {
   actor: ConversationActor;
@@ -166,6 +171,7 @@ export class ConversationTurnService {
     private readonly attachments: AttachmentService,
     private readonly telemetry: AiInvocationTelemetry,
     private readonly createAdapter: ConversationAdapterFactory,
+    private readonly gateway: ConversationProviderGateway,
     options: { newId?: (prefix: string) => string; now?: () => Date } = {},
   ) {
     this.makeId = options.newId ?? newId;
@@ -293,12 +299,6 @@ export class ConversationTurnService {
     let adapter: ConversationLlmAdapter;
     try {
       adapter = this.createAdapter(provider, scope.conversation.model);
-      if (adapter.provider !== provider || adapter.model !== scope.conversation.model) {
-        throw new ConversationTurnError(
-          "provider_pin_mismatch",
-          "configured adapter does not match the immutable conversation provider/model pin",
-        );
-      }
     } catch (error) {
       const failure = publicFailure(error);
       await this.attempts.fail(begun.id, null, "", {
@@ -312,6 +312,49 @@ export class ConversationTurnService {
         latencyMs: Math.max(0, this.now().getTime() - startedAt.getTime()),
       });
       throw error;
+    }
+
+    const maxInputTokens = estimateGatewayInputTokens(
+      new TextEncoder().encode(
+        JSON.stringify({
+          system: assembled.system,
+          messages,
+          maxTokens: CONVERSATION_MAX_OUTPUT_TOKENS,
+        }),
+      ).byteLength,
+    );
+    const admission = await this.gateway.reserveConversation(
+      {
+        reservationKey: begun.id,
+        usageRequestId,
+        projectId: input.projectId,
+        workItemId: input.workItemId,
+        conversationId: input.conversationId,
+        initiatedByUserId: input.actor.id,
+        provider,
+        model: scope.conversation.model,
+      },
+      { maxInputTokens, maxOutputTokens: CONVERSATION_MAX_OUTPUT_TOKENS },
+    );
+    if (admission.kind === "refused") {
+      await this.attempts.fail(begun.id, null, "", {
+        usageStatus: "unavailable",
+        code: admission.code,
+        messageRedacted: admission.message,
+        sanitized: null,
+      });
+      await trace.fail({
+        code: admission.code,
+        category: "gateway_admission",
+        messageRedacted: admission.message,
+        latencyMs: Math.max(0, this.now().getTime() - startedAt.getTime()),
+        sanitized: { request_dispatched: false },
+      });
+      throw new ConversationTurnError(
+        admission.code,
+        admission.message,
+        admission.code === "gateway_unavailable" ? 503 : 402,
+      );
     }
 
     const controller = new AbortController();
@@ -328,6 +371,7 @@ export class ConversationTurnService {
       telemetryRetryAttempt: prior?.attempt_number ?? 0,
       system: assembled.system,
       messages,
+      maxTokens: CONVERSATION_MAX_OUTPUT_TOKENS,
       signal: controller.signal,
     };
     let hasRun = false;
@@ -342,13 +386,17 @@ export class ConversationTurnService {
           outputMessageId,
           adapter,
           request,
+          admission.lease,
           trace,
           controller,
           startedAt,
           callbacks,
         );
       },
-      cancel: () => controller.abort(),
+      cancel: () => {
+        controller.abort();
+        if (!hasRun) void admission.lease.release().catch(() => undefined);
+      },
     };
   }
 
@@ -380,6 +428,7 @@ export class ConversationTurnService {
     outputMessageId: string,
     adapter: ConversationLlmAdapter,
     request: Parameters<ConversationLlmAdapter["streamConversation"]>[0],
+    lease: ConversationGatewayLease,
     trace: AiInvocationTrace,
     controller: AbortController,
     startedAt: Date,
@@ -391,7 +440,7 @@ export class ConversationTurnService {
     let terminal = false;
     let stream: AsyncIterable<ConversationStreamEvent> | null = null;
     try {
-      stream = await adapter.streamConversation(request);
+      stream = await lease.stream(adapter, request);
       for await (const event of stream) {
         if (event.type === "response_started") {
           if (providerRequestId !== null) {
@@ -427,6 +476,7 @@ export class ConversationTurnService {
           text,
           providerRequestId,
           event,
+          lease,
           trace,
           startedAt,
           callbacks,
@@ -449,6 +499,16 @@ export class ConversationTurnService {
       }
       if (usage.usage && providerRequestId) {
         await trace.observe(observation(usage.usage, providerRequestId));
+      }
+      if (usage.usage) {
+        await lease.settle(usage.usage).catch(() => undefined);
+      } else if (
+        providerRequestId === null &&
+        adapterError?.metadata?.request_dispatched === false
+      ) {
+        await lease.release().catch(() => undefined);
+      } else {
+        await lease.retainAmbiguous().catch(() => undefined);
       }
       const cancelled = controller.signal.aborted || adapterError?.kind === "cancelled";
       if (cancelled) {
@@ -491,6 +551,7 @@ export class ConversationTurnService {
     text: string,
     providerRequestId: string | null,
     event: Extract<ConversationStreamEvent, { type: "finish" }>,
+    lease: ConversationGatewayLease,
     trace: AiInvocationTrace,
     startedAt: Date,
     callbacks: ConversationTurnCallbacks,
@@ -530,6 +591,7 @@ export class ConversationTurnService {
       await this.attempts.startVisibleOutput(begun.id, outputMessageId, text);
     }
     await trace.observe(observation(event.result.usage, providerRequestId));
+    await lease.settle(event.result.usage).catch(() => undefined);
     const settled = await this.attempts.succeed(
       begun.id,
       outputMessageId,
