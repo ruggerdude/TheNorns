@@ -288,6 +288,7 @@ export interface ConversationRepository {
     clientMessageId: string,
   ): Promise<V2WorkMessageT | null>;
   hasActiveTurnAttempt(conversationId: string): Promise<boolean>;
+  hasActivePlanProposal(conversationId: string): Promise<boolean>;
   insertUserMessage(input: InsertUserMessage): Promise<V2WorkMessageT>;
   listMessages(
     projectId: string,
@@ -499,6 +500,18 @@ class SqlConversationRepository implements ConversationRepository {
            FROM conversation_turn_attempts
           WHERE conversation_id=$1
             AND status IN ('pending','streaming')
+       ) AS active`,
+      [conversationId],
+    );
+    return result.rows[0]?.active ?? false;
+  }
+
+  async hasActivePlanProposal(conversationId: string): Promise<boolean> {
+    const result = await this.sql.query<{ active: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM conversation_plan_proposal_attempts
+          WHERE conversation_id=$1 AND status='pending'
        ) AS active`,
       [conversationId],
     );

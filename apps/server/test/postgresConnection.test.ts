@@ -109,6 +109,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             shadow_read_recorded_order: true,
             conversation_domain_complete: true,
             conversation_stream_lifecycle: "conversation_stream_lifecycle_v1",
+            conversation_plan_workflow: "conversation_plan_workflow_v1",
           },
         ],
       }),
@@ -137,6 +138,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             shadow_read_recorded_order: false,
             conversation_domain_complete: false,
             conversation_stream_lifecycle: null,
+            conversation_plan_workflow: null,
           },
         ],
       }),
@@ -149,7 +151,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "planning_runs.mode, knowledge_packages, agent_handoffs, " +
         "agent_profiles.reasoning_effort, ai_usage_events, project_members, " +
         "ai_usage_calibration_observations, shadow_read_comparisons.recorded_order, " +
-        "conversation domain tables, conversation_stream_lifecycle_v1",
+        "conversation domain tables, conversation_stream_lifecycle_v1, " +
+        "conversation_plan_workflow_v1",
     });
   });
 
@@ -173,6 +176,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             shadow_read_recorded_order: true,
             conversation_domain_complete: true,
             conversation_stream_lifecycle: null,
+            conversation_plan_workflow: null,
           },
         ],
       }),
@@ -183,7 +187,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
         code: "runtime_schema_outdated",
         message:
           "database migrations are required before startup; missing: " +
-          "conversation_stream_lifecycle_v1",
+          "conversation_stream_lifecycle_v1, conversation_plan_workflow_v1",
       },
     );
   });

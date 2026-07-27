@@ -259,6 +259,11 @@ export const CONVERSATION_STREAM_LIFECYCLE_MIGRATION_URL = new URL(
   "../../../drizzle/0036_conversation_stream_lifecycle.sql",
   import.meta.url,
 );
+export const CONVERSATION_PLAN_WORKFLOW_MIGRATION_NAME = "0037_conversation_plan_workflow";
+export const CONVERSATION_PLAN_WORKFLOW_MIGRATION_URL = new URL(
+  "../../../drizzle/0037_conversation_plan_workflow.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -434,6 +439,10 @@ export async function loadConversationDomainMigrationSql(): Promise<string> {
 
 export async function loadConversationStreamLifecycleMigrationSql(): Promise<string> {
   return readFile(CONVERSATION_STREAM_LIFECYCLE_MIGRATION_URL, "utf8");
+}
+
+export async function loadConversationPlanWorkflowMigrationSql(): Promise<string> {
+  return readFile(CONVERSATION_PLAN_WORKFLOW_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -687,6 +696,10 @@ export async function runCurrentV2Migrations(
     {
       name: CONVERSATION_STREAM_LIFECYCLE_MIGRATION_NAME,
       sql: await loadConversationStreamLifecycleMigrationSql(),
+    },
+    {
+      name: CONVERSATION_PLAN_WORKFLOW_MIGRATION_NAME,
+      sql: await loadConversationPlanWorkflowMigrationSql(),
     },
   ]);
 }

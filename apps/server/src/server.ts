@@ -64,11 +64,15 @@ import {
 import { bearerToken, verifyRunnerSignature } from "./auth.js";
 import {
   ConversationContextAssembler,
+  ConversationPlanChangeProposalService,
+  ConversationPlanProposalService,
+  ConversationPlanWorkflowService,
   ConversationService,
   ConversationTurnError,
   ConversationTurnRepository,
   ConversationTurnService,
   PostgresConversationRepository,
+  registerConversationPlanRoutes,
   registerConversationRoutes,
 } from "./conversations/index.js";
 // ONBOARDING O4: Actions-hosted execution.
@@ -871,6 +875,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // is constructed, so the onClose hook can clear it alongside its siblings.
   let phaseQueueDrainTimer: ReturnType<typeof setInterval> | undefined;
   let conversationTurns: ConversationTurnService | null = null;
+  let conversationService: ConversationService | null = null;
+  let conversationContextAssembler: ConversationContextAssembler | null = null;
+  let conversationAttempts: ConversationTurnRepository | null = null;
+  let conversationPlanWorkflow: ConversationPlanWorkflowService | null = null;
   if (options.phase4) {
     const dispatcher = new Phase4Dispatcher(
       options.phase4.dispatch,
@@ -3040,11 +3048,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     const conversationRepository = new PostgresConversationRepository(
       runtimeTransactionsForInference,
     );
-    const conversationService = new ConversationService(conversationRepository);
-    const conversationAttempts = new ConversationTurnRepository(runtimeTransactionsForInference);
+    conversationService = new ConversationService(conversationRepository);
+    conversationAttempts = new ConversationTurnRepository(runtimeTransactionsForInference);
+    conversationContextAssembler = new ConversationContextAssembler(
+      runtimeTransactionsForInference,
+    );
     conversationTurns = new ConversationTurnService(
       conversationService,
-      new ConversationContextAssembler(runtimeTransactionsForInference),
+      conversationContextAssembler,
       conversationAttempts,
       attachmentService,
       canonicalTelemetry,
@@ -3084,6 +3095,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       conversations: conversationService,
       turns: conversationTurns,
       attempts: conversationAttempts,
+      planDetail: (userId, projectId, workItemId, conversationId) =>
+        conversationPlanWorkflow
+          ? conversationPlanWorkflow.detail(userId, projectId, workItemId, conversationId)
+          : Promise.resolve({
+              plan_versions: [],
+              actions: [],
+              plan_reviews: [],
+              action_effects: [],
+            }),
       pinForProject: async (projectId) => {
         const selected = await projects.pmSelectionOf(projectId);
         return {
@@ -4953,7 +4973,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       const resolvePlanningModels = async (
         projectId: string,
         run?: {
-          mode: "planned" | "quick";
+          mode: "planned" | "quick" | "review_only";
           pm: {
             provider: ProviderName;
             model: string;
@@ -5010,8 +5030,48 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           },
         };
       };
+      let executeReviewNow: (runId: string) => Promise<unknown> = async () => {
+        throw new Error("planning worker is not initialized");
+      };
+      if (
+        conversationService &&
+        conversationContextAssembler &&
+        conversationAttempts &&
+        runtimeTransactionsForInference
+      ) {
+        conversationPlanWorkflow = new ConversationPlanWorkflowService(planningTransactions, {
+          now,
+          resolveReviewModels: async (projectId, pm) => {
+            const resolved = await resolvePlanningModels(projectId, {
+              mode: "review_only",
+              pm,
+            });
+            return { pm: resolved.pm, reviewer: resolved.reviewer };
+          },
+          runReviewNow: (runId) => executeReviewNow(runId),
+          ...(options.planningRuns.executionKickoff
+            ? { executionKickoff: options.planningRuns.executionKickoff }
+            : {}),
+        });
+      }
+      const reviewWorkflow = conversationPlanWorkflow;
       const planningWorker = new PlanningRunWorker(planningTransactions, buildPlanningAdapter, {
         resolveModels: resolvePlanningModels,
+        ...(reviewWorkflow
+          ? {
+              loadReviewOnlySeed: (runId: string) => reviewWorkflow.loadReviewOnlySeed(runId),
+              markReviewOnlyStarted: (reviewId: string) =>
+                reviewWorkflow.markReviewOnlyStarted(reviewId),
+              completeReviewOnly: (input: {
+                reviewId: string;
+                planningRunId: string;
+                result: import("./planning/reviewOnlySession.js").ReviewOnlyPlanningResult;
+                totalCostUsd: number;
+              }) => reviewWorkflow.completeReviewOnly(input),
+              failReviewOnly: (runId: string, error: unknown) =>
+                reviewWorkflow.failReviewOnly(runId, error),
+            }
+          : {}),
         ...(options.planningRuns.executionKickoff
           ? { executionKickoff: options.planningRuns.executionKickoff }
           : {}),
@@ -5053,6 +5113,36 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           };
         },
       });
+      executeReviewNow = (runId) => planningWorker.runNow(runId);
+
+      if (
+        conversationPlanWorkflow &&
+        conversationService &&
+        conversationContextAssembler &&
+        runtimeTransactionsForInference
+      ) {
+        const planProposals = new ConversationPlanProposalService(
+          runtimeTransactionsForInference,
+          conversationService,
+          conversationContextAssembler,
+          conversationPlanWorkflow,
+          {
+            now,
+            createAdapter: (provider, model) => buildPlanningAdapter(provider, model),
+          },
+        );
+        const planChanges = new ConversationPlanChangeProposalService(
+          runtimeTransactionsForInference,
+          conversationPlanWorkflow,
+        );
+        await planProposals.reconcileOrphans();
+        registerConversationPlanRoutes(app, {
+          requireUser: requireSessionUser,
+          workflow: conversationPlanWorkflow,
+          proposals: planProposals,
+          changes: planChanges,
+        });
+      }
 
       // A restarted process can never resume a run that was mid-flight when
       // it died (runPlanning() isn't itself resumable mid-round), so any run

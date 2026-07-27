@@ -99,6 +99,7 @@ interface RuntimeSchemaPosture {
   shadow_read_recorded_order: boolean;
   conversation_domain_complete: boolean;
   conversation_stream_lifecycle: string | null;
+  conversation_plan_workflow: string | null;
 }
 
 /**
@@ -164,7 +165,9 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                WHERE to_regclass('public.' || required_table.name) IS NOT NULL
             ) AS conversation_domain_complete,
             to_regclass('public.conversation_stream_lifecycle_v1')::text
-              AS conversation_stream_lifecycle`,
+              AS conversation_stream_lifecycle,
+            to_regclass('public.conversation_plan_workflow_v1')::text
+              AS conversation_plan_workflow`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -183,6 +186,7 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.shadow_read_recorded_order ? ["shadow_read_comparisons.recorded_order"] : []),
     ...(!posture?.conversation_domain_complete ? ["conversation domain tables"] : []),
     ...(!posture?.conversation_stream_lifecycle ? ["conversation_stream_lifecycle_v1"] : []),
+    ...(!posture?.conversation_plan_workflow ? ["conversation_plan_workflow_v1"] : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

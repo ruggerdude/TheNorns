@@ -225,6 +225,30 @@
   font-size: 0.72rem;
 }
 
+.conversation-plan-proposal-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.conversation-plan-proposal-control > div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.conversation-plan-proposal-control strong {
+  font-size: 0.7rem;
+}
+
+.conversation-plan-proposal-control span {
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+
 .conversation-thread-root {
   min-height: 0;
   flex: 1;
@@ -305,6 +329,12 @@
   color: var(--muted);
   background: transparent;
   text-align: center;
+}
+
+.conversation-message.is-system
+  :is(.conversation-plan-card, .conversation-action-card, .conversation-qc-card) {
+  color: var(--text);
+  text-align: left;
 }
 
 .conversation-markdown {
@@ -432,6 +462,549 @@
   border-radius: 8px;
   color: var(--info);
   background: color-mix(in srgb, var(--info) 12%, transparent);
+}
+
+.conversation-plan-card {
+  display: grid;
+  width: min(46rem, 100%);
+  gap: 1rem;
+  margin-top: 0.75rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+}
+
+.conversation-plan-card-header,
+.conversation-plan-task-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.conversation-plan-card h3,
+.conversation-plan-card h4,
+.conversation-plan-card p {
+  margin: 0;
+}
+
+.conversation-plan-card h3 {
+  margin-top: 0.2rem;
+  font-size: 1rem;
+  line-height: 1.4;
+}
+
+.conversation-plan-card h4 {
+  font-size: 0.72rem;
+}
+
+.conversation-plan-status {
+  display: grid;
+  flex: 0 0 auto;
+  justify-items: end;
+  gap: 0.3rem;
+}
+
+.conversation-plan-status code,
+.conversation-plan-task-heading code {
+  color: var(--muted);
+  font: 0.58rem "DM Mono", monospace;
+}
+
+.conversation-plan-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.conversation-plan-summary > div {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.65rem 0.75rem;
+}
+
+.conversation-plan-summary > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.conversation-plan-summary dt,
+.conversation-plan-task-meta dt {
+  color: var(--muted);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.conversation-plan-summary dd,
+.conversation-plan-task-meta dd {
+  margin: 0;
+  font-size: 0.7rem;
+}
+
+.conversation-plan-section {
+  display: grid;
+  min-width: 0;
+  gap: 0.55rem;
+}
+
+.conversation-plan-section > ul,
+.conversation-plan-diff ul {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding-left: 1rem;
+  font-size: 0.7rem;
+}
+
+.conversation-plan-section li > span {
+  display: block;
+  margin-top: 0.12rem;
+  color: var(--muted);
+}
+
+.conversation-plan-tasks {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conversation-plan-task {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--raised) 54%, transparent);
+}
+
+.conversation-plan-task-heading > div {
+  display: grid;
+  gap: 0.12rem;
+}
+
+.conversation-plan-task > p {
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+
+.conversation-plan-task-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 0;
+}
+
+.conversation-plan-task-meta > div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.conversation-plan-task details,
+.conversation-plan-diff {
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--line);
+}
+
+.conversation-plan-task summary,
+.conversation-plan-diff summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.conversation-plan-task summary:focus-visible,
+.conversation-plan-diff summary:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.conversation-plan-acceptance {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0.6rem 0 0;
+  padding-left: 1rem;
+  font-size: 0.68rem;
+}
+
+.conversation-plan-acceptance li {
+  padding-left: 0.15rem;
+}
+
+.conversation-plan-acceptance span {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--muted);
+  font: 0.6rem "DM Mono", monospace;
+}
+
+.conversation-plan-columns,
+.conversation-plan-diff > div {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.conversation-plan-empty,
+.conversation-plan-first-version {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.conversation-plan-diff > div {
+  margin-top: 0.65rem;
+}
+
+.conversation-plan-diff section {
+  display: grid;
+  align-content: start;
+  gap: 0.4rem;
+}
+
+.conversation-plan-change-control {
+  display: grid;
+  width: min(46rem, 100%);
+  gap: 0.65rem;
+  margin-top: 0.75rem;
+  padding: 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 38%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--warning) 5%, var(--surface));
+}
+
+.conversation-plan-change-control > div:first-child {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.conversation-plan-change-control h4,
+.conversation-plan-change-control p {
+  margin: 0;
+}
+
+.conversation-plan-change-control h4,
+.conversation-plan-change-control > label {
+  font-size: 0.68rem;
+}
+
+.conversation-plan-change-control p,
+.conversation-plan-change-actions > span {
+  color: var(--muted);
+  font-size: 0.62rem;
+  line-height: 1.45;
+}
+
+.conversation-plan-change-control textarea {
+  min-height: 5.5rem;
+}
+
+.conversation-plan-change-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.conversation-plan-change-control.is-ready {
+  border-color: color-mix(in srgb, var(--info) 38%, var(--line));
+  background: color-mix(in srgb, var(--info) 5%, var(--surface));
+}
+
+.conversation-action-card,
+.conversation-qc-card {
+  display: grid;
+  width: min(46rem, 100%);
+  gap: 0.9rem;
+  margin-top: 0.75rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--info) 38%, var(--line));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--info) 5%, var(--surface));
+}
+
+.conversation-action-card > header,
+.conversation-qc-card > header,
+.conversation-qc-group > div,
+.conversation-qc-disposition,
+.conversation-action-confirm,
+.conversation-action-effect {
+  display: flex;
+  align-items: center;
+}
+
+.conversation-action-card > header,
+.conversation-qc-card > header,
+.conversation-qc-group > div,
+.conversation-action-confirm {
+  justify-content: space-between;
+}
+
+.conversation-action-card h3,
+.conversation-action-card p,
+.conversation-qc-card h3,
+.conversation-qc-card h4,
+.conversation-qc-card p {
+  margin: 0;
+}
+
+.conversation-action-card h3,
+.conversation-qc-card h3 {
+  margin-top: 0.2rem;
+  font-size: 0.94rem;
+}
+
+.conversation-action-card > p {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.conversation-action-target,
+.conversation-qc-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.conversation-qc-summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.conversation-action-target > div,
+.conversation-qc-summary > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.15rem;
+  padding: 0.65rem 0.75rem;
+}
+
+.conversation-action-target > div + div,
+.conversation-qc-summary > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.conversation-action-target dt,
+.conversation-qc-summary dt {
+  color: var(--muted);
+  font-size: 0.56rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.conversation-action-target dd,
+.conversation-qc-summary dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.66rem;
+}
+
+.conversation-action-card blockquote {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0.7rem 0.8rem;
+  border: 0;
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  font-size: 0.68rem;
+}
+
+.conversation-action-delivery {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.conversation-action-delivery > strong {
+  font-size: 0.65rem;
+}
+
+.conversation-action-delivery ol {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conversation-action-delivery li {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.53rem;
+  text-align: center;
+}
+
+.conversation-action-delivery li::before {
+  position: absolute;
+  top: 0.3rem;
+  right: 50%;
+  left: -50%;
+  height: 1px;
+  background: var(--line);
+  content: "";
+}
+
+.conversation-action-delivery li:first-child::before {
+  display: none;
+}
+
+.conversation-action-delivery li > span:first-child {
+  z-index: 1;
+  width: 0.62rem;
+  height: 0.62rem;
+  border: 1px solid var(--line2);
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.conversation-action-delivery li.is-complete,
+.conversation-action-delivery li.is-current {
+  color: var(--text);
+}
+
+.conversation-action-delivery li.is-complete > span:first-child,
+.conversation-action-delivery li.is-current > span:first-child {
+  border-color: var(--success);
+  background: var(--success);
+}
+
+.conversation-action-outcome,
+.conversation-action-error,
+.conversation-action-effect,
+.conversation-qc-progress,
+.conversation-qc-failure {
+  padding: 0.62rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  font-size: 0.66rem;
+  line-height: 1.45;
+}
+
+.conversation-action-effect {
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.conversation-action-effect.is-success {
+  border-color: color-mix(in srgb, var(--success) 42%, var(--line));
+  background: color-mix(in srgb, var(--success) 8%, transparent);
+}
+
+.conversation-action-effect.is-info,
+.conversation-qc-progress {
+  border-color: color-mix(in srgb, var(--info) 40%, var(--line));
+  background: color-mix(in srgb, var(--info) 7%, transparent);
+}
+
+.conversation-action-effect.is-failed,
+.conversation-action-outcome.is-failed,
+.conversation-action-error,
+.conversation-qc-failure {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+}
+
+.conversation-action-effect a {
+  color: var(--info);
+  font-weight: 700;
+}
+
+.conversation-action-confirm {
+  gap: 1rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--line);
+}
+
+.conversation-action-confirm p {
+  max-width: 48ch;
+  color: var(--muted);
+  font-size: 0.65rem;
+}
+
+.conversation-qc-card {
+  border-color: color-mix(in srgb, var(--warning) 38%, var(--line));
+  background: color-mix(in srgb, var(--warning) 4%, var(--surface));
+}
+
+.conversation-qc-group {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.conversation-qc-group h4 {
+  font-size: 0.7rem;
+}
+
+.conversation-qc-group ol {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conversation-qc-finding {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 9px;
+  font-size: 0.68rem;
+}
+
+.conversation-qc-group.is-must_fix .conversation-qc-finding {
+  border-left-color: var(--danger);
+}
+
+.conversation-qc-group.is-should_fix .conversation-qc-finding {
+  border-left-color: var(--warning);
+}
+
+.conversation-qc-group.is-suggestion .conversation-qc-finding {
+  border-left-color: var(--info);
+}
+
+.conversation-qc-finding > div:first-child {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.conversation-qc-finding code {
+  width: fit-content;
+  color: var(--muted);
+  font: 0.58rem "DM Mono", monospace;
+}
+
+.conversation-qc-disposition {
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.conversation-qc-pending-disposition,
+.conversation-qc-revision,
+.conversation-qc-clear {
+  color: var(--muted);
+  font-size: 0.66rem;
 }
 
 .conversation-turn-meta,
@@ -574,6 +1147,17 @@
     grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
   }
 
+  .conversation-plan-columns,
+  .conversation-plan-diff > div,
+  .conversation-qc-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .conversation-qc-summary > div + div {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
   .conversation-header {
     align-items: flex-start;
   }
@@ -582,6 +1166,16 @@
 @media (max-width: 640px) {
   .conversation-header {
     display: grid;
+  }
+
+  .conversation-plan-proposal-control {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .conversation-plan-change-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .conversation-header-actions {
@@ -600,6 +1194,41 @@
 
   .conversation-message {
     max-width: 94%;
+  }
+
+  .conversation-plan-card-header,
+  .conversation-plan-task-heading,
+  .conversation-action-card > header,
+  .conversation-qc-card > header,
+  .conversation-action-confirm {
+    display: grid;
+  }
+
+  .conversation-plan-status {
+    grid-template-columns: auto auto;
+    align-items: center;
+    justify-content: start;
+  }
+
+  .conversation-plan-summary,
+  .conversation-plan-task-meta,
+  .conversation-action-target {
+    grid-template-columns: 1fr;
+  }
+
+  .conversation-plan-summary > div + div,
+  .conversation-action-target > div + div {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .conversation-action-delivery ol {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    row-gap: 0.65rem;
+  }
+
+  .conversation-action-delivery li:nth-child(4)::before {
+    display: none;
   }
 
   .conversation-keyboard-help {

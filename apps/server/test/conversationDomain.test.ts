@@ -177,7 +177,7 @@ describe.sequential("conversation-first durable domain", () => {
     ).resolves.toBeUndefined();
     const replay = await runCurrentV2Migrations(asMigrationDatabase(pg));
     expect(replay.at(-1)).toMatchObject({
-      name: "0036_conversation_stream_lifecycle",
+      name: "0037_conversation_plan_workflow",
       applied: false,
     });
   });
@@ -452,7 +452,12 @@ describe.sequential("conversation-first durable domain", () => {
       conversation_id: conversationId,
       source_message_id: firstMessageId,
       action_type: "send_plan_to_qc",
-      payload: { parameters: { plan_version_id: "plan-1" } },
+      payload: {
+        parameters: {
+          plan_version_id: "plan-1",
+          content_hash: "a".repeat(64),
+        },
+      },
     });
     expect(proposal.actor).toEqual({ actor_type: "human", actor_id: member.id });
     const confirmation = {
@@ -485,7 +490,13 @@ describe.sequential("conversation-first durable domain", () => {
       conversation_id: conversationId,
       source_message_id: firstMessageId,
       action_type: "approve_plan",
-      payload: { parameters: { plan_version_id: "plan-1" } },
+      payload: {
+        parameters: {
+          plan_version_id: "plan-1",
+          content_hash: "a".repeat(64),
+          plan_review_id: "review-1",
+        },
+      },
     });
     await expect(
       service.confirmAction(member, {
@@ -640,7 +651,7 @@ describe.sequential("conversation-first durable domain", () => {
                 approved_at=now()
           WHERE id='work-plan-2'`,
       ),
-    ).rejects.toThrow(/invalid plan version status transition/);
+    ).rejects.toThrow(/candidate approval requires an exact successful QC result revision/);
   });
 
   it("freezes the exact approved plan in handoffs and keeps summaries immutable", async () => {

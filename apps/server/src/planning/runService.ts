@@ -26,7 +26,7 @@ export type PlanningRunStatus =
 
 /** PHASE TAB P1: which implementation providers allocation staffing may use. */
 export type WorkerProviderSelection = "anthropic" | "openai" | "both";
-export type PlanningRunMode = "planned" | "quick";
+export type PlanningRunMode = "planned" | "quick" | "review_only";
 
 export interface PlanningParticipantSelection {
   provider: ProviderName;

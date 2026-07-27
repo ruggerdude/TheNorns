@@ -1,9 +1,14 @@
 import type {
+  V2ConfirmConversationPlanActionResponseT,
+  V2ConversationActionT,
+  V2ConversationPlanActionEffectT,
+  V2ConversationPlanReviewT,
   V2ConversationTurnAttemptT,
   V2WorkConversationT,
   V2WorkItemT,
   V2WorkMessagePartT,
   V2WorkMessageT,
+  V2WorkPlanVersionT,
 } from "@norns/contracts";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 
@@ -18,6 +23,10 @@ export interface ConversationDetail {
   messages: V2WorkMessageT[];
   active_attempt: V2ConversationTurnAttemptT | null;
   retryable_attempt: V2ConversationTurnAttemptT | null;
+  plan_versions: V2WorkPlanVersionT[];
+  actions: V2ConversationActionT[];
+  plan_reviews: V2ConversationPlanReviewT[];
+  action_effects: V2ConversationPlanActionEffectT[];
 }
 
 async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -38,6 +47,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
     throw new ApiError(
       payload.message ?? payload.error ?? `request failed: ${response.status}`,
       response.status,
+      payload.error ?? null,
     );
   }
   return payload;
@@ -88,6 +98,60 @@ export function messageEndpoint(
   conversationId: string,
 ): string {
   return `/api/v2/projects/${projectId}/work-items/${workItemId}/conversations/${conversationId}`;
+}
+
+export function confirmConversationAction(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  actionId: string,
+  idempotencyKey: string,
+): Promise<V2ConfirmConversationPlanActionResponseT> {
+  return requestJson(
+    `${messageEndpoint(projectId, workItemId, conversationId)}/actions/${encodeURIComponent(actionId)}/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    },
+  );
+}
+
+export function generateConversationPlanProposal(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  idempotencyKey: string,
+): Promise<{
+  message: V2WorkMessageT;
+  action: V2ConversationActionT;
+}> {
+  return requestJson(`${messageEndpoint(projectId, workItemId, conversationId)}/plan-proposals`, {
+    method: "POST",
+    body: JSON.stringify({ idempotency_key: idempotencyKey }),
+  });
+}
+
+export function generateConversationPlanChangeProposal(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  input: {
+    idempotency_key: string;
+    plan_version_id: string;
+    plan_hash: string;
+    direction: string;
+  },
+): Promise<{
+  message: V2WorkMessageT;
+  action: V2ConversationActionT;
+}> {
+  return requestJson(
+    `${messageEndpoint(projectId, workItemId, conversationId)}/plan-change-proposals`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
 }
 
 export interface SubmitConversationMessageBody {

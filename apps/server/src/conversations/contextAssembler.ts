@@ -130,7 +130,6 @@ export class ConversationContextAssembler {
             AND triggering_message.work_item_id=item.id
             AND triggering_message.conversation_id=conversation.id
             AND triggering_message.id=$4
-            AND triggering_message.role='user'
           WHERE item.project_id=$1 AND item.id=$2 AND conversation.id=$3`,
         [projectId, workItemId, conversationId, triggeringMessageId],
       );
@@ -216,6 +215,32 @@ export class ConversationContextAssembler {
         triggering_message_index: triggeringMessageIndex,
       };
     });
+  }
+
+  async assemblePlanProposal(
+    projectId: string,
+    workItemId: string,
+    conversationId: string,
+  ): Promise<ConversationContextAssembly & { source_message_id: string }> {
+    const sourceMessageId = await this.transactions.transaction(async (tx) => {
+      const row = (
+        await tx.query<{ id: string }>(
+          `SELECT id
+             FROM work_messages
+            WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3
+              AND visibility_status='complete'
+            ORDER BY sequence DESC
+            LIMIT 1`,
+          [projectId, workItemId, conversationId],
+        )
+      ).rows[0];
+      if (!row) throw new Error("plan proposal requires at least one complete visible message");
+      return row.id;
+    });
+    return {
+      ...(await this.assemble(projectId, workItemId, conversationId, sourceMessageId)),
+      source_message_id: sourceMessageId,
+    };
   }
 
   private async addRules(
@@ -403,7 +428,7 @@ export class ConversationContextAssembler {
               AND sequence<=(
                 SELECT sequence FROM work_messages
                  WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3
-                   AND id=$6 AND role='user'
+                   AND id=$6
               )
             ORDER BY sequence DESC
             LIMIT $5

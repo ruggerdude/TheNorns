@@ -4669,9 +4669,22 @@ export const conversationActions = pgTable(
         workMessages.id,
       ],
     }).onDelete("restrict"),
+    uniqueIndex("conversation_actions_scope_identity_unique").on(
+      table.projectId,
+      table.workItemId,
+      table.conversationId,
+      table.id,
+    ),
     uniqueIndex("conversation_actions_confirmation_idempotency_unique")
       .on(table.conversationId, table.confirmedByUserId, table.confirmationIdempotencyKey)
       .where(sql`${table.confirmationIdempotencyKey} IS NOT NULL`),
+    uniqueIndex("conversation_actions_one_open_plan_choice")
+      .on(table.conversationId, table.initiatedByUserId, table.actionType, table.payloadHash)
+      .where(sql`${table.status} = 'proposed'
+        AND ${table.actionType} IN (
+          'save_plan_candidate','send_plan_to_qc','request_plan_changes',
+          'approve_plan','reject_plan'
+        )`),
     index("conversation_actions_conversation_status_idx").on(
       table.conversationId,
       table.status,
@@ -4794,6 +4807,7 @@ export const workPlanVersions = pgTable(
     status: text("status").notNull(),
     plan: jsonb("plan").notNull(),
     contentHash: text("content_hash").notNull(),
+    createdByActionId: text("created_by_action_id"),
     supersedesPlanVersionId: text("supersedes_plan_version_id"),
     diffFromPrevious: jsonb("diff_from_previous"),
     approvedByUserId: text("approved_by_user_id").references(() => phase2Users.id, {
@@ -4813,6 +4827,16 @@ export const workPlanVersions = pgTable(
         workConversations.id,
       ],
     }).onDelete("restrict"),
+    foreignKey({
+      name: "work_plan_versions_created_by_action_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.createdByActionId],
+      foreignColumns: [
+        conversationActions.projectId,
+        conversationActions.workItemId,
+        conversationActions.conversationId,
+        conversationActions.id,
+      ],
+    }).onDelete("restrict"),
     uniqueIndex("work_plan_versions_version_unique").on(table.workItemId, table.version),
     uniqueIndex("work_plan_versions_one_approved_per_work_item")
       .on(table.workItemId)
@@ -4820,6 +4844,12 @@ export const workPlanVersions = pgTable(
     uniqueIndex("work_plan_versions_identity_unique").on(
       table.projectId,
       table.workItemId,
+      table.id,
+    ),
+    uniqueIndex("work_plan_versions_conversation_identity_unique").on(
+      table.projectId,
+      table.workItemId,
+      table.conversationId,
       table.id,
     ),
     lazyForeignKey(
@@ -4875,6 +4905,368 @@ export const workPlanVersions = pgTable(
           AND ${table.approvedByUserId} IS NULL
           AND ${table.approvedAt} IS NULL
         )`,
+    ),
+  ],
+);
+
+export const conversationPlanReviews = pgTable(
+  "conversation_plan_reviews",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    actionId: text("action_id").notNull(),
+    planVersionId: text("plan_version_id").notNull(),
+    planningRunId: text("planning_run_id").notNull(),
+    initiatedByUserId: text("initiated_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    attemptNumber: integer("attempt_number").notNull(),
+    pmProvider: text("pm_provider").notNull(),
+    pmModel: text("pm_model").notNull(),
+    reviewerProvider: text("reviewer_provider").notNull(),
+    reviewerModel: text("reviewer_model").notNull(),
+    usageRequestGroupId: text("usage_request_group_id").notNull(),
+    status: text("status").notNull().default("queued"),
+    seedPlan: jsonb("seed_plan").notNull(),
+    planContentHash: text("plan_content_hash").notNull(),
+    resultPlanContentHash: text("result_plan_content_hash").notNull(),
+    contextReceipt: jsonb("context_receipt").notNull(),
+    contextManifest: jsonb("context_manifest").notNull(),
+    contextHash: text("context_hash").notNull(),
+    findings: jsonb("findings").notNull().default([]),
+    dispositions: jsonb("dispositions").notNull().default([]),
+    revisedPlan: jsonb("revised_plan"),
+    revisedPlanContentHash: text("revised_plan_content_hash"),
+    revisedPlanVersionId: text("revised_plan_version_id"),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
+    completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+    failureCode: text("failure_code"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    foreignKey({
+      name: "conversation_plan_reviews_action_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.actionId],
+      foreignColumns: [
+        conversationActions.projectId,
+        conversationActions.workItemId,
+        conversationActions.conversationId,
+        conversationActions.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_plan_reviews_plan_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.planVersionId],
+      foreignColumns: [
+        workPlanVersions.projectId,
+        workPlanVersions.workItemId,
+        workPlanVersions.conversationId,
+        workPlanVersions.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_plan_reviews_run_scope_fk",
+      columns: [table.projectId, table.planningRunId],
+      foreignColumns: [conversationPlanningRuns.projectId, conversationPlanningRuns.id],
+    }).onDelete("restrict"),
+    lazyForeignKey(
+      "conversation_plan_reviews_revision_scope_fk",
+      (): AnyPgColumn[] => [
+        table.projectId,
+        table.workItemId,
+        table.conversationId,
+        table.revisedPlanVersionId,
+      ],
+      (): AnyPgColumn[] => [
+        workPlanVersions.projectId,
+        workPlanVersions.workItemId,
+        workPlanVersions.conversationId,
+        workPlanVersions.id,
+      ],
+    ).onDelete("restrict"),
+    uniqueIndex("conversation_plan_reviews_action_unique").on(table.actionId),
+    uniqueIndex("conversation_plan_reviews_run_unique").on(table.planningRunId),
+    uniqueIndex("conversation_plan_reviews_attempt_unique").on(
+      table.planVersionId,
+      table.attemptNumber,
+    ),
+    uniqueIndex("conversation_plan_reviews_identity_unique").on(
+      table.projectId,
+      table.workItemId,
+      table.conversationId,
+      table.id,
+    ),
+    uniqueIndex("conversation_plan_reviews_one_active_per_version")
+      .on(table.planVersionId)
+      .where(sql`${table.status} IN ('queued','running')`),
+    index("conversation_plan_reviews_conversation_time_idx").on(
+      table.conversationId,
+      table.createdAt,
+      table.id,
+    ),
+    index("conversation_plan_reviews_work_item_status_idx").on(
+      table.workItemId,
+      table.status,
+      table.createdAt,
+      table.id,
+    ),
+    check("conversation_plan_reviews_schema_version_check", sql`${table.schemaVersion} = 2`),
+    check("conversation_plan_reviews_attempt_check", sql`${table.attemptNumber} > 0`),
+    check(
+      "conversation_plan_reviews_status_check",
+      sql`${table.status} IN ('queued','running','converged','cap_reached','failed')`,
+    ),
+    check(
+      "conversation_plan_reviews_provider_policy_check",
+      sql`${table.pmProvider} IN ('anthropic','openai')
+        AND ${table.reviewerProvider} IN ('anthropic','openai')
+        AND ${table.pmProvider} <> ${table.reviewerProvider}
+        AND length(trim(${table.pmModel})) > 0
+        AND length(trim(${table.reviewerModel})) > 0`,
+    ),
+    check(
+      "conversation_plan_reviews_content_check",
+      sql`jsonb_typeof(${table.seedPlan}) = 'object'
+        AND jsonb_typeof(${table.contextReceipt}) = 'object'
+        AND jsonb_typeof(${table.contextManifest}) = 'object'
+        AND jsonb_typeof(${table.findings}) = 'array'
+        AND jsonb_typeof(${table.dispositions}) = 'array'
+        AND ${table.planContentHash} ~ '^[a-f0-9]{64}$'
+        AND ${table.resultPlanContentHash} ~ '^[a-f0-9]{64}$'
+        AND ${table.contextHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
+
+export const conversationPlanActionEffects = pgTable(
+  "conversation_plan_action_effects",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    actionId: text("action_id").notNull(),
+    effectKind: text("effect_kind").notNull(),
+    planVersionId: text("plan_version_id").notNull(),
+    planReviewId: text("plan_review_id"),
+    planningRunId: text("planning_run_id"),
+    executionStatus: text("execution_status"),
+    executionStarted: boolean("execution_started"),
+    executionDetail: text("execution_detail"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    foreignKey({
+      name: "conversation_plan_action_effects_action_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.actionId],
+      foreignColumns: [
+        conversationActions.projectId,
+        conversationActions.workItemId,
+        conversationActions.conversationId,
+        conversationActions.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_plan_action_effects_plan_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.planVersionId],
+      foreignColumns: [
+        workPlanVersions.projectId,
+        workPlanVersions.workItemId,
+        workPlanVersions.conversationId,
+        workPlanVersions.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_plan_action_effects_review_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.planReviewId],
+      foreignColumns: [
+        conversationPlanReviews.projectId,
+        conversationPlanReviews.workItemId,
+        conversationPlanReviews.conversationId,
+        conversationPlanReviews.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_plan_action_effects_run_scope_fk",
+      columns: [table.projectId, table.planningRunId],
+      foreignColumns: [conversationPlanningRuns.projectId, conversationPlanningRuns.id],
+    }).onDelete("restrict"),
+    uniqueIndex("conversation_plan_action_effects_action_unique").on(table.actionId),
+    uniqueIndex("conversation_plan_action_effects_identity_unique").on(
+      table.projectId,
+      table.workItemId,
+      table.conversationId,
+      table.id,
+    ),
+    index("conversation_plan_action_effects_conversation_time_idx").on(
+      table.conversationId,
+      table.createdAt,
+      table.id,
+    ),
+    check("conversation_plan_action_effects_schema_version_check", sql`${table.schemaVersion} = 2`),
+    check(
+      "conversation_plan_action_effects_kind_check",
+      sql`${table.effectKind} IN (
+        'plan_saved','qc_started','changes_requested','plan_approved','plan_rejected'
+      )`,
+    ),
+  ],
+);
+
+export const conversationPlanProposalAttempts = pgTable(
+  "conversation_plan_proposal_attempts",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    initiatedByUserId: text("initiated_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    sourceMessageId: text("source_message_id").notNull(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    usageRequestId: text("usage_request_id").notNull(),
+    retryAttempt: integer("retry_attempt").notNull().default(0),
+    providerRequestId: text("provider_request_id"),
+    usageStatus: text("usage_status").notNull().default("pending"),
+    inputTokens: bigint("input_tokens", { mode: "number" }),
+    outputTokens: bigint("output_tokens", { mode: "number" }),
+    cacheReadTokens: bigint("cache_read_tokens", { mode: "number" }),
+    cacheWriteTokens: bigint("cache_write_tokens", { mode: "number" }),
+    costUsd: numeric("cost_usd", { precision: 18, scale: 6 }),
+    status: text("status").notNull().default("pending"),
+    contextManifest: jsonb("context_manifest").notNull(),
+    contextHash: text("context_hash").notNull(),
+    outputMessageId: text("output_message_id"),
+    actionId: text("action_id"),
+    planContentHash: text("plan_content_hash"),
+    failureCode: text("failure_code"),
+    failureMessageRedacted: text("failure_message_redacted"),
+    sanitizedFailure: jsonb("sanitized_failure"),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }).notNull(),
+    settledAt: timestamp("settled_at", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    foreignKey({
+      name: "conversation_plan_proposals_source_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.sourceMessageId],
+      foreignColumns: [
+        workMessages.projectId,
+        workMessages.workItemId,
+        workMessages.conversationId,
+        workMessages.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_plan_proposals_output_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.outputMessageId],
+      foreignColumns: [
+        workMessages.projectId,
+        workMessages.workItemId,
+        workMessages.conversationId,
+        workMessages.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_plan_proposals_action_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.actionId],
+      foreignColumns: [
+        conversationActions.projectId,
+        conversationActions.workItemId,
+        conversationActions.conversationId,
+        conversationActions.id,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex("conversation_plan_proposals_idempotency_unique").on(
+      table.conversationId,
+      table.initiatedByUserId,
+      table.idempotencyKey,
+    ),
+    uniqueIndex("conversation_plan_proposals_usage_request_unique").on(table.usageRequestId),
+    uniqueIndex("conversation_plan_proposals_one_pending_per_conversation")
+      .on(table.conversationId)
+      .where(sql`${table.status} = 'pending'`),
+    index("conversation_plan_proposals_conversation_time_idx").on(
+      table.conversationId,
+      table.createdAt,
+      table.id,
+    ),
+  ],
+);
+
+export const conversationPlanChangeProposals = pgTable(
+  "conversation_plan_change_proposals",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    initiatedByUserId: text("initiated_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    planVersionId: text("plan_version_id").notNull(),
+    planContentHash: text("plan_content_hash").notNull(),
+    direction: text("direction").notNull(),
+    directionHash: text("direction_hash").notNull(),
+    messageId: text("message_id").notNull(),
+    actionId: text("action_id").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    foreignKey({
+      name: "conversation_plan_change_proposals_plan_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.planVersionId],
+      foreignColumns: [
+        workPlanVersions.projectId,
+        workPlanVersions.workItemId,
+        workPlanVersions.conversationId,
+        workPlanVersions.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_plan_change_proposals_message_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.messageId],
+      foreignColumns: [
+        workMessages.projectId,
+        workMessages.workItemId,
+        workMessages.conversationId,
+        workMessages.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_plan_change_proposals_action_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.actionId],
+      foreignColumns: [
+        conversationActions.projectId,
+        conversationActions.workItemId,
+        conversationActions.conversationId,
+        conversationActions.id,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex("conversation_plan_change_proposals_idempotency_unique").on(
+      table.conversationId,
+      table.initiatedByUserId,
+      table.idempotencyKey,
+    ),
+    index("conversation_plan_change_proposals_conversation_time_idx").on(
+      table.conversationId,
+      table.createdAt,
+      table.id,
     ),
   ],
 );
@@ -5017,6 +5409,10 @@ export const conversationDomainSchema = {
   conversationTurnAttempts,
   conversationActions,
   workPlanVersions,
+  conversationPlanReviews,
+  conversationPlanActionEffects,
+  conversationPlanProposalAttempts,
+  conversationPlanChangeProposals,
   conversationHandoffs,
   conversationSummaries,
 };

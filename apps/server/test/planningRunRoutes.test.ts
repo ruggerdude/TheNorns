@@ -100,6 +100,7 @@ describe.sequential("durable planning run HTTP API", () => {
       users,
       projects: new ProjectStore(),
       planningRuns: { transactions },
+      attachments: { transactions },
       integrationEnvironment: {
         ANTHROPIC_API_KEY: "test-anthropic",
         OPENAI_API_KEY: "test-openai",
@@ -124,6 +125,25 @@ describe.sequential("durable planning run HTTP API", () => {
       payload: { objective: "do the thing" },
     });
     expect(res.statusCode).toBe(401);
+  });
+
+  it("mounts the conversation plan workflow routes in the production relational composition", async () => {
+    const unauthenticated = await server.app.inject({
+      method: "POST",
+      url: `/api/v2/projects/${projectId}/work-items/missing-work/conversations/missing-conversation/plan-proposals`,
+      payload: { idempotency_key: "route-mounted" },
+    });
+    expect(unauthenticated.statusCode).toBe(401);
+
+    const authenticated = await inject(
+      server,
+      token,
+      "POST",
+      `/api/v2/projects/${projectId}/work-items/missing-work/conversations/missing-conversation/plan-proposals`,
+      { idempotency_key: "route-mounted" },
+    );
+    expect(authenticated.json()).toMatchObject({ error: "conversation_not_found" });
+    expect(authenticated.statusCode).toBe(404);
   });
 
   it("rejects an invalid body", async () => {

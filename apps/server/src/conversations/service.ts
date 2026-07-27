@@ -275,6 +275,12 @@ export class ConversationService {
           "wait for or stop the active response before sending another message",
         );
       }
+      if (await repository.hasActivePlanProposal(input.conversation_id)) {
+        throw new ConversationPersistenceError(
+          "turn_in_progress",
+          "wait for the active plan proposal before sending another message",
+        );
+      }
 
       const attachmentIds = [
         ...new Set(

@@ -3,6 +3,7 @@ import { V2WorkMessagePart } from "@norns/contracts";
 import { createUIMessageStream, pipeUIMessageStreamToResponse } from "ai";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import type { ConversationPlanDetail } from "./planWorkflow.js";
 import { ConversationPersistenceError } from "./repository.js";
 import type { ConversationActor, ConversationService, PlanningConversationPin } from "./service.js";
 import type { ConversationTurnRepository } from "./turnRepository.js";
@@ -22,6 +23,12 @@ export interface ConversationRouteOptions {
   turns: ConversationTurnService;
   attempts: ConversationTurnRepository;
   pinForProject(projectId: string): Promise<PlanningConversationPin>;
+  planDetail?(
+    userId: string,
+    projectId: string,
+    workItemId: string,
+    conversationId: string,
+  ): Promise<ConversationPlanDetail>;
 }
 
 const WorkItemBody = z
@@ -238,12 +245,29 @@ export function registerConversationRoutes(
     };
     try {
       const found = await options.conversations.getConversation(user, projectId, conversationId);
+      const planDetail = (await options.planDetail?.(
+        user.id,
+        projectId,
+        found.work_item.id,
+        conversationId,
+      )) ?? {
+        plan_versions: [],
+        actions: [],
+        plan_reviews: [],
+        action_effects: [],
+      };
       const [messages, active_attempt, retryable_attempt] = await Promise.all([
         options.conversations.listMessages(user, projectId, found.work_item.id, conversationId),
         options.attempts.active(projectId, conversationId),
         options.attempts.latestRetryableAttempt(projectId, found.work_item.id, conversationId),
       ]);
-      return reply.send({ ...found, messages, active_attempt, retryable_attempt });
+      return reply.send({
+        ...found,
+        messages,
+        active_attempt,
+        retryable_attempt,
+        ...planDetail,
+      });
     } catch (error) {
       routeError(reply, error);
     }
@@ -265,12 +289,29 @@ export function registerConversationRoutes(
           "conversation scope mismatch",
         );
       }
+      const planDetail = (await options.planDetail?.(
+        user.id,
+        projectId,
+        workItemId,
+        conversationId,
+      )) ?? {
+        plan_versions: [],
+        actions: [],
+        plan_reviews: [],
+        action_effects: [],
+      };
       const [messages, active_attempt, retryable_attempt] = await Promise.all([
         options.conversations.listMessages(user, projectId, workItemId, conversationId),
         options.attempts.active(projectId, conversationId),
         options.attempts.latestRetryableAttempt(projectId, workItemId, conversationId),
       ]);
-      return reply.send({ ...found, messages, active_attempt, retryable_attempt });
+      return reply.send({
+        ...found,
+        messages,
+        active_attempt,
+        retryable_attempt,
+        ...planDetail,
+      });
     } catch (error) {
       routeError(reply, error);
     }
@@ -319,6 +360,12 @@ export function registerConversationRoutes(
         throw new ConversationTurnError(
           "turn_in_progress",
           "wait for or stop the active response before sending another message",
+        );
+      }
+      if (await options.attempts.hasActivePlanProposal(conversationId)) {
+        throw new ConversationTurnError(
+          "turn_in_progress",
+          "wait for the active plan proposal before sending another message",
         );
       }
       const message = await options.conversations.submitUserMessage(user, {

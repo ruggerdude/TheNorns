@@ -510,7 +510,7 @@ export const V2WorkPlanContract = z
           .object({
             module_id: V2EntityId,
             agent_role: V2NonEmptyString,
-            provider: V2NonEmptyString,
+            provider: z.enum(["anthropic", "openai"]),
             model: V2NonEmptyString,
           })
           .strict(),
@@ -588,6 +588,7 @@ export const V2WorkPlanVersion = z
     status: V2WorkPlanVersionStatus,
     plan: V2WorkPlanContract,
     content_hash: V2Sha256Hex,
+    created_by_action_id: V2EntityId.nullable(),
     supersedes_plan_version_id: V2EntityId.nullable(),
     diff_from_previous: V2WorkPlanVersionDiff.nullable(),
     approved_by_user_id: V2EntityId.nullable(),
@@ -629,6 +630,376 @@ export const V2WorkPlanVersion = z
     }
   });
 export type V2WorkPlanVersionT = z.infer<typeof V2WorkPlanVersion>;
+
+export const V2SavePlanCandidateParameters = z
+  .object({
+    plan: V2WorkPlanContract,
+    predecessor_plan_version_id: V2EntityId.nullable(),
+    predecessor_content_hash: V2Sha256Hex.nullable(),
+    referenced_artifacts: z
+      .array(
+        z
+          .object({
+            id: V2EntityId,
+            content_hash: V2Sha256Hex,
+          })
+          .strict(),
+      )
+      .default([]),
+  })
+  .strict()
+  .refine(
+    (input) =>
+      (input.predecessor_plan_version_id === null) === (input.predecessor_content_hash === null),
+    {
+      path: ["predecessor_content_hash"],
+      message: "predecessor id and content hash must be present together",
+    },
+  );
+export type V2SavePlanCandidateParametersT = z.infer<typeof V2SavePlanCandidateParameters>;
+
+const planVersionReferenceParameters = {
+  plan_version_id: V2EntityId,
+  content_hash: V2Sha256Hex,
+};
+
+export const V2SendPlanToQcParameters = z.object(planVersionReferenceParameters).strict();
+export type V2SendPlanToQcParametersT = z.infer<typeof V2SendPlanToQcParameters>;
+
+export const V2RequestPlanChangesParameters = z
+  .object({
+    ...planVersionReferenceParameters,
+    direction: z.string().trim().min(1).max(2_000),
+  })
+  .strict();
+export type V2RequestPlanChangesParametersT = z.infer<typeof V2RequestPlanChangesParameters>;
+
+export const V2ApprovePlanParameters = z
+  .object({
+    ...planVersionReferenceParameters,
+    plan_review_id: V2EntityId,
+  })
+  .strict();
+export type V2ApprovePlanParametersT = z.infer<typeof V2ApprovePlanParameters>;
+
+export const V2RejectPlanParameters = z
+  .object({
+    ...planVersionReferenceParameters,
+    reason: V2NonEmptyString.nullable(),
+  })
+  .strict();
+export type V2RejectPlanParametersT = z.infer<typeof V2RejectPlanParameters>;
+
+export const V2ConversationPlanReviewStatus = z.enum([
+  "queued",
+  "running",
+  "converged",
+  "cap_reached",
+  "failed",
+]);
+export type V2ConversationPlanReviewStatusT = z.infer<typeof V2ConversationPlanReviewStatus>;
+
+export const V2ConversationPlanReviewContextEntry = z
+  .object({
+    kind: z.enum(["global_rules", "project_rules", "project_knowledge", "decision", "artifact"]),
+    ref: V2EntityId,
+    content_hash: V2Sha256Hex,
+  })
+  .strict();
+
+export const V2ConversationPlanReviewContextManifest = z
+  .object({
+    entries: z.array(V2ConversationPlanReviewContextEntry),
+    context_hash: V2Sha256Hex,
+  })
+  .strict();
+
+export const V2ConversationPlanReviewFinding = z
+  .object({
+    id: V2EntityId,
+    index: nonNegativeInteger,
+    severity: z.enum(["must_fix", "should_fix", "suggestion"]),
+    module_id: V2EntityId.nullable(),
+    finding: V2NonEmptyString,
+    recommendation: V2NonEmptyString,
+  })
+  .strict();
+export type V2ConversationPlanReviewFindingT = z.infer<typeof V2ConversationPlanReviewFinding>;
+
+export const V2ConversationPlanReviewDisposition = z
+  .object({
+    finding_id: V2EntityId,
+    finding_index: nonNegativeInteger,
+    disposition: z.enum(["accept", "rebut"]),
+    rationale: V2NonEmptyString,
+  })
+  .strict();
+export type V2ConversationPlanReviewDispositionT = z.infer<
+  typeof V2ConversationPlanReviewDisposition
+>;
+
+export const V2ConversationPlanReview = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    work_item_id: V2EntityId,
+    conversation_id: V2EntityId,
+    action_id: V2EntityId,
+    plan_version_id: V2EntityId,
+    planning_run_id: V2EntityId,
+    initiated_by_user_id: V2EntityId,
+    attempt_number: z.number().int().positive(),
+    pm_provider: z.enum(["anthropic", "openai"]),
+    pm_model: V2NonEmptyString,
+    reviewer_provider: z.enum(["anthropic", "openai"]),
+    reviewer_model: V2NonEmptyString,
+    usage_request_group_id: V2EntityId,
+    status: V2ConversationPlanReviewStatus,
+    plan_content_hash: V2Sha256Hex,
+    result_plan_content_hash: V2Sha256Hex,
+    context_manifest: V2ConversationPlanReviewContextManifest,
+    findings: z.array(V2ConversationPlanReviewFinding),
+    dispositions: z.array(V2ConversationPlanReviewDisposition),
+    revised_plan_version_id: V2EntityId.nullable(),
+    started_at: nullableDate,
+    completed_at: nullableDate,
+    failure_code: V2NonEmptyString.nullable(),
+    created_at: V2IsoDateTime,
+    updated_at: V2IsoDateTime,
+  })
+  .strict()
+  .superRefine((review, ctx) => {
+    const terminal = ["converged", "cap_reached", "failed"].includes(review.status);
+    if (terminal !== (review.completed_at !== null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["completed_at"],
+        message: "terminal plan reviews require completed_at",
+      });
+    }
+    const validTiming =
+      (review.status === "queued" && review.started_at === null && review.completed_at === null) ||
+      (review.status === "running" && review.started_at !== null && review.completed_at === null) ||
+      (review.status === "failed" && review.completed_at !== null) ||
+      (["converged", "cap_reached"].includes(review.status) &&
+        review.started_at !== null &&
+        review.completed_at !== null);
+    if (!validTiming) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["started_at"],
+        message: "plan review timing must match its lifecycle state",
+      });
+    }
+    if ((review.status === "failed") !== (review.failure_code !== null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["failure_code"],
+        message: "only failed plan reviews carry a failure code",
+      });
+    }
+    if (review.pm_provider === review.reviewer_provider) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reviewer_provider"],
+        message: "plan QC requires an opposite-provider reviewer",
+      });
+    }
+    const findingIds = new Set<string>();
+    const findingIndices = new Set<number>();
+    const findingById = new Map<string, z.infer<typeof V2ConversationPlanReviewFinding>>();
+    for (const finding of review.findings) {
+      if (findingIds.has(finding.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["findings"],
+          message: "plan review finding ids must be unique",
+        });
+      }
+      if (findingIndices.has(finding.index)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["findings"],
+          message: "plan review finding indices must be unique",
+        });
+      }
+      findingIds.add(finding.id);
+      findingIndices.add(finding.index);
+      findingById.set(finding.id, finding);
+    }
+    const dispositionIds = new Set<string>();
+    const dispositionIndices = new Set<number>();
+    for (const disposition of review.dispositions) {
+      if (
+        dispositionIds.has(disposition.finding_id) ||
+        dispositionIndices.has(disposition.finding_index)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["dispositions"],
+          message: "each finding can have only one disposition",
+        });
+      }
+      dispositionIds.add(disposition.finding_id);
+      dispositionIndices.add(disposition.finding_index);
+      const finding = findingById.get(disposition.finding_id);
+      if (!finding || finding.index !== disposition.finding_index) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["dispositions"],
+          message: "dispositions must reference the exact finding id and index",
+        });
+      }
+    }
+    if (["converged", "cap_reached"].includes(review.status)) {
+      const undisposedMustFix = review.findings.filter(
+        (finding) => finding.severity === "must_fix" && !dispositionIds.has(finding.id),
+      );
+      if (undisposedMustFix.length > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["dispositions"],
+          message: "every must-fix finding requires an attributable disposition",
+        });
+      }
+      if (
+        review.status === "cap_reached" &&
+        !review.findings.some((finding) => finding.severity === "must_fix")
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["findings"],
+          message: "cap-reached reviews must retain their must-fix finding evidence",
+        });
+      }
+    }
+    const hasRevision = review.revised_plan_version_id !== null;
+    if (hasRevision !== (review.result_plan_content_hash !== review.plan_content_hash)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["revised_plan_version_id"],
+        message: "a changed QC result must identify its materialized revision version",
+      });
+    }
+    if (
+      ["queued", "running", "failed"].includes(review.status) &&
+      (hasRevision || review.result_plan_content_hash !== review.plan_content_hash)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["revised_plan_version_id"],
+        message: "non-terminal-success reviews cannot expose revision evidence",
+      });
+    }
+    if (
+      ["queued", "running", "failed"].includes(review.status) &&
+      (review.findings.length > 0 || review.dispositions.length > 0)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["findings"],
+        message: "queued, running, and failed reviews cannot expose QC result evidence",
+      });
+    }
+  });
+export type V2ConversationPlanReviewT = z.infer<typeof V2ConversationPlanReview>;
+
+export const V2ConversationPlanExecution = z
+  .object({
+    status: z.enum(["pending", "started", "refused", "failed"]),
+    started: z.boolean().nullable(),
+    detail: V2NonEmptyString.nullable(),
+  })
+  .strict()
+  .superRefine((execution, ctx) => {
+    if (
+      execution.status === "pending" &&
+      (execution.started !== null || execution.detail !== null)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["started"],
+        message: "pending execution has no outcome",
+      });
+    }
+    if (
+      execution.status !== "pending" &&
+      (execution.started === null || execution.detail === null)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["started"],
+        message: "settled execution requires its outcome",
+      });
+    }
+    if (
+      (execution.status === "started" && execution.started !== true) ||
+      (["refused", "failed"].includes(execution.status) && execution.started !== false)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["started"],
+        message: "execution status and started outcome must agree",
+      });
+    }
+  });
+export type V2ConversationPlanExecutionT = z.infer<typeof V2ConversationPlanExecution>;
+
+export const V2ConversationPlanActionEffectValue = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("plan_saved"),
+      plan_version: V2WorkPlanVersion,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("qc_started"),
+      plan_review: V2ConversationPlanReview,
+      planning_run_id: V2EntityId,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("changes_requested"),
+      plan_version: V2WorkPlanVersion,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("plan_approved"),
+      plan_version: V2WorkPlanVersion,
+      plan_review_id: V2EntityId,
+      planning_run_id: V2EntityId,
+      execution: V2ConversationPlanExecution,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("plan_rejected"),
+      plan_version: V2WorkPlanVersion,
+    })
+    .strict(),
+]);
+export type V2ConversationPlanActionEffectValueT = z.infer<
+  typeof V2ConversationPlanActionEffectValue
+>;
+
+export const V2ConversationPlanActionEffect = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    work_item_id: V2EntityId,
+    conversation_id: V2EntityId,
+    action_id: V2EntityId,
+    effect: V2ConversationPlanActionEffectValue,
+    created_at: V2IsoDateTime,
+    updated_at: V2IsoDateTime,
+  })
+  .strict();
+export type V2ConversationPlanActionEffectT = z.infer<typeof V2ConversationPlanActionEffect>;
 
 const attributedNarrative = z
   .object({
@@ -800,7 +1171,28 @@ export const V2ProposeConversationActionInput = z
     action_type: V2ConversationActionType,
     payload: V2ConversationActionPayload,
   })
-  .strict();
+  .strict()
+  .superRefine((input, ctx) => {
+    const planActionSchemas = {
+      save_plan_candidate: V2SavePlanCandidateParameters,
+      send_plan_to_qc: V2SendPlanToQcParameters,
+      request_plan_changes: V2RequestPlanChangesParameters,
+      approve_plan: V2ApprovePlanParameters,
+      reject_plan: V2RejectPlanParameters,
+    } as const;
+    if (!(input.action_type in planActionSchemas)) return;
+    const schema = planActionSchemas[
+      input.action_type as keyof typeof planActionSchemas
+    ] as z.ZodType;
+    const parsed = schema.safeParse(input.payload.parameters);
+    if (parsed.success) return;
+    for (const issue of parsed.error.issues) {
+      ctx.addIssue({
+        ...issue,
+        path: ["payload", "parameters", ...issue.path],
+      });
+    }
+  });
 export type V2ProposeConversationActionInputT = z.infer<typeof V2ProposeConversationActionInput>;
 
 export const V2ConfirmConversationActionInput = z
@@ -813,3 +1205,54 @@ export const V2ConfirmConversationActionInput = z
   })
   .strict();
 export type V2ConfirmConversationActionInputT = z.infer<typeof V2ConfirmConversationActionInput>;
+
+export const V2ConfirmConversationPlanActionResponse = z
+  .object({
+    action: V2ConversationAction,
+    effect: V2ConversationPlanActionEffectValue,
+  })
+  .strict();
+export type V2ConfirmConversationPlanActionResponseT = z.infer<
+  typeof V2ConfirmConversationPlanActionResponse
+>;
+
+export const V2CreateConversationPlanProposalInput = z
+  .object({
+    idempotency_key: V2EntityId,
+  })
+  .strict();
+export type V2CreateConversationPlanProposalInputT = z.infer<
+  typeof V2CreateConversationPlanProposalInput
+>;
+
+export const V2CreateConversationPlanProposalResponse = z
+  .object({
+    message: V2WorkMessage,
+    action: V2ConversationAction,
+  })
+  .strict();
+export type V2CreateConversationPlanProposalResponseT = z.infer<
+  typeof V2CreateConversationPlanProposalResponse
+>;
+
+export const V2CreateConversationPlanChangeProposalInput = z
+  .object({
+    idempotency_key: V2EntityId,
+    plan_version_id: V2EntityId,
+    plan_hash: V2Sha256Hex,
+    direction: z.string().trim().min(1).max(2_000),
+  })
+  .strict();
+export type V2CreateConversationPlanChangeProposalInputT = z.infer<
+  typeof V2CreateConversationPlanChangeProposalInput
+>;
+
+export const V2CreateConversationPlanChangeProposalResponse = z
+  .object({
+    message: V2WorkMessage,
+    action: V2ConversationAction,
+  })
+  .strict();
+export type V2CreateConversationPlanChangeProposalResponseT = z.infer<
+  typeof V2CreateConversationPlanChangeProposalResponse
+>;

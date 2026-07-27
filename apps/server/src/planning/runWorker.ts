@@ -16,7 +16,9 @@ import { randomUUID } from "node:crypto";
 import type { ImagePart, LlmAdapter, ProviderName } from "@norns/adapters";
 import { type CodexReasoningEffortT, PlanContract, type PlanContractT } from "@norns/contracts";
 import type { ReviewFindingT, UsageEventT } from "@norns/contracts";
+import type { V2WorkPlanContractT } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
+import { type ReviewOnlyPlanningResult, runReviewOnlyPlanning } from "./reviewOnlySession.js";
 import type {
   ApprovedPlanExecutionKickoff,
   PlanningRunDecisionDto,
@@ -98,6 +100,21 @@ export interface PlanningRunWorkerOptions {
     projectId: string,
     attachmentIds: readonly string[],
   ) => Promise<readonly ImagePart[]>;
+  loadReviewOnlySeed?: (runId: string) => Promise<{
+    reviewId: string;
+    usageRequestGroupId: string;
+    initiatedByUserId: string;
+    seedPlan: V2WorkPlanContractT;
+    frozenContext: unknown;
+  }>;
+  markReviewOnlyStarted?: (reviewId: string) => Promise<void>;
+  completeReviewOnly?: (input: {
+    reviewId: string;
+    planningRunId: string;
+    result: ReviewOnlyPlanningResult;
+    totalCostUsd: number;
+  }) => Promise<void>;
+  failReviewOnly?: (planningRunId: string, error: unknown) => Promise<void>;
 }
 
 interface ClaimedPlanningRunRow {
@@ -267,13 +284,14 @@ export class PlanningRunWorker {
    *  what this does and does not guarantee. Returns the number of runs
    *  reconciled. */
   async reconcileOrphans(): Promise<number> {
-    return this.transactions.transaction(async (tx) => {
+    const reconciled = await this.transactions.transaction(async (tx) => {
       const planning = await tx.query<{ id: string }>(
         `UPDATE planning_runs
          SET status = 'failed',
              error = 'orphaned: server restarted before the run completed',
              lease_token = NULL, leased_until = NULL, updated_at = $1
-         WHERE status IN ('drafting','reviewing','revising')
+         WHERE mode <> 'review_only'
+           AND status IN ('drafting','reviewing','revising')
          RETURNING id`,
         [this.now().toISOString()],
       );
@@ -289,8 +307,29 @@ export class PlanningRunWorker {
          RETURNING id`,
         [this.now().toISOString()],
       );
-      return planning.rows.length + kickoff.rows.length;
+      const reviewOnly = await tx.query<{ id: string }>(
+        `SELECT id
+           FROM planning_runs
+          WHERE mode = 'review_only'
+            AND status IN ('drafting','reviewing','revising')
+          ORDER BY created_at, id`,
+      );
+      return {
+        count: planning.rows.length + kickoff.rows.length,
+        reviewOnlyIds: reviewOnly.rows.map((row) => row.id),
+      };
     });
+    const failReviewOnly = this.options.failReviewOnly;
+    if (reconciled.reviewOnlyIds.length > 0 && !failReviewOnly) {
+      throw new Error("review-only orphan recovery is not configured");
+    }
+    for (const runId of reconciled.reviewOnlyIds) {
+      await failReviewOnly?.(
+        runId,
+        new Error("orphaned: server restarted before the review completed"),
+      );
+    }
+    return reconciled.count + reconciled.reviewOnlyIds.length;
   }
 
   /** Processes at most one planning run or pending quick kickoff. */
@@ -324,7 +363,9 @@ export class PlanningRunWorker {
         ? `WITH next_run AS (
              SELECT id FROM planning_runs WHERE id = $4 AND status = 'queued' FOR UPDATE SKIP LOCKED
            )
-           UPDATE planning_runs SET status = 'drafting', lease_token = $1, leased_until = $2, updated_at = $3
+           UPDATE planning_runs SET
+             status = CASE planning_runs.mode WHEN 'review_only' THEN 'reviewing' ELSE 'drafting' END,
+             lease_token = $1, leased_until = $2, updated_at = $3
            FROM next_run WHERE planning_runs.id = next_run.id
            RETURNING planning_runs.id, planning_runs.project_id, planning_runs.objective,
              planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids,
@@ -337,7 +378,9 @@ export class PlanningRunWorker {
              SELECT id FROM planning_runs WHERE status = 'queued'
              ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1
            )
-           UPDATE planning_runs SET status = 'drafting', lease_token = $1, leased_until = $2, updated_at = $3
+           UPDATE planning_runs SET
+             status = CASE planning_runs.mode WHEN 'review_only' THEN 'reviewing' ELSE 'drafting' END,
+             lease_token = $1, leased_until = $2, updated_at = $3
            FROM next_run WHERE planning_runs.id = next_run.id
            RETURNING planning_runs.id, planning_runs.project_id, planning_runs.objective,
              planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids,
@@ -356,6 +399,7 @@ export class PlanningRunWorker {
 
   private async execute(claim: ClaimedPlanningRunRow): Promise<void> {
     const quick = claim.mode === "quick";
+    const reviewOnly = claim.mode === "review_only";
     const pmOverride =
       claim.pm_provider && claim.pm_model
         ? {
@@ -366,19 +410,50 @@ export class PlanningRunWorker {
         : null;
     let models: ResolvedPlanningModels;
     try {
-      models = await this.options.resolveModels(claim.project_id, {
-        mode: claim.mode ?? "planned",
-        pm: pmOverride,
-      });
+      if (reviewOnly) {
+        if (!pmOverride || !claim.agent_provider || !claim.agent_model) {
+          throw new Error("review-only planning run is missing durable PM/reviewer model pins");
+        }
+        models = {
+          pm: pmOverride,
+          reviewer: {
+            provider: claim.agent_provider,
+            model: claim.agent_model,
+          },
+        };
+      } else {
+        models = await this.options.resolveModels(claim.project_id, {
+          mode: claim.mode ?? "planned",
+          pm: pmOverride,
+        });
+      }
     } catch (error) {
-      await this.fail(claim, error);
+      if (reviewOnly && this.options.failReviewOnly) {
+        await this.options.failReviewOnly(claim.id, error);
+      } else {
+        await this.fail(claim, error);
+      }
       return;
     }
 
-    const pm = this.createAdapter(models.pm.provider, models.pm.model, models.pm.reasoning_effort);
-    const reviewer = quick
-      ? null
-      : this.createAdapter(models.reviewer.provider, models.reviewer.model);
+    let pm: LlmAdapter;
+    let reviewer: LlmAdapter | null;
+    try {
+      pm = this.createAdapter(models.pm.provider, models.pm.model, models.pm.reasoning_effort);
+      reviewer = quick ? null : this.createAdapter(models.reviewer.provider, models.reviewer.model);
+    } catch (error) {
+      if (reviewOnly && this.options.failReviewOnly) {
+        await this.options.failReviewOnly(claim.id, error);
+      } else {
+        await this.fail(claim, error);
+      }
+      return;
+    }
+
+    if (reviewOnly) {
+      await this.executeReviewOnly(claim, pm, reviewer, models);
+      return;
+    }
     // PHASE TAB P1: a modify re-entry appends to the run's prior transcript
     // (the earlier rounds are history the human already saw) and seeds the
     // loop with the prior plan + the human's direction.
@@ -527,6 +602,51 @@ export class PlanningRunWorker {
     } catch (error) {
       await this.fail(claim, error);
     }
+  }
+
+  private async executeReviewOnly(
+    claim: ClaimedPlanningRunRow,
+    pm: LlmAdapter,
+    reviewer: LlmAdapter | null,
+    models: ResolvedPlanningModels,
+  ): Promise<void> {
+    try {
+      if (
+        !reviewer ||
+        !this.options.loadReviewOnlySeed ||
+        !this.options.markReviewOnlyStarted ||
+        !this.options.completeReviewOnly ||
+        !this.options.failReviewOnly
+      ) {
+        throw new Error("review-only planning workflow is not configured");
+      }
+      const seed = await this.options.loadReviewOnlySeed(claim.id);
+      await this.options.markReviewOnlyStarted(seed.reviewId);
+      const result = await runReviewOnlyPlanning({
+        pm,
+        reviewer,
+        projectId: claim.project_id,
+        initiatedByUserId: seed.initiatedByUserId,
+        seedPlan: seed.seedPlan,
+        frozenContext: seed.frozenContext,
+        telemetryGroupId: seed.usageRequestGroupId,
+        maxRounds: claim.max_rounds,
+      });
+      this.options.recordUsage?.(result.usage);
+      const totalCostUsd = result.usage.reduce(
+        (total, usage) => total + usage.estimated_cost_usd,
+        0,
+      );
+      await this.options.completeReviewOnly({
+        reviewId: seed.reviewId,
+        planningRunId: claim.id,
+        result,
+        totalCostUsd,
+      });
+    } catch (error) {
+      await this.options.failReviewOnly?.(claim.id, error);
+    }
+    void models;
   }
 
   /**

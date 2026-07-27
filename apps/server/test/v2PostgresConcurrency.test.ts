@@ -1,6 +1,7 @@
-import { V2StartPhaseCommand } from "@norns/contracts";
+import { V2StartPhaseCommand, V2WorkPlanContract } from "@norns/contracts";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { ConversationPlanWorkflowService } from "../src/conversations/planWorkflow.js";
 import { PostgresConversationRepository } from "../src/conversations/repository.js";
 import { ConversationService } from "../src/conversations/service.js";
 import { canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
@@ -11,6 +12,45 @@ import { SqlV2ApplicationTransaction } from "../src/persistence/v2/sqlRepositori
 
 const databaseUrl = process.env.V2_POSTGRES_TEST_URL;
 const postgresDescribe = databaseUrl ? describe.sequential : describe.skip;
+
+const realPgPlan = V2WorkPlanContract.parse({
+  plan: {
+    objective: "Prove plan confirmation concurrency.",
+    assumptions: [],
+    modules: [
+      {
+        id: "concurrency",
+        title: "Concurrency",
+        description: "Verify exact-once plan actions.",
+        deliverables: ["Real PostgreSQL evidence"],
+        acceptance: [
+          {
+            id: "real-pg-pass",
+            statement: "Concurrent confirmation creates one effect.",
+            verification_type: "test",
+            verification: "Run the real PostgreSQL suite.",
+          },
+        ],
+        dependencies: [],
+        estimated_complexity: "S",
+        risk: "low",
+      },
+    ],
+    risks: [],
+    out_of_scope: [],
+  },
+  staffing: [
+    {
+      module_id: "concurrency",
+      agent_role: "implementation",
+      provider: "openai",
+      model: "gpt-5.6-sol",
+    },
+  ],
+  verification_requirements: ["Real PostgreSQL concurrency passes."],
+  open_decisions: [],
+  estimated_budget: { currency: "USD", amount: 5 },
+});
 
 postgresDescribe("V2 real PostgreSQL concurrency evidence", () => {
   let administrationPool: Pool;
@@ -439,7 +479,12 @@ postgresDescribe("V2 real PostgreSQL concurrency evidence", () => {
       conversation_id: conversationId,
       source_message_id: conversationMessageId,
       action_type: "send_plan_to_qc",
-      payload: { parameters: { plan_version_id: "real-pg-plan" } },
+      payload: {
+        parameters: {
+          plan_version_id: "real-pg-plan",
+          content_hash: "a".repeat(64),
+        },
+      },
     });
     const confirmation = {
       project_id: "conversation-concurrency-project",
@@ -489,6 +534,91 @@ postgresDescribe("V2 real PostgreSQL concurrency evidence", () => {
       status: "rejected",
       reason: { code: "idempotency_conflict", httpStatus: 409 },
     });
+  });
+
+  it("serializes plan save effects and QC creation through the real workflow", async () => {
+    const actor = { id: "conversation-concurrency-user" };
+    const dispatches: string[] = [];
+    const workflow = new ConversationPlanWorkflowService(runtimeRunner, {
+      newId: (prefix) => `${prefix}-workflow-real-pg-${++conversationIdSequence}`,
+      resolveReviewModels: async (_projectId, pm) => ({
+        pm,
+        reviewer: { provider: "anthropic", model: "claude-fable-5" },
+      }),
+      runReviewNow: async (runId) => {
+        dispatches.push(runId);
+      },
+    });
+    const saveAction = await conversationService.proposeAction(actor, {
+      project_id: "conversation-concurrency-project",
+      work_item_id: conversationWorkItemId,
+      conversation_id: conversationId,
+      source_message_id: conversationMessageId,
+      action_type: "save_plan_candidate",
+      payload: {
+        parameters: {
+          plan: realPgPlan,
+          predecessor_plan_version_id: null,
+          predecessor_content_hash: null,
+          referenced_artifacts: [],
+        },
+      },
+    });
+    const saveConfirmation = {
+      project_id: "conversation-concurrency-project",
+      work_item_id: conversationWorkItemId,
+      conversation_id: conversationId,
+      action_id: saveAction.id,
+      idempotency_key: "real-pg-plan-save-key",
+    };
+    const [saved, saveReplay] = await Promise.all([
+      workflow.confirm(actor.id, saveConfirmation),
+      workflow.confirm(actor.id, saveConfirmation),
+    ]);
+    expect(saveReplay).toEqual(saved);
+    expect(saved.effect.kind).toBe("plan_saved");
+    const afterSave = await workflow.detail(
+      actor.id,
+      "conversation-concurrency-project",
+      conversationWorkItemId,
+      conversationId,
+    );
+    expect(afterSave.plan_versions).toHaveLength(1);
+    expect(
+      afterSave.action_effects.filter((effect) => effect.action_id === saveAction.id),
+    ).toHaveLength(1);
+    const sendAction = afterSave.actions.find(
+      (candidate) => candidate.action_type === "send_plan_to_qc" && candidate.status === "proposed",
+    );
+    if (!sendAction) throw new Error("plan save did not emit send-to-QC");
+    const sendConfirmation = {
+      ...saveConfirmation,
+      action_id: sendAction.id,
+      idempotency_key: "real-pg-plan-qc-key",
+    };
+    const [sent, sendReplay] = await Promise.all([
+      workflow.confirm(actor.id, sendConfirmation),
+      workflow.confirm(actor.id, sendConfirmation),
+    ]);
+    expect(sendReplay).toEqual(sent);
+    expect(sent.effect.kind).toBe("qc_started");
+    expect(dispatches).toHaveLength(1);
+    const counts = await applicationPool.query<{
+      reviews: number;
+      review_runs: number;
+      effects: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::int FROM conversation_plan_reviews
+           WHERE conversation_id=$1) AS reviews,
+         (SELECT count(*)::int FROM planning_runs
+           WHERE project_id='conversation-concurrency-project'
+             AND mode='review_only') AS review_runs,
+         (SELECT count(*)::int FROM conversation_plan_action_effects
+           WHERE action_id=$2) AS effects`,
+      [conversationId, sendAction.id],
+    );
+    expect(counts.rows[0]).toEqual({ reviews: 1, review_runs: 1, effects: 1 });
   });
 
   it("serializes attachment reference creation against concurrent tombstoning", async () => {

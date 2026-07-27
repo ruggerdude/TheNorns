@@ -149,6 +149,10 @@ describe("conversation deep links", () => {
           messages: [],
           active_attempt: null,
           retryable_attempt: null,
+          plan_versions: [],
+          actions: [],
+          plan_reviews: [],
+          action_effects: [],
         },
       },
     );

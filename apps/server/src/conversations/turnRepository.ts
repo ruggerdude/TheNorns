@@ -187,6 +187,20 @@ export interface ConversationAttemptFailure extends ConversationAttemptUsage {
 export class ConversationTurnRepository {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
+  hasActivePlanProposal(conversationId: string): Promise<boolean> {
+    return this.transactions.transaction(async (tx) =>
+      Boolean(
+        (
+          await tx.query<{ id: string }>(
+            `SELECT id FROM conversation_plan_proposal_attempts
+              WHERE conversation_id=$1 AND status='pending' LIMIT 1`,
+            [conversationId],
+          )
+        ).rows[0],
+      ),
+    );
+  }
+
   begin(input: BeginConversationAttempt): Promise<BegunConversationAttempt> {
     return this.transactions.transaction(async (tx) => {
       const conversation = (
@@ -214,6 +228,20 @@ export class ConversationTurnRepository {
         throw new ConversationPersistenceError(
           "request_fingerprint_mismatch",
           "turn provider/model does not match the immutable conversation pin",
+        );
+      }
+      if (
+        (
+          await tx.query<{ id: string }>(
+            `SELECT id FROM conversation_plan_proposal_attempts
+              WHERE conversation_id=$1 AND status='pending' LIMIT 1`,
+            [input.conversationId],
+          )
+        ).rows[0]
+      ) {
+        throw new ConversationPersistenceError(
+          "conversation_inactive",
+          "wait for the active plan proposal before starting a PM response",
         );
       }
       const trigger = (
