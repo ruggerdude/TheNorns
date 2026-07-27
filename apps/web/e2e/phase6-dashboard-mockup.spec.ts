@@ -157,6 +157,8 @@ async function prepare(page: Page) {
         active_work: available("workflow_state", [
           {
             work_item: workItem,
+            conversation_id: conversationId,
+            deep_link: `/projects/${projectId}/work/${conversationId}`,
             phase_progress: null,
           },
         ]),
@@ -166,9 +168,14 @@ async function prepare(page: Page) {
             key: "mockup:1",
             source_type: "mockup",
             source_id: "mockup-version-1",
+            work_item_id: workItemId,
+            conversation_id: conversationId,
+            phase_id: null,
+            task_id: "checkout",
             title: "Review checkout mockup",
             summary: "Desktop and mobile are ready.",
             severity: "high",
+            deep_link: `/projects/${projectId}/work/${conversationId}`,
             occurred_at: now,
           },
         ]),
