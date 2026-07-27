@@ -3,7 +3,7 @@
 // shows up based on /api/auth/status and the ?invite= URL param, and whether
 // the Account/Admin buttons appear in the authenticated chrome based on the
 // signed-in user's role.
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { App } from "./App";
@@ -100,8 +100,52 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
 
     const adminButton = await screen.findByRole("button", { name: /^admin$/i });
     expect(screen.getByRole("button", { name: /^usage$/i })).toBeInTheDocument();
+    const headerActions = adminButton.closest(".header-actions");
+    expect(headerActions).not.toBeNull();
+    const headerButtons = within(headerActions as HTMLElement).getAllByRole("button");
+    expect(headerButtons).toHaveLength(4);
+    expect(headerButtons[0]).toHaveAccessibleName("Usage");
+    expect(headerButtons[1]).toHaveAccessibleName("Settings");
+    expect(headerButtons[2]).toHaveAccessibleName("Admin");
+    expect(headerButtons[3]).toHaveAccessibleName("admin@x.com");
     await user.click(adminButton);
     expect(await screen.findByTestId("admin-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("admin-panel")).toHaveClass("full-page-view");
+    expect(screen.queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument();
+  });
+
+  test("opens user settings and sign out actions from the username menu", async () => {
+    mock.get("/api/auth/me", {
+      body: {
+        id: "u1",
+        email: "david@example.com",
+        name: "David Hatwell",
+        role: "admin",
+        status: "active",
+      },
+    });
+    mock.get("/api/auth/sessions", { body: { sessions: [] } });
+    mock.get("/api/integrations/github", {
+      body: {
+        configured: false,
+        setup_available: false,
+        configuration_source: null,
+        user_authorization: { connected: false, login: null },
+        connections: [],
+      },
+    });
+    mock.get("/api/integrations/ai", { body: { cross_provider_ready: false, providers: [] } });
+    mock.get("/api/local-sources", { body: { state: "unavailable", repositories: [] } });
+    mock.install();
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: /david hatwell/i }));
+    expect(screen.getByRole("menuitem", { name: "User settings" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Sign out" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("menuitem", { name: "User settings" }));
+    expect(await screen.findByTestId("account-panel")).toHaveClass("full-page-view");
   });
 
   test("opens personal usage from the authenticated portfolio navigation", async () => {

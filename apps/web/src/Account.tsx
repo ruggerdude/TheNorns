@@ -5,7 +5,7 @@ import {
   chooseLocalRepository,
   loadLocalRepositories,
 } from "./localSources";
-import { Alert, Badge, Button, Field, Input, Select, Spinner } from "./ui";
+import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner } from "./ui";
 
 interface SessionSummary {
   id: string;
@@ -54,6 +54,7 @@ interface LocalAgentSetup {
   downloads: {
     windows: string | null;
     macos: string | null;
+    macos_release: "notarized" | "unsigned_preview" | null;
   };
   install_command: string;
   install_command_windows: string;
@@ -322,17 +323,23 @@ export function Account({
   };
 
   return (
-    <div className="modal-overlay">
-      <button type="button" className="modal-backdrop" aria-label="Dismiss" onClick={onClose} />
-      <div className="modal modal-wide settings-modal card" data-testid="account-panel">
-        <div className="section-head settings-head">
+    <div className="full-page-view" data-testid="account-panel">
+      <header className="full-page-header">
+        <div className="full-page-header-title">
+          <Brand />
+          <span>Settings</span>
+        </div>
+        <Button variant="ghost" className="btn-small" onClick={onClose}>
+          Close
+        </Button>
+      </header>
+      <main className="page settings-page">
+        <div className="section-head settings-head full-page-intro">
           <div>
             <div className="eyebrow">Workspace</div>
-            <h2>Settings</h2>
+            <h1>Settings</h1>
+            <p className="muted">Manage your profile, integrations, and active sessions.</p>
           </div>
-          <Button variant="ghost" className="btn-small" onClick={onClose}>
-            Close
-          </Button>
         </div>
         <div className="settings-layout">
           <nav className="settings-nav" aria-label="Settings sections">
@@ -726,10 +733,23 @@ export function Account({
                                             className="btn btn-primary btn-small"
                                             href={localAgentSetup.downloads.macos}
                                           >
-                                            Download for Mac
+                                            {localAgentSetup.downloads.macos_release ===
+                                            "unsigned_preview"
+                                              ? "Download unsigned Mac preview"
+                                              : "Download for Mac"}
                                           </a>
                                         ) : null}
                                       </div>
+                                      {localAgentSetup.downloads.macos_release ===
+                                      "unsigned_preview" ? (
+                                        <Alert>
+                                          This Mac preview is not yet Developer ID signed or
+                                          notarized. macOS may block it. Only use the release from
+                                          the official Norns GitHub repository; if prompted, open
+                                          System Settings → Privacy &amp; Security and choose Open
+                                          Anyway.
+                                        </Alert>
+                                      ) : null}
                                       <div>
                                         <strong>2. Connect this computer</strong>
                                         <p className="muted">
@@ -898,7 +918,7 @@ export function Account({
             ) : null}
           </section>
         </div>
-      </div>
+      </main>
     </div>
   );
 }

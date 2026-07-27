@@ -52,14 +52,18 @@ describe("project dashboard entry and removal", () => {
     );
   }
 
-  it("starts with project content and keeps New project in the top header", async () => {
+  it("starts with project content and puts New project in Quick access", async () => {
     setup();
     await screen.findByRole("link", { name: "Enter Alpha" });
 
     expect(screen.queryByText("Keep every project in motion.")).not.toBeInTheDocument();
     expect(screen.queryByText("Portfolio command center")).not.toBeInTheDocument();
     const createButton = screen.getByRole("button", { name: "+ New project" });
-    expect(createButton.closest("header")).toHaveClass("topbar");
+    expect(createButton.closest("section")).toHaveAttribute(
+      "aria-labelledby",
+      "quick-access-heading",
+    );
+    expect(createButton.closest("header")).toBeNull();
   });
 
   it("enters a project from the full dashboard row by click or keyboard", async () => {

@@ -35,15 +35,11 @@ describe("Account panel", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  test("clicking the backdrop dismisses the panel", async () => {
-    const onClose = vi.fn();
-    const user = userEvent.setup();
-    render(<Account user={admin} onClose={onClose} onSignOut={vi.fn()} />);
+  test("uses the full page layout without a dismissible backdrop", () => {
+    render(<Account user={admin} onClose={vi.fn()} onSignOut={vi.fn()} />);
 
-    const backdrop = document.querySelector(".modal-backdrop");
-    expect(backdrop).not.toBeNull();
-    await user.click(backdrop as HTMLElement);
-    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("account-panel")).toHaveClass("full-page-view");
+    expect(document.querySelector(".modal-backdrop")).toBeNull();
   });
 });
 

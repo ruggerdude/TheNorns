@@ -9,6 +9,7 @@ import {
 } from "@norns/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GitHubConnection, GitHubIntegrationStatus, SettingsTab } from "./Account";
+import { AuthenticatedHeaderActions } from "./UserMenu";
 import { ApiError, type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
 import {
   type LocalRepositoryInventory,
@@ -1463,42 +1464,15 @@ export function Projects({
           <Brand />
           <span className="topbar-location">Portfolio</span>
         </div>
-        <div className="header-actions">
-          <Button
-            variant="primary"
-            className="btn-small header-new-project"
-            onClick={() => {
-              setIdempotencyKey(globalThis.crypto.randomUUID());
-              setDialog(true);
-            }}
-          >
-            + New project
-          </Button>
-          {user ? (
-            <span className="user-chip" title={user.email}>
-              <span className="user-avatar">
-                {(user.name ?? user.email).slice(0, 1).toUpperCase()}
-              </span>
-              <span>{user.name ?? user.email}</span>
-            </span>
-          ) : null}
-          <Button variant="ghost" className="btn-small" onClick={() => onOpenAccount()}>
-            Settings
-          </Button>
-          {user && onOpenUsage ? (
-            <Button variant="ghost" className="btn-small" onClick={onOpenUsage}>
-              Usage
-            </Button>
-          ) : null}
-          {user?.role === "admin" ? (
-            <Button variant="ghost" className="btn-small" onClick={onOpenAdmin}>
-              Admin
-            </Button>
-          ) : null}
-          <Button variant="ghost" className="btn-small" onClick={onSignOut}>
-            Sign out
-          </Button>
-        </div>
+        {user && onOpenUsage ? (
+          <AuthenticatedHeaderActions
+            user={user}
+            onOpenUsage={onOpenUsage}
+            onOpenAccount={onOpenAccount}
+            onOpenAdmin={onOpenAdmin}
+            onSignOut={onSignOut}
+          />
+        ) : null}
       </header>
       <ProjectTabs projects={openProjects} onSelect={onOpenProject} onClose={onCloseProject} />
       <main className="page project-dashboard">
@@ -1513,7 +1487,19 @@ export function Projects({
                 <div className="eyebrow">01 · Get to work</div>
                 <h2 id="quick-access-heading">Quick access</h2>
               </div>
-              <span className="focus-hint">Your open and recent projects</span>
+              <div className="quick-access-actions">
+                <span className="focus-hint">Your open and recent projects</span>
+                <Button
+                  variant="primary"
+                  className="btn-small"
+                  onClick={() => {
+                    setIdempotencyKey(globalThis.crypto.randomUUID());
+                    setDialog(true);
+                  }}
+                >
+                  + New project
+                </Button>
+              </div>
             </div>
             <Input
               aria-label="Search projects"

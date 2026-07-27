@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
-import { Alert, Badge, Button, Field, Input, Select, TextArea } from "./ui";
+import { Alert, Badge, Brand, Button, Field, Input, Select, TextArea } from "./ui";
 
 interface UserSummary {
   id: string;
@@ -198,14 +198,21 @@ export function Admin({
   }, [fail, globalRulesDraft]);
 
   return (
-    <div className="modal-overlay">
-      <button type="button" className="modal-backdrop" aria-label="Dismiss" onClick={onClose} />
-      <div className="modal modal-wide card" data-testid="admin-panel">
-        <div className="section-head">
-          <h2>Administration</h2>
-          <Button variant="ghost" className="btn-small" onClick={onClose}>
-            Close
-          </Button>
+    <div className="full-page-view" data-testid="admin-panel">
+      <header className="full-page-header">
+        <div className="full-page-header-title">
+          <Brand />
+          <span>Administration</span>
+        </div>
+        <Button variant="ghost" className="btn-small" onClick={onClose}>
+          Close
+        </Button>
+      </header>
+      <main className="page admin-page">
+        <div className="full-page-intro">
+          <div className="eyebrow">Workspace controls</div>
+          <h1>Administration</h1>
+          <p className="muted">Manage global agent rules, members, roles, and invitations.</p>
         </div>
         {error ? <Alert testId="admin-error">{error}</Alert> : null}
 
@@ -363,7 +370,7 @@ export function Admin({
             ) : null}
           </section>
         </div>
-      </div>
+      </main>
     </div>
   );
 }

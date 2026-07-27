@@ -35,6 +35,7 @@ import {
 import { RunLog } from "./RunLog";
 import { StartPhaseControl } from "./StartPhaseControl";
 import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
+import { AuthenticatedHeaderActions } from "./UserMenu";
 import { WorkspaceSettings } from "./WorkspaceSettings";
 import {
   ApiError,
@@ -1758,24 +1759,15 @@ function ProjectGraph({
             ← Portfolio
           </Button>
         </div>
-        <div className="header-actions">
-          <Button className="btn-small" variant="ghost" onClick={() => onOpenAccount()}>
-            Settings
-          </Button>
-          {user ? (
-            <Button className="btn-small" variant="ghost" onClick={onOpenUsage}>
-              Usage
-            </Button>
-          ) : null}
-          {user?.role === "admin" ? (
-            <Button className="btn-small" variant="ghost" onClick={onOpenAdmin}>
-              Admin
-            </Button>
-          ) : null}
-          <Button className="btn-small" variant="ghost" onClick={() => onLogout("Signed out.")}>
-            Sign out
-          </Button>
-        </div>
+        {user ? (
+          <AuthenticatedHeaderActions
+            user={user}
+            onOpenUsage={onOpenUsage}
+            onOpenAccount={onOpenAccount}
+            onOpenAdmin={onOpenAdmin}
+            onSignOut={() => onLogout("Signed out.")}
+          />
+        ) : null}
       </header>
       <main className="page workspace-page">
         <div className="project-heading workspace-header">
@@ -3011,6 +3003,8 @@ export function App(): React.ReactElement {
 
   const openAccount = useCallback((tab: SettingsTab = "profile") => {
     setAccountTab(tab);
+    setShowAdmin(false);
+    setShowUsage(false);
     setShowAccount(true);
   }, []);
 
@@ -3040,7 +3034,21 @@ export function App(): React.ReactElement {
   return (
     <>
       <ThemeToggle />
-      {showUsage && user ? (
+      {showAccount && user ? (
+        <Account
+          user={user}
+          onClose={() => setShowAccount(false)}
+          onSignOut={() => logout("Signed out.")}
+          onUnauthorized={() => logout("Session expired. Sign in again.")}
+          initialTab={accountTab}
+          githubCallback={githubCallback}
+        />
+      ) : showAdmin && user?.role === "admin" ? (
+        <Admin
+          onClose={() => setShowAdmin(false)}
+          onUnauthorized={() => logout("Session expired. Sign in again.")}
+        />
+      ) : showUsage && user ? (
         <Suspense fallback={<Spinner label="Loading usage intelligence…" />}>
           <UsageHub
             user={user}
@@ -3060,8 +3068,16 @@ export function App(): React.ReactElement {
           onSignOut={() => logout("Signed out.")}
           user={user}
           onOpenAccount={openAccount}
-          onOpenAdmin={() => setShowAdmin(true)}
-          onOpenUsage={() => setShowUsage(true)}
+          onOpenAdmin={() => {
+            setShowAccount(false);
+            setShowUsage(false);
+            setShowAdmin(true);
+          }}
+          onOpenUsage={() => {
+            setShowAccount(false);
+            setShowAdmin(false);
+            setShowUsage(true);
+          }}
         />
       ) : (
         <ProjectGraph
@@ -3078,8 +3094,16 @@ export function App(): React.ReactElement {
           onLogout={logout}
           user={user}
           onOpenAccount={openAccount}
-          onOpenAdmin={() => setShowAdmin(true)}
-          onOpenUsage={() => setShowUsage(true)}
+          onOpenAdmin={() => {
+            setShowAccount(false);
+            setShowUsage(false);
+            setShowAdmin(true);
+          }}
+          onOpenUsage={() => {
+            setShowAccount(false);
+            setShowAdmin(false);
+            setShowUsage(true);
+          }}
           initialWorkRoute={workConversationRoute?.projectId === activeProject.id}
           initialConversationId={
             workConversationRoute?.projectId === activeProject.id
@@ -3093,22 +3117,6 @@ export function App(): React.ReactElement {
           onConversationRouteCleared={() => clearConversationRoute(activeProject.id)}
         />
       )}
-      {showAccount && user ? (
-        <Account
-          user={user}
-          onClose={() => setShowAccount(false)}
-          onSignOut={() => logout("Signed out.")}
-          onUnauthorized={() => logout("Session expired. Sign in again.")}
-          initialTab={accountTab}
-          githubCallback={githubCallback}
-        />
-      ) : null}
-      {showAdmin && user?.role === "admin" ? (
-        <Admin
-          onClose={() => setShowAdmin(false)}
-          onUnauthorized={() => logout("Session expired. Sign in again.")}
-        />
-      ) : null}
     </>
   );
 }

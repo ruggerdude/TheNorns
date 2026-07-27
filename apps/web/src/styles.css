@@ -4305,12 +4305,24 @@ button:disabled {
   align-items: center;
   gap: .5rem;
   max-width: 220px;
-  margin-right: .35rem;
+  min-height: 38px;
+  padding: .3rem .45rem;
+  border: 1px solid transparent;
+  border-radius: 10px;
   color: var(--muted);
+  background: transparent;
   font-size: .71rem;
+  cursor: pointer;
 }
 
-.user-chip > span:last-child {
+.user-chip:hover,
+.user-chip[aria-expanded="true"] {
+  color: var(--text);
+  border-color: var(--line);
+  background: var(--raised);
+}
+
+.user-chip > span:nth-child(2) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4327,6 +4339,61 @@ button:disabled {
   color: var(--accent2);
   background: color-mix(in srgb, var(--accent) 10%, var(--raised));
   font: 600 .66rem "DM Mono", monospace;
+}
+
+.header-user-menu {
+  position: relative;
+  margin-left: .2rem;
+}
+
+.user-menu-caret {
+  color: var(--muted);
+  font-size: .6rem;
+}
+
+.user-menu-popover {
+  position: absolute;
+  top: calc(100% + .5rem);
+  right: 0;
+  z-index: 60;
+  display: grid;
+  width: 220px;
+  padding: .45rem;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--surface) 97%, transparent);
+  box-shadow: 0 18px 55px rgba(1, 4, 14, 0.35);
+  backdrop-filter: blur(20px);
+}
+
+.user-menu-identity {
+  display: grid;
+  gap: .15rem;
+  min-width: 0;
+  margin: .15rem .35rem .4rem;
+  padding: 0 .2rem .55rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.user-menu-identity strong,
+.user-menu-identity span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-menu-identity strong {
+  font-size: .76rem;
+}
+
+.user-menu-identity span {
+  color: var(--muted);
+  font-size: .65rem;
+}
+
+.user-menu-popover .btn {
+  justify-content: flex-start;
+  width: 100%;
 }
 
 .project-tabs {
@@ -4449,6 +4516,12 @@ button:disabled {
 .focus-hint {
   color: var(--muted);
   font-size: .67rem;
+}
+
+.quick-access-actions {
+  display: flex;
+  align-items: center;
+  gap: .85rem;
 }
 
 .quick-access-panel > .input {
@@ -5098,6 +5171,76 @@ button:disabled {
   box-shadow: 0 30px 100px rgba(1, 4, 14, 0.5);
 }
 
+.full-page-view {
+  min-height: 100vh;
+  background: radial-gradient(
+      circle at 50% -15%,
+      color-mix(in srgb, var(--accent) 11%, transparent),
+      transparent 34rem
+    ), var(--bg);
+}
+
+.full-page-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 72px;
+  padding-inline: clamp(1rem, 3vw, 2.5rem);
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  backdrop-filter: blur(22px) saturate(1.35);
+}
+
+.full-page-header-title {
+  display: flex;
+  align-items: center;
+  gap: 1.1rem;
+}
+
+.full-page-header-title > span {
+  padding-left: 1.1rem;
+  border-left: 1px solid var(--line);
+  color: var(--muted);
+  font-size: .73rem;
+  font-weight: 650;
+}
+
+.settings-page,
+.admin-page {
+  width: min(1360px, calc(100% - clamp(2rem, 6vw, 5rem)));
+  padding-top: clamp(2rem, 4vw, 3.5rem);
+  padding-bottom: 6rem;
+}
+
+.full-page-intro {
+  margin-bottom: 1.8rem;
+}
+
+.full-page-intro h1 {
+  margin: .25rem 0 .35rem;
+  font-size: clamp(2rem, 4vw, 3.2rem);
+  letter-spacing: -.055em;
+}
+
+.full-page-intro p {
+  margin: 0;
+}
+
+.settings-page .settings-layout {
+  grid-template-columns: 230px minmax(0, 1fr);
+}
+
+.settings-page .settings-content {
+  min-height: 60vh;
+}
+
+.admin-page .admin-layout {
+  gap: 1.6rem;
+}
+
 .settings-layout {
   gap: 1.6rem;
 }
@@ -5255,9 +5398,24 @@ button:disabled {
   }
 
   .topbar-location,
-  .user-chip,
-  .topbar .header-actions .btn:not(:last-child) {
+  .topbar .header-actions > .btn,
+  .workspace-topbar .header-actions > .btn {
     display: none;
+  }
+
+  .header-user-menu {
+    margin-left: 0;
+  }
+
+  .user-chip > span:nth-child(2),
+  .user-menu-caret {
+    display: none;
+  }
+
+  .quick-access-actions {
+    align-items: flex-end;
+    flex-direction: column;
+    gap: .5rem;
   }
 
   .page,
@@ -5383,6 +5541,22 @@ button:disabled {
 
   .settings-nav {
     grid-template-columns: repeat(3, 1fr);
+  }
+
+  .settings-page,
+  .admin-page {
+    width: calc(100% - 1.25rem);
+  }
+
+  .settings-page .settings-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-content {
+    padding-top: 1.2rem;
+    padding-left: 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
   }
 
   .login {
@@ -5965,22 +6139,12 @@ body {
   }
 }
 
-/* Portfolio efficiency follow-up: creation lives in the global header and
-   the dashboard begins immediately with actionable project content. */
+/* Portfolio efficiency follow-up: the dashboard begins immediately with
+   actionable project content. */
 .project-dashboard {
   padding-top: clamp(0.85rem, 2vw, 1.35rem);
 }
 
-.header-new-project {
-  margin-right: 0.45rem;
-}
-
 .workspace-settings-card {
   width: 100%;
-}
-
-@media (max-width: 760px) {
-  .topbar .header-actions .btn.header-new-project {
-    display: inline-flex;
-  }
 }
