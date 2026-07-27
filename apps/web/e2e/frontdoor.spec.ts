@@ -385,6 +385,13 @@ test("New project goes from one brief to the first coding task", async ({ page }
   await page.goto("/");
   await page.getByRole("button", { name: /new project/i }).click();
 
+  await expect(page.getByRole("heading", { name: "Project setup", level: 1 })).toBeVisible();
+  await expect(page.locator(".topbar")).toBeHidden();
+  await expect(page.locator(".project-setup-header")).toBeVisible();
+  await expect(page.getByText("Guided setup")).toHaveCount(0);
+  const setupPage = await page.getByRole("main", { name: "New project" }).boundingBox();
+  expect(setupPage?.width ?? 0).toBeGreaterThan(900);
+
   await expect(page.getByTestId("automatic-github-destination")).toContainText("octocat");
   await page
     .getByTestId("project-description")

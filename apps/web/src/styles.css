@@ -42,6 +42,9 @@
 * {
   box-sizing: border-box;
 }
+[hidden] {
+  display: none !important;
+}
 html,
 body,
 #root {
@@ -378,7 +381,7 @@ button:disabled {
   margin-bottom: 2rem;
 }
 .page-intro h1 {
-  font-size: clamp(2rem, 5vw, 3.7rem);
+  font-size: var(--heading-page-size);
   line-height: 1.02;
   letter-spacing: -.06em;
   margin: .55rem 0;
@@ -1056,7 +1059,7 @@ button:disabled {
 }
 .dashboard-hero h1 {
   margin: .45rem 0 .35rem;
-  font-size: clamp(2.2rem, 5vw, 4rem);
+  font-size: var(--heading-display-size);
   letter-spacing: -.06em;
 }
 .dashboard-hero p {
@@ -3173,94 +3176,100 @@ button:disabled {
   }
 }
 
-/* ---- New Project wizard (full page, replaces the former modal) ---- */
-.wizard-page {
-  display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 820px);
-  align-items: start;
-  justify-content: center;
-  gap: clamp(1.5rem, 4vw, 3.5rem);
-  max-width: 1180px;
+/* ---- New Project setup: one full-width page, separate from the dashboard ---- */
+.project-setup-view .wizard-page {
+  display: block;
+  max-width: 1120px;
   padding-top: calc(72px + clamp(2rem, 4vw, 3.5rem));
+  padding-bottom: 6rem;
 }
 .project-setup-header {
   position: fixed;
   inset: 0 0 auto;
   width: 100%;
 }
-.project-setup-guide {
-  position: sticky;
-  top: 104px;
-  padding-top: 0.7rem;
+.project-setup-title {
+  margin-bottom: clamp(2rem, 4vw, 3rem);
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid var(--line);
 }
-.project-setup-guide h1 {
-  margin: 0.45rem 0 0.8rem;
-  font-size: clamp(1.9rem, 3.5vw, 2.8rem);
-  line-height: 1.04;
-  letter-spacing: -0.055em;
-}
-.project-setup-guide > p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.82rem;
-  line-height: 1.65;
-}
-.project-setup-guide ol {
-  display: grid;
-  gap: 0;
-  margin: 1.6rem 0 0;
-  padding: 0;
-  list-style: none;
-}
-.project-setup-guide li {
-  position: relative;
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  gap: 0.75rem;
-  min-height: 74px;
-}
-.project-setup-guide li:not(:last-child)::after {
-  position: absolute;
-  top: 31px;
-  bottom: 7px;
-  left: 15px;
-  width: 1px;
-  background: var(--line);
-  content: "";
-}
-.project-setup-guide li > span {
-  display: grid;
-  place-items: center;
-  align-self: start;
-  width: 31px;
-  height: 31px;
-  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
-  border-radius: 9px;
-  color: var(--accent2);
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
-  font: 600 0.58rem "DM Mono", monospace;
-}
-.project-setup-guide li div {
-  display: grid;
-  align-content: start;
-  gap: 0.22rem;
-  padding-top: 0.2rem;
-}
-.project-setup-guide li strong {
-  font-size: 0.78rem;
-}
-.project-setup-guide li small {
-  color: var(--muted);
-  font-size: 0.69rem;
-  line-height: 1.45;
+.project-setup-title h1 {
+  margin: 0.35rem 0 0;
 }
 .wizard-shell {
-  padding: 1.6rem 1.8rem;
+  width: 100%;
+  padding: 0;
+}
+.project-setup-view .wizard-shell > .form-stack,
+.project-setup-view .wizard-shell > [data-testid="wizard-blocker-step"] {
+  gap: 1.75rem;
+}
+.project-setup-view .source-picker {
+  gap: 0.9rem;
+}
+.project-setup-view .source-picker legend,
+.project-setup-view .field-label {
+  margin-bottom: 0.25rem;
+  font-size: 1rem;
+  font-weight: 700;
+}
+.project-setup-view .source-options {
+  gap: 1rem;
+}
+.project-setup-view .source-options button {
+  align-content: start;
+  gap: 0.7rem;
+  min-height: 138px;
+  padding: 1.3rem 1.4rem;
+  border-radius: 16px;
+}
+.project-setup-view .source-options strong {
+  font-size: 1.12rem;
+  line-height: 1.3;
+}
+.project-setup-view .source-options span {
+  max-width: 48ch;
+  font-size: 0.88rem;
+  line-height: 1.55;
+}
+.project-setup-view .repository-picker,
+.project-setup-view .connection-required,
+.project-setup-view .policy,
+.project-setup-view .setup-confirmation {
+  padding: 1.2rem 1.3rem;
+  border-radius: 15px;
+}
+.project-setup-view .input,
+.project-setup-view .select,
+.project-setup-view .textarea {
+  min-height: 52px;
+  padding: 0.9rem 1rem;
+  border-radius: 13px;
+  font-size: 1rem;
+}
+.project-setup-view .textarea {
+  min-height: 150px;
+}
+.project-setup-view .field-help,
+.project-setup-view .setup-confirmation,
+.project-setup-view .policy {
+  font-size: 0.88rem;
+}
+.project-setup-view details > summary {
+  padding-block: 0.35rem;
+  font-size: 0.96rem;
+  font-weight: 700;
+}
+.project-setup-view .wizard-shell > .form-stack > .btn-primary {
+  justify-self: start;
+  min-height: 52px;
+  padding-inline: 1.35rem;
+  font-size: 1rem;
 }
 .two-col-fields {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.8rem;
+  gap: 1rem;
 }
 .rounds-stepper {
   display: inline-flex;
@@ -3279,34 +3288,8 @@ button:disabled {
   .two-col-fields {
     grid-template-columns: 1fr;
   }
-  .wizard-page {
-    grid-template-columns: 1fr;
-  }
-  .project-setup-guide {
-    position: static;
-    padding: 0;
-  }
-  .project-setup-guide ol {
-    grid-template-columns: repeat(3, 1fr);
-    gap: 0.5rem;
-    margin-top: 1rem;
-  }
-  .project-setup-guide li {
-    grid-template-columns: 1fr;
+  .project-setup-view .source-options button {
     min-height: 0;
-    padding: 0.75rem;
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--surface) 88%, transparent);
-  }
-  .project-setup-guide li:not(:last-child)::after {
-    display: none;
-  }
-  .project-setup-guide li small {
-    display: none;
-  }
-  .wizard-shell {
-    padding: 1.2rem;
   }
 }
 
@@ -4568,7 +4551,7 @@ button:disabled {
 .dashboard-hero h1 {
   max-width: 760px;
   margin: .5rem 0 .55rem;
-  font-size: clamp(2.4rem, 5vw, 4.7rem);
+  font-size: var(--heading-display-size);
   line-height: 1.02;
   letter-spacing: -.065em;
   text-wrap: balance;
@@ -4615,7 +4598,7 @@ button:disabled {
 
 .focus-panel-head h2 {
   margin: .24rem 0 0;
-  font-size: 1.18rem;
+  font-size: var(--heading-subsection-size);
   letter-spacing: -.035em;
 }
 
@@ -4935,7 +4918,7 @@ button:disabled {
 
 .project-toolbar h2 {
   margin: .22rem 0;
-  font-size: 1.32rem;
+  font-size: var(--heading-section-size);
   letter-spacing: -.035em;
 }
 
@@ -5258,7 +5241,7 @@ button:disabled {
 
 .debates-head h2,
 .debates-head h3 {
-  font-size: clamp(1.8rem, 4vw, 2.7rem);
+  font-size: var(--heading-page-size);
   letter-spacing: -.05em;
 }
 
@@ -5327,7 +5310,7 @@ button:disabled {
 
 .full-page-intro h1 {
   margin: .25rem 0 .35rem;
-  font-size: clamp(2rem, 4vw, 3.2rem);
+  font-size: var(--heading-page-size);
   letter-spacing: -.055em;
 }
 
@@ -5758,6 +5741,15 @@ button:disabled {
   --brand-wash: rgba(0, 22, 137, 0.22);
   --brand-wash-subtle: rgba(0, 22, 137, 0.12);
   --gold-accent: #ffb600;
+  /* Global heading hierarchy: display > page > section > subsection > detail. */
+  --heading-display-size: clamp(2.8rem, 5vw, 4.7rem);
+  --heading-page-size: clamp(2.3rem, 4vw, 3.3rem);
+  --heading-section-size: clamp(1.5rem, 2.6vw, 2rem);
+  --heading-subsection-size: clamp(1.12rem, 1.8vw, 1.35rem);
+  --heading-detail-size: 1.05rem;
+  --heading-tight-leading: 1.08;
+  --heading-section-leading: 1.16;
+  --heading-tracking: -0.045em;
 }
 
 :root[data-theme="light"] {
@@ -5783,6 +5775,40 @@ body {
   line-height: 1.58;
   background: radial-gradient(circle at 8% -5%, rgba(0, 22, 137, 0.2), transparent 31rem),
     radial-gradient(circle at 94% 8%, rgba(255, 182, 0, 0.035), transparent 24rem), var(--bg);
+}
+
+/* Site-wide semantic heading guidelines. Contextual selectors may choose a
+   larger tier, but the hierarchy and rhythm stay consistent. */
+h1,
+h2,
+h3,
+h4 {
+  color: var(--text);
+  text-wrap: balance;
+}
+
+h1 {
+  font-size: var(--heading-page-size);
+  line-height: var(--heading-tight-leading);
+  letter-spacing: var(--heading-tracking);
+}
+
+h2 {
+  font-size: var(--heading-section-size);
+  line-height: var(--heading-section-leading);
+  letter-spacing: -0.035em;
+}
+
+h3 {
+  font-size: var(--heading-subsection-size);
+  line-height: 1.22;
+  letter-spacing: -0.025em;
+}
+
+h4 {
+  font-size: var(--heading-detail-size);
+  line-height: 1.25;
+  letter-spacing: -0.018em;
 }
 
 :root[data-theme="light"] body {
@@ -5813,15 +5839,15 @@ body {
 }
 
 .workspace-shell h2 {
-  font-size: clamp(1.55rem, 2.6vw, 2rem);
+  font-size: var(--heading-section-size);
 }
 
 .workspace-shell h3 {
-  font-size: clamp(1.12rem, 1.8vw, 1.35rem);
+  font-size: var(--heading-subsection-size);
 }
 
 .workspace-shell h4 {
-  font-size: 1.05rem;
+  font-size: var(--heading-detail-size);
 }
 
 .workspace-shell p,
@@ -5848,7 +5874,7 @@ body {
 }
 
 .workspace-header h1 {
-  font-size: clamp(2.1rem, 4vw, 3rem);
+  font-size: var(--heading-page-size);
 }
 
 .workspace-tabs {

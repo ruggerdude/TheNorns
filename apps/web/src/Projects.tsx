@@ -2113,55 +2113,11 @@ export function Projects({
               ← Dashboard
             </Button>
           </header>
-          <aside className="project-setup-guide" aria-label="Project setup guide">
-            <div className="eyebrow">Guided setup</div>
-            <h1>Start with the essentials.</h1>
-            <p>
-              Tell The Norns where the work lives and what success looks like. You stay in control
-              before any coding begins.
-            </p>
-            <ol>
-              <li>
-                <span>01</span>
-                <div>
-                  <strong>Choose the project</strong>
-                  <small>Start fresh or bring in existing work.</small>
-                </div>
-              </li>
-              <li>
-                <span>02</span>
-                <div>
-                  <strong>Pick the workspace</strong>
-                  <small>Connect GitHub or an approved local repository.</small>
-                </div>
-              </li>
-              <li>
-                <span>03</span>
-                <div>
-                  <strong>Set the first outcome</strong>
-                  <small>Describe the brief and review the setup before launch.</small>
-                </div>
-              </li>
-            </ol>
-          </aside>
-          <section className="wizard-shell card">
-            <div className="section-head">
-              <div>
-                <div className="eyebrow">Project setup</div>
-                <h2>Let's set the brief</h2>
-                <p className="muted">
-                  {wizardStep === "attach"
-                    ? planningError
-                      ? "The project exists. Resume the interrupted planning setup without creating it again."
-                      : sourceKind === "local"
-                        ? "Preserving references and starting planning in the approved local Git repository."
-                        : "Creating the repository, preserving references, and starting planning."
-                    : wizardStep === "blocker"
-                      ? "One thing needs fixing before this project can run."
-                      : "Start fresh or bring an existing codebase into The Norns. Nothing runs until you approve the plan."}
-                </p>
-              </div>
-            </div>
+          <div className="project-setup-title">
+            <div className="eyebrow">New project</div>
+            <h1>Project setup</h1>
+          </div>
+          <section className="wizard-shell">
             {wizardStep === "attach" && draftProject ? (
               <div className="form-stack wizard-attach-step" data-testid="wizard-attach-step">
                 <Alert>

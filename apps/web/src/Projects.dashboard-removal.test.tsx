@@ -73,7 +73,9 @@ describe("project dashboard entry and removal", () => {
     await userEvent.click(screen.getByRole("button", { name: "+ New project" }));
 
     expect(screen.getByRole("main", { name: "New project" })).toBeInTheDocument();
-    expect(screen.getByRole("complementary", { name: "Project setup guide" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Project setup", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText("Guided setup")).not.toBeInTheDocument();
+    expect(screen.queryByText("Let's set the brief")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Quick access" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Enter Alpha" })).not.toBeInTheDocument();
 
