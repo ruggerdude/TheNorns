@@ -16,8 +16,7 @@ import { pmModelOption } from "@norns/contracts";
 // dormant behind the "No plan yet" hint.
 import type { Connection, Edge, Node } from "@xyflow/react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Account, type SettingsTab } from "./Account";
-import { Admin } from "./Admin";
+import type { SettingsTab } from "./Account";
 import { AnalyzeRepositoryControl } from "./AnalyzeRepositoryControl";
 import { Debates } from "./Debates";
 import { Gantt, type GanttPhase } from "./Gantt";
@@ -76,6 +75,8 @@ import { type UpdatePreferences, resolveUpdatePreferences } from "./workspacePre
 const GraphCanvas = lazy(() =>
   import("./GraphCanvas").then(({ GraphCanvas }) => ({ default: GraphCanvas })),
 );
+const Account = lazy(() => import("./Account").then(({ Account }) => ({ default: Account })));
+const Admin = lazy(() => import("./Admin").then(({ Admin }) => ({ default: Admin })));
 const UsageHub = lazy(() => import("./UsageHub").then(({ UsageHub }) => ({ default: UsageHub })));
 const PhaseTab = lazy(() => import("./PhaseTab").then(({ PhaseTab }) => ({ default: PhaseTab })));
 const ConversationOverview = lazy(() =>
@@ -3035,19 +3036,23 @@ export function App(): React.ReactElement {
     <>
       <ThemeToggle />
       {showAccount && user ? (
-        <Account
-          user={user}
-          onClose={() => setShowAccount(false)}
-          onSignOut={() => logout("Signed out.")}
-          onUnauthorized={() => logout("Session expired. Sign in again.")}
-          initialTab={accountTab}
-          githubCallback={githubCallback}
-        />
+        <Suspense fallback={<Spinner label="Loading settings…" />}>
+          <Account
+            user={user}
+            onClose={() => setShowAccount(false)}
+            onSignOut={() => logout("Signed out.")}
+            onUnauthorized={() => logout("Session expired. Sign in again.")}
+            initialTab={accountTab}
+            githubCallback={githubCallback}
+          />
+        </Suspense>
       ) : showAdmin && user?.role === "admin" ? (
-        <Admin
-          onClose={() => setShowAdmin(false)}
-          onUnauthorized={() => logout("Session expired. Sign in again.")}
-        />
+        <Suspense fallback={<Spinner label="Loading administration…" />}>
+          <Admin
+            onClose={() => setShowAdmin(false)}
+            onUnauthorized={() => logout("Session expired. Sign in again.")}
+          />
+        </Suspense>
       ) : showUsage && user ? (
         <Suspense fallback={<Spinner label="Loading usage intelligence…" />}>
           <UsageHub
