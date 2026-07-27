@@ -11,6 +11,48 @@ export interface HelperRunnerSnapshot {
 
 export type HelperConnectionState = "connected" | "degraded" | "disconnected" | "not_installed";
 
+export interface LocalAgentDownloads {
+  windows: string | null;
+  macos: string | null;
+}
+
+function optionalHttpsDownload(value: string | undefined, name: string): string | null {
+  if (!value?.trim()) return null;
+  const url = new URL(value);
+  if (url.protocol !== "https:" || url.username || url.password) {
+    throw new Error(`${name} must be a public HTTPS URL`);
+  }
+  return url.toString();
+}
+
+export function localAgentDownloadsFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+): LocalAgentDownloads {
+  return {
+    windows: optionalHttpsDownload(
+      environment.NORNS_WINDOWS_AGENT_DOWNLOAD_URL,
+      "NORNS_WINDOWS_AGENT_DOWNLOAD_URL",
+    ),
+    macos: optionalHttpsDownload(
+      environment.NORNS_MACOS_AGENT_DOWNLOAD_URL,
+      "NORNS_MACOS_AGENT_DOWNLOAD_URL",
+    ),
+  };
+}
+
+export function localAgentPairingUri(input: {
+  origin: string;
+  code: string;
+  runnerId?: string;
+}): string {
+  const { origin, runnerId } = validated(input);
+  const url = new URL("norns-agent://pair");
+  url.searchParams.set("server", origin);
+  url.searchParams.set("code", input.code);
+  url.searchParams.set("runner_id", runnerId);
+  return url.toString();
+}
+
 export function helperStatus(runners: readonly HelperRunnerSnapshot[]) {
   const repositoryReady = (runner: HelperRunnerSnapshot) =>
     runner.connected &&
@@ -25,7 +67,7 @@ export function helperStatus(runners: readonly HelperRunnerSnapshot[]) {
       runner_id: ready.runner_id,
       runners,
       workspace_clone_ready: ready.workspace_clone_ready,
-      message: "The Norns helper is ready to choose a folder on this computer.",
+      message: "Norns Local Agent is ready to choose folders on this computer.",
     };
   }
   const outdated = runners.find((runner) => runner.connected);
@@ -36,7 +78,7 @@ export function helperStatus(runners: readonly HelperRunnerSnapshot[]) {
       runners,
       workspace_clone_ready: false,
       message:
-        "The local helper is out of date. Re-run helper setup in Connections before choosing a folder.",
+        "Norns Local Agent is out of date. Update it in Connections before choosing a folder.",
     };
   }
   if (runners.length > 0) {
@@ -45,7 +87,7 @@ export function helperStatus(runners: readonly HelperRunnerSnapshot[]) {
       runner_id: runners[0]?.runner_id ?? null,
       runners,
       workspace_clone_ready: false,
-      message: "The local helper is installed but is not currently reachable.",
+      message: "Norns Local Agent is installed but is not currently reachable.",
     };
   }
   return {
@@ -53,7 +95,7 @@ export function helperStatus(runners: readonly HelperRunnerSnapshot[]) {
     runner_id: null,
     runners,
     workspace_clone_ready: false,
-    message: "Set up the local helper once, then choose folders with the system picker.",
+    message: "Install Norns Local Agent once, then choose folders with the system picker.",
   };
 }
 

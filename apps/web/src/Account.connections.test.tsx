@@ -24,7 +24,9 @@ describe("workspace connections settings", () => {
       body: {
         state: "not_installed",
         runner_id: null,
+        workspace_clone_ready: false,
         message: "Set up the local helper once.",
+        downloads: { windows: null, macos: null },
         install_command: "install-helper",
         install_command_windows: "install-helper-windows",
         repositories: [],
@@ -192,17 +194,37 @@ describe("workspace connections settings", () => {
       },
     });
     mock.post("/api/pairing/start", {
-      body: { install_command: "curl https://norns.example/install | sh" },
+      body: {
+        code: "a1b2c3d4",
+        expires_at: "2026-07-27T21:00:00.000Z",
+        runner_id: "runner-1",
+        pairing_uri:
+          "norns-agent://pair?server=https%3A%2F%2Fnorns.example&code=a1b2c3d4&runner_id=runner-1",
+        downloads: {
+          windows: "https://downloads.example/Norns-Local-Agent-Setup.exe",
+          macos: null,
+        },
+        install_command: "curl https://norns.example/install | sh",
+        install_command_windows: "Install-NornsHelper",
+      },
     });
     mock.install();
 
     render(<Account user={admin} initialTab="connections" onClose={vi.fn()} onSignOut={vi.fn()} />);
 
     expect(await screen.findByText("Not configured")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /manage local/i }));
+    await userEvent.click(screen.getByRole("button", { name: /manage agent/i }));
     expect(screen.getByText(/set up the local helper once/i)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /set up local helper/i }));
-    expect(await screen.findByText("curl https://norns.example/install | sh")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /set up norns local agent/i }));
+    expect(await screen.findByRole("link", { name: "Download for Windows" })).toHaveAttribute(
+      "href",
+      "https://downloads.example/Norns-Local-Agent-Setup.exe",
+    );
+    expect(screen.getByRole("link", { name: "Connect installed agent" })).toHaveAttribute(
+      "href",
+      expect.stringMatching(/^norns-agent:\/\/pair/),
+    );
+    expect(screen.getByText("curl https://norns.example/install | sh")).toBeInTheDocument();
   });
 
   it("shows provider readiness and the exact missing deployment variables", async () => {

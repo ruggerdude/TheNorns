@@ -2519,11 +2519,11 @@ export function Projects({
                     </div>
                     {executionLocation === "local" ? (
                       localSources === null ? (
-                        <Spinner label="Checking the local helper…" />
+                        <Spinner label="Checking Norns Local Agent…" />
                       ) : localSources.state !== "connected" ? (
                         <div className="connection-required">
                           <div>
-                            <strong>Local helper required</strong>
+                            <strong>Norns Local Agent required</strong>
                             <p>{localSources.message}</p>
                           </div>
                           <Button
@@ -2538,10 +2538,8 @@ export function Projects({
                       ) : !localSources.workspace_clone_ready ? (
                         <div className="connection-required">
                           <div>
-                            <strong>Update the local helper</strong>
-                            <p>
-                              Re-run helper setup in Connections to enable secure GitHub cloning.
-                            </p>
+                            <strong>Update Norns Local Agent</strong>
+                            <p>Update the agent in Connections to enable secure GitHub cloning.</p>
                           </div>
                           <Button
                             type="button"

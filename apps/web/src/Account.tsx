@@ -46,6 +46,19 @@ interface AiIntegrationStatus {
   }>;
 }
 
+interface LocalAgentSetup {
+  code: string;
+  expires_at: string;
+  runner_id: string;
+  pairing_uri: string;
+  downloads: {
+    windows: string | null;
+    macos: string | null;
+  };
+  install_command: string;
+  install_command_windows: string;
+}
+
 type ConnectionPanel = "github" | "local" | "ai";
 
 export type SettingsTab = "profile" | "connections" | "security";
@@ -122,7 +135,7 @@ export function Account({
   );
   const [aiStatus, setAiStatus] = useState<AiIntegrationStatus | null>(null);
   const [localSources, setLocalSources] = useState<LocalRepositoryInventory | null>(null);
-  const [localInstallCommand, setLocalInstallCommand] = useState("");
+  const [localAgentSetup, setLocalAgentSetup] = useState<LocalAgentSetup | null>(null);
   const [githubOwnerType, setGitHubOwnerType] = useState<"personal" | "organization">("personal");
   const [githubOrganization, setGitHubOrganization] = useState("");
 
@@ -157,7 +170,7 @@ export function Account({
     try {
       const inventory = await loadLocalRepositories();
       setLocalSources(inventory);
-      if (inventory.state === "connected") setLocalInstallCommand("");
+      if (inventory.state === "connected") setLocalAgentSetup(null);
     } catch (error) {
       if (error instanceof UnauthorizedError) onUnauthorized();
       else setConnectionError(error instanceof Error ? error.message : String(error));
@@ -281,11 +294,11 @@ export function Account({
     setConnectionBusy("local-setup");
     setConnectionError(null);
     try {
-      const setup = await integrationRequest<{ install_command: string }>("/api/pairing/start", {
+      const setup = await integrationRequest<LocalAgentSetup>("/api/pairing/start", {
         method: "POST",
         body: JSON.stringify({}),
       });
-      setLocalInstallCommand(setup.install_command);
+      setLocalAgentSetup(setup);
     } catch (error) {
       if (error instanceof UnauthorizedError) onUnauthorized();
       else setConnectionError(error instanceof Error ? error.message : String(error));
@@ -602,8 +615,8 @@ export function Account({
                     <div className="connection-brand">
                       <span className="connection-icon">⌂</span>
                       <div>
-                        <h4>Local repositories</h4>
-                        <p>Approved Git folders on this computer</p>
+                        <h4>Norns Local Agent</h4>
+                        <p>Local coding and approved project folders on this computer</p>
                       </div>
                     </div>
                     <div className="connection-card-controls">
@@ -619,14 +632,14 @@ export function Account({
                         aria-controls="local-connection-details"
                         onClick={() => void toggleConnection("local")}
                       >
-                        {openConnection === "local" ? "Hide" : "Manage local"}
+                        {openConnection === "local" ? "Hide" : "Manage agent"}
                       </Button>
                     </div>
                   </div>
                   {openConnection === "local" ? (
                     <div className="connection-details" id="local-connection-details">
                       {localSources === null ? (
-                        <Spinner label="Checking the local helper…" />
+                        <Spinner label="Checking Norns Local Agent…" />
                       ) : (
                         <>
                           <p className="muted">{localSources.message}</p>
@@ -684,22 +697,92 @@ export function Account({
                                   {connectionBusy === "local-setup"
                                     ? "Preparing…"
                                     : localSources.state === "degraded"
-                                      ? "Update local helper"
-                                      : "Set up local helper"}
+                                      ? "Update Norns Local Agent"
+                                      : "Set up Norns Local Agent"}
                                 </Button>
                               </div>
-                              {localInstallCommand ? (
-                                <div className="local-helper-command">
-                                  <code>{localInstallCommand}</code>
-                                  <Button
-                                    variant="ghost"
-                                    className="btn-small"
-                                    onClick={() =>
-                                      void navigator.clipboard.writeText(localInstallCommand)
-                                    }
-                                  >
-                                    Copy command
-                                  </Button>
+                              {localAgentSetup ? (
+                                <div className="local-agent-setup">
+                                  {localAgentSetup.downloads.windows ||
+                                  localAgentSetup.downloads.macos ? (
+                                    <>
+                                      <div>
+                                        <strong>1. Install Norns Local Agent</strong>
+                                        <p className="muted">
+                                          The installer includes everything the agent needs.
+                                        </p>
+                                      </div>
+                                      <div className="connection-actions">
+                                        {localAgentSetup.downloads.windows ? (
+                                          <a
+                                            className="btn btn-primary btn-small"
+                                            href={localAgentSetup.downloads.windows}
+                                          >
+                                            Download for Windows
+                                          </a>
+                                        ) : null}
+                                        {localAgentSetup.downloads.macos ? (
+                                          <a
+                                            className="btn btn-primary btn-small"
+                                            href={localAgentSetup.downloads.macos}
+                                          >
+                                            Download for Mac
+                                          </a>
+                                        ) : null}
+                                      </div>
+                                      <div>
+                                        <strong>2. Connect this computer</strong>
+                                        <p className="muted">
+                                          After installation, this one-use link securely pairs the
+                                          agent with your account.
+                                        </p>
+                                      </div>
+                                      <div className="connection-actions">
+                                        <a
+                                          className="btn btn-primary btn-small"
+                                          href={localAgentSetup.pairing_uri}
+                                        >
+                                          Connect installed agent
+                                        </a>
+                                      </div>
+                                    </>
+                                  ) : (
+                                    <Alert>
+                                      Downloadable installers are not published for this deployment
+                                      yet. Advanced setup remains available below.
+                                    </Alert>
+                                  )}
+                                  <details>
+                                    <summary>Advanced command-line setup</summary>
+                                    <div className="local-helper-command">
+                                      <code>{localAgentSetup.install_command}</code>
+                                      <Button
+                                        variant="ghost"
+                                        className="btn-small"
+                                        onClick={() =>
+                                          void navigator.clipboard.writeText(
+                                            localAgentSetup.install_command,
+                                          )
+                                        }
+                                      >
+                                        Copy Mac/Linux command
+                                      </Button>
+                                    </div>
+                                    <div className="local-helper-command">
+                                      <code>{localAgentSetup.install_command_windows}</code>
+                                      <Button
+                                        variant="ghost"
+                                        className="btn-small"
+                                        onClick={() =>
+                                          void navigator.clipboard.writeText(
+                                            localAgentSetup.install_command_windows,
+                                          )
+                                        }
+                                      >
+                                        Copy Windows command
+                                      </Button>
+                                    </div>
+                                  </details>
                                 </div>
                               ) : null}
                             </>

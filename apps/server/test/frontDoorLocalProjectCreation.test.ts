@@ -81,7 +81,13 @@ describe.sequential("Front Door secure local-folder creation", () => {
         method: "POST",
         headers: { authorization: `Bearer ${token}` },
       })
-    ).json()) as { code: string };
+    ).json()) as {
+      code: string;
+      pairing_uri: string;
+      downloads: { windows: string | null; macos: string | null };
+    };
+    expect(pairing.pairing_uri).toMatch(/^norns-agent:\/\/pair\?/);
+    expect(pairing.downloads).toEqual({ windows: null, macos: null });
     daemon = new RunnerDaemon({
       serverUrl: url,
       runnerId: "runner-local",

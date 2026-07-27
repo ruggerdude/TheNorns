@@ -5,6 +5,10 @@ export interface LocalHelperStatus {
   runner_id: string | null;
   workspace_clone_ready: boolean;
   message: string;
+  downloads: {
+    windows: string | null;
+    macos: string | null;
+  };
   install_command: string;
   install_command_windows: string;
 }

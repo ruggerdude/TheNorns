@@ -10,5 +10,6 @@ test-results/
 playwright-report/
 blob-report/
 dist-pack/
+dist-agent/
 .claude/worktrees/
 .claude/snapshots/

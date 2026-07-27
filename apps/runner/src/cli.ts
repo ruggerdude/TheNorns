@@ -12,6 +12,11 @@ import { mkdirSync } from "node:fs";
 //     handling commands until Ctrl-C.
 import { homedir } from "node:os";
 import { join } from "node:path";
+import {
+  parseLocalAgentPairingUri,
+  readLocalAgentConfig,
+  writeLocalAgentConfig,
+} from "./agentPairing.js";
 import { type RunnerContextIdentity, RunnerSignedContextFetcher } from "./contextAuth.js";
 import { RunnerDaemon } from "./daemon.js";
 import type { RelayInferenceClient } from "./inferenceClient.js";
@@ -229,6 +234,8 @@ const USAGE = `norns-runner — TheNorns Local Runner
 
 Usage:
   norns-runner pair <code> --server <url> [--id <runnerId>] [--data <dir>]
+  norns-runner pair-url <norns-agent://pair?...> [--data <dir>]
+  norns-runner agent-start [--data <dir>]
   norns-runner start --server <url> [--id <runnerId>] [--data <dir>]
   norns-runner start --ephemeral --id <runnerId> --job <dispatchJobId>
   norns-runner workspace add <folder> [--label <name>] [--data <dir>]
@@ -251,13 +258,19 @@ Ephemeral (GitHub Actions) mode:
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const { runnerId, server, dataDir } = resolveOptions(args.flags);
+  const resolved = resolveOptions(args.flags);
+  const agentConfig =
+    args.command === "agent-start" ? readLocalAgentConfig(resolved.dataDir) : undefined;
+  const runnerId = agentConfig?.runner_id ?? resolved.runnerId;
+  const server = agentConfig?.server ?? resolved.server;
+  const dataDir = resolved.dataDir;
+  const command = args.command === "agent-start" ? "start" : args.command;
 
-  if (!args.command || args.command === "help" || args.flags.help) {
+  if (!command || command === "help" || args.flags.help) {
     process.stdout.write(USAGE);
     return;
   }
-  if (args.command === "workspace") {
+  if (command === "workspace") {
     const registry = new WorkspaceRegistry(dataDir);
     const action = args.positional[0];
     if (action === "add") {
@@ -282,12 +295,35 @@ async function main(): Promise<void> {
     }
     throw new Error("workspace command must be add, list, or remove");
   }
+  if (command === "pair-url") {
+    const pairingUri = args.positional[0];
+    if (!pairingUri) throw new Error("local-agent pairing link required");
+    const pairing = parseLocalAgentPairingUri(pairingUri);
+    const allowedOrigin = process.env.NORNS_AGENT_ALLOWED_ORIGIN;
+    if (allowedOrigin && new URL(allowedOrigin).origin !== pairing.server) {
+      throw new Error("this Norns Local Agent installer belongs to a different server");
+    }
+    const pairingDataDir = args.flags.data ?? join(homedir(), ".norns", pairing.runnerId);
+    const daemon = new RunnerDaemon({
+      serverUrl: pairing.server,
+      runnerId: pairing.runnerId,
+      dataDir: pairingDataDir,
+    });
+    await daemon.pair(pairing.code);
+    writeLocalAgentConfig(pairingDataDir, {
+      version: 1,
+      server: pairing.server,
+      runner_id: pairing.runnerId,
+    });
+    process.stdout.write(`Norns Local Agent connected as "${pairing.runnerId}"\n`);
+    return;
+  }
   if (!server) {
     process.stderr.write("error: --server <url> is required (or set NORNS_SERVER)\n");
     process.exit(2);
   }
 
-  if (args.command === "pair") {
+  if (command === "pair") {
     const code = args.positional[0];
     if (!code) {
       process.stderr.write("error: pairing code required — `norns-runner pair <code> ...`\n");
@@ -301,7 +337,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (args.command === "start") {
+  if (command === "start") {
     // ONBOARDING O4 — ephemeral (GitHub Actions) mode. Purely additive: without
     // --ephemeral every line below behaves exactly as it did for laptop
     // runners. With it, the runner enrolls instead of loading paired state,
@@ -443,7 +479,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  process.stderr.write(`unknown command "${args.command}"\n\n${USAGE}`);
+  process.stderr.write(`unknown command "${command}"\n\n${USAGE}`);
   process.exit(2);
 }
 

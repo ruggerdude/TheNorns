@@ -1,4 +1,13 @@
 export { RunnerDaemon, type DaemonOptions } from "./daemon.js";
+export {
+  LOCAL_AGENT_CONFIG_FILENAME,
+  LOCAL_AGENT_PAIRING_PROTOCOL,
+  type LocalAgentConfig,
+  type LocalAgentPairing,
+  parseLocalAgentPairingUri,
+  readLocalAgentConfig,
+  writeLocalAgentConfig,
+} from "./agentPairing.js";
 export { FixtureExecutor } from "./fixture.js";
 export {
   LiveRunRegistry,

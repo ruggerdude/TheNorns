@@ -1315,6 +1315,28 @@ button:disabled {
   align-items: start;
   flex-wrap: wrap;
 }
+.local-agent-setup {
+  display: grid;
+  gap: .8rem;
+  padding: .85rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+}
+.local-agent-setup details {
+  border-top: 1px solid var(--line);
+  padding-top: .75rem;
+}
+.local-agent-setup summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: .75rem;
+  font-weight: 650;
+}
+.local-agent-setup details[open] {
+  display: grid;
+  gap: .7rem;
+}
 .local-helper-command {
   flex: 1 0 100%;
   display: grid;
@@ -1539,10 +1561,9 @@ button:disabled {
   font-size: .78rem;
   line-height: 1.45;
 }
-/* O1: the confirmation step's honest, plain-language explainer — where the
-   code lives and how execution works (GitHub Actions, never the human's own
-   machine). Deliberately neutral/quiet, not another colored callout stacked
-   under the cross-provider-review policy box above it. */
+/* O1: the confirmation step's honest, plain-language explainer for the
+   selected execution location. Deliberately neutral/quiet, not another
+   colored callout stacked under the cross-provider-review policy box. */
 .setup-confirmation {
   margin: 0;
   padding: .7rem .85rem;

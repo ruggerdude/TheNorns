@@ -1,0 +1,100 @@
+name: Local Agent Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Installer version
+        required: true
+        default: 0.1.0
+      publish_release:
+        description: Publish a signed prerelease
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @norns/runner... run build
+      - run: pnpm --filter @norns/runner pack:tarball
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+      - name: Build self-contained installer
+        shell: pwsh
+        run: ./scripts/package-windows-agent.ps1 -Version '${{ inputs.version }}'
+      - name: Authenticode sign installer
+        id: signing
+        shell: pwsh
+        env:
+          SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+          SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
+        run: |
+          $installer = 'dist-agent\windows\installer\Norns-Local-Agent-Setup.exe'
+          if (-not $env:SIGNING_CERTIFICATE_BASE64) {
+            if ($env:PUBLISH_RELEASE -eq 'true') {
+              throw 'Publishing requires WINDOWS_CODESIGN_PFX_BASE64 and WINDOWS_CODESIGN_PFX_PASSWORD.'
+            }
+            "signed=false" >> $env:GITHUB_OUTPUT
+            Write-Host 'No signing identity configured; retaining this build as a CI artifact only.'
+            exit 0
+          }
+          $certificate = Join-Path $env:RUNNER_TEMP 'norns-codesign.pfx'
+          [IO.File]::WriteAllBytes(
+            $certificate,
+            [Convert]::FromBase64String($env:SIGNING_CERTIFICATE_BASE64)
+          )
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+            -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signTool) { throw 'signtool.exe was not found.' }
+          $timestamp = if ($env:SIGNING_TIMESTAMP_URL) {
+            $env:SIGNING_TIMESTAMP_URL
+          } else {
+            'http://timestamp.digicert.com'
+          }
+          & $signTool.FullName sign /fd SHA256 /f $certificate `
+            /p $env:SIGNING_CERTIFICATE_PASSWORD /tr $timestamp /td SHA256 $installer
+          if ($LASTEXITCODE -ne 0) { throw 'Authenticode signing failed.' }
+          & $signTool.FullName verify /pa /v $installer
+          if ($LASTEXITCODE -ne 0) { throw 'Authenticode verification failed.' }
+          Remove-Item -Force $certificate
+          "signed=true" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: norns-local-agent-windows-${{ inputs.version }}
+          path: dist-agent/windows/installer/Norns-Local-Agent-Setup.exe
+          if-no-files-found: error
+      - name: Publish signed prerelease
+        if: inputs.publish_release && steps.signing.outputs.signed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          tag="agent-v${VERSION}"
+          asset="dist-agent/windows/installer/Norns-Local-Agent-Setup.exe"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+          else
+            gh release create "$tag" "$asset" \
+              --prerelease \
+              --title "Norns Local Agent ${VERSION}" \
+              --notes "Signed Windows beta of Norns Local Agent."
+          fi

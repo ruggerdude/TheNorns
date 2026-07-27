@@ -280,6 +280,8 @@ import {
   helperStatus,
   installCommand,
   installCommandWindows,
+  localAgentDownloadsFromEnvironment,
+  localAgentPairingUri,
 } from "./runners/helperOnboarding.js";
 // EXECUTION E3: proxied model inference for credential-free runners.
 import {
@@ -604,6 +606,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const loginThrottle = new LoginAttemptThrottle();
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
   const integrationEnvironment = options.integrationEnvironment ?? process.env;
+  const localAgentDownloads = localAgentDownloadsFromEnvironment(integrationEnvironment);
   const configuredDebateModels = () =>
     buildSelectableModelCatalog(
       modelAvailabilityFromDebateEnvironment(integrationEnvironment),
@@ -2128,6 +2131,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       code,
       expires_at: expiresAt.toISOString(),
       runner_id: runnerId ?? "runner-1",
+      pairing_uri: localAgentPairingUri(target),
+      downloads: localAgentDownloads,
       install_command: installCommand(target),
       install_command_windows: installCommandWindows(target),
     });
@@ -2399,6 +2404,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     const origin = externalOrigin(req);
     return {
       ...helperStatus(helperRunnerSnapshots()),
+      downloads: localAgentDownloads,
       install_command: installCommand({ origin }),
       install_command_windows: installCommandWindows({ origin }),
     };
