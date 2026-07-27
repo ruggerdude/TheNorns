@@ -1,6 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { getTableName } from "drizzle-orm";
-import type { PgTable } from "drizzle-orm/pg-core";
+import { type PgTable, getTableConfig } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
@@ -11,6 +11,7 @@ import {
   CONVERSATION_DOMAIN_MIGRATION_NAME,
   CONVERSATION_EXECUTION_HANDOFF_MIGRATION_NAME,
   CONVERSATION_HUMAN_STEERING_MIGRATION_NAME,
+  CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME,
   CONVERSATION_PLAN_WORKFLOW_MIGRATION_NAME,
   CONVERSATION_STREAM_LIFECYCLE_MIGRATION_NAME,
   DEBATE_WORKFLOW_MIGRATION_NAME,
@@ -43,6 +44,7 @@ import {
   USAGE_INTELLIGENCE_POLICIES_MIGRATION_NAME,
   type V2MigrationDatabase,
   WORKSPACE_CONNECTIONS_MIGRATION_NAME,
+  currentV2MigrationSources,
   runCurrentV2Migrations,
   runPhase1V2Migration,
   runPhase2PreservationMigration,
@@ -54,6 +56,153 @@ const asMigrationDatabase = (database: PGlite): V2MigrationDatabase =>
   database as unknown as V2MigrationDatabase;
 
 describe.sequential("Phase 2 forward migration dependency", () => {
+  it("refuses 0040 when the exact 0039 ledger dependency is absent", async () => {
+    const candidate = new PGlite();
+    try {
+      await candidate.exec(`
+        CREATE ROLE norns_app NOLOGIN;
+        CREATE TABLE norns_state (
+          key TEXT PRIMARY KEY,
+          snapshot JSONB NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+      `);
+      const sources = await currentV2MigrationSources();
+      const phase6Index = sources.findIndex(
+        (source) => source.name === CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME,
+      );
+      expect(phase6Index).toBeGreaterThan(0);
+      const phase6Source = sources[phase6Index];
+      if (!phase6Source) throw new Error("Phase 6 migration source is missing");
+      await runV2Migrations(asMigrationDatabase(candidate), sources.slice(0, phase6Index));
+      await candidate.query("DELETE FROM norns_schema_migrations WHERE name=$1", [
+        CONVERSATION_HUMAN_STEERING_MIGRATION_NAME,
+      ]);
+      await expect(runV2Migrations(asMigrationDatabase(candidate), [phase6Source])).rejects.toThrow(
+        /requires 0039_conversation_human_steering/,
+      );
+      const marker = await candidate.query<{ marker: string | null }>(
+        "SELECT to_regclass('conversation_mockups_dashboard_v1')::text AS marker",
+      );
+      expect(marker.rows[0]?.marker).toBeNull();
+    } finally {
+      await candidate.close();
+    }
+  }, 30_000);
+
+  it("normalizes every schema-valid Phase 5 mockup status without inventing evidence", async () => {
+    const candidate = new PGlite();
+    try {
+      await candidate.exec(`
+        CREATE ROLE norns_app NOLOGIN;
+        CREATE TABLE norns_state (
+          key TEXT PRIMARY KEY,
+          snapshot JSONB NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+      `);
+      const sources = await currentV2MigrationSources();
+      const phase6Index = sources.findIndex(
+        (source) => source.name === CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME,
+      );
+      const phase6Source = sources[phase6Index];
+      if (!phase6Source) throw new Error("Phase 6 migration source is missing");
+      await runV2Migrations(asMigrationDatabase(candidate), sources.slice(0, phase6Index));
+      await candidate.exec("SET session_replication_role='replica'");
+      try {
+        for (const [index, status] of [
+          "queued",
+          "leased",
+          "rendered",
+          "failed",
+          "cancelled",
+        ].entries()) {
+          const actionId = `legacy-mockup-action-${index}`;
+          const requestId = `legacy-mockup-request-${index}`;
+          await candidate.query(
+            `INSERT INTO conversation_actions (
+               id,project_id,work_item_id,conversation_id,initiated_by_user_id,
+               actor_type,actor_id,source_message_id,action_type,payload,payload_hash,
+               status,interaction_class
+             ) VALUES (
+               $1,'legacy-project','legacy-work','legacy-conversation','legacy-user',
+               'system','migration','legacy-message','create_mockup',
+               $2::jsonb,repeat('a',64),'proposed','mockup_request'
+             )`,
+            [
+              actionId,
+              JSON.stringify({
+                parameters: {
+                  brief: `Legacy ${status}`,
+                  target: "responsive",
+                  task_id: null,
+                  artifact_refs: [],
+                },
+              }),
+            ],
+          );
+          await candidate.query(
+            `INSERT INTO conversation_mockup_requests (
+               id,project_id,work_item_id,conversation_id,action_id,task_id,
+               brief,target,artifact_refs,status
+             ) VALUES (
+               $1,'legacy-project','legacy-work','legacy-conversation',$2,NULL,
+               $3,'responsive','[]'::jsonb,$4
+             )`,
+            [requestId, actionId, `Legacy ${status}`, status],
+          );
+        }
+      } finally {
+        await candidate.exec("SET session_replication_role='origin'");
+      }
+      await runV2Migrations(asMigrationDatabase(candidate), [phase6Source]);
+      const rows = await candidate.query<{
+        id: string;
+        status: string;
+        attempts: number;
+        last_error: string | null;
+      }>(
+        `SELECT id,status,attempts,last_error
+           FROM conversation_mockup_requests
+          ORDER BY id`,
+      );
+      expect(rows.rows).toEqual([
+        {
+          id: "legacy-mockup-request-0",
+          status: "queued",
+          attempts: 0,
+          last_error: null,
+        },
+        {
+          id: "legacy-mockup-request-1",
+          status: "queued",
+          attempts: 1,
+          last_error: expect.stringContaining("legacy lease"),
+        },
+        {
+          id: "legacy-mockup-request-2",
+          status: "failed",
+          attempts: 0,
+          last_error: expect.stringContaining("legacy rendered claim"),
+        },
+        {
+          id: "legacy-mockup-request-3",
+          status: "failed",
+          attempts: 0,
+          last_error: expect.stringContaining("legacy failure"),
+        },
+        {
+          id: "legacy-mockup-request-4",
+          status: "cancelled",
+          attempts: 0,
+          last_error: null,
+        },
+      ]);
+    } finally {
+      await candidate.close();
+    }
+  }, 30_000);
+
   it("refuses 0002 when the frozen 0001 migration is absent", async () => {
     const candidate = new PGlite();
     try {
@@ -263,6 +412,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       { name: CONVERSATION_PLAN_WORKFLOW_MIGRATION_NAME, applied: false },
       { name: CONVERSATION_EXECUTION_HANDOFF_MIGRATION_NAME, applied: false },
       { name: CONVERSATION_HUMAN_STEERING_MIGRATION_NAME, applied: false },
+      { name: CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME, applied: false },
     ]);
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
@@ -312,6 +462,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       CONVERSATION_PLAN_WORKFLOW_MIGRATION_NAME,
       CONVERSATION_EXECUTION_HANDOFF_MIGRATION_NAME,
       CONVERSATION_HUMAN_STEERING_MIGRATION_NAME,
+      CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME,
     ]);
   });
 
@@ -344,6 +495,13 @@ describe.sequential("Phase 2 preservation schema", () => {
       ["ai_provider_usage_plans", "allowance_usd_equivalent"],
       ["ai_usage_calibration_observations", "implied_max_tokens"],
       ["shadow_read_comparisons", "recorded_order"],
+      ["conversation_mockup_requests", "payload_hash"],
+      ["conversation_mockup_versions", "manifest_artifact_hash"],
+      ["conversation_task_package_supplement_dispatch_receipts", "context_ref"],
+      ["project_delivery_records", "provider_id"],
+      ["project_delivery_records", "current_observation_sequence"],
+      ["project_delivery_observations", "source_id"],
+      ["implementation_visual_evidence", "deployment_observation_id"],
     ] as const;
     for (const [tableName, columnName] of requiredColumns) {
       const result = await pg.query<{ count: number }>(
@@ -356,6 +514,834 @@ describe.sequential("Phase 2 preservation schema", () => {
       );
       expect(result.rows[0]?.count, `${tableName}.${columnName}`).toBe(1);
     }
+
+    const requiredDrizzleParity = {
+      artifact_blobs: {
+        checks: ["artifact_blobs_content_hash_check", "artifact_blobs_byte_size_check"],
+        foreignKeys: ["artifact_blobs_project_id_artifact_id_artifacts_project_id_id_fk"],
+      },
+      conversation_mockup_versions: {
+        checks: [
+          "conversation_mockup_versions_canonical_manifest_check",
+          "conversation_mockup_versions_revision_shape_check",
+        ],
+        foreignKeys: [
+          "conversation_mockup_versions_request_scope_fk",
+          "conversation_mockup_versions_manifest_scope_fk",
+        ],
+      },
+      conversation_mockup_decisions: {
+        checks: ["conversation_mockup_decisions_shape_check"],
+        foreignKeys: [
+          "conversation_mockup_decisions_version_scope_fk",
+          "conversation_mockup_decisions_action_scope_fk",
+        ],
+      },
+      conversation_task_package_supplements: {
+        checks: [
+          "conversation_task_package_supplements_canonical_check",
+          "conversation_task_package_supplements_context_media_type_check",
+        ],
+        foreignKeys: ["conversation_task_package_supplements_package_scope_fk"],
+      },
+      conversation_task_package_supplement_dispatch_receipts: {
+        checks: [
+          "task_package_supplement_receipts_content_hash_check",
+          "task_package_supplement_receipts_context_ref_check",
+        ],
+        foreignKeys: [
+          "task_package_supplement_receipts_run_scope_fk",
+          "task_package_supplement_receipts_command_scope_fk",
+        ],
+      },
+      project_delivery_records: {
+        checks: [
+          "project_delivery_records_commit_sha_check",
+          "project_delivery_records_success_shape_check",
+          "project_delivery_records_scope_shape_check",
+        ],
+        foreignKeys: [
+          "project_delivery_records_repository_scope_fk",
+          "project_delivery_records_run_scope_fk",
+        ],
+      },
+      project_delivery_observations: {
+        checks: [
+          "project_delivery_observations_provider_shape_check",
+          "project_delivery_observations_success_shape_check",
+        ],
+        foreignKeys: ["project_delivery_observations_delivery_scope_fk"],
+      },
+      implementation_visual_evidence: {
+        checks: [
+          "implementation_visual_evidence_commit_sha_check",
+          "implementation_visual_evidence_comparison_shape_check",
+        ],
+        foreignKeys: [
+          "implementation_visual_evidence_verification_scope_fk",
+          "implementation_visual_evidence_deployment_scope_fk",
+          "implementation_visual_evidence_observation_scope_fk",
+        ],
+      },
+      implementation_visual_evidence_artifacts: {
+        checks: [
+          "implementation_visual_evidence_artifacts_viewport_check",
+          "implementation_visual_evidence_artifacts_hash_check",
+        ],
+        foreignKeys: ["implementation_visual_evidence_artifacts_artifact_scope_fk"],
+      },
+    } as const;
+    for (const [tableName, expected] of Object.entries(requiredDrizzleParity)) {
+      const table = tables.find((candidate) => getTableName(candidate) === tableName);
+      if (!table) throw new Error(`Drizzle table ${tableName} is missing`);
+      const config = getTableConfig(table);
+      expect(
+        config.checks.map((constraint) => constraint.name),
+        `${tableName} Drizzle checks`,
+      ).toEqual(expect.arrayContaining([...expected.checks]));
+      expect(
+        config.foreignKeys.map((constraint) => constraint.getName()),
+        `${tableName} Drizzle foreign keys`,
+      ).toEqual(expect.arrayContaining([...expected.foreignKeys]));
+    }
+  });
+
+  it("installs the Phase 6 marker, immutable guards, and least-privilege grants", async () => {
+    const marker = await pg.query<{ marker: string | null }>(
+      "SELECT to_regclass('conversation_mockups_dashboard_v1')::text AS marker",
+    );
+    expect(marker.rows[0]?.marker).toBe("conversation_mockups_dashboard_v1");
+
+    const expectedTriggers = [
+      "artifact_blobs_immutable_guard",
+      "artifact_blobs_immutable_truncate_guard",
+      "artifact_blobs_scope_guard",
+      "artifacts_blob_backed_immutable_guard",
+      "conversation_mockup_approval_supplement_guard",
+      "conversation_mockup_decisions_immutable_guard",
+      "conversation_mockup_decisions_immutable_truncate_guard",
+      "conversation_mockup_decisions_scope_guard",
+      "conversation_mockup_requests_delete_guard",
+      "conversation_mockup_requests_phase6_guard",
+      "conversation_mockup_requests_truncate_guard",
+      "conversation_mockup_version_artifacts_immutable_guard",
+      "conversation_mockup_version_artifacts_immutable_truncate_guard",
+      "conversation_mockup_version_artifacts_scope_guard",
+      "conversation_mockup_versions_immutable_guard",
+      "conversation_mockup_versions_immutable_truncate_guard",
+      "conversation_mockup_versions_scope_guard",
+      "conversation_task_package_supplements_immutable_guard",
+      "conversation_task_package_supplements_immutable_truncate_guard",
+      "conversation_task_package_supplements_scope_guard",
+      "dispatch_jobs_mockup_supplements_guard",
+      "implementation_visual_evidence_artifacts_immutable_guard",
+      "implementation_visual_artifacts_immutable_truncate_guard",
+      "implementation_visual_evidence_artifacts_scope_guard",
+      "implementation_visual_evidence_complete_guard",
+      "implementation_visual_evidence_immutable_guard",
+      "implementation_visual_evidence_immutable_truncate_guard",
+      "implementation_visual_evidence_scope_guard",
+      "project_delivery_observations_immutable_guard",
+      "project_delivery_observations_immutable_truncate_guard",
+      "project_delivery_observations_scope_guard",
+      "project_delivery_records_delete_guard",
+      "project_delivery_records_observation_guard",
+      "project_delivery_records_scope_guard",
+      "project_delivery_records_truncate_guard",
+      "task_package_supplement_receipts_immutable_guard",
+      "task_package_supplement_receipts_truncate_guard",
+      "task_package_supplement_receipts_scope_guard",
+    ].sort();
+    const triggers = await pg.query<{ tgname: string }>(
+      `SELECT tgname
+         FROM pg_trigger
+        WHERE NOT tgisinternal
+          AND tgname = ANY($1::text[])
+        ORDER BY tgname`,
+      [expectedTriggers],
+    );
+    expect(triggers.rows.map((row) => row.tgname)).toEqual(expectedTriggers);
+
+    const expectedIndexes = [
+      "artifact_blobs_project_hash_unique",
+      "conversation_mockup_requests_scope_unique",
+      "conversation_mockup_requests_worker_idx",
+      "conversation_mockup_versions_root_version_unique",
+      "conversation_mockup_versions_scope_unique",
+      "conversation_mockup_version_artifacts_parent_artifact_unique",
+      "conversation_task_packages_scope_unique",
+      "conversation_task_package_supplements_package_order_unique",
+      "conversation_task_package_supplements_task_mockup_unique",
+      "task_package_supplement_receipts_order_unique",
+      "project_delivery_records_provider_unique",
+      "project_delivery_records_project_id_unique",
+      "project_delivery_records_visual_scope_unique",
+      "project_delivery_observations_record_sequence_unique",
+      "project_delivery_observations_provider_event_unique",
+      "project_delivery_observations_scope_unique",
+      "verification_results_visual_scope_unique",
+      "implementation_visual_evidence_run_mockup_unique",
+      "implementation_visual_evidence_artifacts_parent_artifact_unique",
+    ].sort();
+    const indexes = await pg.query<{ indexname: string }>(
+      `SELECT indexname
+         FROM pg_indexes
+        WHERE indexname = ANY($1::text[])
+        ORDER BY indexname`,
+      [expectedIndexes],
+    );
+    expect(indexes.rows.map((row) => row.indexname)).toEqual(expectedIndexes);
+
+    const constraints = await pg.query<{
+      table_name: string;
+      contype: string;
+      definition: string;
+    }>(
+      `SELECT conrelid::regclass::text AS table_name,contype,
+              pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint
+        WHERE conrelid::regclass::text = ANY($1::text[])`,
+      [
+        [
+          "conversation_mockup_requests",
+          "artifact_blobs",
+          "conversation_mockup_versions",
+          "conversation_mockup_decisions",
+          "conversation_task_package_supplements",
+          "conversation_task_package_supplement_dispatch_receipts",
+          "project_delivery_records",
+          "project_delivery_observations",
+          "implementation_visual_evidence",
+          "implementation_visual_evidence_artifacts",
+        ],
+      ],
+    );
+    const catalog = constraints.rows.map((row) => ({
+      ...row,
+      definition: row.definition.toLowerCase().replace(/\s+/g, " "),
+    }));
+    const expectConstraint = (table: string, type: string, fragments: readonly string[]) => {
+      expect(
+        catalog.some(
+          (entry) =>
+            entry.table_name === table &&
+            entry.contype === type &&
+            fragments.every((fragment) =>
+              entry.definition.includes(fragment.toLowerCase().replace(/\s+/g, " ")),
+            ),
+        ),
+        `${table} ${type}: ${fragments.join(" | ")}`,
+      ).toBe(true);
+    };
+    expectConstraint("artifact_blobs", "f", [
+      "foreign key (project_id, artifact_id)",
+      "references artifacts(project_id, id)",
+    ]);
+    expectConstraint("conversation_mockup_versions", "f", [
+      "foreign key (project_id, work_item_id, conversation_id, request_id)",
+      "references conversation_mockup_requests",
+    ]);
+    expectConstraint("conversation_mockup_decisions", "f", [
+      "foreign key (project_id, work_item_id, conversation_id, action_id)",
+      "references conversation_actions",
+    ]);
+    expectConstraint("conversation_task_package_supplements", "f", [
+      "foreign key (project_id, work_item_id, conversation_id, base_package_id)",
+      "references conversation_task_packages",
+    ]);
+    expectConstraint("conversation_task_package_supplement_dispatch_receipts", "f", [
+      "foreign key (project_id, phase_id, task_id, run_id, command_id)",
+      "references commands",
+    ]);
+    expectConstraint("project_delivery_records", "f", [
+      "foreign key (project_id, phase_id, task_id, run_id)",
+      "references agent_runs",
+    ]);
+    expectConstraint("project_delivery_records", "u", [
+      "unique (project_id, provider_id, provider_deployment_id)",
+    ]);
+    expectConstraint("implementation_visual_evidence", "f", [
+      "repository_binding_id, commit_sha, verification_result_id",
+      "references verification_results",
+    ]);
+    expectConstraint("implementation_visual_evidence", "f", [
+      "deployment_record_id",
+      "references project_delivery_records",
+    ]);
+    expectConstraint("conversation_mockup_requests", "c", ["queued", "leased", "rendered"]);
+    expectConstraint("conversation_mockup_requests", "c", [
+      "status = 'leased'",
+      "lease_owner is not null",
+    ]);
+    expectConstraint("conversation_task_package_supplements", "c", [
+      "context_media_type = 'application/json'",
+    ]);
+    expectConstraint("project_delivery_records", "c", ["40", "64", "commit_sha"]);
+    expectConstraint("project_delivery_records", "c", ["norns_is_public_https_url(public_url)"]);
+    expectConstraint("implementation_visual_evidence", "c", ["40", "64", "commit_sha"]);
+    expectConstraint("implementation_visual_evidence_artifacts", "c", [
+      "desktop",
+      "mobile",
+      "viewport",
+    ]);
+
+    const phase6Tables = [
+      "artifact_blobs",
+      "conversation_mockup_versions",
+      "conversation_mockup_version_artifacts",
+      "conversation_mockup_decisions",
+      "conversation_task_package_supplements",
+      "conversation_task_package_supplement_dispatch_receipts",
+      "project_delivery_records",
+      "project_delivery_observations",
+      "implementation_visual_evidence",
+      "implementation_visual_evidence_artifacts",
+    ];
+    for (const table of phase6Tables) {
+      const privileges = await pg.query<{
+        can_select: boolean;
+        can_insert: boolean;
+        can_update: boolean;
+        can_delete: boolean;
+      }>(
+        `SELECT
+           has_table_privilege('norns_app',$1,'SELECT') AS can_select,
+           has_table_privilege('norns_app',$1,'INSERT') AS can_insert,
+           has_table_privilege('norns_app',$1,'UPDATE') AS can_update,
+           has_table_privilege('norns_app',$1,'DELETE') AS can_delete`,
+        [table],
+      );
+      expect(privileges.rows[0], table).toEqual({
+        can_select: true,
+        can_insert: true,
+        can_update: table === "project_delivery_records",
+        can_delete: false,
+      });
+      const publicPrivileges = await pg.query<{
+        can_select: boolean;
+        can_insert: boolean;
+        can_update: boolean;
+        can_delete: boolean;
+      }>(
+        `SELECT
+           has_table_privilege('public',$1,'SELECT') AS can_select,
+           has_table_privilege('public',$1,'INSERT') AS can_insert,
+           has_table_privilege('public',$1,'UPDATE') AS can_update,
+           has_table_privilege('public',$1,'DELETE') AS can_delete`,
+        [table],
+      );
+      expect(publicPrivileges.rows[0], `PUBLIC ${table}`).toEqual({
+        can_select: false,
+        can_insert: false,
+        can_update: false,
+        can_delete: false,
+      });
+    }
+  });
+
+  it("keeps attributed deployment summaries exact, monotonic, and terminal once", async () => {
+    await pg.exec(`
+      INSERT INTO users (
+        id,username,display_name,email,name,password_hash,password_hash_scheme,role,status
+      ) VALUES (
+        'phase6-delivery-user','phase6-delivery@example.test','Phase 6 Delivery',
+        'phase6-delivery@example.test','Phase 6 Delivery','hash','scrypt-v1','admin','active'
+      );
+      INSERT INTO projects (
+        id,name,status,assignment_policy_ref,verification_policy_ref,budget_policy_ref,
+        owner_user_id
+      ) VALUES (
+        'phase6-delivery-project','Phase 6 Delivery','active',
+        'assignment','verification','budget','phase6-delivery-user'
+      );
+      INSERT INTO repository_bindings (
+        id,project_id,binding_type,status,runner_id,workspace_id,repository_id,
+        repository_display_name,granted_permissions,default_branch,
+        verification_policy_ref,repository_health,created_by_actor_type,created_by_actor_id
+      ) VALUES (
+        'phase6-delivery-binding','phase6-delivery-project','local_runner','connected',
+        'phase6-delivery-runner','phase6-delivery-workspace','phase6-delivery-repository',
+        'Phase 6 Delivery','{}'::jsonb,'main','verification','healthy',
+        'human','phase6-delivery-user'
+      );
+    `);
+    await pg.transaction(async (tx) => {
+      await tx.query(
+        `INSERT INTO project_delivery_records (
+           id,project_id,repository_binding_id,environment,service,commit_sha,
+           provider_id,provider_deployment_id,status,current_observation_sequence,started_at
+         ) VALUES (
+           'phase6-delivery','phase6-delivery-project','phase6-delivery-binding',
+           'production','web',repeat('a',40),'railway','provider-delivery','pending',1,
+           '2026-07-27T12:00:00Z'
+         )`,
+      );
+      await tx.query(
+        `INSERT INTO project_delivery_observations (
+           id,delivery_record_id,project_id,sequence,status,source_type,source_id,observed_at
+         ) VALUES (
+           'phase6-observation-1','phase6-delivery','phase6-delivery-project',1,
+           'pending','system','deployment-monitor','2026-07-27T12:00:00Z'
+         )`,
+      );
+    });
+
+    await expect(
+      pg.transaction(async (tx) => {
+        await tx.query(
+          `INSERT INTO project_delivery_records (
+             id,project_id,repository_binding_id,environment,service,commit_sha,
+             provider_id,provider_deployment_id,status,current_observation_sequence,
+             public_url,started_at
+           ) VALUES (
+             'phase6-tampered-delivery','phase6-delivery-project','phase6-delivery-binding',
+             'production','api',repeat('b',40),'railway','provider-tampered','pending',1,
+             'https://one.example.test','2026-07-27T12:00:00Z'
+           )`,
+        );
+        await tx.query(
+          `INSERT INTO project_delivery_observations (
+             id,delivery_record_id,project_id,sequence,status,source_type,source_id,
+             public_url,observed_at
+           ) VALUES (
+             'phase6-tampered-observation','phase6-tampered-delivery',
+             'phase6-delivery-project',1,'pending','system','deployment-monitor',
+             'https://two.example.test','2026-07-27T12:00:00Z'
+           )`,
+        );
+      }),
+    ).rejects.toThrow(/current observation/);
+
+    await expect(
+      pg.query(
+        `INSERT INTO project_delivery_observations (
+           id,delivery_record_id,project_id,sequence,status,source_type,source_id,observed_at
+         ) VALUES (
+           'phase6-reversed-observation','phase6-delivery','phase6-delivery-project',2,
+           'deploying','system','deployment-monitor','2026-07-27T11:59:59Z'
+         )`,
+      ),
+    ).rejects.toThrow(/strictly monotonic/);
+
+    await pg.transaction(async (tx) => {
+      await tx.query(
+        `INSERT INTO project_delivery_observations (
+           id,delivery_record_id,project_id,sequence,status,source_type,source_id,observed_at
+         ) VALUES (
+           'phase6-observation-2','phase6-delivery','phase6-delivery-project',2,
+           'failed','system','deployment-monitor','2026-07-27T12:01:00Z'
+         )`,
+      );
+      await tx.query(
+        `UPDATE project_delivery_records
+            SET status='failed',current_observation_sequence=2,
+                completed_at='2026-07-27T12:01:00Z'
+          WHERE id='phase6-delivery'`,
+      );
+    });
+    await expect(
+      pg.query(
+        `INSERT INTO project_delivery_observations (
+           id,delivery_record_id,project_id,sequence,status,source_type,source_id,observed_at
+         ) VALUES (
+           'phase6-observation-3','phase6-delivery','phase6-delivery-project',3,
+           'failed','system','deployment-monitor','2026-07-27T12:02:00Z'
+         )`,
+      ),
+    ).rejects.toThrow(/lifecycle/);
+  });
+
+  it("binds delivered visual evidence to the exact SHA and both distinct viewports", async () => {
+    await pg.exec("SET session_replication_role='replica'");
+    try {
+      await pg.exec(`
+        INSERT INTO phases (
+          id,project_id,objective_summary,priority,status,initiated_by_user_id
+        ) VALUES (
+          'phase6-visual-phase','phase6-delivery-project','Visual evidence',1,
+          'approved','phase6-delivery-user'
+        );
+        INSERT INTO tasks (
+          id,project_id,phase_id,objective_id,strategy_version_id,title,description,
+          deliverables,acceptance_criteria,complexity,risk,required_roles,
+          required_capabilities,required_inputs,expected_outputs,environment_policy_ref,
+          verification_policy_ref,state,lifecycle_version
+        ) VALUES (
+          'phase6-visual-task','phase6-delivery-project','phase6-visual-phase',
+          'phase6-visual-objective','phase6-visual-strategy','Visual task','Visual task',
+          '[]'::jsonb,'[]'::jsonb,'M','medium','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,
+          '[]'::jsonb,'environment','verification','pending',0
+        );
+        INSERT INTO agent_runs (
+          id,project_id,phase_id,task_id,assignment_id,attempt,state,is_designated,
+          repository_binding_id,expected_revision,lifecycle_version,
+          published_commit_sha,publication_outcome
+        ) VALUES (
+          'phase6-visual-run','phase6-delivery-project','phase6-visual-phase',
+          'phase6-visual-task','phase6-visual-assignment',1,'succeeded',false,
+          'phase6-delivery-binding',repeat('c',40),1,repeat('c',40),'pushed'
+        );
+        INSERT INTO conversation_mockup_versions (
+          id,root_request_id,request_id,project_id,work_item_id,conversation_id,task_id,
+          created_by_action_id,version,brief,target,interaction_notes,
+          manifest_artifact_id,manifest_artifact_hash,canonical_manifest,renderer_profile
+        ) VALUES (
+          'phase6-visual-version','phase6-visual-request','phase6-visual-request',
+          'phase6-delivery-project','phase6-visual-work','phase6-visual-conversation',
+          'phase6-visual-task','phase6-visual-create-action',1,'Visual brief','responsive',
+          '["Interaction"]'::jsonb,'phase6-visual-manifest',
+          encode(sha256(convert_to('{}','UTF8')),'hex'),'{}',
+          '{"renderer":"norns-deterministic-v1"}'::jsonb
+        );
+        INSERT INTO conversation_mockup_decisions (
+          id,project_id,work_item_id,conversation_id,mockup_version_id,action_id,
+          decided_by_user_id,decision,manifest_artifact_id,manifest_artifact_hash
+        ) VALUES (
+          'phase6-visual-decision','phase6-delivery-project','phase6-visual-work',
+          'phase6-visual-conversation','phase6-visual-version','phase6-visual-approve-action',
+          'phase6-delivery-user','approved','phase6-visual-manifest',
+          encode(sha256(convert_to('{}','UTF8')),'hex')
+        );
+        INSERT INTO verification_results (
+          id,project_id,phase_id,task_id,run_id,repository_binding_id,commit_sha,
+          verification_policy_ref,passed,command_results,evidence,produced_by_runner_id
+        ) VALUES (
+          'phase6-visual-verification','phase6-delivery-project','phase6-visual-phase',
+          'phase6-visual-task','phase6-visual-run','phase6-delivery-binding',
+          repeat('c',40),'verification',true,'[]'::jsonb,'[]'::jsonb,
+          'phase6-delivery-runner'
+        );
+        INSERT INTO project_delivery_records (
+          id,project_id,phase_id,task_id,run_id,repository_binding_id,environment,service,
+          commit_sha,provider_id,provider_deployment_id,status,current_observation_sequence,
+          public_url,health_url,health_status_code,evidence_artifact_id,
+          evidence_artifact_hash,started_at,completed_at
+        ) VALUES (
+          'phase6-visual-delivery','phase6-delivery-project','phase6-visual-phase',
+          'phase6-visual-task','phase6-visual-run','phase6-delivery-binding',
+          'production','web',repeat('c',40),'railway','phase6-visual-provider','succeeded',1,
+          'https://visual.example.test','https://visual.example.test/health',200,
+          'phase6-visual-delivery-evidence',repeat('d',64),
+          '2026-07-27T12:00:00Z','2026-07-27T12:01:00Z'
+        );
+        INSERT INTO project_delivery_observations (
+          id,delivery_record_id,project_id,sequence,status,source_type,source_id,
+          provider_event_id,public_url,health_url,health_status_code,evidence_artifact_id,
+          evidence_artifact_hash,observed_at
+        ) VALUES (
+          'phase6-visual-observation','phase6-visual-delivery','phase6-delivery-project',
+          1,'succeeded','provider','railway','phase6-visual-provider-event',
+          'https://visual.example.test','https://visual.example.test/health',200,
+          'phase6-visual-delivery-evidence',repeat('d',64),'2026-07-27T12:01:00Z'
+        );
+      `);
+    } finally {
+      await pg.exec("SET session_replication_role='origin'");
+    }
+
+    await expect(
+      pg.transaction(async (tx) => {
+        await tx.query(
+          `INSERT INTO implementation_visual_evidence (
+             id,project_id,work_item_id,conversation_id,phase_id,task_id,run_id,
+             approved_mockup_version_id,repository_binding_id,verification_result_id,
+             deployment_record_id,deployment_observation_id,commit_sha,capture_profile,
+             verified_at
+           ) VALUES (
+             'phase6-incomplete-visual','phase6-delivery-project','phase6-visual-work',
+             'phase6-visual-conversation','phase6-visual-phase','phase6-visual-task',
+             'phase6-visual-run','phase6-visual-version','phase6-delivery-binding',
+             'phase6-visual-verification','phase6-visual-delivery',
+             'phase6-visual-observation',repeat('c',40),
+             '{
+               "renderer":"playwright","browser_name":"chromium",
+               "browser_version":"130","font_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+               "pixel_ratio":1,"network":"application_only","locale":"en-US",
+               "timezone":"UTC","fixed_clock":"2026-07-27T12:01:00.000Z"
+             }'::jsonb,
+             '2026-07-27T12:02:00Z'
+           )`,
+        );
+      }),
+    ).rejects.toThrow(/exactly one desktop and one mobile/);
+
+    await expect(
+      pg.query(
+        `INSERT INTO implementation_visual_evidence (
+           id,project_id,work_item_id,conversation_id,phase_id,task_id,run_id,
+           approved_mockup_version_id,repository_binding_id,verification_result_id,
+           deployment_record_id,deployment_observation_id,commit_sha,capture_profile,
+           verified_at
+         ) VALUES (
+           'phase6-wrong-sha-visual','phase6-delivery-project','phase6-visual-work',
+           'phase6-visual-conversation','phase6-visual-phase','phase6-visual-task',
+           'phase6-visual-run','phase6-visual-version','phase6-delivery-binding',
+           'phase6-visual-verification','phase6-visual-delivery',
+           'phase6-visual-observation',repeat('e',40),
+           '{
+             "renderer":"playwright","browser_name":"chromium",
+             "browser_version":"130","font_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+             "pixel_ratio":1,"network":"application_only","locale":"en-US",
+             "timezone":"UTC","fixed_clock":"2026-07-27T12:01:00.000Z"
+           }'::jsonb,
+           '2026-07-27T12:02:00Z'
+         )`,
+      ),
+    ).rejects.toThrow(/exact verified deployed commit|foreign key/i);
+
+    await pg.exec(`
+      INSERT INTO artifacts (
+        id,project_id,kind,label,media_type,storage_ref,content_hash,byte_size,
+        provenance_actor_type,redaction_status
+      ) VALUES
+        (
+          'phase6-visual-desktop','phase6-delivery-project','visual_evidence',
+          'Delivered desktop','image/png','db://artifact/phase6-visual-desktop',
+          encode(sha256(decode('89504e470d0a1a0a','hex')),'hex'),8,
+          'runner','not_required'
+        ),
+        (
+          'phase6-visual-mobile','phase6-delivery-project','visual_evidence',
+          'Delivered mobile','image/png','db://artifact/phase6-visual-mobile',
+          encode(sha256(decode('89504e470d0a1a0a00','hex')),'hex'),9,
+          'runner','not_required'
+        );
+      INSERT INTO artifact_blobs (
+        artifact_id,project_id,content,content_hash,byte_size
+      ) VALUES
+        (
+          'phase6-visual-desktop','phase6-delivery-project',
+          decode('89504e470d0a1a0a','hex'),
+          encode(sha256(decode('89504e470d0a1a0a','hex')),'hex'),8
+        ),
+        (
+          'phase6-visual-mobile','phase6-delivery-project',
+          decode('89504e470d0a1a0a00','hex'),
+          encode(sha256(decode('89504e470d0a1a0a00','hex')),'hex'),9
+        );
+    `);
+    await pg.transaction(async (tx) => {
+      await tx.query(
+        `INSERT INTO implementation_visual_evidence (
+           id,project_id,work_item_id,conversation_id,phase_id,task_id,run_id,
+           approved_mockup_version_id,repository_binding_id,verification_result_id,
+           deployment_record_id,deployment_observation_id,commit_sha,capture_profile,
+           verified_at
+         ) VALUES (
+           'phase6-complete-visual','phase6-delivery-project','phase6-visual-work',
+           'phase6-visual-conversation','phase6-visual-phase','phase6-visual-task',
+           'phase6-visual-run','phase6-visual-version','phase6-delivery-binding',
+           'phase6-visual-verification','phase6-visual-delivery',
+           'phase6-visual-observation',repeat('c',40),
+           '{
+             "renderer":"playwright","browser_name":"chromium",
+             "browser_version":"130","font_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+             "pixel_ratio":1,"network":"application_only","locale":"en-US",
+             "timezone":"UTC","fixed_clock":"2026-07-27T12:01:00.000Z"
+           }'::jsonb,
+           '2026-07-27T12:02:00Z'
+         )`,
+      );
+      await tx.query(
+        `INSERT INTO implementation_visual_evidence_artifacts (
+           visual_evidence_id,project_id,viewport,artifact_id,artifact_hash,
+           width,height,capture_profile
+         ) VALUES
+           (
+             'phase6-complete-visual','phase6-delivery-project','desktop',
+             'phase6-visual-desktop',
+             encode(sha256(decode('89504e470d0a1a0a','hex')),'hex'),1440,1024,
+             '{
+               "renderer":"playwright","browser_name":"chromium",
+               "browser_version":"130","font_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+               "pixel_ratio":1,"network":"application_only","locale":"en-US",
+               "timezone":"UTC","fixed_clock":"2026-07-27T12:01:00.000Z"
+             }'::jsonb
+           ),
+           (
+             'phase6-complete-visual','phase6-delivery-project','mobile',
+             'phase6-visual-mobile',
+             encode(sha256(decode('89504e470d0a1a0a00','hex')),'hex'),390,844,
+             '{
+               "renderer":"playwright","browser_name":"chromium",
+               "browser_version":"130","font_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+               "pixel_ratio":1,"network":"application_only","locale":"en-US",
+               "timezone":"UTC","fixed_clock":"2026-07-27T12:01:00.000Z"
+             }'::jsonb
+           )`,
+      );
+    });
+    const complete = await pg.query<{ screenshots: number }>(
+      `SELECT count(*)::int AS screenshots
+         FROM implementation_visual_evidence_artifacts
+        WHERE visual_evidence_id='phase6-complete-visual'`,
+    );
+    expect(complete.rows[0]?.screenshots).toBe(2);
+  });
+
+  it("binds approved mockup supplements to one exact command before dispatch", async () => {
+    const hash = await pg.query<{ hash: string }>(
+      "SELECT encode(sha256(convert_to('{}','UTF8')),'hex') AS hash",
+    );
+    const contentHash = hash.rows[0]?.hash;
+    if (!contentHash) throw new Error("PostgreSQL did not calculate a content hash");
+    const contextRef = {
+      artifact_id: "phase6-supplement-context",
+      content_hash: contentHash,
+      byte_size: 2,
+      storage_ref:
+        "https://norns.example.test/api/v2/execution/task-context/phase6-supplement-context",
+    };
+    await pg.exec("SET session_replication_role='replica'");
+    try {
+      await pg.query(
+        `INSERT INTO task_context_blobs (sha256,content)
+         VALUES ($1,convert_to('{}','UTF8'))`,
+        [contentHash],
+      );
+      await pg.query(
+        `INSERT INTO task_context_documents (
+           id,project_id,section,sha256,byte_size,media_type
+         ) VALUES (
+           'phase6-supplement-context','phase6-delivery-project','approved_mockup',
+           $1,2,'application/json'
+         )`,
+        [contentHash],
+      );
+      await pg.query(
+        `INSERT INTO conversation_task_packages (
+           id,project_id,work_item_id,conversation_id,handoff_id,
+           approved_plan_version_id,module_id,package,canonical_package,content_hash
+         ) VALUES (
+           'phase6-package','phase6-delivery-project','phase6-visual-work',
+           'phase6-visual-conversation','phase6-handoff','phase6-plan','phase6-module',
+           '{}'::jsonb,'{}',$1
+         )`,
+        [contentHash],
+      );
+      await pg.query(
+        `INSERT INTO conversation_task_package_bindings (
+           package_id,project_id,work_item_id,conversation_id,handoff_id,phase_id,
+           task_id,content_hash,context_document_id
+         ) VALUES (
+           'phase6-package','phase6-delivery-project','phase6-visual-work',
+           'phase6-visual-conversation','phase6-handoff','phase6-visual-phase',
+           'phase6-visual-task',$1,'phase6-supplement-context'
+         )`,
+        [contentHash],
+      );
+      await pg.query(
+        `INSERT INTO conversation_task_package_supplements (
+           id,project_id,work_item_id,conversation_id,task_id,base_package_id,ordinal,
+           source_mockup_version_id,approval_decision_id,manifest_artifact_id,
+           manifest_artifact_hash,supplement,canonical_supplement,content_hash,
+           context_document_id,context_byte_size,context_media_type
+         ) VALUES (
+           'phase6-supplement','phase6-delivery-project','phase6-visual-work',
+           'phase6-visual-conversation','phase6-visual-task','phase6-package',1,
+           'phase6-visual-version','phase6-visual-decision','phase6-visual-manifest',
+           $2,'{}'::jsonb,'{}',$1,'phase6-supplement-context',2,'application/json'
+         )`,
+        [contentHash, contentHash],
+      );
+      await pg.query(
+        `INSERT INTO commands (
+           command_id,dispatch_job_id,project_id,phase_id,task_id,run_id,runner_id,
+           runner_generation,kind,envelope,status,correlation_id
+         ) VALUES (
+           'phase6-supplement-command','phase6-supplement-job',
+           'phase6-delivery-project','phase6-visual-phase','phase6-visual-task',
+           'phase6-visual-run','phase6-delivery-runner',1,'launch_run',$1::jsonb,
+           'queued','phase6-supplement-correlation'
+         )`,
+        [
+          JSON.stringify({
+            task_package_id: "phase6-package",
+            task_package_supplements: [
+              {
+                supplement_id: "phase6-supplement",
+                task_id: "phase6-visual-task",
+                base_package_id: "phase6-package",
+                ordinal: 1,
+                content_hash: contentHash,
+                context_ref: contextRef,
+              },
+            ],
+          }),
+        ],
+      );
+    } finally {
+      await pg.exec("SET session_replication_role='origin'");
+    }
+
+    await expect(
+      pg.query(
+        `INSERT INTO conversation_task_package_supplement_dispatch_receipts (
+           command_id,run_id,supplement_id,project_id,phase_id,task_id,base_package_id,
+           ordinal,content_hash,context_document_id,context_ref
+         ) VALUES (
+           'phase6-supplement-command','phase6-visual-run','phase6-supplement',
+           'phase6-delivery-project','phase6-visual-phase','phase6-visual-task',
+           'phase6-package',1,$1,'phase6-supplement-context',$2::jsonb
+         )`,
+        [
+          contentHash,
+          JSON.stringify({ ...contextRef, storage_ref: "https://tampered.example.test" }),
+        ],
+      ),
+    ).rejects.toThrow(/does not match its command and immutable context/);
+
+    await pg.query(
+      `INSERT INTO conversation_task_package_supplement_dispatch_receipts (
+         command_id,run_id,supplement_id,project_id,phase_id,task_id,base_package_id,
+         ordinal,content_hash,context_document_id,context_ref
+       ) VALUES (
+         'phase6-supplement-command','phase6-visual-run','phase6-supplement',
+         'phase6-delivery-project','phase6-visual-phase','phase6-visual-task',
+         'phase6-package',1,$1,'phase6-supplement-context',$2::jsonb
+       )`,
+      [contentHash, JSON.stringify(contextRef)],
+    );
+    await pg.query(
+      `INSERT INTO dispatch_jobs (
+         id,project_id,phase_id,task_id,run_id,command_id,runner_id,status
+       ) VALUES (
+         'phase6-supplement-job','phase6-delivery-project','phase6-visual-phase',
+         'phase6-visual-task','phase6-visual-run','phase6-supplement-command',
+         'phase6-delivery-runner','queued'
+       )`,
+    );
+
+    await expect(
+      pg.query(
+        `UPDATE conversation_task_package_supplement_dispatch_receipts
+            SET content_hash=repeat('f',64)
+          WHERE command_id='phase6-supplement-command'`,
+      ),
+    ).rejects.toThrow(/immutable/);
+    await expect(
+      pg.query(
+        `DELETE FROM conversation_task_package_supplement_dispatch_receipts
+          WHERE command_id='phase6-supplement-command'`,
+      ),
+    ).rejects.toThrow(/immutable/);
+
+    await expect(
+      pg.query(
+        `INSERT INTO conversation_task_package_supplements (
+           id,project_id,work_item_id,conversation_id,task_id,base_package_id,ordinal,
+           source_mockup_version_id,approval_decision_id,manifest_artifact_id,
+           manifest_artifact_hash,supplement,canonical_supplement,content_hash,
+           context_document_id,context_byte_size,context_media_type
+         ) VALUES (
+           'phase6-late-supplement','phase6-delivery-project','phase6-visual-work',
+           'phase6-visual-conversation','phase6-visual-task','phase6-package',2,
+           'phase6-visual-version','phase6-late-decision','phase6-visual-manifest',
+           $2,'{}'::jsonb,'{}',$1,'phase6-supplement-context',2,'application/json'
+         )`,
+        [contentHash, contentHash],
+      ),
+    ).rejects.toThrow(/must be frozen before a task command/);
   });
 
   it("represents invited/null identity and requires revoked legacy credentials", async () => {

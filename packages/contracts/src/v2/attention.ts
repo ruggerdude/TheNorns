@@ -49,6 +49,9 @@ export const V2AttentionSourceType = z.enum([
   "agent_run",
   "budget_reservation",
   "phase",
+  "human_wait",
+  "mockup",
+  "deployment",
 ]);
 export const V2AttentionKind = z.enum([
   "decision",

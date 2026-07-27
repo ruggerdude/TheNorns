@@ -274,6 +274,11 @@ export const CONVERSATION_HUMAN_STEERING_MIGRATION_URL = new URL(
   "../../../drizzle/0039_conversation_human_steering.sql",
   import.meta.url,
 );
+export const CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME = "0040_conversation_mockups_dashboard";
+export const CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_URL = new URL(
+  "../../../drizzle/0040_conversation_mockups_dashboard.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -461,6 +466,10 @@ export async function loadConversationExecutionHandoffMigrationSql(): Promise<st
 
 export async function loadConversationHumanSteeringMigrationSql(): Promise<string> {
   return readFile(CONVERSATION_HUMAN_STEERING_MIGRATION_URL, "utf8");
+}
+
+export async function loadConversationMockupsDashboardMigrationSql(): Promise<string> {
+  return readFile(CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -730,6 +739,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: CONVERSATION_HUMAN_STEERING_MIGRATION_NAME,
       sql: await loadConversationHumanSteeringMigrationSql(),
+    },
+    {
+      name: CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME,
+      sql: await loadConversationMockupsDashboardMigrationSql(),
     },
   ];
 }

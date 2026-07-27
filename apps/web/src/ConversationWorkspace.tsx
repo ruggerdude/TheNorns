@@ -134,6 +134,8 @@ type HumanWaitUpdateData = HumanWaitData & {
   status: "continuation_queued" | "resumed" | "expired" | "cancelled" | "failed";
 };
 
+type MockupData = ReferenceData;
+
 type NornsDataParts = {
   artifact: ArtifactData;
   plan: PlanData;
@@ -142,6 +144,7 @@ type NornsDataParts = {
   "planning-excerpt": PlanningExcerptData;
   "human-wait": HumanWaitData;
   "human-wait-update": HumanWaitUpdateData;
+  mockup: MockupData;
   attempt: AttemptData;
   usage: UsageData;
   "message-status": MessageStatusData;
@@ -466,6 +469,16 @@ function messagePartToUi(
             label: "Human wait update",
             status: part.status,
             view: resources.humanWaits.get(part.human_wait_id) ?? null,
+          },
+        },
+      ];
+    case "mockup":
+      return [
+        {
+          type: "data-mockup",
+          data: {
+            id: part.mockup_version_id,
+            label: "Mockup version",
           },
         },
       ];
@@ -1298,6 +1311,7 @@ function UserMessage(): React.ReactElement {
                 "planning-excerpt": PlanningExcerptPreview,
                 "human-wait": HumanWaitPreview,
                 "human-wait-update": HumanWaitUpdatePreview,
+                mockup: ReferencePreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -1328,6 +1342,7 @@ function AssistantMessage(): React.ReactElement {
                 "planning-excerpt": PlanningExcerptPreview,
                 "human-wait": HumanWaitPreview,
                 "human-wait-update": HumanWaitUpdatePreview,
+                mockup: ReferencePreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -1360,6 +1375,7 @@ function SystemMessage(): React.ReactElement {
                 "planning-excerpt": PlanningExcerptPreview,
                 "human-wait": HumanWaitPreview,
                 "human-wait-update": HumanWaitUpdatePreview,
+                mockup: ReferencePreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,

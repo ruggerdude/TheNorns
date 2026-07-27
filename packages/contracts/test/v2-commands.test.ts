@@ -343,6 +343,52 @@ describe("V2 immutable dispatch identity", () => {
     ).toBe(false);
   });
 
+  it("binds each approved mockup supplement and context document exactly once", () => {
+    const packageRef = dispatch.context_refs[0];
+    const supplementRef = {
+      artifact_id: "supplement-context-1",
+      content_hash: OTHER_HASH,
+      byte_size: 84,
+      storage_ref: "object/supplement-context-1",
+    };
+    const supplement = {
+      supplement_id: "supplement-1",
+      task_id: dispatch.task_id,
+      base_package_id: "task-package-1",
+      ordinal: 1,
+      content_hash: OTHER_HASH,
+      context_ref: supplementRef,
+    };
+    const withSupplement = {
+      ...dispatch,
+      context_refs: [packageRef, supplementRef],
+      task_package_id: "task-package-1",
+      task_package_content_hash: HASH,
+      task_package_context_ref: packageRef,
+      task_package_supplements: [supplement],
+    };
+    expect(V2DispatchCommand.safeParse(withSupplement).success).toBe(true);
+    expect(
+      V2DispatchCommand.safeParse({
+        ...withSupplement,
+        task_package_supplements: [supplement, { ...supplement, ordinal: 2 }],
+      }).success,
+    ).toBe(false);
+    expect(
+      V2DispatchCommand.safeParse({
+        ...withSupplement,
+        task_package_supplements: [
+          supplement,
+          {
+            ...supplement,
+            supplement_id: "supplement-2",
+            ordinal: 2,
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
   it("carries only the fixed committed verification-manifest path", () => {
     expect(
       V2DispatchCommand.parse({

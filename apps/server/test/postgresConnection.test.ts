@@ -112,6 +112,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             conversation_plan_workflow: "conversation_plan_workflow_v1",
             conversation_execution_handoff: "conversation_execution_handoff_v1",
             conversation_human_steering: "conversation_human_steering_v1",
+            conversation_mockups_dashboard: "conversation_mockups_dashboard_v1",
           },
         ],
       }),
@@ -143,6 +144,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             conversation_plan_workflow: null,
             conversation_execution_handoff: null,
             conversation_human_steering: null,
+            conversation_mockups_dashboard: null,
           },
         ],
       }),
@@ -157,7 +159,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "ai_usage_calibration_observations, shadow_read_comparisons.recorded_order, " +
         "conversation domain tables, conversation_stream_lifecycle_v1, " +
         "conversation_plan_workflow_v1, conversation_execution_handoff_v1, " +
-        "conversation_human_steering_v1",
+        "conversation_human_steering_v1, conversation_mockups_dashboard_v1",
     });
   });
 
@@ -184,6 +186,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             conversation_plan_workflow: null,
             conversation_execution_handoff: null,
             conversation_human_steering: null,
+            conversation_mockups_dashboard: null,
           },
         ],
       }),
@@ -195,7 +198,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
         message:
           "database migrations are required before startup; missing: " +
           "conversation_stream_lifecycle_v1, conversation_plan_workflow_v1, " +
-          "conversation_execution_handoff_v1, conversation_human_steering_v1",
+          "conversation_execution_handoff_v1, conversation_human_steering_v1, " +
+          "conversation_mockups_dashboard_v1",
       },
     );
   });

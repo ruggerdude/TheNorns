@@ -253,9 +253,13 @@ describe.sequential("Phase 1 V2 normalized schema", () => {
       );
     }
 
-    const expectedIndexes = schemaTables.flatMap((table) =>
-      getTableConfig(table).indexes.map((index) => index.config.name),
-    );
+    const expectedIndexes = schemaTables
+      .flatMap((table) => getTableConfig(table).indexes.map((index) => index.config.name))
+      // The shared Drizzle declaration reflects the current schema. This index
+      // is deliberately introduced by forward migration 0040 and is asserted
+      // against the current catalog in v2PreservationSchema.test.ts, not
+      // against the frozen 0001 catalog exercised here.
+      .filter((name) => name !== "verification_results_visual_scope_unique");
     const indexRows = await pg.query<{ indexname: string }>(
       "SELECT indexname FROM pg_indexes WHERE schemaname = 'public'",
     );

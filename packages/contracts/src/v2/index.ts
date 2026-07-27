@@ -14,3 +14,4 @@ export * from "./coordination.js";
 export * from "./debate.js";
 export * from "./knowledge.js";
 export * from "./conversation.js";
+export * from "./projectDashboard.js";

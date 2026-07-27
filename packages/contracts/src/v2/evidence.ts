@@ -69,6 +69,10 @@ export const V2ArtifactKind = z.enum([
   "verification_output",
   "architecture",
   "provider_response",
+  "mockup",
+  "visual_evidence",
+  "visual_comparison",
+  "deployment_evidence",
 ]);
 export const V2ArtifactRedactionStatus = z.enum(["pending", "applied", "not_required", "failed"]);
 

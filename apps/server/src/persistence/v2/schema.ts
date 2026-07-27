@@ -1254,6 +1254,15 @@ export const verificationResults = pgTable(
   },
   (table) => [
     index("verification_results_run_created_idx").on(table.runId, table.createdAt),
+    uniqueIndex("verification_results_visual_scope_unique").on(
+      table.projectId,
+      table.phaseId,
+      table.taskId,
+      table.runId,
+      table.repositoryBindingId,
+      table.commitSha,
+      table.id,
+    ),
     foreignKey({
       name: "verification_results_run_scope_fk",
       columns: [table.projectId, table.phaseId, table.taskId, table.runId],
@@ -5461,6 +5470,12 @@ export const conversationTaskPackages = pgTable(
   },
   (table) => [
     uniqueIndex("conversation_task_packages_module_unique").on(table.handoffId, table.moduleId),
+    uniqueIndex("conversation_task_packages_scope_unique").on(
+      table.projectId,
+      table.workItemId,
+      table.conversationId,
+      table.id,
+    ),
   ],
 );
 
@@ -5755,20 +5770,1011 @@ export const conversationExecutionPlanChangeRequests = pgTable(
   },
 );
 
-export const conversationMockupRequests = pgTable("conversation_mockup_requests", {
-  id: text("id").primaryKey(),
-  projectId: text("project_id").notNull(),
-  workItemId: text("work_item_id").notNull(),
-  conversationId: text("conversation_id").notNull(),
-  actionId: text("action_id").notNull().unique(),
-  taskId: text("task_id"),
-  brief: text("brief").notNull(),
-  target: text("target").notNull(),
-  artifactRefs: jsonb("artifact_refs").notNull(),
-  status: text("status").notNull().default("queued"),
-  createdAt: createdAt(),
-  updatedAt: updatedAt(),
-});
+export const conversationMockupRequests = pgTable(
+  "conversation_mockup_requests",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    actionId: text("action_id").notNull().unique(),
+    taskId: text("task_id"),
+    rootRequestId: text("root_request_id").notNull(),
+    sourceMockupVersionId: text("source_mockup_version_id"),
+    payloadHash: text("payload_hash").notNull(),
+    brief: text("brief").notNull(),
+    target: text("target").notNull(),
+    artifactRefs: jsonb("artifact_refs").notNull(),
+    revisionDirection: text("revision_direction"),
+    status: text("status").notNull().default("queued"),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "string" }),
+    attempts: integer("attempts").notNull().default(0),
+    availableAt: timestamp("available_at", { withTimezone: true, mode: "string" }).notNull(),
+    lastError: text("last_error"),
+    renderedVersionId: text("rendered_version_id"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("conversation_mockup_requests_scope_unique").on(
+      table.projectId,
+      table.workItemId,
+      table.conversationId,
+      table.id,
+    ),
+    index("conversation_mockup_requests_worker_idx").on(
+      table.status,
+      table.availableAt,
+      table.leaseExpiresAt,
+      table.createdAt,
+      table.id,
+    ),
+    foreignKey({
+      name: "conversation_mockup_requests_action_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.actionId],
+      foreignColumns: [
+        conversationActions.projectId,
+        conversationActions.workItemId,
+        conversationActions.conversationId,
+        conversationActions.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_mockup_requests_task_id_tasks_id_fk",
+      columns: [table.taskId],
+      foreignColumns: [tasks.id],
+    }).onDelete("restrict"),
+    lazyForeignKey(
+      "conversation_mockup_requests_source_version_fk",
+      (): AnyPgColumn[] => [table.sourceMockupVersionId],
+      (): AnyPgColumn[] => [conversationMockupVersions.id],
+    ).onDelete("restrict"),
+    lazyForeignKey(
+      "conversation_mockup_requests_rendered_version_fk",
+      (): AnyPgColumn[] => [table.renderedVersionId],
+      (): AnyPgColumn[] => [conversationMockupVersions.id],
+    ).onDelete("restrict"),
+    check("conversation_mockup_requests_brief_check", sql`length(trim(${table.brief})) > 0`),
+    check(
+      "conversation_mockup_requests_target_check",
+      sql`${table.target} IN ('desktop','mobile','responsive')`,
+    ),
+    check(
+      "conversation_mockup_requests_artifact_refs_check",
+      sql`jsonb_typeof(${table.artifactRefs})='array'`,
+    ),
+    check(
+      "conversation_mockup_requests_status_check",
+      sql`${table.status} IN ('queued','leased','rendered','failed','cancelled')`,
+    ),
+    check("conversation_mockup_requests_hash_check", sql`${table.payloadHash} ~ '^[a-f0-9]{64}$'`),
+    check("conversation_mockup_requests_attempts_check", sql`${table.attempts} >= 0`),
+    check(
+      "conversation_mockup_requests_revision_shape_check",
+      sql`(
+        (${table.sourceMockupVersionId} IS NULL AND ${table.rootRequestId}=${table.id}
+          AND ${table.revisionDirection} IS NULL)
+        OR (${table.sourceMockupVersionId} IS NOT NULL AND ${table.revisionDirection} IS NOT NULL)
+      )`,
+    ),
+    check(
+      "conversation_mockup_requests_lease_shape_check",
+      sql`(
+        (${table.status}='leased' AND ${table.leaseOwner} IS NOT NULL
+          AND ${table.leaseExpiresAt} IS NOT NULL)
+        OR (${table.status}<>'leased' AND ${table.leaseOwner} IS NULL
+          AND ${table.leaseExpiresAt} IS NULL)
+      )`,
+    ),
+    check(
+      "conversation_mockup_requests_result_shape_check",
+      sql`(
+        (${table.status}='rendered' AND ${table.renderedVersionId} IS NOT NULL
+          AND ${table.lastError} IS NULL)
+        OR (${table.status}='failed' AND ${table.renderedVersionId} IS NULL
+          AND ${table.lastError} IS NOT NULL)
+        OR (${table.status} IN ('queued','leased','cancelled')
+          AND ${table.renderedVersionId} IS NULL)
+      )`,
+    ),
+  ],
+);
+
+/**
+ * Migration 0040 is deliberately hand-authored: its composite foreign keys,
+ * CHECK constraints, deferred guards, immutable triggers, and grants are the
+ * runtime authority. These declarations mirror its query surface and named
+ * indexes. `v2PreservationSchema.test.ts` pins the complete critical catalog;
+ * this schema is never a license to replace 0040 with schema-push output.
+ */
+export const artifactBlobs = pgTable(
+  "artifact_blobs",
+  {
+    artifactId: text("artifact_id")
+      .primaryKey()
+      .references(() => artifacts.id, { onDelete: "restrict" }),
+    projectId: text("project_id").notNull(),
+    content: bytea("content").notNull(),
+    contentHash: text("content_hash").notNull(),
+    byteSize: bigint("byte_size", { mode: "number" }).notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("artifact_blobs_project_hash_unique").on(table.projectId, table.contentHash),
+    foreignKey({
+      name: "artifact_blobs_project_id_artifact_id_artifacts_project_id_id_fk",
+      columns: [table.projectId, table.artifactId],
+      foreignColumns: [artifacts.projectId, artifacts.id],
+    }).onDelete("restrict"),
+    check("artifact_blobs_content_check", sql`octet_length(${table.content}) > 0`),
+    check(
+      "artifact_blobs_content_hash_check",
+      sql`${table.contentHash} ~ '^[a-f0-9]{64}$'
+        AND ${table.contentHash}=encode(sha256(${table.content}),'hex')`,
+    ),
+    check(
+      "artifact_blobs_byte_size_check",
+      sql`${table.byteSize} > 0 AND ${table.byteSize}=octet_length(${table.content})`,
+    ),
+  ],
+);
+
+export const conversationMockupVersions = pgTable(
+  "conversation_mockup_versions",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    rootRequestId: text("root_request_id")
+      .notNull()
+      .references(() => conversationMockupRequests.id, { onDelete: "restrict" }),
+    requestId: text("request_id")
+      .notNull()
+      .unique()
+      .references(() => conversationMockupRequests.id, { onDelete: "restrict" }),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "restrict" }),
+    createdByActionId: text("created_by_action_id")
+      .notNull()
+      .unique()
+      .references(() => conversationActions.id, { onDelete: "restrict" }),
+    version: integer("version").notNull(),
+    brief: text("brief").notNull(),
+    target: text("target").notNull(),
+    interactionNotes: jsonb("interaction_notes").notNull(),
+    manifestArtifactId: text("manifest_artifact_id")
+      .notNull()
+      .unique()
+      .references(() => artifacts.id, { onDelete: "restrict" }),
+    manifestArtifactHash: text("manifest_artifact_hash").notNull(),
+    canonicalManifest: text("canonical_manifest").notNull(),
+    rendererProfile: jsonb("renderer_profile").notNull(),
+    supersedesMockupVersionId: text("supersedes_mockup_version_id"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("conversation_mockup_versions_root_version_unique").on(
+      table.rootRequestId,
+      table.version,
+    ),
+    uniqueIndex("conversation_mockup_versions_project_id_unique").on(table.projectId, table.id),
+    uniqueIndex("conversation_mockup_versions_scope_unique").on(
+      table.projectId,
+      table.workItemId,
+      table.conversationId,
+      table.id,
+    ),
+    index("conversation_mockup_versions_conversation_created_idx").on(
+      table.conversationId,
+      table.createdAt,
+      table.id,
+    ),
+    foreignKey({
+      name: "conversation_mockup_versions_request_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.requestId],
+      foreignColumns: [
+        conversationMockupRequests.projectId,
+        conversationMockupRequests.workItemId,
+        conversationMockupRequests.conversationId,
+        conversationMockupRequests.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_mockup_versions_action_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.createdByActionId],
+      foreignColumns: [
+        conversationActions.projectId,
+        conversationActions.workItemId,
+        conversationActions.conversationId,
+        conversationActions.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_mockup_versions_manifest_scope_fk",
+      columns: [table.projectId, table.manifestArtifactId],
+      foreignColumns: [artifacts.projectId, artifacts.id],
+    }).onDelete("restrict"),
+    lazyForeignKey(
+      "conversation_mockup_versions_supersedes_mockup_version_id_fk",
+      (): AnyPgColumn[] => [table.supersedesMockupVersionId],
+      (): AnyPgColumn[] => [conversationMockupVersions.id],
+    ).onDelete("restrict"),
+    check("conversation_mockup_versions_schema_version_check", sql`${table.schemaVersion}=2`),
+    check("conversation_mockup_versions_version_check", sql`${table.version} > 0`),
+    check("conversation_mockup_versions_brief_check", sql`length(trim(${table.brief})) > 0`),
+    check(
+      "conversation_mockup_versions_target_check",
+      sql`${table.target} IN ('desktop','mobile','responsive')`,
+    ),
+    check(
+      "conversation_mockup_versions_interaction_notes_check",
+      sql`jsonb_typeof(${table.interactionNotes})='array'
+        AND jsonb_array_length(${table.interactionNotes})>0`,
+    ),
+    check(
+      "conversation_mockup_versions_manifest_hash_check",
+      sql`${table.manifestArtifactHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "conversation_mockup_versions_renderer_profile_check",
+      sql`jsonb_typeof(${table.rendererProfile})='object'`,
+    ),
+    check(
+      "conversation_mockup_versions_canonical_manifest_check",
+      sql`${table.canonicalManifest}::jsonb IS NOT NULL
+        AND encode(sha256(convert_to(${table.canonicalManifest},'UTF8')),'hex')
+          =${table.manifestArtifactHash}`,
+    ),
+    check(
+      "conversation_mockup_versions_revision_shape_check",
+      sql`(
+        (${table.version}=1 AND ${table.supersedesMockupVersionId} IS NULL)
+        OR (${table.version}>1 AND ${table.supersedesMockupVersionId} IS NOT NULL)
+      )`,
+    ),
+  ],
+);
+
+export const conversationMockupVersionArtifacts = pgTable(
+  "conversation_mockup_version_artifacts",
+  {
+    mockupVersionId: text("mockup_version_id")
+      .notNull()
+      .references(() => conversationMockupVersions.id, { onDelete: "restrict" }),
+    projectId: text("project_id").notNull(),
+    viewport: text("viewport").notNull(),
+    artifactId: text("artifact_id")
+      .notNull()
+      .references(() => artifacts.id, { onDelete: "restrict" }),
+    artifactHash: text("artifact_hash").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    captureProfile: jsonb("capture_profile").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    primaryKey({
+      name: "conversation_mockup_version_artifacts_pkey",
+      columns: [table.mockupVersionId, table.viewport],
+    }),
+    uniqueIndex("conversation_mockup_version_artifacts_parent_artifact_unique").on(
+      table.mockupVersionId,
+      table.artifactId,
+    ),
+    foreignKey({
+      name: "conversation_mockup_version_artifacts_artifact_scope_fk",
+      columns: [table.projectId, table.artifactId],
+      foreignColumns: [artifacts.projectId, artifacts.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_mockup_version_artifacts_version_scope_fk",
+      columns: [table.projectId, table.mockupVersionId],
+      foreignColumns: [conversationMockupVersions.projectId, conversationMockupVersions.id],
+    }).onDelete("restrict"),
+    check(
+      "conversation_mockup_version_artifacts_viewport_check",
+      sql`${table.viewport} IN ('desktop','mobile')`,
+    ),
+    check(
+      "conversation_mockup_version_artifacts_hash_check",
+      sql`${table.artifactHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "conversation_mockup_version_artifacts_width_check",
+      sql`${table.width} > 0 AND ${table.width} <= 4096`,
+    ),
+    check(
+      "conversation_mockup_version_artifacts_height_check",
+      sql`${table.height} > 0 AND ${table.height} <= 4096`,
+    ),
+    check(
+      "conversation_mockup_version_artifacts_capture_profile_check",
+      sql`jsonb_typeof(${table.captureProfile})='object'`,
+    ),
+  ],
+);
+
+export const conversationMockupDecisions = pgTable(
+  "conversation_mockup_decisions",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    mockupVersionId: text("mockup_version_id")
+      .notNull()
+      .unique()
+      .references(() => conversationMockupVersions.id, { onDelete: "restrict" }),
+    actionId: text("action_id")
+      .notNull()
+      .unique()
+      .references(() => conversationActions.id, { onDelete: "restrict" }),
+    decidedByUserId: text("decided_by_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    decision: text("decision").notNull(),
+    manifestArtifactId: text("manifest_artifact_id")
+      .notNull()
+      .references(() => artifacts.id, { onDelete: "restrict" }),
+    manifestArtifactHash: text("manifest_artifact_hash").notNull(),
+    rationale: text("rationale"),
+    direction: text("direction"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("conversation_mockup_decisions_conversation_created_idx").on(
+      table.conversationId,
+      table.createdAt,
+      table.id,
+    ),
+    foreignKey({
+      name: "conversation_mockup_decisions_version_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.mockupVersionId],
+      foreignColumns: [
+        conversationMockupVersions.projectId,
+        conversationMockupVersions.workItemId,
+        conversationMockupVersions.conversationId,
+        conversationMockupVersions.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "conversation_mockup_decisions_action_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.actionId],
+      foreignColumns: [
+        conversationActions.projectId,
+        conversationActions.workItemId,
+        conversationActions.conversationId,
+        conversationActions.id,
+      ],
+    }).onDelete("restrict"),
+    check("conversation_mockup_decisions_schema_version_check", sql`${table.schemaVersion}=2`),
+    check(
+      "conversation_mockup_decisions_decision_check",
+      sql`${table.decision} IN ('approved','revision_requested','rejected')`,
+    ),
+    check(
+      "conversation_mockup_decisions_manifest_hash_check",
+      sql`${table.manifestArtifactHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "conversation_mockup_decisions_shape_check",
+      sql`(
+        (${table.decision}='approved' AND ${table.direction} IS NULL
+          AND ${table.rationale} IS NULL)
+        OR (${table.decision}='revision_requested' AND ${table.direction} IS NOT NULL
+          AND ${table.rationale} IS NULL)
+        OR (${table.decision}='rejected' AND ${table.direction} IS NULL
+          AND ${table.rationale} IS NOT NULL)
+      )`,
+    ),
+  ],
+);
+
+export const conversationTaskPackageSupplements = pgTable(
+  "conversation_task_package_supplements",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id, { onDelete: "restrict" }),
+    basePackageId: text("base_package_id")
+      .notNull()
+      .references(() => conversationTaskPackages.id, { onDelete: "restrict" }),
+    ordinal: integer("ordinal").notNull(),
+    sourceMockupVersionId: text("source_mockup_version_id")
+      .notNull()
+      .references(() => conversationMockupVersions.id, { onDelete: "restrict" }),
+    approvalDecisionId: text("approval_decision_id")
+      .notNull()
+      .unique()
+      .references(() => conversationMockupDecisions.id, { onDelete: "restrict" }),
+    manifestArtifactId: text("manifest_artifact_id")
+      .notNull()
+      .references(() => artifacts.id, { onDelete: "restrict" }),
+    manifestArtifactHash: text("manifest_artifact_hash").notNull(),
+    supplement: jsonb("supplement").notNull(),
+    canonicalSupplement: text("canonical_supplement").notNull(),
+    contentHash: text("content_hash").notNull(),
+    contextDocumentId: text("context_document_id").notNull(),
+    contextByteSize: integer("context_byte_size").notNull(),
+    contextMediaType: text("context_media_type").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("conversation_task_package_supplements_package_order_unique").on(
+      table.basePackageId,
+      table.ordinal,
+    ),
+    uniqueIndex("conversation_task_package_supplements_task_mockup_unique").on(
+      table.taskId,
+      table.sourceMockupVersionId,
+    ),
+    index("conversation_task_package_supplements_task_order_idx").on(
+      table.taskId,
+      table.ordinal,
+      table.id,
+    ),
+    foreignKey({
+      name: "conversation_task_package_supplements_package_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.basePackageId],
+      foreignColumns: [
+        conversationTaskPackages.projectId,
+        conversationTaskPackages.workItemId,
+        conversationTaskPackages.conversationId,
+        conversationTaskPackages.id,
+      ],
+    }).onDelete("restrict"),
+    check(
+      "conversation_task_package_supplements_schema_version_check",
+      sql`${table.schemaVersion}=2`,
+    ),
+    check("conversation_task_package_supplements_ordinal_check", sql`${table.ordinal} > 0`),
+    check(
+      "conversation_task_package_supplements_manifest_hash_check",
+      sql`${table.manifestArtifactHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "conversation_task_package_supplements_supplement_check",
+      sql`jsonb_typeof(${table.supplement})='object'`,
+    ),
+    check(
+      "conversation_task_package_supplements_canonical_check",
+      sql`${table.canonicalSupplement}::jsonb=${table.supplement}
+        AND encode(sha256(convert_to(${table.canonicalSupplement},'UTF8')),'hex')
+          =${table.contentHash}`,
+    ),
+    check(
+      "conversation_task_package_supplements_content_hash_check",
+      sql`${table.contentHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "conversation_task_package_supplements_context_size_check",
+      sql`${table.contextByteSize} > 0`,
+    ),
+    check(
+      "conversation_task_package_supplements_context_media_type_check",
+      sql`${table.contextMediaType}='application/json'`,
+    ),
+  ],
+);
+
+export const conversationTaskPackageSupplementDispatchReceipts = pgTable(
+  "conversation_task_package_supplement_dispatch_receipts",
+  {
+    commandId: text("command_id")
+      .notNull()
+      .references(() => commands.commandId, { onDelete: "restrict" }),
+    runId: text("run_id")
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: "restrict" }),
+    supplementId: text("supplement_id")
+      .notNull()
+      .references(() => conversationTaskPackageSupplements.id, { onDelete: "restrict" }),
+    projectId: text("project_id").notNull(),
+    phaseId: text("phase_id").notNull(),
+    taskId: text("task_id").notNull(),
+    basePackageId: text("base_package_id")
+      .notNull()
+      .references(() => conversationTaskPackages.id, { onDelete: "restrict" }),
+    ordinal: integer("ordinal").notNull(),
+    contentHash: text("content_hash").notNull(),
+    contextDocumentId: text("context_document_id").notNull(),
+    contextRef: jsonb("context_ref").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    primaryKey({
+      name: "conversation_task_package_supplement_dispatch_receipts_pkey",
+      columns: [table.commandId, table.supplementId],
+    }),
+    uniqueIndex("task_package_supplement_receipts_order_unique").on(table.commandId, table.ordinal),
+    foreignKey({
+      name: "task_package_supplement_receipts_run_scope_fk",
+      columns: [table.projectId, table.phaseId, table.taskId, table.runId],
+      foreignColumns: [agentRuns.projectId, agentRuns.phaseId, agentRuns.taskId, agentRuns.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "task_package_supplement_receipts_command_scope_fk",
+      columns: [table.projectId, table.phaseId, table.taskId, table.runId, table.commandId],
+      foreignColumns: [
+        commands.projectId,
+        commands.phaseId,
+        commands.taskId,
+        commands.runId,
+        commands.commandId,
+      ],
+    }).onDelete("restrict"),
+    check("task_package_supplement_receipts_ordinal_check", sql`${table.ordinal} > 0`),
+    check(
+      "task_package_supplement_receipts_content_hash_check",
+      sql`${table.contentHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "task_package_supplement_receipts_context_ref_check",
+      sql`jsonb_typeof(${table.contextRef})='object'`,
+    ),
+  ],
+);
+
+export const projectDeliveryRecords = pgTable(
+  "project_delivery_records",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "restrict" }),
+    phaseId: text("phase_id").references(() => phases.id, { onDelete: "restrict" }),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "restrict" }),
+    runId: text("run_id").references(() => agentRuns.id, { onDelete: "restrict" }),
+    repositoryBindingId: text("repository_binding_id")
+      .notNull()
+      .references(() => repositoryBindings.id, { onDelete: "restrict" }),
+    environment: text("environment").notNull(),
+    service: text("service").notNull(),
+    commitSha: text("commit_sha").notNull(),
+    providerId: text("provider_id").notNull(),
+    providerDeploymentId: text("provider_deployment_id").notNull(),
+    status: text("status").notNull(),
+    currentObservationSequence: integer("current_observation_sequence").notNull().default(1),
+    publicUrl: text("public_url"),
+    healthUrl: text("health_url"),
+    healthStatusCode: integer("health_status_code"),
+    evidenceArtifactId: text("evidence_artifact_id").references(() => artifacts.id, {
+      onDelete: "restrict",
+    }),
+    evidenceArtifactHash: text("evidence_artifact_hash"),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("project_delivery_records_provider_unique").on(
+      table.projectId,
+      table.providerId,
+      table.providerDeploymentId,
+    ),
+    uniqueIndex("project_delivery_records_project_id_unique").on(table.projectId, table.id),
+    index("project_delivery_records_project_recent_idx").on(
+      table.projectId,
+      table.createdAt,
+      table.id,
+    ),
+    index("project_delivery_records_commit_idx").on(table.projectId, table.commitSha, table.status),
+    uniqueIndex("project_delivery_records_visual_scope_unique").on(
+      table.projectId,
+      table.phaseId,
+      table.taskId,
+      table.runId,
+      table.repositoryBindingId,
+      table.commitSha,
+      table.id,
+    ),
+    foreignKey({
+      name: "project_delivery_records_repository_scope_fk",
+      columns: [table.projectId, table.repositoryBindingId],
+      foreignColumns: [repositoryBindings.projectId, repositoryBindings.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "project_delivery_records_phase_scope_fk",
+      columns: [table.projectId, table.phaseId],
+      foreignColumns: [phases.projectId, phases.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "project_delivery_records_task_scope_fk",
+      columns: [table.projectId, table.phaseId, table.taskId],
+      foreignColumns: [tasks.projectId, tasks.phaseId, tasks.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "project_delivery_records_run_scope_fk",
+      columns: [table.projectId, table.phaseId, table.taskId, table.runId],
+      foreignColumns: [agentRuns.projectId, agentRuns.phaseId, agentRuns.taskId, agentRuns.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "project_delivery_records_evidence_scope_fk",
+      columns: [table.projectId, table.evidenceArtifactId],
+      foreignColumns: [artifacts.projectId, artifacts.id],
+    }).onDelete("restrict"),
+    check("project_delivery_records_schema_version_check", sql`${table.schemaVersion}=2`),
+    check("project_delivery_records_environment_check", sql`length(trim(${table.environment}))>0`),
+    check("project_delivery_records_service_check", sql`length(trim(${table.service}))>0`),
+    check(
+      "project_delivery_records_commit_sha_check",
+      sql`${table.commitSha} ~ '^([a-f0-9]{40}|[a-f0-9]{64})$'`,
+    ),
+    check("project_delivery_records_provider_id_check", sql`length(trim(${table.providerId}))>0`),
+    check(
+      "project_delivery_records_provider_deployment_id_check",
+      sql`length(trim(${table.providerDeploymentId}))>0`,
+    ),
+    check(
+      "project_delivery_records_status_check",
+      sql`${table.status} IN ('pending','deploying','succeeded','failed')`,
+    ),
+    check(
+      "project_delivery_records_observation_sequence_check",
+      sql`${table.currentObservationSequence}>0`,
+    ),
+    check(
+      "project_delivery_records_public_url_check",
+      sql`${table.publicUrl} IS NULL OR norns_is_public_https_url(${table.publicUrl})`,
+    ),
+    check(
+      "project_delivery_records_health_url_check",
+      sql`${table.healthUrl} IS NULL OR norns_is_public_https_url(${table.healthUrl})`,
+    ),
+    check(
+      "project_delivery_records_health_status_check",
+      sql`${table.healthStatusCode} IS NULL OR ${table.healthStatusCode} BETWEEN 100 AND 599`,
+    ),
+    check(
+      "project_delivery_records_evidence_hash_check",
+      sql`${table.evidenceArtifactHash} IS NULL
+        OR ${table.evidenceArtifactHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "project_delivery_records_terminal_shape_check",
+      sql`(
+        (${table.status} IN ('pending','deploying') AND ${table.completedAt} IS NULL)
+        OR (${table.status} IN ('succeeded','failed') AND ${table.completedAt} IS NOT NULL)
+      )`,
+    ),
+    check(
+      "project_delivery_records_evidence_shape_check",
+      sql`(${table.evidenceArtifactId} IS NULL)=(${table.evidenceArtifactHash} IS NULL)`,
+    ),
+    check(
+      "project_delivery_records_success_shape_check",
+      sql`${table.status}<>'succeeded' OR (
+        ${table.publicUrl} IS NOT NULL AND ${table.healthUrl} IS NOT NULL
+        AND ${table.healthStatusCode} BETWEEN 200 AND 399
+        AND ${table.evidenceArtifactId} IS NOT NULL
+        AND ${table.evidenceArtifactHash} IS NOT NULL
+      )`,
+    ),
+    check(
+      "project_delivery_records_scope_shape_check",
+      sql`(
+        (${table.phaseId} IS NULL AND ${table.taskId} IS NULL AND ${table.runId} IS NULL)
+        OR (${table.phaseId} IS NOT NULL AND ${table.taskId} IS NULL AND ${table.runId} IS NULL)
+        OR (${table.phaseId} IS NOT NULL AND ${table.taskId} IS NOT NULL)
+      )`,
+    ),
+  ],
+);
+
+export const projectDeliveryObservations = pgTable(
+  "project_delivery_observations",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    deliveryRecordId: text("delivery_record_id")
+      .notNull()
+      .references(() => projectDeliveryRecords.id, { onDelete: "restrict" }),
+    projectId: text("project_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    status: text("status").notNull(),
+    sourceType: text("source_type").notNull(),
+    sourceId: text("source_id").notNull(),
+    providerEventId: text("provider_event_id"),
+    publicUrl: text("public_url"),
+    healthUrl: text("health_url"),
+    healthStatusCode: integer("health_status_code"),
+    evidenceArtifactId: text("evidence_artifact_id").references(() => artifacts.id, {
+      onDelete: "restrict",
+    }),
+    evidenceArtifactHash: text("evidence_artifact_hash"),
+    observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("project_delivery_observations_record_sequence_unique").on(
+      table.deliveryRecordId,
+      table.sequence,
+    ),
+    uniqueIndex("project_delivery_observations_provider_event_unique").on(
+      table.projectId,
+      table.sourceId,
+      table.providerEventId,
+    ),
+    uniqueIndex("project_delivery_observations_scope_unique").on(
+      table.projectId,
+      table.deliveryRecordId,
+      table.id,
+    ),
+    index("project_delivery_observations_record_created_idx").on(
+      table.deliveryRecordId,
+      table.sequence,
+      table.createdAt,
+      table.id,
+    ),
+    foreignKey({
+      name: "project_delivery_observations_delivery_scope_fk",
+      columns: [table.projectId, table.deliveryRecordId],
+      foreignColumns: [projectDeliveryRecords.projectId, projectDeliveryRecords.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "project_delivery_observations_evidence_scope_fk",
+      columns: [table.projectId, table.evidenceArtifactId],
+      foreignColumns: [artifacts.projectId, artifacts.id],
+    }).onDelete("restrict"),
+    check("project_delivery_observations_schema_version_check", sql`${table.schemaVersion}=2`),
+    check("project_delivery_observations_sequence_check", sql`${table.sequence}>0`),
+    check(
+      "project_delivery_observations_status_check",
+      sql`${table.status} IN ('pending','deploying','succeeded','failed')`,
+    ),
+    check(
+      "project_delivery_observations_source_type_check",
+      sql`${table.sourceType} IN ('provider','runner','system','human')`,
+    ),
+    check("project_delivery_observations_source_id_check", sql`length(trim(${table.sourceId}))>0`),
+    check(
+      "project_delivery_observations_public_url_check",
+      sql`${table.publicUrl} IS NULL OR norns_is_public_https_url(${table.publicUrl})`,
+    ),
+    check(
+      "project_delivery_observations_health_url_check",
+      sql`${table.healthUrl} IS NULL OR norns_is_public_https_url(${table.healthUrl})`,
+    ),
+    check(
+      "project_delivery_observations_health_status_check",
+      sql`${table.healthStatusCode} IS NULL OR ${table.healthStatusCode} BETWEEN 100 AND 599`,
+    ),
+    check(
+      "project_delivery_observations_evidence_hash_check",
+      sql`${table.evidenceArtifactHash} IS NULL
+        OR ${table.evidenceArtifactHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "project_delivery_observations_provider_shape_check",
+      sql`(${table.sourceType}='provider')=(${table.providerEventId} IS NOT NULL)`,
+    ),
+    check(
+      "project_delivery_observations_evidence_shape_check",
+      sql`(${table.evidenceArtifactId} IS NULL)=(${table.evidenceArtifactHash} IS NULL)`,
+    ),
+    check(
+      "project_delivery_observations_success_shape_check",
+      sql`${table.status}<>'succeeded' OR (
+        ${table.publicUrl} IS NOT NULL AND ${table.healthUrl} IS NOT NULL
+        AND ${table.healthStatusCode} BETWEEN 200 AND 399
+        AND ${table.evidenceArtifactId} IS NOT NULL
+        AND ${table.evidenceArtifactHash} IS NOT NULL
+      )`,
+    ),
+  ],
+);
+
+export const implementationVisualEvidence = pgTable(
+  "implementation_visual_evidence",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    phaseId: text("phase_id")
+      .notNull()
+      .references(() => phases.id, { onDelete: "restrict" }),
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id, { onDelete: "restrict" }),
+    runId: text("run_id")
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: "restrict" }),
+    approvedMockupVersionId: text("approved_mockup_version_id")
+      .notNull()
+      .references(() => conversationMockupVersions.id, { onDelete: "restrict" }),
+    repositoryBindingId: text("repository_binding_id")
+      .notNull()
+      .references(() => repositoryBindings.id, { onDelete: "restrict" }),
+    verificationResultId: text("verification_result_id")
+      .notNull()
+      .references(() => verificationResults.id, { onDelete: "restrict" }),
+    deploymentRecordId: text("deployment_record_id")
+      .notNull()
+      .references(() => projectDeliveryRecords.id, { onDelete: "restrict" }),
+    deploymentObservationId: text("deployment_observation_id")
+      .notNull()
+      .references(() => projectDeliveryObservations.id, { onDelete: "restrict" }),
+    commitSha: text("commit_sha").notNull(),
+    captureProfile: jsonb("capture_profile").notNull(),
+    comparisonArtifactId: text("comparison_artifact_id")
+      .unique()
+      .references(() => artifacts.id, { onDelete: "restrict" }),
+    comparisonArtifactHash: text("comparison_artifact_hash"),
+    verifiedAt: timestamp("verified_at", { withTimezone: true, mode: "string" }).notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("implementation_visual_evidence_run_mockup_unique").on(
+      table.runId,
+      table.approvedMockupVersionId,
+    ),
+    index("implementation_visual_evidence_conversation_created_idx").on(
+      table.conversationId,
+      table.createdAt,
+      table.id,
+    ),
+    foreignKey({
+      name: "implementation_visual_evidence_mockup_scope_fk",
+      columns: [
+        table.projectId,
+        table.workItemId,
+        table.conversationId,
+        table.approvedMockupVersionId,
+      ],
+      foreignColumns: [
+        conversationMockupVersions.projectId,
+        conversationMockupVersions.workItemId,
+        conversationMockupVersions.conversationId,
+        conversationMockupVersions.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "implementation_visual_evidence_run_scope_fk",
+      columns: [table.projectId, table.phaseId, table.taskId, table.runId],
+      foreignColumns: [agentRuns.projectId, agentRuns.phaseId, agentRuns.taskId, agentRuns.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "implementation_visual_evidence_verification_scope_fk",
+      columns: [
+        table.projectId,
+        table.phaseId,
+        table.taskId,
+        table.runId,
+        table.repositoryBindingId,
+        table.commitSha,
+        table.verificationResultId,
+      ],
+      foreignColumns: [
+        verificationResults.projectId,
+        verificationResults.phaseId,
+        verificationResults.taskId,
+        verificationResults.runId,
+        verificationResults.repositoryBindingId,
+        verificationResults.commitSha,
+        verificationResults.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "implementation_visual_evidence_deployment_scope_fk",
+      columns: [
+        table.projectId,
+        table.phaseId,
+        table.taskId,
+        table.runId,
+        table.repositoryBindingId,
+        table.commitSha,
+        table.deploymentRecordId,
+      ],
+      foreignColumns: [
+        projectDeliveryRecords.projectId,
+        projectDeliveryRecords.phaseId,
+        projectDeliveryRecords.taskId,
+        projectDeliveryRecords.runId,
+        projectDeliveryRecords.repositoryBindingId,
+        projectDeliveryRecords.commitSha,
+        projectDeliveryRecords.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "implementation_visual_evidence_observation_scope_fk",
+      columns: [table.projectId, table.deploymentRecordId, table.deploymentObservationId],
+      foreignColumns: [
+        projectDeliveryObservations.projectId,
+        projectDeliveryObservations.deliveryRecordId,
+        projectDeliveryObservations.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "implementation_visual_evidence_comparison_scope_fk",
+      columns: [table.projectId, table.comparisonArtifactId],
+      foreignColumns: [artifacts.projectId, artifacts.id],
+    }).onDelete("restrict"),
+    check("implementation_visual_evidence_schema_version_check", sql`${table.schemaVersion}=2`),
+    check(
+      "implementation_visual_evidence_commit_sha_check",
+      sql`${table.commitSha} ~ '^([a-f0-9]{40}|[a-f0-9]{64})$'`,
+    ),
+    check(
+      "implementation_visual_evidence_capture_profile_check",
+      sql`jsonb_typeof(${table.captureProfile})='object'`,
+    ),
+    check(
+      "implementation_visual_evidence_comparison_hash_check",
+      sql`${table.comparisonArtifactHash} IS NULL
+        OR ${table.comparisonArtifactHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "implementation_visual_evidence_comparison_shape_check",
+      sql`(${table.comparisonArtifactId} IS NULL)=(${table.comparisonArtifactHash} IS NULL)`,
+    ),
+  ],
+);
+
+export const implementationVisualEvidenceArtifacts = pgTable(
+  "implementation_visual_evidence_artifacts",
+  {
+    visualEvidenceId: text("visual_evidence_id")
+      .notNull()
+      .references(() => implementationVisualEvidence.id, { onDelete: "restrict" }),
+    projectId: text("project_id").notNull(),
+    viewport: text("viewport").notNull(),
+    artifactId: text("artifact_id")
+      .notNull()
+      .references(() => artifacts.id, { onDelete: "restrict" }),
+    artifactHash: text("artifact_hash").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    captureProfile: jsonb("capture_profile").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    primaryKey({
+      name: "implementation_visual_evidence_artifacts_pkey",
+      columns: [table.visualEvidenceId, table.viewport],
+    }),
+    uniqueIndex("implementation_visual_evidence_artifacts_parent_artifact_unique").on(
+      table.visualEvidenceId,
+      table.artifactId,
+    ),
+    foreignKey({
+      name: "implementation_visual_evidence_artifacts_artifact_scope_fk",
+      columns: [table.projectId, table.artifactId],
+      foreignColumns: [artifacts.projectId, artifacts.id],
+    }).onDelete("restrict"),
+    check(
+      "implementation_visual_evidence_artifacts_viewport_check",
+      sql`${table.viewport} IN ('desktop','mobile')`,
+    ),
+    check(
+      "implementation_visual_evidence_artifacts_hash_check",
+      sql`${table.artifactHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "implementation_visual_evidence_artifacts_width_check",
+      sql`${table.width} > 0 AND ${table.width} <= 4096`,
+    ),
+    check(
+      "implementation_visual_evidence_artifacts_height_check",
+      sql`${table.height} > 0 AND ${table.height} <= 4096`,
+    ),
+    check(
+      "implementation_visual_evidence_artifacts_capture_profile_check",
+      sql`jsonb_typeof(${table.captureProfile})='object'`,
+    ),
+  ],
+);
 
 export const conversationActionCheckpointContexts = pgTable(
   "conversation_action_checkpoint_contexts",
@@ -6042,6 +7048,16 @@ export const conversationDomainSchema = {
   runCommandUsageReceipts,
   conversationExecutionPlanChangeRequests,
   conversationMockupRequests,
+  artifactBlobs,
+  conversationMockupVersions,
+  conversationMockupVersionArtifacts,
+  conversationMockupDecisions,
+  conversationTaskPackageSupplements,
+  conversationTaskPackageSupplementDispatchReceipts,
+  projectDeliveryRecords,
+  projectDeliveryObservations,
+  implementationVisualEvidence,
+  implementationVisualEvidenceArtifacts,
   conversationActionCheckpointContexts,
   conversationPauseCheckpoints,
   humanWaits,

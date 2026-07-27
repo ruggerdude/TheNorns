@@ -453,6 +453,7 @@ describe("conversation workspace", () => {
             label: "API review",
             media_type: "text/markdown",
           },
+          { type: "mockup", mockup_version_id: "mockup-version-1" },
         ],
       }),
     ];
@@ -478,6 +479,9 @@ describe("conversation workspace", () => {
     expect(screen.getByText("one risk")).toBeInTheDocument();
     expect(screen.getByText("const durable = true;")).toBeInTheDocument();
     expect(screen.getByTestId("conversation-artifact")).toHaveTextContent("API review");
+    expect(screen.getByText("Mockup version").closest("article")).toHaveTextContent(
+      "mockup-version-1",
+    );
     expect(screen.getByTestId("conversation-model-pin")).toHaveTextContent(
       "anthropic · claude-sonnet-5",
     );

@@ -177,7 +177,7 @@ describe.sequential("conversation-first durable domain", () => {
     ).resolves.toBeUndefined();
     const replay = await runCurrentV2Migrations(asMigrationDatabase(pg));
     expect(replay.at(-1)).toMatchObject({
-      name: "0039_conversation_human_steering",
+      name: "0040_conversation_mockups_dashboard",
       applied: false,
     });
   });
@@ -540,6 +540,62 @@ describe.sequential("conversation-first durable domain", () => {
         [proposal.id],
       ),
     ).rejects.toThrow(/delivery evidence changes only with status/);
+  });
+
+  it("keeps the deployed Phase 5 mockup writer compatible after migration 0040", async () => {
+    const proposal = await service.proposeAction(member, {
+      project_id: "conversation-project",
+      work_item_id: workItemId,
+      conversation_id: conversationId,
+      source_message_id: firstMessageId,
+      action_type: "create_mockup",
+      payload: {
+        parameters: {
+          brief: "Render the approved conversation workspace.",
+          target: "responsive",
+          task_id: null,
+          artifact_refs: [],
+        },
+      },
+    });
+    await service.confirmAction(member, {
+      project_id: "conversation-project",
+      work_item_id: workItemId,
+      conversation_id: conversationId,
+      action_id: proposal.id,
+      idempotency_key: "confirm-phase6-rollout-mockup",
+    });
+    await pg.query(
+      `UPDATE conversation_actions
+          SET status='recorded',recorded_at=now(),updated_at=now()
+        WHERE id=$1`,
+      [proposal.id],
+    );
+    const inserted = await pg.query<{
+      root_request_id: string;
+      payload_hash: string;
+      available: boolean;
+    }>(
+      `INSERT INTO conversation_mockup_requests (
+         id,project_id,work_item_id,conversation_id,action_id,task_id,
+         brief,target,artifact_refs
+       ) VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,'[]'::jsonb)
+       RETURNING root_request_id,payload_hash,available_at IS NOT NULL AS available`,
+      [
+        `mockup-request:${proposal.id}`,
+        "conversation-project",
+        workItemId,
+        conversationId,
+        proposal.id,
+        "Render the approved conversation workspace.",
+        "responsive",
+      ],
+    );
+    expect(inserted.rows[0]).toEqual({
+      root_request_id: `mockup-request:${proposal.id}`,
+      payload_hash: proposal.payload_hash,
+      available: true,
+    });
   });
 
   it("returns a clean idempotency conflict when different actions race on one key", async () => {

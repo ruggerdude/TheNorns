@@ -3,6 +3,7 @@ import { PlanContract, PlanModule, validatePlan } from "../plan.js";
 import {
   V2Actor,
   V2EntityId,
+  V2EvidenceRef,
   V2GitCommitSha,
   V2IsoDateTime,
   V2NonEmptyString,
@@ -184,6 +185,13 @@ export const V2MessageHumanWaitUpdatePart = z
   })
   .strict();
 
+export const V2MessageMockupPart = z
+  .object({
+    type: z.literal("mockup"),
+    mockup_version_id: V2EntityId,
+  })
+  .strict();
+
 /**
  * Deliberately excludes reasoning/thought parts. Durable conversation history
  * contains only content shown to the user.
@@ -199,6 +207,7 @@ export const V2WorkMessagePart = z.discriminatedUnion("type", [
   V2MessagePlanningExcerptPart,
   V2MessageHumanWaitPart,
   V2MessageHumanWaitUpdatePart,
+  V2MessageMockupPart,
 ]);
 export type V2WorkMessagePartT = z.infer<typeof V2WorkMessagePart>;
 
@@ -648,28 +657,617 @@ export const V2CreateMockupParameters = z
     task_id: V2EntityId.nullable().optional(),
     artifact_refs: z.array(V2EntityId).max(32),
   })
-  .strict();
+  .strict()
+  .superRefine((parameters, ctx) => {
+    if (new Set(parameters.artifact_refs).size !== parameters.artifact_refs.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["artifact_refs"],
+        message: "mockup artifact references must be distinct",
+      });
+    }
+  });
 
 export const V2ApproveMockupParameters = z
   .object({
-    artifact_id: V2EntityId,
-    artifact_hash: V2Sha256Hex,
+    mockup_version_id: V2EntityId,
+    task_id: V2EntityId,
+    manifest_artifact_id: V2EntityId,
+    manifest_artifact_hash: V2Sha256Hex,
   })
   .strict();
 
 export const V2ReviseMockupParameters = z
   .object({
-    artifact_id: V2EntityId,
+    mockup_version_id: V2EntityId,
+    manifest_artifact_id: V2EntityId,
+    manifest_artifact_hash: V2Sha256Hex,
     direction: boundedDirection,
   })
   .strict();
 
 export const V2RejectMockupParameters = z
   .object({
-    artifact_id: V2EntityId,
+    mockup_version_id: V2EntityId,
+    manifest_artifact_id: V2EntityId,
+    manifest_artifact_hash: V2Sha256Hex,
     reason: boundedRationale,
   })
   .strict();
+
+export const V2MockupArtifactUploadInput = z.discriminatedUnion("media_type", [
+  z
+    .object({
+      project_id: V2EntityId,
+      work_item_id: V2EntityId,
+      conversation_id: V2EntityId,
+      media_type: z.literal("image/png"),
+      purpose: z.enum([
+        "mockup_desktop",
+        "mockup_mobile",
+        "implementation_desktop",
+        "implementation_mobile",
+      ]),
+      content_hash: V2Sha256Hex,
+      byte_size: z
+        .number()
+        .int()
+        .positive()
+        .max(10 * 1024 * 1024),
+      idempotency_key: V2EntityId,
+    })
+    .strict(),
+  z
+    .object({
+      project_id: V2EntityId,
+      work_item_id: V2EntityId,
+      conversation_id: V2EntityId,
+      media_type: z.literal("application/json"),
+      purpose: z.enum(["mockup_manifest", "visual_comparison", "deployment_evidence"]),
+      content_hash: V2Sha256Hex,
+      byte_size: z
+        .number()
+        .int()
+        .positive()
+        .max(1024 * 1024),
+      idempotency_key: V2EntityId,
+    })
+    .strict(),
+]);
+export type V2MockupArtifactUploadInputT = z.infer<typeof V2MockupArtifactUploadInput>;
+
+export const V2ProjectArtifactQuotaReceipt = z
+  .object({
+    project_id: V2EntityId,
+    limit_bytes: z.number().int().safe().positive(),
+    used_bytes_before: z.number().int().safe().nonnegative(),
+    requested_bytes: z.number().int().safe().positive(),
+    allowed: z.boolean(),
+  })
+  .strict()
+  .superRefine((receipt, ctx) => {
+    if (
+      receipt.allowed !==
+      receipt.used_bytes_before + receipt.requested_bytes <= receipt.limit_bytes
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["allowed"],
+        message: "quota outcome must match the authoritative project byte total",
+      });
+    }
+  });
+export type V2ProjectArtifactQuotaReceiptT = z.infer<typeof V2ProjectArtifactQuotaReceipt>;
+
+export const V2MockupViewport = z.enum(["desktop", "mobile"]);
+export type V2MockupViewportT = z.infer<typeof V2MockupViewport>;
+
+export const V2MockupRendererProfile = z
+  .object({
+    renderer: z.literal("norns-deterministic-v1"),
+    renderer_revision: V2Sha256Hex,
+    font_revision: V2Sha256Hex,
+    pixel_ratio: z.literal(1),
+    network: z.literal("disabled"),
+    scripts: z.literal("disabled"),
+    locale: z.literal("en-US"),
+    timezone: z.literal("UTC"),
+    fixed_clock: V2IsoDateTime,
+    seed: V2Sha256Hex,
+  })
+  .strict();
+export type V2MockupRendererProfileT = z.infer<typeof V2MockupRendererProfile>;
+
+export const V2MockupScreenshot = z
+  .object({
+    viewport: V2MockupViewport,
+    artifact: V2EvidenceRef,
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+    capture_profile: V2MockupRendererProfile,
+  })
+  .strict();
+export type V2MockupScreenshotT = z.infer<typeof V2MockupScreenshot>;
+
+function refineExactMockupScreenshots(
+  screenshots: readonly [
+    V2MockupScreenshotT & { viewport: "desktop" },
+    V2MockupScreenshotT & { viewport: "mobile" },
+  ],
+  rendererProfile: V2MockupRendererProfileT,
+  ctx: z.RefinementCtx,
+): void {
+  if (
+    screenshots[0].width !== 1440 ||
+    screenshots[0].height !== 1024 ||
+    screenshots[1].width !== 390 ||
+    screenshots[1].height !== 844
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["screenshots"],
+      message: "mockup screenshots must use the fixed 1440x1024 and 390x844 viewports",
+    });
+  }
+  if (screenshots[0].artifact.artifact_id === screenshots[1].artifact.artifact_id) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["screenshots"],
+      message: "desktop and mobile screenshots require distinct artifacts",
+    });
+  }
+  for (const [index, screenshot] of screenshots.entries()) {
+    if (screenshot.artifact.media_type !== "image/png") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["screenshots", index, "artifact", "media_type"],
+        message: "mockup screenshots must be PNG images",
+      });
+    }
+    if (JSON.stringify(screenshot.capture_profile) !== JSON.stringify(rendererProfile)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["screenshots", index, "capture_profile"],
+        message: "every screenshot must use the exact deterministic renderer profile",
+      });
+    }
+  }
+}
+
+export const V2MockupManifest = z
+  .object({
+    schema_version: schemaVersion,
+    kind: z.literal("mockup"),
+    mockup_version_id: V2EntityId,
+    root_request_id: V2EntityId,
+    request_id: V2EntityId,
+    task_id: V2EntityId.nullable(),
+    version: V2PositiveVersion,
+    brief: boundedDirection,
+    target: z.enum(["desktop", "mobile", "responsive"]),
+    interaction_notes: z.array(V2NonEmptyString).min(1).max(32),
+    renderer_profile: V2MockupRendererProfile,
+    screenshots: z.tuple([
+      V2MockupScreenshot.extend({ viewport: z.literal("desktop") }).strict(),
+      V2MockupScreenshot.extend({ viewport: z.literal("mobile") }).strict(),
+    ]),
+  })
+  .strict()
+  .superRefine((manifest, ctx) => {
+    refineExactMockupScreenshots(manifest.screenshots, manifest.renderer_profile, ctx);
+  });
+export type V2MockupManifestT = z.infer<typeof V2MockupManifest>;
+
+export const V2ConversationMockupVersionStatus = z.enum([
+  "candidate",
+  "approved",
+  "revision_requested",
+  "rejected",
+  "superseded",
+]);
+export type V2ConversationMockupVersionStatusT = z.infer<typeof V2ConversationMockupVersionStatus>;
+
+export const V2ConversationMockupVersion = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    root_request_id: V2EntityId,
+    request_id: V2EntityId,
+    project_id: V2EntityId,
+    work_item_id: V2EntityId,
+    conversation_id: V2EntityId,
+    task_id: V2EntityId.nullable(),
+    created_by_action_id: V2EntityId,
+    version: V2PositiveVersion,
+    status: V2ConversationMockupVersionStatus,
+    brief: boundedDirection,
+    target: z.enum(["desktop", "mobile", "responsive"]),
+    interaction_notes: z.array(V2NonEmptyString).min(1).max(32),
+    manifest: V2EvidenceRef,
+    renderer_profile: V2MockupRendererProfile,
+    screenshots: z.tuple([
+      V2MockupScreenshot.extend({ viewport: z.literal("desktop") }).strict(),
+      V2MockupScreenshot.extend({ viewport: z.literal("mobile") }).strict(),
+    ]),
+    supersedes_mockup_version_id: V2EntityId.nullable(),
+    created_at: V2IsoDateTime,
+  })
+  .strict()
+  .superRefine((version, ctx) => {
+    if ((version.version === 1) !== (version.supersedes_mockup_version_id === null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["supersedes_mockup_version_id"],
+        message: "only the first mockup version can omit its superseded version",
+      });
+    }
+    const artifactIds = new Set([
+      version.manifest.artifact_id,
+      ...version.screenshots.map((screenshot) => screenshot.artifact.artifact_id),
+    ]);
+    if (artifactIds.size !== 3) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["screenshots"],
+        message: "manifest, desktop, and mobile artifacts must be distinct",
+      });
+    }
+    if (version.manifest.media_type !== "application/json") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["manifest", "media_type"],
+        message: "the immutable mockup manifest must be JSON",
+      });
+    }
+    refineExactMockupScreenshots(version.screenshots, version.renderer_profile, ctx);
+  });
+export type V2ConversationMockupVersionT = z.infer<typeof V2ConversationMockupVersion>;
+
+export const V2ConversationMockupDecision = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    work_item_id: V2EntityId,
+    conversation_id: V2EntityId,
+    mockup_version_id: V2EntityId,
+    action_id: V2EntityId,
+    decided_by_user_id: V2EntityId,
+    decision: z.enum(["approved", "revision_requested", "rejected"]),
+    manifest_artifact_id: V2EntityId,
+    manifest_artifact_hash: V2Sha256Hex,
+    rationale: boundedRationale.nullable(),
+    direction: boundedDirection.nullable(),
+    created_at: V2IsoDateTime,
+  })
+  .strict()
+  .superRefine((decision, ctx) => {
+    if ((decision.decision === "revision_requested") !== (decision.direction !== null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["direction"],
+        message: "only revision requests require direction",
+      });
+    }
+    if (decision.decision !== "rejected" && decision.rationale !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["rationale"],
+        message: "only rejection carries a decision rationale",
+      });
+    }
+    if (decision.decision === "rejected" && decision.rationale === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["rationale"],
+        message: "rejection requires an attributable rationale",
+      });
+    }
+  });
+export type V2ConversationMockupDecisionT = z.infer<typeof V2ConversationMockupDecision>;
+
+export const V2ApprovedMockupTaskSupplementContent = z
+  .object({
+    schema_version: schemaVersion,
+    kind: z.literal("approved_mockup"),
+    mockup_version_id: V2EntityId,
+    manifest_artifact_id: V2EntityId,
+    manifest_artifact_hash: V2Sha256Hex,
+    approval: z
+      .object({
+        decision_id: V2EntityId,
+        action_id: V2EntityId,
+        decided_by_user_id: V2EntityId,
+        decided_at: V2IsoDateTime,
+      })
+      .strict(),
+    brief: boundedDirection,
+    target: z.enum(["desktop", "mobile", "responsive"]),
+    interaction_notes: z.array(V2NonEmptyString).min(1).max(32),
+    renderer_profile: V2MockupRendererProfile,
+    screenshots: z.tuple([
+      V2MockupScreenshot.extend({ viewport: z.literal("desktop") }).strict(),
+      V2MockupScreenshot.extend({ viewport: z.literal("mobile") }).strict(),
+    ]),
+  })
+  .strict()
+  .superRefine((content, ctx) => {
+    refineExactMockupScreenshots(content.screenshots, content.renderer_profile, ctx);
+    const artifactIds = new Set([
+      content.manifest_artifact_id,
+      ...content.screenshots.map((screenshot) => screenshot.artifact.artifact_id),
+    ]);
+    if (artifactIds.size !== 3) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["screenshots"],
+        message: "manifest, desktop, and mobile supplement artifacts must be distinct",
+      });
+    }
+  });
+export type V2ApprovedMockupTaskSupplementContentT = z.infer<
+  typeof V2ApprovedMockupTaskSupplementContent
+>;
+
+export const V2ConversationTaskPackageSupplement = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    work_item_id: V2EntityId,
+    conversation_id: V2EntityId,
+    task_id: V2EntityId,
+    base_package_id: V2EntityId,
+    ordinal: V2PositiveVersion,
+    source_mockup_version_id: V2EntityId,
+    approval_decision_id: V2EntityId,
+    manifest_artifact_id: V2EntityId,
+    manifest_artifact_hash: V2Sha256Hex,
+    supplement: V2ApprovedMockupTaskSupplementContent,
+    canonical_supplement: V2NonEmptyString,
+    content_hash: V2Sha256Hex,
+    context_ref: z
+      .object({
+        context_document_id: V2EntityId,
+        content_hash: V2Sha256Hex,
+        byte_size: z.number().int().positive(),
+        media_type: z.literal("application/json"),
+      })
+      .strict(),
+    created_at: V2IsoDateTime,
+  })
+  .strict()
+  .superRefine((supplement, ctx) => {
+    if (supplement.content_hash !== supplement.context_ref.content_hash) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["context_ref", "content_hash"],
+        message: "supplement bytes and context receipt must have the same hash",
+      });
+    }
+    let canonical: unknown;
+    try {
+      canonical = JSON.parse(supplement.canonical_supplement);
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["canonical_supplement"],
+        message: "canonical supplement must be valid JSON",
+      });
+      return;
+    }
+    const stableJson = (value: unknown): string => {
+      if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+      if (value !== null && typeof value === "object") {
+        return `{${Object.entries(value as Record<string, unknown>)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+          .join(",")}}`;
+      }
+      return JSON.stringify(value) ?? "null";
+    };
+    const expectedCanonical = stableJson(supplement.supplement);
+    if (
+      stableJson(canonical) !== expectedCanonical ||
+      supplement.canonical_supplement !== expectedCanonical
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["canonical_supplement"],
+        message: "canonical supplement must represent the exact structured supplement",
+      });
+    }
+    if (
+      supplement.supplement.mockup_version_id !== supplement.source_mockup_version_id ||
+      supplement.supplement.manifest_artifact_id !== supplement.manifest_artifact_id ||
+      supplement.supplement.manifest_artifact_hash !== supplement.manifest_artifact_hash ||
+      supplement.supplement.approval.decision_id !== supplement.approval_decision_id
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["supplement"],
+        message: "supplement must bind its exact approved mockup manifest",
+      });
+    }
+  });
+export type V2ConversationTaskPackageSupplementT = z.infer<
+  typeof V2ConversationTaskPackageSupplement
+>;
+
+export const V2ConversationTaskPackageSupplementDispatchReceipt = z
+  .object({
+    schema_version: schemaVersion,
+    command_id: V2EntityId,
+    run_id: V2EntityId,
+    project_id: V2EntityId,
+    phase_id: V2EntityId,
+    task_id: V2EntityId,
+    base_package_id: V2EntityId,
+    supplement_id: V2EntityId,
+    ordinal: V2PositiveVersion,
+    content_hash: V2Sha256Hex,
+    context_document_id: V2EntityId,
+    context_ref: z
+      .object({
+        artifact_id: V2EntityId,
+        content_hash: V2Sha256Hex,
+        byte_size: z.number().int().nonnegative(),
+        storage_ref: V2NonEmptyString,
+      })
+      .strict(),
+    created_at: V2IsoDateTime,
+  })
+  .strict()
+  .superRefine((receipt, ctx) => {
+    if (
+      receipt.content_hash !== receipt.context_ref.content_hash ||
+      receipt.context_document_id !== receipt.context_ref.artifact_id
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["context_ref", "content_hash"],
+        message: "dispatch receipt must identify the exact supplement bytes",
+      });
+    }
+  });
+export type V2ConversationTaskPackageSupplementDispatchReceiptT = z.infer<
+  typeof V2ConversationTaskPackageSupplementDispatchReceipt
+>;
+
+export const V2ImplementationCaptureProfile = z
+  .object({
+    renderer: z.literal("playwright"),
+    browser_name: V2NonEmptyString,
+    browser_version: V2NonEmptyString,
+    font_revision: V2Sha256Hex,
+    pixel_ratio: z.literal(1),
+    network: z.literal("application_only"),
+    locale: z.literal("en-US"),
+    timezone: z.literal("UTC"),
+    fixed_clock: V2IsoDateTime,
+  })
+  .strict();
+export type V2ImplementationCaptureProfileT = z.infer<typeof V2ImplementationCaptureProfile>;
+
+export const V2ImplementationScreenshot = z
+  .object({
+    viewport: V2MockupViewport,
+    artifact: V2EvidenceRef,
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+    capture_profile: V2ImplementationCaptureProfile,
+  })
+  .strict();
+
+const visualComparisonPairFields = {
+  mockup_artifact_id: V2EntityId,
+  mockup_artifact_hash: V2Sha256Hex,
+  implementation_artifact_id: V2EntityId,
+  implementation_artifact_hash: V2Sha256Hex,
+} as const;
+
+export const V2VisualComparisonReceipt = z
+  .object({
+    schema_version: schemaVersion,
+    kind: z.literal("visual_comparison"),
+    implementation_visual_evidence_id: V2EntityId,
+    approved_mockup_version_id: V2EntityId,
+    commit_sha: V2GitCommitSha,
+    comparisons: z.tuple([
+      z.object({ viewport: z.literal("desktop"), ...visualComparisonPairFields }).strict(),
+      z.object({ viewport: z.literal("mobile"), ...visualComparisonPairFields }).strict(),
+    ]),
+  })
+  .strict()
+  .superRefine((receipt, ctx) => {
+    for (const [index, pair] of receipt.comparisons.entries()) {
+      if (pair.mockup_artifact_id === pair.implementation_artifact_id) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["comparisons", index, "implementation_artifact_id"],
+          message: "comparison sides must identify distinct immutable artifacts",
+        });
+      }
+    }
+  });
+export type V2VisualComparisonReceiptT = z.infer<typeof V2VisualComparisonReceipt>;
+
+export const V2ImplementationVisualEvidence = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    work_item_id: V2EntityId,
+    conversation_id: V2EntityId,
+    phase_id: V2EntityId,
+    task_id: V2EntityId,
+    run_id: V2EntityId,
+    approved_mockup_version_id: V2EntityId,
+    repository_binding_id: V2EntityId,
+    verification_result_id: V2EntityId,
+    deployment_record_id: V2EntityId,
+    deployment_observation_id: V2EntityId,
+    commit_sha: V2GitCommitSha,
+    capture_profile: V2ImplementationCaptureProfile,
+    screenshots: z.tuple([
+      V2ImplementationScreenshot.extend({ viewport: z.literal("desktop") }).strict(),
+      V2ImplementationScreenshot.extend({ viewport: z.literal("mobile") }).strict(),
+    ]),
+    comparison_artifact: V2EvidenceRef.nullable(),
+    verified_at: V2IsoDateTime,
+    created_at: V2IsoDateTime,
+  })
+  .strict()
+  .superRefine((evidence, ctx) => {
+    if (
+      evidence.screenshots[0].artifact.artifact_id === evidence.screenshots[1].artifact.artifact_id
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["screenshots"],
+        message: "desktop and mobile evidence require distinct artifacts",
+      });
+    }
+    for (const [index, screenshot] of evidence.screenshots.entries()) {
+      if (screenshot.artifact.media_type !== "image/png") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["screenshots", index, "artifact", "media_type"],
+          message: "delivered visual evidence must be PNG",
+        });
+      }
+      if (JSON.stringify(screenshot.capture_profile) !== JSON.stringify(evidence.capture_profile)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["screenshots", index, "capture_profile"],
+          message: "delivered screenshots must use the evidence capture profile",
+        });
+      }
+    }
+    if (
+      evidence.comparison_artifact !== null &&
+      evidence.comparison_artifact.media_type !== "application/json"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["comparison_artifact", "media_type"],
+        message: "visual comparison receipts must be JSON",
+      });
+    }
+    if (
+      evidence.screenshots[0].width !== 1440 ||
+      evidence.screenshots[0].height !== 1024 ||
+      evidence.screenshots[1].width !== 390 ||
+      evidence.screenshots[1].height !== 844
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["screenshots"],
+        message: "delivered evidence uses the fixed desktop and mobile viewports",
+      });
+    }
+  });
+export type V2ImplementationVisualEvidenceT = z.infer<typeof V2ImplementationVisualEvidence>;
 
 export const V2AnswerHumanWaitParameters = z
   .object({
@@ -1830,6 +2428,9 @@ export const V2CreateExecutionActionProposalInput = z
       "pause_work",
       "resume_work",
       "create_mockup",
+      "approve_mockup",
+      "revise_mockup",
+      "reject_mockup",
     ]),
     payload: V2ConversationActionPayload,
   })

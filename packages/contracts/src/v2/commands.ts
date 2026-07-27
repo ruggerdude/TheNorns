@@ -439,6 +439,27 @@ export const V2VerificationCommand = z
   .strict();
 export type V2VerificationCommandT = z.infer<typeof V2VerificationCommand>;
 
+export const V2TaskPackageSupplementBinding = z
+  .object({
+    supplement_id: V2EntityId,
+    task_id: V2EntityId,
+    base_package_id: V2EntityId,
+    ordinal: V2PositiveVersion,
+    content_hash: V2Sha256Hex,
+    context_ref: V2ContentAddressedReference,
+  })
+  .strict()
+  .superRefine((binding, ctx) => {
+    if (binding.content_hash !== binding.context_ref.content_hash) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["context_ref", "content_hash"],
+        message: "supplement content hash must equal its context reference hash",
+      });
+    }
+  });
+export type V2TaskPackageSupplementBindingT = z.infer<typeof V2TaskPackageSupplementBinding>;
+
 export const V2DispatchCommand = z
   .object({
     schema_version: schemaVersion,
@@ -479,6 +500,7 @@ export const V2DispatchCommand = z
     task_package_id: V2EntityId.optional(),
     task_package_content_hash: V2Sha256Hex.optional(),
     task_package_context_ref: V2ContentAddressedReference.optional(),
+    task_package_supplements: z.array(V2TaskPackageSupplementBinding).default([]),
     human_wait_channel: z
       .object({
         version: z.literal(V2_HUMAN_WAIT_CHANNEL_VERSION),
@@ -608,6 +630,65 @@ export const V2DispatchCommand = z
         path: ["task_package_context_ref"],
         message: "task package hash must identify one exact dispatched context reference",
       });
+    }
+    if (command.task_package_supplements.length > 0 && !hasPackage) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["task_package_supplements"],
+        message: "task package supplements require their immutable base task package",
+      });
+    }
+    const supplementIds = new Set<string>();
+    const supplementContextIds = new Set<string>();
+    for (const [index, supplement] of command.task_package_supplements.entries()) {
+      if (supplementIds.has(supplement.supplement_id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["task_package_supplements", index, "supplement_id"],
+          message: "a supplement can appear only once in one command",
+        });
+      }
+      supplementIds.add(supplement.supplement_id);
+      if (supplementContextIds.has(supplement.context_ref.artifact_id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["task_package_supplements", index, "context_ref", "artifact_id"],
+          message: "every supplement requires its own immutable context document",
+        });
+      }
+      supplementContextIds.add(supplement.context_ref.artifact_id);
+      if (supplement.ordinal !== index + 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["task_package_supplements", index, "ordinal"],
+          message: "task package supplements must be complete and ordered from ordinal 1",
+        });
+      }
+      if (
+        supplement.task_id !== command.task_id ||
+        supplement.base_package_id !== command.task_package_id
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["task_package_supplements", index],
+          message: "every supplement must be bound to this task and immutable base package",
+        });
+      }
+      if (
+        !command.context_refs.some(
+          (reference) =>
+            reference.artifact_id === supplement.context_ref.artifact_id &&
+            reference.content_hash === supplement.context_ref.content_hash &&
+            reference.byte_size === supplement.context_ref.byte_size &&
+            reference.storage_ref === supplement.context_ref.storage_ref,
+        )
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["task_package_supplements", index, "context_ref"],
+          message: "every supplement must be an exact dispatched context reference",
+        });
+      }
     }
     if (
       command.continuation?.resume_session_id !== undefined &&
