@@ -80,6 +80,21 @@ const EXECUTION_ACTIONS = {
     button: "Create mockup",
     description: "Request a reviewable visual artifact before implementation continues.",
   },
+  approve_mockup: {
+    title: "Approve mockup",
+    button: "Approve exact mockup",
+    description: "Approve the exact mockup version and immutable manifest for task implementation.",
+  },
+  revise_mockup: {
+    title: "Revise mockup",
+    button: "Request exact revision",
+    description: "Request a new version while preserving this exact mockup and immutable manifest.",
+  },
+  reject_mockup: {
+    title: "Reject mockup",
+    button: "Reject exact mockup",
+    description: "Reject the exact mockup version and immutable manifest with a recorded reason.",
+  },
   answer_human_wait: {
     title: "Answer blocking question",
     button: "Submit exact answer",
@@ -379,6 +394,9 @@ function ExecutionActionDetails({
   const runId = parameterText(parameters, "run_id");
   const target = parameterText(parameters, "target");
   const decisionPoint = parameterText(parameters, "decision_point");
+  const mockupVersionId = parameterText(parameters, "mockup_version_id");
+  const manifestArtifactId = parameterText(parameters, "manifest_artifact_id");
+  const manifestArtifactHash = parameterText(parameters, "manifest_artifact_hash");
 
   return (
     <>
@@ -389,11 +407,15 @@ function ExecutionActionDetails({
               ? "Exact answer"
               : action.action_type === "create_mockup"
                 ? "Mockup brief"
-                : action.action_type === "record_human_decision"
-                  ? "Decision"
-                  : action.action_type === "pause_work" || action.action_type === "resume_work"
-                    ? "Reason"
-                    : "Direction"}
+                : action.action_type === "revise_mockup"
+                  ? "Revision direction"
+                  : action.action_type === "reject_mockup"
+                    ? "Rejection reason"
+                    : action.action_type === "record_human_decision"
+                      ? "Decision"
+                      : action.action_type === "pause_work" || action.action_type === "resume_work"
+                        ? "Reason"
+                        : "Direction"}
           </strong>
           <p>{primary}</p>
           {rationale ? <small>Rationale · {rationale}</small> : null}
@@ -426,6 +448,26 @@ function ExecutionActionDetails({
           <div>
             <dt>Target</dt>
             <dd>{target}</dd>
+          </div>
+        ) : null}
+        {mockupVersionId ? (
+          <div>
+            <dt>Exact mockup version</dt>
+            <dd>{mockupVersionId}</dd>
+          </div>
+        ) : null}
+        {manifestArtifactId ? (
+          <div>
+            <dt>Manifest artifact</dt>
+            <dd>{manifestArtifactId}</dd>
+          </div>
+        ) : null}
+        {manifestArtifactHash ? (
+          <div>
+            <dt>Manifest hash</dt>
+            <dd>
+              <code title={manifestArtifactHash}>{manifestArtifactHash.slice(0, 12)}</code>
+            </dd>
           </div>
         ) : null}
       </dl>

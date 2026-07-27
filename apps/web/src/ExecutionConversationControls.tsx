@@ -24,7 +24,6 @@ const ACTION_OPTIONS: Array<{ value: ProposalActionType; label: string }> = [
   { value: "approve_plan_change", label: "Plan-change approval" },
   { value: "pause_work", label: "Pause work" },
   { value: "resume_work", label: "Resume work" },
-  { value: "create_mockup", label: "Mockup request" },
 ];
 
 const EXECUTION_ACTION_TYPES = new Set<string>([
@@ -50,6 +49,136 @@ function eventsFor(
 function nullable(value: string): string | null {
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+export interface MockupSelectorOption {
+  id: string;
+  label: string;
+}
+
+export function MockupRequestComposer({
+  taskOptions,
+  artifactOptions,
+  busy,
+  error,
+  disabledReason,
+  onPrepare,
+}: {
+  taskOptions: MockupSelectorOption[];
+  artifactOptions: MockupSelectorOption[];
+  busy: boolean;
+  error: string | null;
+  disabledReason: string | null;
+  onPrepare: (parameters: Record<string, unknown>) => Promise<boolean>;
+}): React.ReactElement {
+  const [brief, setBrief] = useState("");
+  const [taskId, setTaskId] = useState("");
+  const [target, setTarget] = useState<"desktop" | "mobile" | "responsive">("responsive");
+  const [artifactIds, setArtifactIds] = useState(() => new Set<string>());
+  const [open, setOpen] = useState(false);
+
+  return (
+    <details
+      className="mockup-request-composer"
+      data-testid="mockup-request-composer"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>Create Mockup</summary>
+      {open ? (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void onPrepare({
+              brief: brief.trim(),
+              target,
+              ...(taskId ? { task_id: taskId } : {}),
+              artifact_refs: [...artifactIds],
+            }).then((created) => {
+              if (!created) return;
+              setBrief("");
+              setArtifactIds(new Set());
+            });
+          }}
+        >
+          <p>
+            Request deterministic desktop and mobile evidence. Preparing this request creates an
+            inert action card for separate confirmation.
+          </p>
+          <Field label="Mockup brief">
+            <TextArea
+              required
+              maxLength={8_000}
+              value={brief}
+              disabled={busy}
+              onChange={(event) => setBrief(event.target.value)}
+            />
+          </Field>
+          <Field label="Task (optional)">
+            <Select
+              aria-label="Mockup task"
+              value={taskId}
+              disabled={busy}
+              onChange={(event) => setTaskId(event.target.value)}
+            >
+              <option value="">Whole work item</option>
+              {taskOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Viewport target">
+            <Select
+              value={target}
+              disabled={busy}
+              onChange={(event) =>
+                setTarget(event.target.value as "desktop" | "mobile" | "responsive")
+              }
+            >
+              <option value="responsive">Desktop and mobile</option>
+              <option value="desktop">Desktop</option>
+              <option value="mobile">Mobile</option>
+            </Select>
+          </Field>
+          <fieldset className="mockup-artifact-selector">
+            <legend>Reference artifacts (optional)</legend>
+            {artifactOptions.length === 0 ? (
+              <p className="muted">No project artifacts are available to reference.</p>
+            ) : (
+              artifactOptions.map((option) => (
+                <label key={option.id}>
+                  <input
+                    type="checkbox"
+                    checked={artifactIds.has(option.id)}
+                    disabled={busy}
+                    onChange={(event) => {
+                      setArtifactIds((current) => {
+                        const next = new Set(current);
+                        if (event.target.checked) next.add(option.id);
+                        else next.delete(option.id);
+                        return next;
+                      });
+                    }}
+                  />
+                  <span>{option.label}</span>
+                </label>
+              ))
+            )}
+          </fieldset>
+          {disabledReason ? <p className="muted">{disabledReason}</p> : null}
+          {error ? (
+            <output className="conversation-action-error" role="alert">
+              {error}
+            </output>
+          ) : null}
+          <Button type="submit" variant="primary" disabled={busy || Boolean(disabledReason)}>
+            {busy ? "Preparing mockup…" : "Prepare mockup request"}
+          </Button>
+        </form>
+      ) : null}
+    </details>
+  );
 }
 
 function proposalParameters(
@@ -296,13 +425,9 @@ export function ExecutionActionComposer({
           </Field>
         ) : null}
 
-        {[
-          "record_human_decision",
-          "redirect_agent",
-          "pause_work",
-          "resume_work",
-          "create_mockup",
-        ].includes(actionType) ? (
+        {["record_human_decision", "redirect_agent", "pause_work", "resume_work"].includes(
+          actionType,
+        ) ? (
           <Field label={actionType === "redirect_agent" ? "Task ID" : "Task ID (optional)"}>
             <Input
               required={actionType === "redirect_agent"}
@@ -323,18 +448,14 @@ export function ExecutionActionComposer({
             label={
               actionType === "record_human_decision"
                 ? "Decision"
-                : actionType === "create_mockup"
-                  ? "Mockup brief"
-                  : actionType === "pause_work" || actionType === "resume_work"
-                    ? "Reason"
-                    : "Direction"
+                : actionType === "pause_work" || actionType === "resume_work"
+                  ? "Reason"
+                  : "Direction"
             }
           >
             <TextArea
               required={requiresPrimary}
-              maxLength={
-                actionType === "redirect_agent" || actionType === "create_mockup" ? 8_000 : 4_000
-              }
+              maxLength={actionType === "redirect_agent" ? 8_000 : 4_000}
               value={primary}
               onChange={(event) => setPrimary(event.target.value)}
             />
@@ -350,29 +471,6 @@ export function ExecutionActionComposer({
               onChange={(event) => setRationale(event.target.value)}
             />
           </Field>
-        ) : null}
-
-        {actionType === "create_mockup" ? (
-          <>
-            <Field label="Viewport target">
-              <Select
-                value={mockupTarget}
-                onChange={(event) =>
-                  setMockupTarget(event.target.value as "desktop" | "mobile" | "responsive")
-                }
-              >
-                <option value="responsive">Desktop and mobile</option>
-                <option value="desktop">Desktop</option>
-                <option value="mobile">Mobile</option>
-              </Select>
-            </Field>
-            <Field label="Artifact references (comma-separated, optional)">
-              <Input
-                value={artifactRefs}
-                onChange={(event) => setArtifactRefs(event.target.value)}
-              />
-            </Field>
-          </>
         ) : null}
 
         {unavailable ? <p className="muted">{unavailable}</p> : null}

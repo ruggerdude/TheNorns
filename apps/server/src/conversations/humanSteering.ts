@@ -222,14 +222,19 @@ export class ConversationHumanSteeringService {
           [scope.projectId, scope.workItemId, scope.conversationId],
         )
       ).rows[0];
+      const planningMockupAction =
+        conversation?.kind === "planning" &&
+        ["create_mockup", "approve_mockup", "revise_mockup", "reject_mockup"].includes(
+          proposal.action_type,
+        );
       if (
         !conversation ||
         conversation.status !== "active" ||
-        conversation.kind !== "execution_pm"
+        (conversation.kind !== "execution_pm" && !planningMockupAction)
       ) {
         throw new ConversationPersistenceError(
           "conversation_inactive",
-          "execution actions require an active execution PM conversation",
+          "execution actions require an active execution PM conversation; mockup actions also support active planning conversations",
         );
       }
       await this.assertActionScope(tx, scope, proposal.action_type, proposal.payload.parameters);

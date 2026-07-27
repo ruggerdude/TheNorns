@@ -573,6 +573,52 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
     return { proposal, confirmation, answerEffect: confirmation.effect };
   }
 
+  it("allows only Phase 6 mockup actions to be proposed from an active planning conversation", async () => {
+    const planningConversationId = "conversation-phase6-planning";
+    await pg.query(
+      `INSERT INTO work_conversations (
+         id,project_id,work_item_id,created_by_user_id,kind,status,provider,model
+       ) VALUES ($1,$2,$3,$4,'planning','active','anthropic','claude-sonnet-5')`,
+      [planningConversationId, projectId, workItemId, ownerId],
+    );
+    const steering = new ConversationHumanSteeringService(transactions, {
+      newId: (prefix) => `${prefix}-planning-mockup`,
+    });
+    const proposal = await steering.proposeAction(
+      ownerId,
+      { projectId, workItemId, conversationId: planningConversationId },
+      {
+        idempotency_key: "planning-mockup-proposal",
+        message: "Show the responsive project overview before implementation.",
+        action_type: "create_mockup",
+        payload: {
+          parameters: {
+            brief: "Show the responsive project overview before implementation.",
+            target: "responsive",
+            artifact_refs: [],
+          },
+        },
+      },
+    );
+    expect(proposal.action).toMatchObject({
+      action_type: "create_mockup",
+      interaction_class: "mockup_request",
+      status: "proposed",
+    });
+    await expect(
+      steering.proposeAction(
+        ownerId,
+        { projectId, workItemId, conversationId: planningConversationId },
+        {
+          idempotency_key: "planning-pause-proposal",
+          message: "Pause this work.",
+          action_type: "pause_work",
+          payload: { parameters: { reason: "Review the plan first." } },
+        },
+      ),
+    ).rejects.toMatchObject({ code: "conversation_inactive" });
+  });
+
   it("requires publish-before-wait with exact causation, then survives restart without holding a runner", async () => {
     const scheduled = await schedule();
     await deliver(scheduled);

@@ -1,0 +1,189 @@
+.project-operations-dashboard {
+  display: grid;
+  gap: 20px;
+}
+
+.operations-header,
+.operations-section-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.operations-header p {
+  color: var(--muted);
+  margin: 4px 0 0;
+}
+
+.operations-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.operations-section {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.operations-section h3 {
+  margin: 0;
+}
+
+.operations-section > small,
+.operations-section li > small {
+  color: var(--muted);
+}
+
+.operations-unavailable {
+  border-style: dashed;
+}
+
+.operations-empty,
+.operations-inline-unavailable {
+  color: var(--muted);
+  margin: 0;
+}
+
+.operations-inline-unavailable {
+  border-left: 3px solid var(--warning);
+  padding-left: 10px;
+}
+
+.operations-list {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.operations-list li {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.operations-list li > div {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.operations-list p {
+  margin: 0;
+}
+
+.operations-list code {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.operations-progress {
+  background: var(--line);
+  border-radius: 999px;
+  height: 7px;
+  overflow: hidden;
+}
+
+.operations-progress > span {
+  background: var(--accent);
+  display: block;
+  height: 100%;
+}
+
+.operations-metrics {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.operations-metrics > div {
+  display: grid;
+  gap: 4px;
+}
+
+.operations-metrics dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.operations-metrics dd {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.operations-conversation-groups {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.operations-conversation-groups > div {
+  display: grid;
+  gap: 7px;
+}
+
+.operations-mockup-strip {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.operations-mockup-strip article {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.operations-mockup-strip img {
+  aspect-ratio: 16 / 10;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  object-fit: contain;
+  width: 100%;
+}
+
+.artifact-image-loading,
+.artifact-image-fallback {
+  align-items: center;
+  aspect-ratio: 16 / 10;
+  background: var(--surface);
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  display: flex;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+}
+
+@media (max-width: 760px) {
+  .operations-grid,
+  .operations-conversation-groups,
+  .operations-mockup-strip,
+  .operations-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .operations-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

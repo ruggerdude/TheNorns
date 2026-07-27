@@ -1,6 +1,7 @@
 import type {
   V2ConversationActionDeliveryEventT,
   V2ConversationActionT,
+  V2ConversationMockupVersionT,
   V2ConversationPlanActionEffectT,
   V2ConversationPlanReviewT,
   V2ConversationPmUpdateSettingsT,
@@ -69,6 +70,76 @@ function executionConversation(overrides: Partial<V2WorkConversationT> = {}): V2
     model: "gpt-5.6-sol",
     next_message_sequence: 2,
     ...overrides,
+  };
+}
+
+function mockupVersion(
+  version = 1,
+  supersedesMockupVersionId: string | null = null,
+): V2ConversationMockupVersionT {
+  const renderer = {
+    renderer: "norns-deterministic-v1" as const,
+    renderer_revision: "a".repeat(64),
+    font_revision: "b".repeat(64),
+    pixel_ratio: 1 as const,
+    network: "disabled" as const,
+    scripts: "disabled" as const,
+    locale: "en-US" as const,
+    timezone: "UTC" as const,
+    fixed_clock: now,
+    seed: "c".repeat(64),
+  };
+  const id = `mockup-version-${version}`;
+  return {
+    schema_version: 2,
+    id,
+    root_request_id: "mockup-request-1",
+    request_id: `mockup-request-${version}`,
+    project_id: projectId,
+    work_item_id: workItemId,
+    conversation_id: conversationId,
+    task_id: "core-api",
+    created_by_action_id: `mockup-action-${version}`,
+    version,
+    status: "candidate",
+    brief: "Show the conversation-first project workspace.",
+    target: "responsive",
+    interaction_notes: ["Approval remains an explicit project action."],
+    manifest: {
+      artifact_id: `manifest-${version}`,
+      content_hash: "d".repeat(64),
+      media_type: "application/json",
+      label: `Mockup manifest v${version}`,
+    },
+    renderer_profile: renderer,
+    screenshots: [
+      {
+        viewport: "desktop",
+        artifact: {
+          artifact_id: `desktop-${version}`,
+          content_hash: "e".repeat(64),
+          media_type: "image/png",
+          label: `Desktop v${version}`,
+        },
+        width: 1440,
+        height: 1024,
+        capture_profile: renderer,
+      },
+      {
+        viewport: "mobile",
+        artifact: {
+          artifact_id: `mobile-${version}`,
+          content_hash: "f".repeat(64),
+          media_type: "image/png",
+          label: `Mobile v${version}`,
+        },
+        width: 390,
+        height: 844,
+        capture_profile: renderer,
+      },
+    ],
+    supersedes_mockup_version_id: supersedesMockupVersionId,
+    created_at: now,
   };
 }
 
@@ -461,6 +532,10 @@ describe("conversation workspace", () => {
       const url = urlOf(input);
       if (url.endsWith("/work-items")) return listResponse();
       if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse(history);
+      if (url.endsWith("/mockups/mockup-version-1")) return Response.json(mockupVersion());
+      if (url.includes("/artifacts/") && url.endsWith("/content")) {
+        return new Response(new Blob(["png"], { type: "image/png" }));
+      }
       throw new Error(`Unexpected request: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -479,16 +554,21 @@ describe("conversation workspace", () => {
     expect(screen.getByText("one risk")).toBeInTheDocument();
     expect(screen.getByText("const durable = true;")).toBeInTheDocument();
     expect(screen.getByTestId("conversation-artifact")).toHaveTextContent("API review");
-    expect(screen.getByText("Mockup version").closest("article")).toHaveTextContent(
-      "mockup-version-1",
-    );
+    expect(await screen.findByRole("heading", { name: "Mockup version 1" })).toBeInTheDocument();
+    expect(screen.getByText("Approval remains an explicit project action.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Revise" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
     expect(screen.getByTestId("conversation-model-pin")).toHaveTextContent(
       "anthropic · claude-sonnet-5",
     );
     expect(screen.queryByTestId("conversation-welcome")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry response" })).not.toBeInTheDocument();
 
-    const callsBeforeParentRerender = fetchMock.mock.calls.length;
+    const workspaceReadsBeforeParentRerender = fetchMock.mock.calls.filter(([input]) => {
+      const url = urlOf(input);
+      return url.endsWith("/work-items") || url.endsWith(`/conversations/${conversationId}`);
+    }).length;
     view.rerender(
       <ConversationWorkspace
         projectId={projectId}
@@ -500,9 +580,63 @@ describe("conversation workspace", () => {
     );
     await new Promise((resolve) => window.setTimeout(resolve, 20));
 
-    expect(fetchMock).toHaveBeenCalledTimes(callsBeforeParentRerender);
+    expect(
+      fetchMock.mock.calls.filter(([input]) => {
+        const url = urlOf(input);
+        return url.endsWith("/work-items") || url.endsWith(`/conversations/${conversationId}`);
+      }),
+    ).toHaveLength(workspaceReadsBeforeParentRerender);
     expect(screen.getByText("Please inspect the API.")).toBeInTheDocument();
     expect(screen.getByTestId("conversation-model-pin")).toBeInTheDocument();
+  });
+
+  it("keeps the prior mockup visible in a responsive before-and-after revision comparison", async () => {
+    const history = [
+      message({
+        id: "message-mockups",
+        role: "assistant",
+        sequence: 1,
+        parts: [
+          { type: "mockup", mockup_version_id: "mockup-version-1" },
+          { type: "mockup", mockup_version_id: "mockup-version-2" },
+        ],
+      }),
+    ];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.endsWith("/work-items")) return listResponse();
+      if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse(history);
+      if (url.endsWith("/mockups/mockup-version-1")) return Response.json(mockupVersion());
+      if (url.endsWith("/mockups/mockup-version-2")) {
+        return Response.json(mockupVersion(2, "mockup-version-1"));
+      }
+      if (url.includes("/artifacts/") && url.endsWith("/content")) {
+        return new Response(new Blob(["png"], { type: "image/png" }));
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onConversationSelected={() => undefined}
+        onUnsupported={() => undefined}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Mockup version 1" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Mockup version 2" })).toBeInTheDocument();
+    const comparison = await screen.findByTestId("conversation-mockup-comparison");
+    expect(comparison).toHaveTextContent("Before");
+    expect(comparison).toHaveTextContent("Version 1 remains visible");
+    expect(comparison).toHaveTextContent("After");
+    expect(comparison).toHaveTextContent("Version 2");
+    expect(
+      screen.getAllByText("Approval remains an explicit project action.").length,
+    ).toBeGreaterThanOrEqual(2);
   });
 
   it("hydrates exact Plan Contract, QC, and explicit action cards from durable detail", async () => {

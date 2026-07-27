@@ -71,6 +71,42 @@ describe("conversation action card", () => {
     expect(onConfirm).toHaveBeenCalledWith(proposed);
   });
 
+  it("binds a mockup approval card to the exact version, manifest ID, and hash", () => {
+    const mockupApproval: V2ConversationActionT = {
+      ...action("proposed"),
+      id: "action-approve-mockup",
+      action_type: "approve_mockup",
+      interaction_class: "approval",
+      payload: {
+        parameters: {
+          mockup_version_id: "mockup-version-2",
+          task_id: "task-7",
+          manifest_artifact_id: "manifest-2",
+          manifest_artifact_hash: "d".repeat(64),
+        },
+      },
+    };
+
+    render(
+      <ConversationActionCard
+        action={mockupApproval}
+        busy={false}
+        effect={null}
+        error="The mockup version is stale; refresh before confirming."
+        onConfirm={async () => undefined}
+      />,
+    );
+
+    const card = screen.getByTestId("conversation-action-approve_mockup");
+    expect(card).toHaveTextContent("mockup-version-2");
+    expect(card).toHaveTextContent("manifest-2");
+    expect(card).toHaveTextContent("dddddddddddd");
+    expect(card).toHaveTextContent("stale");
+    expect(
+      screen.getByRole("button", { name: "Confirm action: Approve exact mockup" }),
+    ).toBeInTheDocument();
+  });
+
   it.each(["confirmed", "recorded", "sent", "agent_acknowledged"] as const)(
     "offers recovery when a %s action has no durable effect",
     async (status) => {

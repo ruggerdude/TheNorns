@@ -82,6 +82,11 @@ const ConversationOverview = lazy(() =>
     default: ConversationOverview,
   })),
 );
+const ProjectOperationsDashboard = lazy(() =>
+  import("./ProjectOperationsDashboard").then(({ ProjectOperationsDashboard }) => ({
+    default: ProjectOperationsDashboard,
+  })),
+);
 
 export interface WorkConversationRoute {
   projectId: string;
@@ -1856,6 +1861,16 @@ function ProjectGraph({
         {workspaceTab === "overview" ? (
           <div className="workspace-tab-panel" data-testid="workspace-tab-overview">
             {error ? <Alert testId="error">{error}</Alert> : null}
+
+            <Suspense fallback={<Spinner label="Loading project operations…" />}>
+              <ProjectOperationsDashboard
+                projectId={project.id}
+                onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+                onOpenLegacyPlanningRun={(planningRunId) => {
+                  setActivePlanningRunId(planningRunId);
+                }}
+              />
+            </Suspense>
 
             {resume &&
             resume.phases.length === 0 &&

@@ -21,6 +21,7 @@ import type {
   V2ConversationActionDeliveryEventT,
   V2ConversationActionT,
   V2ConversationHandoffT,
+  V2ConversationMockupVersionT,
   V2ConversationPlanActionEffectValueT,
   V2ConversationPlanReviewT,
   V2ConversationPlanningExcerptReceiptT,
@@ -36,6 +37,7 @@ import type {
   V2WorkPlanVersionT,
 } from "@norns/contracts";
 import {
+  V2ConversationMockupVersion,
   V2CreateExecutionActionProposalInput,
   V2CreateHumanWaitAnswerProposalInput,
 } from "@norns/contracts";
@@ -51,6 +53,7 @@ import {
   useState,
 } from "react";
 import remarkGfm from "remark-gfm";
+import { ArtifactImage } from "./ArtifactImage";
 import { ConversationActionCard } from "./ConversationActionCard";
 import { ConversationPlanCard } from "./ConversationPlanCard";
 import { ConversationQcCard } from "./ConversationQcCard";
@@ -59,6 +62,7 @@ import {
   ExecutionActionHistory,
   HumanWaitCard,
   type HumanWaitView,
+  MockupRequestComposer,
   PmUpdateControls,
 } from "./ExecutionConversationControls";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
@@ -349,6 +353,9 @@ type ConversationResources = {
 type ConversationActionEffect = V2ConfirmConversationActionResponseT["effect"];
 
 type ConversationActionContextValue = {
+  projectId: string;
+  workItemId: string;
+  conversationId: string;
   actions: Map<string, V2ConversationActionT>;
   effects: Map<string, ConversationActionEffect>;
   deliveryEvents: V2ConversationActionDeliveryEventT[];
@@ -366,6 +373,13 @@ type ConversationActionContextValue = {
   planChangeErrors: Map<string, string>;
   planChangeLockedIds: Set<string>;
   proposePlanChanges: (version: V2WorkPlanVersionT, direction: string) => Promise<boolean>;
+  prepareExecutionAction: (
+    actionType: V2CreateExecutionActionProposalInputT["action_type"],
+    parameters: Record<string, unknown>,
+  ) => Promise<boolean>;
+  executionProposalBusy: boolean;
+  executionProposalError: string | null;
+  onUnauthorized: () => void;
 };
 
 const ConversationActionContext = createContext<ConversationActionContextValue | null>(null);
@@ -635,6 +649,338 @@ function ReferenceCard({ data }: { data: ReferenceData }): React.ReactElement {
 
 function ReferencePreview({ data }: DataMessagePartProps<ReferenceData>): React.ReactElement {
   return <ReferenceCard data={data} />;
+}
+
+async function fetchMockupVersion(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  mockupVersionId: string,
+): Promise<V2ConversationMockupVersionT> {
+  const response = await fetch(
+    `/api/v2/projects/${encodeURIComponent(projectId)}/work-items/${encodeURIComponent(
+      workItemId,
+    )}/conversations/${encodeURIComponent(conversationId)}/mockups/${encodeURIComponent(
+      mockupVersionId,
+    )}`,
+    { credentials: "include", headers: authHeaders() },
+  );
+  if (response.status === 401) throw new UnauthorizedError();
+  const payload = (await response.json().catch(() => ({}))) as {
+    error?: string;
+    message?: string;
+  };
+  if (!response.ok) {
+    throw new ApiError(
+      payload.message ?? payload.error ?? `Mockup request failed: ${response.status}`,
+      response.status,
+      payload.error ?? null,
+    );
+  }
+  return V2ConversationMockupVersion.parse(payload);
+}
+
+function MockupScreenshots({
+  mockup,
+  projectId,
+  prefix,
+  onUnauthorized,
+}: {
+  mockup: V2ConversationMockupVersionT;
+  projectId: string;
+  prefix: string;
+  onUnauthorized: () => void;
+}): React.ReactElement {
+  return (
+    <div className="conversation-mockup-screenshots">
+      {mockup.screenshots.map((screenshot) => (
+        <figure key={screenshot.viewport}>
+          <ArtifactImage
+            projectId={projectId}
+            artifactId={screenshot.artifact.artifact_id}
+            alt={`${prefix} mockup version ${mockup.version} ${screenshot.viewport} viewport`}
+            onUnauthorized={onUnauthorized}
+          />
+          <figcaption>
+            <strong>{screenshot.viewport}</strong>
+            <span>
+              {screenshot.width} × {screenshot.height}
+            </span>
+          </figcaption>
+        </figure>
+      ))}
+    </div>
+  );
+}
+
+function MockupReviewControls({
+  mockup,
+  context,
+}: {
+  mockup: V2ConversationMockupVersionT;
+  context: ConversationActionContextValue;
+}): React.ReactElement | null {
+  const [reviewMode, setReviewMode] = useState<"revise" | "reject" | null>(null);
+  const [reviewText, setReviewText] = useState("");
+  const pendingAction =
+    [...context.actions.values()].find(
+      (action) =>
+        ["approve_mockup", "revise_mockup", "reject_mockup"].includes(action.action_type) &&
+        action.payload.parameters.mockup_version_id === mockup.id &&
+        action.status !== "rejected",
+    ) ?? null;
+  if (pendingAction) {
+    return (
+      <ConversationActionCard
+        action={pendingAction}
+        busy={context.busyActionId === pendingAction.id}
+        effect={context.effects.get(pendingAction.id) ?? null}
+        error={context.errors.get(pendingAction.id) ?? null}
+        onConfirm={context.confirm}
+      />
+    );
+  }
+  if (mockup.status !== "candidate") return null;
+
+  const exactReference = {
+    mockup_version_id: mockup.id,
+    manifest_artifact_id: mockup.manifest.artifact_id,
+    manifest_artifact_hash: mockup.manifest.content_hash,
+  };
+  return (
+    <section
+      className="conversation-mockup-review"
+      aria-label={`Review mockup version ${mockup.version}`}
+    >
+      <div>
+        <Button
+          className="btn-small"
+          variant="primary"
+          disabled={context.executionProposalBusy || mockup.task_id === null}
+          title={mockup.task_id === null ? "Approval requires a task-scoped mockup." : undefined}
+          onClick={() =>
+            void context.prepareExecutionAction("approve_mockup", {
+              ...exactReference,
+              task_id: mockup.task_id,
+            })
+          }
+        >
+          Approve
+        </Button>
+        <Button
+          className="btn-small"
+          disabled={context.executionProposalBusy}
+          aria-expanded={reviewMode === "revise"}
+          onClick={() => {
+            setReviewMode("revise");
+            setReviewText("");
+          }}
+        >
+          Revise
+        </Button>
+        <Button
+          className="btn-small"
+          variant="danger"
+          disabled={context.executionProposalBusy}
+          aria-expanded={reviewMode === "reject"}
+          onClick={() => {
+            setReviewMode("reject");
+            setReviewText("");
+          }}
+        >
+          Reject
+        </Button>
+      </div>
+      {reviewMode ? (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void context.prepareExecutionAction(
+              reviewMode === "revise" ? "revise_mockup" : "reject_mockup",
+              {
+                ...exactReference,
+                [reviewMode === "revise" ? "direction" : "reason"]: reviewText.trim(),
+              },
+            );
+          }}
+        >
+          <Field label={reviewMode === "revise" ? "Revision direction" : "Rejection reason"}>
+            <TextArea
+              required
+              maxLength={reviewMode === "revise" ? 8_000 : 4_000}
+              value={reviewText}
+              onChange={(event) => setReviewText(event.target.value)}
+            />
+          </Field>
+          <p>
+            This prepares an inert {reviewMode} card bound to version {mockup.version}, manifest{" "}
+            <code>{mockup.manifest.artifact_id}</code>, and hash{" "}
+            <code>{mockup.manifest.content_hash.slice(0, 12)}</code>. Confirm it separately.
+          </p>
+          <div className="actions">
+            <Button type="submit" variant="primary" disabled={context.executionProposalBusy}>
+              Prepare {reviewMode} action
+            </Button>
+            <Button type="button" variant="ghost" onClick={() => setReviewMode(null)}>
+              Cancel
+            </Button>
+          </div>
+        </form>
+      ) : null}
+      {context.executionProposalError ? (
+        <output className="conversation-action-error" role="alert">
+          {context.executionProposalError}
+        </output>
+      ) : null}
+    </section>
+  );
+}
+
+function MockupPreview({ data }: DataMessagePartProps<MockupData>): React.ReactElement {
+  const context = useContext(ConversationActionContext);
+  const [mockup, setMockup] = useState<V2ConversationMockupVersionT | null>(null);
+  const [previous, setPrevious] = useState<V2ConversationMockupVersionT | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!context) return;
+    let cancelled = false;
+    setError(null);
+    void fetchMockupVersion(context.projectId, context.workItemId, context.conversationId, data.id)
+      .then(async (version) => {
+        if (cancelled) return;
+        setMockup(version);
+        if (!version.supersedes_mockup_version_id) {
+          setPrevious(null);
+          return;
+        }
+        const predecessor = await fetchMockupVersion(
+          context.projectId,
+          context.workItemId,
+          context.conversationId,
+          version.supersedes_mockup_version_id,
+        );
+        if (!cancelled) setPrevious(predecessor);
+      })
+      .catch((caught: unknown) => {
+        if (cancelled) return;
+        if (caught instanceof UnauthorizedError) context.onUnauthorized();
+        else setError(caught instanceof Error ? caught.message : String(caught));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [context, data.id]);
+
+  if (!context) return <ReferenceCard data={data} />;
+  if (error) {
+    return (
+      <article className="conversation-reference-card" data-testid="conversation-mockup-error">
+        <strong>Mockup version</strong>
+        <span>Unavailable</span>
+        <p>{error}</p>
+        <code>{data.id}</code>
+      </article>
+    );
+  }
+  if (!mockup) {
+    return (
+      <article className="conversation-reference-card" aria-busy="true">
+        <strong>Loading mockup…</strong>
+        <code>{data.id}</code>
+      </article>
+    );
+  }
+
+  return (
+    <article
+      className="conversation-mockup-card"
+      data-testid={`conversation-mockup-version-${mockup.version}`}
+      aria-labelledby={`conversation-mockup-${mockup.id}`}
+    >
+      <header>
+        <div>
+          <span className="eyebrow">Reviewable visual artifact</span>
+          <h3 id={`conversation-mockup-${mockup.id}`}>Mockup version {mockup.version}</h3>
+        </div>
+        <Badge
+          tone={
+            mockup.status === "approved"
+              ? "success"
+              : mockup.status === "rejected"
+                ? "danger"
+                : "warn"
+          }
+        >
+          {mockup.status.replaceAll("_", " ")}
+        </Badge>
+      </header>
+      <p>{mockup.brief}</p>
+      <MockupScreenshots
+        mockup={mockup}
+        projectId={context.projectId}
+        prefix="Current"
+        onUnauthorized={context.onUnauthorized}
+      />
+      <dl className="conversation-mockup-evidence">
+        <div>
+          <dt>Version</dt>
+          <dd>{mockup.version}</dd>
+        </div>
+        <div>
+          <dt>Manifest artifact</dt>
+          <dd>
+            <code>{mockup.manifest.artifact_id}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>Manifest hash</dt>
+          <dd>
+            <code title={mockup.manifest.content_hash}>
+              {mockup.manifest.content_hash.slice(0, 12)}
+            </code>
+          </dd>
+        </div>
+      </dl>
+      <section className="conversation-mockup-notes" aria-label="Mockup interaction notes">
+        <strong>Interaction notes</strong>
+        <ul>
+          {mockup.interaction_notes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      </section>
+      {previous ? (
+        <section
+          className="conversation-mockup-comparison"
+          aria-label={`Before and after comparison for version ${mockup.version}`}
+          data-testid="conversation-mockup-comparison"
+        >
+          <div>
+            <span className="eyebrow">Before</span>
+            <strong>Version {previous.version} remains visible</strong>
+            <MockupScreenshots
+              mockup={previous}
+              projectId={context.projectId}
+              prefix="Before"
+              onUnauthorized={context.onUnauthorized}
+            />
+          </div>
+          <div>
+            <span className="eyebrow">After</span>
+            <strong>Version {mockup.version}</strong>
+            <MockupScreenshots
+              mockup={mockup}
+              projectId={context.projectId}
+              prefix="After"
+              onUnauthorized={context.onUnauthorized}
+            />
+          </div>
+        </section>
+      ) : null}
+      <MockupReviewControls mockup={mockup} context={context} />
+    </article>
+  );
 }
 
 function HandoffPreview({ data }: DataMessagePartProps<HandoffData>): React.ReactElement {
@@ -1311,7 +1657,7 @@ function UserMessage(): React.ReactElement {
                 "planning-excerpt": PlanningExcerptPreview,
                 "human-wait": HumanWaitPreview,
                 "human-wait-update": HumanWaitUpdatePreview,
-                mockup: ReferencePreview,
+                mockup: MockupPreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -1342,7 +1688,7 @@ function AssistantMessage(): React.ReactElement {
                 "planning-excerpt": PlanningExcerptPreview,
                 "human-wait": HumanWaitPreview,
                 "human-wait-update": HumanWaitUpdatePreview,
-                mockup: ReferencePreview,
+                mockup: MockupPreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -1375,7 +1721,7 @@ function SystemMessage(): React.ReactElement {
                 "planning-excerpt": PlanningExcerptPreview,
                 "human-wait": HumanWaitPreview,
                 "human-wait-update": HumanWaitUpdatePreview,
-                mockup: ReferencePreview,
+                mockup: MockupPreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -2334,6 +2680,9 @@ function ConversationThread({
     );
     for (const [id, effect] of effectOverrides) effects.set(id, effect);
     return {
+      projectId: detail.work_item.project_id,
+      workItemId: detail.work_item.id,
+      conversationId: detail.conversation.id,
       actions,
       effects,
       deliveryEvents: detail.action_delivery_events ?? [],
@@ -2347,21 +2696,32 @@ function ConversationThread({
       planChangeErrors,
       planChangeLockedIds,
       proposePlanChanges,
+      prepareExecutionAction: proposeExecutionAction,
+      executionProposalBusy,
+      executionProposalError,
+      onUnauthorized,
     };
   }, [
     actionErrors,
     actionOverrides,
     busyActionId,
     confirmAction,
+    detail.conversation.id,
     detail.action_delivery_events,
     detail.action_effects,
+    detail.work_item.id,
+    detail.work_item.project_id,
     effectOverrides,
+    executionProposalBusy,
+    executionProposalError,
     lockedHumanWaitAnswerIds,
     planChangeBusyId,
     planChangeErrors,
     planChangeLockedIds,
     prepareHumanWaitAnswer,
     proposePlanChanges,
+    proposeExecutionAction,
+    onUnauthorized,
     onRefresh,
     resources.actions,
   ]);
@@ -2386,6 +2746,27 @@ function ConversationThread({
   const isPlanning = detail.conversation.kind === "planning";
   const isExecution = detail.conversation.kind === "execution_pm";
   const isReadOnly = detail.conversation.status !== "active";
+  const latestPlan = detail.plan_versions.at(-1);
+  const taskOptions = Array.from(
+    new Map(
+      [
+        ...(latestPlan?.plan.plan.modules.map((module) => ({
+          id: module.id,
+          label: `${module.title} · ${module.id}`,
+        })) ?? []),
+        ...(detail.handoff?.package.task_ids.map((taskId) => ({
+          id: taskId,
+          label: taskId,
+        })) ?? []),
+      ].map((option) => [option.id, option]),
+    ).values(),
+  );
+  const artifactOptions = Array.from(
+    new Set([
+      ...(detail.handoff?.package.artifact_ids ?? []),
+      ...(detail.latest_summary?.summary.artifact_ids ?? []),
+    ]),
+  ).map((artifactId) => ({ id: artifactId, label: artifactId }));
   const referencedActionIds = new Set(
     detail.messages.flatMap((message) =>
       message.parts.flatMap((part) => (part.type === "action" ? [part.action_id] : [])),
@@ -2426,6 +2807,18 @@ function ConversationThread({
                     : "Create plan proposal"}
               </Button>
             </div>
+          ) : null}
+          {(isPlanning || isExecution) && !isReadOnly ? (
+            <MockupRequestComposer
+              taskOptions={isExecution ? taskOptions : []}
+              artifactOptions={artifactOptions}
+              busy={executionProposalBusy}
+              error={executionProposalError}
+              disabledReason={
+                lockedExecutionRequest ? "Retry the locked exact request first." : null
+              }
+              onPrepare={(parameters) => proposeExecutionAction("create_mockup", parameters)}
+            />
           ) : null}
           {isExecution && !isReadOnly ? (
             <section className="execution-conversation-controls" aria-label="Execution controls">

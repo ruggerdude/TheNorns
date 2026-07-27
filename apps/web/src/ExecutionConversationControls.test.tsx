@@ -12,6 +12,7 @@ import { ConversationActionCard } from "./ConversationActionCard";
 import {
   ExecutionActionComposer,
   HumanWaitCard,
+  MockupRequestComposer,
   PmUpdateControls,
 } from "./ExecutionConversationControls";
 
@@ -145,6 +146,41 @@ function humanWait(status: V2HumanWaitT["status"] = "awaiting_human"): V2HumanWa
 }
 
 describe("Phase 5 execution conversation controls", () => {
+  it("prepares a mockup from task and artifact selectors without free-form IDs", async () => {
+    const onPrepare = vi.fn(async () => true);
+    const user = userEvent.setup();
+    render(
+      <MockupRequestComposer
+        taskOptions={[{ id: "task-7", label: "Checkout · task-7" }]}
+        artifactOptions={[
+          { id: "artifact-wireframe", label: "Wireframe" },
+          { id: "artifact-copy", label: "Approved copy" },
+        ]}
+        busy={false}
+        error={null}
+        disabledReason={null}
+        onPrepare={onPrepare}
+      />,
+    );
+
+    await user.click(screen.getByText("Create Mockup"));
+    await user.type(
+      screen.getByRole("textbox", { name: "Mockup brief" }),
+      "Show checkout on desktop and mobile.",
+    );
+    await user.selectOptions(screen.getByRole("combobox", { name: "Mockup task" }), "task-7");
+    await user.click(screen.getByRole("checkbox", { name: "Wireframe" }));
+    await user.click(screen.getByRole("button", { name: "Prepare mockup request" }));
+
+    expect(onPrepare).toHaveBeenCalledWith({
+      brief: "Show checkout on desktop and mobile.",
+      target: "responsive",
+      task_id: "task-7",
+      artifact_refs: ["artifact-wireframe"],
+    });
+    expect(screen.queryByText(/comma-separated/i)).not.toBeInTheDocument();
+  });
+
   it("prepares typed task direction without treating discussion as a mutation", async () => {
     const onPrepare = vi.fn(async () => true);
     const user = userEvent.setup();

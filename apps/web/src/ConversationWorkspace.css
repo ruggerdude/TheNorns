@@ -1626,6 +1626,173 @@
   padding: 2rem;
 }
 
+.mockup-request-composer {
+  border: 1px solid var(--line);
+  border-radius: 0.9rem;
+  margin: 0 1rem;
+  overflow: hidden;
+}
+
+.mockup-request-composer > summary {
+  cursor: pointer;
+  font-weight: 700;
+  padding: 0.9rem 1rem;
+}
+
+.mockup-request-composer > form {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 0.85rem;
+  padding: 1rem;
+}
+
+.mockup-request-composer p,
+.conversation-mockup-card p,
+.conversation-mockup-card figure {
+  margin: 0;
+}
+
+.mockup-artifact-selector {
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0.75rem;
+}
+
+.mockup-artifact-selector label {
+  align-items: center;
+  display: flex;
+  gap: 0.55rem;
+}
+
+.conversation-mockup-card {
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.conversation-mockup-card > header {
+  align-items: flex-start;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.conversation-mockup-card h3 {
+  margin: 0;
+}
+
+.conversation-mockup-screenshots {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: minmax(0, 3fr) minmax(9rem, 1fr);
+}
+
+.conversation-mockup-screenshots figure {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.conversation-mockup-screenshots img,
+.conversation-mockup-screenshots .artifact-image-loading,
+.conversation-mockup-screenshots .artifact-image-fallback {
+  aspect-ratio: 16 / 10;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  object-fit: contain;
+  width: 100%;
+}
+
+.conversation-mockup-screenshots figcaption {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.conversation-mockup-screenshots figcaption span,
+.conversation-mockup-evidence dt {
+  color: var(--muted);
+}
+
+.conversation-mockup-evidence {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+}
+
+.conversation-mockup-evidence > div {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.conversation-mockup-evidence dt {
+  font-size: 0.75rem;
+}
+
+.conversation-mockup-evidence dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.conversation-mockup-evidence code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conversation-mockup-notes ul {
+  margin-bottom: 0;
+}
+
+.conversation-mockup-comparison {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding-top: 1rem;
+}
+
+.conversation-mockup-comparison > div {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.conversation-mockup-comparison .conversation-mockup-screenshots {
+  grid-template-columns: 1fr;
+}
+
+.conversation-mockup-review {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 0.8rem;
+  padding-top: 1rem;
+}
+
+.conversation-mockup-review > div,
+.conversation-mockup-review .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.conversation-mockup-review form {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.8rem;
+}
+
 @media (max-width: 860px) {
   .conversation-workspace {
     grid-template-columns: 1fr;
@@ -1761,6 +1928,7 @@
   }
 
   .execution-action-composer .btn,
+  .mockup-request-composer .btn,
   .human-wait-answer-form .btn,
   .pm-update-controls .btn {
     width: 100%;
@@ -1769,6 +1937,16 @@
   .human-wait-continuation ol,
   .pm-update-history li {
     grid-template-columns: 1fr;
+  }
+
+  .conversation-mockup-screenshots,
+  .conversation-mockup-evidence,
+  .conversation-mockup-comparison {
+    grid-template-columns: 1fr;
+  }
+
+  .conversation-mockup-card > header {
+    display: grid;
   }
 }
 
