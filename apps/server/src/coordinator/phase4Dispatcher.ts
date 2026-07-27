@@ -51,6 +51,7 @@ export class Phase4DispatchRepository {
              updated_at = now()
          FROM candidate, commands command
          WHERE job.id = candidate.id AND command.command_id = job.command_id
+           AND command.kind='launch_run'
          RETURNING job.id, job.attempts, job.run_id, command.envelope`,
         [owner, leaseMs],
       );
@@ -80,12 +81,13 @@ export class Phase4DispatchRepository {
           `WITH candidate AS (
              SELECT job.id,actions.status AS actions_status,
                     actions.conclusion,actions.last_error
-               FROM dispatch_jobs job
+              FROM dispatch_jobs job
                JOIN github_actions_runs actions ON actions.dispatch_job_id=job.id
-               JOIN commands command ON command.command_id=job.command_id
+              JOIN commands command ON command.command_id=job.command_id
                LEFT JOIN github_actions_execution_bindings binding
                  ON binding.repository_binding_id=actions.repository_binding_id
               WHERE job.status='awaiting_enrollment'
+                AND command.kind='launch_run'
                 AND (
                   actions.status IN ('completed','failed','abandoned')
                   OR binding.enabled IS NOT TRUE
@@ -128,7 +130,8 @@ export class Phase4DispatchRepository {
            FROM dispatch_jobs job
            JOIN commands command ON command.command_id=job.command_id
            JOIN github_actions_runs actions ON actions.dispatch_job_id=job.id
-          WHERE job.runner_id=$1 AND job.status='awaiting_enrollment'
+         WHERE job.runner_id=$1 AND job.status='awaiting_enrollment'
+            AND command.kind='launch_run'
             AND command.runner_id=$1 AND command.runner_generation=$2
             AND actions.runner_id=$1 AND actions.runner_generation=$2
             AND actions.status='enrolled'

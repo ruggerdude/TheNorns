@@ -549,6 +549,27 @@ export class HumanWaitContinuationWorker {
           command.causation_id,
         ],
       );
+      for (const supplement of command.task_package_supplements) {
+        await tx.query(
+          `INSERT INTO conversation_task_package_supplement_dispatch_receipts (
+             command_id,run_id,supplement_id,project_id,phase_id,task_id,
+             base_package_id,ordinal,content_hash,context_document_id,context_ref
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)`,
+          [
+            command.command_id,
+            row.source_run_id,
+            supplement.supplement_id,
+            row.project_id,
+            row.phase_id,
+            row.task_id,
+            supplement.base_package_id,
+            supplement.ordinal,
+            supplement.content_hash,
+            supplement.context_ref.artifact_id,
+            JSON.stringify(supplement.context_ref),
+          ],
+        );
+      }
       await tx.query(
         `INSERT INTO dispatch_jobs (
            id,project_id,phase_id,task_id,run_id,command_id,runner_id,status

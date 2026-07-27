@@ -672,19 +672,28 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
         // remain necessary execution support and retain their fail-closed
         // checks.
         const model = await this.gather(tx, taskId, true);
+        const mockupSupplements = await this.approvedMockupSupplements(
+          tx,
+          taskId,
+          frozenPackage.project_id,
+        );
         const steering = await this.pendingSteeringContext(tx, taskId, frozenPackage.project_id);
         const steeringBytes = steering?.byte_size ?? 0;
-        if (steeringBytes >= this.maxTotalBytes) {
+        const supplementBytes = mockupSupplements.reduce(
+          (total, reference) => total + reference.byte_size,
+          0,
+        );
+        if (steeringBytes + supplementBytes >= this.maxTotalBytes) {
           throw new TaskContextAssemblyError(
             "context_too_large",
-            `confirmed task directions for ${taskId} are ${steeringBytes} bytes, over the ${this.maxTotalBytes}-byte context cap`,
-            "Consolidate or shorten the pending directions before dispatching this task.",
+            `immutable task addenda for ${taskId} are ${steeringBytes + supplementBytes} bytes, over the ${this.maxTotalBytes}-byte context cap`,
+            "Consolidate pending directions or revise the approved mockup evidence before dispatch.",
           );
         }
         const sections = trimFrozenPackageContext(
           model,
           content,
-          this.maxTotalBytes - steeringBytes,
+          this.maxTotalBytes - steeringBytes - supplementBytes,
         );
         const refs: V2ContentAddressedReferenceT[] = [];
         for (const section of sections) {
@@ -714,6 +723,7 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
             storage_ref: `${this.baseUrl}${TASK_CONTEXT_ROUTE_PREFIX}/${stored.id}`,
           });
         }
+        refs.push(...mockupSupplements);
         if (steering) refs.push(steering);
         return refs;
       }
@@ -735,6 +745,67 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
       }
       return refs;
     });
+  }
+
+  private async approvedMockupSupplements(
+    tx: V2SqlExecutor,
+    taskId: string,
+    projectId: string,
+  ): Promise<V2ContentAddressedReferenceT[]> {
+    const rows = (
+      await tx.query<{
+        supplement_id: string;
+        ordinal: number | string;
+        canonical_supplement: string;
+        content_hash: string;
+        context_document_id: string;
+        document_hash: string;
+        byte_size: number | string;
+        media_type: string;
+        content: Buffer | Uint8Array;
+      }>(
+        `SELECT supplement.id AS supplement_id,supplement.ordinal,
+                supplement.canonical_supplement,supplement.content_hash,
+                supplement.context_document_id,document.sha256 AS document_hash,
+                document.byte_size,document.media_type,blob.content
+           FROM conversation_task_package_supplements supplement
+           JOIN task_context_documents document
+             ON document.id=supplement.context_document_id
+           JOIN task_context_blobs blob ON blob.sha256=document.sha256
+          WHERE supplement.project_id=$1 AND supplement.task_id=$2
+          ORDER BY supplement.ordinal,supplement.id`,
+        [projectId, taskId],
+      )
+    ).rows;
+    const references: V2ContentAddressedReferenceT[] = [];
+    let expectedOrdinal = 1;
+    for (const row of rows) {
+      const bytes = Buffer.from(row.content);
+      const parsed: unknown = JSON.parse(row.canonical_supplement);
+      if (
+        Number(row.ordinal) !== expectedOrdinal ||
+        canonicalJson(parsed) !== row.canonical_supplement ||
+        canonicalSha256(parsed) !== row.content_hash ||
+        row.document_hash !== row.content_hash ||
+        row.media_type !== "application/json" ||
+        Number(row.byte_size) !== bytes.byteLength ||
+        !bytes.equals(Buffer.from(row.canonical_supplement, "utf8"))
+      ) {
+        throw new TaskContextAssemblyError(
+          "task_package_mismatch",
+          `task ${taskId} approved mockup supplement ${row.supplement_id} is not exact`,
+          "Do not dispatch this task; reconcile its immutable approved mockup supplement.",
+        );
+      }
+      references.push({
+        artifact_id: row.context_document_id,
+        content_hash: row.content_hash,
+        byte_size: bytes.byteLength,
+        storage_ref: `${this.baseUrl}${TASK_CONTEXT_ROUTE_PREFIX}/${row.context_document_id}`,
+      });
+      expectedOrdinal += 1;
+    }
+    return references;
   }
 
   private async pendingSteeringContext(

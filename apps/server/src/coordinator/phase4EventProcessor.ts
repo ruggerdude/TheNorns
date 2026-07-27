@@ -108,12 +108,13 @@ export class Phase4EventProcessor {
       }
       if (event.payload.kind === "command_ack") {
         const command = await sql.query<{
+          kind: string;
           runner_generation: number;
           runner_id: string;
           run_id: string;
           correlation_id: string;
         }>(
-          `SELECT runner_generation,runner_id,run_id,correlation_id
+          `SELECT kind,runner_generation,runner_id,run_id,correlation_id
              FROM commands WHERE command_id=$1 FOR UPDATE`,
           [event.payload.command_id],
         );
@@ -182,6 +183,32 @@ export class Phase4EventProcessor {
               event.generation,
             ],
           );
+        }
+        if (row.kind === "collect_visual_evidence") {
+          if (terminalCommandState) {
+            const successfulUpload = event.payload.state === "succeeded";
+            await sql.query(
+              `UPDATE implementation_visual_evidence_collections
+                  SET status=CASE
+                        WHEN $2 AND evidence_id IS NOT NULL THEN 'completed'
+                        ELSE 'failed'
+                      END,
+                      last_error=CASE
+                        WHEN $2 AND evidence_id IS NOT NULL THEN NULL
+                        WHEN $2 THEN 'visual_evidence_upload_missing'
+                        ELSE COALESCE(NULLIF($3,''),'visual_evidence_collection_failed')
+                      END,
+                      completed_at=COALESCE(completed_at,now()),updated_at=now()
+                WHERE command_id=$1
+                  AND status IN ('awaiting_runner','delivered','completed')`,
+              [event.payload.command_id, successfulUpload, event.payload.detail],
+            );
+          }
+          await sql.query(
+            "UPDATE runner_events SET run_id = $2, applied_at = now() WHERE id = $1",
+            [eventId, row.run_id],
+          );
+          return { duplicate: false };
         }
         const pauseApplied =
           terminalCommandState && terminalCommandState !== "waiting_for_human"

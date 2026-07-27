@@ -183,6 +183,16 @@ interface ConversationTaskPackageBindingRow {
   byte_size: number | string | null;
 }
 
+interface ConversationTaskPackageSupplementRow {
+  supplement_id: string;
+  task_id: string;
+  base_package_id: string;
+  ordinal: number | string;
+  content_hash: string;
+  context_document_id: string;
+  byte_size: number | string;
+}
+
 function runIdentity(taskId: string, attempt: number): string {
   return `run:${encodeURIComponent(taskId)}:${attempt}`;
 }
@@ -325,6 +335,50 @@ export class Phase4Coordinator {
       if (packageScope?.package_id && !taskPackageDispatch) {
         throw new Phase4CoordinatorConflictError("immutable task package binding is incomplete");
       }
+      const supplementRows = taskPackageDispatch
+        ? (
+            await sql.query<ConversationTaskPackageSupplementRow>(
+              `SELECT supplement.id AS supplement_id,supplement.task_id,
+                      supplement.base_package_id,supplement.ordinal,
+                      supplement.content_hash,supplement.context_document_id,
+                      document.byte_size
+                 FROM conversation_task_package_supplements supplement
+                 JOIN task_context_documents document
+                   ON document.id=supplement.context_document_id
+                WHERE supplement.project_id=$1 AND supplement.task_id=$2
+                  AND supplement.base_package_id=$3
+                ORDER BY supplement.ordinal,supplement.id
+                FOR SHARE OF supplement,document`,
+              [input.project_id, input.task_id, taskPackageDispatch.id],
+            )
+          ).rows
+        : [];
+      const taskPackageSupplements = supplementRows.map((supplement, index) => {
+        if (Number(supplement.ordinal) !== index + 1) {
+          throw new Phase4CoordinatorConflictError(
+            "immutable task package supplements are not a contiguous append-only sequence",
+          );
+        }
+        const matches = contextRefs.filter(
+          (reference) =>
+            reference.artifact_id === supplement.context_document_id &&
+            reference.content_hash === supplement.content_hash &&
+            reference.byte_size === Number(supplement.byte_size),
+        );
+        if (matches.length !== 1 || !matches[0]) {
+          throw new Phase4CoordinatorConflictError(
+            `dispatch context does not contain exact approved mockup supplement ${supplement.supplement_id}`,
+          );
+        }
+        return {
+          supplement_id: supplement.supplement_id,
+          task_id: supplement.task_id,
+          base_package_id: supplement.base_package_id,
+          ordinal: Number(supplement.ordinal),
+          content_hash: supplement.content_hash,
+          context_ref: matches[0],
+        };
+      });
       if (row.repository_binding_status !== "connected") {
         throw new Phase4CoordinatorConflictError(
           "execution requires a verified repository binding and an online runner; " +
@@ -651,6 +705,7 @@ export class Phase4Coordinator {
               task_package_id: taskPackageDispatch.id,
               task_package_content_hash: taskPackageDispatch.contentHash,
               task_package_context_ref: taskPackageDispatch.contextRef,
+              task_package_supplements: taskPackageSupplements,
             }
           : {}),
         human_wait_channel: {
@@ -696,6 +751,27 @@ export class Phase4Coordinator {
           input.causation_id,
         ],
       );
+      for (const supplement of taskPackageSupplements) {
+        await sql.query(
+          `INSERT INTO conversation_task_package_supplement_dispatch_receipts (
+             command_id,run_id,supplement_id,project_id,phase_id,task_id,
+             base_package_id,ordinal,content_hash,context_document_id,context_ref
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)`,
+          [
+            commandId,
+            runId,
+            supplement.supplement_id,
+            input.project_id,
+            input.phase_id,
+            input.task_id,
+            supplement.base_package_id,
+            supplement.ordinal,
+            supplement.content_hash,
+            supplement.context_ref.artifact_id,
+            JSON.stringify(supplement.context_ref),
+          ],
+        );
+      }
       await sql.query(
         `INSERT INTO dispatch_jobs (
            id, project_id, phase_id, task_id, run_id, command_id, runner_id, status

@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 // The relay/API server (ADR-002: the backend IS the relay). Exposes:
 //   POST /api/commands, GET /api/commands/:id
 //   GET  /api/audit, /api/events/:runnerId
@@ -46,7 +47,10 @@ import {
   type V2DispatchCommandT,
   V2EvidenceRef,
   V2HumanDirectionRequest,
+  V2ImplementationCaptureProfile,
   V2InterveneDebateRunCommand,
+  V2MockupArtifactUploadInput,
+  V2RecordProjectDeploymentObservationInput,
   V2RepositoryIngestionSeed,
   V2StartDebateRunCommand,
   V2StrategyVersion,
@@ -161,6 +165,22 @@ import { type KnowledgeSystemService, registerKnowledgeRoutes } from "./knowledg
 import type { Phase7OperationsService } from "./operations/phase7Operations.js";
 import { SqlAiUsageTelemetryRepository } from "./persistence/v2/aiUsageTelemetry.js";
 import type { V2TransactionRunner } from "./persistence/v2/database.js";
+import {
+  CreateDeploymentInput,
+  HealthProbeError,
+  Phase6ArtifactError,
+  Phase6DashboardService,
+  Phase6DeploymentError,
+  Phase6DeploymentService,
+  Phase6MockupError,
+  Phase6MockupService,
+  Phase6MockupWorker,
+  Phase6VisualEvidenceCollectionWorker,
+  Phase6VisualEvidenceError,
+  Phase6VisualEvidenceService,
+  RecordHumanDeploymentObservationInput,
+  probePublicHttpsUrl,
+} from "./phase6/index.js";
 import {
   AllocationRecommendationError,
   recommendProjectAllocation,
@@ -550,7 +570,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   await app.register(websocket);
   app.addContentTypeParser(
     ["image/png", "image/jpeg", "image/webp", "image/gif"],
-    { parseAs: "buffer", bodyLimit: ATTACHMENT_CAPS.maxBytesPerImage },
+    { parseAs: "buffer", bodyLimit: 10 * 1024 * 1024 },
     (_request, body, done) => done(null, body),
   );
 
@@ -589,6 +609,24 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     options.planningRuns?.transactions ??
     options.onboarding?.transactions ??
     options.attachments?.transactions;
+  const phase6Mockups = options.execution
+    ? new Phase6MockupService(options.execution.transactions)
+    : null;
+  const phase6Deployments = options.execution
+    ? new Phase6DeploymentService(options.execution.transactions)
+    : null;
+  const phase6VisualEvidence = options.execution
+    ? new Phase6VisualEvidenceService(options.execution.transactions)
+    : null;
+  const phase6Dashboard =
+    options.execution && phase6Mockups && phase6Deployments
+      ? new Phase6DashboardService(
+          options.execution.transactions,
+          phase6Mockups,
+          phase6Deployments,
+          now,
+        )
+      : null;
   const canonicalTelemetry = runtimeTransactionsForInference
     ? new AiInvocationTelemetry(
         new SqlAiUsageTelemetryRepository(runtimeTransactionsForInference),
@@ -884,6 +922,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   let humanWaitContinuationTimer: ReturnType<typeof setInterval> | undefined;
   let humanWaitRecoveryTimer: ReturnType<typeof setInterval> | undefined;
   let conversationActionDeliveryTimer: ReturnType<typeof setInterval> | undefined;
+  let phase6MockupTimer: ReturnType<typeof setInterval> | undefined;
+  let phase6VisualEvidenceTimer: ReturnType<typeof setInterval> | undefined;
   let conversationPmUpdateTimer: ReturnType<typeof setInterval> | undefined;
   let usageBudgetEvaluationTimer: ReturnType<typeof setInterval> | undefined;
   let conversationKickoffTimer: ReturnType<typeof setInterval> | undefined;
@@ -1109,8 +1149,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       options.execution.transactions,
       {
         contextBaseUrl: options.execution.baseUrl ?? options.publicOrigin ?? "http://127.0.0.1",
+        ...(phase6Mockups ? { phase6: phase6Mockups } : {}),
       },
     );
+    const phase6MockupWorker = phase6Mockups
+      ? new Phase6MockupWorker(options.execution.transactions, phase6Mockups)
+      : null;
     let actionDeliveryTicking = false;
     conversationActionDeliveryTimer = setInterval(() => {
       if (actionDeliveryTicking) return;
@@ -1124,6 +1168,20 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         });
     }, 500);
     conversationActionDeliveryTimer.unref();
+    if (phase6MockupWorker) {
+      let mockupTicking = false;
+      phase6MockupTimer = setInterval(() => {
+        if (mockupTicking) return;
+        mockupTicking = true;
+        void phase6MockupWorker
+          .tick()
+          .catch((error) => app.log.error({ err: error }, "Phase 6 mockup render tick failed"))
+          .finally(() => {
+            mockupTicking = false;
+          });
+      }, 1_000);
+      phase6MockupTimer.unref();
+    }
     const pmUpdateScheduler = new ConversationPmUpdateScheduler(options.execution.transactions);
     let pmUpdateTicking = false;
     conversationPmUpdateTimer = setInterval(() => {
@@ -1144,6 +1202,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (humanWaitContinuationTimer) clearInterval(humanWaitContinuationTimer);
     if (humanWaitRecoveryTimer) clearInterval(humanWaitRecoveryTimer);
     if (conversationActionDeliveryTimer) clearInterval(conversationActionDeliveryTimer);
+    if (phase6MockupTimer) clearInterval(phase6MockupTimer);
+    if (phase6VisualEvidenceTimer) clearInterval(phase6VisualEvidenceTimer);
     if (conversationPmUpdateTimer) clearInterval(conversationPmUpdateTimer);
     if (phaseQueueDrainTimer) clearInterval(phaseQueueDrainTimer);
     if (usageBudgetEvaluationTimer) clearInterval(usageBudgetEvaluationTimer);
@@ -1546,6 +1606,61 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       stores.audit("server", "command.delivered", envelope.command_id, now());
     }
   };
+
+  if (options.execution) {
+    const visualEvidenceCollectionWorker = new Phase6VisualEvidenceCollectionWorker(
+      options.execution.transactions,
+      {
+        prepareTarget: async (collection) => {
+          if (!options.actionsExecution) {
+            throw new Error(
+              "GitHub Actions execution is required for fresh visual evidence collection",
+            );
+          }
+          const prepared = await options.actionsExecution.coordinator.prepareContinuation(
+            collection.project_id,
+          );
+          if (prepared.repository_binding_id !== collection.repository_binding_id) {
+            throw new Error("visual evidence Actions binding changed during provisioning");
+          }
+          const runnerId = actionsDispatchRunnerId(collection.project_id, collection.id);
+          const reserved = stores.runner(runnerId);
+          return {
+            repository_binding_id: prepared.repository_binding_id,
+            runner_id: runnerId,
+            runner_generation: reserved?.generation ?? stores.reserveRunnerGeneration(runnerId),
+          };
+        },
+        launch: async (input) => {
+          if (!options.actionsExecution) {
+            throw new Error(
+              "GitHub Actions execution is required for fresh visual evidence collection",
+            );
+          }
+          await options.actionsExecution.coordinator.launchContinuation(input);
+        },
+        enqueue: (command) => {
+          const record = stores.enqueueCommand(command, now());
+          return record.state === "queued" || record.state === "delivered";
+        },
+        notify: (runnerId) => deliverPending(runnerId, new Set()),
+      },
+    );
+    let visualEvidenceTicking = false;
+    phase6VisualEvidenceTimer = setInterval(() => {
+      if (visualEvidenceTicking) return;
+      visualEvidenceTicking = true;
+      void visualEvidenceCollectionWorker
+        .tick()
+        .catch((error) =>
+          app.log.error({ err: error }, "Phase 6 visual evidence collection tick failed"),
+        )
+        .finally(() => {
+          visualEvidenceTicking = false;
+        });
+    }, 1_000);
+    phase6VisualEvidenceTimer.unref();
+  }
 
   // ---- auth: real user accounts -------------------------------------------------
   // Replaces the single shared deploy token as the day-to-day login mechanism.
@@ -6829,6 +6944,470 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       requireAdmin,
       resolveUser,
     });
+  }
+
+  // ---- Phase 6 immutable mockups and evidence bytes -------------------------
+  if (phase6Mockups) {
+    const artifactService = phase6Mockups.artifactService();
+    const ArtifactUploadEnvelope = z
+      .object({
+        metadata: V2MockupArtifactUploadInput,
+        content_base64: z.string().min(1),
+        label: z.string().trim().min(1).max(500),
+      })
+      .strict();
+    const phase6Error = (reply: FastifyReply, error: unknown): void => {
+      if (error instanceof z.ZodError) {
+        reply.code(400).send({ error: "bad_request", issues: error.issues });
+        return;
+      }
+      if (error instanceof Phase6ArtifactError) {
+        const status =
+          error.code === "artifact_not_found"
+            ? 404
+            : error.code === "unsupported_media_type"
+              ? 415
+              : error.code === "project_quota"
+                ? 409
+                : 400;
+        reply.code(status).send({ error: error.code, message: error.message });
+        return;
+      }
+      if (error instanceof Phase6MockupError) {
+        const status = error.code === "mockup_not_found" ? 404 : 409;
+        reply.code(status).send({ error: error.code, message: error.message });
+        return;
+      }
+      if (error instanceof Phase6DeploymentError) {
+        reply
+          .code(error.code === "deployment_not_found" ? 404 : 409)
+          .send({ error: error.code, message: error.message });
+        return;
+      }
+      if (error instanceof HealthProbeError) {
+        reply.code(422).send({ error: error.code, message: error.message });
+        return;
+      }
+      throw error;
+    };
+
+    app.post(
+      "/api/v2/projects/:projectId/artifacts",
+      { bodyLimit: 16 * 1024 * 1024 },
+      async (request, reply) => {
+        const user = await requireSessionUser(request, reply);
+        if (!user) return;
+        const { projectId } = request.params as { projectId: string };
+        try {
+          let metadata: z.infer<typeof V2MockupArtifactUploadInput>;
+          let content: Buffer;
+          let label: string;
+          if (Buffer.isBuffer(request.body)) {
+            const header = (name: string): string => {
+              const value = request.headers[name];
+              if (typeof value !== "string" || value.trim().length === 0) {
+                throw new Phase6ArtifactError("invalid_content", `missing ${name} header`);
+              }
+              return value.trim();
+            };
+            content = request.body;
+            label = header("x-norns-artifact-label").slice(0, 500);
+            metadata = V2MockupArtifactUploadInput.parse({
+              project_id: projectId,
+              work_item_id: header("x-norns-work-item-id"),
+              conversation_id: header("x-norns-conversation-id"),
+              media_type: String(request.headers["content-type"] ?? "").split(";")[0],
+              purpose: header("x-norns-artifact-purpose"),
+              content_hash: header("x-norns-content-sha256"),
+              byte_size: content.byteLength,
+              idempotency_key: header("x-idempotency-key"),
+            });
+          } else {
+            const envelope = ArtifactUploadEnvelope.parse(request.body);
+            if (envelope.metadata.project_id !== projectId) {
+              return reply.code(409).send({ error: "project_scope_mismatch" });
+            }
+            metadata = envelope.metadata;
+            content = Buffer.from(envelope.content_base64, "base64");
+            label = envelope.label;
+          }
+          const storedArtifact = await artifactService.put({
+            metadata,
+            content,
+            label,
+            provenance: { actor_type: "human", actor_id: user.id },
+          });
+          stores.audit(
+            user.email,
+            "phase6.artifact.created",
+            `${projectId}:${storedArtifact.id}`,
+            now(),
+          );
+          return reply.code(201).send(storedArtifact);
+        } catch (error) {
+          phase6Error(reply, error);
+        }
+      },
+    );
+
+    app.get("/api/v2/projects/:projectId/artifacts/:artifactId/content", async (request, reply) => {
+      if (!(await requireSession(request, reply))) return;
+      const { projectId, artifactId } = request.params as {
+        projectId: string;
+        artifactId: string;
+      };
+      try {
+        const artifact = await artifactService.content(projectId, artifactId);
+        return reply
+          .header("Content-Type", artifact.media_type)
+          .header("Content-Length", String(artifact.byte_size))
+          .header("Cache-Control", "private, max-age=31536000, immutable")
+          .header(
+            "Content-Disposition",
+            artifact.media_type === "image/png" ? "inline" : "attachment",
+          )
+          .header("X-Content-Type-Options", "nosniff")
+          .header("Content-Security-Policy", "default-src 'none'; sandbox")
+          .header("ETag", `"sha256:${artifact.content_hash}"`)
+          .send(artifact.bytes);
+      } catch (error) {
+        phase6Error(reply, error);
+      }
+    });
+
+    const listMockups = async (request: FastifyRequest, reply: FastifyReply) => {
+      if (!(await requireSession(request, reply))) return;
+      const { projectId, workItemId, conversationId } = request.params as {
+        projectId: string;
+        workItemId?: string;
+        conversationId: string;
+      };
+      try {
+        const mockups = await phase6Mockups.list(projectId, conversationId);
+        if (workItemId && mockups.some((mockup) => mockup.work_item_id !== workItemId)) {
+          return reply.code(404).send({ error: "conversation_not_found" });
+        }
+        return reply.header("Cache-Control", "no-store").send({ mockups });
+      } catch (error) {
+        phase6Error(reply, error);
+      }
+    };
+    app.get("/api/v2/projects/:projectId/conversations/:conversationId/mockups", listMockups);
+    app.get(
+      "/api/v2/projects/:projectId/work-items/:workItemId/conversations/:conversationId/mockups",
+      listMockups,
+    );
+    app.get(
+      "/api/v2/projects/:projectId/work-items/:workItemId/conversations/:conversationId/mockups/:mockupVersionId",
+      async (request, reply) => {
+        if (!(await requireSession(request, reply))) return;
+        const { projectId, workItemId, conversationId, mockupVersionId } = request.params as {
+          projectId: string;
+          workItemId: string;
+          conversationId: string;
+          mockupVersionId: string;
+        };
+        try {
+          const mockup = await phase6Mockups.version(projectId, conversationId, mockupVersionId);
+          if (mockup.work_item_id !== workItemId) {
+            return reply.code(404).send({ error: "mockup_not_found" });
+          }
+          return reply.header("Cache-Control", "no-store").send(mockup);
+        } catch (error) {
+          phase6Error(reply, error);
+        }
+      },
+    );
+
+    if (phase6Deployments) {
+      app.post("/api/v2/projects/:projectId/deployments", async (request, reply) => {
+        const user = await requireSessionUser(request, reply);
+        if (!user) return;
+        const { projectId } = request.params as { projectId: string };
+        try {
+          const parsed = CreateDeploymentInput.parse({
+            ...(request.body as Record<string, unknown>),
+            project_id: projectId,
+            source_id: user.id,
+          });
+          const created = await phase6Deployments.create(parsed);
+          stores.audit(
+            user.email,
+            "phase6.deployment.observed",
+            `${projectId}:${created.id}:pending`,
+            now(),
+          );
+          return reply.code(201).send(created);
+        } catch (error) {
+          phase6Error(reply, error);
+        }
+      });
+
+      app.post(
+        "/api/v2/projects/:projectId/deployments/:deploymentId/observations",
+        async (request, reply) => {
+          const user = await requireSessionUser(request, reply);
+          if (!user) return;
+          const { projectId, deploymentId } = request.params as {
+            projectId: string;
+            deploymentId: string;
+          };
+          try {
+            const input = RecordHumanDeploymentObservationInput.parse({
+              ...(request.body as Record<string, unknown>),
+              project_id: projectId,
+              delivery_record_id: deploymentId,
+            });
+            if (input.status === "succeeded" && input.health_url) {
+              const probe = await probePublicHttpsUrl(input.health_url);
+              if (
+                probe.status_code !== input.health_status_code ||
+                probe.status_code < 200 ||
+                probe.status_code >= 400
+              ) {
+                return reply.code(409).send({
+                  error: "health_observation_mismatch",
+                  observed_status_code: probe.status_code,
+                });
+              }
+            }
+            const result = await phase6Deployments.recordHumanObservation(input, user.id);
+            if (!result.replayed) {
+              stores.audit(
+                user.email,
+                "phase6.deployment.human_observed",
+                `${projectId}:${deploymentId}:${result.observation.sequence}`,
+                now(),
+              );
+            }
+            return reply.code(result.replayed ? 200 : 201).send(result);
+          } catch (error) {
+            phase6Error(reply, error);
+          }
+        },
+      );
+
+      app.post("/api/integrations/deployments/observations", async (request, reply) => {
+        let input: z.infer<typeof V2RecordProjectDeploymentObservationInput>;
+        try {
+          input = V2RecordProjectDeploymentObservationInput.parse(request.body);
+        } catch (error) {
+          phase6Error(reply, error);
+          return;
+        }
+        const authorization = request.headers.authorization;
+        const presented = bearerToken(authorization);
+        let configured: unknown = {};
+        try {
+          configured = JSON.parse(
+            integrationEnvironment.NORNS_DEPLOYMENT_PROVIDER_TOKENS_JSON ?? "{}",
+          );
+        } catch {
+          configured = {};
+        }
+        const expected =
+          configured &&
+          typeof configured === "object" &&
+          !Array.isArray(configured) &&
+          typeof (configured as Record<string, unknown>)[input.provider_id] === "string"
+            ? String((configured as Record<string, unknown>)[input.provider_id])
+            : null;
+        const authenticated =
+          presented !== null &&
+          expected !== null &&
+          presented.length === expected.length &&
+          timingSafeEqual(Buffer.from(presented), Buffer.from(expected));
+        if (!authenticated) {
+          stores.audit(
+            `provider:${input.provider_id}`,
+            "phase6.deployment.provider_auth_failed",
+            input.delivery_record_id,
+            now(),
+          );
+          return reply.code(401).send({ error: "unauthorized" });
+        }
+        try {
+          if (input.status === "succeeded" && input.health_url) {
+            const probe = await probePublicHttpsUrl(input.health_url);
+            if (
+              probe.status_code !== input.health_status_code ||
+              probe.status_code < 200 ||
+              probe.status_code >= 400
+            ) {
+              return reply.code(409).send({
+                error: "health_observation_mismatch",
+                observed_status_code: probe.status_code,
+              });
+            }
+          }
+          const result = await phase6Deployments.recordProviderObservation(input);
+          if (!result.replayed) {
+            stores.audit(
+              `provider:${input.provider_id}`,
+              "phase6.deployment.provider_observed",
+              `${input.project_id}:${input.delivery_record_id}:${result.observation.sequence}`,
+              now(),
+            );
+          }
+          return reply.code(result.replayed ? 200 : 201).send(result);
+        } catch (error) {
+          phase6Error(reply, error);
+        }
+      });
+
+      app.get("/api/v2/projects/:projectId/deployments", async (request, reply) => {
+        if (!(await requireSession(request, reply))) return;
+        const { projectId } = request.params as { projectId: string };
+        try {
+          return reply
+            .header("Cache-Control", "no-store")
+            .send({ deployments: await phase6Deployments.list(projectId) });
+        } catch (error) {
+          phase6Error(reply, error);
+        }
+      });
+
+      app.get(
+        "/api/v2/projects/:projectId/deployments/:deploymentId/observations",
+        async (request, reply) => {
+          if (!(await requireSession(request, reply))) return;
+          const { projectId, deploymentId } = request.params as {
+            projectId: string;
+            deploymentId: string;
+          };
+          try {
+            return reply.header("Cache-Control", "no-store").send({
+              observations: await phase6Deployments.observations(projectId, deploymentId),
+            });
+          } catch (error) {
+            phase6Error(reply, error);
+          }
+        },
+      );
+
+      app.post("/api/v2/projects/:projectId/deployments/health-probe", async (request, reply) => {
+        if (!(await requireSession(request, reply))) return;
+        try {
+          const body = z.object({ url: z.string().url() }).strict().parse(request.body);
+          return reply
+            .header("Cache-Control", "no-store")
+            .send(await probePublicHttpsUrl(body.url));
+        } catch (error) {
+          phase6Error(reply, error);
+        }
+      });
+    }
+
+    if (phase6Dashboard) {
+      app.get("/api/v2/projects/:projectId/dashboard", async (request, reply) => {
+        if (!(await requireSession(request, reply))) return;
+        const { projectId } = request.params as { projectId: string };
+        return reply
+          .header("Cache-Control", "no-store")
+          .send(await phase6Dashboard.read(projectId));
+      });
+    }
+  }
+
+  if (phase6VisualEvidence) {
+    const base64 = z
+      .string()
+      .min(1)
+      .refine(
+        (value) =>
+          value.length % 4 === 0 &&
+          /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value),
+        "invalid base64",
+      );
+    const RunnerVisualEvidenceEnvelope = z
+      .object({
+        work_item_id: z.string().trim().min(1),
+        conversation_id: z.string().trim().min(1),
+        phase_id: z.string().trim().min(1),
+        task_id: z.string().trim().min(1),
+        run_id: z.string().trim().min(1),
+        approved_mockup_version_id: z.string().trim().min(1),
+        repository_binding_id: z.string().trim().min(1),
+        verification_result_id: z.string().trim().min(1),
+        deployment_record_id: z.string().trim().min(1),
+        deployment_observation_id: z.string().trim().min(1),
+        commit_sha: z.string().regex(/^([a-f0-9]{40}|[a-f0-9]{64})$/),
+        capture_profile: V2ImplementationCaptureProfile,
+        verified_at: z.string().datetime(),
+        desktop_png_base64: base64,
+        mobile_png_base64: base64,
+      })
+      .strict();
+    app.post(
+      "/api/runner/v2/projects/:projectId/visual-evidence",
+      { bodyLimit: 30 * 1024 * 1024 },
+      async (request, reply) => {
+        const path = new URL(request.url, "http://placeholder.invalid").pathname;
+        const auth = authenticateRunnerContextRequest(
+          {
+            method: request.method,
+            path,
+            headers: request.headers as Record<string, string | string[] | undefined>,
+          },
+          (runnerId) => stores.runner(runnerId)?.public_key_pem ?? null,
+          now().getTime(),
+        );
+        if (!auth.ok) {
+          stores.audit(
+            `runner:${request.headers[RUNNER_CONTEXT_RUNNER_ID_HEADER] ?? "unknown"}`,
+            "phase6.visual_evidence.auth_failed",
+            auth.reason,
+            now(),
+          );
+          return reply.code(401).send({ error: "unauthorized" });
+        }
+        const { projectId } = request.params as { projectId: string };
+        try {
+          const body = RunnerVisualEvidenceEnvelope.parse(request.body);
+          const evidence = await phase6VisualEvidence.record({
+            project_id: projectId,
+            work_item_id: body.work_item_id,
+            conversation_id: body.conversation_id,
+            phase_id: body.phase_id,
+            task_id: body.task_id,
+            run_id: body.run_id,
+            approved_mockup_version_id: body.approved_mockup_version_id,
+            repository_binding_id: body.repository_binding_id,
+            verification_result_id: body.verification_result_id,
+            deployment_record_id: body.deployment_record_id,
+            deployment_observation_id: body.deployment_observation_id,
+            commit_sha: body.commit_sha,
+            capture_profile: body.capture_profile,
+            verified_at: body.verified_at,
+            runner_id: auth.runner_id,
+            desktop_png: Buffer.from(body.desktop_png_base64, "base64"),
+            mobile_png: Buffer.from(body.mobile_png_base64, "base64"),
+          });
+          stores.audit(
+            `runner:${auth.runner_id}`,
+            "phase6.visual_evidence.recorded",
+            `${projectId}:${evidence.id}`,
+            now(),
+          );
+          return reply.code(201).send(evidence);
+        } catch (error) {
+          if (error instanceof z.ZodError) {
+            return reply.code(400).send({ error: "bad_request", issues: error.issues });
+          }
+          if (error instanceof Phase6VisualEvidenceError) {
+            return reply
+              .code(error.code === "evidence_not_found" ? 404 : 409)
+              .send({ error: error.code, message: error.message });
+          }
+          if (error instanceof Phase6ArtifactError) {
+            return reply
+              .code(error.code === "project_quota" ? 409 : 400)
+              .send({ error: error.code, message: error.message });
+          }
+          throw error;
+        }
+      },
+    );
   }
 
   return {

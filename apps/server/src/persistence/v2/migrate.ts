@@ -279,6 +279,11 @@ export const CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_URL = new URL(
   "../../../drizzle/0040_conversation_mockups_dashboard.sql",
   import.meta.url,
 );
+export const PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME = "0041_phase6_runtime_delivery";
+export const PHASE6_RUNTIME_DELIVERY_MIGRATION_URL = new URL(
+  "../../../drizzle/0041_phase6_runtime_delivery.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -470,6 +475,10 @@ export async function loadConversationHumanSteeringMigrationSql(): Promise<strin
 
 export async function loadConversationMockupsDashboardMigrationSql(): Promise<string> {
   return readFile(CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_URL, "utf8");
+}
+
+export async function loadPhase6RuntimeDeliveryMigrationSql(): Promise<string> {
+  return readFile(PHASE6_RUNTIME_DELIVERY_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -743,6 +752,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME,
       sql: await loadConversationMockupsDashboardMigrationSql(),
+    },
+    {
+      name: PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
+      sql: await loadPhase6RuntimeDeliveryMigrationSql(),
     },
   ];
 }

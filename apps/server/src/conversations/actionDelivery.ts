@@ -664,7 +664,7 @@ export class ConversationActionDeliveryWorker {
   }
 }
 
-interface CheckpointAction {
+export interface CheckpointAction {
   intent_id: string;
   action_id: string;
   action_type: string;
@@ -677,6 +677,18 @@ interface CheckpointAction {
   target_run_id: string | null;
 }
 
+export interface ConversationPhase6ActionHandler {
+  checkpointAction(
+    tx: V2SqlExecutor,
+    action: CheckpointAction,
+    parameters: Record<string, unknown>,
+  ): Promise<{
+    state: "queued" | "applied";
+    resource_type: "project" | "task";
+    resource_id: string;
+  } | null>;
+}
+
 /**
  * Consumes every non-live Phase 5 action. Local state changes advance through
  * the same recorded/sent/acknowledged/applied evidence ladder; mockup creation
@@ -686,13 +698,19 @@ interface CheckpointAction {
 export class ConversationActionCheckpointWorker {
   private readonly workerId: string;
   private readonly contextBaseUrl: string;
+  private readonly phase6: ConversationPhase6ActionHandler | undefined;
 
   constructor(
     private readonly transactions: V2TransactionRunner,
-    options: { workerId?: string; contextBaseUrl?: string } = {},
+    options: {
+      workerId?: string;
+      contextBaseUrl?: string;
+      phase6?: ConversationPhase6ActionHandler;
+    } = {},
   ) {
     this.workerId = options.workerId ?? `conversation-checkpoint:${process.pid}`;
     this.contextBaseUrl = (options.contextBaseUrl ?? "http://127.0.0.1").replace(/\/+$/, "");
+    this.phase6 = options.phase6;
   }
 
   async tick(): Promise<{
@@ -787,7 +805,32 @@ export class ConversationActionCheckpointWorker {
           }
         }
 
-        if (claimed.action_type === "create_mockup") {
+        const phase6Result = this.phase6
+          ? await this.phase6.checkpointAction(tx, claimed, parameters)
+          : null;
+        if (phase6Result?.state === "queued") {
+          const queued = await tx.query<{ id: string }>(
+            `UPDATE conversation_action_delivery_intents
+              SET status='fallback_queued',lease_owner=NULL,lease_expires_at=NULL,
+                  last_error='phase6_mockup_render_queued',updated_at=now()
+            WHERE id=$1 AND status='leased' AND lease_owner=$2
+            RETURNING id`,
+            [claimed.intent_id, this.workerId],
+          );
+          if (!queued.rows[0]) throw new Error("mockup request lost its delivery lease");
+          return { action_id: claimed.action_id, state: "phase6_queued" as const };
+        }
+        if (phase6Result?.state === "applied") {
+          await this.finishCheckpoint(
+            tx,
+            claimed,
+            phase6Result.resource_type,
+            phase6Result.resource_id,
+          );
+          return { action_id: claimed.action_id, state: "applied" as const };
+        }
+
+        if (!this.phase6 && claimed.action_type === "create_mockup") {
           const requestId = `mockup-request:${claimed.action_id}`;
           await tx.query(
             `INSERT INTO conversation_mockup_requests (

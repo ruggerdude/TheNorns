@@ -5,7 +5,11 @@ import { ConversationService } from "../src/conversations/service.js";
 import { canonicalJson, canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
 import { assertCurrentRuntimeSchema } from "../src/persistence/postgresConnection.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
-import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
+import {
+  PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
+  type V2MigrationDatabase,
+  runCurrentV2Migrations,
+} from "../src/persistence/v2/migrate.js";
 
 const asMigrationDatabase = (database: PGlite): V2MigrationDatabase =>
   database as unknown as V2MigrationDatabase;
@@ -177,7 +181,7 @@ describe.sequential("conversation-first durable domain", () => {
     ).resolves.toBeUndefined();
     const replay = await runCurrentV2Migrations(asMigrationDatabase(pg));
     expect(replay.at(-1)).toMatchObject({
-      name: "0040_conversation_mockups_dashboard",
+      name: PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
       applied: false,
     });
   });

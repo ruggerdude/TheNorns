@@ -369,7 +369,14 @@ const needsAttention = z.array(
     .object({
       project_id: V2EntityId,
       key: V2NonEmptyString,
-      source_type: z.enum(["human_wait", "decision", "blocker", "mockup", "deployment"]),
+      source_type: z.enum([
+        "human_wait",
+        "decision",
+        "blocker",
+        "mockup",
+        "deployment",
+        "visual_evidence",
+      ]),
       source_id: V2EntityId,
       title: V2NonEmptyString,
       summary: V2NonEmptyString,
@@ -431,7 +438,7 @@ const recentVerification = z.array(
       run_id: V2EntityId,
       commit_sha: V2GitCommitSha,
       passed: z.boolean(),
-      evidence: z.array(V2EvidenceRef).min(1),
+      evidence: z.array(V2EvidenceRef),
       created_at: V2IsoDateTime,
     })
     .strict(),

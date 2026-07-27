@@ -5901,7 +5901,7 @@ export const artifactBlobs = pgTable(
     createdAt: createdAt(),
   },
   (table) => [
-    uniqueIndex("artifact_blobs_project_hash_unique").on(table.projectId, table.contentHash),
+    index("artifact_blobs_project_hash_idx").on(table.projectId, table.contentHash),
     foreignKey({
       name: "artifact_blobs_project_id_artifact_id_artifacts_project_id_id_fk",
       columns: [table.projectId, table.artifactId],
@@ -6722,6 +6722,168 @@ export const implementationVisualEvidence = pgTable(
   ],
 );
 
+export const implementationVisualEvidenceCollections = pgTable(
+  "implementation_visual_evidence_collections",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    phaseId: text("phase_id").notNull(),
+    taskId: text("task_id").notNull(),
+    runId: text("run_id").notNull(),
+    approvedMockupVersionId: text("approved_mockup_version_id").notNull(),
+    repositoryBindingId: text("repository_binding_id").notNull(),
+    verificationResultId: text("verification_result_id").notNull(),
+    deploymentRecordId: text("deployment_record_id").notNull(),
+    deploymentObservationId: text("deployment_observation_id").notNull(),
+    commitSha: text("commit_sha").notNull(),
+    status: text("status").notNull().default("queued"),
+    commandId: text("command_id")
+      .unique()
+      .references(() => commands.commandId, { onDelete: "restrict" }),
+    dispatchJobId: text("dispatch_job_id")
+      .unique()
+      .references(() => dispatchJobs.id, { onDelete: "restrict" }),
+    runnerId: text("runner_id"),
+    runnerGeneration: integer("runner_generation"),
+    evidenceId: text("evidence_id")
+      .unique()
+      .references(() => implementationVisualEvidence.id, { onDelete: "restrict" }),
+    attempts: integer("attempts").notNull().default(0),
+    availableAt: timestamp("available_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "string" }),
+    lastError: text("last_error"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    uniqueIndex("implementation_visual_evidence_collections_run_mockup_unique").on(
+      table.runId,
+      table.approvedMockupVersionId,
+    ),
+    index("implementation_visual_evidence_collections_worker_idx").on(
+      table.status,
+      table.availableAt,
+      table.leaseExpiresAt,
+      table.createdAt,
+      table.id,
+    ),
+    foreignKey({
+      name: "implementation_visual_evidence_collections_mockup_scope_fk",
+      columns: [
+        table.projectId,
+        table.workItemId,
+        table.conversationId,
+        table.approvedMockupVersionId,
+      ],
+      foreignColumns: [
+        conversationMockupVersions.projectId,
+        conversationMockupVersions.workItemId,
+        conversationMockupVersions.conversationId,
+        conversationMockupVersions.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "implementation_visual_evidence_collections_run_scope_fk",
+      columns: [table.projectId, table.phaseId, table.taskId, table.runId],
+      foreignColumns: [agentRuns.projectId, agentRuns.phaseId, agentRuns.taskId, agentRuns.id],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "implementation_visual_evidence_collections_verification_scope_fk",
+      columns: [
+        table.projectId,
+        table.phaseId,
+        table.taskId,
+        table.runId,
+        table.repositoryBindingId,
+        table.commitSha,
+        table.verificationResultId,
+      ],
+      foreignColumns: [
+        verificationResults.projectId,
+        verificationResults.phaseId,
+        verificationResults.taskId,
+        verificationResults.runId,
+        verificationResults.repositoryBindingId,
+        verificationResults.commitSha,
+        verificationResults.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "implementation_visual_evidence_collections_delivery_scope_fk",
+      columns: [
+        table.projectId,
+        table.phaseId,
+        table.taskId,
+        table.runId,
+        table.repositoryBindingId,
+        table.commitSha,
+        table.deploymentRecordId,
+      ],
+      foreignColumns: [
+        projectDeliveryRecords.projectId,
+        projectDeliveryRecords.phaseId,
+        projectDeliveryRecords.taskId,
+        projectDeliveryRecords.runId,
+        projectDeliveryRecords.repositoryBindingId,
+        projectDeliveryRecords.commitSha,
+        projectDeliveryRecords.id,
+      ],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "implementation_visual_evidence_collections_observation_scope_fk",
+      columns: [table.projectId, table.deploymentRecordId, table.deploymentObservationId],
+      foreignColumns: [
+        projectDeliveryObservations.projectId,
+        projectDeliveryObservations.deliveryRecordId,
+        projectDeliveryObservations.id,
+      ],
+    }).onDelete("restrict"),
+    check(
+      "implementation_visual_evidence_collections_commit_sha_check",
+      sql`${table.commitSha} ~ '^([a-f0-9]{40}|[a-f0-9]{64})$'`,
+    ),
+    check(
+      "implementation_visual_evidence_collections_status_check",
+      sql`${table.status} IN ('queued','leased','awaiting_runner','delivered','completed','failed')`,
+    ),
+    check(
+      "implementation_visual_evidence_collections_generation_check",
+      sql`${table.runnerGeneration} IS NULL OR ${table.runnerGeneration}>=0`,
+    ),
+    check("implementation_visual_evidence_collections_attempts_check", sql`${table.attempts}>=0`),
+    check(
+      "implementation_visual_evidence_collections_shape_check",
+      sql`(
+        (${table.status} IN ('queued','leased') AND ${table.commandId} IS NULL
+          AND ${table.dispatchJobId} IS NULL AND ${table.runnerId} IS NULL
+          AND ${table.runnerGeneration} IS NULL)
+        OR (${table.status} IN ('awaiting_runner','delivered')
+          AND ${table.commandId} IS NOT NULL AND ${table.dispatchJobId} IS NOT NULL
+          AND ${table.runnerId} IS NOT NULL AND ${table.runnerGeneration} IS NOT NULL)
+        OR (${table.status}='completed' AND ${table.commandId} IS NOT NULL
+          AND ${table.dispatchJobId} IS NOT NULL AND ${table.runnerId} IS NOT NULL
+          AND ${table.runnerGeneration} IS NOT NULL AND ${table.evidenceId} IS NOT NULL
+          AND ${table.completedAt} IS NOT NULL)
+        OR (${table.status}='failed' AND ${table.lastError} IS NOT NULL
+          AND ${table.completedAt} IS NOT NULL)
+      )`,
+    ),
+    check(
+      "implementation_visual_evidence_collections_lease_shape_check",
+      sql`(${table.status}='leased' AND ${table.leaseOwner} IS NOT NULL
+        AND ${table.leaseExpiresAt} IS NOT NULL)
+        OR (${table.status}<>'leased' AND ${table.leaseOwner} IS NULL
+          AND ${table.leaseExpiresAt} IS NULL)`,
+    ),
+  ],
+);
+
 export const implementationVisualEvidenceArtifacts = pgTable(
   "implementation_visual_evidence_artifacts",
   {
@@ -7057,6 +7219,7 @@ export const conversationDomainSchema = {
   projectDeliveryRecords,
   projectDeliveryObservations,
   implementationVisualEvidence,
+  implementationVisualEvidenceCollections,
   implementationVisualEvidenceArtifacts,
   conversationActionCheckpointContexts,
   conversationPauseCheckpoints,

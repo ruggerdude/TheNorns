@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
 import {
   type CommandEnvelopeT,
+  type V2DispatchCommandT,
   V2_HUMAN_WAIT_CHANNEL_VERSION,
   V2_HUMAN_WAIT_INSTRUCTION_HASH,
 } from "@norns/contracts";
@@ -36,6 +37,7 @@ import {
   sqlV2BudgetSweepRepositoryFactory,
   sqlV2BudgetTransactionFactory,
 } from "../src/persistence/v2/sqlRepositories.js";
+import { Phase6MockupService, Phase6MockupWorker } from "../src/phase6/index.js";
 
 const projectId = "project-phase5-wait";
 const phaseId = "phase-phase5-wait";
@@ -55,12 +57,7 @@ interface Scheduled {
   dispatch_job_id: string;
   command_id: string;
   budget_reservation_id: string;
-  command: {
-    runtime: string;
-    target_branch: string;
-    command_id: string;
-    run_id: string;
-  };
+  command: V2DispatchCommandT;
 }
 
 describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
@@ -343,6 +340,103 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
     } finally {
       await pg.exec("SET session_replication_role='origin'");
     }
+  }
+
+  async function seedApprovedMockupSupplementDispatchScope() {
+    const contentHash = createHash("sha256").update("{}").digest("hex");
+    const packageRef = {
+      artifact_id: "document-phase5-package",
+      content_hash: contentHash,
+      byte_size: 2,
+      storage_ref:
+        "https://norns.example.test/api/v2/execution/task-context/document-phase5-package",
+    };
+    const supplementRef = {
+      artifact_id: "document-phase5-approved-mockup",
+      content_hash: contentHash,
+      byte_size: 2,
+      storage_ref:
+        "https://norns.example.test/api/v2/execution/task-context/document-phase5-approved-mockup",
+    };
+    await pg.exec("SET session_replication_role='replica'");
+    try {
+      await pg.query(
+        `INSERT INTO task_context_blobs (sha256,content)
+         VALUES ($1,convert_to('{}','UTF8'))`,
+        [contentHash],
+      );
+      await pg.query(
+        `INSERT INTO task_context_documents (
+           id,project_id,section,sha256,byte_size,media_type
+         ) VALUES
+           ($1,$3,'task_package',$4,2,'application/json'),
+           ($2,$3,'approved_mockup',$4,2,'application/json')`,
+        [packageRef.artifact_id, supplementRef.artifact_id, projectId, contentHash],
+      );
+      await pg.query(
+        `INSERT INTO conversation_task_packages (
+           id,project_id,work_item_id,conversation_id,handoff_id,
+           approved_plan_version_id,module_id,package,canonical_package,content_hash
+         ) VALUES (
+           'package-phase5-supplement',$1,$2,$3,'handoff-phase5-supplement',
+           'plan-phase5-supplement','module-phase5-supplement','{}'::jsonb,'{}',$4
+         )`,
+        [projectId, workItemId, conversationId, contentHash],
+      );
+      await pg.query(
+        `INSERT INTO conversation_task_package_bindings (
+           package_id,project_id,work_item_id,conversation_id,handoff_id,
+           phase_id,task_id,content_hash,context_document_id
+         ) VALUES (
+           'package-phase5-supplement',$1,$2,$3,'handoff-phase5-supplement',
+           $4,$5,$6,$7
+         )`,
+        [
+          projectId,
+          workItemId,
+          conversationId,
+          phaseId,
+          taskId,
+          contentHash,
+          packageRef.artifact_id,
+        ],
+      );
+      await pg.query(
+        `INSERT INTO conversation_task_package_supplements (
+           id,project_id,work_item_id,conversation_id,task_id,base_package_id,ordinal,
+           source_mockup_version_id,approval_decision_id,manifest_artifact_id,
+           manifest_artifact_hash,supplement,canonical_supplement,content_hash,
+           context_document_id,context_byte_size,context_media_type
+         ) VALUES (
+           'supplement-phase5-approved-mockup',$1,$2,$3,$4,
+           'package-phase5-supplement',1,'mockup-version-phase5-supplement',
+           'mockup-decision-phase5-supplement','mockup-manifest-phase5-supplement',
+           $5,'{}'::jsonb,'{}',$5,$6,2,'application/json'
+         )`,
+        [projectId, workItemId, conversationId, taskId, contentHash, supplementRef.artifact_id],
+      );
+      await pg.query(
+        `UPDATE phases SET planning_run_id='planning-phase5-supplement'
+          WHERE id=$1`,
+        [phaseId],
+      );
+      await pg.query(
+        `INSERT INTO conversation_kickoff_intents (
+           id,project_id,work_item_id,source_conversation_id,
+           execution_conversation_id,action_id,approved_plan_version_id,
+           plan_review_id,planning_run_id,handoff_id,decided_by_user_id,status
+         ) VALUES (
+           'kickoff-phase5-supplement',$1,$2,$3,$3,
+           'action-phase5-supplement','plan-phase5-supplement',
+           'review-phase5-supplement','planning-phase5-supplement',
+           'handoff-phase5-supplement',$4,'pending'
+         )`,
+        [projectId, workItemId, conversationId, ownerId],
+      );
+    } finally {
+      await pg.exec("SET session_replication_role='origin'");
+    }
+    return { contentHash, packageRef, supplementRef };
   }
 
   async function confirmCheckpointAction(
@@ -894,6 +988,105 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
       commands: 2,
       jobs: 2,
     });
+  });
+
+  it("binds the exact approved mockup supplement to ordinary and continuation dispatch receipts", async () => {
+    const { contentHash, packageRef, supplementRef } =
+      await seedApprovedMockupSupplementDispatchScope();
+    const scheduled = await schedule({
+      context_refs: [
+        {
+          artifact_id: "phase5-root-context",
+          content_hash: "d".repeat(64),
+          byte_size: 128,
+          storage_ref: "relay://phase5-root-context",
+        },
+        packageRef,
+        supplementRef,
+      ],
+    });
+    expect(scheduled.command).toMatchObject({
+      task_package_id: "package-phase5-supplement",
+      task_package_content_hash: contentHash,
+      task_package_context_ref: packageRef,
+      task_package_supplements: [
+        {
+          supplement_id: "supplement-phase5-approved-mockup",
+          task_id: taskId,
+          base_package_id: "package-phase5-supplement",
+          ordinal: 1,
+          content_hash: contentHash,
+          context_ref: supplementRef,
+        },
+      ],
+    });
+    const originalReceipt = await pg.query<{
+      command_id: string;
+      supplement_id: string;
+      context_ref: unknown;
+    }>(
+      `SELECT command_id,supplement_id,context_ref
+         FROM conversation_task_package_supplement_dispatch_receipts
+        WHERE command_id=$1`,
+      [scheduled.command_id],
+    );
+    expect(originalReceipt.rows).toEqual([
+      {
+        command_id: scheduled.command_id,
+        supplement_id: "supplement-phase5-approved-mockup",
+        context_ref: supplementRef,
+      },
+    ]);
+
+    await deliver(scheduled);
+    const processor = new Phase4EventProcessor(transactions);
+    await runningEvidence(scheduled, processor);
+    await publish(scheduled, processor);
+    await processor.apply(envelope(scheduled, 4, waitRequest(scheduled)) as never);
+    const waitId = "human-wait:runner-event:runner-phase5:7:4";
+    await answerWait(waitId, "supplement-continuation");
+    const continuation = await new HumanWaitContinuationWorker(
+      new PGliteTransactionRunner(pg),
+      async () => ({
+        kind: "local",
+        runner_id: "runner-phase5",
+        runner_generation: 8,
+      }),
+      { owner: "phase5-supplement-continuation-worker" },
+    ).tick();
+    expect(continuation?.command.task_package_supplements).toEqual(
+      scheduled.command.task_package_supplements,
+    );
+    if (!continuation) throw new Error("missing supplement-bearing continuation");
+    const receipts = await pg.query<{
+      command_id: string;
+      run_id: string;
+      supplement_id: string;
+      content_hash: string;
+      context_ref: unknown;
+    }>(
+      `SELECT command_id,run_id,supplement_id,content_hash,context_ref
+         FROM conversation_task_package_supplement_dispatch_receipts
+        WHERE run_id=$1
+        ORDER BY command_id`,
+      [scheduled.run_id],
+    );
+    expect(receipts.rows).toEqual([
+      {
+        command_id: continuation.command.command_id,
+        run_id: scheduled.run_id,
+        supplement_id: "supplement-phase5-approved-mockup",
+        content_hash: contentHash,
+        context_ref: supplementRef,
+      },
+      {
+        command_id: scheduled.command_id,
+        run_id: scheduled.run_id,
+        supplement_id: "supplement-phase5-approved-mockup",
+        content_hash: contentHash,
+        context_ref: supplementRef,
+      },
+    ]);
   });
 
   it("binds a fallback direction into a human-wait continuation and applies its exact context receipt", async () => {
@@ -2907,7 +3100,7 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
     });
   });
 
-  it("queues one immutable mockup request for Phase 6 without claiming it was rendered", async () => {
+  it("queues then restart-safely renders one immutable mockup with visible dual-viewport evidence", async () => {
     await seedTaskBinding();
     const { proposal } = await confirmCheckpointAction("mockup-request", {
       idempotency_key: "proposal-mockup-request",
@@ -2960,6 +3153,278 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
       intent_status: "fallback_queued",
       events: ["confirmed", "recorded"],
     });
+
+    const restartedTransactions = new PGliteTransactionRunner(pg);
+    const mockups = new Phase6MockupService(restartedTransactions);
+    const renderer = new Phase6MockupWorker(restartedTransactions, mockups, {
+      workerId: "restarted-mockup-renderer",
+    });
+    const rendered = await renderer.tick();
+    if (rendered?.status !== "rendered") {
+      const failure = await pg.query<{ last_error: string | null }>(
+        "SELECT last_error FROM conversation_mockup_requests WHERE id=$1",
+        [`mockup-request:${proposal.action.id}`],
+      );
+      throw new Error(failure.rows[0]?.last_error ?? "mockup render did not expose an error");
+    }
+    expect(rendered).toEqual({
+      request_id: `mockup-request:${proposal.action.id}`,
+      version_id: `mockup-version:mockup-request:${proposal.action.id}`,
+      status: "rendered",
+    });
+    if (!rendered?.version_id) throw new Error("mockup render did not return its exact version");
+
+    const version = await mockups.version(projectId, conversationId, rendered.version_id);
+    expect(version).toMatchObject({
+      id: rendered.version_id,
+      task_id: taskId,
+      version: 1,
+      status: "candidate",
+      brief: "Show deployment status, open decisions, and budget.",
+      target: "responsive",
+    });
+    expect(version.screenshots.map((screenshot) => screenshot.viewport)).toEqual([
+      "desktop",
+      "mobile",
+    ]);
+    expect(version.interaction_notes).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("responsive"),
+        expect.stringContaining("Show deployment status, open decisions, and budget."),
+      ]),
+    );
+
+    const durable = await pg.query<{
+      artifacts: number;
+      messages: number;
+      message_parts: unknown;
+      action_status: string;
+      intent_status: string;
+      events: string[];
+    }>(
+      `SELECT
+         (SELECT count(*)::int
+            FROM conversation_mockup_version_artifacts artifact
+           WHERE artifact.mockup_version_id=$2) AS artifacts,
+         (SELECT count(*)::int FROM work_messages message
+           WHERE message.conversation_id=$3
+             AND message.parts @> $4::jsonb) AS messages,
+         (SELECT parts FROM work_messages message
+           WHERE message.conversation_id=$3
+             AND message.parts @> $4::jsonb LIMIT 1) AS message_parts,
+         action.status AS action_status,intent.status AS intent_status,
+         array_agg(event.status ORDER BY event.sequence) AS events
+       FROM conversation_actions action
+       JOIN conversation_action_delivery_intents intent ON intent.action_id=action.id
+       JOIN conversation_action_delivery_events event ON event.action_id=action.id
+       WHERE action.id=$1
+       GROUP BY action.status,intent.status`,
+      [
+        proposal.action.id,
+        rendered.version_id,
+        conversationId,
+        JSON.stringify([{ type: "mockup", mockup_version_id: rendered.version_id }]),
+      ],
+    );
+    expect(durable.rows[0]).toMatchObject({
+      artifacts: 2,
+      messages: 1,
+      action_status: "applied",
+      intent_status: "applied",
+      events: ["confirmed", "recorded", "sent", "agent_acknowledged", "applied"],
+    });
+    expect(durable.rows[0]?.message_parts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "text",
+          text: "Mockup version 1 is ready for explicit review.",
+        }),
+        { type: "mockup", mockup_version_id: rendered.version_id },
+      ]),
+    );
+    await expect(
+      new Phase6MockupWorker(new PGliteTransactionRunner(pg), mockups).tick(),
+    ).resolves.toBeNull();
+
+    await pg.exec("SET session_replication_role='replica'");
+    try {
+      await pg.query(
+        `INSERT INTO conversation_task_packages (
+           id,project_id,work_item_id,conversation_id,handoff_id,
+           approved_plan_version_id,module_id,package,canonical_package,content_hash
+         ) VALUES (
+           'package-phase5',$1,$2,$3,'handoff-phase5',
+           'plan-phase5-seeded','module-phase5','{}'::jsonb,'{}',
+           encode(sha256(convert_to('{}','UTF8')),'hex')
+         )
+         ON CONFLICT(id) DO NOTHING`,
+        [projectId, workItemId, conversationId],
+      );
+    } finally {
+      await pg.exec("SET session_replication_role='origin'");
+    }
+
+    const staleApproval = await confirmCheckpointAction("mockup-stale-approval", {
+      idempotency_key: "proposal-mockup-stale-approval",
+      message: "Approve the stale mockup manifest.",
+      action_type: "approve_mockup",
+      payload: {
+        parameters: {
+          mockup_version_id: version.id,
+          task_id: taskId,
+          manifest_artifact_id: version.manifest.artifact_id,
+          manifest_artifact_hash: "f".repeat(64),
+        },
+      },
+    });
+    await expect(
+      new ConversationActionCheckpointWorker(new PGliteTransactionRunner(pg), {
+        workerId: "stale-mockup-approval-worker",
+        phase6: mockups,
+      }).tick(),
+    ).resolves.toEqual({
+      action_id: staleApproval.proposal.action.id,
+      state: "failed",
+    });
+
+    const approval = await confirmCheckpointAction("mockup-approval", {
+      idempotency_key: "proposal-mockup-approval",
+      message: "Approve the exact rendered mockup.",
+      action_type: "approve_mockup",
+      payload: {
+        parameters: {
+          mockup_version_id: version.id,
+          task_id: taskId,
+          manifest_artifact_id: version.manifest.artifact_id,
+          manifest_artifact_hash: version.manifest.content_hash,
+        },
+      },
+    });
+    const revision = await confirmCheckpointAction("mockup-revision-race", {
+      idempotency_key: "proposal-mockup-revision-race",
+      message: "Revise the same exact rendered mockup.",
+      action_type: "revise_mockup",
+      payload: {
+        parameters: {
+          mockup_version_id: version.id,
+          manifest_artifact_id: version.manifest.artifact_id,
+          manifest_artifact_hash: version.manifest.content_hash,
+          direction: "Emphasize the failed deployment state.",
+        },
+      },
+    });
+    const [approvalResult, revisionResult] = await Promise.all([
+      new ConversationActionCheckpointWorker(new PGliteTransactionRunner(pg), {
+        workerId: "mockup-approval-race-a",
+        phase6: mockups,
+      }).tick(),
+      new ConversationActionCheckpointWorker(new PGliteTransactionRunner(pg), {
+        workerId: "mockup-approval-race-b",
+        phase6: mockups,
+      }).tick(),
+    ]);
+    const raceStates = [approvalResult?.state, revisionResult?.state];
+    expect(raceStates.filter((state) => state === "failed")).toHaveLength(1);
+    expect(
+      raceStates.filter((state) => state === "applied" || state === "phase6_queued"),
+    ).toHaveLength(1);
+    const racedDecision = await pg.query<{
+      decisions: number;
+      decision: string;
+      stale_status: string;
+      stale_failure: string | null;
+      approval_status: string;
+      revision_status: string;
+    }>(
+      `SELECT
+         (SELECT count(*)::int FROM conversation_mockup_decisions
+           WHERE mockup_version_id=$1) AS decisions,
+         (SELECT decision FROM conversation_mockup_decisions
+           WHERE mockup_version_id=$1) AS decision,
+         stale.status AS stale_status,stale.failure_code AS stale_failure,
+         approval.status AS approval_status,revision.status AS revision_status
+       FROM conversation_actions stale
+       CROSS JOIN conversation_actions approval
+       CROSS JOIN conversation_actions revision
+       WHERE stale.id=$2 AND approval.id=$3 AND revision.id=$4`,
+      [
+        version.id,
+        staleApproval.proposal.action.id,
+        approval.proposal.action.id,
+        revision.proposal.action.id,
+      ],
+    );
+    expect(racedDecision.rows[0]).toMatchObject({
+      decisions: 1,
+      stale_status: "failed",
+    });
+    expect(racedDecision.rows[0]?.stale_failure).toContain("manifest race");
+
+    let approvedVersionId = version.id;
+    if (racedDecision.rows[0]?.decision === "revision_requested") {
+      expect(racedDecision.rows[0]).toMatchObject({
+        approval_status: "failed",
+        revision_status: "recorded",
+      });
+      const revised = await renderer.tick();
+      expect(revised).toMatchObject({ status: "rendered" });
+      if (!revised?.version_id) throw new Error("revision race winner did not render a successor");
+      approvedVersionId = revised.version_id;
+      const revisedVersion = await mockups.version(projectId, conversationId, revised.version_id);
+      expect(revisedVersion).toMatchObject({
+        version: 2,
+        supersedes_mockup_version_id: version.id,
+      });
+      expect(revisedVersion.interaction_notes).toEqual(
+        expect.arrayContaining([expect.stringContaining("Emphasize the failed deployment state.")]),
+      );
+      const revisedApproval = await confirmCheckpointAction("revised-mockup-approval", {
+        idempotency_key: "proposal-revised-mockup-approval",
+        message: "Approve the exact revised mockup.",
+        action_type: "approve_mockup",
+        payload: {
+          parameters: {
+            mockup_version_id: revisedVersion.id,
+            task_id: taskId,
+            manifest_artifact_id: revisedVersion.manifest.artifact_id,
+            manifest_artifact_hash: revisedVersion.manifest.content_hash,
+          },
+        },
+      });
+      const revisedApprovalResult = await new ConversationActionCheckpointWorker(
+        new PGliteTransactionRunner(pg),
+        {
+          workerId: "revised-mockup-approval-worker",
+          phase6: mockups,
+        },
+      ).tick();
+      if (revisedApprovalResult?.state !== "applied") {
+        const failure = await pg.query<{ failure_code: string | null }>(
+          "SELECT failure_code FROM conversation_actions WHERE id=$1",
+          [revisedApproval.proposal.action.id],
+        );
+        throw new Error(failure.rows[0]?.failure_code ?? "revised mockup approval failed");
+      }
+      expect(revisedApprovalResult).toEqual({
+        action_id: revisedApproval.proposal.action.id,
+        state: "applied",
+      });
+    } else {
+      expect(racedDecision.rows[0]).toMatchObject({
+        decision: "approved",
+        approval_status: "applied",
+        revision_status: "failed",
+      });
+    }
+    const supplements = await pg.query<{ supplements: number; decisions: number }>(
+      `SELECT
+         (SELECT count(*)::int FROM conversation_task_package_supplements
+           WHERE source_mockup_version_id=$1) AS supplements,
+         (SELECT count(*)::int FROM conversation_mockup_decisions
+           WHERE mockup_version_id=$1 AND decision='approved') AS decisions`,
+      [approvedVersionId],
+    );
+    expect(supplements.rows[0]).toEqual({ supplements: 1, decisions: 1 });
   });
 
   it("inherits deterministic PM update defaults and persists project overrides across restart", async () => {

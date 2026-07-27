@@ -76,6 +76,14 @@ export {
 } from "./modelGateway.js";
 export { CodexRuntime } from "./runtimes/codex.js";
 export {
+  RUNNER_VISUAL_EVIDENCE_MANIFEST,
+  RunnerVisualEvidenceUploader,
+  readRunnerVisualEvidence,
+  type RunnerVisualEvidence,
+  type RunnerVisualEvidenceDeliveryScope,
+  type RunnerVisualEvidenceScreenshot,
+} from "./visualEvidence.js";
+export {
   ApprovedRepositoryRegistry,
   CommandPolicyVerifier,
   GitWorktreeManager,

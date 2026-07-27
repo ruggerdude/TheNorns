@@ -1,11 +1,21 @@
+import { createHash } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { NodePgTransactionRunner } from "../src/persistence/v2/database.js";
 import {
-  CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME,
+  PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
   type V2MigrationDatabase,
   runCurrentV2Migrations,
 } from "../src/persistence/v2/migrate.js";
+import {
+  Phase6ArtifactService,
+  Phase6DashboardService,
+  Phase6DeploymentService,
+  Phase6MockupService,
+} from "../src/phase6/index.js";
+import { buildServer } from "../src/server.js";
+import { RelayStores } from "../src/stores.js";
+import { UserStore } from "../src/users/store.js";
 
 const databaseUrl = process.env.V2_POSTGRES_TEST_URL;
 const postgresDescribe = databaseUrl ? describe.sequential : describe.skip;
@@ -14,6 +24,7 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
   let administrationPool: Pool;
   let applicationPool: Pool;
   let schemaName: string;
+  let transactions: NodePgTransactionRunner;
 
   const seedDelivery = async (id: string): Promise<void> => {
     const client = await applicationPool.connect();
@@ -101,6 +112,7 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
     const privilegedRunner = new NodePgTransactionRunner(applicationPool, {
       mode: "privileged",
     });
+    transactions = privilegedRunner;
     const migrationDatabase: V2MigrationDatabase = {
       query: async <TRow = Record<string, unknown>>(sql: string, params?: unknown[]) => {
         const result = await applicationPool.query(sql, params);
@@ -119,7 +131,7 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
     `);
     const applied = await runCurrentV2Migrations(migrationDatabase);
     expect(applied.at(-1)).toMatchObject({
-      name: CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME,
+      name: PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
       applied: true,
     });
     await applicationPool.query(`
@@ -146,6 +158,37 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
         'Phase 6 PostgreSQL','{}'::jsonb,'main','verification','healthy',
         'human','phase6-pg-user'
       );
+      INSERT INTO projects (
+        id,name,status,assignment_policy_ref,verification_policy_ref,budget_policy_ref,
+        owner_user_id
+      ) VALUES (
+        'phase6-pg-other-project','Phase 6 Other PostgreSQL','active',
+        'assignment','verification','budget','phase6-pg-user'
+      );
+      INSERT INTO repository_bindings (
+        id,project_id,binding_type,status,runner_id,workspace_id,repository_id,
+        repository_display_name,granted_permissions,default_branch,
+        verification_policy_ref,repository_health,created_by_actor_type,created_by_actor_id
+      ) VALUES (
+        'phase6-pg-other-binding','phase6-pg-other-project','local_runner','connected',
+        'phase6-pg-other-runner','phase6-pg-other-workspace','phase6-pg-other-repository',
+        'Phase 6 Other PostgreSQL','{}'::jsonb,'main','verification','healthy',
+        'human','phase6-pg-user'
+      );
+      INSERT INTO work_items (
+        id,project_id,created_by_user_id,title,objective
+      ) VALUES
+        ('phase6-pg-work','phase6-pg-project','phase6-pg-user',
+         'Artifact acceptance','Verify exact evidence storage'),
+        ('phase6-pg-other-work','phase6-pg-other-project','phase6-pg-user',
+         'Other artifact acceptance','Verify project isolation');
+      INSERT INTO work_conversations (
+        id,project_id,work_item_id,created_by_user_id,kind,provider,model
+      ) VALUES
+        ('phase6-pg-conversation','phase6-pg-project','phase6-pg-work',
+         'phase6-pg-user','task','openai','gpt-5.6'),
+        ('phase6-pg-other-conversation','phase6-pg-other-project','phase6-pg-other-work',
+         'phase6-pg-user','task','openai','gpt-5.6');
     `);
   }, 45_000);
 
@@ -156,7 +199,7 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
     await administrationPool.end();
   });
 
-  it("replays 0040 by checksum and exposes its exact catalog and runtime grants", async () => {
+  it("replays Phase 6 migrations by checksum and exposes their exact catalog and grants", async () => {
     const privilegedRunner = new NodePgTransactionRunner(applicationPool, {
       mode: "privileged",
     });
@@ -171,7 +214,7 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
     };
     const replay = await runCurrentV2Migrations(migrationDatabase);
     expect(replay.at(-1)).toMatchObject({
-      name: CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME,
+      name: PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
       applied: false,
     });
 
@@ -274,6 +317,276 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
       public_execute: false,
     });
   }, 45_000);
+
+  it("deduplicates project bytes across semantic purposes at the exact quota boundary", async () => {
+    const bytes = Buffer.from('{"phase":6}', "utf8");
+    const contentHash = createHash("sha256").update(bytes).digest("hex");
+    const artifacts = new Phase6ArtifactService(transactions, bytes.byteLength);
+    const put = (purpose: "mockup_manifest" | "visual_comparison", idempotencyKey: string) =>
+      artifacts.put({
+        metadata: {
+          project_id: "phase6-pg-project",
+          work_item_id: "phase6-pg-work",
+          conversation_id: "phase6-pg-conversation",
+          media_type: "application/json",
+          purpose,
+          content_hash: contentHash,
+          byte_size: bytes.byteLength,
+          idempotency_key: idempotencyKey,
+        },
+        content: bytes,
+        label: purpose,
+        provenance: { actor_type: "system", actor_id: "phase6-acceptance" },
+      });
+
+    const manifest = await put("mockup_manifest", "artifact-first");
+    expect(manifest.quota).toMatchObject({
+      used_bytes_before: 0,
+      requested_bytes: bytes.byteLength,
+      allowed: true,
+    });
+    const comparison = await put("visual_comparison", "artifact-second");
+    expect(comparison.id).not.toBe(manifest.id);
+    expect(comparison.quota).toMatchObject({
+      used_bytes_before: bytes.byteLength,
+      requested_bytes: 0,
+      allowed: true,
+    });
+    const replay = await put("mockup_manifest", "artifact-replay");
+    expect(replay.id).toBe(manifest.id);
+    expect(replay.quota.requested_bytes).toBe(0);
+
+    const stored = await applicationPool.query<{
+      references: number;
+      unique_bytes: number;
+    }>(
+      `SELECT count(*)::int AS references,
+              sum(byte_size) FILTER (
+                WHERE artifact_id IN (
+                  SELECT min(artifact_id) FROM artifact_blobs
+                   WHERE project_id='phase6-pg-project' GROUP BY content_hash
+                )
+              )::int AS unique_bytes
+         FROM artifact_blobs
+        WHERE project_id='phase6-pg-project'`,
+    );
+    expect(stored.rows[0]).toEqual({
+      references: 2,
+      unique_bytes: bytes.byteLength,
+    });
+
+    const differentBytes = Buffer.from('{"phase":7}', "utf8");
+    await expect(
+      artifacts.put({
+        metadata: {
+          project_id: "phase6-pg-project",
+          work_item_id: "phase6-pg-work",
+          conversation_id: "phase6-pg-conversation",
+          media_type: "application/json",
+          purpose: "deployment_evidence",
+          content_hash: createHash("sha256").update(differentBytes).digest("hex"),
+          byte_size: differentBytes.byteLength,
+          idempotency_key: "artifact-over-quota",
+        },
+        content: differentBytes,
+        label: "over quota",
+        provenance: { actor_type: "system", actor_id: "phase6-acceptance" },
+      }),
+    ).rejects.toMatchObject({ code: "project_quota" });
+    await expect(artifacts.content("phase6-pg-other-project", manifest.id)).rejects.toMatchObject({
+      code: "artifact_not_found",
+    });
+  });
+
+  it("replays exact deployment identities and keeps manual observation authorship distinct", async () => {
+    const deployments = new Phase6DeploymentService(transactions);
+    const createInput = {
+      project_id: "phase6-pg-project",
+      phase_id: null,
+      task_id: null,
+      run_id: null,
+      repository_binding_id: "phase6-pg-binding",
+      environment: "production",
+      service: "manual-authorship",
+      commit_sha: "b".repeat(40),
+      provider_id: "railway",
+      provider_deployment_id: "manual-authorship-1",
+      started_at: "2026-07-27T13:00:00.000Z",
+      source_id: "phase6-pg-user",
+    };
+    const created = await deployments.create(createInput);
+    expect(await deployments.create(createInput)).toEqual(created);
+    await expect(
+      deployments.create({ ...createInput, commit_sha: "c".repeat(40) }),
+    ).rejects.toMatchObject({ code: "deployment_conflict" });
+
+    const observationInput = {
+      project_id: "phase6-pg-project",
+      delivery_record_id: created.id,
+      expected_sequence: 2,
+      status: "deploying" as const,
+      public_url: null,
+      health_url: null,
+      health_status_code: null,
+      evidence: null,
+      observed_at: "2026-07-27T13:01:00.000Z",
+      idempotency_key: "manual-observation-1",
+    };
+    const first = await deployments.recordHumanObservation(observationInput, "phase6-pg-user");
+    expect(first).toMatchObject({
+      replayed: false,
+      observation: {
+        source_type: "human",
+        source_id: "phase6-pg-user",
+        provider_event_id: null,
+      },
+    });
+    expect(
+      await deployments.recordHumanObservation(observationInput, "phase6-pg-user"),
+    ).toMatchObject({ replayed: true, observation: { id: first.observation.id } });
+    await expect(
+      deployments.recordHumanObservation(
+        { ...observationInput, status: "failed" },
+        "phase6-pg-user",
+      ),
+    ).rejects.toMatchObject({ code: "observation_conflict" });
+    await expect(
+      deployments.observations("phase6-pg-other-project", created.id),
+    ).rejects.toMatchObject({ code: "deployment_not_found" });
+  });
+
+  it("reports unknown budget truthfully while keeping empty authoritative sections available", async () => {
+    const dashboard = await new Phase6DashboardService(
+      transactions,
+      new Phase6MockupService(transactions),
+      new Phase6DeploymentService(transactions),
+      () => new Date("2026-07-27T13:30:00.000Z"),
+    ).read("phase6-pg-other-project");
+    expect(dashboard.budget).toMatchObject({
+      availability: "unavailable",
+      source: "usage_ledger_and_approved_plan",
+      reason_code: "no_authoritative_budget_source",
+      retryable: false,
+      data: null,
+    });
+    expect(dashboard.recent_verification).toEqual({
+      availability: "available",
+      source: "verification_results",
+      observed_at: "2026-07-27T13:30:00.000Z",
+      data: [],
+    });
+    expect(dashboard.recent_deployments).toMatchObject({
+      availability: "available",
+      data: [],
+    });
+    expect(dashboard.conversations).toMatchObject({
+      availability: "available",
+      data: [expect.objectContaining({ id: "phase6-pg-other-conversation" })],
+    });
+  });
+
+  it("authenticates provider callbacks independently of project membership and fences ownership", async () => {
+    const deployments = new Phase6DeploymentService(transactions);
+    const created = await deployments.create({
+      project_id: "phase6-pg-project",
+      phase_id: null,
+      task_id: null,
+      run_id: null,
+      repository_binding_id: "phase6-pg-binding",
+      environment: "production",
+      service: "provider-auth",
+      commit_sha: "d".repeat(40),
+      provider_id: "railway",
+      provider_deployment_id: "provider-auth-1",
+      started_at: "2026-07-27T14:00:00.000Z",
+      source_id: "phase6-pg-user",
+    });
+    const server = await buildServer({
+      stores: new RelayStores(),
+      users: new UserStore(),
+      execution: { transactions },
+      integrationEnvironment: {
+        NORNS_DEPLOYMENT_PROVIDER_TOKENS_JSON: JSON.stringify({
+          railway: "railway-provider-token",
+          attacker: "attacker-provider-token",
+        }),
+      },
+    });
+    const payload = {
+      project_id: "phase6-pg-project",
+      delivery_record_id: created.id,
+      expected_sequence: 2,
+      status: "deploying",
+      provider_id: "railway",
+      provider_event_id: "railway-event-1",
+      public_url: null,
+      health_url: null,
+      health_status_code: null,
+      evidence: null,
+      observed_at: "2026-07-27T14:01:00.000Z",
+      idempotency_key: "provider-observation-1",
+    };
+    try {
+      expect(
+        (
+          await server.app.inject({
+            method: "POST",
+            url: "/api/integrations/deployments/observations",
+            payload,
+          })
+        ).statusCode,
+      ).toBe(401);
+      expect(
+        (
+          await server.app.inject({
+            method: "POST",
+            url: "/api/integrations/deployments/observations",
+            headers: { authorization: "Bearer wrong-token" },
+            payload,
+          })
+        ).statusCode,
+      ).toBe(401);
+      const forged = await server.app.inject({
+        method: "POST",
+        url: "/api/integrations/deployments/observations",
+        headers: { authorization: "Bearer attacker-provider-token" },
+        payload: {
+          ...payload,
+          provider_id: "attacker",
+          provider_event_id: "attacker-event-1",
+          idempotency_key: "attacker-observation-1",
+        },
+      });
+      expect(forged.statusCode).toBe(409);
+      expect(forged.json()).toMatchObject({ error: "observation_conflict" });
+
+      const accepted = await server.app.inject({
+        method: "POST",
+        url: "/api/integrations/deployments/observations",
+        headers: { authorization: "Bearer railway-provider-token" },
+        payload,
+      });
+      expect(accepted.statusCode).toBe(201);
+      expect(accepted.json()).toMatchObject({
+        replayed: false,
+        observation: {
+          source_type: "provider",
+          source_id: "railway",
+          provider_event_id: "railway-event-1",
+        },
+      });
+      const replay = await server.app.inject({
+        method: "POST",
+        url: "/api/integrations/deployments/observations",
+        headers: { authorization: "Bearer railway-provider-token" },
+        payload,
+      });
+      expect(replay.statusCode).toBe(200);
+      expect(replay.json()).toMatchObject({ replayed: true });
+    } finally {
+      await server.app.close();
+    }
+  });
 
   it("enforces append-only observations and immutable deployment identity", async () => {
     await seedDelivery("phase6-pg-immutable");

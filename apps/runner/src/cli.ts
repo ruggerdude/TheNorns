@@ -30,6 +30,7 @@ import {
   V2RunnerExecutor,
 } from "./v2Execution.js";
 import { runnerVerificationPolicies } from "./verificationPolicies.js";
+import { RunnerVisualEvidenceUploader, readRunnerVisualEvidence } from "./visualEvidence.js";
 import { WorkspaceRegistry } from "./workspaceRegistry.js";
 
 interface Args {
@@ -337,6 +338,42 @@ async function main(): Promise<void> {
           });
         }
         return (await execution.executor.execute(command, emit, capabilities)).outcome;
+      },
+      collectVisualEvidence: async (command) => {
+        if (!execution.repositories) {
+          throw new Error("visual evidence repository registry is not initialized");
+        }
+        if (ephemeral) {
+          const workspace = process.env.GITHUB_WORKSPACE;
+          if (!workspace) throw new Error("GITHUB_WORKSPACE is not set in this job");
+          execution.repositories.register({
+            repository_binding_id: command.repository_binding_id,
+            repository_path: workspace,
+          });
+        }
+        const evidence = await readRunnerVisualEvidence({
+          worktree_path: execution.repositories.resolve(command.repository_binding_id),
+          expected_commit: command.commit_sha,
+        });
+        if (evidence.approved_mockup_version_id !== command.approved_mockup_version_id) {
+          throw new Error("visual evidence manifest names a different approved mockup");
+        }
+        await new RunnerVisualEvidenceUploader(server, {
+          runnerId,
+          sign: (payload) => daemon.sign(payload),
+        }).upload(evidence, {
+          project_id: command.project_id,
+          work_item_id: command.work_item_id,
+          conversation_id: command.conversation_id,
+          phase_id: command.phase_id,
+          task_id: command.task_id,
+          run_id: command.run_id,
+          repository_binding_id: command.repository_binding_id,
+          verification_result_id: command.verification_result_id,
+          deployment_record_id: command.deployment_record_id,
+          deployment_observation_id: command.deployment_observation_id,
+          verified_at: new Date().toISOString(),
+        });
       },
     });
     if (ephemeral) {

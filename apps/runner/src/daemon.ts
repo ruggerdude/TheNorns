@@ -34,6 +34,9 @@ export interface DaemonOptions {
     emit: (event: EventPayloadT) => void,
     capabilities: { knowledge_transport: boolean },
   ) => Promise<"succeeded" | "waiting_for_human" | "failed" | "cancelled">;
+  collectVisualEvidence?: (
+    command: Extract<CommandEnvelopeT["payload"], { kind: "collect_visual_evidence" }>,
+  ) => Promise<void>;
   /** Optional runner-local folder registry.  Paths never enter relay frames. */
   workspaces?: WorkspaceRegistry;
   /**
@@ -47,9 +50,9 @@ export interface DaemonOptions {
 
 export class RunnerDaemon {
   private readonly opts: Required<
-    Omit<DaemonOptions, "executeV2" | "workspaces" | "onRunSettled">
+    Omit<DaemonOptions, "executeV2" | "collectVisualEvidence" | "workspaces" | "onRunSettled">
   > &
-    Pick<DaemonOptions, "executeV2" | "workspaces" | "onRunSettled">;
+    Pick<DaemonOptions, "executeV2" | "collectVisualEvidence" | "workspaces" | "onRunSettled">;
   /** ONBOARDING O4: launch_run commands awaiting a terminal ack. */
   private readonly launchCommands = new Set<string>();
   private settledReported = false;
@@ -452,7 +455,12 @@ export class RunnerDaemon {
     // ONBOARDING O4: registered before any ack so that a replayed, already
     // terminal launch_run still settles an ephemeral host rather than leaving
     // it connected until its job times out.
-    if (command.payload.kind === "launch_run") this.launchCommands.add(command.command_id);
+    if (
+      command.payload.kind === "launch_run" ||
+      command.payload.kind === "collect_visual_evidence"
+    ) {
+      this.launchCommands.add(command.command_id);
+    }
     const recorded = state.executionState(command.command_id);
     const meta = { correlation: command.correlation_id, causation: command.command_id };
     if (recorded) {
@@ -536,6 +544,34 @@ export class RunnerDaemon {
             );
             state.recordExecution(command.command_id, "failed");
             this.ack(command.command_id, "failed", meta);
+          });
+        return;
+      case "collect_visual_evidence":
+        if (!this.opts.collectVisualEvidence) {
+          state.recordExecution(command.command_id, "rejected");
+          this.ack(
+            command.command_id,
+            "rejected",
+            meta,
+            "this runner cannot collect visual evidence",
+          );
+          return;
+        }
+        executing();
+        void this.opts
+          .collectVisualEvidence(payload)
+          .then(() => {
+            state.recordExecution(command.command_id, "succeeded");
+            this.ack(command.command_id, "succeeded", meta);
+          })
+          .catch((error) => {
+            state.recordExecution(command.command_id, "failed");
+            this.ack(
+              command.command_id,
+              "failed",
+              meta,
+              error instanceof Error ? error.message : "visual evidence collection failed",
+            );
           });
         return;
       // EXECUTION E11 — every control now asks the live V2 run first.

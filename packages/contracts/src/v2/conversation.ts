@@ -741,7 +741,7 @@ export const V2ProjectArtifactQuotaReceipt = z
     project_id: V2EntityId,
     limit_bytes: z.number().int().safe().positive(),
     used_bytes_before: z.number().int().safe().nonnegative(),
-    requested_bytes: z.number().int().safe().positive(),
+    requested_bytes: z.number().int().safe().nonnegative(),
     allowed: z.boolean(),
   })
   .strict()
