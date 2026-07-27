@@ -345,7 +345,7 @@ if (databaseUrl) {
         enrollment: new ActionsEnrollmentService(
           actionsRepository,
           (runnerId, publicKeyPem, generation) =>
-            stores.enrollRunnerAtGeneration(runnerId, publicKeyPem, generation),
+            stores.restoreDurableRunnerIdentity(runnerId, publicKeyPem, generation),
         ),
       };
     }

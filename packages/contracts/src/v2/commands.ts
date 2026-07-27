@@ -3,10 +3,13 @@ import { CodexReasoningEffort } from "../models.js";
 import {
   V2Actor,
   V2EntityId,
+  V2GitCommitSha,
   V2IsoDateTime,
   V2NonEmptyString,
   V2PositiveVersion,
   V2Sha256Hex,
+  V2_HUMAN_WAIT_CHANNEL_VERSION,
+  V2_HUMAN_WAIT_INSTRUCTION_HASH,
 } from "./common.js";
 import { V2DebateStoppingPolicy } from "./debate.js";
 import { type V2StrategyVersionT, fingerprintV2StrategyImmutableContent } from "./domain.js";
@@ -476,6 +479,37 @@ export const V2DispatchCommand = z
     task_package_id: V2EntityId.optional(),
     task_package_content_hash: V2Sha256Hex.optional(),
     task_package_context_ref: V2ContentAddressedReference.optional(),
+    human_wait_channel: z
+      .object({
+        version: z.literal(V2_HUMAN_WAIT_CHANNEL_VERSION),
+        instruction_hash: z.literal(V2_HUMAN_WAIT_INSTRUCTION_HASH),
+      })
+      .strict()
+      .optional(),
+    /**
+     * E11 continuation receipt. A human answer resumes the same logical run and
+     * budget reservation from an exact remotely published checkpoint. Session
+     * resumption is allowed only when portability was explicitly established;
+     * transcript/context replay remains the universal fallback.
+     */
+    continuation: z
+      .object({
+        wait_id: V2EntityId,
+        root_command_id: V2EntityId,
+        resume_commit_sha: V2GitCommitSha,
+        resume_branch: V2NonEmptyString,
+        question_hash: V2Sha256Hex,
+        answer_receipt_hash: V2Sha256Hex,
+        compact_summary_hash: V2Sha256Hex,
+        context_hash: V2Sha256Hex,
+        task_package_hash: V2Sha256Hex.nullable(),
+        replay_context_ref: V2ContentAddressedReference,
+        resume_session_id: V2NonEmptyString.optional(),
+        session_portability: z.enum(["transcript_only", "same_runner", "cross_runner_verified"]),
+        session_portability_evidence: V2NonEmptyString.nullable(),
+      })
+      .strict()
+      .optional(),
     budget_reservation_id: V2EntityId,
     max_charge_usd: z.number().nonnegative(),
     max_input_tokens: z.number().int().nonnegative(),
@@ -573,6 +607,107 @@ export const V2DispatchCommand = z
         code: z.ZodIssueCode.custom,
         path: ["task_package_context_ref"],
         message: "task package hash must identify one exact dispatched context reference",
+      });
+    }
+    if (
+      command.continuation?.resume_session_id !== undefined &&
+      command.continuation.session_portability === "transcript_only"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["continuation", "resume_session_id"],
+        message:
+          "provider session resumption requires audited same-runner or cross-runner portability",
+      });
+    }
+    const resumableContinuation =
+      command.continuation !== undefined &&
+      command.continuation.session_portability !== "transcript_only";
+    if (
+      command.continuation !== undefined &&
+      resumableContinuation !== (command.continuation.resume_session_id !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["continuation", "resume_session_id"],
+        message: "audited resumable continuations require a provider session ID",
+      });
+    }
+    if (
+      command.continuation !== undefined &&
+      (command.continuation.session_portability === "transcript_only") !==
+        (command.continuation.session_portability_evidence === null)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["continuation", "session_portability_evidence"],
+        message: "session portability evidence is required exactly for resumable sessions",
+      });
+    }
+    if (
+      command.continuation !== undefined &&
+      command.continuation.task_package_hash !== (command.task_package_content_hash ?? null)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["continuation", "task_package_hash"],
+        message: "continuation must preserve the root command task package binding",
+      });
+    }
+    if (
+      command.continuation !== undefined &&
+      (command.expected_revision !== command.continuation.resume_commit_sha ||
+        command.target_branch !== command.continuation.resume_branch)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["continuation", "resume_commit_sha"],
+        message: "continuation must prepare the exact saved commit on the exact saved branch",
+      });
+    }
+    if (
+      command.continuation !== undefined &&
+      !command.context_refs.some(
+        (reference) =>
+          reference.artifact_id === command.continuation?.replay_context_ref.artifact_id &&
+          reference.content_hash === command.continuation.replay_context_ref.content_hash &&
+          reference.byte_size === command.continuation.replay_context_ref.byte_size &&
+          reference.storage_ref === command.continuation.replay_context_ref.storage_ref,
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["continuation", "replay_context_ref"],
+        message: "continuation replay receipt must identify one exact dispatched context reference",
+      });
+    }
+    if (
+      command.continuation !== undefined &&
+      (() => {
+        const finalReference = command.context_refs.at(-1);
+        const replayReference = command.continuation.replay_context_ref;
+        return (
+          finalReference?.artifact_id !== replayReference.artifact_id ||
+          finalReference.content_hash !== replayReference.content_hash ||
+          finalReference.byte_size !== replayReference.byte_size ||
+          finalReference.storage_ref !== replayReference.storage_ref
+        );
+      })()
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["continuation", "replay_context_ref"],
+        message: "continuation replay receipt must be the final dispatched context reference",
+      });
+    }
+    if (
+      command.continuation !== undefined &&
+      command.causation_id !== command.continuation.root_command_id
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["causation_id"],
+        message: "continuation causation_id must equal the immutable root command ID",
       });
     }
   });

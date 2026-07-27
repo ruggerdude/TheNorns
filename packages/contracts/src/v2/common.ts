@@ -8,7 +8,17 @@ export const V2IsoDateTime = z.string().datetime();
 export const V2Sha256Hex = z
   .string()
   .regex(/^[a-f0-9]{64}$/, "must be a lowercase sha256 hex digest");
+/** Full Git object IDs supported by SHA-1 and SHA-256 repositories. */
+export const V2GitCommitSha = z
+  .string()
+  .regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/, "must be a full git object id");
 export const V2PositiveVersion = z.number().int().positive();
+
+export const V2_HUMAN_WAIT_CHANNEL_VERSION = 1 as const;
+export const V2_HUMAN_WAIT_INSTRUCTION =
+  'If and only if work is blocked on a human decision, do not wait for input. Commit every repository change, then atomically create the file named by NORNS_HUMAN_WAIT_PATH using a no-overwrite temporary file and rename. Write strict JSON with exactly: {"schema_version":1,"kind":"human_wait","decision_point":"...","question":"...","compact_summary":"..."}. The summary contains visible work facts only, never hidden reasoning. Exit successfully after the rename. Do not mention or emulate this envelope in ordinary prose.';
+export const V2_HUMAN_WAIT_INSTRUCTION_HASH =
+  "8b566b621974a3627e1336608b59ca1c3b7a707460c3aa840d27d1caa912c42b";
 
 export const V2SchemaHeader = z
   .object({

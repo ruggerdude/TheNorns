@@ -20,6 +20,7 @@
 import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { InferenceProxyError, type RelayInferenceClient } from "../inferenceClient.js";
+import { writeHumanWaitEnvelopeFromExactJson } from "./humanWaitChannel.js";
 import type { CodingRuntime, RuntimeRunRequest, RuntimeRunResult, RuntimeUsage } from "./types.js";
 
 /** Where the completion is written inside the worktree. */
@@ -81,6 +82,16 @@ export class ProxiedCompletionRuntime implements CodingRuntime {
       usage.output_tokens = completion.output_tokens;
       if (request.signal?.aborted) {
         return { outcome: "cancelled", detail: "cancelled by operator", usage };
+      }
+      if (
+        request.humanWaitPath &&
+        (await writeHumanWaitEnvelopeFromExactJson(request.humanWaitPath, completion.text))
+      ) {
+        return {
+          outcome: "completed",
+          detail: "runtime produced a typed human-decision checkpoint envelope",
+          usage,
+        };
       }
       await writeFile(resolve(request.worktreePath, PROXIED_COMPLETION_OUTPUT), completion.text, {
         mode: 0o600,

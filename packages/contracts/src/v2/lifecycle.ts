@@ -43,6 +43,7 @@ export const V2AgentRunState = z.enum([
   "created",
   "dispatched",
   "running",
+  "waiting_for_human",
   "verifying",
   "succeeded",
   "failed",
@@ -56,8 +57,9 @@ export const V2_AGENT_RUN_STATES = V2AgentRunState.options;
 export const V2_AGENT_RUN_TRANSITIONS: Record<V2AgentRunStateT, readonly V2AgentRunStateT[]> = {
   created: ["dispatched", "cancelled", "expired"],
   dispatched: ["running", "failed", "cancelled", "expired"],
-  running: ["verifying", "failed", "cancelled"],
-  verifying: ["succeeded", "failed", "cancelled"],
+  running: ["waiting_for_human", "verifying", "failed", "cancelled"],
+  waiting_for_human: ["dispatched", "cancelled", "expired"],
+  verifying: ["waiting_for_human", "succeeded", "failed", "cancelled"],
   succeeded: [],
   failed: [],
   cancelled: [],
@@ -250,6 +252,9 @@ export function projectV2TaskStateFromRun(
     case "dispatched":
     case "running":
       targetState = "in_progress";
+      break;
+    case "waiting_for_human":
+      targetState = "blocked";
       break;
     case "verifying":
       targetState = "verifying";

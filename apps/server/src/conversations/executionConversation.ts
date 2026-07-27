@@ -1,14 +1,26 @@
 import {
+  V2ConversationActionDeliveryEvent,
+  type V2ConversationActionDeliveryEventT,
   V2ConversationHandoff,
   type V2ConversationHandoffT,
   V2ConversationPlanningExcerptReceipt,
   type V2ConversationPlanningExcerptReceiptT,
+  V2ConversationPmUpdate,
+  V2ConversationPmUpdateSettings,
+  type V2ConversationPmUpdateSettingsT,
+  type V2ConversationPmUpdateT,
   V2ConversationSummary,
   type V2ConversationSummaryT,
   V2ConversationUsage,
   type V2ConversationUsageT,
   V2CreateConversationPlanningExcerptInput,
   type V2CreateConversationPlanningExcerptInputT,
+  V2HumanWait,
+  V2HumanWaitAnswer,
+  type V2HumanWaitAnswerT,
+  V2HumanWaitContinuation,
+  type V2HumanWaitContinuationT,
+  type V2HumanWaitT,
   V2WorkMessage,
   type V2WorkMessageT,
 } from "@norns/contracts";
@@ -57,6 +69,14 @@ export interface ExecutionConversationDetail {
   latest_summary: V2ConversationSummaryT | null;
   planning_excerpt_receipts: V2ConversationPlanningExcerptReceiptT[];
   usage: V2ConversationUsageT;
+  human_waits: Array<{
+    wait: V2HumanWaitT;
+    answer: V2HumanWaitAnswerT | null;
+    continuation: V2HumanWaitContinuationT | null;
+  }>;
+  action_delivery_events: V2ConversationActionDeliveryEventT[];
+  pm_updates: V2ConversationPmUpdateT[];
+  pm_update_settings: V2ConversationPmUpdateSettingsT;
 }
 
 function json<T>(value: unknown): T {
@@ -124,7 +144,16 @@ export class ExecutionConversationService {
     return this.transactions.transaction(async (tx) => {
       await this.assertAccess(tx, projectId, userId);
       await this.assertConversation(tx, projectId, workItemId, conversationId, false);
-      const [handoffResult, summaryResult, excerptsResult, usage] = await Promise.all([
+      const [
+        handoffResult,
+        summaryResult,
+        excerptsResult,
+        usage,
+        waitsResult,
+        deliveryResult,
+        updatesResult,
+        pmSettings,
+      ] = await Promise.all([
         tx.query<{
           schema_version: 2;
           id: string;
@@ -183,6 +212,49 @@ export class ExecutionConversationService {
           [projectId, workItemId, conversationId],
         ),
         this.usageInTransaction(tx, projectId, conversationId),
+        tx.query<Record<string, unknown>>(
+          `SELECT wait.*,answer.schema_version AS answer_schema_version,
+                  answer.id AS answer_id,answer.answered_by_user_id,
+                  answer.action_id AS answer_action_id,
+                  answer.idempotency_key AS answer_idempotency_key,
+                  answer.request_fingerprint AS answer_request_fingerprint,
+                  answer.answer,answer.rationale,answer.answer_receipt_hash,
+                  answer.created_at AS answer_created_at,
+                  continuation.schema_version AS continuation_schema_version,
+                  continuation.id AS continuation_id,
+                  continuation.answer_id AS continuation_answer_id,
+                  continuation.resume_command_id,continuation.resume_job_id,
+                  continuation.saved_commit_sha,
+                  continuation.context_hash AS continuation_context_hash,
+                  continuation.answer_receipt_hash AS continuation_answer_receipt_hash,
+                  continuation.replay_context_ref,continuation.runner_id,
+                  continuation.runner_generation,continuation.delivery_receipt_hash,
+                  continuation.status AS continuation_status,
+                  continuation.created_at AS continuation_created_at,
+                  continuation.updated_at AS continuation_updated_at
+             FROM human_waits wait
+             LEFT JOIN human_wait_answers answer ON answer.wait_id=wait.id
+             LEFT JOIN human_wait_continuations continuation ON continuation.wait_id=wait.id
+            WHERE wait.project_id=$1 AND wait.work_item_id=$2 AND wait.conversation_id=$3
+            ORDER BY wait.created_at,wait.id`,
+          [projectId, workItemId, conversationId],
+        ),
+        tx.query<Record<string, unknown>>(
+          `SELECT *
+             FROM conversation_action_delivery_events
+            WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3
+            ORDER BY occurred_at,id`,
+          [projectId, workItemId, conversationId],
+        ),
+        tx.query<Record<string, unknown>>(
+          `SELECT schema_version,id,project_id,work_item_id,conversation_id,
+                  transition_sequence,state_hash,status,content,created_at
+             FROM conversation_pm_updates
+            WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3
+            ORDER BY transition_sequence`,
+          [projectId, workItemId, conversationId],
+        ),
+        this.pmSettingsInTransaction(tx, projectId),
       ]);
       const handoffRow = handoffResult.rows[0];
       const summaryRow = summaryResult.rows[0];
@@ -217,7 +289,254 @@ export class ExecutionConversationService {
         latest_summary,
         planning_excerpt_receipts: excerptsResult.rows.map(toExcerpt),
         usage,
+        human_waits: waitsResult.rows.map((row) => ({
+          wait: this.humanWait(row),
+          answer: row.answer_id
+            ? V2HumanWaitAnswer.parse({
+                schema_version: Number(row.answer_schema_version),
+                id: row.answer_id,
+                wait_id: row.id,
+                project_id: row.project_id,
+                answered_by_user_id: row.answered_by_user_id,
+                action_id: row.answer_action_id,
+                idempotency_key: row.answer_idempotency_key,
+                request_fingerprint: row.answer_request_fingerprint,
+                answer: row.answer,
+                rationale: row.rationale,
+                answer_receipt_hash: row.answer_receipt_hash,
+                created_at: iso(row.answer_created_at as Date | string),
+              })
+            : null,
+          continuation: row.continuation_id
+            ? V2HumanWaitContinuation.parse({
+                schema_version: Number(row.continuation_schema_version),
+                id: row.continuation_id,
+                wait_id: row.id,
+                answer_id: row.continuation_answer_id,
+                root_run_id: row.root_run_id,
+                resume_command_id: row.resume_command_id,
+                resume_job_id: row.resume_job_id,
+                budget_reservation_id: row.budget_reservation_id,
+                saved_commit_sha: row.saved_commit_sha,
+                context_hash: row.continuation_context_hash,
+                answer_receipt_hash: row.continuation_answer_receipt_hash,
+                replay_context_ref: json(row.replay_context_ref),
+                runner_id: row.runner_id,
+                runner_generation:
+                  row.runner_generation === null ? null : Number(row.runner_generation),
+                delivery_receipt_hash: row.delivery_receipt_hash,
+                status: row.continuation_status,
+                created_at: iso(row.continuation_created_at as Date | string),
+                updated_at: iso(row.continuation_updated_at as Date | string),
+              })
+            : null,
+        })),
+        action_delivery_events: deliveryResult.rows.map((row) =>
+          V2ConversationActionDeliveryEvent.parse({
+            ...row,
+            schema_version: Number(row.schema_version),
+            sequence: Number(row.sequence),
+            receipt: json(row.receipt),
+            occurred_at: iso(row.occurred_at as Date | string),
+          }),
+        ),
+        pm_updates: updatesResult.rows.map((row) =>
+          V2ConversationPmUpdate.parse({
+            ...row,
+            schema_version: Number(row.schema_version),
+            transition_sequence: Number(row.transition_sequence),
+            created_at: iso(row.created_at as Date | string),
+          }),
+        ),
+        pm_update_settings: pmSettings,
       };
+    });
+  }
+
+  async pmSettings(userId: string, projectId: string): Promise<V2ConversationPmUpdateSettingsT> {
+    return this.transactions.transaction(async (tx) => {
+      await this.assertAccess(tx, projectId, userId);
+      return this.pmSettingsInTransaction(tx, projectId);
+    });
+  }
+
+  async updatePmSettings(
+    userId: string,
+    projectId: string,
+    input: {
+      update_interval_seconds?: number | null;
+      content_level?: "concise" | "standard" | "detailed" | null;
+    },
+  ): Promise<V2ConversationPmUpdateSettingsT> {
+    return this.transactions.transaction(async (tx) => {
+      await this.assertAccess(tx, projectId, userId);
+      const existing = (
+        await tx.query<{
+          update_interval_seconds: number | null;
+          content_level: "concise" | "standard" | "detailed" | null;
+        }>(
+          `SELECT update_interval_seconds,content_level
+             FROM conversation_pm_update_project_settings
+            WHERE project_id=$1 FOR UPDATE`,
+          [projectId],
+        )
+      ).rows[0];
+      const interval =
+        input.update_interval_seconds === undefined
+          ? (existing?.update_interval_seconds ?? null)
+          : input.update_interval_seconds;
+      const content =
+        input.content_level === undefined ? (existing?.content_level ?? null) : input.content_level;
+      const changed =
+        (existing?.update_interval_seconds ?? null) !== interval ||
+        (existing?.content_level ?? null) !== content;
+      if (changed && interval === null && content === null) {
+        await tx.query("DELETE FROM conversation_pm_update_project_settings WHERE project_id=$1", [
+          projectId,
+        ]);
+      } else if (changed) {
+        await tx.query(
+          `INSERT INTO conversation_pm_update_project_settings (
+             project_id,update_interval_seconds,content_level,updated_by_user_id
+           ) VALUES ($1,$2,$3,$4)
+           ON CONFLICT(project_id) DO UPDATE SET
+             update_interval_seconds=EXCLUDED.update_interval_seconds,
+             content_level=EXCLUDED.content_level,
+             updated_by_user_id=EXCLUDED.updated_by_user_id,
+             updated_at=now()`,
+          [projectId, interval, content, userId],
+        );
+      }
+      if (changed) {
+        const effective = (
+          await tx.query<{ seconds: string | number }>(
+            `SELECT COALESCE(project.update_interval_seconds,global.update_interval_seconds)
+                      AS seconds
+               FROM conversation_pm_update_global_settings global
+               LEFT JOIN conversation_pm_update_project_settings project
+                 ON project.project_id=$1
+              WHERE global.singleton=true`,
+            [projectId],
+          )
+        ).rows[0];
+        await tx.query(
+          `UPDATE conversation_pm_update_cursors cursor
+              SET next_due_at=now()+($2::text || ' seconds')::interval,updated_at=now()
+             FROM work_conversations conversation
+            WHERE cursor.conversation_id=conversation.id
+              AND conversation.project_id=$1`,
+          [projectId, Number(effective?.seconds ?? 300)],
+        );
+        await tx.query(
+          `INSERT INTO audit_events (
+             audit_id,audit_type,project_id,actor_type,actor_id,outcome,severity,
+             correlation_id,occurred_at,targets,summary,details,redaction_applied
+           ) VALUES (
+             $1,'conversation.pm_settings_changed',$2,'human',$3,'succeeded','info',
+             $4,now(),$5::jsonb,$6,$7::jsonb,false
+           )`,
+          [
+            newId("audit"),
+            projectId,
+            userId,
+            `conversation-pm-settings:${projectId}`,
+            JSON.stringify([{ entity_type: "project", entity_id: projectId }]),
+            "Conversation PM update settings changed",
+            JSON.stringify({
+              prior: existing ?? {
+                update_interval_seconds: null,
+                content_level: null,
+              },
+              next: {
+                update_interval_seconds: interval,
+                content_level: content,
+              },
+            }),
+          ],
+        );
+      }
+      return this.pmSettingsInTransaction(tx, projectId);
+    });
+  }
+
+  private async pmSettingsInTransaction(
+    tx: V2SqlExecutor,
+    projectId: string,
+  ): Promise<V2ConversationPmUpdateSettingsT> {
+    const row = (
+      await tx.query<{
+        global_interval: number | string;
+        global_content: "concise" | "standard" | "detailed";
+        project_interval: number | string | null;
+        project_content: "concise" | "standard" | "detailed" | null;
+        project_updated_at: Date | string | null;
+      }>(
+        `SELECT global.update_interval_seconds AS global_interval,
+                global.content_level AS global_content,
+                project.update_interval_seconds AS project_interval,
+                project.content_level AS project_content,
+                project.updated_at AS project_updated_at
+           FROM conversation_pm_update_global_settings global
+           LEFT JOIN conversation_pm_update_project_settings project
+             ON project.project_id=$1
+          WHERE global.singleton=true`,
+        [projectId],
+      )
+    ).rows[0];
+    if (!row) throw new Error("global conversation PM update settings are missing");
+    return V2ConversationPmUpdateSettings.parse({
+      project_id: projectId,
+      update_interval_seconds: Number(row.project_interval ?? row.global_interval),
+      content_level: row.project_content ?? row.global_content,
+      interval_inherited: row.project_interval === null,
+      content_level_inherited: row.project_content === null,
+      updated_at: row.project_updated_at ? iso(row.project_updated_at) : null,
+    });
+  }
+
+  private humanWait(row: Record<string, unknown>): V2HumanWaitT {
+    return V2HumanWait.parse({
+      schema_version: Number(row.schema_version),
+      id: row.id,
+      project_id: row.project_id,
+      work_item_id: row.work_item_id,
+      conversation_id: row.conversation_id,
+      phase_id: row.phase_id,
+      task_id: row.task_id,
+      source_run_id: row.source_run_id,
+      source_event_id: row.source_event_id,
+      decision_point: row.decision_point,
+      question: row.question,
+      question_hash: row.question_hash,
+      published: {
+        branch: row.published_branch,
+        commit_sha: row.published_commit_sha,
+        remote: row.published_remote,
+      },
+      runtime: {
+        runtime_id: row.runtime_id,
+        session_id: row.runtime_session_id,
+        session_portability: row.session_portability,
+        session_portability_evidence: row.session_portability_evidence,
+      },
+      context: {
+        root_command_id: row.source_command_id,
+        ask_channel_version: Number(row.ask_channel_version),
+        ask_instruction_hash: row.ask_instruction_hash,
+        root_context_refs: json(row.root_context_refs),
+        context_hash: row.context_hash,
+        task_package_hash: row.task_package_hash,
+        compact_summary: row.compact_summary,
+        compact_summary_hash: row.compact_summary_hash,
+      },
+      budget: { reservation_id: row.budget_reservation_id, root_run_id: row.root_run_id },
+      status: row.status,
+      version: Number(row.version),
+      expires_at: iso(row.expires_at as Date | string),
+      answered_at: row.answered_at ? iso(row.answered_at as Date | string) : null,
+      resumed_at: row.resumed_at ? iso(row.resumed_at as Date | string) : null,
+      created_at: iso(row.created_at as Date | string),
+      updated_at: iso(row.updated_at as Date | string),
     });
   }
 

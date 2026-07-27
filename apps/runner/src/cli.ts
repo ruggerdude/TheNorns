@@ -184,12 +184,18 @@ function createV2Executor(
           new CodexRuntime({
             model,
             ...(context.reasoningEffort ? { reasoningEffort: context.reasoningEffort } : {}),
+            ...(context.resumeSessionId ? { resumeThreadId: context.resumeSessionId } : {}),
             ...gateway(context.runId),
           }),
       ],
       [
         "claude-code",
-        (model: string, context) => new ClaudeCodeRuntime({ model, ...gateway(context.runId) }),
+        (model: string, context) =>
+          new ClaudeCodeRuntime({
+            model,
+            ...(context.resumeSessionId ? { resumeSessionId: context.resumeSessionId } : {}),
+            ...gateway(context.runId),
+          }),
       ],
       // EXECUTION E3 — credential-free. Gets its model access from the relay,
       // where the call is authorized against the run and charged to the

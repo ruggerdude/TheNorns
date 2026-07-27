@@ -167,6 +167,12 @@ describe.sequential("Phase 6 autonomous multi-agent coordination", () => {
     runnerId: string,
     taskId: string,
   ) {
+    const commandReceipt = await pg.query<{ correlation_id: string }>(
+      "SELECT correlation_id FROM commands WHERE command_id=$1",
+      [run.command_id],
+    );
+    const commandCorrelationId = commandReceipt.rows[0]?.correlation_id;
+    if (!commandCorrelationId) throw new Error("scheduled command lost its correlation receipt");
     const claim = await dispatch.claim(`dispatcher:${runnerId}`, 30_000);
     expect(claim?.job_id).toBe(run.dispatch_job_id);
     await dispatch.markDelivered(
@@ -186,7 +192,7 @@ describe.sequential("Phase 6 autonomous multi-agent coordination", () => {
         event_seq,
         runner_id: runnerId,
         generation: 1,
-        correlation_id: `runner:${run.run_id}`,
+        correlation_id: commandCorrelationId,
         causation_id: run.command_id,
         occurred_at: new Date(Date.UTC(2026, 6, 16, 21, 1, event_seq)).toISOString(),
         payload,

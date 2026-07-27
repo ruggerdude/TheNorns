@@ -1,12 +1,19 @@
 import type {
+  V2ConversationActionDeliveryEventT,
   V2ConversationActionT,
   V2ConversationPlanActionEffectT,
   V2ConversationPlanReviewT,
+  V2ConversationPmUpdateSettingsT,
+  V2ConversationPmUpdateT,
+  V2HumanWaitAnswerT,
+  V2HumanWaitContinuationT,
+  V2HumanWaitT,
   V2WorkConversationT,
   V2WorkItemT,
   V2WorkMessageT,
   V2WorkPlanVersionT,
 } from "@norns/contracts";
+import { V2_HUMAN_WAIT_INSTRUCTION_HASH } from "@norns/contracts";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
@@ -61,6 +68,65 @@ function executionConversation(overrides: Partial<V2WorkConversationT> = {}): V2
     provider: "openai",
     model: "gpt-5.6-sol",
     next_message_sequence: 2,
+    ...overrides,
+  };
+}
+
+function humanWait(overrides: Partial<V2HumanWaitT> = {}): V2HumanWaitT {
+  const hash = "a".repeat(64);
+  const execution = executionConversation();
+  return {
+    schema_version: 2,
+    id: "wait-1",
+    project_id: projectId,
+    work_item_id: workItemId,
+    conversation_id: execution.id,
+    phase_id: "phase-1",
+    task_id: "task-1",
+    source_run_id: "run-1",
+    source_event_id: "event-ask-1",
+    decision_point: "Choose the deployment window",
+    question: "Should the migration run before the deployment?",
+    question_hash: hash,
+    published: {
+      branch: "phase5/wait-1",
+      commit_sha: hash,
+      remote: "origin",
+    },
+    runtime: {
+      runtime_id: "runtime-1",
+      session_id: null,
+      session_portability: "transcript_only",
+      session_portability_evidence: null,
+    },
+    context: {
+      root_command_id: "root-command-1",
+      ask_channel_version: 1,
+      ask_instruction_hash: V2_HUMAN_WAIT_INSTRUCTION_HASH,
+      root_context_refs: [
+        {
+          artifact_id: "context-artifact-1",
+          content_hash: hash,
+          byte_size: 64,
+          storage_ref: "artifacts/context-1.json",
+        },
+      ],
+      context_hash: hash,
+      task_package_hash: hash,
+      compact_summary: "The migration is ready and waiting on its deployment window.",
+      compact_summary_hash: hash,
+    },
+    budget: {
+      reservation_id: "reservation-1",
+      root_run_id: "root-run-1",
+    },
+    status: "awaiting_human",
+    version: 1,
+    expires_at: "2026-07-28T12:00:00.000Z",
+    answered_at: null,
+    resumed_at: null,
+    created_at: now,
+    updated_at: now,
     ...overrides,
   };
 }
@@ -199,6 +265,7 @@ function planAction(overrides: Partial<V2ConversationActionT> = {}): V2Conversat
     actor: { actor_type: "agent", actor_id: "project-pm" },
     source_message_id: "message-action",
     action_type: "send_plan_to_qc",
+    interaction_class: overrides.interaction_class ?? "approval",
     payload: {
       parameters: {
         plan_version_id: "plan-version-1",
@@ -313,6 +380,14 @@ function detailResponse(
     latestSummary?: unknown;
     usage?: unknown;
     excerptReceipts?: unknown[];
+    humanWaits?: Array<{
+      wait: V2HumanWaitT;
+      answer: V2HumanWaitAnswerT | null;
+      continuation: V2HumanWaitContinuationT | null;
+    }>;
+    deliveryEvents?: V2ConversationActionDeliveryEventT[];
+    pmUpdates?: V2ConversationPmUpdateT[];
+    pmUpdateSettings?: V2ConversationPmUpdateSettingsT | null;
   } = {},
 ): Response {
   return Response.json({
@@ -338,6 +413,10 @@ function detailResponse(
         attempt_count: 0,
       } as const),
     planning_excerpt_receipts: resources.excerptReceipts ?? [],
+    human_waits: resources.humanWaits ?? [],
+    action_delivery_events: resources.deliveryEvents ?? [],
+    pm_updates: resources.pmUpdates ?? [],
+    pm_update_settings: resources.pmUpdateSettings ?? null,
   });
 }
 
@@ -2368,6 +2447,551 @@ describe("conversation workspace", () => {
       screen.queryByRole("link", { name: /execution pm conversation/i }),
     ).not.toBeInTheDocument();
     expect(selected).not.toHaveBeenCalled();
+  });
+
+  it("hydrates one durable human-wait card on an execution deep link and refreshes its continuation outcome", async () => {
+    const execution = executionConversation({ next_message_sequence: 3 });
+    const hash = "a".repeat(64);
+    const baseWait: V2HumanWaitT = {
+      schema_version: 2,
+      id: "wait-deep-link",
+      project_id: projectId,
+      work_item_id: workItemId,
+      conversation_id: execution.id,
+      phase_id: "phase-1",
+      task_id: "task-1",
+      source_run_id: "run-1",
+      source_event_id: "event-ask-1",
+      decision_point: "Choose the deployment window",
+      question: "Should the migration run before the deployment?",
+      question_hash: hash,
+      published: {
+        branch: "phase5/wait-deep-link",
+        commit_sha: hash,
+        remote: "origin",
+      },
+      runtime: {
+        runtime_id: "runtime-1",
+        session_id: null,
+        session_portability: "transcript_only",
+        session_portability_evidence: null,
+      },
+      context: {
+        root_command_id: "root-command-1",
+        ask_channel_version: 1,
+        ask_instruction_hash: V2_HUMAN_WAIT_INSTRUCTION_HASH,
+        root_context_refs: [
+          {
+            artifact_id: "context-artifact-1",
+            content_hash: hash,
+            byte_size: 64,
+            storage_ref: "artifacts/context-1.json",
+          },
+        ],
+        context_hash: hash,
+        task_package_hash: hash,
+        compact_summary: "The migration is ready and waiting on its deployment window.",
+        compact_summary_hash: hash,
+      },
+      budget: {
+        reservation_id: "reservation-1",
+        root_run_id: "root-run-1",
+      },
+      status: "awaiting_human",
+      version: 1,
+      expires_at: "2026-07-28T12:00:00.000Z",
+      answered_at: null,
+      resumed_at: null,
+      created_at: now,
+      updated_at: now,
+    };
+    const answer: V2HumanWaitAnswerT = {
+      schema_version: 2,
+      id: "answer-1",
+      wait_id: baseWait.id,
+      project_id: projectId,
+      answered_by_user_id: "user-1",
+      action_id: "action-answer-1",
+      idempotency_key: "answer-proposal-1",
+      request_fingerprint: hash,
+      answer: "Run it before deployment.",
+      rationale: "Rollback is simpler before traffic moves.",
+      answer_receipt_hash: hash,
+      created_at: now,
+    };
+    const continuation: V2HumanWaitContinuationT = {
+      schema_version: 2,
+      id: "continuation-1",
+      wait_id: baseWait.id,
+      answer_id: answer.id,
+      root_run_id: "root-run-1",
+      resume_command_id: "resume-command-1",
+      resume_job_id: "resume-job-1",
+      budget_reservation_id: "reservation-1",
+      saved_commit_sha: hash,
+      context_hash: hash,
+      answer_receipt_hash: hash,
+      replay_context_ref: {
+        artifact_id: "replay-artifact-1",
+        content_hash: hash,
+        byte_size: 128,
+        storage_ref: "artifacts/replay-1.json",
+      },
+      runner_id: "runner-2",
+      runner_generation: 4,
+      delivery_receipt_hash: hash,
+      status: "applied",
+      created_at: now,
+      updated_at: now,
+    };
+    const initialMessage = message({
+      id: "message-human-wait",
+      role: "assistant",
+      conversation_id: execution.id,
+      sequence: 1,
+      parts: [{ type: "human_wait", human_wait_id: baseWait.id }],
+    });
+    const updateMessage = message({
+      id: "message-human-wait-update",
+      role: "assistant",
+      conversation_id: execution.id,
+      sequence: 2,
+      parts: [
+        {
+          type: "human_wait_update",
+          human_wait_id: baseWait.id,
+          status: "resumed",
+        },
+      ],
+    });
+    let detailCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [
+              {
+                work_item: { ...workItem, status: "executing" },
+                conversations: [conversation, execution],
+              },
+            ],
+          });
+        }
+        if (url.endsWith(`/conversations/${execution.id}`)) {
+          detailCalls += 1;
+          const resumed = detailCalls > 1;
+          return detailResponse(
+            resumed ? [initialMessage, updateMessage] : [initialMessage],
+            null,
+            null,
+            {
+              workItem: { ...workItem, status: "executing" },
+              conversation: execution,
+              humanWaits: [
+                {
+                  wait: resumed
+                    ? {
+                        ...baseWait,
+                        status: "resumed",
+                        version: 3,
+                        answered_at: now,
+                        resumed_at: now,
+                      }
+                    : baseWait,
+                  answer: resumed ? answer : null,
+                  continuation: resumed ? continuation : null,
+                },
+              ],
+            },
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={execution.id}
+        onConversationSelected={() => undefined}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("article", { name: "Choose the deployment window" }),
+    ).toHaveTextContent("Should the migration run before the deployment?");
+    expect(screen.getByText("phase5/wait-deep-link")).toBeInTheDocument();
+    expect(screen.getAllByTestId(`human-wait-${baseWait.id}`)).toHaveLength(1);
+    expect(screen.getByTestId("execution-action-composer")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Refresh conversation" }));
+
+    expect(await screen.findByTestId(`human-wait-update-${baseWait.id}`)).toHaveTextContent(
+      "resumed · continuation applied",
+    );
+    expect(screen.getAllByTestId(`human-wait-${baseWait.id}`)).toHaveLength(1);
+    expect(screen.getByText("Run it before deployment.")).toBeInTheDocument();
+  });
+
+  it("retries a byte-equivalent execution proposal whose action points to its new visible source message", async () => {
+    const execution = executionConversation({ next_message_sequence: 3 });
+    const exactDirection = "Use the restart-safe adapter and stop at the migration boundary.";
+    const sourceMessage = message({
+      id: "message-visible-direction",
+      role: "user",
+      conversation_id: execution.id,
+      sequence: 2,
+      parts: [
+        { type: "text", format: "plain", text: exactDirection },
+        { type: "action", action_id: "action-visible-direction" },
+      ],
+    });
+    const directionAction = planAction({
+      id: "action-visible-direction",
+      conversation_id: execution.id,
+      actor: { actor_type: "human", actor_id: "user-1" },
+      source_message_id: sourceMessage.id,
+      action_type: "redirect_agent",
+      payload: {
+        parameters: {
+          task_id: "task-7",
+          run_id: "run-7",
+          direction: exactDirection,
+          delivery_preference: "live_or_checkpoint",
+        },
+      },
+    });
+    const seedMessage = message({
+      id: "message-execution-existing",
+      role: "system",
+      conversation_id: execution.id,
+      sequence: 1,
+      parts: [{ type: "text", format: "plain", text: "Execution handoff loaded." }],
+    });
+    const requestBodies: string[] = [];
+    let proposalRecorded = false;
+    let proposalAttempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [
+              {
+                work_item: { ...workItem, status: "executing" },
+                conversations: [conversation, execution],
+              },
+            ],
+          });
+        }
+        if (url.endsWith(`/conversations/${execution.id}/actions`) && init?.method === "POST") {
+          requestBodies.push(String(init.body));
+          proposalAttempts += 1;
+          if (proposalAttempts === 1) throw new TypeError("connection reset");
+          proposalRecorded = true;
+          return Response.json({ message: sourceMessage, action: directionAction });
+        }
+        if (url.endsWith(`/conversations/${execution.id}`)) {
+          return detailResponse(
+            proposalRecorded ? [seedMessage, sourceMessage] : [seedMessage],
+            null,
+            null,
+            {
+              workItem: { ...workItem, status: "executing" },
+              conversation: execution,
+              actions: proposalRecorded ? [directionAction] : [],
+            },
+          );
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={execution.id}
+        onConversationSelected={() => undefined}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("Execution handoff loaded.")).toBeInTheDocument();
+    expect(requestBodies).toHaveLength(0);
+    await user.click(screen.getByText("Decisions, direction, pause, and artifacts"));
+    await user.type(screen.getByRole("textbox", { name: "Task ID" }), "task-7");
+    await user.type(screen.getByRole("textbox", { name: "Active run ID" }), "run-7");
+    await user.type(screen.getByRole("textbox", { name: "Direction" }), exactDirection);
+    await user.click(screen.getByRole("button", { name: "Prepare action for confirmation" }));
+
+    expect(await screen.findByText("Exact request locked")).toBeInTheDocument();
+    expect(screen.getByText(/byte-equivalent request and idempotency key/i)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry exact action proposal" }));
+
+    expect(
+      await screen.findByRole("button", { name: "Confirm action: Send task direction" }),
+    ).toBeInTheDocument();
+    expect(requestBodies).toHaveLength(2);
+    expect(requestBodies[1]).toBe(requestBodies[0]);
+    const proposalBody = JSON.parse(requestBodies[0] ?? "{}") as Record<string, unknown>;
+    expect(proposalBody).not.toHaveProperty("source_message_id");
+    expect(proposalBody).toMatchObject({
+      message: exactDirection,
+      action_type: "redirect_agent",
+    });
+    expect(screen.getByText(sourceMessage.id)).toBeInTheDocument();
+    expect(screen.getAllByTestId("conversation-action-redirect_agent")).toHaveLength(1);
+  });
+
+  it("keeps an uncertain execution request locked across reload until its exact source-message receipt appears", async () => {
+    const execution = executionConversation({ next_message_sequence: 4 });
+    const exactDirection = "Apply the migration only at the saved checkpoint.";
+    const exactRequest = {
+      idempotency_key: "execution-proposal-owned-key",
+      message: exactDirection,
+      action_type: "redirect_agent" as const,
+      payload: {
+        parameters: {
+          task_id: "task-7",
+          run_id: "run-7",
+          direction: exactDirection,
+          delivery_preference: "live_or_checkpoint",
+        },
+      },
+    };
+    const storageKey = `norns:execution-action-proposal:request:${execution.id}`;
+    window.sessionStorage.setItem(storageKey, JSON.stringify(exactRequest));
+    window.sessionStorage.setItem(
+      `norns:execution-action-proposal:${execution.id}`,
+      exactRequest.idempotency_key,
+    );
+    const unrelatedSource = message({
+      id: "message-unrelated-direction",
+      role: "user",
+      conversation_id: execution.id,
+      client_message_id: "execution-proposal-someone-else",
+      sequence: 2,
+      parts: [
+        { type: "text", format: "plain", text: exactDirection },
+        { type: "action", action_id: "action-unrelated-direction" },
+      ],
+    });
+    const unrelatedAction = planAction({
+      id: "action-unrelated-direction",
+      conversation_id: execution.id,
+      actor: { actor_type: "human", actor_id: "user-2" },
+      source_message_id: unrelatedSource.id,
+      action_type: exactRequest.action_type,
+      payload: exactRequest.payload,
+    });
+    const exactSource = message({
+      id: "message-exact-direction-receipt",
+      role: "user",
+      conversation_id: execution.id,
+      client_message_id: exactRequest.idempotency_key,
+      sequence: 3,
+      parts: [
+        { type: "text", format: "plain", text: exactDirection },
+        { type: "action", action_id: "action-exact-direction-receipt" },
+      ],
+    });
+    const exactAction = planAction({
+      id: "action-exact-direction-receipt",
+      conversation_id: execution.id,
+      actor: { actor_type: "human", actor_id: "user-1" },
+      source_message_id: exactSource.id,
+      action_type: exactRequest.action_type,
+      payload: exactRequest.payload,
+    });
+    const seedMessage = message({
+      id: "message-execution-reload",
+      role: "system",
+      conversation_id: execution.id,
+      sequence: 1,
+      parts: [{ type: "text", format: "plain", text: "Execution handoff loaded." }],
+    });
+    let detailCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [
+              {
+                work_item: { ...workItem, status: "executing" },
+                conversations: [conversation, execution],
+              },
+            ],
+          });
+        }
+        if (url.endsWith(`/conversations/${execution.id}`)) {
+          detailCalls += 1;
+          const exactReceiptVisible = detailCalls > 1;
+          return detailResponse(
+            exactReceiptVisible
+              ? [seedMessage, unrelatedSource, exactSource]
+              : [seedMessage, unrelatedSource],
+            null,
+            null,
+            {
+              workItem: { ...workItem, status: "executing" },
+              conversation: execution,
+              actions: exactReceiptVisible ? [unrelatedAction, exactAction] : [unrelatedAction],
+            },
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={execution.id}
+        onConversationSelected={() => undefined}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("Exact request locked")).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(storageKey)).toBe(JSON.stringify(exactRequest));
+
+    await user.click(screen.getByRole("button", { name: "Refresh conversation" }));
+
+    expect(await screen.findByText("Prepare execution action")).toBeInTheDocument();
+    await waitFor(() => expect(window.sessionStorage.getItem(storageKey)).toBeNull());
+  });
+
+  it("keeps an uncertain human-wait answer locked until the matching source-message client key appears", async () => {
+    const execution = executionConversation({ next_message_sequence: 4 });
+    const wait = humanWait({ conversation_id: execution.id });
+    const exactRequest = {
+      idempotency_key: "wait-answer-owned-key",
+      expected_version: wait.version,
+      question_hash: wait.question_hash,
+      answer: "Run it before deployment.",
+      rationale: "Rollback is simpler before traffic moves.",
+    };
+    const storageKey = `norns:human-wait-answer-proposal:request:${wait.id}`;
+    window.sessionStorage.setItem(storageKey, JSON.stringify(exactRequest));
+    window.sessionStorage.setItem(
+      `norns:human-wait-answer-proposal:${wait.id}`,
+      exactRequest.idempotency_key,
+    );
+    const waitMessage = message({
+      id: "message-wait-reload",
+      role: "assistant",
+      conversation_id: execution.id,
+      sequence: 1,
+      parts: [{ type: "human_wait", human_wait_id: wait.id }],
+    });
+    const unrelatedSource = message({
+      id: "message-unrelated-wait-answer",
+      role: "user",
+      conversation_id: execution.id,
+      client_message_id: "wait-answer-someone-else",
+      sequence: 2,
+      parts: [
+        { type: "text", format: "plain", text: exactRequest.answer },
+        { type: "action", action_id: "action-unrelated-wait-answer" },
+      ],
+    });
+    const actionPayload = {
+      parameters: {
+        wait_id: wait.id,
+        expected_version: exactRequest.expected_version,
+        question_hash: exactRequest.question_hash,
+        answer: exactRequest.answer,
+        rationale: exactRequest.rationale,
+      },
+    };
+    const unrelatedAction = planAction({
+      id: "action-unrelated-wait-answer",
+      conversation_id: execution.id,
+      actor: { actor_type: "human", actor_id: "user-2" },
+      source_message_id: unrelatedSource.id,
+      action_type: "answer_human_wait",
+      payload: actionPayload,
+    });
+    const exactSource = message({
+      id: "message-exact-wait-answer-receipt",
+      role: "user",
+      conversation_id: execution.id,
+      client_message_id: exactRequest.idempotency_key,
+      sequence: 3,
+      parts: [
+        { type: "text", format: "plain", text: exactRequest.answer },
+        { type: "action", action_id: "action-exact-wait-answer-receipt" },
+      ],
+    });
+    const exactAction = planAction({
+      id: "action-exact-wait-answer-receipt",
+      conversation_id: execution.id,
+      actor: { actor_type: "human", actor_id: "user-1" },
+      source_message_id: exactSource.id,
+      action_type: "answer_human_wait",
+      payload: actionPayload,
+    });
+    let detailCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [
+              {
+                work_item: { ...workItem, status: "executing" },
+                conversations: [conversation, execution],
+              },
+            ],
+          });
+        }
+        if (url.endsWith(`/conversations/${execution.id}`)) {
+          detailCalls += 1;
+          const exactReceiptVisible = detailCalls > 1;
+          return detailResponse(
+            exactReceiptVisible
+              ? [waitMessage, unrelatedSource, exactSource]
+              : [waitMessage, unrelatedSource],
+            null,
+            null,
+            {
+              workItem: { ...workItem, status: "executing" },
+              conversation: execution,
+              actions: exactReceiptVisible ? [unrelatedAction, exactAction] : [unrelatedAction],
+              humanWaits: [{ wait, answer: null, continuation: null }],
+            },
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={execution.id}
+        onConversationSelected={() => undefined}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("article", { name: "Choose the deployment window" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(window.sessionStorage.getItem(storageKey)).toBe(JSON.stringify(exactRequest)),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Refresh conversation" }));
+
+    await waitFor(() => expect(window.sessionStorage.getItem(storageKey)).toBeNull());
   });
 
   it("does not resolve a conversation ID outside the current project scope", async () => {

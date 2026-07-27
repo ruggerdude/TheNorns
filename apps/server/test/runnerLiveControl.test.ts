@@ -468,6 +468,40 @@ describe("EXECUTION E11 — send_message delivery", () => {
       expect(result.outcome).toBe("cancelled");
     },
   );
+
+  it(
+    "rejecting pause does not cancel the run or discard its uncommitted worktree",
+    { timeout: 60_000 },
+    async () => {
+      const h = await harness(cleanup);
+      const liveRuns = new LiveRunRegistry();
+      const events: EventPayloadT[] = [];
+      const { executor, scriptBytes } = executorFor(
+        h,
+        [
+          'echo "WORKTREE:$PWD"',
+          "node -e \"require('fs').writeFileSync('dirty-pause.txt','still here\\n')\"",
+          "echo DIRTY_PAUSE_READY",
+          "sleep 60",
+        ].join("\n"),
+        liveRuns,
+        githubApi().fetchImpl,
+      );
+      const running = executor.execute(dispatchCommand(scriptBytes, h.base), (event) =>
+        events.push(event),
+      );
+      await awaitMarker(events, "DIRTY_PAUSE_READY", "uncommitted work to exist");
+      const worktree = resolve(h.worktreeRoot, "run-1");
+
+      const paused = await liveRuns.control("run-1", "suspend");
+      expect(paused).toMatchObject({ applied: false, state: "rejected" });
+      expect(liveRuns.isLive("run-1")).toBe(true);
+      await expect(stat(resolve(worktree, "dirty-pause.txt"))).resolves.toBeTruthy();
+
+      await liveRuns.control("run-1", "cancel");
+      await expect(running).resolves.toMatchObject({ outcome: "cancelled" });
+    },
+  );
 });
 
 describe("EXECUTION E11 — the per-runtime mid-session-input verdict is declared, not assumed", () => {

@@ -177,7 +177,7 @@ describe.sequential("conversation-first durable domain", () => {
     ).resolves.toBeUndefined();
     const replay = await runCurrentV2Migrations(asMigrationDatabase(pg));
     expect(replay.at(-1)).toMatchObject({
-      name: "0038_conversation_execution_handoff",
+      name: "0039_conversation_human_steering",
       applied: false,
     });
   });
@@ -549,7 +549,7 @@ describe.sequential("conversation-first durable domain", () => {
       conversation_id: conversationId,
       source_message_id: firstMessageId,
       action_type: "pause_work",
-      payload: { parameters: {} },
+      payload: { parameters: { reason: "Pause while the conflicting request is resolved." } },
     });
     const concurrentSecond = await service.proposeAction(member, {
       project_id: "conversation-project",

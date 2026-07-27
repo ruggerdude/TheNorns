@@ -190,12 +190,16 @@ describe.sequential("runner knowledge transport", () => {
     const registry = new ApprovedRepositoryRegistry([root]);
     registry.register({ repository_binding_id: "binding-kt", repository_path: repository });
     const worktrees: RunnerWorktreeManager = {
-      prepare: async () => ({
-        path: resolve(root, "worktree"),
-        base_revision: "base-kt",
-        head: async () => COMMIT,
-        cleanup: async () => undefined,
-      }),
+      prepare: async () => {
+        const worktreePath = resolve(root, "worktree");
+        await mkdir(worktreePath, { recursive: true });
+        return {
+          path: worktreePath,
+          base_revision: "base-kt",
+          head: async () => COMMIT,
+          cleanup: async () => undefined,
+        };
+      },
     };
     const verifier: RunnerVerifier = {
       verify: async () => ({

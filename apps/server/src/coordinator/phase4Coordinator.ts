@@ -6,6 +6,8 @@ import {
   type V2ContentAddressedReferenceT,
   V2DispatchCommand,
   type V2DispatchCommandT,
+  V2_HUMAN_WAIT_CHANNEL_VERSION,
+  V2_HUMAN_WAIT_INSTRUCTION_HASH,
   v2CommandIdForDispatchJob,
 } from "@norns/contracts";
 import {
@@ -109,6 +111,12 @@ export interface Phase4ScheduleInput {
   issued_at: string;
   expires_at: string;
   /**
+   * Actions-hosted work is durable before its ephemeral runner enrolls. Such
+   * jobs remain outside the ordinary dispatcher retry loop until enrollment
+   * proves the exact runner generation.
+   */
+  awaiting_runner_enrollment?: boolean;
+  /**
    * Required when a replacement attempt supersedes the currently designated
    * run. This is accepted only for reviewer rework from a succeeded run or
    * explicit recovery from a terminal failed/expired/cancelled run.
@@ -166,6 +174,9 @@ interface SchedulingRow {
 
 interface ConversationTaskPackageBindingRow {
   handoff_id: string;
+  work_item_id: string;
+  work_item_status: string;
+  pause_pending: boolean;
   package_id: string | null;
   content_hash: string | null;
   context_document_id: string | null;
@@ -242,13 +253,29 @@ export class Phase4Coordinator {
       if (!row) throw new Phase4CoordinatorConflictError("task scheduling scope is unavailable");
       const packageScope = (
         await sql.query<ConversationTaskPackageBindingRow>(
-          `SELECT intent.handoff_id,
+          `SELECT intent.handoff_id,intent.work_item_id,
+                  item.status AS work_item_status,
+                  EXISTS (
+                    SELECT 1
+                      FROM conversation_actions pause
+                     WHERE pause.work_item_id=intent.work_item_id
+                       AND pause.action_type='pause_work'
+                       AND pause.status IN ('recorded','sent','agent_acknowledged')
+                       AND (
+                         NOT (pause.payload->'parameters' ? 'task_id')
+                         OR pause.payload->'parameters'->>'task_id' IS NULL
+                         OR pause.payload->'parameters'->>'task_id'=$3
+                       )
+                  ) AS pause_pending,
                   package_binding.package_id, package_binding.content_hash,
                   package_binding.context_document_id, document.byte_size
              FROM phases phase
              JOIN conversation_kickoff_intents intent
                ON intent.project_id=phase.project_id
               AND intent.planning_run_id=phase.planning_run_id
+             JOIN work_items item
+               ON item.id=intent.work_item_id
+              AND item.project_id=intent.project_id
              LEFT JOIN conversation_task_package_bindings package_binding
                ON package_binding.handoff_id=intent.handoff_id
               AND package_binding.task_id=$3
@@ -260,6 +287,11 @@ export class Phase4Coordinator {
           [input.project_id, input.phase_id, input.task_id],
         )
       ).rows[0];
+      if (packageScope?.work_item_status === "blocked" || packageScope?.pause_pending) {
+        throw new Phase4CoordinatorConflictError(
+          "conversation work is paused and cannot dispatch until an explicit resume is applied",
+        );
+      }
       if (packageScope && !packageScope.package_id) {
         throw new Phase4CoordinatorConflictError(
           "conversation-originated task is missing its immutable task package binding",
@@ -621,6 +653,10 @@ export class Phase4Coordinator {
               task_package_context_ref: taskPackageDispatch.contextRef,
             }
           : {}),
+        human_wait_channel: {
+          version: V2_HUMAN_WAIT_CHANNEL_VERSION,
+          instruction_hash: V2_HUMAN_WAIT_INSTRUCTION_HASH,
+        },
         budget_reservation_id: reservationId,
         max_charge_usd: maxCharge,
         max_input_tokens: input.max_input_tokens,
@@ -663,7 +699,7 @@ export class Phase4Coordinator {
       await sql.query(
         `INSERT INTO dispatch_jobs (
            id, project_id, phase_id, task_id, run_id, command_id, runner_id, status
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,'queued')`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
         [
           dispatchJobId,
           input.project_id,
@@ -672,8 +708,95 @@ export class Phase4Coordinator {
           runId,
           commandId,
           input.runner_id,
+          input.awaiting_runner_enrollment ? "awaiting_enrollment" : "queued",
         ],
       );
+      const steeringContexts = (
+        await sql.query<{
+          action_id: string;
+          project_id: string;
+          work_item_id: string;
+          conversation_id: string;
+          action_status: string;
+          intent_id: string;
+        }>(
+          `SELECT checkpoint.action_id,checkpoint.project_id,checkpoint.work_item_id,
+                  checkpoint.conversation_id,action.status AS action_status,
+                  intent.id AS intent_id
+             FROM conversation_action_checkpoint_contexts checkpoint
+             JOIN conversation_actions action ON action.id=checkpoint.action_id
+             JOIN conversation_action_delivery_intents intent
+               ON intent.action_id=checkpoint.action_id
+            WHERE checkpoint.task_id=$1 AND checkpoint.status='prepared'
+              AND checkpoint.context_document_id=ANY($2::text[])
+              AND checkpoint.context_hash=ANY($3::text[])
+            ORDER BY action.confirmed_at,action.id
+            FOR UPDATE OF checkpoint,action,intent`,
+          [
+            input.task_id,
+            contextRefs.map((reference) => reference.artifact_id),
+            contextRefs.map((reference) => reference.content_hash),
+          ],
+        )
+      ).rows;
+      for (const steering of steeringContexts) {
+        const leased = await sql.query<{ id: string }>(
+          `UPDATE conversation_action_delivery_intents
+              SET status='leased',lease_owner='phase4-context-dispatch',
+                  lease_expires_at=now()+interval '30 seconds',attempts=attempts+1,
+                  updated_at=now()
+            WHERE id=$1 AND status='fallback_queued' RETURNING id`,
+          [steering.intent_id],
+        );
+        if (!leased.rows[0]) {
+          throw new Phase4CoordinatorConflictError(
+            `queued direction ${steering.action_id} lost its checkpoint lease`,
+          );
+        }
+        await sql.query(
+          `UPDATE conversation_action_delivery_intents
+              SET status='sent',target_command_id=$2,target_runner_generation=$3,
+                  lease_owner=NULL,lease_expires_at=NULL,last_error=NULL,updated_at=now()
+            WHERE id=$1 AND status='leased'`,
+          [steering.intent_id, commandId, input.runner_generation],
+        );
+        if (steering.action_status === "recorded") {
+          const sent = await sql.query<{ id: string }>(
+            `UPDATE conversation_actions SET status='sent',sent_at=now(),updated_at=now()
+              WHERE id=$1 AND status='recorded' RETURNING id`,
+            [steering.action_id],
+          );
+          if (!sent.rows[0]) {
+            throw new Phase4CoordinatorConflictError(
+              `queued direction ${steering.action_id} lost its recorded state`,
+            );
+          }
+        }
+        await sql.query(
+          `UPDATE conversation_action_checkpoint_contexts
+              SET status='sent',command_id=$2,sent_at=now()
+            WHERE action_id=$1 AND status='prepared'`,
+          [steering.action_id, commandId],
+        );
+        await sql.query(
+          `INSERT INTO conversation_action_delivery_events (
+             id,project_id,work_item_id,conversation_id,action_id,sequence,status,
+             delivery_mode,target_run_id,target_command_id,receipt
+           ) SELECT $1,$2,$3,$4,$5,COALESCE(max(sequence),0)+1,'sent','checkpoint',
+                    $6,$7,$8::jsonb
+               FROM conversation_action_delivery_events WHERE action_id=$5`,
+          [
+            `action-delivery-event:${steering.action_id}:checkpoint:${commandId}`,
+            steering.project_id,
+            steering.work_item_id,
+            steering.conversation_id,
+            steering.action_id,
+            runId,
+            commandId,
+            JSON.stringify({ kind: "sent", outbox_id: commandId }),
+          ],
+        );
+      }
       await sql.query(
         `UPDATE phases SET status = 'active', started_at = COALESCE(started_at, $2),
                            aggregate_version = aggregate_version + 1, updated_at = now()

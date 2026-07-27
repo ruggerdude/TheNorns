@@ -1,8 +1,9 @@
 import { fireEvent, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { renderAppAndOpenProject, seedAuth } from "./test/appHarness";
 import { makeProject } from "./test/fixtures";
 import { MockFetch } from "./test/mockFetch";
+import { preloadConversationWorkspaceForTest } from "./test/preloadConversationWorkspace";
 
 const project = makeProject({
   onboarding_scenario: "new_repo",
@@ -14,6 +15,7 @@ const phaseId = "phase-relational";
 describe("relational Graph read model", () => {
   let mock: MockFetch;
 
+  beforeAll(preloadConversationWorkspaceForTest);
   afterEach(() => mock.restore());
 
   it("shows the current relational phase tasks instead of the legacy No plan yet state", async () => {
@@ -291,7 +293,7 @@ describe("relational Graph read model", () => {
 
     await user.click(await screen.findByTestId("overview-no-plan-pointer"));
     await user.type(
-      await screen.findByTestId("phase-goal"),
+      await screen.findByTestId("phase-goal", undefined, { timeout: 3_000 }),
       "Correct the workspace empty-state copy",
     );
     await user.click(screen.getByTestId("phase-start"));

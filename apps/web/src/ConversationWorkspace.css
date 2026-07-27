@@ -1195,6 +1195,245 @@
   font-size: 0.65rem;
 }
 
+.execution-conversation-controls {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--accent) 3%, var(--surface));
+}
+
+.execution-conversation-controls > details,
+.pm-update-controls {
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+}
+
+.execution-conversation-controls > details > summary,
+.pm-update-controls > summary {
+  padding: 0.7rem 0.8rem;
+  cursor: pointer;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.execution-conversation-controls > details > summary:focus-visible,
+.pm-update-controls > summary:focus-visible {
+  border-radius: 8px;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.execution-action-composer {
+  display: grid;
+  gap: 0.8rem;
+  padding: 0 0.8rem 0.8rem;
+}
+
+.execution-action-composer > div,
+.execution-action-composer form,
+.human-wait-answer-form,
+.pm-update-controls form {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.execution-action-composer h3,
+.execution-action-composer p,
+.human-wait-card h3,
+.human-wait-card p,
+.human-wait-answer-form p,
+.pm-update-controls p {
+  margin: 0;
+}
+
+.execution-action-composer h3,
+.human-wait-card h3 {
+  font-size: 0.86rem;
+}
+
+.execution-action-composer p,
+.human-wait-answer-form p,
+.pm-update-controls p {
+  color: var(--muted);
+  font-size: 0.64rem;
+  line-height: 1.5;
+}
+
+.execution-action-composer textarea {
+  min-height: 5rem;
+}
+
+.execution-action-composer .btn,
+.human-wait-answer-form .btn,
+.pm-update-controls .btn {
+  width: fit-content;
+}
+
+.execution-action-history {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.execution-action-history .conversation-action-card {
+  width: 100%;
+  margin: 0;
+}
+
+.human-wait-card {
+  display: grid;
+  width: min(46rem, 100%);
+  gap: 0.85rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 44%, var(--line));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--warning) 6%, var(--surface));
+}
+
+.human-wait-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.human-wait-question {
+  font-size: 0.78rem;
+  font-weight: 650;
+  line-height: 1.55;
+}
+
+.human-wait-card > .muted {
+  font-size: 0.65rem;
+  line-height: 1.5;
+}
+
+.human-wait-evidence {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.human-wait-evidence > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.18rem;
+  padding: 0.65rem;
+}
+
+.human-wait-evidence > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.human-wait-evidence dt {
+  color: var(--muted);
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.human-wait-evidence dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.63rem;
+}
+
+.human-wait-answer-form {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+}
+
+.human-wait-answer-form textarea {
+  min-height: 5.5rem;
+}
+
+.human-wait-continuation {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.human-wait-continuation > strong {
+  font-size: 0.65rem;
+}
+
+.human-wait-continuation ol {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.human-wait-continuation li {
+  padding: 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 0.58rem;
+  text-align: center;
+  text-transform: capitalize;
+}
+
+.human-wait-continuation li.is-current,
+.human-wait-continuation li.is-complete {
+  border-color: color-mix(in srgb, var(--success) 44%, var(--line));
+  color: var(--text);
+  background: color-mix(in srgb, var(--success) 7%, transparent);
+}
+
+.human-wait-update {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: min(46rem, 100%);
+  padding: 0.7rem 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--info) 36%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--info) 6%, var(--surface));
+  font-size: 0.65rem;
+}
+
+.human-wait-update:is(.is-expired, .is-cancelled, .is-failed) {
+  border-color: color-mix(in srgb, var(--danger) 36%, var(--line));
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+}
+
+.pm-update-controls form {
+  padding: 0 0.8rem 0.8rem;
+}
+
+.pm-update-history {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0 0.8rem 0.8rem;
+  list-style: none;
+}
+
+.pm-update-history li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 0.62rem;
+}
+
+.pm-update-history code {
+  color: var(--muted);
+  font-size: 0.56rem;
+}
+
 .conversation-qc-card {
   border-color: color-mix(in srgb, var(--warning) 38%, var(--line));
   background: color-mix(in srgb, var(--warning) 4%, var(--surface));
@@ -1405,11 +1644,13 @@
   .conversation-plan-columns,
   .conversation-plan-diff > div,
   .conversation-qc-summary,
-  .conversation-handoff-card > dl {
+  .conversation-handoff-card > dl,
+  .human-wait-evidence {
     grid-template-columns: 1fr;
   }
 
-  .conversation-handoff-card > dl > div + div {
+  .conversation-handoff-card > dl > div + div,
+  .human-wait-evidence > div + div {
     border-top: 1px solid var(--line);
     border-left: 0;
   }
@@ -1471,7 +1712,8 @@
   .conversation-plan-task-heading,
   .conversation-action-card > header,
   .conversation-qc-card > header,
-  .conversation-action-confirm {
+  .conversation-action-confirm,
+  .human-wait-card > header {
     display: grid;
   }
 
@@ -1512,6 +1754,21 @@
 
   .conversation-icon-button {
     margin-right: auto;
+  }
+
+  .execution-conversation-controls {
+    padding-inline: 0.75rem;
+  }
+
+  .execution-action-composer .btn,
+  .human-wait-answer-form .btn,
+  .pm-update-controls .btn {
+    width: 100%;
+  }
+
+  .human-wait-continuation ol,
+  .pm-update-history li {
+    grid-template-columns: 1fr;
   }
 }
 

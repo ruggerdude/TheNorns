@@ -672,7 +672,20 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
         // remain necessary execution support and retain their fail-closed
         // checks.
         const model = await this.gather(tx, taskId, true);
-        const sections = trimFrozenPackageContext(model, content, this.maxTotalBytes);
+        const steering = await this.pendingSteeringContext(tx, taskId, frozenPackage.project_id);
+        const steeringBytes = steering?.byte_size ?? 0;
+        if (steeringBytes >= this.maxTotalBytes) {
+          throw new TaskContextAssemblyError(
+            "context_too_large",
+            `confirmed task directions for ${taskId} are ${steeringBytes} bytes, over the ${this.maxTotalBytes}-byte context cap`,
+            "Consolidate or shorten the pending directions before dispatching this task.",
+          );
+        }
+        const sections = trimFrozenPackageContext(
+          model,
+          content,
+          this.maxTotalBytes - steeringBytes,
+        );
         const refs: V2ContentAddressedReferenceT[] = [];
         for (const section of sections) {
           const stored = await this.store.put(tx, {
@@ -701,6 +714,7 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
             storage_ref: `${this.baseUrl}${TASK_CONTEXT_ROUTE_PREFIX}/${stored.id}`,
           });
         }
+        if (steering) refs.push(steering);
         return refs;
       }
       const model = await this.gather(tx, taskId, false);
@@ -721,6 +735,102 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
       }
       return refs;
     });
+  }
+
+  private async pendingSteeringContext(
+    tx: V2SqlExecutor,
+    taskId: string,
+    projectId: string,
+    maxBytes = this.maxTotalBytes,
+  ): Promise<V2ContentAddressedReferenceT | null> {
+    const directions = (
+      await tx.query<{
+        action_id: string;
+        project_id: string;
+        work_item_id: string;
+        conversation_id: string;
+        payload_hash: string;
+        confirmed_at: Date | string;
+        direction: string;
+      }>(
+        `SELECT action.id AS action_id,action.project_id,action.work_item_id,
+                action.conversation_id,action.payload_hash,action.confirmed_at,
+                action.payload->'parameters'->>'direction' AS direction
+           FROM conversation_actions action
+           JOIN conversation_action_delivery_intents intent ON intent.action_id=action.id
+           JOIN conversation_task_package_bindings binding
+             ON binding.project_id=action.project_id
+            AND binding.work_item_id=action.work_item_id
+            AND binding.conversation_id=action.conversation_id
+            AND binding.task_id=action.payload->'parameters'->>'task_id'
+          WHERE binding.task_id=$1 AND action.action_type='redirect_agent'
+            AND action.status IN ('recorded','sent','agent_acknowledged')
+            AND intent.status='fallback_queued'
+          ORDER BY action.confirmed_at,action.id
+          FOR UPDATE OF action,intent`,
+        [taskId],
+      )
+    ).rows;
+    if (directions.length === 0) return null;
+    if (directions.length > 64) {
+      throw new TaskContextAssemblyError(
+        "context_too_large",
+        `task ${taskId} has ${directions.length} pending directions; at most 64 can be delivered in one immutable checkpoint`,
+        "Consolidate the directions into a smaller confirmed instruction before dispatch.",
+      );
+    }
+    const document = {
+      schema_version: 1,
+      kind: "confirmed_task_directions",
+      task_id: taskId,
+      directions: directions.map((direction) => ({
+        action_id: direction.action_id,
+        payload_hash: direction.payload_hash,
+        confirmed_at: new Date(direction.confirmed_at).toISOString(),
+        direction: direction.direction,
+      })),
+    };
+    const content = Buffer.from(canonicalJson(document), "utf8");
+    if (content.byteLength >= maxBytes) {
+      throw new TaskContextAssemblyError(
+        "context_too_large",
+        `confirmed task directions for ${taskId} are ${content.byteLength} bytes, over the ${maxBytes}-byte steering allowance`,
+        "Consolidate or shorten the pending directions before dispatching this task.",
+      );
+    }
+    const stored = await this.store.put(tx, {
+      projectId,
+      section: "confirmed_task_directions",
+      content,
+      mediaType: "application/json",
+    });
+    for (const direction of directions) {
+      await tx.query(
+        `INSERT INTO conversation_action_checkpoint_contexts (
+           action_id,project_id,work_item_id,conversation_id,task_id,
+           context_document_id,context_hash
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT(action_id) DO UPDATE SET
+           context_document_id=EXCLUDED.context_document_id,
+           context_hash=EXCLUDED.context_hash
+         WHERE conversation_action_checkpoint_contexts.status='prepared'`,
+        [
+          direction.action_id,
+          direction.project_id,
+          direction.work_item_id,
+          direction.conversation_id,
+          taskId,
+          stored.id,
+          stored.sha256,
+        ],
+      );
+    }
+    return {
+      artifact_id: stored.id,
+      content_hash: stored.sha256,
+      byte_size: stored.byte_size,
+      storage_ref: `${this.baseUrl}${TASK_CONTEXT_ROUTE_PREFIX}/${stored.id}`,
+    };
   }
 
   private async frozenConversationPackage(

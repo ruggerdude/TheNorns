@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,6 +14,12 @@ import {
 } from "@norns/contracts";
 import type { LiveRunRegistry } from "./liveRuns.js";
 import { PublicationError, type PublicationResult, type RunnerPublisher } from "./publication.js";
+import {
+  type HumanWaitEnvelopeT,
+  hashHumanWaitEnvelope,
+  humanWaitPrompt,
+  readHumanWaitEnvelope,
+} from "./runtimes/humanWaitChannel.js";
 import type { CodingRuntime, RuntimeRunResult, RuntimeSession } from "./runtimes/types.js";
 import {
   REPOSITORY_VERIFICATION_MANIFEST,
@@ -622,7 +628,7 @@ export interface V2RunnerExecutionResult {
    * command's terminal state. An empty run is a `failed` outcome carrying
    * `empty: true` — it is not, and must never be, a success.
    */
-  outcome: "succeeded" | "failed" | "cancelled";
+  outcome: "succeeded" | "waiting_for_human" | "failed" | "cancelled";
   commit_sha: string | null;
   verification_passed: boolean;
   usage: RuntimeRunResult["usage"];
@@ -708,6 +714,9 @@ export class V2RunnerExecutor {
             taskId: command.task_id,
             maxOutputTokens: command.max_output_tokens,
             ...(command.reasoning_effort ? { reasoningEffort: command.reasoning_effort } : {}),
+            ...(command.continuation?.resume_session_id
+              ? { resumeSessionId: command.continuation.resume_session_id }
+              : {}),
           })
         : runtimeProvider;
     let scratch: string | undefined;
@@ -930,12 +939,27 @@ export class V2RunnerExecutor {
       });
       if (controller.signal.aborted) return cancelledBefore("preparing the worktree");
       emit({ kind: "run_status", run_id: command.run_id, status: "started" });
+      if (command.continuation) {
+        emit({
+          kind: "continuation_context_applied",
+          run_id: command.run_id,
+          wait_id: command.continuation.wait_id,
+          root_command_id: command.continuation.root_command_id,
+          context_hash: command.continuation.context_hash,
+          replay_context_hash: command.continuation.replay_context_ref.content_hash,
+        });
+      }
       startKnowledgeHeartbeats();
       stage = "runtime";
-      const runtimeResult = await runtime.run({
+      const humanWaitDirectoryName = `.norns-control-${randomUUID()}`;
+      const humanWaitDirectory = resolve(worktree.path, humanWaitDirectoryName);
+      await mkdir(humanWaitDirectory);
+      const humanWaitPath = resolve(humanWaitDirectory, "human-wait.json");
+      let runtimeResult = await runtime.run({
         runId: command.run_id,
         worktreePath: worktree.path,
-        prompt,
+        prompt: command.human_wait_channel ? `${prompt}\n${humanWaitPrompt()}` : prompt,
+        humanWaitPath,
         timeoutMs: command.max_duration_seconds * 1_000,
         executionMode: command.execution_mode ?? "planned",
         ...(command.max_charge_usd > 0 ? { maxBudgetUsd: command.max_charge_usd } : {}),
@@ -959,6 +983,46 @@ export class V2RunnerExecutor {
             ]),
           }),
       });
+      let humanWaitEnvelope: HumanWaitEnvelopeT | null;
+      try {
+        humanWaitEnvelope = await readHumanWaitEnvelope(humanWaitPath);
+        if (humanWaitEnvelope) {
+          try {
+            await execFileAsync("git", [
+              "-C",
+              worktree.path,
+              "cat-file",
+              "-e",
+              `HEAD:${humanWaitDirectoryName}/human-wait.json`,
+            ]);
+            throw new Error("human wait control envelope was committed into the repository");
+          } catch (error) {
+            if (
+              error instanceof Error &&
+              error.message === "human wait control envelope was committed into the repository"
+            ) {
+              throw error;
+            }
+          }
+        }
+      } finally {
+        await rm(humanWaitDirectory, { recursive: true, force: true });
+      }
+      if (humanWaitEnvelope) {
+        if (!command.human_wait_channel) {
+          throw new Error(
+            "runtime produced a human wait envelope for a command without an audited ask channel",
+          );
+        }
+        runtimeResult = {
+          outcome: "waiting_for_human",
+          detail: humanWaitEnvelope.compact_summary,
+          usage: runtimeResult.usage,
+          ...(runtimeResult.sessionId ? { sessionId: runtimeResult.sessionId } : {}),
+          stopReason: "waiting_for_human",
+          humanWait: hashHumanWaitEnvelope(humanWaitEnvelope),
+        };
+      }
       if (runtimeResult.sessionId) {
         sessionId = runtimeResult.sessionId;
         // Emitted as a run log because that is the only durable channel a
@@ -998,6 +1062,137 @@ export class V2RunnerExecutor {
         remaining: "moderate",
         risk: runtimeResult.outcome === "completed" ? "green" : "red",
       });
+      if (runtimeResult.outcome === "waiting_for_human") {
+        if (!command.human_wait_channel) {
+          const reason = "the source command did not authorize a versioned human-wait channel";
+          emitFailure("runtime", "human_wait_channel_unauthorized", reason);
+          return finish({
+            outcome: "failed",
+            commit_sha: null,
+            verification_passed: false,
+            usage: runtimeResult.usage,
+            empty: false,
+            publication: null,
+            session_id: sessionId,
+            reason,
+          });
+        }
+        const request = runtimeResult.humanWait;
+        const questionHash = request
+          ? createHash("sha256").update(request.question).digest("hex")
+          : null;
+        const summaryHash = request
+          ? createHash("sha256").update(request.compactSummary).digest("hex")
+          : null;
+        if (
+          !request ||
+          questionHash !== request.questionHash ||
+          summaryHash !== request.compactSummaryHash
+        ) {
+          const reason =
+            "the runtime requested human input without a valid typed question/visible-summary receipt";
+          emitFailure("runtime", "human_wait_receipt_invalid", reason);
+          return finish({
+            outcome: "failed",
+            commit_sha: null,
+            verification_passed: false,
+            usage: runtimeResult.usage,
+            empty: false,
+            publication: null,
+            session_id: sessionId,
+            reason,
+          });
+        }
+        const dirty = await this.allUncommittedPaths(worktree.path);
+        if (dirty.length > 0) {
+          const reason = `human input was requested with ${dirty.length} uncommitted path(s); the runner refused to release an ephemeral worktree that could not be resumed exactly`;
+          emitFailure("publication", "human_wait_checkpoint_unpublished", reason);
+          return finish({
+            outcome: "failed",
+            commit_sha: await worktree.head(),
+            verification_passed: false,
+            usage: runtimeResult.usage,
+            empty: false,
+            publication: null,
+            session_id: sessionId,
+            reason,
+          });
+        }
+        const commit = await worktree.head();
+        let publication: PublicationResult;
+        try {
+          if (!this.publisher) {
+            throw new PublicationError(
+              "this runner has no publisher configured for a resumable human checkpoint",
+              "construct V2RunnerExecutor with a RunnerPublisher",
+            );
+          }
+          publication = await this.publisher.publish({
+            worktree_path: worktree.path,
+            branch: command.target_branch,
+            commit,
+            run_id: command.run_id,
+            task_id: command.task_id,
+            verification_passed: false,
+            verification_summary: "waiting for a human decision; checkpoint is not yet verified",
+          });
+          if (publication.outcome === "local_only" || publication.remote === null) {
+            throw new PublicationError(
+              "a human wait requires a remotely pushed checkpoint",
+              "local-only branches cannot survive an ephemeral runner",
+            );
+          }
+        } catch (error) {
+          const reason =
+            error instanceof PublicationError
+              ? error.reason
+              : "the human-wait checkpoint could not be published";
+          emitFailure("publication", "human_wait_checkpoint_unpublished", reason);
+          return finish({
+            outcome: "failed",
+            commit_sha: commit,
+            verification_passed: false,
+            usage: runtimeResult.usage,
+            empty: commit === worktree.base_revision,
+            publication: null,
+            session_id: sessionId,
+            reason,
+          });
+        }
+        // Ordering is part of the protocol: the coordinator may open a wait
+        // only after it has durably applied this exact pushed publication.
+        emit(this.publishedEvent(command.run_id, publication));
+        emit({
+          kind: "human_wait_requested",
+          run_id: command.run_id,
+          decision_point: request.decisionPoint,
+          question: request.question,
+          question_hash: request.questionHash,
+          compact_summary: request.compactSummary,
+          compact_summary_hash: request.compactSummaryHash,
+          runtime: runtime.name,
+          session_id: runtimeResult.sessionId ?? null,
+          ask_channel_version: command.human_wait_channel.version,
+          ask_instruction_hash: command.human_wait_channel.instruction_hash,
+        });
+        emitKnowledgeHandoff(
+          "blocked",
+          request.compactSummary,
+          ["Execution is paused at a remotely published checkpoint."],
+          [request.question],
+        );
+        emit({ kind: "run_status", run_id: command.run_id, status: "waiting_for_human" });
+        return finish({
+          outcome: "waiting_for_human",
+          commit_sha: commit,
+          verification_passed: false,
+          usage: runtimeResult.usage,
+          empty: commit === worktree.base_revision,
+          publication,
+          session_id: sessionId,
+          reason: request.question,
+        });
+      }
       // EXECUTION E11 — A CANCELLED RUN IS NOT A FAILED RUN, AND ITS WORK IS
       // NOT FORFEIT.
       //
@@ -1486,6 +1681,21 @@ export class V2RunnerExecutor {
     } catch {
       return [];
     }
+  }
+
+  /** A human wait must preserve even untracked files before the runner exits. */
+  private async allUncommittedPaths(worktreePath: string): Promise<string[]> {
+    const { stdout } = await execFileAsync("git", [
+      "-C",
+      worktreePath,
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+    ]);
+    return stdout
+      .split("\n")
+      .map((line) => line.slice(3).trim())
+      .filter(Boolean);
   }
 
   /** Repository-relative committed paths are useful evidence and reveal no local root. */

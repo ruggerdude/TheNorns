@@ -269,6 +269,11 @@ export const CONVERSATION_EXECUTION_HANDOFF_MIGRATION_URL = new URL(
   "../../../drizzle/0038_conversation_execution_handoff.sql",
   import.meta.url,
 );
+export const CONVERSATION_HUMAN_STEERING_MIGRATION_NAME = "0039_conversation_human_steering";
+export const CONVERSATION_HUMAN_STEERING_MIGRATION_URL = new URL(
+  "../../../drizzle/0039_conversation_human_steering.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -454,6 +459,10 @@ export async function loadConversationExecutionHandoffMigrationSql(): Promise<st
   return readFile(CONVERSATION_EXECUTION_HANDOFF_MIGRATION_URL, "utf8");
 }
 
+export async function loadConversationHumanSteeringMigrationSql(): Promise<string> {
+  return readFile(CONVERSATION_HUMAN_STEERING_MIGRATION_URL, "utf8");
+}
+
 export function v2MigrationChecksum(sql: string): string {
   return createHash("sha256").update(sql).digest("hex");
 }
@@ -561,7 +570,11 @@ export async function runPhase2PreservationMigration(
 export async function runCurrentV2Migrations(
   database: V2MigrationDatabase,
 ): Promise<V2MigrationResult[]> {
-  return runV2Migrations(database, [
+  return runV2Migrations(database, await currentV2MigrationSources());
+}
+
+export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> {
+  return [
     {
       name: PHASE1_V2_MIGRATION_NAME,
       sql: await loadPhase1V2MigrationSql(),
@@ -714,5 +727,9 @@ export async function runCurrentV2Migrations(
       name: CONVERSATION_EXECUTION_HANDOFF_MIGRATION_NAME,
       sql: await loadConversationExecutionHandoffMigrationSql(),
     },
-  ]);
+    {
+      name: CONVERSATION_HUMAN_STEERING_MIGRATION_NAME,
+      sql: await loadConversationHumanSteeringMigrationSql(),
+    },
+  ];
 }

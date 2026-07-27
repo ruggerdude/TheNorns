@@ -177,9 +177,46 @@ export class RelayStores {
     publicKeyPem: string,
     generation: number,
   ): RunnerRecord | null {
-    const record = this.state.runners[runnerId];
-    if (!record || record.generation !== generation) return null;
+    let record = this.state.runners[runnerId];
+    if (!record) {
+      // Actions enrollment is durably scoped and generation-fenced in
+      // PostgreSQL before this call. Reconstructing the in-memory relay record
+      // makes a post-commit process restart recoverable by an exact retry.
+      record = {
+        runner_id: runnerId,
+        public_key_pem: publicKeyPem,
+        generation,
+        last_seen_at: null,
+      };
+      this.state.runners[runnerId] = record;
+      this.changed();
+      return record;
+    }
+    if (record.generation !== generation) return null;
+    if (record.public_key_pem && record.public_key_pem !== publicKeyPem) return null;
     record.public_key_pem = publicKeyPem;
+    this.changed();
+    return record;
+  }
+
+  /**
+   * Rebuild the process-local cache from a DB-authoritative, non-revoked
+   * Actions enrollment. The caller must perform that durable authorization
+   * check first; unlike interactive pairing, this deliberately replaces stale
+   * process memory after restart or failover.
+   */
+  restoreDurableRunnerIdentity(
+    runnerId: string,
+    publicKeyPem: string,
+    generation: number,
+  ): RunnerRecord {
+    const record: RunnerRecord = {
+      runner_id: runnerId,
+      public_key_pem: publicKeyPem,
+      generation,
+      last_seen_at: null,
+    };
+    this.state.runners[runnerId] = record;
     this.changed();
     return record;
   }
@@ -215,6 +252,13 @@ export class RelayStores {
   // -- command outbox ---------------------------------------------------------
 
   enqueueCommand(envelope: CommandEnvelopeT, now: Date): CommandRecord {
+    const existing = this.state.commands[envelope.command_id];
+    if (existing) {
+      if (JSON.stringify(existing.envelope) !== JSON.stringify(envelope)) {
+        throw new Error(`command ${envelope.command_id} was replayed with a different envelope`);
+      }
+      return existing;
+    }
     const record: CommandRecord = {
       envelope,
       state: "queued",

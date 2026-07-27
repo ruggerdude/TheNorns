@@ -7,15 +7,17 @@
 // content, and Debates remains inside the workspace shell.
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { App } from "./App";
 import { setToken } from "./auth";
 import { fullyAllocatedGraph, projectAlpha } from "./test/fixtures";
 import { MockFetch } from "./test/mockFetch";
+import { preloadConversationWorkspaceForTest } from "./test/preloadConversationWorkspace";
 
 describe("FRONT DOOR P1d: workspace tab bar", () => {
   let mock: MockFetch;
 
+  beforeAll(preloadConversationWorkspaceForTest);
   afterEach(() => mock.restore());
 
   it("defaults to the Overview dashboard and history, but not the graph canvas", async () => {
@@ -211,7 +213,9 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     await user.click(pointer);
     expect(await screen.findByRole("button", { name: "Work" })).toHaveClass("on");
-    expect(await screen.findByTestId("phase-goal")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("phase-goal", undefined, { timeout: 3_000 }),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Plan" })).not.toBeInTheDocument();
   });
 

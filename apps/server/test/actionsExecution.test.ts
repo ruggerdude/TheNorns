@@ -20,6 +20,7 @@ import {
   ActionsExecutionRepository,
 } from "../src/coordinator/actionsExecution.js";
 import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
+import { Phase4DispatchRepository, Phase4Dispatcher } from "../src/coordinator/phase4Dispatcher.js";
 import {
   NORNS_ENROLLMENT_SECRET_NAME,
   NORNS_WORKFLOW_PATH,
@@ -40,7 +41,13 @@ import {
   sealRepositorySecret,
 } from "../src/integrations/githubActions.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
-import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
+import {
+  CONVERSATION_HUMAN_STEERING_MIGRATION_NAME,
+  type V2MigrationDatabase,
+  currentV2MigrationSources,
+  runCurrentV2Migrations,
+  runV2Migrations,
+} from "../src/persistence/v2/migrate.js";
 import { RelayStores } from "../src/stores.js";
 
 const TEMPLATE = {
@@ -621,6 +628,7 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
   let repository: ActionsExecutionRepository;
   let stores: RelayStores;
   let dispatched: { inputs: Record<string, string> }[];
+  let secretWrites: number;
 
   const contents = `https://api.github.com/repos/octo/widgets/contents/${NORNS_WORKFLOW_PATH}`;
   const secretsBase = "https://api.github.com/repos/octo/widgets/actions/secrets";
@@ -693,7 +701,10 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
       if (request.url === `${secretsBase}/public-key`) {
         return json({ key_id: "key-1", key: publicKeyBase64 });
       }
-      if (request.url === `${secretsBase}/${NORNS_ENROLLMENT_SECRET_NAME}`) return noContent();
+      if (request.url === `${secretsBase}/${NORNS_ENROLLMENT_SECRET_NAME}`) {
+        secretWrites += 1;
+        return noContent();
+      }
       if (request.url === dispatchUrl) {
         dispatched.push({ inputs: (request.body?.inputs ?? {}) as Record<string, string> });
         return noContent();
@@ -729,7 +740,7 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
         reserveGeneration: (runnerId) => stores.reserveRunnerGeneration(runnerId),
       },
     );
-    return { coordinator, repository };
+    return { coordinator, repository, actions: built.actions };
   }
 
   let publicKeyBase64: string;
@@ -742,6 +753,7 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
     );
     stores = new RelayStores();
     dispatched = [];
+    secretWrites = 0;
   });
 
   const scheduleInput = {
@@ -767,8 +779,8 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
     max_input_tokens: 10_000,
     max_output_tokens: 4_000,
     max_duration_seconds: 900,
-    issued_at: "2026-07-21T20:00:00.000Z",
-    expires_at: "2026-07-21T20:15:00.000Z",
+    issued_at: new Date(Date.now() - 60_000).toISOString(),
+    expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
   };
 
   it("dispatches an Actions-hosted run for a connected binding", async () => {
@@ -896,6 +908,451 @@ describe("Actions-hosted scheduling extends the Phase 4 gate", () => {
     });
     expect(dispatched).toHaveLength(0);
   });
+
+  it("recovers a crash after workflow_dispatch without rotating the pinned token or dispatching twice", async () => {
+    const { coordinator } = await build();
+    await seed("connected");
+    const scheduled = await coordinator.schedule(scheduleInput);
+    const before = await repository.runForDispatch(scheduled.dispatch_job_id);
+    expect(before?.enrollment_secret_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(secretWrites).toBe(1);
+    expect(dispatched).toHaveLength(1);
+
+    // Models: GitHub returned 204, then the process died before markDispatched.
+    await pg.query(
+      `UPDATE github_actions_runs
+          SET status='dispatching',github_run_id=NULL,github_run_url=NULL,
+              launch_lease_owner='dead-process',
+              launch_lease_expires_at=now()-interval '1 second',
+              launch_available_at=now()-interval '1 second'
+        WHERE dispatch_job_id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    await expect(coordinator.recoverNextLaunch()).resolves.toBe(true);
+    const recovered = await repository.runForDispatch(scheduled.dispatch_job_id);
+    expect(recovered).toMatchObject({
+      status: "dispatched",
+      github_run_id: 99,
+      enrollment_secret_hash: before?.enrollment_secret_hash,
+    });
+    expect(secretWrites).toBe(1);
+    expect(dispatched).toHaveLength(1);
+  });
+
+  it("leases one launch to one worker and fences a stale owner from recording success", async () => {
+    const { coordinator } = await build();
+    await seed("connected");
+    const scheduled = await coordinator.schedule(scheduleInput);
+    await pg.query(
+      `UPDATE github_actions_runs
+          SET status='requested',github_run_id=NULL,github_run_url=NULL,
+              launch_lease_owner=NULL,launch_lease_expires_at=NULL,
+              launch_available_at=now()-interval '1 second'
+        WHERE dispatch_job_id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    const claims = await Promise.all([
+      repository.claimLaunch(scheduled.dispatch_job_id, "worker-a", 30_000),
+      repository.claimLaunch(scheduled.dispatch_job_id, "worker-b", 30_000),
+    ]);
+    expect(claims.filter(Boolean)).toHaveLength(1);
+    const winner = claims[0] ? "worker-a" : "worker-b";
+    const loser = winner === "worker-a" ? "worker-b" : "worker-a";
+    await expect(
+      repository.markDispatched(
+        scheduled.dispatch_job_id,
+        { id: 100, url: "https://github.example/run/100" },
+        loser,
+      ),
+    ).rejects.toMatchObject({ code: "actions_launch_lease_lost" });
+    await expect(
+      repository.markDispatched(
+        scheduled.dispatch_job_id,
+        { id: 99, url: "https://github.example/run/99" },
+        winner,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("keeps strict FIFO per repository until enrollment, then launches the successor", async () => {
+    const { coordinator } = await build();
+    await seed("connected");
+    await pg.exec(`
+      INSERT INTO tasks (
+        id, project_id, phase_id, objective_id, strategy_version_id, title,
+        description, deliverables, acceptance_criteria, complexity, risk,
+        required_roles, required_capabilities, required_inputs, expected_outputs,
+        environment_policy_ref, verification_policy_ref, state, lifecycle_version
+      ) VALUES ('task-2','project-1','phase-1','objective-1','strategy-1','Second',
+        'Second FIFO task','["change"]'::jsonb,'["verified"]'::jsonb,
+        'M','medium','["implementation"]'::jsonb,'[]'::jsonb,'[]'::jsonb,
+        '["commit"]'::jsonb,'environment','verification','pending',0);
+      INSERT INTO agent_assignments (
+        id, project_id, phase_id, task_id, agent_profile_id, status, rationale,
+        rationale_factors, budget_limit_usd, allocation_policy_ref
+      ) VALUES ('assignment-2','project-1','phase-1','task-2','agent-1','proposed',
+        'FIFO fixture','["capability"]'::jsonb,10,'allocation');
+      UPDATE projects SET max_concurrent_tasks=2 WHERE id='project-1';
+      UPDATE agent_profiles SET max_concurrent_runs=2 WHERE id='agent-1';
+    `);
+    const first = await coordinator.schedule(scheduleInput);
+    const second = await coordinator.schedule({
+      ...scheduleInput,
+      task_id: "task-2",
+      assignment_id: "assignment-2",
+    });
+    expect(await repository.runForDispatch(first.dispatch_job_id)).toMatchObject({
+      status: "dispatched",
+    });
+    expect(await repository.runForDispatch(second.dispatch_job_id)).toMatchObject({
+      status: "requested",
+    });
+    expect(secretWrites).toBe(1);
+    expect(dispatched).toHaveLength(1);
+
+    await pg.query(
+      `UPDATE github_actions_runs
+          SET status='enrolled',enrolled_at=now(),
+              enrolled_public_key_hash=repeat('b',64),
+              enrolled_public_key_pem='fifo-test-public-key'
+        WHERE dispatch_job_id=$1`,
+      [first.dispatch_job_id],
+    );
+    await expect(coordinator.recoverNextLaunch()).resolves.toBe(true);
+    expect(await repository.runForDispatch(second.dispatch_job_id)).toMatchObject({
+      status: "dispatched",
+    });
+    expect(secretWrites).toBe(2);
+    expect(dispatched).toHaveLength(2);
+  });
+
+  it("keeps transient launch failures retryable past five attempts until command expiry", async () => {
+    const { coordinator, actions } = await build();
+    await seed("connected");
+    const scheduled = await coordinator.schedule(scheduleInput);
+    await pg.query(
+      `UPDATE github_actions_runs
+          SET status='requested',github_run_id=NULL,github_run_url=NULL,
+              launch_lease_owner=NULL,launch_lease_expires_at=NULL,
+              launch_attempts=0,launch_available_at=now()-interval '1 second'
+        WHERE dispatch_job_id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    vi.spyOn(actions, "findRunForJob").mockResolvedValue(null);
+    vi.spyOn(actions, "dispatchWorkflow").mockRejectedValue(
+      new Error("temporary GitHub dispatch outage"),
+    );
+    for (let attempt = 1; attempt <= 7; attempt += 1) {
+      await expect(coordinator.recoverNextLaunch()).rejects.toMatchObject({
+        code: "actions_dispatch_failed",
+      });
+      expect(await repository.runForDispatch(scheduled.dispatch_job_id)).toMatchObject({
+        status: "requested",
+      });
+      await pg.query(
+        `UPDATE github_actions_runs SET launch_available_at=now()-interval '1 second'
+          WHERE dispatch_job_id=$1`,
+        [scheduled.dispatch_job_id],
+      );
+    }
+    await pg.query(
+      `UPDATE commands
+          SET envelope=jsonb_set(
+            envelope,'{expires_at}',to_jsonb((now()-interval '1 second')::text)
+          )
+        WHERE dispatch_job_id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    await expect(coordinator.recoverNextLaunch()).resolves.toBe(false);
+    const terminalDispatcher = new Phase4Dispatcher(
+      new Phase4DispatchRepository(transactions),
+      "expired-launch-terminal",
+      async () => {
+        throw new Error("expired Actions launch must not dispatch");
+      },
+    );
+    await expect(terminalDispatcher.tick()).resolves.toBe(true);
+    expect(await repository.runForDispatch(scheduled.dispatch_job_id)).toMatchObject({
+      status: "abandoned",
+    });
+    await expect(coordinator.recoverNextLaunch()).resolves.toBe(false);
+  });
+
+  it("never recovers a launch after its binding is disabled", async () => {
+    const { coordinator, actions } = await build();
+    await seed("connected");
+    const scheduled = await coordinator.schedule(scheduleInput);
+    await pg.query(
+      `UPDATE github_actions_runs
+          SET status='requested',github_run_id=NULL,github_run_url=NULL,
+              launch_lease_owner=NULL,launch_lease_expires_at=NULL,
+              launch_available_at=now()-interval '1 second'
+        WHERE dispatch_job_id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    await repository.setEnabled("binding-1", false);
+    const dispatchSpy = vi.spyOn(actions, "dispatchWorkflow");
+    await expect(coordinator.recoverNextLaunch()).resolves.toBe(false);
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    const terminalDispatcher = new Phase4Dispatcher(
+      new Phase4DispatchRepository(transactions),
+      "disabled-binding-terminal",
+      async () => {
+        throw new Error("disabled Actions work must not dispatch");
+      },
+    );
+    await expect(terminalDispatcher.tick()).resolves.toBe(true);
+    expect(await repository.runForDispatch(scheduled.dispatch_job_id)).toMatchObject({
+      status: "abandoned",
+    });
+  });
+
+  it("dead-letters an Actions outbox exactly once when its execution-binding projection is missing", async () => {
+    const { coordinator } = await build();
+    await seed("connected");
+    const scheduled = await coordinator.schedule(scheduleInput);
+    await pg.query(
+      `DELETE FROM github_actions_execution_bindings
+        WHERE repository_binding_id='binding-1'`,
+    );
+    const deliver = vi.fn(async () => {
+      throw new Error("an orphaned Actions outbox must not enter ordinary delivery");
+    });
+    const dispatcher = new Phase4Dispatcher(
+      new Phase4DispatchRepository(transactions),
+      "orphaned-binding-terminal",
+      deliver,
+    );
+    await expect(dispatcher.tick()).resolves.toBe(true);
+    await expect(dispatcher.tick()).resolves.toBe(false);
+    expect(deliver).not.toHaveBeenCalled();
+    expect(await repository.runForDispatch(scheduled.dispatch_job_id)).toMatchObject({
+      status: "abandoned",
+    });
+    const terminal = await pg.query<{ job_status: string; command_status: string }>(
+      `SELECT job.status AS job_status,command.status AS command_status
+         FROM dispatch_jobs job
+         JOIN commands command ON command.command_id=job.command_id
+        WHERE job.id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    expect(terminal.rows[0]).toEqual({
+      job_status: "dead_letter",
+      command_status: "failed",
+    });
+  });
+
+  it("reconciles a completed GitHub job that never enrolled and dead-letters its outbox once", async () => {
+    const { coordinator, actions } = await build();
+    await seed("connected");
+    const scheduled = await coordinator.schedule(scheduleInput);
+    vi.spyOn(actions, "runStatus").mockResolvedValue({
+      github_run_id: 99,
+      status: "completed",
+      conclusion: "failure",
+      html_url: "https://github.example/run/99",
+      run_number: 1,
+      display_title: nornsRunName(scheduled.dispatch_job_id),
+      created_at: new Date().toISOString(),
+    });
+    await expect(coordinator.reconcileNextUnenrolledRun()).resolves.toBe(true);
+    expect(await repository.runForDispatch(scheduled.dispatch_job_id)).toMatchObject({
+      status: "failed",
+      github_run_id: 99,
+    });
+    const dispatcher = new Phase4Dispatcher(
+      new Phase4DispatchRepository(transactions),
+      "actions-terminal-test",
+      async () => {
+        throw new Error("a terminal Actions outbox must not deliver");
+      },
+    );
+    await expect(dispatcher.tick()).resolves.toBe(true);
+    await expect(dispatcher.tick()).resolves.toBe(false);
+    const terminal = await pg.query<{ job_status: string; command_status: string }>(
+      `SELECT job.status AS job_status,command.status AS command_status
+         FROM dispatch_jobs job JOIN commands command ON command.command_id=job.command_id
+        WHERE job.id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    expect(terminal.rows[0]).toEqual({
+      job_status: "dead_letter",
+      command_status: "failed",
+    });
+  });
+
+  it("terminalizes an enrolled job that dies before websocket reconcile", async () => {
+    const { coordinator, actions } = await build();
+    await seed("connected");
+    const scheduled = await coordinator.schedule(scheduleInput);
+    const tokenForRun = generateEnrollmentToken();
+    await pg.query(
+      `UPDATE github_actions_runs SET enrollment_secret_hash=$2
+        WHERE dispatch_job_id=$1`,
+      [scheduled.dispatch_job_id, enrollmentTokenHash(tokenForRun)],
+    );
+    const ephemeralStores = new RelayStores();
+    ephemeralStores.reserveRunnerGeneration(scheduled.actions.runner_id);
+    const enrollment = new ActionsEnrollmentService(repository, (runnerId, pem, generation) =>
+      ephemeralStores.restoreDurableRunnerIdentity(runnerId, pem, generation),
+    );
+    const publicPem = generateKeyPairSync("ed25519")
+      .publicKey.export({ type: "spki", format: "pem" })
+      .toString();
+    await enrollment.redeem({
+      enrollment_token: tokenForRun,
+      runner_id: scheduled.actions.runner_id,
+      dispatch_job_id: scheduled.dispatch_job_id,
+      public_key_pem: publicPem,
+    });
+    const before = await pg.query<{ actions_status: string; job_status: string }>(
+      `SELECT actions.status AS actions_status,job.status AS job_status
+         FROM github_actions_runs actions
+         JOIN dispatch_jobs job ON job.id=actions.dispatch_job_id
+        WHERE actions.dispatch_job_id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    expect(before.rows[0]).toEqual({
+      actions_status: "enrolled",
+      job_status: "awaiting_enrollment",
+    });
+    vi.spyOn(actions, "runStatus").mockResolvedValue({
+      github_run_id: 99,
+      status: "completed",
+      conclusion: "cancelled",
+      html_url: "https://github.example/run/99",
+      run_number: 1,
+      display_title: nornsRunName(scheduled.dispatch_job_id),
+      created_at: new Date().toISOString(),
+    });
+    await expect(coordinator.reconcileNextUnenrolledRun()).resolves.toBe(true);
+    expect(await repository.runForDispatch(scheduled.dispatch_job_id)).toMatchObject({
+      status: "failed",
+    });
+    const dispatcher = new Phase4Dispatcher(
+      new Phase4DispatchRepository(transactions),
+      "enrolled-before-websocket-terminal",
+      async () => {
+        throw new Error("terminal job must not dispatch");
+      },
+    );
+    await expect(dispatcher.tick()).resolves.toBe(true);
+  });
+
+  it("lets exact enrollment promotion win a reconciliation race once", async () => {
+    const { coordinator } = await build();
+    await seed("connected");
+    const scheduled = await coordinator.schedule(scheduleInput);
+    const claimed = await repository.claimUnenrolledReconciliation("terminal-racer", 30_000);
+    expect(claimed?.dispatch_job_id).toBe(scheduled.dispatch_job_id);
+    const tokenForRun = generateEnrollmentToken();
+    await pg.query(
+      `UPDATE github_actions_runs SET enrollment_secret_hash=$2
+        WHERE dispatch_job_id=$1`,
+      [scheduled.dispatch_job_id, enrollmentTokenHash(tokenForRun)],
+    );
+    const ephemeralStores = new RelayStores();
+    ephemeralStores.reserveRunnerGeneration(scheduled.actions.runner_id);
+    const enrollment = new ActionsEnrollmentService(repository, (runnerId, pem, generation) =>
+      ephemeralStores.restoreDurableRunnerIdentity(runnerId, pem, generation),
+    );
+    await enrollment.redeem({
+      enrollment_token: tokenForRun,
+      runner_id: scheduled.actions.runner_id,
+      dispatch_job_id: scheduled.dispatch_job_id,
+      public_key_pem: generateKeyPairSync("ed25519")
+        .publicKey.export({ type: "spki", format: "pem" })
+        .toString(),
+    });
+    await expect(
+      repository.markUnenrolledTerminal(
+        scheduled.dispatch_job_id,
+        "terminal-racer",
+        "late terminal observation",
+      ),
+    ).resolves.toBe(false);
+    const pending = await new Phase4DispatchRepository(transactions).pendingForRunner(
+      scheduled.actions.runner_id,
+      scheduled.actions.runner_generation,
+    );
+    expect(pending.map((command) => command.command_id)).toEqual([scheduled.command_id]);
+    const final = await pg.query<{ actions_status: string; job_status: string }>(
+      `SELECT actions.status AS actions_status,job.status AS job_status
+         FROM github_actions_runs actions
+         JOIN dispatch_jobs job ON job.id=actions.dispatch_job_id
+        WHERE actions.dispatch_job_id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    expect(final.rows[0]).toEqual({
+      actions_status: "enrolled",
+      job_status: "delivered",
+    });
+    // The coordinator itself now has no terminal candidate for this delivered
+    // command even if its previous reconciliation lease later expires.
+    await expect(coordinator.reconcileNextUnenrolledRun()).resolves.toBe(false);
+  });
+
+  it("waits through indexing lag until command expiry while transient API failures remain retriable", async () => {
+    const { coordinator, actions } = await build();
+    await seed("connected");
+    const scheduled = await coordinator.schedule(scheduleInput);
+    const findSpy = vi.spyOn(actions, "findRunForJob").mockResolvedValue(null);
+    await pg.query(
+      `UPDATE github_actions_runs
+          SET github_run_id=NULL,github_run_url=NULL,
+              reconcile_available_at=now()-interval '1 second'
+        WHERE dispatch_job_id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      await expect(coordinator.reconcileNextUnenrolledRun()).resolves.toBe(true);
+      expect(await repository.runForDispatch(scheduled.dispatch_job_id)).toMatchObject({
+        status: "dispatched",
+      });
+      await pg.query(
+        `UPDATE github_actions_runs SET reconcile_available_at=now()-interval '1 second'
+          WHERE dispatch_job_id=$1`,
+        [scheduled.dispatch_job_id],
+      );
+    }
+    await pg.query(
+      `UPDATE commands
+          SET envelope=jsonb_set(
+            envelope,'{expires_at}',to_jsonb((now()-interval '1 second')::text)
+          )
+        WHERE dispatch_job_id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    await expect(coordinator.reconcileNextUnenrolledRun()).resolves.toBe(true);
+    expect(await repository.runForDispatch(scheduled.dispatch_job_id)).toMatchObject({
+      status: "failed",
+    });
+
+    // A fresh job with a correlated run and transient status API failure is
+    // released for retry, not terminalized early.
+    await pg.query(
+      `UPDATE github_actions_runs
+          SET status='dispatched',completed_at=NULL,last_error=NULL,
+              github_run_id=99,github_run_url='https://github.example/run/99',
+              reconcile_attempts=0,reconcile_available_at=now()-interval '1 second'
+        WHERE dispatch_job_id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    await pg.query(
+      `UPDATE commands
+          SET envelope=jsonb_set(
+            envelope,'{expires_at}',to_jsonb((now()+interval '15 minutes')::text)
+          )
+        WHERE dispatch_job_id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    findSpy.mockRestore();
+    vi.spyOn(actions, "runStatus").mockRejectedValueOnce(new Error("temporary GitHub outage"));
+    await expect(coordinator.reconcileNextUnenrolledRun()).rejects.toThrow(/temporary GitHub/);
+    expect(await repository.runForDispatch(scheduled.dispatch_job_id)).toMatchObject({
+      status: "dispatched",
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -916,7 +1373,7 @@ describe("ephemeral runner enrollment", () => {
     repository = new ActionsExecutionRepository(built.transactions);
     stores = new RelayStores();
     enrollment = new ActionsEnrollmentService(repository, (runnerId, pem, generation) =>
-      stores.enrollRunnerAtGeneration(runnerId, pem, generation),
+      stores.restoreDurableRunnerIdentity(runnerId, pem, generation),
     );
     await pg.exec(`
       INSERT INTO projects (
@@ -930,6 +1387,62 @@ describe("ephemeral runner enrollment", () => {
         repository_health, created_by_actor_type, created_by_actor_id
       ) VALUES ('binding-1','project-1','github','connected','actions:project-1','90210',
         'octo/widgets','5001','octo','widgets','{}'::jsonb,'main','v','healthy','human','admin-1');
+      INSERT INTO phases (
+        id, project_id, objective_summary, priority, status, approved_budget_usd
+      ) VALUES ('phase-1','project-1','Enrollment fixture',1,'approved',20);
+      INSERT INTO objectives (
+        id, project_id, phase_id, outcome, success_measures, status, "order"
+      ) VALUES ('objective-1','project-1','phase-1','Enroll one runner',
+        '["runner enrolls"]'::jsonb,'active',0);
+      INSERT INTO strategy_versions (
+        id, project_id, phase_id, version, status, objective, content,
+        convergence, review_rounds, content_hash
+      ) VALUES ('strategy-1','project-1','phase-1',1,'approved','Enrollment',
+        '{}'::jsonb,'converged',1,repeat('a',64));
+      UPDATE phases SET approved_strategy_version_id='strategy-1' WHERE id='phase-1';
+      INSERT INTO tasks (
+        id, project_id, phase_id, objective_id, strategy_version_id, title,
+        description, deliverables, acceptance_criteria, complexity, risk,
+        required_roles, required_capabilities, required_inputs, expected_outputs,
+        environment_policy_ref, verification_policy_ref, state, lifecycle_version
+      ) VALUES ('task-1','project-1','phase-1','objective-1','strategy-1','Enroll',
+        'Enrollment fixture','["runner"]'::jsonb,'["enrolled"]'::jsonb,
+        'S','low','["implementation"]'::jsonb,'[]'::jsonb,'[]'::jsonb,
+        '["runner"]'::jsonb,'environment','v','assigned',1);
+      INSERT INTO agent_profiles (
+        id, provider, runtime, model, roles, capabilities, context_limit_tokens,
+        security_restrictions, status, active_workload, cost_metadata
+      ) VALUES ('agent-1','openai','codex','gpt-5-codex','["implementation"]'::jsonb,
+        '[]'::jsonb,200000,'[]'::jsonb,'available',0,
+        '{"billing_mode":"subscription"}'::jsonb);
+      INSERT INTO agent_assignments (
+        id, project_id, phase_id, task_id, agent_profile_id, status, rationale,
+        rationale_factors, budget_limit_usd, allocation_policy_ref
+      ) VALUES ('assignment-1','project-1','phase-1','task-1','agent-1','active',
+        'Enrollment fixture','["fixture"]'::jsonb,10,'allocation');
+      INSERT INTO agent_runs (
+        id,project_id,phase_id,task_id,assignment_id,attempt,state,is_designated,
+        runner_id,repository_binding_id,expected_revision
+      ) VALUES (
+        'run:task-1:1','project-1','phase-1','task-1','assignment-1',1,'created',true,
+        'actions:project-1','binding-1','fixture-revision'
+      );
+      INSERT INTO commands (
+        command_id,dispatch_job_id,project_id,phase_id,task_id,run_id,runner_id,
+        runner_generation,kind,envelope,status,correlation_id
+      ) VALUES (
+        'dispatch:dispatch-job:run:task-1:1','dispatch-job:run:task-1:1',
+        'project-1','phase-1','task-1','run:task-1:1','actions:project-1',
+        1,'launch_run',
+        jsonb_build_object('expires_at',(now()+interval '15 minutes')::text),
+        'queued','enrollment-fixture'
+      );
+      INSERT INTO dispatch_jobs (
+        id,project_id,phase_id,task_id,run_id,command_id,runner_id,status
+      ) VALUES (
+        'dispatch-job:run:task-1:1','project-1','phase-1','task-1','run:task-1:1',
+        'dispatch:dispatch-job:run:task-1:1','actions:project-1','awaiting_enrollment'
+      );
     `);
     await repository.upsertBinding({
       repository_binding_id: "binding-1",
@@ -950,6 +1463,7 @@ describe("ephemeral runner enrollment", () => {
       run_id: "run:task-1:1",
       runner_id: "actions:project-1",
       runner_generation: generation,
+      enrollment_secret_hash: enrollmentTokenHash(token),
     });
     await repository.markDispatched("dispatch-job:run:task-1:1", { id: 99, url: "https://x" });
   });
@@ -970,9 +1484,43 @@ describe("ephemeral runner enrollment", () => {
     expect(stores.runner("actions:project-1")?.generation).toBe(result.generation);
   });
 
-  it("is single-use: a replay of the same enrollment loses", async () => {
-    await redeem();
-    await expect(redeem()).rejects.toBeInstanceOf(ActionsExecutionError);
+  it("reconstructs the enrolled public identity after a fresh-server restart", async () => {
+    const result = await redeem();
+    const durable = await repository.enrolledRunnerIdentity("actions:project-1");
+    expect(durable).toEqual({
+      public_key_pem: publicKeyPem,
+      runner_generation: result.generation,
+    });
+    const freshStores = new RelayStores();
+    expect(
+      freshStores.enrollRunnerAtGeneration(
+        "actions:project-1",
+        durable?.public_key_pem ?? "",
+        durable?.runner_generation ?? -1,
+      ),
+    ).toMatchObject({ generation: result.generation });
+    expect(freshStores.runner("actions:project-1")).toMatchObject({
+      public_key_pem: publicKeyPem,
+      generation: result.generation,
+    });
+    await pg.query(
+      `INSERT INTO runner_revocations (
+         runner_id,revoked_through_generation,reason,revoked_by
+       ) VALUES ('actions:project-1',$1,'compromised','admin-1')`,
+      [result.generation],
+    );
+    await expect(repository.enrolledRunnerIdentity("actions:project-1")).resolves.toBeNull();
+  });
+
+  it("replays the exact same token and public key idempotently after response loss", async () => {
+    const first = await redeem();
+    await expect(redeem()).resolves.toEqual(first);
+    const changedPublicKey = generateKeyPairSync("ed25519")
+      .publicKey.export({ type: "spki", format: "pem" })
+      .toString();
+    await expect(redeem({ public_key_pem: changedPublicKey })).rejects.toBeInstanceOf(
+      ActionsExecutionError,
+    );
   });
 
   it("rejects a wrong token without revealing which check failed", async () => {
@@ -989,9 +1537,19 @@ describe("ephemeral runner enrollment", () => {
   });
 
   it("rejects a token redeemed against a superseded generation", async () => {
-    // A second launch reserves a newer generation; the older job has lost.
+    // Revocation is durable generation authority; a fresh process must make
+    // the same decision as this one.
     stores.reserveRunnerGeneration("actions:project-1");
+    await pg.query(
+      `INSERT INTO runner_revocations (
+         runner_id,revoked_through_generation,reason,revoked_by
+       ) VALUES ('actions:project-1',1,'superseded','admin-1')`,
+    );
     await expect(redeem()).rejects.toMatchObject({ code: "invalid_enrollment" });
+    await expect(repository.enrolledRunnerIdentity("actions:project-1")).resolves.toBeNull();
+    await expect(repository.runForDispatch("dispatch-job:run:task-1:1")).resolves.toMatchObject({
+      status: "dispatched",
+    });
   });
 
   it("rejects every enrollment once the binding is disabled", async () => {
@@ -999,12 +1557,14 @@ describe("ephemeral runner enrollment", () => {
     await expect(redeem()).rejects.toMatchObject({ code: "invalid_enrollment" });
   });
 
-  it("rejects the previous token after rotation", async () => {
+  it("keeps the run-pinned token valid across later binding rotation", async () => {
     const rotated = generateEnrollmentToken();
     await repository.storeEnrollmentSecretHash("binding-1", enrollmentTokenHash(rotated));
-    await expect(redeem()).rejects.toMatchObject({ code: "invalid_enrollment" });
-    await expect(redeem({ enrollment_token: rotated })).resolves.toMatchObject({
+    await expect(redeem()).resolves.toMatchObject({
       run_id: "run:task-1:1",
+    });
+    await expect(redeem({ enrollment_token: rotated })).rejects.toMatchObject({
+      code: "invalid_enrollment",
     });
   });
 });
@@ -1174,6 +1734,260 @@ describe("review follow-ups: tokens, ordering, rotation, correlation", () => {
   });
 });
 
+describe("migration 0039 legacy Actions outbox upgrade", () => {
+  it("pins safe credentials, quarantines missing credentials, and removes both from ordinary dispatch", async () => {
+    const migrationPg = new PGlite();
+    openDatabases.push(migrationPg);
+    await migrationPg.exec(`
+      CREATE ROLE norns_app NOLOGIN;
+      CREATE TABLE norns_state (
+        key TEXT PRIMARY KEY,
+        snapshot JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    const sources = await currentV2MigrationSources();
+    const phase5Index = sources.findIndex(
+      (source) => source.name === CONVERSATION_HUMAN_STEERING_MIGRATION_NAME,
+    );
+    expect(phase5Index).toBeGreaterThan(0);
+    await runV2Migrations(
+      migrationPg as unknown as V2MigrationDatabase,
+      sources.slice(0, phase5Index),
+    );
+    await migrationPg.exec("SET session_replication_role='replica'");
+    try {
+      await migrationPg.exec(`
+        INSERT INTO github_actions_execution_bindings (
+          repository_binding_id,project_id,connection_id,installation_id,
+          repository_github_id,owner,name,default_branch,runner_id,
+          enrollment_secret_hash
+        ) VALUES
+          ('legacy-safe-binding','legacy-safe-project','github:1','1',101,
+           'octo','safe','main','actions:legacy-safe',repeat('a',64)),
+          ('legacy-missing-binding','legacy-missing-project','github:2','2',102,
+           'octo','missing','main','actions:legacy-missing',NULL),
+          ('legacy-ambiguous-binding','legacy-ambiguous-project','github:3','3',103,
+           'octo','ambiguous','main','actions:legacy-ambiguous',repeat('c',64)),
+          ('legacy-enrolled-binding','legacy-enrolled-project','github:4','4',104,
+           'octo','enrolled','main','actions:legacy-enrolled',repeat('d',64));
+        INSERT INTO commands (
+          command_id,dispatch_job_id,project_id,phase_id,task_id,run_id,
+          runner_id,runner_generation,kind,envelope,status,correlation_id
+        ) VALUES
+          ('legacy-safe-command','legacy-safe-job','legacy-safe-project',
+           'legacy-safe-phase','legacy-safe-task','legacy-safe-run',
+           'actions:legacy-safe:dispatch',1,'launch_run',
+           jsonb_build_object('expires_at',(now()+interval '15 minutes')::text),
+           'queued','legacy-safe-correlation'),
+          ('legacy-missing-command','legacy-missing-job','legacy-missing-project',
+           'legacy-missing-phase','legacy-missing-task','legacy-missing-run',
+           'actions:legacy-missing:dispatch',1,'launch_run',
+           jsonb_build_object('expires_at',(now()+interval '15 minutes')::text),
+           'queued','legacy-missing-correlation'),
+          ('legacy-ambiguous-command-1','legacy-ambiguous-job-1','legacy-ambiguous-project',
+           'legacy-ambiguous-phase','legacy-ambiguous-task-1','legacy-ambiguous-run-1',
+           'actions:legacy-ambiguous:dispatch-1',1,'launch_run',
+           jsonb_build_object('expires_at',(now()+interval '15 minutes')::text),
+           'queued','legacy-ambiguous-correlation-1'),
+          ('legacy-ambiguous-command-2','legacy-ambiguous-job-2','legacy-ambiguous-project',
+           'legacy-ambiguous-phase','legacy-ambiguous-task-2','legacy-ambiguous-run-2',
+           'actions:legacy-ambiguous:dispatch-2',1,'launch_run',
+           jsonb_build_object('expires_at',(now()+interval '15 minutes')::text),
+           'queued','legacy-ambiguous-correlation-2'),
+          ('legacy-enrolled-command','legacy-enrolled-job','legacy-enrolled-project',
+           'legacy-enrolled-phase','legacy-enrolled-task','legacy-enrolled-run',
+           'actions:legacy-enrolled:dispatch',1,'launch_run',
+           jsonb_build_object('expires_at',(now()+interval '15 minutes')::text),
+           'queued','legacy-enrolled-correlation');
+        INSERT INTO dispatch_jobs (
+          id,project_id,phase_id,task_id,run_id,command_id,runner_id,status
+        ) VALUES
+          ('legacy-safe-job','legacy-safe-project','legacy-safe-phase',
+           'legacy-safe-task','legacy-safe-run','legacy-safe-command',
+           'actions:legacy-safe:dispatch','queued'),
+          ('legacy-missing-job','legacy-missing-project','legacy-missing-phase',
+           'legacy-missing-task','legacy-missing-run','legacy-missing-command',
+           'actions:legacy-missing:dispatch','leased'),
+          ('legacy-ambiguous-job-1','legacy-ambiguous-project','legacy-ambiguous-phase',
+           'legacy-ambiguous-task-1','legacy-ambiguous-run-1','legacy-ambiguous-command-1',
+           'actions:legacy-ambiguous:dispatch-1','queued'),
+          ('legacy-ambiguous-job-2','legacy-ambiguous-project','legacy-ambiguous-phase',
+           'legacy-ambiguous-task-2','legacy-ambiguous-run-2','legacy-ambiguous-command-2',
+           'actions:legacy-ambiguous:dispatch-2','queued'),
+          ('legacy-enrolled-job','legacy-enrolled-project','legacy-enrolled-phase',
+           'legacy-enrolled-task','legacy-enrolled-run','legacy-enrolled-command',
+           'actions:legacy-enrolled:dispatch','queued');
+        UPDATE dispatch_jobs
+           SET lease_owner='legacy-worker',
+               lease_expires_at=now()+interval '1 minute'
+         WHERE id='legacy-missing-job';
+        INSERT INTO github_actions_runs (
+          id,project_id,repository_binding_id,dispatch_job_id,run_id,runner_id,
+          runner_generation,status
+        ) VALUES
+          ('legacy-safe-actions','legacy-safe-project','legacy-safe-binding',
+           'legacy-safe-job','legacy-safe-run','actions:legacy-safe:dispatch',1,'dispatched'),
+          ('legacy-missing-actions','legacy-missing-project','legacy-missing-binding',
+           'legacy-missing-job','legacy-missing-run','actions:legacy-missing:dispatch',1,'requested');
+        INSERT INTO github_actions_runs (
+          id,project_id,repository_binding_id,dispatch_job_id,run_id,runner_id,
+          runner_generation,status,enrolled_at
+        ) VALUES
+          ('legacy-ambiguous-actions-1','legacy-ambiguous-project',
+           'legacy-ambiguous-binding','legacy-ambiguous-job-1','legacy-ambiguous-run-1',
+           'actions:legacy-ambiguous:dispatch-1',1,'dispatched',NULL),
+          ('legacy-ambiguous-actions-2','legacy-ambiguous-project',
+           'legacy-ambiguous-binding','legacy-ambiguous-job-2','legacy-ambiguous-run-2',
+           'actions:legacy-ambiguous:dispatch-2',1,'requested',NULL),
+          ('legacy-enrolled-actions','legacy-enrolled-project','legacy-enrolled-binding',
+           'legacy-enrolled-job','legacy-enrolled-run','actions:legacy-enrolled:dispatch',
+           1,'enrolled',now());
+      `);
+    } finally {
+      await migrationPg.exec("SET session_replication_role='origin'");
+    }
+    const phase5Migration = sources[phase5Index];
+    if (!phase5Migration) throw new Error("missing phase 5 migration source");
+    await runV2Migrations(migrationPg as unknown as V2MigrationDatabase, [phase5Migration]);
+    const upgraded = await migrationPg.query<{
+      dispatch_job_id: string;
+      actions_status: string;
+      enrollment_secret_hash: string | null;
+      job_status: string;
+      lease_owner: string | null;
+    }>(
+      `SELECT actions.dispatch_job_id,actions.status AS actions_status,
+              actions.enrollment_secret_hash,job.status AS job_status,
+              job.lease_owner
+         FROM github_actions_runs actions
+         JOIN dispatch_jobs job ON job.id=actions.dispatch_job_id
+        ORDER BY actions.dispatch_job_id`,
+    );
+    expect(upgraded.rows).toEqual([
+      {
+        dispatch_job_id: "legacy-ambiguous-job-1",
+        actions_status: "abandoned",
+        enrollment_secret_hash: null,
+        job_status: "awaiting_enrollment",
+        lease_owner: null,
+      },
+      {
+        dispatch_job_id: "legacy-ambiguous-job-2",
+        actions_status: "abandoned",
+        enrollment_secret_hash: null,
+        job_status: "awaiting_enrollment",
+        lease_owner: null,
+      },
+      {
+        dispatch_job_id: "legacy-enrolled-job",
+        actions_status: "abandoned",
+        enrollment_secret_hash: null,
+        job_status: "awaiting_enrollment",
+        lease_owner: null,
+      },
+      {
+        dispatch_job_id: "legacy-missing-job",
+        actions_status: "abandoned",
+        enrollment_secret_hash: null,
+        job_status: "awaiting_enrollment",
+        lease_owner: null,
+      },
+      {
+        dispatch_job_id: "legacy-safe-job",
+        actions_status: "dispatched",
+        enrollment_secret_hash: "a".repeat(64),
+        job_status: "awaiting_enrollment",
+        lease_owner: null,
+      },
+    ]);
+    const transactions = new PGliteTransactionRunner(migrationPg);
+    const actionsRepository = new ActionsExecutionRepository(transactions);
+    await expect(
+      actionsRepository.redeemEnrollment({
+        dispatch_job_id: "legacy-safe-job",
+        runner_id: "actions:legacy-safe:dispatch",
+        enrollment_secret_hash: "a".repeat(64),
+        public_key_hash: "b".repeat(64),
+        public_key_pem: "legacy-public-key",
+      }),
+    ).resolves.toEqual({ run_id: "legacy-safe-run", runner_generation: 1 });
+    const dispatchRepository = new Phase4DispatchRepository(transactions);
+    await expect(dispatchRepository.claim("ordinary-runner", 30_000)).resolves.toBeNull();
+    const dispatcher = new Phase4Dispatcher(
+      dispatchRepository,
+      "legacy-terminal-worker",
+      async () => {
+        throw new Error("migrated Actions work must never enter ordinary delivery");
+      },
+    );
+    for (let quarantined = 0; quarantined < 4; quarantined += 1) {
+      await expect(dispatcher.tick()).resolves.toBe(true);
+    }
+    await expect(dispatcher.tick()).resolves.toBe(false);
+    const terminal = await migrationPg.query<{
+      dispatch_job_id: string;
+      job_status: string;
+      command_status: string;
+    }>(
+      `SELECT job.id AS dispatch_job_id,job.status AS job_status,
+              command.status AS command_status
+         FROM dispatch_jobs job JOIN commands command ON command.command_id=job.command_id
+        WHERE job.id<>'legacy-safe-job'
+        ORDER BY job.id`,
+    );
+    expect(terminal.rows).toEqual([
+      {
+        dispatch_job_id: "legacy-ambiguous-job-1",
+        job_status: "dead_letter",
+        command_status: "failed",
+      },
+      {
+        dispatch_job_id: "legacy-ambiguous-job-2",
+        job_status: "dead_letter",
+        command_status: "failed",
+      },
+      {
+        dispatch_job_id: "legacy-enrolled-job",
+        job_status: "dead_letter",
+        command_status: "failed",
+      },
+      {
+        dispatch_job_id: "legacy-missing-job",
+        job_status: "dead_letter",
+        command_status: "failed",
+      },
+    ]);
+    await migrationPg.exec("SET session_replication_role='replica'");
+    try {
+      await migrationPg.exec(`
+        INSERT INTO github_actions_runs (
+          id,project_id,repository_binding_id,dispatch_job_id,run_id,runner_id,
+          runner_generation,status
+        ) VALUES (
+          'legacy-old-app-shape','legacy-safe-project','legacy-safe-binding',
+          'legacy-old-app-job','legacy-old-app-run','actions:legacy-old-app',1,'requested'
+        );
+      `);
+    } finally {
+      await migrationPg.exec("SET session_replication_role='origin'");
+    }
+    await expect(
+      migrationPg.query(
+        `UPDATE github_actions_runs SET status='dispatched'
+          WHERE id='legacy-old-app-shape'`,
+      ),
+    ).rejects.toThrow(/enrollment_identity_shape/i);
+    await expect(
+      migrationPg.query(
+        `UPDATE github_actions_runs
+            SET enrollment_secret_hash=repeat('e',64),status='enrolled',enrolled_at=now()
+          WHERE id='legacy-old-app-shape'`,
+      ),
+    ).rejects.toThrow(/enrollment_identity_shape/i);
+  });
+});
+
 describe("migration 0017 grants the runtime role what it needs", () => {
   /**
    * Production runs as the restricted `norns_app` role, so a table created
@@ -1227,7 +2041,9 @@ describe("migration 0017 grants the runtime role what it needs", () => {
         `INSERT INTO github_actions_runs (
            id, project_id, repository_binding_id, dispatch_job_id, run_id, runner_id
          ) VALUES ('actions-run:j','project-1','binding-1','j','run:1','actions:project-1');
-         UPDATE github_actions_runs SET status = 'dispatched' WHERE dispatch_job_id = 'j';
+         UPDATE github_actions_runs
+            SET enrollment_secret_hash=repeat('a',64),status='dispatched'
+          WHERE dispatch_job_id = 'j';
          SELECT 1 FROM github_actions_runs;`,
       ),
     ).resolves.toBeUndefined();

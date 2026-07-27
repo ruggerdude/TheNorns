@@ -17,17 +17,27 @@ import {
 import { AssistantChatTransport, useAISDKChat, useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
 import type {
+  V2ConfirmConversationActionResponseT,
+  V2ConversationActionDeliveryEventT,
   V2ConversationActionT,
   V2ConversationHandoffT,
   V2ConversationPlanActionEffectValueT,
   V2ConversationPlanReviewT,
   V2ConversationPlanningExcerptReceiptT,
+  V2ConversationPmUpdateSettingsT,
   V2ConversationSummaryT,
+  V2CreateExecutionActionProposalInputT,
+  V2CreateHumanWaitAnswerProposalInputT,
+  V2HumanWaitT,
   V2RequestPlanChangesParametersT,
   V2WorkConversationT,
   V2WorkMessagePartT,
   V2WorkMessageT,
   V2WorkPlanVersionT,
+} from "@norns/contracts";
+import {
+  V2CreateExecutionActionProposalInput,
+  V2CreateHumanWaitAnswerProposalInput,
 } from "@norns/contracts";
 import type { ChatRequestOptions, CreateUIMessage, UIMessage, UIMessageChunk } from "ai";
 import {
@@ -44,6 +54,13 @@ import remarkGfm from "remark-gfm";
 import { ConversationActionCard } from "./ConversationActionCard";
 import { ConversationPlanCard } from "./ConversationPlanCard";
 import { ConversationQcCard } from "./ConversationQcCard";
+import {
+  ExecutionActionComposer,
+  ExecutionActionHistory,
+  HumanWaitCard,
+  type HumanWaitView,
+  PmUpdateControls,
+} from "./ExecutionConversationControls";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import {
   type ConversationDetail,
@@ -57,8 +74,11 @@ import {
   getConversation,
   listWorkItemConversations,
   messageEndpoint,
+  proposeExecutionConversationAction,
+  proposeHumanWaitAnswer,
   resolveConversation,
   retrieveConversationPlanningExcerpt,
+  updateConversationPmSettings,
 } from "./conversationApi";
 import { Alert, Badge, Button, Field, Input, Spinner, TextArea } from "./ui";
 import "./ConversationWorkspace.css";
@@ -106,12 +126,22 @@ type PlanningExcerptData = ReferenceData & {
   receipt: V2ConversationPlanningExcerptReceiptT | null;
 };
 
+type HumanWaitData = ReferenceData & {
+  view: HumanWaitView | null;
+};
+
+type HumanWaitUpdateData = HumanWaitData & {
+  status: "continuation_queued" | "resumed" | "expired" | "cancelled" | "failed";
+};
+
 type NornsDataParts = {
   artifact: ArtifactData;
   plan: PlanData;
   action: ActionData;
   handoff: HandoffData;
   "planning-excerpt": PlanningExcerptData;
+  "human-wait": HumanWaitData;
+  "human-wait-update": HumanWaitUpdateData;
   attempt: AttemptData;
   usage: UsageData;
   "message-status": MessageStatusData;
@@ -310,14 +340,25 @@ type ConversationResources = {
   reviews: V2ConversationPlanReviewT[];
   handoff: V2ConversationHandoffT | null;
   excerptReceipts: Map<string, V2ConversationPlanningExcerptReceiptT>;
+  humanWaits: Map<string, HumanWaitView>;
 };
+
+type ConversationActionEffect = V2ConfirmConversationActionResponseT["effect"];
 
 type ConversationActionContextValue = {
   actions: Map<string, V2ConversationActionT>;
-  effects: Map<string, V2ConversationPlanActionEffectValueT>;
+  effects: Map<string, ConversationActionEffect>;
+  deliveryEvents: V2ConversationActionDeliveryEventT[];
   busyActionId: string | null;
   errors: Map<string, string>;
   confirm: (action: V2ConversationActionT) => Promise<void>;
+  prepareHumanWaitAnswer: (
+    wait: V2HumanWaitT,
+    answer: string,
+    rationale: string | null,
+  ) => Promise<boolean>;
+  lockedHumanWaitAnswerIds: Set<string>;
+  refresh: () => void;
   planChangeBusyId: string | null;
   planChangeErrors: Map<string, string>;
   planChangeLockedIds: Set<string>;
@@ -402,6 +443,29 @@ function messagePartToUi(
             id: part.excerpt_receipt_id,
             label: "Retrieved planning excerpt",
             receipt: resources.excerptReceipts.get(part.excerpt_receipt_id) ?? null,
+          },
+        },
+      ];
+    case "human_wait":
+      return [
+        {
+          type: "data-human-wait",
+          data: {
+            id: part.human_wait_id,
+            label: "Question awaiting your answer",
+            view: resources.humanWaits.get(part.human_wait_id) ?? null,
+          },
+        },
+      ];
+    case "human_wait_update":
+      return [
+        {
+          type: "data-human-wait-update",
+          data: {
+            id: part.human_wait_id,
+            label: "Human wait update",
+            status: part.status,
+            view: resources.humanWaits.get(part.human_wait_id) ?? null,
           },
         },
       ];
@@ -609,6 +673,51 @@ function PlanningExcerptPreview({
   );
 }
 
+function HumanWaitPreview({ data }: DataMessagePartProps<HumanWaitData>): React.ReactElement {
+  const context = useContext(ConversationActionContext);
+  if (!data.view || !context) return <ReferenceCard data={data} />;
+  const answerAction =
+    [...context.actions.values()].find(
+      (action) =>
+        action.action_type === "answer_human_wait" &&
+        action.payload.parameters.wait_id === data.id &&
+        action.status !== "rejected",
+    ) ?? null;
+  return (
+    <HumanWaitCard
+      view={data.view}
+      answerAction={answerAction}
+      deliveryEvents={context.deliveryEvents}
+      effect={answerAction ? (context.effects.get(answerAction.id) ?? null) : null}
+      busy={context.busyActionId === (answerAction?.id ?? data.id)}
+      exactRetryLocked={context.lockedHumanWaitAnswerIds.has(data.id)}
+      error={context.errors.get(answerAction?.id ?? data.id) ?? context.errors.get(data.id) ?? null}
+      onPrepareAnswer={context.prepareHumanWaitAnswer}
+      onConfirm={context.confirm}
+      onRefresh={context.refresh}
+    />
+  );
+}
+
+function HumanWaitUpdatePreview({
+  data,
+}: DataMessagePartProps<HumanWaitUpdateData>): React.ReactElement {
+  const continuationStatus = data.view?.continuation?.status;
+  return (
+    <output
+      className={`human-wait-update is-${data.status}`}
+      data-testid={`human-wait-update-${data.id}`}
+      aria-live="polite"
+    >
+      <strong>Human decision update</strong>
+      <span>
+        {data.status.replaceAll("_", " ")}
+        {continuationStatus ? ` · continuation ${continuationStatus}` : ""}
+      </span>
+    </output>
+  );
+}
+
 function planChangeDraftStorageKey(planVersionId: string): string {
   return `norns:conversation-plan-change-draft:${planVersionId}`;
 }
@@ -750,6 +859,7 @@ function ActionPreview({ data }: DataMessagePartProps<ActionData>): React.ReactE
   const context = useContext(ConversationActionContext);
   const action = context?.actions.get(data.id) ?? data.action;
   if (!action || !context) return <ReferenceCard data={data} />;
+  if (action.action_type === "answer_human_wait") return <></>;
   return (
     <ConversationActionCard
       action={action}
@@ -1186,6 +1296,8 @@ function UserMessage(): React.ReactElement {
                 action: ActionPreview,
                 handoff: HandoffPreview,
                 "planning-excerpt": PlanningExcerptPreview,
+                "human-wait": HumanWaitPreview,
+                "human-wait-update": HumanWaitUpdatePreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -1214,6 +1326,8 @@ function AssistantMessage(): React.ReactElement {
                 action: ActionPreview,
                 handoff: HandoffPreview,
                 "planning-excerpt": PlanningExcerptPreview,
+                "human-wait": HumanWaitPreview,
+                "human-wait-update": HumanWaitUpdatePreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -1244,6 +1358,8 @@ function SystemMessage(): React.ReactElement {
                 action: ActionPreview,
                 handoff: HandoffPreview,
                 "planning-excerpt": PlanningExcerptPreview,
+                "human-wait": HumanWaitPreview,
+                "human-wait-update": HumanWaitUpdatePreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -1292,7 +1408,7 @@ function approvalTransitionStorageKey(conversationId: string): string {
   return `norns:conversation-approval-transition:${conversationId}`;
 }
 
-function executionConversationId(effect: V2ConversationPlanActionEffectValueT): string | null {
+function executionConversationId(effect: ConversationActionEffect): string | null {
   if (
     effect.kind !== "plan_approved" ||
     effect.transition_status !== "created" ||
@@ -1307,6 +1423,135 @@ function createConfirmationKey(actionId: string): string {
   const unique =
     typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now().toString(36);
   return `action-confirm-${actionId}-${unique}`;
+}
+
+function durableRequestKey(
+  namespace: string,
+  subjectId: string,
+  memory: Map<string, string>,
+): string {
+  const memoryKey = `${namespace}:${subjectId}`;
+  const remembered = memory.get(memoryKey);
+  if (remembered) return remembered;
+  const storageKey = `norns:${namespace}:${subjectId}`;
+  try {
+    const existing = window.sessionStorage.getItem(storageKey);
+    if (existing) {
+      memory.set(memoryKey, existing);
+      return existing;
+    }
+    const created = `${namespace}-${subjectId}-${
+      typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now().toString(36)
+    }`;
+    memory.set(memoryKey, created);
+    window.sessionStorage.setItem(storageKey, created);
+    return created;
+  } catch {
+    const created = `${namespace}-${subjectId}-${
+      typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now().toString(36)
+    }`;
+    memory.set(memoryKey, created);
+    return created;
+  }
+}
+
+function clearDurableRequestKey(
+  namespace: string,
+  subjectId: string,
+  memory: Map<string, string>,
+): void {
+  const memoryKey = `${namespace}:${subjectId}`;
+  memory.delete(memoryKey);
+  try {
+    window.sessionStorage.removeItem(`norns:${namespace}:${subjectId}`);
+  } catch {
+    // The durable server response remains authoritative.
+  }
+}
+
+function exactRequestStorageKey(namespace: string, subjectId: string): string {
+  return `norns:${namespace}:request:${subjectId}`;
+}
+
+function storedExactRequest<T>(
+  namespace: string,
+  subjectId: string,
+  parse: (value: unknown) => { success: true; data: T } | { success: false },
+): T | null {
+  try {
+    const raw = window.sessionStorage.getItem(exactRequestStorageKey(namespace, subjectId));
+    if (!raw) return null;
+    const parsed = parse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeExactRequest(namespace: string, subjectId: string, request: unknown): void {
+  try {
+    window.sessionStorage.setItem(
+      exactRequestStorageKey(namespace, subjectId),
+      JSON.stringify(request),
+    );
+  } catch {
+    // In-memory component state still locks the exact request for this mount.
+  }
+}
+
+function clearExactRequest(namespace: string, subjectId: string): void {
+  try {
+    window.sessionStorage.removeItem(exactRequestStorageKey(namespace, subjectId));
+  } catch {
+    // The server response remains authoritative.
+  }
+}
+
+function actionHasExactSourceReceipt(
+  action: V2ConversationActionT,
+  messages: V2WorkMessageT[],
+  expectedClientMessageId: string,
+  scope: {
+    projectId: string;
+    workItemId: string;
+    conversationId: string;
+  },
+): boolean {
+  if (
+    action.project_id !== scope.projectId ||
+    action.work_item_id !== scope.workItemId ||
+    action.conversation_id !== scope.conversationId
+  ) {
+    return false;
+  }
+  const sourceMessage = messages.find((message) => message.id === action.source_message_id);
+  return Boolean(
+    sourceMessage &&
+      sourceMessage.project_id === scope.projectId &&
+      sourceMessage.work_item_id === scope.workItemId &&
+      sourceMessage.conversation_id === scope.conversationId &&
+      sourceMessage.client_message_id === expectedClientMessageId &&
+      sourceMessage.parts.some((part) => part.type === "action" && part.action_id === action.id),
+  );
+}
+
+function executionActionMessage(
+  actionType: V2CreateExecutionActionProposalInputT["action_type"],
+  parameters: Record<string, unknown>,
+): string {
+  for (const key of ["decision", "direction", "brief", "reason"]) {
+    const value = parameters[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  if (actionType === "approve_plan_change") {
+    return `Approve plan change ${String(parameters.proposal_action_id ?? "")}`.trim();
+  }
+  if (actionType === "resume_work") {
+    return parameters.task_id
+      ? `Resume work for task ${String(parameters.task_id)}`
+      : "Resume this work item";
+  }
+  return actionType.replaceAll("_", " ");
 }
 
 function proposalStorageKey(conversationId: string): string {
@@ -1423,17 +1668,47 @@ function ConversationThread({
   const [planChangeBusyId, setPlanChangeBusyId] = useState<string | null>(null);
   const [planChangeErrors, setPlanChangeErrors] = useState(() => new Map<string, string>());
   const [planChangeLockedIds, setPlanChangeLockedIds] = useState(() => new Set<string>());
+  const [executionProposalBusy, setExecutionProposalBusy] = useState(false);
+  const [executionProposalError, setExecutionProposalError] = useState<string | null>(null);
+  const [lockedExecutionRequest, setLockedExecutionRequest] =
+    useState<V2CreateExecutionActionProposalInputT | null>(() =>
+      storedExactRequest(
+        "execution-action-proposal",
+        detail.conversation.id,
+        V2CreateExecutionActionProposalInput.safeParse,
+      ),
+    );
+  const [lockedHumanWaitAnswerIds, setLockedHumanWaitAnswerIds] = useState(
+    () =>
+      new Set(
+        (detail.human_waits ?? []).flatMap(({ wait }) =>
+          storedExactRequest(
+            "human-wait-answer-proposal",
+            wait.id,
+            V2CreateHumanWaitAnswerProposalInput.safeParse,
+          )
+            ? [wait.id]
+            : [],
+        ),
+      ),
+  );
+  const [pmSettingsBusy, setPmSettingsBusy] = useState(false);
+  const [pmSettingsError, setPmSettingsError] = useState<string | null>(null);
+  const [pmSettingsOverride, setPmSettingsOverride] =
+    useState<V2ConversationPmUpdateSettingsT | null>(null);
   const [actionOverrides, setActionOverrides] = useState(
     () => new Map<string, V2ConversationActionT>(),
   );
   const [effectOverrides, setEffectOverrides] = useState(
-    () => new Map<string, V2ConversationPlanActionEffectValueT>(),
+    () => new Map<string, ConversationActionEffect>(),
   );
   const [actionErrors, setActionErrors] = useState(() => new Map<string, string>());
   const refreshTimer = useRef<number | null>(null);
   const confirmationKeys = useRef(new Map<string, string>());
   const proposalKeys = useRef(new Map<string, string>());
   const planChangeKeys = useRef(new Map<string, string>());
+  const executionActionKeys = useRef(new Map<string, string>());
+  const waitAnswerKeys = useRef(new Map<string, string>());
   const base = conversationPath(
     detail.work_item.project_id,
     detail.work_item.id,
@@ -1453,6 +1728,9 @@ function ConversationThread({
       excerptReceipts: new Map(
         (detail.planning_excerpt_receipts ?? []).map((receipt) => [receipt.id, receipt]),
       ),
+      humanWaits: new Map(
+        (detail.human_waits ?? []).map((view) => [view.wait.id, view as HumanWaitView]),
+      ),
     }),
     [
       detail.actions,
@@ -1460,6 +1738,7 @@ function ConversationThread({
       detail.plan_reviews,
       detail.plan_versions,
       detail.planning_excerpt_receipts,
+      detail.human_waits,
     ],
   );
   const initialMessages = useMemo(
@@ -1498,6 +1777,83 @@ function ConversationThread({
   );
 
   useEffect(() => {
+    const scope = {
+      projectId: detail.work_item.project_id,
+      workItemId: detail.work_item.id,
+      conversationId: detail.conversation.id,
+    };
+    const resolvedWaitIds = [...lockedHumanWaitAnswerIds].filter((waitId) => {
+      const storedRequest = storedExactRequest(
+        "human-wait-answer-proposal",
+        waitId,
+        V2CreateHumanWaitAnswerProposalInput.safeParse,
+      );
+      if (!storedRequest) return false;
+      return detail.actions.some(
+        (action) =>
+          action.action_type === "answer_human_wait" &&
+          action.payload.parameters.wait_id === waitId &&
+          actionHasExactSourceReceipt(
+            action,
+            detail.messages,
+            storedRequest.idempotency_key,
+            scope,
+          ),
+      );
+    });
+    if (resolvedWaitIds.length === 0) return;
+    for (const waitId of resolvedWaitIds) {
+      clearDurableRequestKey("human-wait-answer-proposal", waitId, waitAnswerKeys.current);
+      clearExactRequest("human-wait-answer-proposal", waitId);
+    }
+    setLockedHumanWaitAnswerIds((current) => {
+      const next = new Set(current);
+      for (const waitId of resolvedWaitIds) next.delete(waitId);
+      return next;
+    });
+  }, [
+    detail.actions,
+    detail.conversation.id,
+    detail.messages,
+    detail.work_item.id,
+    detail.work_item.project_id,
+    lockedHumanWaitAnswerIds,
+  ]);
+
+  useEffect(() => {
+    if (!lockedExecutionRequest) return;
+    const resolved = detail.actions.some(
+      (action) =>
+        action.action_type === lockedExecutionRequest.action_type &&
+        actionHasExactSourceReceipt(
+          action,
+          detail.messages,
+          lockedExecutionRequest.idempotency_key,
+          {
+            projectId: detail.work_item.project_id,
+            workItemId: detail.work_item.id,
+            conversationId: detail.conversation.id,
+          },
+        ),
+    );
+    if (!resolved) return;
+    clearDurableRequestKey(
+      "execution-action-proposal",
+      detail.conversation.id,
+      executionActionKeys.current,
+    );
+    clearExactRequest("execution-action-proposal", detail.conversation.id);
+    setLockedExecutionRequest(null);
+  }, [
+    detail.actions,
+    detail.conversation.id,
+    detail.messages,
+    detail.work_item.id,
+    detail.work_item.project_id,
+    lockedExecutionRequest,
+  ]);
+
+  useEffect(() => {
     if (detail.conversation.kind !== "planning") return;
     let pendingActionId: string | null = null;
     try {
@@ -1528,6 +1884,15 @@ function ConversationThread({
     detail.action_effects.some(
       (record) =>
         record.effect.kind === "plan_approved" && record.effect.execution.status === "pending",
+    ) ||
+    detail.actions.some((action) =>
+      ["confirmed", "recorded", "sent", "agent_acknowledged"].includes(action.status),
+    ) ||
+    (detail.human_waits ?? []).some(
+      ({ wait, continuation }) =>
+        ["answered", "continuation_queued"].includes(wait.status) ||
+        (continuation !== null &&
+          ["queued", "dispatched", "acknowledged"].includes(continuation.status)),
     );
 
   useEffect(() => {
@@ -1676,6 +2041,195 @@ function ConversationThread({
     ],
   );
 
+  const submitExecutionAction = useCallback(
+    async (request: V2CreateExecutionActionProposalInputT): Promise<boolean> => {
+      if (executionProposalBusy) return false;
+      const subjectId = detail.conversation.id;
+      setExecutionProposalBusy(true);
+      setExecutionProposalError(null);
+      setLockedExecutionRequest(request);
+      storeExactRequest("execution-action-proposal", subjectId, request);
+      try {
+        const result = await proposeExecutionConversationAction(
+          detail.work_item.project_id,
+          detail.work_item.id,
+          detail.conversation.id,
+          request,
+        );
+        setActionOverrides((current) => new Map(current).set(result.action.id, result.action));
+        clearDurableRequestKey("execution-action-proposal", subjectId, executionActionKeys.current);
+        clearExactRequest("execution-action-proposal", subjectId);
+        setLockedExecutionRequest(null);
+        onRefresh();
+        return true;
+      } catch (caught) {
+        if (caught instanceof UnauthorizedError) {
+          onUnauthorized();
+          return false;
+        }
+        const uncertain = !(caught instanceof ApiError);
+        setExecutionProposalError(
+          `${
+            uncertain ? "Proposal status is uncertain. Retry the same action values safely. " : ""
+          }${caught instanceof Error ? caught.message : String(caught)}`,
+        );
+        if (!uncertain) {
+          clearDurableRequestKey(
+            "execution-action-proposal",
+            subjectId,
+            executionActionKeys.current,
+          );
+          clearExactRequest("execution-action-proposal", subjectId);
+          setLockedExecutionRequest(null);
+        }
+        return false;
+      } finally {
+        setExecutionProposalBusy(false);
+      }
+    },
+    [
+      detail.conversation.id,
+      detail.work_item.id,
+      detail.work_item.project_id,
+      executionProposalBusy,
+      onRefresh,
+      onUnauthorized,
+    ],
+  );
+
+  const proposeExecutionAction = useCallback(
+    async (
+      actionType: V2CreateExecutionActionProposalInputT["action_type"],
+      parameters: Record<string, unknown>,
+    ): Promise<boolean> => {
+      if (lockedExecutionRequest) return submitExecutionAction(lockedExecutionRequest);
+      const subjectId = detail.conversation.id;
+      const request: V2CreateExecutionActionProposalInputT = {
+        idempotency_key: durableRequestKey(
+          "execution-action-proposal",
+          subjectId,
+          executionActionKeys.current,
+        ),
+        message: executionActionMessage(actionType, parameters),
+        action_type: actionType,
+        payload: { parameters },
+      };
+      return submitExecutionAction(request);
+    },
+    [detail.conversation.id, lockedExecutionRequest, submitExecutionAction],
+  );
+
+  const prepareHumanWaitAnswer = useCallback(
+    async (wait: V2HumanWaitT, answer: string, rationale: string | null): Promise<boolean> => {
+      if (busyActionId !== null) return false;
+      const storedRequest = storedExactRequest(
+        "human-wait-answer-proposal",
+        wait.id,
+        V2CreateHumanWaitAnswerProposalInput.safeParse,
+      );
+      const request: V2CreateHumanWaitAnswerProposalInputT = storedRequest ?? {
+        idempotency_key: durableRequestKey(
+          "human-wait-answer-proposal",
+          wait.id,
+          waitAnswerKeys.current,
+        ),
+        expected_version: wait.version,
+        question_hash: wait.question_hash,
+        answer,
+        rationale,
+      };
+      setBusyActionId(wait.id);
+      storeExactRequest("human-wait-answer-proposal", wait.id, request);
+      setLockedHumanWaitAnswerIds((current) => new Set(current).add(wait.id));
+      setActionErrors((current) => {
+        const next = new Map(current);
+        next.delete(wait.id);
+        return next;
+      });
+      try {
+        const result = await proposeHumanWaitAnswer(
+          detail.work_item.project_id,
+          detail.work_item.id,
+          detail.conversation.id,
+          wait.id,
+          request,
+        );
+        setActionOverrides((current) => new Map(current).set(result.action.id, result.action));
+        clearDurableRequestKey("human-wait-answer-proposal", wait.id, waitAnswerKeys.current);
+        clearExactRequest("human-wait-answer-proposal", wait.id);
+        setLockedHumanWaitAnswerIds((current) => {
+          const next = new Set(current);
+          next.delete(wait.id);
+          return next;
+        });
+        onRefresh();
+        return true;
+      } catch (caught) {
+        if (caught instanceof UnauthorizedError) {
+          onUnauthorized();
+          return false;
+        }
+        const uncertain = !(caught instanceof ApiError);
+        setActionErrors((current) =>
+          new Map(current).set(
+            wait.id,
+            `${
+              uncertain
+                ? "Answer status is uncertain. The exact draft is locked for a safe retry. "
+                : ""
+            }${caught instanceof Error ? caught.message : String(caught)}`,
+          ),
+        );
+        if (!uncertain) {
+          clearDurableRequestKey("human-wait-answer-proposal", wait.id, waitAnswerKeys.current);
+          clearExactRequest("human-wait-answer-proposal", wait.id);
+          setLockedHumanWaitAnswerIds((current) => {
+            const next = new Set(current);
+            next.delete(wait.id);
+            return next;
+          });
+          onRefresh();
+        }
+        return false;
+      } finally {
+        setBusyActionId(null);
+      }
+    },
+    [
+      busyActionId,
+      detail.conversation.id,
+      detail.work_item.id,
+      detail.work_item.project_id,
+      onRefresh,
+      onUnauthorized,
+    ],
+  );
+
+  const savePmSettings = useCallback(
+    async (input: {
+      update_interval_seconds?: number | null;
+      content_level?: "concise" | "standard" | "detailed" | null;
+    }): Promise<void> => {
+      if (pmSettingsBusy) return;
+      setPmSettingsBusy(true);
+      setPmSettingsError(null);
+      try {
+        setPmSettingsOverride(
+          await updateConversationPmSettings(detail.work_item.project_id, input),
+        );
+      } catch (caught) {
+        if (caught instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
+        setPmSettingsError(caught instanceof Error ? caught.message : String(caught));
+      } finally {
+        setPmSettingsBusy(false);
+      }
+    },
+    [detail.work_item.project_id, onUnauthorized, pmSettingsBusy],
+  );
+
   const confirmAction = useCallback(
     async (action: V2ConversationActionT) => {
       if (busyActionId !== null) return;
@@ -1759,16 +2313,20 @@ function ConversationThread({
   const actionContext = useMemo<ConversationActionContextValue>(() => {
     const actions = new Map(resources.actions);
     for (const [id, action] of actionOverrides) actions.set(id, action);
-    const effects = new Map(
+    const effects = new Map<string, ConversationActionEffect>(
       detail.action_effects.map((record) => [record.action_id, record.effect]),
     );
     for (const [id, effect] of effectOverrides) effects.set(id, effect);
     return {
       actions,
       effects,
+      deliveryEvents: detail.action_delivery_events ?? [],
       busyActionId,
       errors: actionErrors,
       confirm: confirmAction,
+      prepareHumanWaitAnswer,
+      lockedHumanWaitAnswerIds,
+      refresh: onRefresh,
       planChangeBusyId,
       planChangeErrors,
       planChangeLockedIds,
@@ -1779,12 +2337,16 @@ function ConversationThread({
     actionOverrides,
     busyActionId,
     confirmAction,
+    detail.action_delivery_events,
     detail.action_effects,
     effectOverrides,
+    lockedHumanWaitAnswerIds,
     planChangeBusyId,
     planChangeErrors,
     planChangeLockedIds,
+    prepareHumanWaitAnswer,
     proposePlanChanges,
+    onRefresh,
     resources.actions,
   ]);
 
@@ -1808,6 +2370,11 @@ function ConversationThread({
   const isPlanning = detail.conversation.kind === "planning";
   const isExecution = detail.conversation.kind === "execution_pm";
   const isReadOnly = detail.conversation.status !== "active";
+  const referencedActionIds = new Set(
+    detail.messages.flatMap((message) =>
+      message.parts.flatMap((part) => (part.type === "action" ? [part.action_id] : [])),
+    ),
+  );
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -1843,6 +2410,49 @@ function ConversationThread({
                     : "Create plan proposal"}
               </Button>
             </div>
+          ) : null}
+          {isExecution && !isReadOnly ? (
+            <section className="execution-conversation-controls" aria-label="Execution controls">
+              <details>
+                <summary>Decisions, direction, pause, and artifacts</summary>
+                <ExecutionActionComposer
+                  actions={[...actionContext.actions.values()]}
+                  planVersions={detail.plan_versions}
+                  busy={executionProposalBusy}
+                  error={executionProposalError}
+                  disabledReason={null}
+                  lockedRequest={lockedExecutionRequest}
+                  onPrepare={proposeExecutionAction}
+                  onRetryLocked={() =>
+                    lockedExecutionRequest
+                      ? submitExecutionAction(lockedExecutionRequest)
+                      : Promise.resolve(false)
+                  }
+                />
+              </details>
+              <ExecutionActionHistory
+                actions={[...actionContext.actions.values()].filter(
+                  (action) => !referencedActionIds.has(action.id),
+                )}
+                deliveryEvents={detail.action_delivery_events ?? []}
+                effects={actionContext.effects}
+                busyActionId={busyActionId}
+                errors={actionErrors}
+                onConfirm={confirmAction}
+              />
+              {(pmSettingsOverride ?? detail.pm_update_settings) ? (
+                <PmUpdateControls
+                  settings={
+                    (pmSettingsOverride ??
+                      detail.pm_update_settings) as V2ConversationPmUpdateSettingsT
+                  }
+                  updates={detail.pm_updates ?? []}
+                  busy={pmSettingsBusy}
+                  error={pmSettingsError}
+                  onSave={savePmSettings}
+                />
+              ) : null}
+            </section>
           ) : null}
           {proposalError ? (
             <div className="conversation-thread-alert">

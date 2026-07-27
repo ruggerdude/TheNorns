@@ -1,13 +1,21 @@
 import type {
-  V2ConfirmConversationPlanActionResponseT,
+  V2ConfirmConversationActionResponseT,
+  V2ConversationActionDeliveryEventT,
   V2ConversationActionT,
   V2ConversationHandoffT,
   V2ConversationPlanActionEffectT,
   V2ConversationPlanReviewT,
   V2ConversationPlanningExcerptReceiptT,
+  V2ConversationPmUpdateSettingsT,
+  V2ConversationPmUpdateT,
   V2ConversationSummaryT,
   V2ConversationTurnAttemptT,
   V2ConversationUsageT,
+  V2CreateExecutionActionProposalInputT,
+  V2CreateHumanWaitAnswerProposalInputT,
+  V2HumanWaitAnswerT,
+  V2HumanWaitContinuationT,
+  V2HumanWaitT,
   V2WorkConversationT,
   V2WorkItemT,
   V2WorkMessagePartT,
@@ -38,6 +46,14 @@ export interface ConversationDetail {
   latest_summary?: V2ConversationSummaryT | null;
   usage?: ConversationUsageSummary | null;
   planning_excerpt_receipts?: V2ConversationPlanningExcerptReceiptT[];
+  human_waits?: Array<{
+    wait: V2HumanWaitT;
+    answer: V2HumanWaitAnswerT | null;
+    continuation: V2HumanWaitContinuationT | null;
+  }>;
+  action_delivery_events?: V2ConversationActionDeliveryEventT[];
+  pm_updates?: V2ConversationPmUpdateT[];
+  pm_update_settings?: V2ConversationPmUpdateSettingsT | null;
 }
 
 async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -117,7 +133,7 @@ export function confirmConversationAction(
   conversationId: string,
   actionId: string,
   idempotencyKey: string,
-): Promise<V2ConfirmConversationPlanActionResponseT> {
+): Promise<V2ConfirmConversationActionResponseT> {
   return requestJson(
     `${messageEndpoint(projectId, workItemId, conversationId)}/actions/${encodeURIComponent(actionId)}/confirm`,
     {
@@ -125,6 +141,49 @@ export function confirmConversationAction(
       body: JSON.stringify({ idempotency_key: idempotencyKey }),
     },
   );
+}
+
+export function proposeExecutionConversationAction(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  input: V2CreateExecutionActionProposalInputT,
+): Promise<{ message: V2WorkMessageT; action: V2ConversationActionT }> {
+  return requestJson(`${messageEndpoint(projectId, workItemId, conversationId)}/actions`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function proposeHumanWaitAnswer(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  waitId: string,
+  input: V2CreateHumanWaitAnswerProposalInputT,
+): Promise<{ message: V2WorkMessageT; action: V2ConversationActionT }> {
+  return requestJson(
+    `${messageEndpoint(projectId, workItemId, conversationId)}/human-waits/${encodeURIComponent(
+      waitId,
+    )}/answer-proposals`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function updateConversationPmSettings(
+  projectId: string,
+  input: {
+    update_interval_seconds?: number | null;
+    content_level?: "concise" | "standard" | "detailed" | null;
+  },
+): Promise<V2ConversationPmUpdateSettingsT> {
+  return requestJson(`/api/v2/projects/${projectId}/conversation-pm-settings`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
 }
 
 export function generateConversationPlanProposal(

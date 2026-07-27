@@ -290,7 +290,7 @@ async function buildStack(taskCount: number, cap: number): Promise<Stack> {
     },
   );
   const enrollment = new ActionsEnrollmentService(actionsRepository, (runnerId, pem, generation) =>
-    stores.enrollRunnerAtGeneration(runnerId, pem, generation),
+    stores.restoreDurableRunnerIdentity(runnerId, pem, generation),
   );
   const users = new UserStore();
   const adminToken = testAdminToken(users);
@@ -342,6 +342,10 @@ async function enrollAndConnect(
   stack: Stack,
   runnerId: string,
   dispatchJobId: string,
+  executeV2: (
+    command: V2DispatchCommandT,
+    emit: (event: EventPayloadT) => void,
+  ) => Promise<"succeeded"> = executeToGreenVerification,
 ): Promise<RunnerDaemon> {
   const token = await stack.latestEnrollmentToken();
   const dataDir = mkdtempSync(join(tmpdir(), "norns-e5-"));
@@ -351,7 +355,7 @@ async function enrollAndConnect(
     dataDir,
     heartbeatMs: 250,
     reconnectDelayMs: 100,
-    executeV2: executeToGreenVerification,
+    executeV2,
   });
   await daemon.enroll({ enrollmentToken: token, dispatchJobId });
   daemon.connect();
@@ -420,13 +424,52 @@ describe("EXECUTION E5 — per-dispatch runner identity, end to end", () => {
 
   it("the concurrency cap refuses the (N+1)th dispatch with a clear, specific reason, and disturbs neither running dispatch", async () => {
     stack = await buildStack(3, 2); // cap = 2, three schedulable tasks
+    let releaseExecution: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      releaseExecution = resolve;
+    });
+    const executeWhileHeld = async (
+      command: V2DispatchCommandT,
+      emit: (event: EventPayloadT) => void,
+    ): Promise<"succeeded"> => {
+      emit({ kind: "run_status", run_id: command.run_id, status: "started" });
+      await held;
+      emit({
+        kind: "verification_result",
+        node_id: command.task_id,
+        commit_sha: command.expected_revision,
+        passed: true,
+        output_digest: "digest",
+        command_results: [],
+      });
+      emit({ kind: "run_status", run_id: command.run_id, status: "completed" });
+      return "succeeded";
+    };
 
     const jobA = await stack.actionsCoordinator.schedule(scheduleInputFor(1));
-    const daemonA = await enrollAndConnect(stack, jobA.actions.runner_id, jobA.dispatch_job_id);
+    const daemonA = await enrollAndConnect(
+      stack,
+      jobA.actions.runner_id,
+      jobA.dispatch_job_id,
+      executeWhileHeld,
+    );
     daemons.push(daemonA);
+    await waitFor(
+      async () => (await runState(stack as Stack, jobA.run_id)) === "running",
+      "run A occupies a concurrency slot",
+    );
     const jobB = await stack.actionsCoordinator.schedule(scheduleInputFor(2));
-    const daemonB = await enrollAndConnect(stack, jobB.actions.runner_id, jobB.dispatch_job_id);
+    const daemonB = await enrollAndConnect(
+      stack,
+      jobB.actions.runner_id,
+      jobB.dispatch_job_id,
+      executeWhileHeld,
+    );
     daemons.push(daemonB);
+    await waitFor(
+      async () => (await runState(stack as Stack, jobB.run_id)) === "running",
+      "run B occupies a concurrency slot",
+    );
 
     // A third dispatch, over the project's configured cap of 2, must be
     // refused with a specific, human-legible reason — not silently dropped,
@@ -441,6 +484,7 @@ describe("EXECUTION E5 — per-dispatch runner identity, end to end", () => {
     expect(stack.server.connectedRunners()).toEqual(
       expect.arrayContaining([jobA.actions.runner_id, jobB.actions.runner_id]),
     );
+    releaseExecution();
   }, 20_000);
 
   it("a superseded (zombie) runner is still refused, and a concurrent dispatch is unaffected", async () => {

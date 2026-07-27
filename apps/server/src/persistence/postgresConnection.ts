@@ -101,6 +101,7 @@ interface RuntimeSchemaPosture {
   conversation_stream_lifecycle: string | null;
   conversation_plan_workflow: string | null;
   conversation_execution_handoff: string | null;
+  conversation_human_steering: string | null;
 }
 
 /**
@@ -170,7 +171,9 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
             to_regclass('public.conversation_plan_workflow_v1')::text
               AS conversation_plan_workflow,
             to_regclass('public.conversation_execution_handoff_v1')::text
-              AS conversation_execution_handoff`,
+              AS conversation_execution_handoff,
+            to_regclass('public.conversation_human_steering_v1')::text
+              AS conversation_human_steering`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -191,6 +194,7 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.conversation_stream_lifecycle ? ["conversation_stream_lifecycle_v1"] : []),
     ...(!posture?.conversation_plan_workflow ? ["conversation_plan_workflow_v1"] : []),
     ...(!posture?.conversation_execution_handoff ? ["conversation_execution_handoff_v1"] : []),
+    ...(!posture?.conversation_human_steering ? ["conversation_human_steering_v1"] : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

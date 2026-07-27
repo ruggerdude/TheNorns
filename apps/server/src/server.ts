@@ -63,10 +63,14 @@ import {
 } from "./attachments/index.js";
 import { bearerToken, verifyRunnerSignature } from "./auth.js";
 import {
+  ConversationActionCheckpointWorker,
+  ConversationActionDeliveryWorker,
   ConversationContextAssembler,
+  ConversationHumanSteeringService,
   ConversationPlanChangeProposalService,
   ConversationPlanProposalService,
   ConversationPlanWorkflowService,
+  ConversationPmUpdateScheduler,
   ConversationService,
   ConversationTurnError,
   ConversationTurnRepository,
@@ -82,9 +86,15 @@ import {
   type ActionsExecutionCoordinator,
   ActionsExecutionError,
   type ActionsExecutionRepository,
+  actionsDispatchRunnerId,
 } from "./coordinator/actionsExecution.js";
 // EXECUTION E2: turns an approved strategy into scheduled work.
 import { DispatchContextScopeRepository } from "./coordinator/dispatchContextScope.js";
+import {
+  HumanWaitContinuationWorker,
+  HumanWaitRecoveryWorker,
+} from "./coordinator/humanWaitContinuation.js";
+import { PauseResumeContinuationWorker } from "./coordinator/pauseResumeContinuation.js";
 import type { Phase4CompletionService } from "./coordinator/phase4Completion.js";
 import type { Phase4Coordinator } from "./coordinator/phase4Coordinator.js";
 import { type Phase4DispatchRepository, Phase4Dispatcher } from "./coordinator/phase4Dispatcher.js";
@@ -871,6 +881,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
   let phase4DispatchTimer: ReturnType<typeof setInterval> | undefined;
   let phase4RecoveryTimer: ReturnType<typeof setInterval> | undefined;
+  let humanWaitContinuationTimer: ReturnType<typeof setInterval> | undefined;
+  let humanWaitRecoveryTimer: ReturnType<typeof setInterval> | undefined;
+  let conversationActionDeliveryTimer: ReturnType<typeof setInterval> | undefined;
+  let conversationPmUpdateTimer: ReturnType<typeof setInterval> | undefined;
   let usageBudgetEvaluationTimer: ReturnType<typeof setInterval> | undefined;
   let conversationKickoffTimer: ReturnType<typeof setInterval> | undefined;
   // EXECUTION E12 — declared here, assigned far below where PhaseLaunchService
@@ -882,6 +896,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   let conversationAttempts: ConversationTurnRepository | null = null;
   let conversationPlanWorkflow: ConversationPlanWorkflowService | null = null;
   let executionConversationService: ExecutionConversationService | null = null;
+  let conversationActionDelivery: ConversationActionDeliveryWorker | null = null;
   if (options.phase4) {
     const dispatcher = new Phase4Dispatcher(
       options.phase4.dispatch,
@@ -934,9 +949,202 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     }, 60_000);
     phase4RecoveryTimer.unref();
   }
+  if (options.phase4 && options.execution) {
+    const continuationWorker = new HumanWaitContinuationWorker(
+      options.execution.transactions,
+      async (candidate) => {
+        if (candidate.repository_binding_type === "local_runner") {
+          const paired = candidate.repository_runner_id
+            ? stores.runner(candidate.repository_runner_id)
+            : null;
+          return paired
+            ? {
+                kind: "local" as const,
+                runner_id: paired.runner_id,
+                runner_generation: paired.generation,
+              }
+            : null;
+        }
+        if (!options.actionsExecution) return null;
+        const prepared = await options.actionsExecution.coordinator.prepareContinuation(
+          candidate.project_id,
+        );
+        if (prepared.repository_binding_id !== candidate.repository_binding_id) {
+          throw new Error("continuation Actions binding changed during provisioning");
+        }
+        const runnerId = actionsDispatchRunnerId(candidate.project_id, candidate.continuation_id);
+        const reserved = stores.runner(runnerId);
+        return {
+          kind: "actions" as const,
+          runner_id: runnerId,
+          runner_generation: reserved?.generation ?? stores.reserveRunnerGeneration(runnerId),
+        };
+      },
+      {
+        afterProvision: async (provisioned) => {
+          if (provisioned.target.kind !== "actions") return;
+          if (!options.actionsExecution) {
+            throw new Error("Actions continuation was provisioned without an Actions runtime");
+          }
+          await options.actionsExecution.coordinator.launchContinuation({
+            project_id: provisioned.command.project_id,
+            repository_binding_id: provisioned.command.repository_binding_id,
+            dispatch_job_id: provisioned.command.dispatch_job_id,
+            run_id: provisioned.command.run_id,
+            runner_id: provisioned.target.runner_id,
+            runner_generation: provisioned.target.runner_generation,
+          });
+        },
+      },
+    );
+    const pauseResumeWorker = new PauseResumeContinuationWorker(
+      options.execution.transactions,
+      async (candidate) => {
+        if (candidate.repository_binding_type === "local_runner") {
+          const paired = candidate.repository_runner_id
+            ? stores.runner(candidate.repository_runner_id)
+            : null;
+          return paired
+            ? {
+                kind: "local" as const,
+                runner_id: paired.runner_id,
+                runner_generation: paired.generation,
+              }
+            : null;
+        }
+        if (!options.actionsExecution) return null;
+        const prepared = await options.actionsExecution.coordinator.prepareContinuation(
+          candidate.project_id,
+        );
+        if (prepared.repository_binding_id !== candidate.repository_binding_id) {
+          throw new Error("pause-resume Actions binding changed during provisioning");
+        }
+        const runnerId = actionsDispatchRunnerId(candidate.project_id, candidate.continuation_id);
+        const reserved = stores.runner(runnerId);
+        return {
+          kind: "actions" as const,
+          runner_id: runnerId,
+          runner_generation: reserved?.generation ?? stores.reserveRunnerGeneration(runnerId),
+        };
+      },
+      async (provisioned) => {
+        if (provisioned.target.kind !== "actions") return;
+        if (!options.actionsExecution) {
+          throw new Error("Actions pause resume was provisioned without an Actions runtime");
+        }
+        await options.actionsExecution.coordinator.launchContinuation({
+          project_id: provisioned.command.project_id,
+          repository_binding_id: provisioned.command.repository_binding_id,
+          dispatch_job_id: provisioned.command.dispatch_job_id,
+          run_id: provisioned.command.run_id,
+          runner_id: provisioned.target.runner_id,
+          runner_generation: provisioned.target.runner_generation,
+        });
+      },
+    );
+    let continuationTicking = false;
+    humanWaitContinuationTimer = setInterval(() => {
+      if (continuationTicking) return;
+      continuationTicking = true;
+      void continuationWorker
+        .tick()
+        .then(() => pauseResumeWorker.tick())
+        .then(() => options.actionsExecution?.coordinator.recoverNextLaunch())
+        .then(() => options.actionsExecution?.coordinator.reconcileNextUnenrolledRun())
+        .catch((error) => app.log.error({ err: error }, "human-wait continuation tick failed"))
+        .finally(() => {
+          continuationTicking = false;
+        });
+    }, 500);
+    humanWaitContinuationTimer.unref();
+    const humanWaitRecovery = new HumanWaitRecoveryWorker(options.execution.transactions);
+    let humanWaitRecoveryRunning = false;
+    humanWaitRecoveryTimer = setInterval(() => {
+      if (humanWaitRecoveryRunning) return;
+      humanWaitRecoveryRunning = true;
+      void humanWaitRecovery
+        .scan()
+        .catch((error) => app.log.error({ err: error }, "human-wait recovery scan failed"))
+        .finally(() => {
+          humanWaitRecoveryRunning = false;
+        });
+    }, 60_000);
+    humanWaitRecoveryTimer.unref();
+  }
+  if (options.execution) {
+    conversationActionDelivery = new ConversationActionDeliveryWorker(
+      options.execution.transactions,
+      {
+        resolveTarget: async (candidate) => {
+          const runner = stores.runner(candidate.runner_id);
+          const socket = runnerSockets.get(candidate.runner_id);
+          const reconciled = reconciledRunners.get(candidate.runner_id);
+          if (
+            !runner ||
+            !socket ||
+            !reconciled ||
+            reconciled.socket !== socket ||
+            reconciled.generation !== runner.generation ||
+            runner.generation !== candidate.runner_generation
+          ) {
+            return null;
+          }
+          return { runner_id: runner.runner_id, generation: runner.generation };
+        },
+        enqueue: (command) => {
+          const record = stores.enqueueCommand(command, now());
+          return record.state === "queued" || record.state === "delivered";
+        },
+        notify: (runnerId) => {
+          if (!runnerSockets.has(runnerId)) return false;
+          deliverPending(runnerId, new Set());
+          return true;
+        },
+        cancel: (commandId) => {
+          stores.setCommandState(commandId, "cancelled", now());
+        },
+      },
+    );
+    const conversationActionCheckpoint = new ConversationActionCheckpointWorker(
+      options.execution.transactions,
+      {
+        contextBaseUrl: options.execution.baseUrl ?? options.publicOrigin ?? "http://127.0.0.1",
+      },
+    );
+    let actionDeliveryTicking = false;
+    conversationActionDeliveryTimer = setInterval(() => {
+      if (actionDeliveryTicking) return;
+      actionDeliveryTicking = true;
+      void conversationActionDelivery
+        ?.tick()
+        .then(() => conversationActionCheckpoint.tick())
+        .catch((error) => app.log.error({ err: error }, "conversation action delivery tick failed"))
+        .finally(() => {
+          actionDeliveryTicking = false;
+        });
+    }, 500);
+    conversationActionDeliveryTimer.unref();
+    const pmUpdateScheduler = new ConversationPmUpdateScheduler(options.execution.transactions);
+    let pmUpdateTicking = false;
+    conversationPmUpdateTimer = setInterval(() => {
+      if (pmUpdateTicking) return;
+      pmUpdateTicking = true;
+      void pmUpdateScheduler
+        .scan()
+        .catch((error) => app.log.error({ err: error }, "conversation PM update tick failed"))
+        .finally(() => {
+          pmUpdateTicking = false;
+        });
+    }, 60_000);
+    conversationPmUpdateTimer.unref();
+  }
   app.addHook("onClose", async () => {
     if (phase4DispatchTimer) clearInterval(phase4DispatchTimer);
     if (phase4RecoveryTimer) clearInterval(phase4RecoveryTimer);
+    if (humanWaitContinuationTimer) clearInterval(humanWaitContinuationTimer);
+    if (humanWaitRecoveryTimer) clearInterval(humanWaitRecoveryTimer);
+    if (conversationActionDeliveryTimer) clearInterval(conversationActionDeliveryTimer);
+    if (conversationPmUpdateTimer) clearInterval(conversationPmUpdateTimer);
     if (phaseQueueDrainTimer) clearInterval(phaseQueueDrainTimer);
     if (usageBudgetEvaluationTimer) clearInterval(usageBudgetEvaluationTimer);
     if (conversationKickoffTimer) clearInterval(conversationKickoffTimer);
@@ -5159,12 +5367,20 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           runtimeTransactionsForInference,
           conversationPlanWorkflow,
         );
+        const humanSteering = new ConversationHumanSteeringService(
+          runtimeTransactionsForInference,
+          {
+            contextBaseUrl:
+              options.execution?.baseUrl ?? options.publicOrigin ?? "http://127.0.0.1",
+          },
+        );
         await planProposals.reconcileOrphans();
         registerConversationPlanRoutes(app, {
           requireUser: requireSessionUser,
           workflow: conversationPlanWorkflow,
           proposals: planProposals,
           changes: planChanges,
+          steering: humanSteering,
         });
       }
 
@@ -6217,7 +6433,33 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       if (!frame) return;
 
       if (frame.type === "auth") {
-        const runner = stores.runner(frame.runner_id);
+        let runner = stores.runner(frame.runner_id);
+        if (frame.runner_id.startsWith("actions:") && options.actionsExecution) {
+          try {
+            const durable = await options.actionsExecution.repository.enrolledRunnerIdentity(
+              frame.runner_id,
+            );
+            if (!durable) {
+              runner = undefined;
+            } else {
+              const restored = stores.restoreDurableRunnerIdentity(
+                frame.runner_id,
+                durable.public_key_pem,
+                durable.runner_generation,
+              );
+              runner = restored;
+            }
+          } catch (error) {
+            stores.audit(
+              `runner:${frame.runner_id}`,
+              "runner.auth_restore_failed",
+              error instanceof Error ? error.message : String(error),
+              now(),
+            );
+            socket.close(1011, "runner authentication persistence unavailable");
+            return;
+          }
+        }
         if (
           !runner ||
           !verifyRunnerSignature(runner.public_key_pem, challenge, frame.nonce_signature)
@@ -6270,6 +6512,30 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         stores.markSeen(authedRunnerId, now());
         stores.audit(`runner:${authedRunnerId}`, "runner.connected", "", now());
         broadcast({ type: "runner_status", runner_id: authedRunnerId, connected: true });
+        const recentlyExecuted = new Set(body.recently_executed_command_ids);
+        let durablePending: Awaited<
+          ReturnType<NonNullable<typeof options.phase4>["dispatch"]["pendingForRunner"]>
+        > = [];
+        if (options.phase4) {
+          try {
+            durablePending = (
+              await options.phase4.dispatch.pendingForRunner(authedRunnerId, runner.generation)
+            ).filter((command) => !recentlyExecuted.has(command.command_id));
+          } catch (error) {
+            // Never acknowledge a successful reconcile while durable command
+            // promotion/fetch is unknown. Closing makes the daemon reconnect
+            // and retry the exact reconcile instead of idling forever.
+            stores.audit(
+              `runner:${authedRunnerId}`,
+              "runner.reconcile_failed",
+              error instanceof Error ? error.message : String(error),
+              now(),
+            );
+            socket.close(1011, "reconcile persistence failed");
+            return;
+          }
+        }
+        const inMemoryPending = stores.pendingCommandsFor(authedRunnerId, recentlyExecuted, now());
         sendFrame(socket, {
           type: "reconcile_response",
           body: {
@@ -6280,24 +6546,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               options.phase4?.events && body.capabilities.includes("knowledge_transport")
                 ? (["knowledge_transport"] as const)
                 : [],
-            resend_commands: stores.pendingCommandsFor(
-              authedRunnerId,
-              new Set(body.recently_executed_command_ids),
-              now(),
-            ),
+            resend_commands: inMemoryPending,
           },
         });
-        if (options.phase4) {
-          for (const command of await options.phase4.dispatch.pendingForRunner(authedRunnerId)) {
-            sendFrame(socket, { type: "command", command: v2WireCommand(command) });
-          }
+        for (const command of durablePending) {
+          sendFrame(socket, { type: "command", command: v2WireCommand(command) });
         }
         // mark the resends delivered
-        for (const cmd of stores.pendingCommandsFor(
-          authedRunnerId,
-          new Set(body.recently_executed_command_ids),
-          now(),
-        )) {
+        for (const cmd of inMemoryPending) {
           stores.setCommandState(cmd.command_id, "delivered", now());
         }
         stores.audit(
@@ -6405,7 +6661,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               socket.close(1008, "runner event rejected");
               return;
             }
-            await options.phase4?.events.apply(event);
+            const actionAckHandled =
+              (await conversationActionDelivery?.applyCommandAck(event)) ?? false;
+            if (!actionAckHandled) await options.phase4?.events.apply(event);
             const outcome = stores.ingestEvent(event);
             if (outcome === "accepted") applyEventSideEffects(event);
             sendFrame(socket, {

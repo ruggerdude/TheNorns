@@ -3,10 +3,12 @@ import { PlanContract, PlanModule, validatePlan } from "../plan.js";
 import {
   V2Actor,
   V2EntityId,
+  V2GitCommitSha,
   V2IsoDateTime,
   V2NonEmptyString,
   V2PositiveVersion,
   V2Sha256Hex,
+  V2_HUMAN_WAIT_INSTRUCTION_HASH,
 } from "./common.js";
 
 const schemaVersion = z.literal(2);
@@ -167,6 +169,21 @@ export const V2MessagePlanningExcerptPart = z
   })
   .strict();
 
+export const V2MessageHumanWaitPart = z
+  .object({
+    type: z.literal("human_wait"),
+    human_wait_id: V2EntityId,
+  })
+  .strict();
+
+export const V2MessageHumanWaitUpdatePart = z
+  .object({
+    type: z.literal("human_wait_update"),
+    human_wait_id: V2EntityId,
+    status: z.enum(["continuation_queued", "resumed", "expired", "cancelled", "failed"]),
+  })
+  .strict();
+
 /**
  * Deliberately excludes reasoning/thought parts. Durable conversation history
  * contains only content shown to the user.
@@ -180,6 +197,8 @@ export const V2WorkMessagePart = z.discriminatedUnion("type", [
   V2MessagePlanPart,
   V2MessageHandoffPart,
   V2MessagePlanningExcerptPart,
+  V2MessageHumanWaitPart,
+  V2MessageHumanWaitUpdatePart,
 ]);
 export type V2WorkMessagePartT = z.infer<typeof V2WorkMessagePart>;
 
@@ -433,12 +452,47 @@ export const V2ConversationActionType = z.enum([
   "pause_work",
   "resume_work",
   "redirect_agent",
+  "record_human_decision",
+  "propose_plan_change",
+  "approve_plan_change",
+  "answer_human_wait",
   "create_mockup",
   "approve_mockup",
   "revise_mockup",
   "reject_mockup",
 ]);
 export type V2ConversationActionTypeT = z.infer<typeof V2ConversationActionType>;
+
+export const V2ConversationInteractionClass = z.enum([
+  "discussion",
+  "human_decision",
+  "task_direction",
+  "plan_change_proposal",
+  "approval",
+  "pause",
+  "resume",
+  "mockup_request",
+]);
+export type V2ConversationInteractionClassT = z.infer<typeof V2ConversationInteractionClass>;
+
+export const V2_CONVERSATION_ACTION_INTERACTION_CLASS = {
+  save_plan_candidate: "plan_change_proposal",
+  send_plan_to_qc: "approval",
+  request_plan_changes: "plan_change_proposal",
+  approve_plan: "approval",
+  reject_plan: "approval",
+  pause_work: "pause",
+  resume_work: "resume",
+  redirect_agent: "task_direction",
+  record_human_decision: "human_decision",
+  propose_plan_change: "plan_change_proposal",
+  approve_plan_change: "approval",
+  answer_human_wait: "human_decision",
+  create_mockup: "mockup_request",
+  approve_mockup: "approval",
+  revise_mockup: "mockup_request",
+  reject_mockup: "approval",
+} as const satisfies Record<V2ConversationActionTypeT, V2ConversationInteractionClassT>;
 
 export const V2ConversationActionStatus = z.enum([
   "proposed",
@@ -470,6 +524,7 @@ export const V2ConversationAction = z
     actor: V2Actor,
     source_message_id: V2EntityId,
     action_type: V2ConversationActionType,
+    interaction_class: V2ConversationInteractionClass.optional(),
     payload: V2ConversationActionPayload,
     payload_hash: V2Sha256Hex,
     status: V2ConversationActionStatus,
@@ -487,6 +542,17 @@ export const V2ConversationAction = z
   })
   .strict()
   .superRefine((action, ctx) => {
+    const expectedInteractionClass = V2_CONVERSATION_ACTION_INTERACTION_CLASS[action.action_type];
+    if (
+      action.interaction_class !== undefined &&
+      action.interaction_class !== expectedInteractionClass
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["interaction_class"],
+        message: "interaction_class must match action_type exactly",
+      });
+    }
     const confirmationValues = [
       action.confirmed_by_user_id,
       action.confirmation_idempotency_key,
@@ -516,8 +582,355 @@ export const V2ConversationAction = z
         message: "failure_code is valid only for failed actions",
       });
     }
-  });
+  })
+  .transform((action) => ({
+    ...action,
+    interaction_class: V2_CONVERSATION_ACTION_INTERACTION_CLASS[action.action_type],
+  }));
 export type V2ConversationActionT = z.infer<typeof V2ConversationAction>;
+
+const boundedDirection = z.string().trim().min(1).max(8_000);
+const boundedRationale = z.string().trim().min(1).max(4_000);
+
+export const V2RecordHumanDecisionParameters = z
+  .object({
+    decision_point: z.string().trim().min(1).max(500),
+    decision: z.string().trim().min(1).max(4_000),
+    rationale: boundedRationale,
+    task_id: V2EntityId.nullable().optional(),
+  })
+  .strict();
+
+export const V2RedirectAgentParameters = z
+  .object({
+    task_id: V2EntityId,
+    run_id: V2EntityId,
+    direction: boundedDirection,
+    delivery_preference: z.literal("live_or_checkpoint"),
+  })
+  .strict();
+
+export const V2ProposePlanChangeParameters = z
+  .object({
+    plan_version_id: V2EntityId,
+    plan_hash: V2Sha256Hex,
+    direction: boundedDirection,
+    rationale: boundedRationale,
+  })
+  .strict();
+
+export const V2ApprovePlanChangeParameters = z
+  .object({
+    proposal_action_id: V2EntityId,
+    plan_version_id: V2EntityId,
+    plan_hash: V2Sha256Hex,
+  })
+  .strict();
+
+export const V2PauseWorkParameters = z
+  .object({
+    reason: boundedRationale,
+    task_id: V2EntityId.nullable().optional(),
+  })
+  .strict();
+
+export const V2ResumeWorkParameters = z
+  .object({
+    reason: z.string().trim().min(1).max(4_000).nullable().optional(),
+    task_id: V2EntityId.nullable().optional(),
+  })
+  .strict();
+
+export const V2CreateMockupParameters = z
+  .object({
+    brief: boundedDirection,
+    target: z.enum(["desktop", "mobile", "responsive"]),
+    task_id: V2EntityId.nullable().optional(),
+    artifact_refs: z.array(V2EntityId).max(32),
+  })
+  .strict();
+
+export const V2ApproveMockupParameters = z
+  .object({
+    artifact_id: V2EntityId,
+    artifact_hash: V2Sha256Hex,
+  })
+  .strict();
+
+export const V2ReviseMockupParameters = z
+  .object({
+    artifact_id: V2EntityId,
+    direction: boundedDirection,
+  })
+  .strict();
+
+export const V2RejectMockupParameters = z
+  .object({
+    artifact_id: V2EntityId,
+    reason: boundedRationale,
+  })
+  .strict();
+
+export const V2AnswerHumanWaitParameters = z
+  .object({
+    wait_id: V2EntityId,
+    expected_version: V2PositiveVersion,
+    question_hash: V2Sha256Hex,
+    answer: boundedDirection,
+    rationale: z.string().trim().min(1).max(4_000).nullable().optional(),
+  })
+  .strict();
+
+export const V2ConversationDeliveryMode = z.enum(["live", "checkpoint", "continuation"]);
+export const V2ConversationDeliveryReceipt = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("confirmation"), fingerprint: V2Sha256Hex }).strict(),
+  z.object({ kind: z.literal("recorded"), record_id: V2EntityId }).strict(),
+  z.object({ kind: z.literal("sent"), outbox_id: V2EntityId }).strict(),
+  z.object({ kind: z.literal("agent_ack"), ack_event_id: V2EntityId }).strict(),
+  z.object({ kind: z.literal("applied"), context_receipt_hash: V2Sha256Hex }).strict(),
+  z.object({ kind: z.literal("failed"), failure_code: V2NonEmptyString }).strict(),
+  z.object({ kind: z.literal("fallback_queued"), reason: V2NonEmptyString }).strict(),
+]);
+export const V2ConversationDeliveryEventStatus = z.union([
+  V2ConversationActionStatus,
+  z.literal("fallback_queued"),
+]);
+export const V2ConversationActionDeliveryEvent = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    work_item_id: V2EntityId,
+    conversation_id: V2EntityId,
+    action_id: V2EntityId,
+    sequence: V2PositiveVersion,
+    status: V2ConversationDeliveryEventStatus,
+    delivery_mode: V2ConversationDeliveryMode,
+    target_run_id: V2EntityId.nullable(),
+    target_command_id: V2EntityId.nullable(),
+    receipt: V2ConversationDeliveryReceipt,
+    occurred_at: V2IsoDateTime,
+  })
+  .strict()
+  .superRefine((event, ctx) => {
+    const receiptStatus = {
+      confirmation: "confirmed",
+      recorded: "recorded",
+      sent: "sent",
+      agent_ack: "agent_acknowledged",
+      applied: "applied",
+      failed: "failed",
+      fallback_queued: "fallback_queued",
+    } as const;
+    if (receiptStatus[event.receipt.kind] !== event.status) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["receipt"],
+        message: "delivery receipt kind must truthfully match the recorded action status",
+      });
+    }
+  });
+export type V2ConversationActionDeliveryEventT = z.infer<typeof V2ConversationActionDeliveryEvent>;
+
+export const V2HumanWaitStatus = z.enum([
+  "awaiting_human",
+  "answered",
+  "continuation_queued",
+  "resumed",
+  "expired",
+  "cancelled",
+  "failed",
+]);
+export const V2HumanWait = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    work_item_id: V2EntityId,
+    conversation_id: V2EntityId,
+    phase_id: V2EntityId,
+    task_id: V2EntityId,
+    source_run_id: V2EntityId,
+    source_event_id: V2EntityId,
+    decision_point: z.string().trim().min(1).max(500),
+    question: boundedDirection,
+    question_hash: V2Sha256Hex,
+    published: z
+      .object({
+        branch: V2NonEmptyString,
+        commit_sha: V2GitCommitSha,
+        remote: V2NonEmptyString,
+      })
+      .strict(),
+    runtime: z
+      .object({
+        runtime_id: V2NonEmptyString,
+        session_id: V2NonEmptyString.nullable(),
+        session_portability: z.enum(["transcript_only", "same_runner", "cross_runner_verified"]),
+        session_portability_evidence: V2NonEmptyString.nullable(),
+      })
+      .strict(),
+    context: z
+      .object({
+        root_command_id: V2EntityId,
+        ask_channel_version: z.literal(1),
+        ask_instruction_hash: z.literal(V2_HUMAN_WAIT_INSTRUCTION_HASH),
+        root_context_refs: z
+          .array(
+            z
+              .object({
+                artifact_id: V2EntityId,
+                content_hash: V2Sha256Hex,
+                byte_size: nonNegativeInteger,
+                storage_ref: V2NonEmptyString,
+              })
+              .strict(),
+          )
+          .min(1),
+        context_hash: V2Sha256Hex,
+        task_package_hash: V2Sha256Hex.nullable(),
+        compact_summary: z.string().trim().min(1).max(16_000),
+        compact_summary_hash: V2Sha256Hex,
+      })
+      .strict(),
+    budget: z
+      .object({
+        reservation_id: V2EntityId,
+        root_run_id: V2EntityId,
+      })
+      .strict(),
+    status: V2HumanWaitStatus,
+    version: V2PositiveVersion,
+    expires_at: V2IsoDateTime,
+    answered_at: nullableDate,
+    resumed_at: nullableDate,
+    created_at: V2IsoDateTime,
+    updated_at: V2IsoDateTime,
+  })
+  .strict()
+  .superRefine((wait, ctx) => {
+    const answered = ["answered", "continuation_queued", "resumed"].includes(wait.status);
+    if (
+      !["failed", "cancelled"].includes(wait.status) &&
+      answered !== (wait.answered_at !== null)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["answered_at"],
+        message: "answered and continuation states require answered_at",
+      });
+    }
+    if ((wait.status === "resumed") !== (wait.resumed_at !== null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["resumed_at"],
+        message: "resumed_at is present exactly for resumed waits",
+      });
+    }
+    const resumable = wait.runtime.session_portability !== "transcript_only";
+    if (resumable !== (wait.runtime.session_portability_evidence !== null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runtime", "session_portability_evidence"],
+        message: "resumable sessions require explicit portability evidence",
+      });
+    }
+    if (resumable && wait.runtime.session_id === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runtime", "session_id"],
+        message: "resumable session classification requires a captured session ID",
+      });
+    }
+  });
+export type V2HumanWaitT = z.infer<typeof V2HumanWait>;
+
+export const V2HumanWaitAnswer = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    wait_id: V2EntityId,
+    project_id: V2EntityId,
+    answered_by_user_id: V2EntityId,
+    action_id: V2EntityId,
+    idempotency_key: V2EntityId,
+    request_fingerprint: V2Sha256Hex,
+    answer: boundedDirection,
+    rationale: z.string().trim().min(1).max(4_000).nullable(),
+    answer_receipt_hash: V2Sha256Hex,
+    created_at: V2IsoDateTime,
+  })
+  .strict();
+export type V2HumanWaitAnswerT = z.infer<typeof V2HumanWaitAnswer>;
+
+export const V2HumanWaitContinuationStatus = z.enum([
+  "queued",
+  "leased",
+  "provisioned",
+  "dispatched",
+  "acknowledged",
+  "applied",
+  "failed",
+]);
+export const V2HumanWaitContinuation = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    wait_id: V2EntityId,
+    answer_id: V2EntityId,
+    root_run_id: V2EntityId,
+    resume_command_id: V2EntityId,
+    resume_job_id: V2EntityId,
+    budget_reservation_id: V2EntityId,
+    saved_commit_sha: V2GitCommitSha,
+    context_hash: V2Sha256Hex,
+    answer_receipt_hash: V2Sha256Hex,
+    replay_context_ref: z
+      .object({
+        artifact_id: V2EntityId,
+        content_hash: V2Sha256Hex,
+        byte_size: nonNegativeInteger,
+        storage_ref: V2NonEmptyString,
+      })
+      .strict(),
+    runner_id: V2EntityId.nullable(),
+    runner_generation: nonNegativeInteger.nullable(),
+    delivery_receipt_hash: V2Sha256Hex.nullable(),
+    status: V2HumanWaitContinuationStatus,
+    created_at: V2IsoDateTime,
+    updated_at: V2IsoDateTime,
+  })
+  .strict();
+export type V2HumanWaitContinuationT = z.infer<typeof V2HumanWaitContinuation>;
+
+export const V2ConversationPmContentLevel = z.enum(["concise", "standard", "detailed"]);
+export const V2ConversationPmUpdateSettings = z
+  .object({
+    project_id: V2EntityId,
+    update_interval_seconds: z.number().int().min(60).max(86_400),
+    content_level: V2ConversationPmContentLevel,
+    interval_inherited: z.boolean(),
+    content_level_inherited: z.boolean(),
+    updated_at: V2IsoDateTime.nullable(),
+  })
+  .strict();
+export type V2ConversationPmUpdateSettingsT = z.infer<typeof V2ConversationPmUpdateSettings>;
+
+export const V2ConversationPmUpdate = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    work_item_id: V2EntityId,
+    conversation_id: V2EntityId,
+    transition_sequence: z.number().int().positive(),
+    state_hash: V2Sha256Hex,
+    status: z.enum(["working", "waiting_for_human", "blocked", "completed"]),
+    content: V2NonEmptyString,
+    created_at: V2IsoDateTime,
+  })
+  .strict();
+export type V2ConversationPmUpdateT = z.infer<typeof V2ConversationPmUpdate>;
 
 export const V2WorkPlanStaffingChoice = z
   .object({
@@ -1374,17 +1787,26 @@ export const V2ProposeConversationActionInput = z
   })
   .strict()
   .superRefine((input, ctx) => {
-    const planActionSchemas = {
+    const actionSchemas = {
       save_plan_candidate: V2SavePlanCandidateParameters,
       send_plan_to_qc: V2SendPlanToQcParameters,
       request_plan_changes: V2RequestPlanChangesParameters,
       approve_plan: V2ApprovePlanParameters,
       reject_plan: V2RejectPlanParameters,
+      record_human_decision: V2RecordHumanDecisionParameters,
+      redirect_agent: V2RedirectAgentParameters,
+      propose_plan_change: V2ProposePlanChangeParameters,
+      approve_plan_change: V2ApprovePlanChangeParameters,
+      pause_work: V2PauseWorkParameters,
+      resume_work: V2ResumeWorkParameters,
+      create_mockup: V2CreateMockupParameters,
+      approve_mockup: V2ApproveMockupParameters,
+      revise_mockup: V2ReviseMockupParameters,
+      reject_mockup: V2RejectMockupParameters,
+      answer_human_wait: V2AnswerHumanWaitParameters,
     } as const;
-    if (!(input.action_type in planActionSchemas)) return;
-    const schema = planActionSchemas[
-      input.action_type as keyof typeof planActionSchemas
-    ] as z.ZodType;
+    if (!(input.action_type in actionSchemas)) return;
+    const schema = actionSchemas[input.action_type as keyof typeof actionSchemas] as z.ZodType;
     const parsed = schema.safeParse(input.payload.parameters);
     if (parsed.success) return;
     for (const issue of parsed.error.issues) {
@@ -1396,6 +1818,60 @@ export const V2ProposeConversationActionInput = z
   });
 export type V2ProposeConversationActionInputT = z.infer<typeof V2ProposeConversationActionInput>;
 
+export const V2CreateExecutionActionProposalInput = z
+  .object({
+    idempotency_key: V2EntityId,
+    message: boundedDirection,
+    action_type: z.enum([
+      "record_human_decision",
+      "redirect_agent",
+      "propose_plan_change",
+      "approve_plan_change",
+      "pause_work",
+      "resume_work",
+      "create_mockup",
+    ]),
+    payload: V2ConversationActionPayload,
+  })
+  .strict()
+  .superRefine((input, ctx) => {
+    const parsed = V2ProposeConversationActionInput.safeParse({
+      project_id: "project",
+      work_item_id: "work-item",
+      conversation_id: "conversation",
+      source_message_id: "server-generated-visible-message",
+      action_type: input.action_type,
+      payload: input.payload,
+    });
+    if (parsed.success) return;
+    for (const issue of parsed.error.issues) {
+      if (issue.path[0] !== "payload") continue;
+      ctx.addIssue({ ...issue, path: issue.path });
+    }
+  });
+export type V2CreateExecutionActionProposalInputT = z.infer<
+  typeof V2CreateExecutionActionProposalInput
+>;
+export const V2CreateExecutionActionProposalResponse = z
+  .object({ message: V2WorkMessage, action: V2ConversationAction })
+  .strict();
+
+export const V2CreateHumanWaitAnswerProposalInput = z
+  .object({
+    idempotency_key: V2EntityId,
+    expected_version: V2PositiveVersion,
+    question_hash: V2Sha256Hex,
+    answer: boundedDirection,
+    rationale: z.string().trim().min(1).max(4_000).nullable().optional(),
+  })
+  .strict();
+export type V2CreateHumanWaitAnswerProposalInputT = z.infer<
+  typeof V2CreateHumanWaitAnswerProposalInput
+>;
+export const V2CreateHumanWaitAnswerProposalResponse = z
+  .object({ message: V2WorkMessage, action: V2ConversationAction })
+  .strict();
+
 export const V2ConfirmConversationActionInput = z
   .object({
     project_id: V2EntityId,
@@ -1406,6 +1882,50 @@ export const V2ConfirmConversationActionInput = z
   })
   .strict();
 export type V2ConfirmConversationActionInputT = z.infer<typeof V2ConfirmConversationActionInput>;
+
+export const V2ConversationExecutionActionEffectValue = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("delivery_queued"),
+      delivery_mode: V2ConversationDeliveryMode,
+      delivery_event: V2ConversationActionDeliveryEvent,
+      target_run_id: V2EntityId.nullable(),
+      target_command_id: V2EntityId.nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("human_wait_answered"),
+      wait: V2HumanWait,
+      answer: V2HumanWaitAnswer,
+      continuation: V2HumanWaitContinuation,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("state_mutation_recorded"),
+      resource_type: z.enum(["project", "task", "plan_change", "mockup"]),
+      resource_id: V2EntityId,
+      state: V2NonEmptyString,
+    })
+    .strict(),
+]);
+export type V2ConversationExecutionActionEffectValueT = z.infer<
+  typeof V2ConversationExecutionActionEffectValue
+>;
+
+export const V2ConfirmConversationActionResponse = z
+  .object({
+    action: V2ConversationAction,
+    effect: z.union([
+      V2ConversationPlanActionEffectValue,
+      V2ConversationExecutionActionEffectValue,
+    ]),
+  })
+  .strict();
+export type V2ConfirmConversationActionResponseT = z.infer<
+  typeof V2ConfirmConversationActionResponse
+>;
 
 export const V2ConfirmConversationPlanActionResponse = z
   .object({

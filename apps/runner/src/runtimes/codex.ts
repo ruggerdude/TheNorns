@@ -63,6 +63,9 @@ export class CodexRuntime implements CodingRuntime {
       const credential = this.options.gateway ? await this.options.gateway() : null;
       const createClient: CodexClientFactory =
         this.options.createClient ?? ((options) => new Codex(options));
+      const runtimeEnv = gatewayEnvironment(this.options.baseEnv ?? process.env, {
+        ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
+      });
       const codex = credential
         ? createClient({
             baseUrl: credential.openai_base_url,
@@ -71,9 +74,9 @@ export class CodexRuntime implements CodingRuntime {
             // provider keys are stripped rather than merely shadowed: a
             // surviving OPENAI_API_KEY would be spent outside every budget and
             // meter Norns has.
-            env: gatewayEnvironment(this.options.baseEnv ?? process.env, {}),
+            env: runtimeEnv,
           })
-        : createClient();
+        : createClient({ env: runtimeEnv });
       const threadOptions = {
         workingDirectory: request.worktreePath,
         skipGitRepoCheck: false,

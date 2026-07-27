@@ -4,6 +4,7 @@
 // of related activity) and causation_id (the message that directly caused it).
 import { z } from "zod";
 import { V2DispatchCommand } from "./v2/commands.js";
+import { V2_HUMAN_WAIT_CHANNEL_VERSION, V2_HUMAN_WAIT_INSTRUCTION_HASH } from "./v2/common.js";
 
 const nonEmpty = z.string().min(1);
 const isoDate = z.string().datetime();
@@ -18,6 +19,7 @@ export const CommandState = z.enum([
   "delivered",
   "accepted",
   "executing",
+  "waiting_for_human",
   "succeeded",
   "failed",
   "rejected",
@@ -33,7 +35,8 @@ export const COMMAND_TRANSITIONS: Record<CommandStateT, readonly CommandStateT[]
   queued: ["delivered", "expired", "cancelled"],
   delivered: ["accepted", "rejected", "expired", "cancelled"],
   accepted: ["executing", "rejected", "cancelled"],
-  executing: ["succeeded", "failed", "cancelled"],
+  executing: ["waiting_for_human", "succeeded", "failed", "cancelled"],
+  waiting_for_human: [],
   succeeded: [],
   failed: [],
   rejected: [],
@@ -43,6 +46,7 @@ export const COMMAND_TRANSITIONS: Record<CommandStateT, readonly CommandStateT[]
 
 export const TERMINAL_COMMAND_STATES: ReadonlySet<CommandStateT> = new Set([
   "succeeded",
+  "waiting_for_human",
   "failed",
   "rejected",
   "expired",
@@ -109,6 +113,7 @@ export const RunStatus = z.enum([
   "started",
   "paused",
   "resumed",
+  "waiting_for_human",
   "completed",
   "failed",
   "cancelled",
@@ -330,11 +335,36 @@ export const EventPayload = z.discriminatedUnion("kind", [
     kind: z.literal("runtime_result"),
     run_id: nonEmpty,
     runtime: nonEmpty,
-    outcome: z.enum(["completed", "failed", "cancelled"]),
+    outcome: z.enum(["completed", "waiting_for_human", "failed", "cancelled"]),
     session_id: nonEmpty.nullable(),
     stop_reason: z.string().trim().min(1).max(500).nullable(),
     detail: z.string().max(4_000),
   }),
+  z
+    .object({
+      kind: z.literal("human_wait_requested"),
+      run_id: nonEmpty,
+      decision_point: z.string().trim().min(1).max(500),
+      question: z.string().trim().min(1).max(8_000),
+      question_hash: z.string().regex(/^[a-f0-9]{64}$/),
+      compact_summary: z.string().trim().min(1).max(16_000),
+      compact_summary_hash: z.string().regex(/^[a-f0-9]{64}$/),
+      runtime: nonEmpty,
+      session_id: nonEmpty.nullable(),
+      ask_channel_version: z.literal(V2_HUMAN_WAIT_CHANNEL_VERSION),
+      ask_instruction_hash: z.literal(V2_HUMAN_WAIT_INSTRUCTION_HASH),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("continuation_context_applied"),
+      run_id: nonEmpty,
+      wait_id: nonEmpty,
+      root_command_id: nonEmpty,
+      context_hash: z.string().regex(/^[a-f0-9]{64}$/),
+      replay_context_hash: z.string().regex(/^[a-f0-9]{64}$/),
+    })
+    .strict(),
   RunnerKnowledgeRegistration,
   RunnerKnowledgeHeartbeat,
   RunnerKnowledgeDelta,

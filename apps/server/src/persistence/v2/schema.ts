@@ -1506,7 +1506,7 @@ export const dispatchJobs = pgTable(
     }).onDelete("cascade"),
     check(
       "dispatch_jobs_status_check",
-      sql`${table.status} IN ('queued', 'leased', 'delivered', 'completed', 'dead_letter', 'cancelled')`,
+      sql`${table.status} IN ('awaiting_enrollment', 'queued', 'leased', 'delivered', 'completed', 'dead_letter', 'cancelled')`,
     ),
     check("dispatch_jobs_attempts_check", sql`${table.attempts} >= 0`),
   ],
@@ -5537,13 +5537,493 @@ export const conversationCompactionReceipts = pgTable(
   (table) => [uniqueIndex("conversation_compaction_receipts_summary_unique").on(table.summaryId)],
 );
 
+/** Phase 5 forward overlays; the Phase 1/0001 declarations above remain frozen. */
+export const phase5RunnerEvents = pgTable(
+  "runner_events",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    runnerId: text("runner_id").notNull(),
+    runnerGeneration: integer("runner_generation").notNull(),
+    runId: text("run_id").references(() => agentRuns.id, { onDelete: "cascade" }),
+    sequence: bigint("sequence", { mode: "number" }).notNull(),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").notNull(),
+    correlationId: text("correlation_id").notNull(),
+    causationId: text("causation_id"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "string" }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+    appliedAt: timestamp("applied_at", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    uniqueIndex("runner_events_runner_generation_sequence_unique").on(
+      table.runnerId,
+      table.runnerGeneration,
+      table.sequence,
+    ),
+    index("runner_events_unapplied_idx").on(table.appliedAt, table.receivedAt),
+    check("runner_events_correlation_check", sql`length(trim(${table.correlationId})) > 0`),
+  ],
+);
+
+export const phase5ConversationActions = pgTable(
+  "conversation_actions",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    initiatedByUserId: text("initiated_by_user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "restrict" }),
+    actorType: text("actor_type").notNull(),
+    actorId: text("actor_id"),
+    sourceMessageId: text("source_message_id").notNull(),
+    actionType: text("action_type").notNull(),
+    interactionClass: text("interaction_class").notNull(),
+    payload: jsonb("payload").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    status: text("status").notNull().default("proposed"),
+    confirmedByUserId: text("confirmed_by_user_id").references(() => phase2Users.id, {
+      onDelete: "restrict",
+    }),
+    confirmationIdempotencyKey: text("confirmation_idempotency_key"),
+    confirmationRequestFingerprint: text("confirmation_request_fingerprint"),
+    proposalIdempotencyKey: text("proposal_idempotency_key"),
+    proposalRequestFingerprint: text("proposal_request_fingerprint"),
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true, mode: "string" }),
+    recordedAt: timestamp("recorded_at", { withTimezone: true, mode: "string" }),
+    sentAt: timestamp("sent_at", { withTimezone: true, mode: "string" }),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true, mode: "string" }),
+    appliedAt: timestamp("applied_at", { withTimezone: true, mode: "string" }),
+    failureCode: text("failure_code"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    foreignKey({
+      name: "conversation_actions_source_message_scope_fk",
+      columns: [table.projectId, table.workItemId, table.conversationId, table.sourceMessageId],
+      foreignColumns: [
+        workMessages.projectId,
+        workMessages.workItemId,
+        workMessages.conversationId,
+        workMessages.id,
+      ],
+    }).onDelete("restrict"),
+    uniqueIndex("conversation_actions_scope_identity_unique").on(
+      table.projectId,
+      table.workItemId,
+      table.conversationId,
+      table.id,
+    ),
+    uniqueIndex("conversation_actions_proposal_idempotency_unique")
+      .on(table.conversationId, table.initiatedByUserId, table.proposalIdempotencyKey)
+      .where(sql`${table.proposalIdempotencyKey} IS NOT NULL`),
+    check(
+      "conversation_actions_interaction_class_check",
+      sql`${table.interactionClass} = CASE
+        WHEN ${table.actionType} IN ('save_plan_candidate','request_plan_changes','propose_plan_change')
+          THEN 'plan_change_proposal'
+        WHEN ${table.actionType} IN (
+          'send_plan_to_qc','approve_plan','reject_plan','approve_plan_change',
+          'approve_mockup','reject_mockup'
+        ) THEN 'approval'
+        WHEN ${table.actionType} IN ('record_human_decision','answer_human_wait')
+          THEN 'human_decision'
+        WHEN ${table.actionType}='redirect_agent' THEN 'task_direction'
+        WHEN ${table.actionType}='pause_work' THEN 'pause'
+        WHEN ${table.actionType}='resume_work' THEN 'resume'
+        WHEN ${table.actionType} IN ('create_mockup','revise_mockup') THEN 'mockup_request'
+      END`,
+    ),
+  ],
+);
+
+export const conversationActionDeliveryIntents = pgTable(
+  "conversation_action_delivery_intents",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    actionId: text("action_id").notNull().unique(),
+    deliveryMode: text("delivery_mode").notNull(),
+    targetRunId: text("target_run_id"),
+    targetCommandId: text("target_command_id"),
+    targetRunnerGeneration: integer("target_runner_generation"),
+    status: text("status").notNull().default("queued"),
+    payload: jsonb("payload").notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "string" }),
+    attempts: integer("attempts").notNull().default(0),
+    availableAt: timestamp("available_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+    lastError: text("last_error"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index("conversation_action_delivery_intents_claim_idx").on(
+      table.status,
+      table.availableAt,
+      table.leaseExpiresAt,
+    ),
+  ],
+);
+
+export const conversationActionDeliveryEvents = pgTable(
+  "conversation_action_delivery_events",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    actionId: text("action_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    status: text("status").notNull(),
+    deliveryMode: text("delivery_mode").notNull(),
+    targetRunId: text("target_run_id"),
+    targetCommandId: text("target_command_id"),
+    receipt: jsonb("receipt").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("conversation_action_delivery_events_action_sequence_unique").on(
+      table.actionId,
+      table.sequence,
+    ),
+    index("conversation_action_delivery_events_scope_idx").on(
+      table.projectId,
+      table.conversationId,
+      table.occurredAt,
+      table.id,
+    ),
+  ],
+);
+
+export const runCommandUsageReceipts = pgTable(
+  "run_command_usage_receipts",
+  {
+    commandId: text("command_id").primaryKey(),
+    runId: text("run_id").notNull(),
+    projectId: text("project_id").notNull(),
+    phaseId: text("phase_id").notNull(),
+    taskId: text("task_id").notNull(),
+    inputTokens: bigint("input_tokens", { mode: "number" }).notNull().default(0),
+    outputTokens: bigint("output_tokens", { mode: "number" }).notNull().default(0),
+    costUsd: numeric("cost_usd", { precision: 24, scale: 9 }).notNull().default("0"),
+    activeMs: bigint("active_ms", { mode: "number" }).notNull().default(0),
+    usageSource: text("usage_source").notNull().default("runner_report"),
+    status: text("status").notNull().default("observing"),
+    lastUsageEventId: text("last_usage_event_id"),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
+    terminalEventId: text("terminal_event_id").unique(),
+    terminalAt: timestamp("terminal_at", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index("run_command_usage_receipts_run_idx").on(table.runId, table.status, table.commandId),
+  ],
+);
+
+export const conversationExecutionPlanChangeRequests = pgTable(
+  "conversation_execution_plan_change_requests",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    actionId: text("action_id").notNull().unique(),
+    planVersionId: text("plan_version_id").notNull(),
+    planHash: text("plan_hash").notNull(),
+    direction: text("direction").notNull(),
+    rationale: text("rationale").notNull(),
+    status: text("status").notNull().default("proposed"),
+    approvedByActionId: text("approved_by_action_id").unique(),
+    createdAt: createdAt(),
+    decidedAt: timestamp("decided_at", { withTimezone: true, mode: "string" }),
+  },
+);
+
+export const conversationMockupRequests = pgTable("conversation_mockup_requests", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  workItemId: text("work_item_id").notNull(),
+  conversationId: text("conversation_id").notNull(),
+  actionId: text("action_id").notNull().unique(),
+  taskId: text("task_id"),
+  brief: text("brief").notNull(),
+  target: text("target").notNull(),
+  artifactRefs: jsonb("artifact_refs").notNull(),
+  status: text("status").notNull().default("queued"),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
+
+export const conversationActionCheckpointContexts = pgTable(
+  "conversation_action_checkpoint_contexts",
+  {
+    actionId: text("action_id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    taskId: text("task_id").notNull(),
+    contextDocumentId: text("context_document_id").notNull(),
+    contextHash: text("context_hash").notNull(),
+    status: text("status").notNull().default("prepared"),
+    commandId: text("command_id"),
+    createdAt: createdAt(),
+    sentAt: timestamp("sent_at", { withTimezone: true, mode: "string" }),
+    appliedAt: timestamp("applied_at", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    index("conversation_action_checkpoint_contexts_document_idx").on(
+      table.contextDocumentId,
+      table.status,
+      table.taskId,
+    ),
+  ],
+);
+
+export const conversationPauseCheckpoints = pgTable(
+  "conversation_pause_checkpoints",
+  {
+    pauseActionId: text("pause_action_id").primaryKey(),
+    resumeActionId: text("resume_action_id").unique(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    phaseId: text("phase_id").notNull(),
+    taskId: text("task_id").notNull(),
+    runId: text("run_id").notNull(),
+    sourceCommandId: text("source_command_id").notNull(),
+    budgetReservationId: text("budget_reservation_id").notNull(),
+    publishedBranch: text("published_branch").notNull(),
+    publishedCommitSha: text("published_commit_sha").notNull(),
+    publishedRemote: text("published_remote").notNull(),
+    rootContextRefs: jsonb("root_context_refs").notNull(),
+    contextHash: text("context_hash").notNull(),
+    resumeContextRef: jsonb("resume_context_ref"),
+    resumeCommandId: text("resume_command_id").unique(),
+    resumeJobId: text("resume_job_id").unique(),
+    runnerId: text("runner_id"),
+    runnerGeneration: integer("runner_generation"),
+    enrollmentSecretHash: text("enrollment_secret_hash"),
+    status: text("status").notNull().default("paused"),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "string" }),
+    attempts: integer("attempts").notNull().default(0),
+    availableAt: timestamp("available_at", { withTimezone: true, mode: "string" }).notNull(),
+    lastError: text("last_error"),
+    pausedAt: timestamp("paused_at", { withTimezone: true, mode: "string" }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+    resumedAt: timestamp("resumed_at", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index("conversation_pause_checkpoints_claim_idx").on(
+      table.status,
+      table.availableAt,
+      table.leaseExpiresAt,
+    ),
+  ],
+);
+
+export const humanWaits = pgTable(
+  "human_waits",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    phaseId: text("phase_id").notNull(),
+    taskId: text("task_id").notNull(),
+    sourceRunId: text("source_run_id").notNull(),
+    sourceEventId: text("source_event_id").notNull().unique(),
+    sourceCommandId: text("source_command_id").notNull(),
+    messageId: text("message_id").notNull().unique(),
+    decisionPointId: text("decision_point_id").notNull().unique(),
+    decisionPoint: text("decision_point").notNull(),
+    question: text("question").notNull(),
+    questionHash: text("question_hash").notNull(),
+    publishedBranch: text("published_branch").notNull(),
+    publishedCommitSha: text("published_commit_sha").notNull(),
+    publishedRemote: text("published_remote").notNull(),
+    runtimeId: text("runtime_id").notNull(),
+    runtimeSessionId: text("runtime_session_id"),
+    sessionPortability: text("session_portability").notNull().default("transcript_only"),
+    sessionPortabilityEvidence: text("session_portability_evidence"),
+    askChannelVersion: integer("ask_channel_version").notNull(),
+    askInstructionHash: text("ask_instruction_hash").notNull(),
+    contextManifest: jsonb("context_manifest").notNull(),
+    canonicalContextManifest: text("canonical_context_manifest").notNull(),
+    rootContextRefs: jsonb("root_context_refs").notNull(),
+    contextHash: text("context_hash").notNull(),
+    taskPackageHash: text("task_package_hash"),
+    compactSummary: text("compact_summary").notNull(),
+    compactSummaryHash: text("compact_summary_hash").notNull(),
+    budgetReservationId: text("budget_reservation_id").notNull(),
+    rootRunId: text("root_run_id").notNull(),
+    status: text("status").notNull().default("awaiting_human"),
+    version: integer("version").notNull().default(1),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+    answeredAt: timestamp("answered_at", { withTimezone: true, mode: "string" }),
+    resumedAt: timestamp("resumed_at", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("human_waits_one_open_per_run")
+      .on(table.sourceRunId)
+      .where(sql`${table.status} IN ('awaiting_human','answered','continuation_queued')`),
+    index("human_waits_scope_status_idx").on(
+      table.projectId,
+      table.conversationId,
+      table.status,
+      table.expiresAt,
+    ),
+  ],
+);
+
+export const humanWaitAnswers = pgTable("human_wait_answers", {
+  id: text("id").primaryKey(),
+  schemaVersion: schemaVersion(),
+  waitId: text("wait_id").notNull().unique(),
+  projectId: text("project_id").notNull(),
+  answeredByUserId: text("answered_by_user_id").notNull(),
+  actionId: text("action_id").notNull().unique(),
+  decisionRecordId: text("decision_record_id").notNull().unique(),
+  idempotencyKey: text("idempotency_key").notNull(),
+  requestFingerprint: text("request_fingerprint").notNull(),
+  answer: text("answer").notNull(),
+  rationale: text("rationale"),
+  answerReceiptHash: text("answer_receipt_hash").notNull(),
+  canonicalAnswerReceipt: text("canonical_answer_receipt").notNull(),
+  createdAt: createdAt(),
+});
+
+export const humanWaitContinuations = pgTable(
+  "human_wait_continuations",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    waitId: text("wait_id").notNull().unique(),
+    answerId: text("answer_id").notNull().unique(),
+    rootRunId: text("root_run_id").notNull(),
+    rootCommandId: text("root_command_id").notNull(),
+    resumeCommandId: text("resume_command_id").notNull().unique(),
+    resumeJobId: text("resume_job_id").notNull().unique(),
+    budgetReservationId: text("budget_reservation_id").notNull(),
+    savedCommitSha: text("saved_commit_sha").notNull(),
+    contextHash: text("context_hash").notNull(),
+    answerReceiptHash: text("answer_receipt_hash").notNull(),
+    replayContextRef: jsonb("replay_context_ref").notNull(),
+    canonicalReplayContextRef: text("canonical_replay_context_ref").notNull(),
+    runnerId: text("runner_id"),
+    runnerGeneration: integer("runner_generation"),
+    enrollmentSecretHash: text("enrollment_secret_hash"),
+    deliveryReceiptHash: text("delivery_receipt_hash"),
+    status: text("status").notNull().default("queued"),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "string" }),
+    attempts: integer("attempts").notNull().default(0),
+    availableAt: timestamp("available_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+    lastError: text("last_error"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index("human_wait_continuations_claim_idx").on(
+      table.status,
+      table.availableAt,
+      table.leaseExpiresAt,
+    ),
+  ],
+);
+
+export const conversationPmUpdateGlobalSettings = pgTable(
+  "conversation_pm_update_global_settings",
+  {
+    singleton: boolean("singleton").primaryKey().default(true),
+    updateIntervalSeconds: integer("update_interval_seconds").notNull().default(300),
+    contentLevel: text("content_level").notNull().default("standard"),
+    updatedAt: updatedAt(),
+  },
+);
+
+export const conversationPmUpdateProjectSettings = pgTable(
+  "conversation_pm_update_project_settings",
+  {
+    projectId: text("project_id").primaryKey(),
+    updateIntervalSeconds: integer("update_interval_seconds"),
+    contentLevel: text("content_level"),
+    updatedByUserId: text("updated_by_user_id").notNull(),
+    updatedAt: updatedAt(),
+  },
+);
+
+export const conversationPmUpdates = pgTable(
+  "conversation_pm_updates",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: schemaVersion(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    messageId: text("message_id").notNull().unique(),
+    transitionSequence: bigint("transition_sequence", { mode: "number" }).notNull(),
+    stateHash: text("state_hash").notNull(),
+    status: text("status").notNull(),
+    content: text("content").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("conversation_pm_updates_conversation_transition_unique").on(
+      table.conversationId,
+      table.transitionSequence,
+    ),
+  ],
+);
+
+export const conversationPmUpdateCursors = pgTable(
+  "conversation_pm_update_cursors",
+  {
+    conversationId: text("conversation_id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    lastEvaluatedAt: timestamp("last_evaluated_at", { withTimezone: true, mode: "string" }),
+    nextDueAt: timestamp("next_due_at", { withTimezone: true, mode: "string" }).notNull(),
+    lastStateHash: text("last_state_hash"),
+    evaluationCount: bigint("evaluation_count", { mode: "number" }).notNull().default(0),
+    transitionCount: bigint("transition_count", { mode: "number" }).notNull().default(0),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index("conversation_pm_update_cursors_due_idx").on(table.nextDueAt, table.conversationId),
+  ],
+);
+
 export const conversationDomainSchema = {
   workItems,
   workConversations,
   workMessages,
   workMessageAttachmentRefs,
   conversationTurnAttempts,
-  conversationActions,
+  conversationActions: phase5ConversationActions,
   workPlanVersions,
   conversationPlanReviews,
   conversationPlanActionEffects,
@@ -5557,12 +6037,27 @@ export const conversationDomainSchema = {
   conversationTaskPackageRuns,
   conversationPlanningExcerptReceipts,
   conversationCompactionReceipts,
+  conversationActionDeliveryIntents,
+  conversationActionDeliveryEvents,
+  runCommandUsageReceipts,
+  conversationExecutionPlanChangeRequests,
+  conversationMockupRequests,
+  conversationActionCheckpointContexts,
+  conversationPauseCheckpoints,
+  humanWaits,
+  humanWaitAnswers,
+  humanWaitContinuations,
+  conversationPmUpdateGlobalSettings,
+  conversationPmUpdateProjectSettings,
+  conversationPmUpdates,
+  conversationPmUpdateCursors,
 };
 
 export const phase2PreservationSchema = {
   archiveEncryptionKeyRegistry,
   credentialHmacKeyRegistry,
   ...phase1V2Schema,
+  runnerEvents: phase5RunnerEvents,
   users: phase2Users,
   sessions: phase2Sessions,
   migrationRuns: phase2MigrationRuns,

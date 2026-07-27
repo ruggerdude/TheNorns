@@ -47,8 +47,10 @@ describe("Phase 4 runner-owned execution", () => {
       prepare: async (input) => {
         expect(input.repository_path).toBe(physicalRepository);
         expect(input.expected_revision).toBe(COMMIT);
+        const worktreePath = resolve(root, "worktree");
+        await mkdir(worktreePath, { recursive: true });
         return {
-          path: resolve(root, "worktree"),
+          path: worktreePath,
           base_revision: BASE,
           head: async () => COMMIT,
           cleanup: async () => {

@@ -63,6 +63,16 @@ const StopBody = z
     attempt_id: z.string().min(1).optional(),
   })
   .strict();
+const PmUpdateSettingsBody = z
+  .object({
+    update_interval_seconds: z.number().int().min(60).max(86_400).nullable().optional(),
+    content_level: z.enum(["concise", "standard", "detailed"]).nullable().optional(),
+  })
+  .strict()
+  .refine(
+    (value) => value.update_interval_seconds !== undefined || value.content_level !== undefined,
+    "at least one PM update setting is required",
+  );
 
 function routeError(reply: FastifyReply, error: unknown): void {
   if (error instanceof z.ZodError) {
@@ -230,7 +240,16 @@ export function registerConversationRoutes(
         projectId,
         workItemId,
       );
-      return reply.send({ conversations });
+      const execution = options.execution;
+      const projected = execution
+        ? await Promise.all(
+            conversations.map(async (conversation) => ({
+              ...conversation,
+              ...(await execution.detail(user.id, projectId, workItemId, conversation.id)),
+            })),
+          )
+        : conversations;
+      return reply.send({ conversations: projected });
     } catch (error) {
       routeError(reply, error);
     }
@@ -295,6 +314,10 @@ export function registerConversationRoutes(
           latest_summary: null,
           planning_excerpt_receipts: [],
           usage: null,
+          human_waits: [],
+          action_delivery_events: [],
+          pm_updates: [],
+          pm_update_settings: null,
         }),
         ...planDetail,
       });
@@ -348,9 +371,49 @@ export function registerConversationRoutes(
           latest_summary: null,
           planning_excerpt_receipts: [],
           usage: null,
+          human_waits: [],
+          action_delivery_events: [],
+          pm_updates: [],
+          pm_update_settings: null,
         }),
         ...planDetail,
       });
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.get("/api/v2/projects/:projectId/conversation-pm-settings", async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    if (!options.execution) {
+      return reply.code(503).send({ error: "conversation_execution_unavailable" });
+    }
+    const { projectId } = request.params as { projectId: string };
+    try {
+      return reply.send(await options.execution.pmSettings(user.id, projectId));
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.patch("/api/v2/projects/:projectId/conversation-pm-settings", async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    if (!options.execution) {
+      return reply.code(503).send({ error: "conversation_execution_unavailable" });
+    }
+    const { projectId } = request.params as { projectId: string };
+    try {
+      const input = PmUpdateSettingsBody.parse(request.body);
+      return reply.send(
+        await options.execution.updatePmSettings(user.id, projectId, {
+          ...(input.update_interval_seconds !== undefined
+            ? { update_interval_seconds: input.update_interval_seconds }
+            : {}),
+          ...(input.content_level !== undefined ? { content_level: input.content_level } : {}),
+        }),
+      );
     } catch (error) {
       routeError(reply, error);
     }

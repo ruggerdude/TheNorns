@@ -18,6 +18,7 @@ function action(status: V2ConversationActionStatusT): V2ConversationActionT {
     actor: { actor_type: "agent", actor_id: "project-pm" },
     source_message_id: "message-1",
     action_type: "send_plan_to_qc",
+    interaction_class: "approval",
     payload: {
       parameters: {
         plan_version_id: "plan-version-1",

@@ -1,12 +1,15 @@
 import type {
   V2ApprovePlanParametersT,
+  V2ConversationActionDeliveryEventT,
   V2ConversationActionT,
+  V2ConversationExecutionActionEffectValueT,
   V2ConversationPlanActionEffectValueT,
   V2RejectPlanParametersT,
   V2RequestPlanChangesParametersT,
   V2SavePlanCandidateParametersT,
   V2SendPlanToQcParametersT,
 } from "@norns/contracts";
+import { V2_CONVERSATION_ACTION_INTERACTION_CLASS } from "@norns/contracts";
 import { ConversationPlanDraftCard } from "./ConversationPlanCard";
 import { Badge, Button } from "./ui";
 
@@ -40,6 +43,52 @@ const PLAN_ACTIONS = {
 
 type PlanActionType = keyof typeof PLAN_ACTIONS;
 
+const EXECUTION_ACTIONS = {
+  record_human_decision: {
+    title: "Record human decision",
+    button: "Record decision",
+    description: "Record this decision and rationale for the execution coordinator.",
+  },
+  redirect_agent: {
+    title: "Send task direction",
+    button: "Send task direction",
+    description:
+      "Deliver exact direction to the live run when possible, or queue it for the next safe checkpoint.",
+  },
+  propose_plan_change: {
+    title: "Propose plan change",
+    button: "Propose plan change",
+    description: "Record a scoped change proposal without silently rewriting the approved plan.",
+  },
+  approve_plan_change: {
+    title: "Approve plan change",
+    button: "Approve plan change",
+    description: "Approve this exact plan-change proposal and immutable plan reference.",
+  },
+  pause_work: {
+    title: "Pause work",
+    button: "Pause work",
+    description: "Record a pause for the whole work item or the named task.",
+  },
+  resume_work: {
+    title: "Resume work",
+    button: "Resume work",
+    description: "Resume the recorded work scope through the coordinator.",
+  },
+  create_mockup: {
+    title: "Create mockup",
+    button: "Create mockup",
+    description: "Request a reviewable visual artifact before implementation continues.",
+  },
+  answer_human_wait: {
+    title: "Answer blocking question",
+    button: "Submit exact answer",
+    description: "Record this exact answer before dispatching one durable continuation.",
+  },
+} as const;
+
+type ExecutionActionType = keyof typeof EXECUTION_ACTIONS;
+
 const DELIVERY_STEPS = [
   { status: "proposed", label: "Proposed", timestamp: "created_at" },
   { status: "confirmed", label: "Confirmed", timestamp: "confirmed_at" },
@@ -53,6 +102,12 @@ function isPlanAction(action: V2ConversationActionT): action is V2ConversationAc
   action_type: PlanActionType;
 } {
   return action.action_type in PLAN_ACTIONS;
+}
+
+function isExecutionAction(action: V2ConversationActionT): action is V2ConversationActionT & {
+  action_type: ExecutionActionType;
+} {
+  return action.action_type in EXECUTION_ACTIONS;
 }
 
 function targetReference(action: V2ConversationActionT): {
@@ -71,14 +126,83 @@ function targetReference(action: V2ConversationActionT): {
   };
 }
 
-function DeliveryStatus({ action }: { action: V2ConversationActionT }): React.ReactElement {
+function deliveryModeNotice(event: V2ConversationActionDeliveryEventT): {
+  tone: "is-info" | "is-success" | "is-failed";
+  text: string;
+} {
+  if (event.status === "failed") {
+    return {
+      tone: "is-failed",
+      text: "Delivery failed. The direction was not applied; review the recorded receipt before retrying.",
+    };
+  }
+  if (event.delivery_mode === "checkpoint") {
+    if (event.status === "applied") {
+      return { tone: "is-success", text: "Direction was applied at a safe checkpoint." };
+    }
+    if (event.status === "agent_acknowledged") {
+      return { tone: "is-info", text: "The checkpoint agent acknowledged this direction." };
+    }
+    if (event.status === "sent") {
+      return {
+        tone: "is-info",
+        text: "Sent at a safe checkpoint; agent acknowledgement is pending.",
+      };
+    }
+    return {
+      tone: "is-info",
+      text: "Queued for the next safe checkpoint. It has not been sent to an agent yet.",
+    };
+  }
+  if (event.delivery_mode === "continuation") {
+    if (event.status === "applied") {
+      return { tone: "is-success", text: "The continuation applied this action." };
+    }
+    if (event.status === "agent_acknowledged") {
+      return { tone: "is-info", text: "The continuation acknowledged this action." };
+    }
+    if (event.status === "sent") {
+      return { tone: "is-info", text: "Sent to the durable continuation." };
+    }
+    return {
+      tone: "is-info",
+      text: "Queued for a durable continuation. No runner is waiting for this answer.",
+    };
+  }
+  if (event.status === "applied") {
+    return { tone: "is-success", text: "The live runtime applied this action." };
+  }
+  if (event.status === "agent_acknowledged") {
+    return { tone: "is-info", text: "The live runtime acknowledged this action." };
+  }
+  if (event.status === "sent") {
+    return { tone: "is-info", text: "Sent to the live runtime; acknowledgement is pending." };
+  }
+  return {
+    tone: "is-info",
+    text: "Live delivery is being recorded. It has not been sent yet.",
+  };
+}
+
+function DeliveryStatus({
+  action,
+  events,
+}: {
+  action: V2ConversationActionT;
+  events: V2ConversationActionDeliveryEventT[];
+}): React.ReactElement {
   const activeIndex = DELIVERY_STEPS.findIndex((step) => step.status === action.status);
+  const latestEvent = [...events].sort((left, right) => left.sequence - right.sequence).at(-1);
+  const notice = latestEvent ? deliveryModeNotice(latestEvent) : null;
+  const copy = isPlanAction(action)
+    ? PLAN_ACTIONS[action.action_type]
+    : isExecutionAction(action)
+      ? EXECUTION_ACTIONS[action.action_type]
+      : null;
   return (
     <div className="conversation-action-delivery">
       <strong>Delivery status</strong>
-      <ol
-        aria-label={`${PLAN_ACTIONS[action.action_type as PlanActionType]?.title ?? "Action"} delivery`}
-      >
+      <ol aria-label={`${copy?.title ?? "Action"} delivery`}>
         {DELIVERY_STEPS.map((step, index) => {
           const timestamp = action[step.timestamp];
           const state =
@@ -111,6 +235,16 @@ function DeliveryStatus({ action }: { action: V2ConversationActionT }): React.Re
           Action rejected
         </output>
       ) : null}
+      {notice ? (
+        <output
+          className={`conversation-action-effect ${notice.tone}`}
+          data-testid="conversation-delivery-mode"
+          aria-live="polite"
+        >
+          <span>{notice.text}</span>
+          {latestEvent?.target_run_id ? <code>Run {latestEvent.target_run_id}</code> : null}
+        </output>
+      ) : null}
     </div>
   );
 }
@@ -119,9 +253,34 @@ function EffectNotice({
   effect,
   projectId,
 }: {
-  effect: V2ConversationPlanActionEffectValueT;
+  effect: V2ConversationPlanActionEffectValueT | V2ConversationExecutionActionEffectValueT;
   projectId: string;
 }): React.ReactElement {
+  if (effect.kind === "delivery_queued") {
+    const notice = deliveryModeNotice(effect.delivery_event);
+    return (
+      <output className={`conversation-action-effect ${notice.tone}`} aria-live="polite">
+        <span>{notice.text}</span>
+      </output>
+    );
+  }
+  if (effect.kind === "human_wait_answered") {
+    return (
+      <output className="conversation-action-effect is-info" aria-live="polite">
+        <span>
+          Answer recorded. Continuation {effect.continuation.status.replaceAll("_", " ")}; no runner
+          remained idle while waiting.
+        </span>
+      </output>
+    );
+  }
+  if (effect.kind === "state_mutation_recorded") {
+    return (
+      <output className="conversation-action-effect is-success" aria-live="polite">
+        {effect.resource_type.replaceAll("_", " ")} state recorded as {effect.state}.
+      </output>
+    );
+  }
   if (effect.kind === "plan_saved") {
     return (
       <output className="conversation-action-effect is-success" aria-live="polite">
@@ -198,40 +357,123 @@ function EffectNotice({
   );
 }
 
+function parameterText(parameters: Record<string, unknown>, key: string): string | null {
+  const value = parameters[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function ExecutionActionDetails({
+  action,
+}: {
+  action: V2ConversationActionT & { action_type: ExecutionActionType };
+}): React.ReactElement {
+  const parameters = action.payload.parameters;
+  const primary =
+    parameterText(parameters, "decision") ??
+    parameterText(parameters, "direction") ??
+    parameterText(parameters, "brief") ??
+    parameterText(parameters, "answer") ??
+    parameterText(parameters, "reason");
+  const rationale = parameterText(parameters, "rationale");
+  const taskId = parameterText(parameters, "task_id");
+  const runId = parameterText(parameters, "run_id");
+  const target = parameterText(parameters, "target");
+  const decisionPoint = parameterText(parameters, "decision_point");
+
+  return (
+    <>
+      {primary ? (
+        <blockquote>
+          <strong>
+            {action.action_type === "answer_human_wait"
+              ? "Exact answer"
+              : action.action_type === "create_mockup"
+                ? "Mockup brief"
+                : action.action_type === "record_human_decision"
+                  ? "Decision"
+                  : action.action_type === "pause_work" || action.action_type === "resume_work"
+                    ? "Reason"
+                    : "Direction"}
+          </strong>
+          <p>{primary}</p>
+          {rationale ? <small>Rationale · {rationale}</small> : null}
+        </blockquote>
+      ) : null}
+      <dl className="conversation-action-target">
+        <div>
+          <dt>Visible source message</dt>
+          <dd>{action.source_message_id}</dd>
+        </div>
+        {decisionPoint ? (
+          <div>
+            <dt>Decision point</dt>
+            <dd>{decisionPoint}</dd>
+          </div>
+        ) : null}
+        {taskId ? (
+          <div>
+            <dt>Task</dt>
+            <dd>{taskId}</dd>
+          </div>
+        ) : null}
+        {runId ? (
+          <div>
+            <dt>Run</dt>
+            <dd>{runId}</dd>
+          </div>
+        ) : null}
+        {target ? (
+          <div>
+            <dt>Target</dt>
+            <dd>{target}</dd>
+          </div>
+        ) : null}
+      </dl>
+    </>
+  );
+}
+
 export function ConversationActionCard({
   action,
   busy,
   effect,
+  deliveryEvents = [],
   error,
   onConfirm,
 }: {
   action: V2ConversationActionT;
   busy: boolean;
-  effect: V2ConversationPlanActionEffectValueT | null;
+  effect: V2ConversationPlanActionEffectValueT | V2ConversationExecutionActionEffectValueT | null;
+  deliveryEvents?: V2ConversationActionDeliveryEventT[];
   error: string | null;
   onConfirm: (action: V2ConversationActionT) => Promise<void>;
 }): React.ReactElement {
-  if (!isPlanAction(action)) {
+  if (!isPlanAction(action) && !isExecutionAction(action)) {
     return (
       <article className="conversation-action-card" data-testid="conversation-action-card">
         <strong>Action</strong>
         <p>{action.action_type.replaceAll("_", " ")}</p>
-        <DeliveryStatus action={action} />
+        <DeliveryStatus action={action} events={deliveryEvents} />
       </article>
     );
   }
 
-  const copy = PLAN_ACTIONS[action.action_type];
-  const reference = targetReference(action);
+  const planAction = isPlanAction(action);
+  const executionAction = isExecutionAction(action);
+  const copy = planAction
+    ? PLAN_ACTIONS[action.action_type]
+    : EXECUTION_ACTIONS[action.action_type];
+  const reference = planAction ? targetReference(action) : null;
   const parameters = action.payload.parameters;
   const saveParameters =
     action.action_type === "save_plan_candidate"
       ? (parameters as V2SavePlanCandidateParametersT)
       : null;
-  const direction =
-    action.action_type === "request_plan_changes"
+  const direction = planAction
+    ? action.action_type === "request_plan_changes"
       ? (parameters as V2RequestPlanChangesParametersT).direction
-      : null;
+      : null
+    : null;
   const reason =
     action.action_type === "reject_plan" ? (parameters as V2RejectPlanParametersT).reason : null;
   const recoverable =
@@ -247,7 +489,10 @@ export function ConversationActionCard({
     >
       <header>
         <div>
-          <div className="eyebrow">Explicit project action</div>
+          <div className="eyebrow">
+            Explicit{" "}
+            {V2_CONVERSATION_ACTION_INTERACTION_CLASS[action.action_type].replaceAll("_", " ")}
+          </div>
           <h3 id={titleId}>{copy.title}</h3>
         </div>
         <Badge
@@ -295,8 +540,9 @@ export function ConversationActionCard({
           <p>{reason ?? "No reason provided."}</p>
         </blockquote>
       ) : null}
+      {executionAction ? <ExecutionActionDetails action={action} /> : null}
 
-      <DeliveryStatus action={action} />
+      <DeliveryStatus action={action} events={deliveryEvents} />
       {effect ? <EffectNotice effect={effect} projectId={action.project_id} /> : null}
       {error ? (
         <output className="conversation-action-error" role="alert">

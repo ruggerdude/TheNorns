@@ -619,6 +619,7 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
     });
     const quickCommand = await pg.query<{
       command_id: string;
+      correlation_id: string;
       run_id: string;
       runner_id: string;
       runner_generation: number;
@@ -634,7 +635,7 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
       };
       amount_usd: number | string;
     }>(
-      `SELECT command.command_id, command.run_id, command.runner_id,
+      `SELECT command.command_id, command.correlation_id, command.run_id, command.runner_id,
               command.runner_generation, command.phase_id, command.task_id,
               assignment.reviewer_agent_profile_id,
               command.envelope, reservation.amount_usd
@@ -671,7 +672,7 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
         event_seq: eventSeq,
         runner_id: command.runner_id,
         generation: command.runner_generation,
-        correlation_id: "quick-terminal-correlation",
+        correlation_id: command.correlation_id,
         causation_id: command.command_id,
         occurred_at: occurredAt,
         payload,

@@ -34,6 +34,7 @@ export class ProcessRuntime implements CodingRuntime {
           GIT_AUTHOR_EMAIL: "worker@norns.local",
           GIT_COMMITTER_NAME: "norns-worker",
           GIT_COMMITTER_EMAIL: "worker@norns.local",
+          ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
         },
       });
       let output = "";

@@ -217,8 +217,11 @@ export class ClaudeCodeRuntime implements CodingRuntime {
             // key would take precedence and the run would bill money nobody is
             // metering.
             ANTHROPIC_AUTH_TOKEN: credential.token,
+            ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
           })
-        : null;
+        : gatewayEnvironment(this.options.baseEnv ?? process.env, {
+            ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
+          });
       // The first message IS the prompt that used to be passed as a string.
       input.push(request.prompt);
       const stream = (this.options.queryImpl ?? query)({
@@ -242,7 +245,7 @@ export class ClaudeCodeRuntime implements CodingRuntime {
           permissionMode: "dontAsk",
           tools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
           allowedTools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
-          ...(env !== null ? { env } : {}),
+          env,
           ...(this.options.model !== undefined ? { model: this.options.model } : {}),
           ...(this.options.resumeSessionId !== undefined
             ? { resume: this.options.resumeSessionId }

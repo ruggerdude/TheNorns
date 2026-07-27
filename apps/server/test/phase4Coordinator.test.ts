@@ -235,7 +235,7 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       [scheduled.dispatch_job_id],
     );
     expect(state.rows[0]).toEqual({ job: "delivered", command: "dispatched", run: "dispatched" });
-    await expect(repository.pendingForRunner("runner-1")).resolves.toEqual([scheduled.command]);
+    await expect(repository.pendingForRunner("runner-1", 3)).resolves.toEqual([scheduled.command]);
   });
 
   it("durably applies runner events once and closes reviewed integrated work", async () => {

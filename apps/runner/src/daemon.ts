@@ -33,7 +33,7 @@ export interface DaemonOptions {
     command: V2DispatchCommandT,
     emit: (event: EventPayloadT) => void,
     capabilities: { knowledge_transport: boolean },
-  ) => Promise<"succeeded" | "failed" | "cancelled">;
+  ) => Promise<"succeeded" | "waiting_for_human" | "failed" | "cancelled">;
   /** Optional runner-local folder registry.  Paths never enter relay frames. */
   workspaces?: WorkspaceRegistry;
   /**
@@ -169,8 +169,9 @@ export class RunnerDaemon {
    * only the public half, and receive the generation the relay expects. The
    * difference is the credential presented — a repository-scoped enrollment
    * token instead of a human-typed pairing code — and that the enrollment is
-   * bound to one dispatch job the server already decided to run, so it is
-   * single-use rather than an open invitation to join the relay.
+   * bound to one dispatch job the server already decided to run. The first
+   * successful redemption binds this exact public key; a response-loss retry
+   * with the same token and key is idempotent, while a changed key is refused.
    *
    * The token is read from the caller's argument and never persisted, logged,
    * or emitted; only the private key reaches the (job-lifetime) state dir.
@@ -179,20 +180,35 @@ export class RunnerDaemon {
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
     const publicPem = publicKey.export({ type: "spki", format: "pem" }).toString();
     const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const res = await fetch(`${this.opts.serverUrl}/api/actions/enroll`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        enrollment_token: input.enrollmentToken,
-        runner_id: this.opts.runnerId,
-        dispatch_job_id: input.dispatchJobId,
-        public_key_pem: publicPem,
-      }),
+    // Build the request once. Retrying with a freshly generated key would
+    // correctly lose the server's exact-key idempotency fence after a
+    // response was committed but lost in transit.
+    const bodyJson = JSON.stringify({
+      enrollment_token: input.enrollmentToken,
+      runner_id: this.opts.runnerId,
+      dispatch_job_id: input.dispatchJobId,
+      public_key_pem: publicPem,
     });
-    if (!res.ok) {
-      // Deliberately does not echo the response body: an enrollment failure
-      // must not become a channel for leaking why it failed into a CI log.
-      throw new Error(`enrollment rejected (${res.status})`);
+    let res: Response | null = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        res = await fetch(`${this.opts.serverUrl}/api/actions/enroll`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: bodyJson,
+        });
+        if (res.ok || res.status < 500 || attempt === 3) break;
+      } catch {
+        if (attempt === 3) break;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, attempt * 100));
+    }
+    if (!res?.ok) {
+      // Deliberately does not echo the response body or network error: an
+      // enrollment failure must not become a channel for leaking why it
+      // failed into a CI log.
+      if (res) throw new Error(`enrollment rejected (${res.status})`);
+      throw new Error("enrollment failed after retry");
     }
     const body = (await res.json()) as { generation: number };
     this.stateFile = new RunnerStateFile(this.opts.dataDir, {
@@ -494,9 +510,17 @@ export class RunnerDaemon {
         }
         executing();
         void this.opts
-          .executeV2(payload.dispatch, (event) => this.emit(event, meta), {
-            knowledge_transport: this.knowledgeTransportEnabled,
-          })
+          .executeV2(
+            payload.dispatch,
+            (event) =>
+              this.emit(event, {
+                correlation: meta.correlation,
+                causation: command.command_id,
+              }),
+            {
+              knowledge_transport: this.knowledgeTransportEnabled,
+            },
+          )
           .then((outcome) => {
             state.recordExecution(command.command_id, outcome);
             this.ack(command.command_id, outcome, meta);

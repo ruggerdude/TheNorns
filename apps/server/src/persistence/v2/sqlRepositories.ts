@@ -277,6 +277,41 @@ export class SqlV2ApplicationTransaction
     return result.rows[0] ?? null;
   }
 
+  /**
+   * Records the runner and revision selected for a continuation without
+   * changing lifecycle state. The exact locked lifecycle version fences this
+   * receipt so continuation workers cannot retarget a run that moved after
+   * their claim.
+   */
+  async recordAgentRunContinuationTarget(input: {
+    row: V2LockedAgentRunLifecycle;
+    runner_id: string;
+    expected_revision: string;
+  }): Promise<void> {
+    const result = await this.sql.query<{ id: string }>(
+      `UPDATE agent_runs
+       SET runner_id = $2,
+           expected_revision = $3,
+           updated_at = now()
+       WHERE id = $1
+         AND state = $4
+         AND lifecycle_version = $5
+         AND aggregate_version = $6
+       RETURNING id`,
+      [
+        input.row.id,
+        input.runner_id,
+        input.expected_revision,
+        input.row.state,
+        input.row.lifecycle_version,
+        input.row.aggregate_version,
+      ],
+    );
+    if (!result.rows[0]) {
+      throw new Error("AgentRun continuation target changed after it was locked");
+    }
+  }
+
   async commitTaskLifecycleTransition(
     input: V2TaskLifecycleCommitInput,
   ): Promise<V2LockedTaskLifecycle> {
@@ -772,6 +807,19 @@ export class SqlV2BudgetSweepRepository implements V2BudgetSweepRepository {
               project_id
        FROM budget_reservations
        WHERE status = 'active' AND expires_at <= $1
+         AND NOT EXISTS (
+           SELECT 1 FROM human_waits wait
+            WHERE wait.budget_reservation_id=budget_reservations.id
+              AND wait.status IN ('awaiting_human','answered','continuation_queued')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM conversation_pause_checkpoints checkpoint
+            WHERE checkpoint.budget_reservation_id=budget_reservations.id
+              AND checkpoint.status IN (
+                'paused','resume_queued','leased','provisioned','dispatched'
+              )
+              AND checkpoint.expires_at>$1
+         )
        ORDER BY expires_at, id
        LIMIT $2`,
       [at, limit],

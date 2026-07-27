@@ -51,6 +51,8 @@ export interface RuntimeRunRequest {
    * human with a refusal that names the runtime instead of pretending.
    */
   onSession?: (session: RuntimeSession) => void;
+  /** Outside-checkout typed ask channel prepared by the runner. */
+  humanWaitPath?: string;
 }
 
 /**
@@ -66,15 +68,34 @@ export interface RuntimeSession {
   interrupt?(): Promise<void>;
 }
 
-export interface RuntimeRunResult {
-  outcome: "completed" | "failed" | "cancelled";
+interface RuntimeRunResultBase {
   detail: string;
   usage: RuntimeUsage;
   /** session/thread id when the runtime supports resumption */
   sessionId?: string;
   /** Provider/SDK-native reason the agent loop stopped, when reported. */
   stopReason?: string;
+  /**
+   * Typed, visible-only ask. It is required exactly for waiting_for_human;
+   * logs or prose can never be inferred into a durable human wait.
+   */
 }
+
+export type RuntimeRunResult =
+  | (RuntimeRunResultBase & {
+      outcome: "waiting_for_human";
+      humanWait: {
+        decisionPoint: string;
+        question: string;
+        questionHash: string;
+        compactSummary: string;
+        compactSummaryHash: string;
+      };
+    })
+  | (RuntimeRunResultBase & {
+      outcome: "completed" | "failed" | "cancelled";
+      humanWait?: never;
+    });
 
 export interface CodingRuntime {
   readonly name: string;

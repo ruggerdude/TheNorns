@@ -2,6 +2,7 @@ import { V2StartPhaseCommand, V2WorkPlanContract } from "@norns/contracts";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ConversationPlanWorkflowService } from "../src/conversations/planWorkflow.js";
+import { ConversationPmUpdateScheduler } from "../src/conversations/pmUpdateScheduler.js";
 import { PostgresConversationRepository } from "../src/conversations/repository.js";
 import { ConversationService } from "../src/conversations/service.js";
 import { canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
@@ -148,6 +149,30 @@ postgresDescribe("V2 real PostgreSQL concurrency evidence", () => {
         'conversation-concurrency-project', 'Conversation concurrency', 'active',
         'assignment/default', 'verification/default', 'budget/default',
         'conversation-concurrency-user'
+      );
+      INSERT INTO phases (
+        id,project_id,objective_summary,priority,status,approved_budget_usd,
+        initiated_by_user_id
+      ) VALUES (
+        'pm-concurrency-phase','conversation-concurrency-project',
+        'Prove deterministic PM update concurrency',1,'awaiting_approval',1,
+        'conversation-concurrency-user'
+      );
+      INSERT INTO work_items (
+        id,project_id,created_by_user_id,title,objective,status,phase_id,
+        execution_started_at
+      ) VALUES (
+        'pm-concurrency-work','conversation-concurrency-project',
+        'conversation-concurrency-user','PM concurrency proof',
+        'Emit one deterministic update across competing schedulers','executing',
+        'pm-concurrency-phase',now()
+      );
+      INSERT INTO work_conversations (
+        id,project_id,work_item_id,created_by_user_id,kind,status,provider,model
+      ) VALUES (
+        'pm-concurrency-execution','conversation-concurrency-project',
+        'pm-concurrency-work','conversation-concurrency-user',
+        'execution_pm','active','openai','gpt-5.6-sol'
       );
     `);
     conversationService = new ConversationService(
@@ -458,6 +483,57 @@ postgresDescribe("V2 real PostgreSQL concurrency evidence", () => {
     expect(rolledBack.rows[0]?.present).toBe(false);
   });
 
+  it("lets one of two real-connection PM schedulers emit a stable transition and makes the loser retry-safe", async () => {
+    const asOf = "2100-01-01T00:00:00.000Z";
+    const [left, right] = await Promise.all([
+      new ConversationPmUpdateScheduler(runtimeRunner).tick(asOf),
+      new ConversationPmUpdateScheduler(runtimeRunner).tick(asOf),
+    ]);
+    const results = [left, right];
+    const emitted = results.filter((evaluation) => evaluation?.emitted);
+    expect(emitted).toHaveLength(1);
+    expect(results.filter((evaluation) => evaluation === null)).toHaveLength(1);
+    expect(emitted[0]).toMatchObject({
+      conversation_id: "pm-concurrency-execution",
+      emitted: true,
+      transition_sequence: 1,
+      message_id: "message:conversation-pm-update:pm-concurrency-execution:1",
+    });
+
+    await expect(new ConversationPmUpdateScheduler(runtimeRunner).tick(asOf)).resolves.toBeNull();
+    const durable = await applicationPool.query<{
+      updates: number;
+      messages: number;
+      evaluation_count: number;
+      transition_count: number;
+      transition_sequence: number;
+      update_id: string;
+    }>(
+      `SELECT
+         (SELECT count(*)::int FROM conversation_pm_updates
+           WHERE conversation_id='pm-concurrency-execution') AS updates,
+         (SELECT count(*)::int FROM work_messages
+           WHERE conversation_id='pm-concurrency-execution'
+             AND actor_id='deterministic-pm-update') AS messages,
+         cursor.evaluation_count::int,
+         cursor.transition_count::int,
+         update.transition_sequence::int,
+         update.id AS update_id
+       FROM conversation_pm_update_cursors cursor
+       JOIN conversation_pm_updates update
+         ON update.conversation_id=cursor.conversation_id
+      WHERE cursor.conversation_id='pm-concurrency-execution'`,
+    );
+    expect(durable.rows[0]).toEqual({
+      updates: 1,
+      messages: 1,
+      evaluation_count: 1,
+      transition_count: 1,
+      transition_sequence: 1,
+      update_id: "conversation-pm-update:pm-concurrency-execution:1",
+    });
+  });
+
   it("serializes conversation ordering and confirmation idempotency across real connections", async () => {
     const actor = { id: "conversation-concurrency-user" };
     const submitted = await Promise.all(
@@ -514,7 +590,7 @@ postgresDescribe("V2 real PostgreSQL concurrency evidence", () => {
           conversation_id: conversationId,
           source_message_id: conversationMessageId,
           action_type: actionType,
-          payload: { parameters: {} },
+          payload: { parameters: { reason: "real PostgreSQL concurrency fixture" } },
         }),
       ),
     );

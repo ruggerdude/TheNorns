@@ -5,5 +5,5 @@
  * on the Suspense fallback. Production still loads this module lazily.
  */
 export async function preloadConversationWorkspaceForTest(): Promise<void> {
-  await import("../ConversationWorkspace");
+  await Promise.all([import("../PhaseTab"), import("../ConversationWorkspace")]);
 }
