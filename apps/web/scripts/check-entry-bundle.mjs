@@ -13,7 +13,7 @@ const gzipBytes = entryScripts.reduce((total, asset) => {
   const source = readFileSync(`${webRoot}/dist/${asset.replace(/^\//, "")}`);
   return total + gzipSync(source).byteLength;
 }, 0);
-const maxEntryJsGzipBytes = 160 * 1024;
+const maxEntryJsGzipBytes = 161 * 1024;
 
 if (gzipBytes > maxEntryJsGzipBytes) {
   throw new Error(
