@@ -73,6 +73,41 @@ describe("runner workspace wire", () => {
     ).toBe(true);
   });
 
+  it("accepts a secure GitHub clone request and returns only opaque repository handles", () => {
+    expect(
+      RunnerWorkspaceRequest.safeParse({
+        request_id: "workspace:clone",
+        operation: "clone",
+        clone_url: "https://github.com/octocat/fresh-app.git",
+        repository_name: "fresh-app",
+        clone_token: "short-lived-repository-token",
+      }).success,
+    ).toBe(true);
+    expect(
+      RunnerWorkspaceRequest.safeParse({
+        request_id: "workspace:clone",
+        operation: "clone",
+        clone_url: "https://token@github.com/octocat/fresh-app.git",
+        repository_name: "fresh-app",
+        clone_token: "short-lived-repository-token",
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerWorkspaceResponse.safeParse({
+        request_id: "workspace:clone",
+        operation: "clone",
+        status: "ok",
+        repository: {
+          workspace_id: "local:workspace",
+          repository_id: "local:repository",
+          repository_display_name: "fresh-app",
+          default_branch: "main",
+          observed_head: "abc123",
+        },
+      }).success,
+    ).toBe(true);
+  });
+
   it("accepts a bounded committed-repository inspection and rejects path leakage", () => {
     const request = {
       request_id: "workspace:inspect",

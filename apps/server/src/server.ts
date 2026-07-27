@@ -597,6 +597,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       generation: number;
       workspacePicker: boolean;
       workspaceRepositoryInventory: boolean;
+      workspaceClone: boolean;
     }
   >();
   const sessionSockets = new Map<WsLike, SessionSocketBinding>();
@@ -2374,20 +2375,25 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // ---- observation -------------------------------------------------------------
 
   const helperRunnerSnapshots = (): HelperRunnerSnapshot[] =>
-    stores.runners().map((runner) => {
-      const reconciled = reconciledRunners.get(runner.runner_id);
-      return {
-        runner_id: runner.runner_id,
-        generation: runner.generation,
-        connected:
-          runnerSockets.has(runner.runner_id) && reconciled?.generation === runner.generation,
-        workspace_picker_ready:
-          reconciled?.generation === runner.generation && reconciled.workspacePicker,
-        workspace_repository_inventory_ready:
-          reconciled?.generation === runner.generation && reconciled.workspaceRepositoryInventory,
-        last_seen_at: runner.last_seen_at,
-      };
-    });
+    stores
+      .runners()
+      .filter((runner) => !runner.runner_id.startsWith("actions:"))
+      .map((runner) => {
+        const reconciled = reconciledRunners.get(runner.runner_id);
+        return {
+          runner_id: runner.runner_id,
+          generation: runner.generation,
+          connected:
+            runnerSockets.has(runner.runner_id) && reconciled?.generation === runner.generation,
+          workspace_picker_ready:
+            reconciled?.generation === runner.generation && reconciled.workspacePicker,
+          workspace_repository_inventory_ready:
+            reconciled?.generation === runner.generation && reconciled.workspaceRepositoryInventory,
+          workspace_clone_ready:
+            reconciled?.generation === runner.generation && reconciled.workspaceClone,
+          last_seen_at: runner.last_seen_at,
+        };
+      });
 
   const helperStatusPayload = (req: FastifyRequest) => {
     const origin = externalOrigin(req);
@@ -3674,17 +3680,18 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     // =====================================================================
     // ONBOARDING O2 -- project setup. Two scenarios, both GitHub-backed.
     //
-    // Nothing is installed on the operator's machine. The runner runs
-    // ephemerally inside a GitHub Actions job in the project's own repository
-    // and connects back to the relay over the existing protocol. So setup is:
+    // GitHub Actions remains the default execution workspace. For a new
+    // repository, the operator can instead ask the authenticated local helper
+    // to choose a parent folder, clone the repository, and make that verified
+    // local binding primary while retaining GitHub as the remote. So setup is:
     //
     //   new_repo       Norns creates the GitHub repository.
     //   existing_repo  The operator selects one the installation can see.
     //
     // Each creates TWO attachments naming the same repository:
     //   * WORKSPACE (role 'workspace') -- where execution happens: an Actions
-    //     job in that repo. This is what the Phase 4 dispatch gate resolves;
-    //     nothing here weakens it.
+    //     job by default, or the verified local clone when explicitly chosen.
+    //     This is what the Phase 4 dispatch gate resolves.
     //   * REMOTE    (role 'remote')    -- where the work is pushed.
     // The roles stay distinct because they are expected to diverge later
     // (fork-and-PR: execute in a fork, push to upstream).
@@ -3757,6 +3764,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             .max(100)
             .regex(/^[A-Za-z0-9._-]+$/, "repository name must be a valid GitHub repository name"),
           private: z.boolean().default(true),
+          local_working_copy: z.boolean().default(false),
         }),
         z.object({
           ...OnboardingFields,
@@ -3797,6 +3805,51 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           idempotency_key: scenario.data.idempotency_key,
         };
         try {
+          let localRunner:
+            | {
+                runner_id: string;
+                generation: number;
+                socket: WsLike;
+              }
+            | undefined;
+          if (scenario.data.scenario === "new_repo" && scenario.data.local_working_copy) {
+            if (!github || !options.phase3) {
+              return reply.code(503).send({
+                error: "local_working_copy_unavailable",
+                message:
+                  "GitHub + this computer requires the GitHub integration and local execution services.",
+              });
+            }
+            const status = helperStatus(helperRunnerSnapshots());
+            const runnerId = status.runner_id;
+            const runner = runnerId ? stores.runner(runnerId) : undefined;
+            const reconciled = runnerId ? reconciledRunners.get(runnerId) : undefined;
+            if (
+              status.state !== "connected" ||
+              !runnerId ||
+              !runner ||
+              !reconciled ||
+              !reconciled.workspacePicker ||
+              !reconciled.workspaceRepositoryInventory ||
+              !reconciled.workspaceClone ||
+              reconciled.socket !== runnerSockets.get(runnerId) ||
+              reconciled.generation !== runner.generation
+            ) {
+              return reply.code(409).send({
+                error:
+                  status.state === "connected" ? "runner_upgrade_required" : "runner_unavailable",
+                message:
+                  status.state === "connected"
+                    ? "Update the local helper before creating a GitHub working copy."
+                    : "The local helper must be connected before creating a working copy on this computer.",
+              });
+            }
+            localRunner = {
+              runner_id: runnerId,
+              generation: runner.generation,
+              socket: reconciled.socket,
+            };
+          }
           const result =
             scenario.data.scenario === "new_repo"
               ? await onboarding.createNewRepo({
@@ -3840,7 +3893,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           // installation and retry via POST /api/v2/projects/:id/activate
           // rather than being stranded with an orphaned repository.
           const activated = await activateQuietly(activation, result.project_id, user.id);
-          return reply.code(result.replayed ? 200 : 201).send({
+          const responsePayload = {
             ...result,
             ...(activated
               ? {
@@ -3859,6 +3912,131 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                   ]),
                 }
               : {}),
+          };
+          if (scenario.data.scenario === "new_repo" && scenario.data.local_working_copy) {
+            if (!activated) {
+              return reply.code(409).send({
+                error: "local_working_copy_unavailable",
+                message:
+                  "The GitHub repository and project were created, but local setup could not start. Try again to finish the working copy.",
+                project_id: result.project_id,
+              });
+            }
+            if (!activated.activated) {
+              return reply.code(result.replayed ? 200 : 201).send({
+                ...responsePayload,
+                execution_location: "local",
+                local_working_copy: { status: "blocked" },
+              });
+            }
+            if (!github || !options.phase3 || !localRunner) {
+              return reply.code(503).send({ error: "local_working_copy_unavailable" });
+            }
+            const repositoryName = scenario.data.repository_name;
+            const repositories = await github.listRepositories(
+              user.id,
+              scenario.data.connection_id,
+              repositoryName,
+            );
+            const repository = repositories.find(
+              (candidate) => candidate.name.toLowerCase() === repositoryName.toLowerCase(),
+            );
+            if (!repository) {
+              return reply.code(409).send({
+                error: "local_working_copy_unavailable",
+                message:
+                  "The GitHub repository was created, but it is not visible to the Norns GitHub App yet. Grant repository access, then try again.",
+                project_id: result.project_id,
+              });
+            }
+            const credential = await github.localCloneCredential(
+              user.id,
+              scenario.data.connection_id,
+              repository.id,
+            );
+            const clone = await workspaceBroker.request(
+              localRunner.runner_id,
+              localRunner.generation,
+              {
+                operation: "clone",
+                clone_url: credential.repository.clone_url,
+                repository_name: credential.repository.name,
+                clone_token: credential.token,
+              },
+            );
+            if (clone.status !== "ok" || !clone.repository) {
+              const message =
+                clone.status === "cancelled"
+                  ? "The GitHub repository was created. Choose a parent folder to finish the local working copy."
+                  : clone.status === "destination_exists"
+                    ? `A folder named ${credential.repository.name} already exists in that location. Choose a different parent folder.`
+                    : "The GitHub repository was created, but the local helper could not clone it. Check this computer's Git access and try again.";
+              return reply.code(409).send({
+                error: `local_working_copy_${clone.status}`,
+                message,
+                project_id: result.project_id,
+              });
+            }
+            const current = reconciledRunners.get(localRunner.runner_id);
+            if (
+              current?.socket !== localRunner.socket ||
+              current.generation !== localRunner.generation ||
+              runnerSockets.get(localRunner.runner_id) !== localRunner.socket
+            ) {
+              return reply.code(409).send({
+                error: "runner_unavailable",
+                message:
+                  "The working copy was cloned, but the helper reconnected before it could be bound. Try again to finish setup.",
+                project_id: result.project_id,
+              });
+            }
+            const binding = await options.phase3.sourceBindings.createLocal(
+              {
+                project_id: result.project_id,
+                runner_id: localRunner.runner_id,
+                workspace_id: clone.repository.workspace_id,
+                repository_id: clone.repository.repository_id,
+                repository_display_name: clone.repository.repository_display_name,
+                default_branch: clone.repository.default_branch,
+                observed_head: clone.repository.observed_head,
+                verification_policy_ref: "verification",
+                created_by: { actor_type: "human", actor_id: user.id },
+              },
+              { makePrimary: true },
+            );
+            stores.audit(
+              user.email,
+              "project.local_working_copy.created",
+              `${result.project_id} ${credential.repository.full_name}`,
+              now(),
+            );
+            return reply.code(result.replayed ? 200 : 201).send({
+              ...responsePayload,
+              workspace: {
+                id: binding.id,
+                tier: "binding",
+                role: "workspace",
+                kind: "local_runner",
+                display_name: clone.repository.repository_display_name,
+                status: binding.status,
+                verified: binding.status === "connected",
+                default_branch: clone.repository.default_branch,
+                installation_ready: null,
+                workflow_installed: false,
+                github: null,
+                observed_head: clone.repository.observed_head,
+                push_credential_strategy: null,
+              },
+              execution_location: "local",
+              local_working_copy: {
+                status: "ready",
+                repository_display_name: clone.repository.repository_display_name,
+              },
+            });
+          }
+          return reply.code(result.replayed ? 200 : 201).send({
+            ...responsePayload,
+            execution_location: "github_actions",
           });
         } catch (error) {
           // Honest errors: a repository GitHub would not confirm, or a reused
@@ -6651,6 +6829,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           workspaceRepositoryInventory: body.capabilities.includes(
             "workspace_repository_inventory",
           ),
+          workspaceClone: body.capabilities.includes("workspace_clone"),
         });
         stores.markSeen(authedRunnerId, now());
         stores.audit(`runner:${authedRunnerId}`, "runner.connected", "", now());

@@ -26,6 +26,14 @@ const safeDisplayLabel = z
       }),
     "label must not contain path separators or control characters",
   );
+const githubCloneUrl = z
+  .string()
+  .url()
+  .max(500)
+  .regex(
+    /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/,
+    "clone URL must be an uncredentialed GitHub HTTPS URL",
+  );
 
 // Local workspace discovery is deliberately a small, transient side channel on
 // the already-authenticated runner socket.  These IDs are opaque handles, not
@@ -34,10 +42,13 @@ const safeDisplayLabel = z
 export const RunnerWorkspaceRequest = z
   .object({
     request_id: opaqueId,
-    operation: z.enum(["list", "catalog", "browse", "validate", "choose", "inspect"]),
+    operation: z.enum(["list", "catalog", "browse", "validate", "choose", "clone", "inspect"]),
     workspace_id: opaqueId.optional(),
     entry_id: opaqueId.optional(),
     repository_id: opaqueId.optional(),
+    clone_url: githubCloneUrl.optional(),
+    repository_name: safeDisplayLabel.optional(),
+    clone_token: z.string().min(1).max(1_000).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -56,6 +67,16 @@ export const RunnerWorkspaceRequest = z
         code: z.ZodIssueCode.custom,
         path: ["repository_id"],
         message: "required",
+      });
+    }
+    if (
+      value.operation === "clone" &&
+      (!value.clone_url || !value.repository_name || !value.clone_token)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["clone_url"],
+        message: "clone URL, repository name, and clone token required",
       });
     }
   });
@@ -85,8 +106,16 @@ export type RunnerWorkspaceRepositoryT = z.infer<typeof RunnerWorkspaceRepositor
 export const RunnerWorkspaceResponse = z
   .object({
     request_id: opaqueId,
-    operation: z.enum(["list", "catalog", "browse", "validate", "choose", "inspect"]),
-    status: z.enum(["ok", "cancelled", "invalid_request", "not_found", "unavailable"]),
+    operation: z.enum(["list", "catalog", "browse", "validate", "choose", "clone", "inspect"]),
+    status: z.enum([
+      "ok",
+      "cancelled",
+      "invalid_request",
+      "not_found",
+      "unavailable",
+      "destination_exists",
+      "clone_failed",
+    ]),
     workspaces: z
       .array(z.object({ workspace_id: opaqueId, label: safeDisplayLabel }).strict())
       .optional(),
@@ -116,7 +145,9 @@ export const RunnerWorkspaceResponse = z
       (value.operation === "list" && value.workspaces !== undefined) ||
       (value.operation === "catalog" && value.repositories !== undefined) ||
       (value.operation === "browse" && value.entries !== undefined) ||
-      ((value.operation === "validate" || value.operation === "choose") &&
+      ((value.operation === "validate" ||
+        value.operation === "choose" ||
+        value.operation === "clone") &&
         value.repository !== undefined) ||
       (value.operation === "inspect" && value.inspection !== undefined);
     if (!correctPayload || payloads.length !== 1) {

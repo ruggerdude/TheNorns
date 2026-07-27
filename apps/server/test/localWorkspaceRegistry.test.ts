@@ -106,6 +106,86 @@ describe("runner-local workspace registry", () => {
     expect(registry.listConfigured()).toEqual([]);
   });
 
+  it("clones into a chosen parent, keeps credentials local, and converges on retry", async () => {
+    const data = mkdtempSync(join(tmpdir(), "norns-native-clone-"));
+    const sourceRoot = mkdtempSync(join(tmpdir(), "norns-clone-source-"));
+    const source = gitRepository(sourceRoot, "fresh-app-source");
+    const parent = join(data, "projects");
+    mkdirSync(parent);
+    const cloneUrl = "https://github.com/octocat/fresh-app.git";
+    const purposes: Array<string | undefined> = [];
+    const tokens: string[] = [];
+    let cloneCount = 0;
+    const registry = new WorkspaceRegistry(
+      data,
+      async (purpose) => {
+        purposes.push(purpose);
+        return parent;
+      },
+      async ({ target, token }) => {
+        cloneCount += 1;
+        tokens.push(token);
+        execFileSync("git", ["clone", "--", source, target]);
+        execFileSync("git", ["-C", target, "remote", "set-url", "origin", cloneUrl]);
+      },
+    );
+    const request = {
+      request_id: "clone-project",
+      operation: "clone" as const,
+      clone_url: cloneUrl,
+      repository_name: "fresh-app",
+      clone_token: "one-use-secret",
+    };
+
+    const first = await registry.handleAsync(request);
+    expect(first).toMatchObject({
+      operation: "clone",
+      status: "ok",
+      repository: {
+        repository_display_name: "fresh-app",
+        default_branch: "main",
+      },
+    });
+    expect(JSON.stringify(first)).not.toContain(parent);
+    expect(JSON.stringify(first)).not.toContain("one-use-secret");
+    expect(readFileSync(join(data, "workspace-registry.json"), "utf8")).not.toContain(
+      "one-use-secret",
+    );
+    expect(tokens).toEqual(["one-use-secret"]);
+
+    const second = await registry.handleAsync({ ...request, request_id: "clone-project-retry" });
+    expect(second).toMatchObject({ operation: "clone", status: "ok" });
+    expect(cloneCount).toBe(1);
+    expect(purposes).toEqual(["clone_parent", "clone_parent"]);
+  });
+
+  it("does not remove a destination another process creates during clone", async () => {
+    const data = mkdtempSync(join(tmpdir(), "norns-native-clone-race-"));
+    const parent = join(data, "projects");
+    mkdirSync(parent);
+    const destination = join(parent, "fresh-app");
+    const registry = new WorkspaceRegistry(
+      data,
+      async () => parent,
+      async () => {
+        mkdirSync(destination);
+        writeFileSync(join(destination, "owned-by-another-process"), "keep\n");
+        throw new Error("simulated clone race");
+      },
+    );
+
+    await expect(
+      registry.handleAsync({
+        request_id: "clone-race",
+        operation: "clone",
+        clone_url: "https://github.com/octocat/fresh-app.git",
+        repository_name: "fresh-app",
+        clone_token: "one-use-secret",
+      }),
+    ).resolves.toMatchObject({ status: "clone_failed" });
+    expect(readFileSync(join(destination, "owned-by-another-process"), "utf8")).toBe("keep\n");
+  });
+
   it("keeps paths local, skips symlinks, and validates an approved Git repository", () => {
     const data = mkdtempSync(join(tmpdir(), "norns-workspaces-"));
     const workspace = join(data, "approved");

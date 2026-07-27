@@ -92,6 +92,7 @@ describe("O1: GitHub and local Git repository onboarding", () => {
       body: {
         state: "connected",
         runner_id: "runner-local",
+        workspace_clone_ready: true,
         message: "The Norns helper is ready.",
         install_command: "",
         install_command_windows: "",
@@ -266,6 +267,35 @@ describe("O1: GitHub and local Git repository onboarding", () => {
           call.url === "/api/v2/projects/project-created/analyze-repository",
       ),
     ).toBe(true);
+  });
+
+  it("offers GitHub + this computer and requests a local working copy", async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /^this computer \+ github/i }));
+    await user.type(screen.getByTestId("project-description"), "Build a fresh application");
+
+    expect(await screen.findByTestId("setup-confirmation")).toHaveTextContent(
+      /ask where to create its working folder on this computer/i,
+    );
+    expect(screen.getByTestId("setup-confirmation")).toHaveTextContent(
+      /git pushes use the credentials configured on this computer/i,
+    );
+    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
+
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
+    expect(
+      mock.calls.find(
+        (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
+      ),
+    ).toMatchObject({
+      body: {
+        scenario: "new_repo",
+        repository_name: "fresh-application",
+        local_working_copy: true,
+      },
+    });
   });
 
   it("adopts an existing project from the reusable local repository inventory", async () => {

@@ -430,6 +430,7 @@ export const ReconcileRequest = z.object({
       z.enum([
         "workspace_picker",
         "workspace_repository_inventory",
+        "workspace_clone",
         "model_proxy",
         "knowledge_transport",
       ]),

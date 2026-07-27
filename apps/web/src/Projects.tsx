@@ -496,6 +496,9 @@ export function Projects({
   // Connections; Existing work can adopt either source.
   const [startingPoint, setStartingPoint] = useState<"new" | "existing">("new");
   const [sourceKind, setSourceKind] = useState<"github" | "local">("github");
+  const [executionLocation, setExecutionLocation] = useState<"github_actions" | "local">(
+    "github_actions",
+  );
   const scenario: ProjectOnboardingScenario =
     startingPoint === "new" ? "new_repo" : "existing_repo";
   const [name, setName] = useState("");
@@ -722,7 +725,10 @@ export function Projects({
   }, [dialog, loadRepositories, scenario, selectedConnectionId]);
 
   useSingleFlightPolling({
-    enabled: dialog && sourceKind === "local",
+    enabled:
+      dialog &&
+      (sourceKind === "local" ||
+        (startingPoint === "new" && sourceKind === "github" && executionLocation === "local")),
     intervalMs: 4_000,
     maxBackoffMs: 60_000,
     resourceKey: "local-sources",
@@ -1158,6 +1164,7 @@ export function Projects({
         pm_provider: pmProvider,
         pm_model: pmModel,
         idempotency_key: idempotencyKey,
+        ...(scenario === "new_repo" ? { local_working_copy: executionLocation === "local" } : {}),
         ...onboardingFields,
       });
       // The onboarding response is a lean summary (project_id, scenario,
@@ -1210,6 +1217,7 @@ export function Projects({
     scenario,
     startingPoint,
     sourceKind,
+    executionLocation,
     localSelection,
     selectedConnectionId,
     derivedIdentity,
@@ -1258,6 +1266,10 @@ export function Projects({
     const project = draftProject;
     setOnboardingBlockers([]);
     setWizardStep("form");
+    if (startingPoint === "new" && sourceKind === "github" && executionLocation === "local") {
+      void create();
+      return;
+    }
     if (startingPoint === "existing") {
       void completeAdoption(project, wizardObjective);
       return;
@@ -1265,10 +1277,13 @@ export function Projects({
     void finishNewProject(project, wizardObjective, pendingAttachmentFiles, wizardAttachmentIds);
   }, [
     completeAdoption,
+    create,
     draftProject,
+    executionLocation,
     finishNewProject,
     pendingAttachmentFiles,
     startingPoint,
+    sourceKind,
     wizardAttachmentIds,
     wizardObjective,
   ]);
@@ -1286,6 +1301,7 @@ export function Projects({
     setDescription("");
     setStartingPoint("new");
     setSourceKind("github");
+    setExecutionLocation("github_actions");
     setSelectedRepositoryId("");
     setRepositoryName("");
     setRepositoryQuery("");
@@ -1410,11 +1426,17 @@ export function Projects({
     : scenario === "existing_repo"
       ? Boolean(selectedRepositoryId)
       : Boolean(selectedConnectionId);
+  const localCloneReady =
+    isLocalSource ||
+    startingPoint !== "new" ||
+    executionLocation !== "local" ||
+    (localSources?.state === "connected" && localSources.workspace_clone_ready);
   const canCreate =
     !creating &&
     (isLocalSource || githubConnected) &&
     (description.trim().length > 0 || startingPoint === "existing") &&
-    sourceReady;
+    sourceReady &&
+    localCloneReady;
   // The confirmation step's one honest passage about where the human's code
   // actually lives (GitHub Actions, not their computer) — null repository
   // name means "not resolved yet", which describeSetup renders as a prompt.
@@ -1429,7 +1451,10 @@ export function Projects({
     ? localSelection
       ? `Norns will not create a folder or initialize Git. It will work only inside the already-initialized, approved local Git repository ${localSelection.repository.repository_display_name}; its filesystem path stays on this computer.`
       : "Select an already-initialized local Git repository approved in Connections. Norns will not create a folder or initialize Git."
-    : describeSetup(confirmationRepositoryFullName);
+    : describeSetup(
+        confirmationRepositoryFullName,
+        startingPoint === "new" ? executionLocation : "github_actions",
+      );
 
   return (
     <div className="app-shell">
@@ -2213,6 +2238,7 @@ export function Projects({
                       className={startingPoint === "existing" ? "is-selected" : ""}
                       onClick={() => {
                         setStartingPoint("existing");
+                        setExecutionLocation("github_actions");
                         setRepositoryName("");
                       }}
                     >
@@ -2234,6 +2260,9 @@ export function Projects({
                       className={sourceKind === "github" ? "is-selected" : ""}
                       onClick={() => {
                         setSourceKind("github");
+                        if (startingPoint === "existing") {
+                          setExecutionLocation("github_actions");
+                        }
                         setLocalSelection(null);
                         setSourceError(null);
                       }}
@@ -2250,6 +2279,7 @@ export function Projects({
                       className={sourceKind === "local" ? "is-selected" : ""}
                       onClick={() => {
                         setSourceKind("local");
+                        setExecutionLocation("github_actions");
                         setSelectedRepositoryId("");
                         setSourceError(null);
                       }}
@@ -2456,6 +2486,81 @@ export function Projects({
                     )}
                   </div>
                 )}
+
+                {!isLocalSource && startingPoint === "new" && githubConnected ? (
+                  <fieldset className="source-picker" data-testid="execution-location-picker">
+                    <legend>Where should approved work run?</legend>
+                    <div className="source-options">
+                      <button
+                        type="button"
+                        className={executionLocation === "local" ? "is-selected" : ""}
+                        onClick={() => {
+                          setExecutionLocation("local");
+                          setSourceError(null);
+                        }}
+                      >
+                        <strong>This computer + GitHub</strong>
+                        <span>
+                          Create the GitHub repository, choose a parent folder, and clone a local
+                          working copy for the helper.
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className={executionLocation === "github_actions" ? "is-selected" : ""}
+                        onClick={() => {
+                          setExecutionLocation("github_actions");
+                          setSourceError(null);
+                        }}
+                      >
+                        <strong>GitHub Actions</strong>
+                        <span>Run approved work in an ephemeral GitHub-hosted runner.</span>
+                      </button>
+                    </div>
+                    {executionLocation === "local" ? (
+                      localSources === null ? (
+                        <Spinner label="Checking the local helper…" />
+                      ) : localSources.state !== "connected" ? (
+                        <div className="connection-required">
+                          <div>
+                            <strong>Local helper required</strong>
+                            <p>{localSources.message}</p>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="primary"
+                            className="btn-small"
+                            onClick={() => onOpenAccount("connections")}
+                          >
+                            Open Connections
+                          </Button>
+                        </div>
+                      ) : !localSources.workspace_clone_ready ? (
+                        <div className="connection-required">
+                          <div>
+                            <strong>Update the local helper</strong>
+                            <p>
+                              Re-run helper setup in Connections to enable secure GitHub cloning.
+                            </p>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="primary"
+                            className="btn-small"
+                            onClick={() => onOpenAccount("connections")}
+                          >
+                            Open Connections
+                          </Button>
+                        </div>
+                      ) : (
+                        <p className="field-help">
+                          The system folder chooser opens after GitHub creates the repository. The
+                          selected path stays on this computer.
+                        </p>
+                      )
+                    ) : null}
+                  </fieldset>
+                ) : null}
 
                 {startingPoint === "new" ? (
                   <>
@@ -2685,11 +2790,15 @@ export function Projects({
                 </p>
                 <Button variant="primary" disabled={!canCreate} onClick={() => void create()}>
                   {creating
-                    ? startingPoint === "new" && sourceKind === "local"
-                      ? "Creating project and starting planning…"
-                      : scenario === "new_repo"
-                        ? "Creating repository and project…"
-                        : "Creating…"
+                    ? startingPoint === "new" &&
+                      sourceKind === "github" &&
+                      executionLocation === "local"
+                      ? "Creating GitHub repository and local folder…"
+                      : startingPoint === "new" && sourceKind === "local"
+                        ? "Creating project and starting planning…"
+                        : scenario === "new_repo"
+                          ? "Creating repository and project…"
+                          : "Creating…"
                     : startingPoint === "new"
                       ? "Create & start planning →"
                       : "Adopt project →"}

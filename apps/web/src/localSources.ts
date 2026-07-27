@@ -3,6 +3,7 @@ import { UnauthorizedError, authHeaders } from "./auth";
 export interface LocalHelperStatus {
   state: "connected" | "degraded" | "disconnected" | "not_installed";
   runner_id: string | null;
+  workspace_clone_ready: boolean;
   message: string;
   install_command: string;
   install_command_windows: string;

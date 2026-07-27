@@ -168,6 +168,59 @@ describe.sequential("ONBOARDING O6: GitHub-evidenced binding promotion", () => {
     return result.project_id;
   }
 
+  it("keeps GitHub as the remote while making a verified local clone primary", async () => {
+    const projectId = await onboardProject("local-working-copy");
+    const activated = await activation.activate({
+      project_id: projectId,
+      actor_id: ACTOR.actor_id,
+    });
+    expect(activated.activated).toBe(true);
+
+    const local = await new SourceBindingService(transactions).createLocal(
+      {
+        project_id: projectId,
+        runner_id: "runner-local",
+        workspace_id: "local:workspace",
+        repository_id: "local:repository",
+        repository_display_name: "app",
+        default_branch: "main",
+        observed_head: HEAD,
+        verification_policy_ref: "verification",
+        created_by: ACTOR,
+      },
+      { makePrimary: true },
+    );
+    const primary = await pg.query<{ primary_id: string; binding_type: string }>(
+      `SELECT project.primary_repository_binding_id AS primary_id, binding.binding_type
+       FROM projects project
+       JOIN repository_bindings binding
+         ON binding.id = project.primary_repository_binding_id
+       WHERE project.id = $1`,
+      [projectId],
+    );
+    expect(primary.rows[0]).toEqual({
+      primary_id: local.id,
+      binding_type: "local_runner",
+    });
+    const remote = await pg.query<{ binding_type: string; role: string }>(
+      `SELECT binding_type, role
+       FROM repository_bindings
+       WHERE project_id = $1 AND role = 'remote' AND status = 'connected'`,
+      [projectId],
+    );
+    expect(remote.rows).toEqual([{ binding_type: "github", role: "remote" }]);
+    const view = await resume.open(projectId);
+    expect(view.onboarding.workspace).toMatchObject({
+      kind: "local_runner",
+      display_name: "app",
+    });
+    expect(view.onboarding.remote).toMatchObject({
+      kind: "github",
+      display_name: "acme/app",
+    });
+    expect(view.onboarding.summary_line).toBe("Runs in app · Pushes to github.com/acme/app");
+  });
+
   /**
    * The rest of the scheduling scope the Phase 4 gate needs. Nothing here is
    * repository-related — it exists so the only thing under test is whether the

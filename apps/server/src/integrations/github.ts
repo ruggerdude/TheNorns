@@ -239,6 +239,16 @@ export const GITHUB_TOKEN_SCOPES = {
     repository_ids: [repositoryId],
     permissions: { contents: "read" },
   }),
+  /**
+   * Clone one repository into an approved local folder. This credential
+   * crosses the authenticated helper socket once, is never written to git
+   * configuration, and is deliberately excluded from the server token cache.
+   */
+  cloneRepository: (repositoryId: number) => ({
+    repository_ids: [repositoryId],
+    permissions: { contents: "read" },
+    no_cache: true,
+  }),
   /** Commit `.github/workflows/norns-agent.yml` into one repository. */
   writeWorkflowFile: (repositoryId: number) => ({
     repository_ids: [repositoryId],
@@ -1079,6 +1089,28 @@ export class GitHubIntegrationService {
       binding_ready: installation.ready,
       installation,
     };
+  }
+
+  async localCloneCredential(
+    userId: string,
+    connectionId: string,
+    repositoryId: string,
+  ): Promise<{ repository: GitHubRepositorySummary; token: string }> {
+    const repository = await this.resolveRepository(userId, connectionId, repositoryId);
+    const connection = await this.connection(connectionId);
+    const numericRepositoryId = Number(repository.id);
+    if (!Number.isInteger(numericRepositoryId) || numericRepositoryId <= 0) {
+      throw new GitHubIntegrationError(
+        "invalid_repository_id",
+        "The selected GitHub repository identifier is invalid",
+        400,
+      );
+    }
+    const token = await this.installationToken(
+      connection.installation_id,
+      GITHUB_TOKEN_SCOPES.cloneRepository(numericRepositoryId),
+    );
+    return { repository, token };
   }
 
   async disconnect(connectionId: string): Promise<void> {

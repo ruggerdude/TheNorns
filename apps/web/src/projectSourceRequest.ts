@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------------------
-// O1 onboarding: execution runs in GitHub Actions — nothing is ever
-// installed on the human's machine. The setup wizard's source step is two
-// scenarios, both GitHub-backed:
+// O1 onboarding: every project has a GitHub remote. New repositories may use
+// either an ephemeral GitHub Actions workspace or a helper-managed local
+// working copy; existing repositories retain the established Actions path.
+// The setup wizard's source step has two GitHub-backed scenarios:
 //
 //   new_repo:      "Start something new" -> Norns creates a GitHub
 //                  repository (name + private/public), backed by
@@ -11,8 +12,8 @@
 //                  repo URL as a shortcut), backed by listRepositories /
 //                  resolveRepository.
 //
-// Both scenarios need a connected GitHub account first — there is no
-// GitHub-free path anymore.
+// Both scenarios need a connected GitHub account. The separate approved-local
+// source flow remains available for repositories that already exist locally.
 //
 // This is now the REAL, confirmed contract for POST
 // /api/v2/projects/onboarding (reconciled against O2's implementation —
@@ -130,8 +131,8 @@ export function parseGitHubRepoRef(text: string): { owner: string; name: string 
 
 /**
  * The confirmation step's one honest, plain-language passage about where
- * the human's code actually lives — execution is a GitHub Actions job
- * inside their repository, never anything running on their own computer.
+ * execution happens: GitHub Actions by default, or a helper-managed local
+ * clone when the operator selects "This computer + GitHub".
  * `repositoryFullName` is null before a repository has been chosen/named
  * (the confirmation step then just prompts for that instead).
  *
@@ -140,7 +141,13 @@ export function parseGitHubRepoRef(text: string): { owner: string; name: string 
  * exists, prefer the resume payload's own `onboarding.summary_line` instead
  * of calling this function again — see Projects.tsx's dashboard cards.
  */
-export function describeSetup(repositoryFullName: string | null): string {
+export function describeSetup(
+  repositoryFullName: string | null,
+  executionLocation: "github_actions" | "local" = "github_actions",
+): string {
   if (!repositoryFullName) return "Choose or create a GitHub repository to continue.";
+  if (executionLocation === "local") {
+    return `Norns will create ${repositoryFullName} on GitHub, ask where to create its working folder on this computer, and run approved work locally. Git pushes use the credentials configured on this computer.`;
+  }
   return `Work happens in a GitHub Actions job inside ${repositoryFullName}. Changes arrive as commits and pull requests in that repository — to get the files on your own machine, clone or pull as usual.`;
 }

@@ -1,9 +1,9 @@
 // ONBOARDING O2: the two project-creation commands.
 //
-// Every project is GitHub-backed. Nothing is installed on the operator's
-// machine: the runner runs ephemerally inside a GitHub Actions job in the
-// project's own repository and connects back to the relay over the existing
-// protocol. So project setup has exactly two shapes:
+// Every project is GitHub-backed. The default runner is ephemeral inside a
+// GitHub Actions job, while the route may replace the workspace role with a
+// helper-verified local clone after this service creates the GitHub-backed
+// project. Project setup has exactly two remote shapes:
 //
 //   new_repo       Norns creates the GitHub repository for this project.
 //   existing_repo  The operator selects a repository the installation can see.
@@ -15,10 +15,9 @@
 //     to this one and the Phase 4 dispatch gate reads it. Untouched here.
 //   * REMOTE    (role 'remote')    -- where the work is pushed.
 //
-// Today both name the SAME repository. The roles stay distinct because they
-// answer genuinely different questions and are expected to diverge (fork-and-
-// PR: execute in a fork, push to upstream). Collapsing them now would mean
-// re-deriving the distinction later from nothing.
+// They initially name the SAME repository. The roles stay distinct because
+// the local-working-copy path intentionally makes them diverge: execution is
+// local while pushes still target the GitHub remote.
 //
 // Both attachments are written to the CANDIDATE tier (FRONT DOOR D2's
 // unverified tier). They are promoted to real `repository_bindings` rows when
@@ -173,6 +172,7 @@ export interface AttachmentRow {
   workflow_installed: boolean;
   push_credential_strategy: string | null;
   remote_provisioning: string | null;
+  is_primary: boolean;
 }
 
 const VERIFIED_STATUSES = new Set(["connected", "promoted"]);
@@ -289,6 +289,11 @@ export const ONBOARDING_ATTACHMENTS_SQL = `
          ) AS workflow_installed,
          binding.push_credential_strategy,
          binding.remote_provisioning,
+         EXISTS (
+           SELECT 1 FROM projects project
+           WHERE project.id = binding.project_id
+             AND project.primary_repository_binding_id = binding.id
+         ) AS is_primary,
          binding.created_at
   FROM repository_bindings binding
   WHERE binding.project_id = $1
@@ -311,6 +316,7 @@ export const ONBOARDING_ATTACHMENTS_SQL = `
          candidate.workflow_installed,
          candidate.push_credential_strategy,
          candidate.remote_provisioning,
+         false AS is_primary,
          candidate.created_at
   FROM repository_binding_candidates candidate
   WHERE candidate.project_id = $1
@@ -326,9 +332,10 @@ export const ONBOARDING_ATTACHMENTS_SQL = `
 export const ONBOARDING_ATTACHMENTS_QUERY = `
   SELECT id, tier, role, kind, display_name, status, github_owner, github_name,
          observed_head, default_branch, installation_ready, workflow_installed,
-         push_credential_strategy, remote_provisioning
+         push_credential_strategy, remote_provisioning, is_primary
   FROM (${ONBOARDING_ATTACHMENTS_SQL}) attachment
-  ORDER BY CASE tier WHEN 'binding' THEN 0 ELSE 1 END, created_at, id
+  ORDER BY CASE WHEN role = 'workspace' AND is_primary THEN 0 ELSE 1 END,
+           CASE tier WHEN 'binding' THEN 0 ELSE 1 END, created_at, id
 `;
 
 interface ResolvedAttachments {

@@ -55,7 +55,7 @@ export class RunnerWorkspaceBroker {
     };
     return new Promise<RunnerWorkspaceResponseT>((resolve, reject) => {
       const timeoutMs =
-        request.operation === "choose"
+        request.operation === "choose" || request.operation === "clone"
           ? (this.options.timeoutMs ?? 5 * 60_000)
           : request.operation === "inspect"
             ? (this.options.timeoutMs ?? 20_000)

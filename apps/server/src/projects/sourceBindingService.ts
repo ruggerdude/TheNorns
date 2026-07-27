@@ -177,7 +177,10 @@ async function appendBindingAudit(tx: V2SqlExecutor, binding: V2RepositoryBindin
 export class SourceBindingService {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
-  createLocal(input: V2CreateLocalRepositoryBindingT): Promise<V2RepositoryBindingT> {
+  createLocal(
+    input: V2CreateLocalRepositoryBindingT,
+    options: { makePrimary?: boolean } = {},
+  ): Promise<V2RepositoryBindingT> {
     const command = V2CreateLocalRepositoryBinding.parse(input);
     const id = stableBindingId([
       command.project_id,
@@ -220,6 +223,14 @@ export class SourceBindingService {
          WHERE project_id = $1 AND source_type = 'local' AND status = 'unverified'`,
         [command.project_id],
       );
+      if (options.makePrimary) {
+        await tx.query(
+          `UPDATE projects
+           SET primary_repository_binding_id = $2, updated_at = now()
+           WHERE id = $1`,
+          [command.project_id, binding.id],
+        );
+      }
       await appendBindingAudit(tx, binding);
       return binding;
     });

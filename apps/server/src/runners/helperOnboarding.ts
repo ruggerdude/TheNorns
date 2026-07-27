@@ -5,23 +5,26 @@ export interface HelperRunnerSnapshot {
   connected: boolean;
   workspace_picker_ready: boolean;
   workspace_repository_inventory_ready: boolean;
+  workspace_clone_ready: boolean;
   last_seen_at: string | null;
 }
 
 export type HelperConnectionState = "connected" | "degraded" | "disconnected" | "not_installed";
 
 export function helperStatus(runners: readonly HelperRunnerSnapshot[]) {
-  const ready = runners.find(
-    (runner) =>
-      runner.connected &&
-      runner.workspace_picker_ready &&
-      runner.workspace_repository_inventory_ready,
-  );
+  const repositoryReady = (runner: HelperRunnerSnapshot) =>
+    runner.connected &&
+    runner.workspace_picker_ready &&
+    runner.workspace_repository_inventory_ready;
+  const ready =
+    runners.find((runner) => repositoryReady(runner) && runner.workspace_clone_ready) ??
+    runners.find(repositoryReady);
   if (ready) {
     return {
       state: "connected" as const,
       runner_id: ready.runner_id,
       runners,
+      workspace_clone_ready: ready.workspace_clone_ready,
       message: "The Norns helper is ready to choose a folder on this computer.",
     };
   }
@@ -31,6 +34,7 @@ export function helperStatus(runners: readonly HelperRunnerSnapshot[]) {
       state: "degraded" as const,
       runner_id: outdated.runner_id,
       runners,
+      workspace_clone_ready: false,
       message:
         "The local helper is out of date. Re-run helper setup in Connections before choosing a folder.",
     };
@@ -40,6 +44,7 @@ export function helperStatus(runners: readonly HelperRunnerSnapshot[]) {
       state: "disconnected" as const,
       runner_id: runners[0]?.runner_id ?? null,
       runners,
+      workspace_clone_ready: false,
       message: "The local helper is installed but is not currently reachable.",
     };
   }
@@ -47,6 +52,7 @@ export function helperStatus(runners: readonly HelperRunnerSnapshot[]) {
     state: "not_installed" as const,
     runner_id: null,
     runners,
+    workspace_clone_ready: false,
     message: "Set up the local helper once, then choose folders with the system picker.",
   };
 }

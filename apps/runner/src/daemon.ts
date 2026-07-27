@@ -269,6 +269,7 @@ export class RunnerDaemon {
                 capabilities: [
                   "workspace_picker",
                   "workspace_repository_inventory",
+                  "workspace_clone",
                   "model_proxy",
                   "knowledge_transport",
                 ],

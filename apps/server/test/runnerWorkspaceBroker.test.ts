@@ -33,6 +33,36 @@ describe("runner workspace broker", () => {
     await expect(waiting).rejects.toBeInstanceOf(WorkspaceBrokerError);
   });
 
+  it("correlates clone responses without returning the clone credential", async () => {
+    let sent: RunnerWorkspaceRequestT | undefined;
+    const broker = new RunnerWorkspaceBroker((_runner, _generation, request) => {
+      sent = request;
+      return true;
+    });
+    const waiting = broker.request("runner-1", 3, {
+      operation: "clone",
+      clone_url: "https://github.com/octocat/fresh-app.git",
+      repository_name: "fresh-app",
+      clone_token: "one-use-secret",
+    });
+    if (!sent) throw new Error("request was not sent");
+    broker.receive("runner-1", 3, {
+      request_id: sent.request_id,
+      operation: "clone",
+      status: "ok",
+      repository: {
+        workspace_id: "local:workspace",
+        repository_id: "local:repository",
+        repository_display_name: "fresh-app",
+        default_branch: "main",
+        observed_head: "abc123",
+      },
+    });
+    const response = await waiting;
+    expect(response.status).toBe("ok");
+    expect(JSON.stringify(response)).not.toContain("one-use-secret");
+  });
+
   it("binds selections to one user and consumes them once", () => {
     const tokens = new WorkspaceSelectionTokens();
     const issued = tokens.issue("user-1", "runner-1", 1, {

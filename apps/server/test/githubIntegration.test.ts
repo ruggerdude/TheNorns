@@ -170,6 +170,31 @@ describe.sequential("workspace GitHub integration", () => {
     ).resolves.toMatchObject({ full_name: "octocat/hello-world" });
   });
 
+  it("mints an uncached, repository-scoped read credential for one local clone", async () => {
+    const before = http.mock.calls.filter(([input]) =>
+      String(input).endsWith("/app/installations/42/access_tokens"),
+    ).length;
+    await expect(
+      service.localCloneCredential("another-workspace-user", "github:42", "9001"),
+    ).resolves.toMatchObject({
+      repository: { id: "9001", clone_url: "https://github.com/octocat/hello-world.git" },
+      token: "installation-token",
+    });
+    await service.localCloneCredential("another-workspace-user", "github:42", "9001");
+    const tokenCalls = http.mock.calls.filter(([input]) =>
+      String(input).endsWith("/app/installations/42/access_tokens"),
+    );
+    expect(tokenCalls).toHaveLength(before + 4);
+    const cloneMintBody = JSON.parse(String(tokenCalls.at(-1)?.[1]?.body)) as {
+      repository_ids: number[];
+      permissions: Record<string, string>;
+    };
+    expect(cloneMintBody).toEqual({
+      repository_ids: [9001],
+      permissions: { contents: "read" },
+    });
+  });
+
   it("retries a transient GitHub outage while loading repositories", async () => {
     const tokenRequestsBefore = http.mock.calls.filter(([input]) =>
       String(input).endsWith("/app/installations/42/access_tokens"),

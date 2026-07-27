@@ -20,6 +20,7 @@ import {
 } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { platform } from "node:process";
+import { promisify } from "node:util";
 import type {
   RepositoryInspectionT,
   RunnerWorkspaceEntryT,
@@ -65,7 +66,30 @@ const MAX_BROWSE_SCAN = 400;
 
 class InvalidWorkspaceRegistryError extends Error {}
 
-export type DirectoryPicker = () => Promise<string | null>;
+const execFileAsync = promisify(execFile);
+
+export type DirectoryPicker = (purpose?: "repository" | "clone_parent") => Promise<string | null>;
+export type RepositoryCloner = (input: {
+  cloneUrl: string;
+  target: string;
+  token: string;
+}) => Promise<void>;
+
+const cloneGitHubRepository: RepositoryCloner = async ({ cloneUrl, target, token }) => {
+  const authorization = Buffer.from(`x-access-token:${token}`, "utf8").toString("base64");
+  await execFileAsync("git", ["clone", "--origin", "origin", "--no-tags", "--", cloneUrl, target], {
+    encoding: "utf8",
+    timeout: 5 * 60_000,
+    maxBuffer: 1024 * 1024,
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "http.https://github.com/.extraHeader",
+      GIT_CONFIG_VALUE_0: `Authorization: Basic ${authorization}`,
+    },
+  });
+};
 
 function pickerCommand(command: string, args: string[]): Promise<string | null> {
   return new Promise((resolvePicker) => {
@@ -81,11 +105,17 @@ function pickerCommand(command: string, args: string[]): Promise<string | null> 
 }
 
 /** Opens the operating system's folder chooser without exposing its result to the relay. */
-export function chooseNativeDirectory(): Promise<string | null> {
+export function chooseNativeDirectory(
+  purpose: "repository" | "clone_parent" = "repository",
+): Promise<string | null> {
+  const prompt =
+    purpose === "clone_parent"
+      ? "Choose where The Norns should create the project folder"
+      : "Choose a Git project folder for The Norns";
   if (platform === "darwin") {
     return pickerCommand("osascript", [
       "-e",
-      'POSIX path of (choose folder with prompt "Choose a Git project folder for The Norns")',
+      `POSIX path of (choose folder with prompt "${prompt}")`,
     ]);
   }
   if (platform === "win32") {
@@ -93,14 +123,10 @@ export function chooseNativeDirectory(): Promise<string | null> {
       "-NoProfile",
       "-STA",
       "-Command",
-      "Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = 'Choose a Git project folder for The Norns'; if ($dialog.ShowDialog() -eq 'OK') { $dialog.SelectedPath }",
+      `Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = '${prompt}'; if ($dialog.ShowDialog() -eq 'OK') { $dialog.SelectedPath }`,
     ]);
   }
-  return pickerCommand("zenity", [
-    "--file-selection",
-    "--directory",
-    "--title=Choose a Git project folder for The Norns",
-  ]);
+  return pickerCommand("zenity", ["--file-selection", "--directory", `--title=${prompt}`]);
 }
 
 function opaque(): string {
@@ -136,6 +162,7 @@ export class WorkspaceRegistry {
   constructor(
     dataDir: string,
     private readonly directoryPicker: DirectoryPicker = chooseNativeDirectory,
+    private readonly repositoryCloner: RepositoryCloner = cloneGitHubRepository,
   ) {
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     this.dataDirectory = dataDir;
@@ -151,11 +178,39 @@ export class WorkspaceRegistry {
 
   /** Handles native selection asynchronously so an open dialog never blocks the runner socket. */
   async handleAsync(request: RunnerWorkspaceRequestT): Promise<RunnerWorkspaceResponseT> {
-    if (request.operation !== "choose") return this.handle(request);
+    if (request.operation !== "choose" && request.operation !== "clone") {
+      return this.handle(request);
+    }
     try {
-      const selectedPath = await this.directoryPicker();
+      const selectedPath = await this.directoryPicker(
+        request.operation === "clone" ? "clone_parent" : "repository",
+      );
       if (!selectedPath) {
-        return { request_id: request.request_id, operation: "choose", status: "cancelled" };
+        return {
+          request_id: request.request_id,
+          operation: request.operation,
+          status: "cancelled",
+        };
+      }
+      if (request.operation === "clone") {
+        const cloned = await this.cloneSelectedRepository(
+          selectedPath,
+          request.clone_url ?? "",
+          request.repository_name ?? "",
+          request.clone_token ?? "",
+        );
+        return "repository" in cloned
+          ? {
+              request_id: request.request_id,
+              operation: "clone",
+              status: "ok",
+              repository: cloned.repository,
+            }
+          : {
+              request_id: request.request_id,
+              operation: "clone",
+              status: cloned.status,
+            };
       }
       const repository = this.registerSelectedRepository(selectedPath);
       return repository
@@ -167,7 +222,87 @@ export class WorkspaceRegistry {
           }
         : { request_id: request.request_id, operation: "choose", status: "invalid_request" };
     } catch {
-      return { request_id: request.request_id, operation: "choose", status: "unavailable" };
+      return {
+        request_id: request.request_id,
+        operation: request.operation,
+        status: request.operation === "clone" ? "clone_failed" : "unavailable",
+      };
+    }
+  }
+
+  /**
+   * Clone into a human-approved parent without exposing that parent to the
+   * relay. The short-lived repository-scoped token is supplied to git only
+   * through process environment configuration and is never written into the
+   * remote URL or the runner registry.
+   */
+  private async cloneSelectedRepository(
+    selectedParent: string,
+    cloneUrl: string,
+    repositoryName: string,
+    cloneToken: string,
+  ): Promise<
+    | { repository: NonNullable<RunnerWorkspaceResponseT["repository"]> }
+    | { status: "invalid_request" | "destination_exists" | "clone_failed" }
+  > {
+    if (
+      !/^[A-Za-z0-9._-]{1,100}$/.test(repositoryName) ||
+      !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/.test(cloneUrl) ||
+      !cloneToken
+    ) {
+      return { status: "invalid_request" };
+    }
+    const parent = this.localDirectory(selectedParent);
+    const target = resolve(parent, repositoryName);
+    if (!this.contains(parent, target) || target === parent) {
+      return { status: "invalid_request" };
+    }
+    if (existsSync(target)) {
+      if (this.matchesClone(target, cloneUrl)) {
+        const repository = this.registerSelectedRepository(target);
+        return repository ? { repository } : { status: "destination_exists" };
+      }
+      return { status: "destination_exists" };
+    }
+    const staging = join(parent, `.norns-clone-${randomUUID()}`);
+    let installedTarget = false;
+    try {
+      await this.repositoryCloner({ cloneUrl, target: staging, token: cloneToken });
+      if (existsSync(target)) {
+        rmSync(staging, { recursive: true, force: true });
+        return { status: "destination_exists" };
+      }
+      renameSync(staging, target);
+      installedTarget = true;
+      const repository = this.registerSelectedRepository(target);
+      if (!repository) throw new Error("cloned repository could not be verified");
+      return { repository };
+    } catch {
+      rmSync(staging, { recursive: true, force: true });
+      if (installedTarget) rmSync(target, { recursive: true, force: true });
+      return { status: "clone_failed" };
+    }
+  }
+
+  private matchesClone(path: string, cloneUrl: string): boolean {
+    try {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+      const physical = realpathSync(path);
+      const existing = execFileSync(
+        "git",
+        ["-C", physical, "config", "--get", "remote.origin.url"],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 3_000,
+        },
+      ).trim();
+      return (
+        existing.toLowerCase() === cloneUrl.toLowerCase() && this.gitMetadata(physical) !== null
+      );
+    } catch {
+      return false;
     }
   }
 

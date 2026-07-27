@@ -17,6 +17,7 @@ function runner(overrides: Partial<HelperRunnerSnapshot> = {}): HelperRunnerSnap
     connected: true,
     workspace_picker_ready: true,
     workspace_repository_inventory_ready: true,
+    workspace_clone_ready: true,
     last_seen_at: "2026-07-27T18:00:00.000Z",
     ...overrides,
   };
@@ -35,6 +36,19 @@ describe("local helper capability status", () => {
       state: "degraded",
       runner_id: "runner-1",
       message: expect.stringMatching(/out of date/i),
+    });
+  });
+
+  it("prefers a clone-capable helper when more than one helper is connected", () => {
+    expect(
+      helperStatus([
+        runner({ runner_id: "legacy-helper", workspace_clone_ready: false }),
+        runner({ runner_id: "current-helper" }),
+      ]),
+    ).toMatchObject({
+      state: "connected",
+      runner_id: "current-helper",
+      workspace_clone_ready: true,
     });
   });
 });
