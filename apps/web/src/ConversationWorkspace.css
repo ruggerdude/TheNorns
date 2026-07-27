@@ -140,6 +140,227 @@
   padding: 0.65rem 1rem 0;
 }
 
+.conversation-context-receipt {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--raised) 46%, transparent);
+}
+
+.conversation-context-indicators {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+
+.conversation-context-indicators > :is(details, output, span) {
+  padding: 0.48rem 0.62rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.conversation-context-indicators output {
+  display: grid;
+  gap: 0.08rem;
+}
+
+.conversation-summary-indicator {
+  max-width: min(34rem, 100%);
+}
+
+.conversation-summary-indicator summary,
+.conversation-handoff-card summary {
+  cursor: pointer;
+}
+
+.conversation-summary-indicator > div {
+  display: grid;
+  gap: 0.28rem;
+  padding-top: 0.55rem;
+}
+
+.conversation-summary-indicator p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.conversation-handoff-card {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--success) 38%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--success) 7%, var(--surface));
+}
+
+.conversation-handoff-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.conversation-handoff-card h3,
+.conversation-handoff-card p {
+  margin: 0;
+}
+
+.conversation-handoff-card h3 {
+  margin-top: 0.16rem;
+  font-size: 0.86rem;
+}
+
+.conversation-handoff-card > dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+.conversation-handoff-card > dl > div {
+  display: grid;
+  gap: 0.12rem;
+  padding: 0.55rem 0.65rem;
+}
+
+.conversation-handoff-card > dl > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.conversation-handoff-card dt {
+  color: var(--muted);
+  font-size: 0.58rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.conversation-handoff-card dd {
+  margin: 0;
+  font-size: 0.7rem;
+}
+
+.conversation-handoff-details {
+  display: grid;
+  gap: 0.55rem;
+  padding-top: 0.6rem;
+}
+
+.conversation-handoff-details section {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.conversation-handoff-details p {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
+
+.conversation-handoff-card > .btn {
+  width: fit-content;
+}
+
+.conversation-excerpt-control {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--info) 32%, var(--line));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--info) 6%, var(--surface));
+}
+
+.conversation-excerpt-control > div:first-child {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.conversation-excerpt-control p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
+
+.conversation-excerpt-control > .btn {
+  width: fit-content;
+}
+
+.conversation-excerpt-confirm {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.conversation-excerpt-control fieldset {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+  margin: 0;
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+.conversation-excerpt-control legend {
+  padding-inline: 0.3rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.conversation-excerpt-options {
+  display: grid;
+  max-height: 18rem;
+  gap: 0.42rem;
+  overflow-y: auto;
+}
+
+.conversation-excerpt-options label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.conversation-excerpt-options label > span {
+  display: grid;
+  min-width: 0;
+  gap: 0.12rem;
+}
+
+.conversation-excerpt-options small {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
+.conversation-read-only {
+  display: grid;
+  width: 100%;
+  gap: 0.16rem;
+  padding: 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--info) 28%, var(--line));
+  border-radius: 11px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--info) 5%, var(--surface));
+  font-size: 0.68rem;
+}
+
+.conversation-read-only strong {
+  color: var(--text);
+}
+
 .conversation-main-loading {
   display: grid;
   min-height: 24rem;
@@ -427,7 +648,8 @@
 }
 
 .conversation-artifact-card,
-.conversation-reference-card {
+.conversation-reference-card,
+.conversation-inline-receipt {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 0.65rem;
@@ -441,6 +663,39 @@
 
 .conversation-reference-card {
   grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.conversation-inline-receipt {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.conversation-inline-receipt > div:first-child {
+  display: grid;
+  gap: 0.12rem;
+}
+
+.conversation-inline-receipt dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin: 0;
+}
+
+.conversation-inline-receipt dl > div {
+  display: grid;
+  gap: 0.08rem;
+}
+
+.conversation-inline-receipt dt {
+  color: var(--muted);
+  font-size: 0.56rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.conversation-inline-receipt dd {
+  margin: 0;
 }
 
 .conversation-artifact-card span:nth-child(2) {
@@ -1149,8 +1404,14 @@
 
   .conversation-plan-columns,
   .conversation-plan-diff > div,
-  .conversation-qc-summary {
+  .conversation-qc-summary,
+  .conversation-handoff-card > dl {
     grid-template-columns: 1fr;
+  }
+
+  .conversation-handoff-card > dl > div + div {
+    border-top: 1px solid var(--line);
+    border-left: 0;
   }
 
   .conversation-qc-summary > div + div {
@@ -1171,6 +1432,16 @@
   .conversation-plan-proposal-control {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .conversation-handoff-card > header {
+    display: grid;
+  }
+
+  .conversation-handoff-card > .btn,
+  .conversation-excerpt-control > .btn,
+  .conversation-excerpt-control .actions .btn {
+    width: 100%;
   }
 
   .conversation-plan-change-actions {

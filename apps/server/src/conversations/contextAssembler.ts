@@ -2,6 +2,7 @@ import type { ConversationMessage } from "@norns/adapters";
 import {
   V2ConversationContextManifest,
   type V2ConversationContextManifestT,
+  V2ConversationHandoffPackage,
   V2ConversationSummaryContent,
   V2WorkMessagePart,
   type V2WorkMessagePartT,
@@ -11,7 +12,10 @@ import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/datab
 import {
   CONVERSATIONAL_PM_INSTRUCTIONS,
   CONVERSATIONAL_PM_PROMPT_VERSION,
+  EXECUTION_PM_INSTRUCTIONS,
+  EXECUTION_PM_PROMPT_VERSION,
   conversationalPmSystem,
+  executionPmSystem,
 } from "./prompt.js";
 
 const MAX_RECENT_MESSAGES = 50;
@@ -66,12 +70,20 @@ function entry(material: ContextMaterial): V2ConversationContextManifestT["entri
 }
 
 function parts(value: unknown): V2WorkMessagePartT[] {
-  const parsed = Array.isArray(value)
-    ? value
-    : typeof value === "string"
-      ? JSON.parse(value)
-      : value;
+  const parsed = jsonValue(value);
   return Array.isArray(parsed) ? parsed.map((part) => V2WorkMessagePart.parse(part)) : [];
+}
+
+function jsonValue(value: unknown): unknown {
+  return typeof value === "string" ? JSON.parse(value) : value;
+}
+
+function jsonArray(value: unknown): string[] {
+  const parsed = jsonValue(value);
+  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) {
+    throw new Error("expected a durable string-array receipt");
+  }
+  return parsed;
 }
 
 function visibleText(messageParts: readonly V2WorkMessagePartT[]): string {
@@ -90,6 +102,10 @@ function visibleText(messageParts: readonly V2WorkMessagePartT[]): string {
           return `[Explicit action card: ${part.action_id}]`;
         case "plan":
           return `[Plan version: ${part.plan_version_id}]`;
+        case "handoff":
+          return `[Execution handoff: ${part.handoff_id}]`;
+        case "planning_excerpt":
+          return `[Requested planning excerpt: ${part.excerpt_receipt_id}]`;
       }
     })
     .join("\n\n");
@@ -117,9 +133,10 @@ export class ConversationContextAssembler {
       const scope = await tx.query<{
         id: string;
         objective: string;
+        kind: "planning" | "execution_pm" | "task";
         triggering_message_sequence: number | string;
       }>(
-        `SELECT item.id, item.objective,
+        `SELECT item.id, item.objective, conversation.kind,
                 triggering_message.sequence AS triggering_message_sequence
            FROM work_items item
            JOIN work_conversations conversation
@@ -138,16 +155,27 @@ export class ConversationContextAssembler {
 
       const materials: ContextMaterial[] = [];
       const systemSections: string[] = [];
+      const executionPm = work.kind === "execution_pm";
       materials.push({
         kind: "prompt",
-        ref: CONVERSATIONAL_PM_PROMPT_VERSION,
-        content: CONVERSATIONAL_PM_INSTRUCTIONS,
+        ref: executionPm ? EXECUTION_PM_PROMPT_VERSION : CONVERSATIONAL_PM_PROMPT_VERSION,
+        content: executionPm ? EXECUTION_PM_INSTRUCTIONS : CONVERSATIONAL_PM_INSTRUCTIONS,
       });
-      await this.addRules(tx, projectId, materials, systemSections);
-      await this.addKnowledge(tx, projectId, materials, systemSections);
-
-      materials.push({ kind: "work_objective", ref: workItemId, content: work.objective });
-      systemSections.push(section("Current work objective", work.objective));
+      if (executionPm) {
+        await this.addExecutionHandoff(
+          tx,
+          projectId,
+          workItemId,
+          conversationId,
+          materials,
+          systemSections,
+        );
+      } else {
+        await this.addRules(tx, projectId, materials, systemSections);
+        await this.addKnowledge(tx, projectId, materials, systemSections);
+        materials.push({ kind: "work_objective", ref: workItemId, content: work.objective });
+        systemSections.push(section("Current work objective", work.objective));
+      }
 
       const summary = await this.addSummary(
         tx,
@@ -158,7 +186,9 @@ export class ConversationContextAssembler {
         materials,
         systemSections,
       );
-      await this.addDecisionsAndRisks(tx, projectId, workItemId, materials, systemSections);
+      if (!executionPm) {
+        await this.addDecisionsAndRisks(tx, projectId, workItemId, materials, systemSections);
+      }
       const recent = await this.recentMessages(
         tx,
         projectId,
@@ -172,6 +202,7 @@ export class ConversationContextAssembler {
       const attachmentIds: string[] = [];
       const currentAttachmentIds: string[] = [];
       const artifactIds: string[] = [];
+      const excerptReceiptIds: string[] = [];
       for (const row of recent) {
         const parsedParts = parts(row.parts);
         const content = visibleText(parsedParts);
@@ -187,7 +218,21 @@ export class ConversationContextAssembler {
             if (row.id === triggeringMessageId) currentAttachmentIds.push(part.attachment_id);
           }
           if (part.type === "artifact") artifactIds.push(part.artifact_id);
+          if (part.type === "planning_excerpt") {
+            excerptReceiptIds.push(part.excerpt_receipt_id);
+          }
         }
+      }
+      if (executionPm && excerptReceiptIds.length > 0) {
+        await this.addPlanningExcerpts(
+          tx,
+          projectId,
+          workItemId,
+          conversationId,
+          [...new Set(excerptReceiptIds)],
+          materials,
+          systemSections,
+        );
       }
       await this.addReferencedArtifacts(
         tx,
@@ -209,12 +254,108 @@ export class ConversationContextAssembler {
       return {
         manifest,
         context_hash: canonicalSha256(manifest),
-        system: conversationalPmSystem(systemSections.join("\n\n")),
+        system: executionPm
+          ? executionPmSystem(systemSections.join("\n\n"))
+          : conversationalPmSystem(systemSections.join("\n\n")),
         messages,
         attachment_ids: [...new Set(currentAttachmentIds)],
         triggering_message_index: triggeringMessageIndex,
       };
     });
+  }
+
+  private async addExecutionHandoff(
+    tx: V2SqlExecutor,
+    projectId: string,
+    workItemId: string,
+    conversationId: string,
+    materials: ContextMaterial[],
+    sections: string[],
+  ): Promise<void> {
+    const row = (
+      await tx.query<{ id: string; package: unknown; content_hash: string }>(
+        `SELECT id, package, content_hash
+           FROM conversation_handoffs
+          WHERE project_id=$1 AND work_item_id=$2 AND target_conversation_id=$3`,
+        [projectId, workItemId, conversationId],
+      )
+    ).rows[0];
+    if (!row) throw new Error("execution PM conversation has no immutable handoff");
+    const handoff = V2ConversationHandoffPackage.parse(
+      typeof row.package === "string" ? JSON.parse(row.package) : row.package,
+    );
+    const content = JSON.stringify(handoff);
+    if (canonicalSha256(handoff) !== row.content_hash) {
+      throw new Error("execution handoff content hash mismatch");
+    }
+    materials.push({
+      kind: "handoff",
+      ref: row.id,
+      content,
+      contentHash: row.content_hash,
+    });
+    sections.push(section("Approved execution handoff", content));
+  }
+
+  private async addPlanningExcerpts(
+    tx: V2SqlExecutor,
+    projectId: string,
+    workItemId: string,
+    targetConversationId: string,
+    receiptIds: string[],
+    materials: ContextMaterial[],
+    sections: string[],
+  ): Promise<void> {
+    const receipts = await tx.query<{
+      id: string;
+      source_conversation_id: string;
+      source_message_ids: unknown;
+      source_message_hashes: unknown;
+    }>(
+      `SELECT id, source_conversation_id, source_message_ids, source_message_hashes
+         FROM conversation_planning_excerpt_receipts
+        WHERE project_id=$1 AND work_item_id=$2 AND target_conversation_id=$3
+          AND id=ANY($4::text[])
+        ORDER BY created_at, id`,
+      [projectId, workItemId, targetConversationId, receiptIds],
+    );
+    if (receipts.rows.length !== receiptIds.length) {
+      throw new Error("one or more requested planning excerpt receipts are unavailable");
+    }
+    const rendered: string[] = [];
+    for (const receipt of receipts.rows) {
+      const ids = jsonArray(receipt.source_message_ids);
+      const hashes = jsonArray(receipt.source_message_hashes);
+      const messages = await tx.query<MessageRow>(
+        `SELECT id, role, sequence, parts
+           FROM work_messages
+          WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3
+            AND visibility_status='complete' AND id=ANY($4::text[])
+          ORDER BY sequence`,
+        [projectId, workItemId, receipt.source_conversation_id, ids],
+      );
+      if (
+        messages.rows.length !== ids.length ||
+        messages.rows.some((message, index) => message.id !== ids[index])
+      ) {
+        throw new Error("planning excerpt receipt source messages no longer match");
+      }
+      const excerpt = messages.rows
+        .map((message, index) => {
+          const content = visibleText(parts(message.parts));
+          const hash = canonicalSha256({
+            sequence: Number(message.sequence),
+            role: message.role,
+            parts: jsonValue(message.parts),
+          });
+          if (hash !== hashes[index]) throw new Error("planning excerpt source hash mismatch");
+          return `[${message.role}] ${content}`;
+        })
+        .join("\n\n");
+      materials.push({ kind: "planning_excerpt", ref: receipt.id, content: excerpt });
+      rendered.push(`### Receipt ${receipt.id}\n${excerpt}`);
+    }
+    sections.push(section("Explicitly requested planning excerpts", rendered.join("\n\n")));
   }
 
   async assemblePlanProposal(

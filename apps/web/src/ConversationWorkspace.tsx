@@ -18,8 +18,11 @@ import { AssistantChatTransport, useAISDKChat, useChatRuntime } from "@assistant
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
 import type {
   V2ConversationActionT,
+  V2ConversationHandoffT,
   V2ConversationPlanActionEffectValueT,
   V2ConversationPlanReviewT,
+  V2ConversationPlanningExcerptReceiptT,
+  V2ConversationSummaryT,
   V2RequestPlanChangesParametersT,
   V2WorkConversationT,
   V2WorkMessagePartT,
@@ -44,6 +47,7 @@ import { ConversationQcCard } from "./ConversationQcCard";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import {
   type ConversationDetail,
+  type ConversationUsageSummary,
   type SubmitConversationMessageBody,
   type WorkItemConversationGroup,
   confirmConversationAction,
@@ -54,6 +58,7 @@ import {
   listWorkItemConversations,
   messageEndpoint,
   resolveConversation,
+  retrieveConversationPlanningExcerpt,
 } from "./conversationApi";
 import { Alert, Badge, Button, Field, Input, Spinner, TextArea } from "./ui";
 import "./ConversationWorkspace.css";
@@ -93,10 +98,20 @@ type MessageStatusData = {
   status: "interrupted";
 };
 
+type HandoffData = ReferenceData & {
+  handoff: V2ConversationHandoffT | null;
+};
+
+type PlanningExcerptData = ReferenceData & {
+  receipt: V2ConversationPlanningExcerptReceiptT | null;
+};
+
 type NornsDataParts = {
   artifact: ArtifactData;
   plan: PlanData;
   action: ActionData;
+  handoff: HandoffData;
+  "planning-excerpt": PlanningExcerptData;
   attempt: AttemptData;
   usage: UsageData;
   "message-status": MessageStatusData;
@@ -126,6 +141,12 @@ function conversationPath(projectId: string, workItemId: string, conversationId:
 function titleForObjective(objective: string): string {
   const firstLine = objective.split("\n", 1)[0]?.trim() ?? "";
   return firstLine.length > 72 ? `${firstLine.slice(0, 69)}…` : firstLine;
+}
+
+function conversationKindLabel(kind: V2WorkConversationT["kind"]): string {
+  if (kind === "planning") return "Planning";
+  if (kind === "execution_pm") return "Execution PM";
+  return "Task";
 }
 
 function attachmentIdFromUrl(url: string): string | null {
@@ -287,6 +308,8 @@ type ConversationResources = {
   planVersions: Map<string, V2WorkPlanVersionT>;
   actions: Map<string, V2ConversationActionT>;
   reviews: V2ConversationPlanReviewT[];
+  handoff: V2ConversationHandoffT | null;
+  excerptReceipts: Map<string, V2ConversationPlanningExcerptReceiptT>;
 };
 
 type ConversationActionContextValue = {
@@ -357,6 +380,28 @@ function messagePartToUi(
             id: part.action_id,
             label: "Action awaiting confirmation",
             action: resources.actions.get(part.action_id) ?? null,
+          },
+        },
+      ];
+    case "handoff":
+      return [
+        {
+          type: "data-handoff",
+          data: {
+            id: part.handoff_id,
+            label: "Compact execution handoff",
+            handoff: resources.handoff?.id === part.handoff_id ? resources.handoff : null,
+          },
+        },
+      ];
+    case "planning_excerpt":
+      return [
+        {
+          type: "data-planning-excerpt",
+          data: {
+            id: part.excerpt_receipt_id,
+            label: "Retrieved planning excerpt",
+            receipt: resources.excerptReceipts.get(part.excerpt_receipt_id) ?? null,
           },
         },
       ];
@@ -513,6 +558,55 @@ function ReferenceCard({ data }: { data: ReferenceData }): React.ReactElement {
 
 function ReferencePreview({ data }: DataMessagePartProps<ReferenceData>): React.ReactElement {
   return <ReferenceCard data={data} />;
+}
+
+function HandoffPreview({ data }: DataMessagePartProps<HandoffData>): React.ReactElement {
+  if (!data.handoff) return <ReferenceCard data={data} />;
+  return (
+    <article className="conversation-inline-receipt" data-testid="conversation-handoff-receipt">
+      <div>
+        <span className="eyebrow">Compact handoff receipt</span>
+        <strong>{data.handoff.package.objective}</strong>
+      </div>
+      <dl>
+        <div>
+          <dt>Approved plan</dt>
+          <dd>
+            <code title={data.handoff.package.approved_plan_content_hash}>
+              {data.handoff.package.approved_plan_content_hash.slice(0, 12)}
+            </code>
+          </dd>
+        </div>
+        <div>
+          <dt>Handoff</dt>
+          <dd>
+            <code title={data.handoff.content_hash}>{data.handoff.content_hash.slice(0, 12)}</code>
+          </dd>
+        </div>
+      </dl>
+    </article>
+  );
+}
+
+function PlanningExcerptPreview({
+  data,
+}: DataMessagePartProps<PlanningExcerptData>): React.ReactElement {
+  if (!data.receipt) return <ReferenceCard data={data} />;
+  return (
+    <article
+      className="conversation-inline-receipt"
+      data-testid="conversation-planning-excerpt-receipt"
+    >
+      <div>
+        <span className="eyebrow">Explicit planning retrieval</span>
+        <strong>
+          {data.receipt.source_message_ids.length} planning message
+          {data.receipt.source_message_ids.length === 1 ? "" : "s"} added
+        </strong>
+      </div>
+      <code>{data.receipt.id}</code>
+    </article>
+  );
 }
 
 function planChangeDraftStorageKey(planVersionId: string): string {
@@ -692,6 +786,380 @@ function InterruptedStatus(): React.ReactElement {
   );
 }
 
+function usageSummary(usage: ConversationUsageSummary): string {
+  if (usage.usage_status === "pending") return "Usage is still settling";
+  if (usage.usage_status === "unavailable") return "Usage is unavailable";
+  const tokens = usage.input_tokens + usage.output_tokens;
+  const cost =
+    usage.cost_usd === null
+      ? "cost unavailable"
+      : `${usage.exact_cost ? "" : "estimated "}$${usage.cost_usd.toFixed(4)}`;
+  return `${tokens.toLocaleString()} tokens · ${cost} · ${usage.attempt_count.toLocaleString()} request${
+    usage.attempt_count === 1 ? "" : "s"
+  }`;
+}
+
+function ConversationSummaryIndicator({
+  summary,
+}: {
+  summary: V2ConversationSummaryT;
+}): React.ReactElement {
+  return (
+    <details
+      className="conversation-summary-indicator"
+      data-testid="conversation-summary-indicator"
+    >
+      <summary>
+        Compacted summary v{summary.version} · messages {summary.from_message_sequence}–
+        {summary.through_message_sequence}
+      </summary>
+      <div>
+        <strong>{summary.summary.objective}</strong>
+        {summary.summary.constraints.length > 0 ? (
+          <p>{summary.summary.constraints.join(" · ")}</p>
+        ) : (
+          <p>No additional compacted constraints.</p>
+        )}
+        <code title={summary.content_hash}>{summary.content_hash.slice(0, 12)}</code>
+      </div>
+    </details>
+  );
+}
+
+function HandoffCard({
+  handoff,
+  currentConversationId,
+  onOpenConversation,
+}: {
+  handoff: V2ConversationHandoffT;
+  currentConversationId: string;
+  onOpenConversation: (conversationId: string) => void;
+}): React.ReactElement {
+  const isTarget = handoff.target_conversation_id === currentConversationId;
+  const linkedConversationId = isTarget
+    ? handoff.source_conversation_id
+    : handoff.target_conversation_id;
+  return (
+    <article
+      className="conversation-handoff-card"
+      data-testid="conversation-handoff-card"
+      aria-labelledby={`conversation-handoff-${handoff.id}`}
+    >
+      <header>
+        <div>
+          <div className="eyebrow">
+            {isTarget ? "Compact execution handoff" : "Planning handoff"}
+          </div>
+          <h3 id={`conversation-handoff-${handoff.id}`}>{handoff.package.objective}</h3>
+        </div>
+        <Badge tone="success">Immutable</Badge>
+      </header>
+      <dl>
+        <div>
+          <dt>Approved plan</dt>
+          <dd>
+            <code title={handoff.package.approved_plan_content_hash}>
+              {handoff.package.approved_plan_content_hash.slice(0, 12)}
+            </code>
+          </dd>
+        </div>
+        <div>
+          <dt>Task sequence</dt>
+          <dd>{handoff.package.task_sequence.length}</dd>
+        </div>
+        <div>
+          <dt>Budget</dt>
+          <dd>
+            {handoff.package.budget.currency} {handoff.package.budget.amount.toFixed(2)}
+          </dd>
+        </div>
+      </dl>
+      <details>
+        <summary>Review compact handoff</summary>
+        <div className="conversation-handoff-details">
+          <section>
+            <strong>Decisions retained</strong>
+            <p>
+              {handoff.package.human_decisions.length > 0
+                ? handoff.package.human_decisions.map((decision) => decision.summary).join(" · ")
+                : "No human decisions were recorded."}
+            </p>
+          </section>
+          <section>
+            <strong>Open risks and questions</strong>
+            <p>
+              {handoff.package.unresolved_risks_and_questions.join(" · ") ||
+                "No unresolved risks or questions."}
+            </p>
+          </section>
+          <section>
+            <strong>Referenced artifacts</strong>
+            <p>{handoff.package.artifact_ids.join(", ") || "No artifacts were carried forward."}</p>
+          </section>
+        </div>
+      </details>
+      <Button
+        className="btn-small"
+        aria-label={
+          isTarget ? "Open archived planning conversation" : "Open execution PM conversation"
+        }
+        onClick={() => onOpenConversation(linkedConversationId)}
+      >
+        {isTarget ? "Open archived planning" : "Open execution PM"}
+      </Button>
+    </article>
+  );
+}
+
+function planningMessagePreview(message: V2WorkMessageT): string {
+  const preview = message.parts
+    .flatMap((part) => {
+      if (part.type === "text") return [part.text];
+      if (part.type === "code") return [`Code (${part.language ?? "plain text"})`];
+      if (part.type === "plan") return [`Plan version ${part.plan_version_id}`];
+      if (part.type === "action") return [`Action ${part.action_id}`];
+      if (part.type === "artifact") return [`Artifact ${part.label}`];
+      return [];
+    })
+    .join(" ")
+    .trim();
+  if (!preview) return "No text preview. Attachments are not replayed automatically.";
+  return preview.length > 180 ? `${preview.slice(0, 177)}…` : preview;
+}
+
+function planningExcerptStorageKey(
+  conversationId: string,
+  sourceConversationId: string,
+  messageIds: readonly string[],
+): string {
+  return `norns:planning-excerpt:${conversationId}:${sourceConversationId}:${messageIds.join(",")}`;
+}
+
+function PlanningExcerptControl({
+  detail,
+  onOpenConversation,
+  onRefresh,
+  onUnauthorized,
+}: {
+  detail: ConversationDetail;
+  onOpenConversation: (conversationId: string) => void;
+  onRefresh: () => void;
+  onUnauthorized: () => void;
+}): React.ReactElement | null {
+  const handoff = detail.handoff;
+  const [armed, setArmed] = useState(false);
+  const [sourceMessages, setSourceMessages] = useState<V2WorkMessageT[] | null>(null);
+  const [selectedIds, setSelectedIds] = useState(() => new Set<string>());
+  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (
+    detail.conversation.kind !== "execution_pm" ||
+    !handoff ||
+    handoff.target_conversation_id !== detail.conversation.id
+  ) {
+    return null;
+  }
+
+  const loadPlanningMessages = async () => {
+    if (loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const source = await getConversation(
+        detail.work_item.project_id,
+        detail.work_item.id,
+        handoff.source_conversation_id,
+      );
+      setSourceMessages(source.messages);
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const retrieve = async () => {
+    const messageIds = [...selectedIds].sort();
+    if (messageIds.length === 0 || submitting) return;
+    const storageKey = planningExcerptStorageKey(
+      detail.conversation.id,
+      handoff.source_conversation_id,
+      messageIds,
+    );
+    let idempotencyKey: string;
+    try {
+      idempotencyKey =
+        window.sessionStorage.getItem(storageKey) ??
+        `planning-excerpt-${detail.conversation.id}-${
+          typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now().toString(36)
+        }`;
+      window.sessionStorage.setItem(storageKey, idempotencyKey);
+    } catch {
+      idempotencyKey = `planning-excerpt-${detail.conversation.id}-${Date.now().toString(36)}`;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await retrieveConversationPlanningExcerpt(
+        detail.work_item.project_id,
+        detail.work_item.id,
+        detail.conversation.id,
+        {
+          idempotency_key: idempotencyKey,
+          source_conversation_id: handoff.source_conversation_id,
+          message_ids: messageIds,
+        },
+      );
+      try {
+        window.sessionStorage.removeItem(storageKey);
+      } catch {
+        // The excerpt is already durable in the execution conversation.
+      }
+      setArmed(false);
+      setSourceMessages(null);
+      setSelectedIds(new Set());
+      onRefresh();
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      const prefix =
+        caught instanceof ApiError
+          ? ""
+          : "Excerpt delivery status is uncertain. Retry the same selection safely. ";
+      setError(`${prefix}${caught instanceof Error ? caught.message : String(caught)}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section
+      className="conversation-excerpt-control"
+      aria-labelledby={`conversation-excerpt-${detail.conversation.id}`}
+    >
+      <div>
+        <strong id={`conversation-excerpt-${detail.conversation.id}`}>
+          Need planning context?
+        </strong>
+        <p>
+          The planning transcript is not in this execution conversation. Retrieve only the specific
+          visible messages needed for the work.
+        </p>
+      </div>
+      {!armed ? (
+        <Button className="btn-small" onClick={() => setArmed(true)}>
+          Retrieve planning excerpt
+        </Button>
+      ) : sourceMessages === null ? (
+        <div className="conversation-excerpt-confirm">
+          <p>
+            Loading the archived planning conversation is an explicit read. Nothing will be added to
+            execution until you select messages and confirm.
+          </p>
+          <div className="actions">
+            <Button
+              className="btn-small"
+              disabled={loading}
+              onClick={() => void loadPlanningMessages()}
+            >
+              {loading ? "Loading planning messages…" : "Load planning messages"}
+            </Button>
+            <Button className="btn-small" variant="ghost" onClick={() => setArmed(false)}>
+              Cancel
+            </Button>
+            <Button
+              className="btn-small"
+              variant="ghost"
+              onClick={() => onOpenConversation(handoff.source_conversation_id)}
+            >
+              Open full planning conversation
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <fieldset>
+          <legend>Select planning messages to add</legend>
+          {sourceMessages.length === 0 ? (
+            <p>No visible planning messages are available.</p>
+          ) : (
+            <div className="conversation-excerpt-options">
+              {sourceMessages.map((message) => {
+                const selected = selectedIds.has(message.id);
+                return (
+                  <label key={message.id}>
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      disabled={!selected && selectedIds.size >= 20}
+                      onChange={(event) => {
+                        setSelectedIds((current) => {
+                          const next = new Set(current);
+                          if (event.target.checked && next.size < 20) next.add(message.id);
+                          else if (!event.target.checked) next.delete(message.id);
+                          return next;
+                        });
+                      }}
+                    />
+                    <span>
+                      <strong>
+                        {message.role === "user"
+                          ? "You"
+                          : message.role === "assistant"
+                            ? "PM"
+                            : "System"}{" "}
+                        · message {message.sequence}
+                      </strong>
+                      <small>{planningMessagePreview(message)}</small>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          <small className="muted" aria-live="polite">
+            {selectedIds.size} of 20 messages selected
+          </small>
+          <div className="actions">
+            <Button
+              className="btn-small"
+              variant="primary"
+              disabled={selectedIds.size === 0 || submitting}
+              onClick={() => void retrieve()}
+            >
+              {submitting ? "Adding excerpt…" : "Add selected excerpt to execution"}
+            </Button>
+            <Button
+              className="btn-small"
+              variant="ghost"
+              disabled={submitting}
+              onClick={() => {
+                setArmed(false);
+                setSourceMessages(null);
+                setSelectedIds(new Set());
+              }}
+            >
+              Cancel
+            </Button>
+          </div>
+        </fieldset>
+      )}
+      {error ? (
+        <output className="conversation-action-error" role="alert">
+          {error}
+        </output>
+      ) : null}
+    </section>
+  );
+}
+
 function ComposerAttachment(): React.ReactElement {
   return (
     <AttachmentPrimitive.Root className="conversation-composer-attachment">
@@ -716,6 +1184,8 @@ function UserMessage(): React.ReactElement {
                 artifact: ArtifactPreview,
                 plan: PlanPreview,
                 action: ActionPreview,
+                handoff: HandoffPreview,
+                "planning-excerpt": PlanningExcerptPreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -742,6 +1212,8 @@ function AssistantMessage(): React.ReactElement {
                 artifact: ArtifactPreview,
                 plan: PlanPreview,
                 action: ActionPreview,
+                handoff: HandoffPreview,
+                "planning-excerpt": PlanningExcerptPreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -770,6 +1242,8 @@ function SystemMessage(): React.ReactElement {
                 artifact: ArtifactPreview,
                 plan: PlanPreview,
                 action: ActionPreview,
+                handoff: HandoffPreview,
+                "planning-excerpt": PlanningExcerptPreview,
                 attempt: AttemptStatus,
                 usage: UsageStatus,
                 "message-status": InterruptedStatus,
@@ -812,6 +1286,21 @@ function RetryTerminalResponseButton({
 
 function confirmationStorageKey(actionId: string): string {
   return `norns:conversation-action-confirmation:${actionId}`;
+}
+
+function approvalTransitionStorageKey(conversationId: string): string {
+  return `norns:conversation-approval-transition:${conversationId}`;
+}
+
+function executionConversationId(effect: V2ConversationPlanActionEffectValueT): string | null {
+  if (
+    effect.kind !== "plan_approved" ||
+    effect.transition_status !== "created" ||
+    effect.execution_conversation_id === null
+  ) {
+    return null;
+  }
+  return effect.execution_conversation_id;
 }
 
 function createConfirmationKey(actionId: string): string {
@@ -914,10 +1403,12 @@ function confirmationKeyFor(action: V2ConversationActionT, memory: Map<string, s
 
 function ConversationThread({
   detail,
+  onOpenConversation,
   onRefresh,
   onUnauthorized,
 }: {
   detail: ConversationDetail;
+  onOpenConversation: (conversationId: string) => void;
   onRefresh: () => void;
   onUnauthorized: () => void;
 }): React.ReactElement {
@@ -958,8 +1449,18 @@ function ConversationThread({
       planVersions: new Map(detail.plan_versions.map((version) => [version.id, version])),
       actions: new Map(detail.actions.map((action) => [action.id, action])),
       reviews: detail.plan_reviews,
+      handoff: detail.handoff ?? null,
+      excerptReceipts: new Map(
+        (detail.planning_excerpt_receipts ?? []).map((receipt) => [receipt.id, receipt]),
+      ),
     }),
-    [detail.actions, detail.plan_reviews, detail.plan_versions],
+    [
+      detail.actions,
+      detail.handoff,
+      detail.plan_reviews,
+      detail.plan_versions,
+      detail.planning_excerpt_receipts,
+    ],
   );
   const initialMessages = useMemo(
     () =>
@@ -995,6 +1496,30 @@ function ConversationThread({
     },
     [],
   );
+
+  useEffect(() => {
+    if (detail.conversation.kind !== "planning") return;
+    let pendingActionId: string | null = null;
+    try {
+      pendingActionId = window.sessionStorage.getItem(
+        approvalTransitionStorageKey(detail.conversation.id),
+      );
+    } catch {
+      return;
+    }
+    if (!pendingActionId) return;
+    const approval = detail.action_effects.find(
+      (record) => record.action_id === pendingActionId && record.effect.kind === "plan_approved",
+    );
+    const targetId = approval ? executionConversationId(approval.effect) : null;
+    if (!targetId) return;
+    try {
+      window.sessionStorage.removeItem(approvalTransitionStorageKey(detail.conversation.id));
+    } catch {
+      // Routing remains correct even when browser storage cannot be cleared.
+    }
+    onOpenConversation(targetId);
+  }, [detail.action_effects, detail.conversation.id, detail.conversation.kind, onOpenConversation]);
 
   const awaitingBackgroundSettlement =
     detail.plan_reviews.some(
@@ -1155,6 +1680,16 @@ function ConversationThread({
     async (action: V2ConversationActionT) => {
       if (busyActionId !== null) return;
       const idempotencyKey = confirmationKeyFor(action, confirmationKeys.current);
+      if (action.action_type === "approve_plan") {
+        try {
+          window.sessionStorage.setItem(
+            approvalTransitionStorageKey(detail.conversation.id),
+            action.id,
+          );
+        } catch {
+          // The response still carries the exact execution conversation target.
+        }
+      }
       setBusyActionId(action.id);
       setActionErrors((current) => {
         const next = new Map(current);
@@ -1177,7 +1712,17 @@ function ConversationThread({
         } catch {
           // Durable server state remains authoritative when browser storage is unavailable.
         }
-        onRefresh();
+        const targetId = executionConversationId(result.effect);
+        if (targetId) {
+          try {
+            window.sessionStorage.removeItem(approvalTransitionStorageKey(detail.conversation.id));
+          } catch {
+            // The exact target came from the approval response, so routing can continue.
+          }
+          onOpenConversation(targetId);
+        } else {
+          onRefresh();
+        }
       } catch (caught) {
         if (caught instanceof UnauthorizedError) {
           onUnauthorized();
@@ -1189,6 +1734,13 @@ function ConversationThread({
             : "Confirmation status is uncertain. Retry this same action to check it safely. ";
         const message = caught instanceof Error ? caught.message : String(caught);
         setActionErrors((current) => new Map(current).set(action.id, `${prefix}${message}`));
+        if (caught instanceof ApiError && action.action_type === "approve_plan") {
+          try {
+            window.sessionStorage.removeItem(approvalTransitionStorageKey(detail.conversation.id));
+          } catch {
+            // The current component still shows the authoritative API failure.
+          }
+        }
       } finally {
         setBusyActionId(null);
       }
@@ -1199,6 +1751,7 @@ function ConversationThread({
       detail.work_item.id,
       detail.work_item.project_id,
       onRefresh,
+      onOpenConversation,
       onUnauthorized,
     ],
   );
@@ -1252,11 +1805,17 @@ function ConversationThread({
         ? `Plan proposal updates are unavailable while work is ${detail.work_item.status.replaceAll("_", " ")}.`
         : null;
   const proposalHelpId = `conversation-plan-proposal-help-${detail.conversation.id}`;
+  const isPlanning = detail.conversation.kind === "planning";
+  const isExecution = detail.conversation.kind === "execution_pm";
+  const isReadOnly = detail.conversation.status !== "active";
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <ConversationActionContext.Provider value={actionContext}>
-        <section className="conversation-thread" aria-label="Planning conversation">
+        <section
+          className="conversation-thread"
+          aria-label={`${conversationKindLabel(detail.conversation.kind)} conversation`}
+        >
           {detail.conversation.kind === "planning" && detail.conversation.status === "active" ? (
             <div className="conversation-plan-proposal-control">
               <div>
@@ -1331,6 +1890,40 @@ function ConversationThread({
               ) : null}
             </div>
           ) : null}
+          {detail.handoff || detail.latest_summary || detail.usage ? (
+            <section
+              className="conversation-context-receipt"
+              aria-label="Conversation context and usage"
+            >
+              {detail.handoff ? (
+                <HandoffCard
+                  handoff={detail.handoff}
+                  currentConversationId={detail.conversation.id}
+                  onOpenConversation={onOpenConversation}
+                />
+              ) : null}
+              <div className="conversation-context-indicators">
+                {detail.latest_summary ? (
+                  <ConversationSummaryIndicator summary={detail.latest_summary} />
+                ) : (
+                  <span data-testid="conversation-summary-empty">No compacted summary</span>
+                )}
+                {detail.usage ? (
+                  <output data-testid="conversation-total-usage">
+                    <strong>Conversation usage</strong>
+                    <span>{usageSummary(detail.usage)}</span>
+                  </output>
+                ) : null}
+              </div>
+              <PlanningExcerptControl
+                key={`${detail.conversation.id}:${detail.handoff?.id ?? "no-handoff"}`}
+                detail={detail}
+                onOpenConversation={onOpenConversation}
+                onRefresh={onRefresh}
+                onUnauthorized={onUnauthorized}
+              />
+            </section>
+          ) : null}
           <ThreadPrimitive.Root className="conversation-thread-root">
             <ThreadPrimitive.Viewport
               className="conversation-thread-viewport"
@@ -1339,11 +1932,18 @@ function ConversationThread({
             >
               <AuiIf condition={(state) => state.thread.messages.length === 0}>
                 <div className="conversation-welcome" data-testid="conversation-welcome">
-                  <div className="eyebrow">Planning conversation</div>
-                  <h2>Talk through the work with your PM</h2>
+                  <div className="eyebrow">
+                    {isExecution ? "Execution PM conversation" : "Planning conversation"}
+                  </div>
+                  <h2>
+                    {isExecution
+                      ? "Continue delivery with your PM"
+                      : "Talk through the work with your PM"}
+                  </h2>
                   <p>
-                    Discuss the objective, constraints, risks, or possible approaches. Project state
-                    changes will always appear as explicit actions for you to confirm.
+                    {isExecution
+                      ? "This fresh conversation starts from the approved compact handoff. Planning discussion is available only when you explicitly retrieve an excerpt."
+                      : "Discuss the objective, constraints, risks, or possible approaches. Project state changes will always appear as explicit actions for you to confirm."}
                   </p>
                 </div>
               </AuiIf>
@@ -1365,42 +1965,60 @@ function ConversationThread({
                 >
                   ↓ Latest
                 </ThreadPrimitive.ScrollToBottom>
-                <ComposerPrimitive.Root className="conversation-composer">
-                  <ComposerPrimitive.Attachments>
-                    {() => <ComposerAttachment />}
-                  </ComposerPrimitive.Attachments>
-                  <ComposerPrimitive.Input
-                    className="conversation-composer-input"
-                    placeholder="Message the project PM…"
-                    aria-label="Message the project PM"
-                    submitMode="enter"
-                    unstable_insertNewlineOnTouchEnter
-                    rows={2}
-                  />
-                  <div className="conversation-composer-actions">
-                    <ComposerPrimitive.AddAttachment
-                      className="conversation-icon-button"
-                      aria-label="Add image"
-                    >
-                      + Image
-                    </ComposerPrimitive.AddAttachment>
-                    <span className="conversation-keyboard-help">
-                      Enter to send · Shift+Enter for a new line
+                {isReadOnly ? (
+                  <output className="conversation-read-only">
+                    <strong>
+                      This {conversationKindLabel(detail.conversation.kind).toLowerCase()}{" "}
+                      conversation is {detail.conversation.status.replaceAll("_", " ")}.
+                    </strong>
+                    <span>
+                      {isPlanning
+                        ? "Its visible history remains readable. Continue work in the linked execution PM conversation."
+                        : "Its visible history remains readable, but it no longer accepts messages."}
                     </span>
-                    <ComposerPrimitive.Cancel
-                      className="conversation-stop-button"
-                      aria-label="Stop response"
-                    >
-                      Stop
-                    </ComposerPrimitive.Cancel>
-                    <ComposerPrimitive.Send
-                      className="conversation-send-button"
-                      aria-label="Send message"
-                    >
-                      Send
-                    </ComposerPrimitive.Send>
-                  </div>
-                </ComposerPrimitive.Root>
+                  </output>
+                ) : (
+                  <ComposerPrimitive.Root className="conversation-composer">
+                    <ComposerPrimitive.Attachments>
+                      {() => <ComposerAttachment />}
+                    </ComposerPrimitive.Attachments>
+                    <ComposerPrimitive.Input
+                      className="conversation-composer-input"
+                      placeholder={
+                        isExecution ? "Message the execution PM…" : "Message the project PM…"
+                      }
+                      aria-label={
+                        isExecution ? "Message the execution PM" : "Message the project PM"
+                      }
+                      submitMode="enter"
+                      unstable_insertNewlineOnTouchEnter
+                      rows={2}
+                    />
+                    <div className="conversation-composer-actions">
+                      <ComposerPrimitive.AddAttachment
+                        className="conversation-icon-button"
+                        aria-label="Add image"
+                      >
+                        + Image
+                      </ComposerPrimitive.AddAttachment>
+                      <span className="conversation-keyboard-help">
+                        Enter to send · Shift+Enter for a new line
+                      </span>
+                      <ComposerPrimitive.Cancel
+                        className="conversation-stop-button"
+                        aria-label="Stop response"
+                      >
+                        Stop
+                      </ComposerPrimitive.Cancel>
+                      <ComposerPrimitive.Send
+                        className="conversation-send-button"
+                        aria-label="Send message"
+                      >
+                        Send
+                      </ComposerPrimitive.Send>
+                    </div>
+                  </ComposerPrimitive.Root>
+                )}
               </ThreadPrimitive.ViewportFooter>
             </ThreadPrimitive.Viewport>
           </ThreadPrimitive.Root>
@@ -1637,6 +2255,46 @@ export function ConversationWorkspace({
     callbacks.current.onConversationSelected?.(conversation.id);
   };
 
+  const openConversationById = useCallback(
+    async (conversationId: string) => {
+      setShowNew(false);
+      setLoadingDetail(true);
+      try {
+        const nextGroups = await loadGroups();
+        const listed = nextGroups
+          ?.flatMap((group) =>
+            group.conversations.map((conversation) => ({
+              workItemId: group.work_item.id,
+              conversation,
+            })),
+          )
+          .find((candidate) => candidate.conversation.id === conversationId);
+        if (listed) {
+          setDetail(null);
+          setSelected({
+            workItemId: listed.workItemId,
+            conversationId: listed.conversation.id,
+          });
+        } else {
+          const resolved = await resolveConversation(projectId, conversationId);
+          setDetail(resolved);
+          setSelected({
+            workItemId: resolved.work_item.id,
+            conversationId: resolved.conversation.id,
+          });
+          setThreadVersion((version) => version + 1);
+        }
+        callbacks.current.onConversationSelected?.(conversationId);
+        setError(null);
+      } catch (caught) {
+        handleError(caught);
+      } finally {
+        setLoadingDetail(false);
+      }
+    },
+    [handleError, loadGroups, projectId],
+  );
+
   const createWork = async (title: string, objective: string) => {
     setCreating(true);
     setError(null);
@@ -1704,25 +2362,24 @@ export function ConversationWorkspace({
               <p>{group.work_item.objective}</p>
               {group.conversations.map((conversation) => {
                 const active = selected?.conversationId === conversation.id && !showNew;
+                const usage = group.conversation_usage?.[conversation.id];
                 return (
                   <button
                     type="button"
                     className={`conversation-list-item${active ? " is-active" : ""}`}
                     aria-current={active ? "page" : undefined}
+                    aria-label={`Open ${conversationKindLabel(conversation.kind)} conversation for ${group.work_item.title} (${conversation.status})`}
                     key={conversation.id}
                     onClick={() => chooseConversation(group.work_item.id, conversation)}
                   >
-                    <span>
-                      {conversation.kind === "planning"
-                        ? "Planning"
-                        : conversation.kind === "execution_pm"
-                          ? "Execution PM"
-                          : "Task"}
-                    </span>
+                    <span>{conversationKindLabel(conversation.kind)}</span>
                     <strong>
                       {conversation.provider} · {conversation.model}
                     </strong>
-                    <small>{conversation.status}</small>
+                    <small>
+                      {conversation.status}
+                      {usage ? ` · ${usageSummary(usage)}` : " · usage unavailable"}
+                    </small>
                   </button>
                 );
               })}
@@ -1743,9 +2400,7 @@ export function ConversationWorkspace({
             <header className="conversation-header">
               <div>
                 <div className="eyebrow">
-                  {detail.conversation.kind === "planning"
-                    ? "Planning conversation"
-                    : detail.conversation.kind.replaceAll("_", " ")}
+                  {conversationKindLabel(detail.conversation.kind)} conversation
                 </div>
                 <h2>{detail.work_item.title}</h2>
                 <p>{detail.work_item.objective}</p>
@@ -1776,6 +2431,7 @@ export function ConversationWorkspace({
             <ConversationThread
               key={`${detail.conversation.id}:${threadVersion}`}
               detail={detail}
+              onOpenConversation={(conversationId) => void openConversationById(conversationId)}
               onRefresh={refresh}
               onUnauthorized={handleUnauthorized}
             />

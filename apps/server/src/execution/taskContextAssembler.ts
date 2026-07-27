@@ -19,8 +19,9 @@
 //     trimmed; if the untrimmable core alone exceeds the cap, that is a
 //     failure, not a truncation.
 import type { V2ContentAddressedReferenceT } from "@norns/contracts";
+import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
-import type { TaskContextStore } from "./taskContextStore.js";
+import { type TaskContextStore, taskContextDocumentId } from "./taskContextStore.js";
 
 /**
  * The frozen interface EXECUTION E1 and E2 build against.
@@ -72,6 +73,8 @@ export type TaskContextAssemblyCode =
   | "architecture_revision_missing"
   | "repository_facts_missing"
   | "verification_commands_missing"
+  | "task_package_missing"
+  | "task_package_mismatch"
   | "context_too_large";
 
 /**
@@ -519,7 +522,7 @@ function renderSection(section: SectionName, model: ContextModel): string | null
 }
 
 interface RenderedSection {
-  section: SectionName;
+  section: SectionName | "approved_task_package";
   content: Buffer;
 }
 
@@ -590,6 +593,37 @@ function trimToCap(model: ContextModel, cap: number): RenderedSection[] {
   return rendered;
 }
 
+function trimFrozenPackageContext(
+  model: ContextModel,
+  canonicalPackage: Buffer,
+  cap: number,
+): RenderedSection[] {
+  const render = (): RenderedSection[] => {
+    const sections: RenderedSection[] = [
+      { section: "mission", content: utf8(`${renderMission(model)}\n`) },
+      { section: "approved_task_package", content: canonicalPackage },
+    ];
+    const dependencies = renderDependencies(model);
+    if (dependencies !== null) {
+      sections.push({ section: "dependencies", content: utf8(`${dependencies}\n`) });
+    }
+    sections.push({ section: "repository", content: utf8(`${renderRepository(model)}\n`) });
+    return sections;
+  };
+  let rendered = render();
+  while (totalBytes(rendered) > cap) {
+    if (!dropLowestValue(model)) {
+      throw new TaskContextAssemblyError(
+        "context_too_large",
+        `the immutable package and execution policy for task ${model.task.id} are ${totalBytes(rendered)} bytes, over the ${cap}-byte context cap`,
+        "Split the approved task or shorten its frozen package; required verification policy cannot be dropped.",
+      );
+    }
+    rendered = render();
+  }
+  return rendered;
+}
+
 // ---- the assembler ----------------------------------------------------------
 
 export interface TaskContextAssemblerOptions {
@@ -629,7 +663,47 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
 
   async assembleForTask(taskId: string): Promise<V2ContentAddressedReferenceT[]> {
     return this.transactions.transaction(async (tx) => {
-      const model = await this.gather(tx, taskId);
+      const frozenPackage = await this.frozenConversationPackage(tx, taskId);
+      if (frozenPackage) {
+        const content = Buffer.from(frozenPackage.canonical_package, "utf8");
+        // Live conversation directives/memory are deliberately not gathered:
+        // binding rules and decisions are frozen inside the package. Static
+        // mission plus repository/verification facts and dependency outcomes
+        // remain necessary execution support and retain their fail-closed
+        // checks.
+        const model = await this.gather(tx, taskId, true);
+        const sections = trimFrozenPackageContext(model, content, this.maxTotalBytes);
+        const refs: V2ContentAddressedReferenceT[] = [];
+        for (const section of sections) {
+          const stored = await this.store.put(tx, {
+            projectId: frozenPackage.project_id,
+            section: section.section,
+            content: section.content,
+            ...(section.section === "approved_task_package"
+              ? { mediaType: "application/json" }
+              : {}),
+          });
+          if (
+            section.section === "approved_task_package" &&
+            (stored.id !== frozenPackage.context_document_id ||
+              stored.sha256 !== frozenPackage.content_hash)
+          ) {
+            throw new TaskContextAssemblyError(
+              "task_package_mismatch",
+              `task ${taskId} package context does not match its immutable package binding`,
+              "Do not dispatch this task; repair the package binding from the approved handoff.",
+            );
+          }
+          refs.push({
+            artifact_id: stored.id,
+            content_hash: stored.sha256,
+            byte_size: stored.byte_size,
+            storage_ref: `${this.baseUrl}${TASK_CONTEXT_ROUTE_PREFIX}/${stored.id}`,
+          });
+        }
+        return refs;
+      }
+      const model = await this.gather(tx, taskId, false);
       const sections = trimToCap(model, this.maxTotalBytes);
       const refs: V2ContentAddressedReferenceT[] = [];
       for (const section of sections) {
@@ -649,7 +723,103 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
     });
   }
 
-  private async gather(tx: V2SqlExecutor, taskId: string): Promise<ContextModel> {
+  private async frozenConversationPackage(
+    tx: V2SqlExecutor,
+    taskId: string,
+  ): Promise<{
+    package_id: string;
+    project_id: string;
+    content_hash: string;
+    canonical_package: string;
+    context_document_id: string;
+  } | null> {
+    const binding = (
+      await tx.query<{
+        package_id: string;
+        project_id: string;
+        content_hash: string;
+        canonical_package: string;
+        package: unknown;
+        context_document_id: string;
+        document_sha256: string;
+        document_bytes: number | string;
+        document_media_type: string;
+        served_bytes: Buffer | Uint8Array;
+      }>(
+        `SELECT binding.package_id, binding.project_id, binding.content_hash,
+                package.canonical_package, package.package,
+                binding.context_document_id,
+                document.sha256 AS document_sha256,
+                document.byte_size AS document_bytes,
+                document.media_type AS document_media_type,
+                blob.content AS served_bytes
+           FROM conversation_task_package_bindings binding
+           JOIN conversation_task_packages package ON package.id=binding.package_id
+           JOIN task_context_documents document
+             ON document.id=binding.context_document_id
+           JOIN task_context_blobs blob ON blob.sha256=document.sha256
+          WHERE binding.task_id=$1`,
+        [taskId],
+      )
+    ).rows[0];
+    if (!binding) {
+      const conversationOrigin = Boolean(
+        (
+          await tx.query<{ expected: boolean }>(
+            `SELECT EXISTS (
+               SELECT 1
+                 FROM tasks task
+                 JOIN phases phase
+                   ON phase.id=task.phase_id AND phase.project_id=task.project_id
+                 JOIN conversation_kickoff_intents intent
+                   ON intent.project_id=phase.project_id
+                  AND intent.planning_run_id=phase.planning_run_id
+                WHERE task.id=$1
+             ) AS expected`,
+            [taskId],
+          )
+        ).rows[0]?.expected,
+      );
+      if (conversationOrigin) {
+        throw new TaskContextAssemblyError(
+          "task_package_missing",
+          `conversation-originated task ${taskId} has no immutable task package binding`,
+          "Do not dispatch this task; reconcile its approval handoff and kickoff package bindings.",
+        );
+      }
+      return null;
+    }
+    const parsed =
+      typeof binding.package === "string" ? JSON.parse(binding.package) : binding.package;
+    const canonicalBytes = Buffer.from(binding.canonical_package, "utf8");
+    const expectedDocumentId = taskContextDocumentId(
+      binding.project_id,
+      "approved_task_package",
+      binding.content_hash,
+    );
+    if (
+      canonicalJson(parsed) !== binding.canonical_package ||
+      canonicalSha256(parsed) !== binding.content_hash ||
+      binding.context_document_id !== expectedDocumentId ||
+      binding.document_sha256 !== binding.content_hash ||
+      Number(binding.document_bytes) !== canonicalBytes.byteLength ||
+      binding.document_media_type !== "application/json" ||
+      !Buffer.from(binding.served_bytes).equals(canonicalBytes)
+    ) {
+      throw new TaskContextAssemblyError(
+        "task_package_mismatch",
+        `task ${taskId} immutable package bytes, hash, or served context do not agree`,
+        "Do not dispatch this task; restore the exact package bytes frozen at approval.",
+      );
+    }
+    return binding;
+  }
+
+  private async gather(
+    tx: V2SqlExecutor,
+    taskId: string,
+    frozenConversationPackage: boolean,
+  ): Promise<ContextModel> {
     const taskResult = await tx.query<TaskRow>(
       `SELECT id, project_id, phase_id, objective_id, strategy_version_id, title, description,
               deliverables, acceptance_criteria, complexity, risk, required_roles,
@@ -803,20 +973,24 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
     // Render policy facts first (they are the useful ones) while keeping the
     // trimming order above: renderRepository partitions on `policy`.
 
-    const globalRulesResult = await tx.query<GlobalRulesRow>(
-      `SELECT content FROM global_rule_settings
-        WHERE id = 'global' AND length(trim(content)) > 0`,
-    );
+    const globalRulesResult = frozenConversationPackage
+      ? { rows: [] }
+      : await tx.query<GlobalRulesRow>(
+          `SELECT content FROM global_rule_settings
+            WHERE id = 'global' AND length(trim(content)) > 0`,
+        );
     const globalRules = globalRulesResult.rows[0]?.content.trim() || null;
 
-    const directiveResult = await tx.query<MemoryRow>(
-      `SELECT id, category, content, confidence FROM project_memory_entries
-        WHERE project_id = $1 AND status = 'active'
-          AND category IN ('directive', 'constraint')
-          AND (phase_id IS NULL OR phase_id = $2)
-        ORDER BY category ASC, created_at ASC, id ASC`,
-      [project.id, task.phase_id],
-    );
+    const directiveResult = frozenConversationPackage
+      ? { rows: [] }
+      : await tx.query<MemoryRow>(
+          `SELECT id, category, content, confidence FROM project_memory_entries
+            WHERE project_id = $1 AND status = 'active'
+              AND category IN ('directive', 'constraint')
+              AND (phase_id IS NULL OR phase_id = $2)
+            ORDER BY category ASC, created_at ASC, id ASC`,
+          [project.id, task.phase_id],
+        );
     const directives: MemoryItem[] = directiveResult.rows.map((row) => ({
       id: row.id,
       category: row.category,
@@ -825,14 +999,16 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
 
     // Only human-approved memory reaches an agent. Machine-inferred lessons
     // that nobody signed off must not steer autonomous work.
-    const memoryResult = await tx.query<MemoryRow>(
-      `SELECT id, category, content, confidence FROM project_memory_entries
-        WHERE project_id = $1 AND status = 'active' AND approved_by_human = true
-          AND category IN ('decision', 'lesson', 'phase_completion', 'architecture')
-          AND (phase_id IS NULL OR phase_id = $2)
-        ORDER BY created_at ASC, id ASC`,
-      [project.id, task.phase_id],
-    );
+    const memoryResult = frozenConversationPackage
+      ? { rows: [] }
+      : await tx.query<MemoryRow>(
+          `SELECT id, category, content, confidence FROM project_memory_entries
+            WHERE project_id = $1 AND status = 'active' AND approved_by_human = true
+              AND category IN ('decision', 'lesson', 'phase_completion', 'architecture')
+              AND (phase_id IS NULL OR phase_id = $2)
+            ORDER BY created_at ASC, id ASC`,
+          [project.id, task.phase_id],
+        );
     const memory: MemoryItem[] = memoryResult.rows.map((row) => ({
       id: row.id,
       category: row.category,
@@ -869,9 +1045,10 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
       assignment = assignmentResult.rows[0] ?? null;
     }
 
-    const knowledgeSection = this.knowledgeSource
-      ? await this.knowledgeSource.contextSectionForTask(tx, task.id)
-      : null;
+    const knowledgeSection =
+      !frozenConversationPackage && this.knowledgeSource
+        ? await this.knowledgeSource.contextSectionForTask(tx, task.id)
+        : null;
 
     return {
       project,

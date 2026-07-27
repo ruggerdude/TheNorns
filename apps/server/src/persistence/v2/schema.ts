@@ -5058,6 +5058,9 @@ export const conversationPlanActionEffects = pgTable(
     executionStatus: text("execution_status"),
     executionStarted: boolean("execution_started"),
     executionDetail: text("execution_detail"),
+    executionConversationId: text("execution_conversation_id"),
+    handoffId: text("handoff_id"),
+    kickoffIntentId: text("kickoff_intent_id"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -5286,6 +5289,7 @@ export const conversationHandoffs = pgTable(
       .references(() => phase2Users.id, { onDelete: "restrict" }),
     kind: text("kind").notNull(),
     package: jsonb("package").notNull(),
+    canonicalPackage: text("canonical_package"),
     contentHash: text("content_hash").notNull(),
     createdAt: createdAt(),
   },
@@ -5401,6 +5405,138 @@ export const conversationSummaries = pgTable(
   ],
 );
 
+export const conversationKickoffIntents = pgTable(
+  "conversation_kickoff_intents",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    sourceConversationId: text("source_conversation_id").notNull(),
+    executionConversationId: text("execution_conversation_id").notNull(),
+    actionId: text("action_id").notNull(),
+    approvedPlanVersionId: text("approved_plan_version_id").notNull(),
+    planReviewId: text("plan_review_id").notNull(),
+    planningRunId: text("planning_run_id").notNull(),
+    handoffId: text("handoff_id").notNull(),
+    decidedByUserId: text("decided_by_user_id").notNull(),
+    status: text("status").notNull().default("pending"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "string" }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    executionStarted: boolean("execution_started"),
+    executionDetail: text("execution_detail"),
+    phaseId: text("phase_id"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    settledAt: timestamp("settled_at", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    uniqueIndex("conversation_kickoff_intents_action_unique").on(table.actionId),
+    uniqueIndex("conversation_kickoff_intents_handoff_unique").on(table.handoffId),
+    index("conversation_kickoff_intents_dispatch_idx").on(
+      table.status,
+      table.leaseExpiresAt,
+      table.createdAt,
+      table.id,
+    ),
+  ],
+);
+
+export const conversationTaskPackages = pgTable(
+  "conversation_task_packages",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    handoffId: text("handoff_id").notNull(),
+    approvedPlanVersionId: text("approved_plan_version_id").notNull(),
+    moduleId: text("module_id").notNull(),
+    package: jsonb("package").notNull(),
+    canonicalPackage: text("canonical_package").notNull(),
+    contentHash: text("content_hash").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("conversation_task_packages_module_unique").on(table.handoffId, table.moduleId),
+  ],
+);
+
+export const conversationTaskPackageBindings = pgTable(
+  "conversation_task_package_bindings",
+  {
+    packageId: text("package_id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    handoffId: text("handoff_id").notNull(),
+    phaseId: text("phase_id").notNull(),
+    taskId: text("task_id").notNull(),
+    contentHash: text("content_hash").notNull(),
+    contextDocumentId: text("context_document_id").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [uniqueIndex("conversation_task_package_bindings_task_unique").on(table.taskId)],
+);
+
+export const conversationTaskPackageRuns = pgTable("conversation_task_package_runs", {
+  runId: text("run_id").primaryKey(),
+  packageId: text("package_id").notNull(),
+  projectId: text("project_id").notNull(),
+  phaseId: text("phase_id").notNull(),
+  taskId: text("task_id").notNull(),
+  contentHash: text("content_hash").notNull(),
+  contextDocumentId: text("context_document_id").notNull(),
+  createdAt: createdAt(),
+});
+
+export const conversationPlanningExcerptReceipts = pgTable(
+  "conversation_planning_excerpt_receipts",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    sourceConversationId: text("source_conversation_id").notNull(),
+    targetConversationId: text("target_conversation_id").notNull(),
+    handoffId: text("handoff_id").notNull(),
+    requestedByUserId: text("requested_by_user_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    sourceMessageIds: jsonb("source_message_ids").notNull(),
+    sourceMessageHashes: jsonb("source_message_hashes").notNull(),
+    resultMessageId: text("result_message_id").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("conversation_planning_excerpt_idempotency_unique").on(
+      table.targetConversationId,
+      table.requestedByUserId,
+      table.idempotencyKey,
+    ),
+    uniqueIndex("conversation_planning_excerpt_result_unique").on(table.resultMessageId),
+  ],
+);
+
+export const conversationCompactionReceipts = pgTable(
+  "conversation_compaction_receipts",
+  {
+    id: text("id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull().default(2),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    summaryId: text("summary_id").notNull(),
+    milestone: text("milestone").notNull(),
+    sourceMessageIds: jsonb("source_message_ids").notNull(),
+    sourceMessageHashes: jsonb("source_message_hashes").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [uniqueIndex("conversation_compaction_receipts_summary_unique").on(table.summaryId)],
+);
+
 export const conversationDomainSchema = {
   workItems,
   workConversations,
@@ -5415,6 +5551,12 @@ export const conversationDomainSchema = {
   conversationPlanChangeProposals,
   conversationHandoffs,
   conversationSummaries,
+  conversationKickoffIntents,
+  conversationTaskPackages,
+  conversationTaskPackageBindings,
+  conversationTaskPackageRuns,
+  conversationPlanningExcerptReceipts,
+  conversationCompactionReceipts,
 };
 
 export const phase2PreservationSchema = {

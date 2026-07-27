@@ -71,6 +71,7 @@ import {
   ConversationTurnError,
   ConversationTurnRepository,
   ConversationTurnService,
+  ExecutionConversationService,
   PostgresConversationRepository,
   registerConversationPlanRoutes,
   registerConversationRoutes,
@@ -871,6 +872,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   let phase4DispatchTimer: ReturnType<typeof setInterval> | undefined;
   let phase4RecoveryTimer: ReturnType<typeof setInterval> | undefined;
   let usageBudgetEvaluationTimer: ReturnType<typeof setInterval> | undefined;
+  let conversationKickoffTimer: ReturnType<typeof setInterval> | undefined;
   // EXECUTION E12 — declared here, assigned far below where PhaseLaunchService
   // is constructed, so the onClose hook can clear it alongside its siblings.
   let phaseQueueDrainTimer: ReturnType<typeof setInterval> | undefined;
@@ -879,6 +881,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   let conversationContextAssembler: ConversationContextAssembler | null = null;
   let conversationAttempts: ConversationTurnRepository | null = null;
   let conversationPlanWorkflow: ConversationPlanWorkflowService | null = null;
+  let executionConversationService: ExecutionConversationService | null = null;
   if (options.phase4) {
     const dispatcher = new Phase4Dispatcher(
       options.phase4.dispatch,
@@ -936,6 +939,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (phase4RecoveryTimer) clearInterval(phase4RecoveryTimer);
     if (phaseQueueDrainTimer) clearInterval(phaseQueueDrainTimer);
     if (usageBudgetEvaluationTimer) clearInterval(usageBudgetEvaluationTimer);
+    if (conversationKickoffTimer) clearInterval(conversationKickoffTimer);
     conversationTurns?.abortAll();
     workspaceBroker.close();
   });
@@ -3049,6 +3053,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       runtimeTransactionsForInference,
     );
     conversationService = new ConversationService(conversationRepository);
+    executionConversationService = new ExecutionConversationService(
+      runtimeTransactionsForInference,
+      {
+        now,
+      },
+    );
     conversationAttempts = new ConversationTurnRepository(runtimeTransactionsForInference);
     conversationContextAssembler = new ConversationContextAssembler(
       runtimeTransactionsForInference,
@@ -3095,6 +3105,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       conversations: conversationService,
       turns: conversationTurns,
       attempts: conversationAttempts,
+      execution: executionConversationService,
       planDetail: (userId, projectId, workItemId, conversationId) =>
         conversationPlanWorkflow
           ? conversationPlanWorkflow.detail(userId, projectId, workItemId, conversationId)
@@ -5053,6 +5064,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             ? { executionKickoff: options.planningRuns.executionKickoff }
             : {}),
         });
+        await conversationPlanWorkflow.reconcileKickoffIntents();
+        let kickoffReconcileInFlight = false;
+        conversationKickoffTimer = setInterval(() => {
+          if (kickoffReconcileInFlight || !conversationPlanWorkflow) return;
+          kickoffReconcileInFlight = true;
+          void conversationPlanWorkflow
+            .reconcileKickoffIntents()
+            .catch(() => undefined)
+            .finally(() => {
+              kickoffReconcileInFlight = false;
+            });
+        }, 5_000);
+        conversationKickoffTimer.unref?.();
       }
       const reviewWorkflow = conversationPlanWorkflow;
       const planningWorker = new PlanningRunWorker(planningTransactions, buildPlanningAdapter, {

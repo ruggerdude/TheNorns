@@ -973,6 +973,12 @@ function v2MaterializedId(
   return [kind, phaseId, ...localIdentityParts].map(encodeURIComponent).join(":");
 }
 
+/** Canonical identity projection shared by strategy materialization and any
+ * durable provenance binding that must name the exact relational task. */
+export function v2MaterializedTaskId(phaseId: string, taskLocalId: string): string {
+  return v2MaterializedId("task", phaseId, taskLocalId);
+}
+
 /**
  * Exact, deterministic projection used by the approval transaction. Every
  * proposal field is copied into its canonical entity; only database-owned
@@ -1014,7 +1020,7 @@ export function materializeV2StrategyVersion(
   const taskIdByLocalId = new Map(
     strategy.proposed_tasks.map((task) => [
       task.local_id,
-      v2MaterializedId("task", strategy.phase_id, task.local_id),
+      v2MaterializedTaskId(strategy.phase_id, task.local_id),
     ]),
   );
   const assignmentByTaskLocalId = new Map(

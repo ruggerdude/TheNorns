@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   V2ConversationHandoff,
+  V2ConversationPlanActionEffectValue,
+  V2ConversationTaskPackage,
   V2ConversationTurnAttempt,
+  V2ConversationUsage,
+  V2CreateConversationPlanningExcerptInput,
   V2WorkMessage,
   V2WorkPlanContract,
   V2WorkPlanVersion,
@@ -295,6 +299,13 @@ describe("V2 conversation contracts", () => {
         phase_ids: [],
         task_ids: [],
         repository_binding_ids: [],
+        context_manifest: [
+          {
+            kind: "approved_plan",
+            ref: "plan-1",
+            content_hash: hash,
+          },
+        ],
       },
       content_hash: hash,
       created_at: at,
@@ -333,6 +344,178 @@ describe("V2 conversation contracts", () => {
           ...handoff.package,
           task_sequence: ["not-the-approved-module-order"],
         },
+      }).success,
+    ).toBe(false);
+    expect(
+      V2ConversationHandoff.safeParse({
+        ...handoff,
+        package: {
+          ...handoff.package,
+          context_manifest: [
+            ...handoff.package.context_manifest,
+            {
+              kind: "approved_plan",
+              ref: "plan-other",
+              content_hash: hash,
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("strictly validates transition, task package, excerpt, and aggregate usage shapes", () => {
+    const planVersion = {
+      schema_version: 2,
+      id: "plan-1",
+      project_id: "project-1",
+      work_item_id: "work-1",
+      conversation_id: "conversation-1",
+      created_by_user_id: "user-1",
+      version: 1,
+      status: "approved",
+      plan,
+      content_hash: hash,
+      created_by_action_id: "action-1",
+      supersedes_plan_version_id: null,
+      diff_from_previous: null,
+      approved_by_user_id: "user-1",
+      approved_at: at,
+      created_at: at,
+      updated_at: at,
+    };
+    const execution = { status: "pending", started: null, detail: null };
+    expect(
+      V2ConversationPlanActionEffectValue.safeParse({
+        kind: "plan_approved",
+        plan_version: planVersion,
+        plan_review_id: "review-1",
+        planning_run_id: "run-1",
+        transition_status: "created",
+        execution_conversation_id: "conversation-2",
+        handoff_id: "handoff-1",
+        kickoff_intent_id: "intent-1",
+        execution,
+      }).success,
+    ).toBe(true);
+    expect(
+      V2ConversationPlanActionEffectValue.safeParse({
+        kind: "plan_approved",
+        plan_version: planVersion,
+        plan_review_id: "review-1",
+        planning_run_id: "run-1",
+        transition_status: "legacy_unavailable",
+        execution_conversation_id: null,
+        handoff_id: null,
+        kickoff_intent_id: null,
+        execution,
+      }).success,
+    ).toBe(true);
+    expect(
+      V2ConversationPlanActionEffectValue.safeParse({
+        kind: "plan_approved",
+        plan_version: planVersion,
+        plan_review_id: "review-1",
+        planning_run_id: "run-1",
+        transition_status: "created",
+        execution_conversation_id: null,
+        handoff_id: "handoff-1",
+        kickoff_intent_id: "intent-1",
+        execution,
+      }).success,
+    ).toBe(false);
+
+    const taskPackage = {
+      schema_version: 2,
+      id: "task-package-1",
+      project_id: "project-1",
+      work_item_id: "work-1",
+      conversation_id: "conversation-2",
+      handoff_id: "handoff-1",
+      approved_plan_version_id: "plan-1",
+      module_id: "contracts",
+      package: {
+        approved_plan_version_id: "plan-1",
+        approved_plan_content_hash: hash,
+        objective: plan.plan.objective,
+        module: plan.plan.modules[0],
+        staffing: plan.staffing[0],
+        budget: plan.estimated_budget,
+        binding_rules: [],
+        human_decisions: [],
+        artifact_ids: [],
+        repository_binding_ids: [],
+        context_manifest: [
+          {
+            kind: "approved_plan",
+            ref: "plan-1",
+            content_hash: hash,
+          },
+        ],
+      },
+      content_hash: hash,
+      created_at: at,
+    };
+    expect(V2ConversationTaskPackage.safeParse(taskPackage).success).toBe(true);
+    expect(
+      V2ConversationTaskPackage.safeParse({
+        ...taskPackage,
+        package: {
+          ...taskPackage.package,
+          staffing: { ...taskPackage.package.staffing, module_id: "other" },
+        },
+      }).success,
+    ).toBe(false);
+
+    const excerpt = {
+      idempotency_key: "excerpt-key",
+      source_conversation_id: "conversation-1",
+      message_ids: ["message-1"],
+    };
+    expect(V2CreateConversationPlanningExcerptInput.safeParse(excerpt).success).toBe(true);
+    expect(
+      V2CreateConversationPlanningExcerptInput.safeParse({
+        ...excerpt,
+        message_ids: ["message-1", "message-1"],
+      }).success,
+    ).toBe(false);
+    expect(
+      V2CreateConversationPlanningExcerptInput.safeParse({
+        ...excerpt,
+        message_ids: Array.from({ length: 21 }, (_, index) => `message-${index}`),
+      }).success,
+    ).toBe(false);
+
+    expect(
+      V2ConversationUsage.safeParse({
+        input_tokens: 10,
+        output_tokens: 4,
+        cost_usd: 0.01,
+        exact_cost: true,
+        usage_status: "exact",
+        attempt_count: 1,
+      }).success,
+    ).toBe(true);
+    for (const usage_status of ["pending", "unavailable"] as const) {
+      expect(
+        V2ConversationUsage.safeParse({
+          input_tokens: 0,
+          output_tokens: 0,
+          cost_usd: null,
+          exact_cost: false,
+          usage_status,
+          attempt_count: 1,
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      V2ConversationUsage.safeParse({
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0,
+        exact_cost: false,
+        usage_status: "unavailable",
+        attempt_count: 1,
       }).success,
     ).toBe(false);
   });

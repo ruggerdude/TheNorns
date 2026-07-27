@@ -23,7 +23,6 @@ import { Debates } from "./Debates";
 import { Gantt, type GanttPhase } from "./Gantt";
 import { KnowledgeStatusPanel } from "./KnowledgeStatusPanel";
 import { Login, type LoginMode } from "./Login";
-import { PhaseTab } from "./PhaseTab";
 import { ProjectMembers } from "./ProjectMembers";
 import {
   AttentionDecisionForm,
@@ -77,6 +76,12 @@ const GraphCanvas = lazy(() =>
   import("./GraphCanvas").then(({ GraphCanvas }) => ({ default: GraphCanvas })),
 );
 const UsageHub = lazy(() => import("./UsageHub").then(({ UsageHub }) => ({ default: UsageHub })));
+const PhaseTab = lazy(() => import("./PhaseTab").then(({ PhaseTab }) => ({ default: PhaseTab })));
+const ConversationOverview = lazy(() =>
+  import("./ConversationOverview").then(({ ConversationOverview }) => ({
+    default: ConversationOverview,
+  })),
+);
 
 export interface WorkConversationRoute {
   projectId: string;
@@ -2159,6 +2164,17 @@ function ProjectGraph({
               </section>
             ) : null}
 
+            <Suspense fallback={<Spinner label="Loading project conversations…" />}>
+              <ConversationOverview
+                projectId={project.id}
+                onOpenConversation={(conversationId) => {
+                  setWorkspaceTab("work");
+                  onConversationSelected?.(conversationId);
+                }}
+                onUnauthorized={handleWorkspaceUnauthorized}
+              />
+            </Suspense>
+
             <KnowledgeStatusPanel
               projectId={project.id}
               phaseId={monitoredPhaseId}
@@ -2338,34 +2354,36 @@ function ProjectGraph({
          *  phaseTabApi.ts (the integrator's single reconciliation point). */}
         {workspaceTab === "work" ? (
           <div className="workspace-tab-panel" data-testid="workspace-tab-work">
-            <PhaseTab
-              projectId={project.id}
-              initialRunId={phaseJourneyRunId}
-              initialConversationId={initialConversationId}
-              initialNewConversation={Boolean(initialWorkRoute && !initialConversationId)}
-              designatedExecution={phaseExecution}
-              composerRequested={phaseComposerRequested}
-              onComposerOpened={() => setPhaseComposerRequested(true)}
-              onRunStarted={(runId) => {
-                setPhaseJourneyRunId(runId);
-                setPhaseComposerRequested(false);
-                void loadPlanningHistory();
-              }}
-              onJourneyChanged={() => {
-                void loadResume();
-                void loadLatestRelationalPlanningRun();
-                void loadPhaseExecution();
-                void loadPlanningHistory();
-              }}
-              onOpenRecoveryDetails={(phaseId) => {
-                setMonitoredPhaseId(phaseId);
-                setWorkspaceTab("overview");
-                if (phaseId === monitoredPhaseId) void loadPhaseExecution();
-              }}
-              onConversationSelected={onConversationSelected}
-              onNewConversation={onNewConversation}
-              onUnauthorized={() => onLogout("Session expired. Sign in again.")}
-            />
+            <Suspense fallback={<Spinner label="Loading conversation workspace…" />}>
+              <PhaseTab
+                projectId={project.id}
+                initialRunId={phaseJourneyRunId}
+                initialConversationId={initialConversationId}
+                initialNewConversation={Boolean(initialWorkRoute && !initialConversationId)}
+                designatedExecution={phaseExecution}
+                composerRequested={phaseComposerRequested}
+                onComposerOpened={() => setPhaseComposerRequested(true)}
+                onRunStarted={(runId) => {
+                  setPhaseJourneyRunId(runId);
+                  setPhaseComposerRequested(false);
+                  void loadPlanningHistory();
+                }}
+                onJourneyChanged={() => {
+                  void loadResume();
+                  void loadLatestRelationalPlanningRun();
+                  void loadPhaseExecution();
+                  void loadPlanningHistory();
+                }}
+                onOpenRecoveryDetails={(phaseId) => {
+                  setMonitoredPhaseId(phaseId);
+                  setWorkspaceTab("overview");
+                  if (phaseId === monitoredPhaseId) void loadPhaseExecution();
+                }}
+                onConversationSelected={onConversationSelected}
+                onNewConversation={onNewConversation}
+                onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+              />
+            </Suspense>
           </div>
         ) : null}
 

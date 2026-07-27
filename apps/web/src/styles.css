@@ -5648,12 +5648,14 @@ body {
 }
 
 .project-overview-dashboard,
+.project-conversation-overview,
 .work-history-card,
 .workspace-settings-card {
   padding: clamp(1.2rem, 2.4vw, 1.75rem);
 }
 
 .project-overview-dashboard .section-head h2,
+.project-conversation-overview .section-head h2,
 .work-history-card .section-head h2,
 .workspace-settings-card .section-head h2 {
   margin: 0.18rem 0 0;
@@ -5716,6 +5718,79 @@ body {
 .work-history-list {
   display: grid;
   gap: 0.7rem;
+}
+
+.project-conversation-overview-list {
+  display: grid;
+  gap: 0.8rem;
+  margin-top: 1rem;
+}
+
+.project-conversation-overview-item {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--raised) 55%, transparent);
+}
+
+.project-conversation-overview-item > header,
+.project-conversation-overview-item li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.project-conversation-overview-item h3,
+.project-conversation-overview-item p {
+  margin: 0;
+}
+
+.project-conversation-overview-item p {
+  display: -webkit-box;
+  margin-top: 0.25rem;
+  overflow: hidden;
+  color: var(--muted);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.project-conversation-overview-item ol {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-conversation-overview-item li {
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.project-conversation-overview-item li > div {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto auto;
+  gap: 0.12rem 0.55rem;
+}
+
+.project-conversation-overview-item li small {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-conversation-kind {
+  color: var(--info);
+  font-size: 0.72rem;
+  font-weight: 700;
 }
 
 .work-history-item {
@@ -5842,8 +5917,15 @@ body {
   }
 
   .workspace-update-digest,
-  .work-history-item {
+  .work-history-item,
+  .project-conversation-overview-item > header,
+  .project-conversation-overview-item li {
     grid-template-columns: 1fr;
+  }
+
+  .project-conversation-overview-item > header,
+  .project-conversation-overview-item li {
+    display: grid;
   }
 
   .workspace-update-digest > .muted {
@@ -5851,7 +5933,8 @@ body {
     grid-row: auto;
   }
 
-  .work-history-item .btn {
+  .work-history-item .btn,
+  .project-conversation-overview-item .btn {
     width: 100%;
   }
 

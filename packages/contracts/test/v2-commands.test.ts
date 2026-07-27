@@ -305,6 +305,44 @@ describe("V2 immutable dispatch identity", () => {
     expect(V2DispatchCommand.parse(dispatch).execution_mode).toBeUndefined();
   });
 
+  it("binds a task package id/hash to one exact dispatched context ref", () => {
+    const packageRef = dispatch.context_refs[0];
+    expect(
+      V2DispatchCommand.safeParse({
+        ...dispatch,
+        task_package_id: "task-package-1",
+        task_package_content_hash: HASH,
+        task_package_context_ref: packageRef,
+      }).success,
+    ).toBe(true);
+    expect(V2DispatchCommand.safeParse(dispatch).success).toBe(true);
+    expect(
+      V2DispatchCommand.safeParse({
+        ...dispatch,
+        task_package_id: "task-package-1",
+      }).success,
+    ).toBe(false);
+    expect(
+      V2DispatchCommand.safeParse({
+        ...dispatch,
+        task_package_id: "task-package-1",
+        task_package_content_hash: "b".repeat(64),
+        task_package_context_ref: packageRef,
+      }).success,
+    ).toBe(false);
+    expect(
+      V2DispatchCommand.safeParse({
+        ...dispatch,
+        task_package_id: "task-package-1",
+        task_package_content_hash: HASH,
+        task_package_context_ref: {
+          ...packageRef,
+          storage_ref: "object/not-dispatched",
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   it("carries only the fixed committed verification-manifest path", () => {
     expect(
       V2DispatchCommand.parse({

@@ -1,8 +1,12 @@
 import type { ProviderName } from "@norns/adapters";
-import { V2WorkMessagePart } from "@norns/contracts";
+import { V2CreateConversationPlanningExcerptInput, V2WorkMessagePart } from "@norns/contracts";
 import { createUIMessageStream, pipeUIMessageStreamToResponse } from "ai";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import type {
+  ExecutionConversationDetail,
+  ExecutionConversationService,
+} from "./executionConversation.js";
 import type { ConversationPlanDetail } from "./planWorkflow.js";
 import { ConversationPersistenceError } from "./repository.js";
 import type { ConversationActor, ConversationService, PlanningConversationPin } from "./service.js";
@@ -29,6 +33,7 @@ export interface ConversationRouteOptions {
     workItemId: string,
     conversationId: string,
   ): Promise<ConversationPlanDetail>;
+  execution?: ExecutionConversationService;
 }
 
 const WorkItemBody = z
@@ -172,7 +177,23 @@ export function registerConversationRoutes(
     const { projectId } = request.params as { projectId: string };
     try {
       const work_items = await options.conversations.listWorkItems(user, projectId);
-      return reply.send({ work_items });
+      const conversationIds = work_items.flatMap((group) =>
+        group.conversations.map((conversation) => conversation.id),
+      );
+      const usage =
+        options.execution && conversationIds.length > 0
+          ? await options.execution.usageByWorkItem(user.id, projectId, conversationIds)
+          : {};
+      return reply.send({
+        work_items: work_items.map((group) => ({
+          ...group,
+          conversation_usage: Object.fromEntries(
+            group.conversations.flatMap((conversation) =>
+              usage[conversation.id] ? [[conversation.id, usage[conversation.id]]] : [],
+            ),
+          ),
+        })),
+      });
     } catch (error) {
       routeError(reply, error);
     }
@@ -261,11 +282,20 @@ export function registerConversationRoutes(
         options.attempts.active(projectId, conversationId),
         options.attempts.latestRetryableAttempt(projectId, found.work_item.id, conversationId),
       ]);
+      const executionDetail: ExecutionConversationDetail | null = options.execution
+        ? await options.execution.detail(user.id, projectId, found.work_item.id, conversationId)
+        : null;
       return reply.send({
         ...found,
         messages,
         active_attempt,
         retryable_attempt,
+        ...(executionDetail ?? {
+          handoff: null,
+          latest_summary: null,
+          planning_excerpt_receipts: [],
+          usage: null,
+        }),
         ...planDetail,
       });
     } catch (error) {
@@ -305,11 +335,20 @@ export function registerConversationRoutes(
         options.attempts.active(projectId, conversationId),
         options.attempts.latestRetryableAttempt(projectId, workItemId, conversationId),
       ]);
+      const executionDetail: ExecutionConversationDetail | null = options.execution
+        ? await options.execution.detail(user.id, projectId, workItemId, conversationId)
+        : null;
       return reply.send({
         ...found,
         messages,
         active_attempt,
         retryable_attempt,
+        ...(executionDetail ?? {
+          handoff: null,
+          latest_summary: null,
+          planning_excerpt_receipts: [],
+          usage: null,
+        }),
         ...planDetail,
       });
     } catch (error) {
@@ -333,6 +372,35 @@ export function registerConversationRoutes(
         conversationId,
       );
       return reply.send({ messages });
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.post(`${conversationBase}/:conversationId/planning-excerpts`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId, workItemId, conversationId } = request.params as {
+      projectId: string;
+      workItemId: string;
+      conversationId: string;
+    };
+    try {
+      if (!options.execution) {
+        throw new ConversationTurnError(
+          "execution_conversation_unavailable",
+          "execution conversation support is unavailable",
+          503,
+        );
+      }
+      const result = await options.execution.createPlanningExcerpt(
+        user.id,
+        projectId,
+        workItemId,
+        conversationId,
+        V2CreateConversationPlanningExcerptInput.parse(request.body),
+      );
+      return reply.send(result);
     } catch (error) {
       routeError(reply, error);
     }

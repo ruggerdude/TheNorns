@@ -1,8 +1,11 @@
+import { v2MaterializedTaskId } from "@norns/contracts";
 import {
   PhaseLaunchError,
   type PhaseLaunchResult,
   type PhaseLaunchService,
 } from "../coordinator/phaseLaunchService.js";
+import { taskContextDocumentId } from "../execution/taskContextStore.js";
+import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 // PHASE TAB P4 — the real ApprovedPlanExecutionKickoff.
 //
 // The product decision this implements: approving a plan in the Phase tab IS
@@ -43,6 +46,7 @@ import {
   type StrategyBridgeService,
   type StrategyReviewDto,
   assignmentLocalId,
+  taskLocalId,
 } from "../projects/strategyBridgeService.js";
 import type {
   ApprovedPlanExecutionKickoff,
@@ -102,13 +106,18 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
       this.loadActivePhase(tx, input.projectId),
     );
     if (active) {
-      const which =
-        active.planning_run_id === input.planningRunId
-          ? `the phase for this plan ("${active.objective_summary}", ${active.id}) is already executing`
-          : `phase "${active.objective_summary}" (${active.id}) is already executing`;
+      if (active.planning_run_id === input.planningRunId) {
+        if (input.handoffId) {
+          await this.bindConversationTaskPackages(input.projectId, input.handoffId, active.id);
+        }
+        return {
+          started: true,
+          detail: `The phase for this plan ("${active.objective_summary}", ${active.id}) is already executing; kickoff replay converged without a second dispatch.`,
+        };
+      }
       return {
         started: false,
-        detail: `${which}; this project runs one phase at a time. The approved plan is recorded and can be started once the active phase completes.`,
+        detail: `Phase "${active.objective_summary}" (${active.id}) is already executing; this project runs one phase at a time. The approved plan is recorded and can be started once the active phase completes.`,
       };
     }
 
@@ -151,6 +160,14 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
     // earlier attempt) skips straight to launch; anything else — e.g. blocked
     // by open must-fix findings — surfaces as the bridge's own refusal above.
 
+    // Conversation-first approval freezes one package per plan module before
+    // this legacy bridge materializes relational tasks. Bind those exact bytes
+    // to the deterministic materialized task ids before any dispatch can see
+    // the phase. A missing/tampered/misaligned package refuses kickoff.
+    if (input.handoffId) {
+      await this.bindConversationTaskPackages(input.projectId, input.handoffId, phaseId);
+    }
+
     // ---- 4. start the phase through the real gate --------------------------
     const result = await this.phaseLaunch.startPhase({
       project_id: input.projectId,
@@ -160,6 +177,123 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
       issued_at: this.now().toISOString(),
     });
     return describeLaunch(phaseId, phaseName, result);
+  }
+
+  private async bindConversationTaskPackages(
+    projectId: string,
+    handoffId: string,
+    phaseId: string,
+  ): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      const packages = await tx.query<{
+        id: string;
+        work_item_id: string;
+        conversation_id: string;
+        module_id: string;
+        package: unknown;
+        canonical_package: string;
+        content_hash: string;
+      }>(
+        `SELECT id, work_item_id, conversation_id, module_id, package,
+                canonical_package, content_hash
+           FROM conversation_task_packages
+          WHERE project_id=$1 AND handoff_id=$2
+          ORDER BY module_id, id
+          FOR SHARE`,
+        [projectId, handoffId],
+      );
+      if (packages.rows.length === 0) {
+        throw new Error(`handoff ${handoffId} has no immutable task packages`);
+      }
+      for (const taskPackage of packages.rows) {
+        const payload =
+          typeof taskPackage.package === "string"
+            ? JSON.parse(taskPackage.package)
+            : taskPackage.package;
+        if (
+          canonicalJson(payload) !== taskPackage.canonical_package ||
+          canonicalSha256(payload) !== taskPackage.content_hash
+        ) {
+          throw new Error(`task package ${taskPackage.id} failed canonical hash verification`);
+        }
+        const taskId = v2MaterializedTaskId(phaseId, taskLocalId(taskPackage.module_id));
+        const contextDocumentId = taskContextDocumentId(
+          projectId,
+          "approved_task_package",
+          taskPackage.content_hash,
+        );
+        const canonicalBytes = Buffer.from(taskPackage.canonical_package, "utf8");
+        await tx.query(
+          `INSERT INTO task_context_blobs (sha256, content)
+           VALUES ($1,$2) ON CONFLICT (sha256) DO NOTHING`,
+          [taskPackage.content_hash, canonicalBytes],
+        );
+        await tx.query(
+          `INSERT INTO task_context_documents (
+             id, project_id, section, sha256, byte_size, media_type
+           ) VALUES ($1,$2,'approved_task_package',$3,$4,'application/json')
+           ON CONFLICT (id) DO NOTHING`,
+          [contextDocumentId, projectId, taskPackage.content_hash, canonicalBytes.byteLength],
+        );
+        await tx.query(
+          `INSERT INTO conversation_task_package_bindings (
+             package_id, project_id, work_item_id, conversation_id, handoff_id,
+             phase_id, task_id, content_hash, context_document_id
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+           ON CONFLICT (package_id) DO NOTHING`,
+          [
+            taskPackage.id,
+            projectId,
+            taskPackage.work_item_id,
+            taskPackage.conversation_id,
+            handoffId,
+            phaseId,
+            taskId,
+            taskPackage.content_hash,
+            contextDocumentId,
+          ],
+        );
+        const bound = (
+          await tx.query<{
+            project_id: string;
+            phase_id: string;
+            task_id: string;
+            content_hash: string;
+            context_document_id: string;
+          }>(
+            `SELECT project_id, phase_id, task_id, content_hash, context_document_id
+               FROM conversation_task_package_bindings
+              WHERE package_id=$1`,
+            [taskPackage.id],
+          )
+        ).rows[0];
+        if (
+          !bound ||
+          bound.project_id !== projectId ||
+          bound.phase_id !== phaseId ||
+          bound.task_id !== taskId ||
+          bound.content_hash !== taskPackage.content_hash ||
+          bound.context_document_id !== contextDocumentId
+        ) {
+          throw new Error(`task package ${taskPackage.id} has a conflicting task binding`);
+        }
+      }
+      const taskCount = Number(
+        (
+          await tx.query<{ count: number | string }>(
+            `SELECT count(*) AS count
+               FROM tasks
+              WHERE project_id=$1 AND phase_id=$2`,
+            [projectId, phaseId],
+          )
+        ).rows[0]?.count ?? 0,
+      );
+      if (taskCount !== packages.rows.length) {
+        throw new Error(
+          `handoff ${handoffId} has ${packages.rows.length} task packages for ${taskCount} materialized tasks`,
+        );
+      }
+    });
   }
 
   /** Maps decision.staffing (node_id -> provider/model) onto the bridge's

@@ -323,7 +323,7 @@ function readStaffingRecommendations(result: unknown): Map<string, StaffingRecom
   return byNode;
 }
 
-function taskLocalId(moduleId: string): string {
+export function taskLocalId(moduleId: string): string {
   return `task-${moduleId}`;
 }
 

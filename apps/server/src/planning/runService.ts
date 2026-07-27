@@ -266,6 +266,11 @@ export interface CreatePlanningRunInput {
 export interface ApprovedPlanExecutionKickoffInput {
   projectId: string;
   planningRunId: string;
+  /**
+   * Conversation-first approvals bind this exact immutable handoff to every
+   * materialized task and dispatch. Legacy planning-run approvals omit it.
+   */
+  handoffId?: string;
   // PHASE TAB P5b: no `plan` payload here — the kickoff implementation
   // deliberately re-loads the run itself (the bridge is the source of truth
   // for materialization), so passing the plan would be a dead field.

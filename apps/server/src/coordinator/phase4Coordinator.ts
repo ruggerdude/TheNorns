@@ -164,6 +164,14 @@ interface SchedulingRow {
   execution_mode: "quick" | "planned";
 }
 
+interface ConversationTaskPackageBindingRow {
+  handoff_id: string;
+  package_id: string | null;
+  content_hash: string | null;
+  context_document_id: string | null;
+  byte_size: number | string | null;
+}
+
 function runIdentity(taskId: string, attempt: number): string {
   return `run:${encodeURIComponent(taskId)}:${attempt}`;
 }
@@ -199,7 +207,8 @@ export class Phase4Coordinator {
                 project.primary_repository_binding_id AS repository_binding_id,
                 project.max_concurrent_tasks, profile.max_concurrent_runs,
                 profile.active_workload,
-                COALESCE(planning.mode, 'planned') AS execution_mode,
+                CASE WHEN planning.mode='quick' THEN 'quick' ELSE 'planned' END
+                  AS execution_mode,
                 binding.observed_head AS expected_revision,
                 binding.repository_id AS runner_repository_id,
                 binding.binding_type AS repository_binding_type,
@@ -231,6 +240,59 @@ export class Phase4Coordinator {
       );
       const row = rows.rows[0];
       if (!row) throw new Phase4CoordinatorConflictError("task scheduling scope is unavailable");
+      const packageScope = (
+        await sql.query<ConversationTaskPackageBindingRow>(
+          `SELECT intent.handoff_id,
+                  package_binding.package_id, package_binding.content_hash,
+                  package_binding.context_document_id, document.byte_size
+             FROM phases phase
+             JOIN conversation_kickoff_intents intent
+               ON intent.project_id=phase.project_id
+              AND intent.planning_run_id=phase.planning_run_id
+             LEFT JOIN conversation_task_package_bindings package_binding
+               ON package_binding.handoff_id=intent.handoff_id
+              AND package_binding.task_id=$3
+             LEFT JOIN task_context_documents document
+               ON document.id=package_binding.context_document_id
+            WHERE phase.project_id=$1 AND phase.id=$2
+            ORDER BY intent.created_at DESC, intent.id DESC
+            LIMIT 1`,
+          [input.project_id, input.phase_id, input.task_id],
+        )
+      ).rows[0];
+      if (packageScope && !packageScope.package_id) {
+        throw new Phase4CoordinatorConflictError(
+          "conversation-originated task is missing its immutable task package binding",
+        );
+      }
+      const taskPackageContextRefs = packageScope?.package_id
+        ? contextRefs.filter(
+            (reference) =>
+              reference.artifact_id === packageScope.context_document_id &&
+              reference.content_hash === packageScope.content_hash &&
+              reference.byte_size === Number(packageScope.byte_size),
+          )
+        : [];
+      if (packageScope?.package_id && taskPackageContextRefs.length !== 1) {
+        throw new Phase4CoordinatorConflictError(
+          "dispatch context does not contain exactly one ref for the bound immutable task package",
+        );
+      }
+      const taskPackageDispatch =
+        packageScope?.package_id &&
+        packageScope.content_hash &&
+        packageScope.context_document_id &&
+        taskPackageContextRefs[0]
+          ? {
+              id: packageScope.package_id,
+              contentHash: packageScope.content_hash,
+              contextDocumentId: packageScope.context_document_id,
+              contextRef: taskPackageContextRefs[0],
+            }
+          : null;
+      if (packageScope?.package_id && !taskPackageDispatch) {
+        throw new Phase4CoordinatorConflictError("immutable task package binding is incomplete");
+      }
       if (row.repository_binding_status !== "connected") {
         throw new Phase4CoordinatorConflictError(
           "execution requires a verified repository binding and an online runner; " +
@@ -420,6 +482,23 @@ export class Phase4Coordinator {
           !isReplacement,
         ],
       );
+      if (taskPackageDispatch) {
+        await sql.query(
+          `INSERT INTO conversation_task_package_runs (
+             run_id, package_id, project_id, phase_id, task_id,
+             content_hash, context_document_id
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            runId,
+            taskPackageDispatch.id,
+            input.project_id,
+            input.phase_id,
+            input.task_id,
+            taskPackageDispatch.contentHash,
+            taskPackageDispatch.contextDocumentId,
+          ],
+        );
+      }
       if (isReplacement) {
         await sql.query(
           `UPDATE agent_runs
@@ -535,6 +614,13 @@ export class Phase4Coordinator {
         model: row.model,
         ...(row.reasoning_effort ? { reasoning_effort: row.reasoning_effort } : {}),
         context_refs: contextRefs,
+        ...(taskPackageDispatch
+          ? {
+              task_package_id: taskPackageDispatch.id,
+              task_package_content_hash: taskPackageDispatch.contentHash,
+              task_package_context_ref: taskPackageDispatch.contextRef,
+            }
+          : {}),
         budget_reservation_id: reservationId,
         max_charge_usd: maxCharge,
         max_input_tokens: input.max_input_tokens,

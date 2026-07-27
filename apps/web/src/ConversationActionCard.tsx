@@ -153,6 +153,15 @@ function EffectNotice({
     );
   }
 
+  if (effect.transition_status !== "created" || effect.execution_conversation_id === null) {
+    return (
+      <output className="conversation-action-effect is-info" aria-live="polite">
+        This plan was approved before execution conversation handoffs were recorded. No linked
+        execution PM conversation is available for this historical approval.
+      </output>
+    );
+  }
+
   const { execution } = effect;
   const message =
     execution.status === "pending"
@@ -174,6 +183,14 @@ function EffectNotice({
       aria-live="polite"
     >
       <span>{message}</span>
+      <a
+        data-testid="conversation-execution-link"
+        href={`/projects/${encodeURIComponent(projectId)}/work/${encodeURIComponent(
+          effect.execution_conversation_id,
+        )}`}
+      >
+        Open execution PM conversation
+      </a>
       {execution.status === "refused" || execution.status === "failed" ? (
         <a href={`/projects/${encodeURIComponent(projectId)}`}>Open project recovery</a>
       ) : null}

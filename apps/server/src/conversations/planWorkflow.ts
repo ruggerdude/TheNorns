@@ -5,6 +5,8 @@ import {
   type V2ConfirmConversationPlanActionResponseT,
   V2ConversationAction,
   type V2ConversationActionT,
+  V2ConversationHandoffPackage,
+  type V2ConversationHandoffPackageT,
   V2ConversationPlanActionEffect,
   type V2ConversationPlanActionEffectT,
   V2ConversationPlanReview,
@@ -19,7 +21,7 @@ import {
   type V2WorkPlanVersionT,
 } from "@norns/contracts";
 import { newId } from "../ids.js";
-import { canonicalSha256 } from "../persistence/migration/canonicalJson.js";
+import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import type { ReviewOnlyPlanningResult } from "../planning/reviewOnlySession.js";
 import type {
@@ -78,6 +80,23 @@ export interface ConversationPlanWorkflowOptions {
   ): Promise<ConversationPlanReviewModels>;
   runReviewNow(runId: string): Promise<unknown>;
   executionKickoff?: ApprovedPlanExecutionKickoff;
+  approvalTransitionCheckpoint?: (
+    checkpoint:
+      | "plan_frozen"
+      | "planning_message_appended"
+      | "summary_created"
+      | "planning_archived"
+      | "execution_conversation_created"
+      | "handoff_created"
+      | "task_packages_created"
+      | "execution_seeded"
+      | "kickoff_intent_created"
+      | "effect_created",
+  ) => void | Promise<void>;
+  kickoffDispatchCheckpoint?: () => void | Promise<void>;
+  /** Failure-injection/recovery seam after an external kickoff response but
+   * before durable outbox settlement. Production leaves it unset. */
+  kickoffSettlementCheckpoint?: () => void | Promise<void>;
 }
 
 export interface ConversationPlanDetail {
@@ -188,6 +207,9 @@ interface EffectRow {
   execution_status: "pending" | "started" | "refused" | "failed" | null;
   execution_started: boolean | null;
   execution_detail: string | null;
+  execution_conversation_id: string | null;
+  handoff_id: string | null;
+  kickoff_intent_id: string | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -215,7 +237,12 @@ const reviewColumns = `schema_version, id, project_id, work_item_id, conversatio
   revised_plan_version_id, started_at, completed_at, failure_code, created_at, updated_at`;
 const effectColumns = `schema_version, id, project_id, work_item_id, conversation_id,
   action_id, effect_kind, plan_version_id, plan_review_id, planning_run_id,
-  execution_status, execution_started, execution_detail, created_at, updated_at`;
+  execution_status, execution_started, execution_detail,
+  to_jsonb(conversation_plan_action_effects)->>'execution_conversation_id'
+    AS execution_conversation_id,
+  to_jsonb(conversation_plan_action_effects)->>'handoff_id' AS handoff_id,
+  to_jsonb(conversation_plan_action_effects)->>'kickoff_intent_id' AS kickoff_intent_id,
+  created_at, updated_at`;
 
 function json<T>(value: unknown): T {
   return typeof value === "string" ? (JSON.parse(value) as T) : (value as T);
@@ -382,7 +409,7 @@ export class ConversationPlanWorkflowService {
   ): Promise<ConversationPlanDetail> {
     return this.transactions.transaction(async (tx) => {
       await this.assertAccess(tx, projectId, userId);
-      await this.assertConversation(tx, projectId, workItemId, conversationId, false);
+      await this.assertConversation(tx, projectId, workItemId, conversationId, false, false, false);
       const plans = await tx.query<PlanRow>(
         `SELECT ${planColumns} FROM work_plan_versions
           WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3
@@ -452,8 +479,8 @@ export class ConversationPlanWorkflowService {
     if (applied.dispatchRunId) {
       void this.options.runReviewNow(applied.dispatchRunId).catch(() => undefined);
     }
-    if (applied.kickoff) {
-      await this.kickoff(applied.kickoff);
+    if (applied.kickoffIntentId) {
+      await this.dispatchKickoffIntent(applied.kickoffIntentId);
     }
     return this.loadConfirmResponse(
       userId,
@@ -719,37 +746,9 @@ export class ConversationPlanWorkflowService {
     models: ConversationPlanReviewModels | null,
   ): Promise<{
     dispatchRunId: string | null;
-    kickoff: {
-      projectId: string;
-      planningRunId: string;
-      planReviewId: string;
-      actionId: string;
-      staffing: ApprovedStaffingEntryDto[];
-      decidedBy: string;
-    } | null;
+    kickoffIntentId: string | null;
   }> {
     await this.assertAccess(tx, input.project_id, userId);
-    const conversation = await this.assertConversation(
-      tx,
-      input.project_id,
-      input.work_item_id,
-      input.conversation_id,
-      true,
-    );
-    if (
-      (
-        await tx.query<{ id: string }>(
-          `SELECT id FROM conversation_plan_proposal_attempts
-            WHERE conversation_id=$1 AND status='pending' LIMIT 1`,
-          [input.conversation_id],
-        )
-      ).rows[0]
-    ) {
-      throw new ConversationPlanWorkflowError(
-        "proposal_in_progress",
-        "wait for the active plan proposal before confirming an action",
-      );
-    }
     const action = await this.lockAction(tx, input, true);
     const expectedFingerprint = confirmationFingerprint(action);
     const keyOwner = (
@@ -796,12 +795,34 @@ export class ConversationPlanWorkflowService {
       if (effect) {
         return {
           dispatchRunId: null,
-          kickoff:
+          kickoffIntentId:
             effect.effect_kind === "plan_approved" && effect.execution_status === "pending"
-              ? await this.kickoffInput(tx, effect, userId)
+              ? effect.kickoff_intent_id
               : null,
         };
       }
+    }
+
+    const conversation = await this.assertConversation(
+      tx,
+      input.project_id,
+      input.work_item_id,
+      input.conversation_id,
+      true,
+    );
+    if (
+      (
+        await tx.query<{ id: string }>(
+          `SELECT id FROM conversation_plan_proposal_attempts
+            WHERE conversation_id=$1 AND status='pending' LIMIT 1`,
+          [input.conversation_id],
+        )
+      ).rows[0]
+    ) {
+      throw new ConversationPlanWorkflowError(
+        "proposal_in_progress",
+        "wait for the active plan proposal before confirming an action",
+      );
     }
 
     const confirmed = await this.actionById(tx, action.id, true);
@@ -1009,7 +1030,7 @@ export class ConversationPlanWorkflowService {
           version.id,
           action.id,
         );
-        return { dispatchRunId: runId, kickoff: null };
+        return { dispatchRunId: runId, kickoffIntentId: null };
       }
       case "request_plan_changes": {
         const version = await this.boundLatestPlan(tx, action, parameters);
@@ -1107,16 +1128,7 @@ export class ConversationPlanWorkflowService {
             WHERE project_id=$1 AND id=$2`,
           [action.project_id, action.work_item_id, version.id, review.planning_run_id, now],
         );
-        await this.insertEffect(
-          tx,
-          action,
-          "plan_approved",
-          version.id,
-          review.id,
-          review.planning_run_id,
-          "pending",
-        );
-        await this.finishLocalAction(tx, action.id);
+        await this.checkpoint("plan_frozen");
         await this.appendVisibleMessage(
           tx,
           action,
@@ -1125,16 +1137,31 @@ export class ConversationPlanWorkflowService {
           version.id,
           action.id,
         );
+        await this.checkpoint("planning_message_appended");
+        const transition = await this.createExecutionTransition(
+          tx,
+          action,
+          version,
+          review,
+          conversation,
+          userId,
+          now,
+        );
+        await this.insertEffect(
+          tx,
+          action,
+          "plan_approved",
+          version.id,
+          review.id,
+          review.planning_run_id,
+          "pending",
+          transition,
+        );
+        await this.checkpoint("effect_created");
+        await this.finishLocalAction(tx, action.id);
         return {
           dispatchRunId: null,
-          kickoff: {
-            projectId: action.project_id,
-            planningRunId: review.planning_run_id,
-            planReviewId: review.id,
-            actionId: action.id,
-            staffing,
-            decidedBy: userId,
-          },
+          kickoffIntentId: transition.kickoffIntentId,
         };
       }
       case "reject_plan": {
@@ -1180,7 +1207,7 @@ export class ConversationPlanWorkflowService {
           `action type "${action.action_type}" is not a Phase 3 plan action`,
         );
     }
-    return { dispatchRunId: null, kickoff: null };
+    return { dispatchRunId: null, kickoffIntentId: null };
   }
 
   private async loadConfirmResponse(
@@ -1197,56 +1224,598 @@ export class ConversationPlanWorkflowService {
     return { action, effect: effect.effect };
   }
 
-  private async kickoff(input: {
-    projectId: string;
-    planningRunId: string;
-    planReviewId: string;
-    actionId: string;
-    staffing: ApprovedStaffingEntryDto[];
-    decidedBy: string;
-  }): Promise<void> {
+  private checkpoint(
+    checkpoint: Parameters<
+      NonNullable<ConversationPlanWorkflowOptions["approvalTransitionCheckpoint"]>
+    >[0],
+  ): Promise<void> {
+    return Promise.resolve(this.options.approvalTransitionCheckpoint?.(checkpoint));
+  }
+
+  private async createExecutionTransition(
+    tx: V2SqlExecutor,
+    action: V2ConversationActionT,
+    version: V2WorkPlanVersionT,
+    review: ReviewRow,
+    pin: { provider: string; model: string },
+    userId: string,
+    now: string,
+  ): Promise<{
+    executionConversationId: string;
+    handoffId: string;
+    kickoffIntentId: string;
+  }> {
+    const executionConversationId = this.makeId("conversation");
+    const handoffId = this.makeId("handoff");
+    const kickoffIntentId = this.makeId("kickoff_intent");
+    const summaryId = this.makeId("conversation_summary");
+    const receiptId = this.makeId("compaction_receipt");
+
+    const globalRule = (
+      await tx.query<{ content: string; version: number }>(
+        "SELECT content, version FROM global_rule_settings WHERE id='global'",
+      )
+    ).rows[0];
+    const projectRules = await tx.query<{
+      id: string;
+      content: string;
+    }>(
+      `SELECT id, content
+         FROM project_memory_entries
+        WHERE project_id=$1 AND phase_id IS NULL AND task_id IS NULL
+          AND category='directive' AND status='active'
+          AND source_ref->>'kind'='project_rules_file'
+        ORDER BY version DESC, created_at DESC, id DESC LIMIT 1`,
+      [action.project_id],
+    );
+    const decisions = await tx.query<{
+      id: string;
+      title: string;
+      rationale: string;
+    }>(
+      `SELECT id, title, rationale
+         FROM decision_records
+        WHERE project_id=$1 AND status='active'
+        ORDER BY created_at, id`,
+      [action.project_id],
+    );
+    const openDecisionPoints = await tx.query<{
+      id: string;
+      question: string;
+      context: string;
+    }>(
+      `SELECT id, question, context
+         FROM decision_points
+        WHERE project_id=$1 AND status='open'
+        ORDER BY created_at, id`,
+      [action.project_id],
+    );
+    const repositories = await tx.query<{
+      id: string;
+      binding_type: string;
+      repository_id: string;
+      observed_head: string | null;
+    }>(
+      `SELECT id, binding_type, repository_id, observed_head
+         FROM repository_bindings
+        WHERE project_id=$1 AND status IN ('connected','degraded')
+        ORDER BY id`,
+      [action.project_id],
+    );
+    const reviewContract = toReview(review);
+    const reviewEntries = reviewContract.context_manifest.entries;
+    const candidateArtifactReferences = reviewEntries
+      .filter((reference) => reference.kind === "artifact")
+      .map((reference) => ({ id: reference.ref, content_hash: reference.content_hash }));
+    const candidateArtifactIds = candidateArtifactReferences.map((reference) => reference.id);
+    const persistedArtifacts =
+      candidateArtifactIds.length === 0
+        ? { rows: [] }
+        : await tx.query<{
+            id: string;
+            kind: string;
+            content_hash: string;
+            phase_id: string | null;
+            task_id: string | null;
+          }>(
+            `SELECT id, kind, content_hash, phase_id, task_id
+               FROM artifacts
+              WHERE project_id=$1 AND id=ANY($2::text[])
+              ORDER BY id`,
+            [action.project_id, candidateArtifactIds],
+          );
+    const persistedAttachments =
+      candidateArtifactIds.length === 0
+        ? { rows: [] }
+        : await tx.query<{
+            id: string;
+            kind: string;
+            content_hash: string;
+            phase_id: null;
+            task_id: null;
+          }>(
+            `SELECT id, 'image_attachment' AS kind, sha256 AS content_hash,
+                    NULL AS phase_id, NULL AS task_id
+               FROM attachments
+              WHERE project_id=$1 AND id=ANY($2::text[]) AND deleted_at IS NULL
+              ORDER BY id`,
+            [action.project_id, candidateArtifactIds],
+          );
+    const exactArtifactById = new Map(
+      [...persistedArtifacts.rows, ...persistedAttachments.rows].map((artifact) => [
+        artifact.id,
+        artifact,
+      ]),
+    );
+    const artifactRows = {
+      rows: candidateArtifactReferences.map((reference) => {
+        const artifact = exactArtifactById.get(reference.id);
+        if (!artifact || artifact.content_hash !== reference.content_hash) {
+          throw new ConversationPlanWorkflowError(
+            "plan_not_reviewed",
+            `reviewed artifact ${reference.id} is unavailable or its content hash changed`,
+          );
+        }
+        return artifact;
+      }),
+    };
+    const bindingRules = [
+      ...(globalRule?.content.trim() ? [globalRule.content] : []),
+      ...projectRules.rows.map((rule) => rule.content).filter((content) => content.trim()),
+    ];
+    const dispositionByFinding = new Map(
+      reviewContract.dispositions.map((disposition) => [disposition.finding_id, disposition]),
+    );
+    const qcEvidence = reviewContract.findings.map((finding) => {
+      const disposition = dispositionByFinding.get(finding.id);
+      return {
+        id: finding.id,
+        summary: `${finding.finding} Recommendation: ${finding.recommendation}`,
+        rationale: disposition
+          ? `${disposition.disposition}: ${disposition.rationale}`
+          : "No explicit disposition was recorded.",
+      };
+    });
+    const unresolved = [
+      ...version.plan.plan.risks.map((risk) =>
+        risk.mitigation ? `${risk.description} Mitigation: ${risk.mitigation}` : risk.description,
+      ),
+      ...version.plan.open_decisions,
+      ...version.plan.plan.modules.flatMap((module) => module.open_decisions),
+      ...openDecisionPoints.rows.map((decision) => `${decision.question} — ${decision.context}`),
+    ];
+    const contextManifest: V2ConversationHandoffPackageT["context_manifest"] = [
+      {
+        kind: "approved_plan",
+        ref: version.id,
+        content_hash: version.content_hash,
+      },
+      ...(globalRule?.content.trim()
+        ? [
+            {
+              kind: "global_rules" as const,
+              ref: `global-rules-v${globalRule.version}`,
+              content_hash: canonicalSha256(globalRule.content),
+            },
+          ]
+        : []),
+      ...projectRules.rows.map((rule) => ({
+        kind: "project_rules" as const,
+        ref: rule.id,
+        content_hash: canonicalSha256(rule.content),
+      })),
+      ...decisions.rows.map((decision) => ({
+        kind: "decision" as const,
+        ref: decision.id,
+        content_hash: canonicalSha256(decision),
+      })),
+      {
+        kind: "qc_review",
+        ref: review.id,
+        content_hash: canonicalSha256({
+          plan_content_hash: review.result_plan_content_hash,
+          findings: reviewContract.findings,
+          dispositions: reviewContract.dispositions,
+        }),
+      },
+      ...artifactRows.rows.map((artifact) => ({
+        kind: "artifact" as const,
+        ref: artifact.id,
+        content_hash: artifact.content_hash,
+      })),
+      ...repositories.rows.map((repository) => ({
+        kind: "repository" as const,
+        ref: repository.id,
+        content_hash: canonicalSha256(repository),
+      })),
+    ];
+    const handoffPackage = V2ConversationHandoffPackage.parse({
+      approved_plan_version_id: version.id,
+      approved_plan_content_hash: version.content_hash,
+      approved_plan: version.plan,
+      objective: version.plan.plan.objective,
+      binding_rules: bindingRules,
+      human_decisions: decisions.rows.map((decision) => ({
+        id: decision.id,
+        summary: decision.title,
+        rationale: decision.rationale,
+      })),
+      qc_findings_and_dispositions: qcEvidence,
+      unresolved_risks_and_questions: [...new Set(unresolved)],
+      task_sequence: version.plan.plan.modules.map((module) => module.id),
+      staffing: version.plan.staffing,
+      budget: version.plan.estimated_budget,
+      required_mockup_artifact_ids: artifactRows.rows
+        .filter((artifact) => artifact.kind === "mockup")
+        .map((artifact) => artifact.id),
+      acceptance_evidence: [
+        ...version.plan.verification_requirements,
+        ...version.plan.plan.modules.flatMap((module) =>
+          module.acceptance.map(
+            (criterion) =>
+              `${module.id}/${criterion.id}: ${criterion.statement} (${criterion.verification_type}: ${criterion.verification})`,
+          ),
+        ),
+      ],
+      artifact_ids: artifactRows.rows.map((artifact) => artifact.id),
+      phase_ids: [
+        ...new Set(
+          artifactRows.rows.flatMap((artifact) =>
+            artifact.phase_id === null ? [] : [artifact.phase_id],
+          ),
+        ),
+      ],
+      task_ids: [
+        ...new Set(
+          artifactRows.rows.flatMap((artifact) =>
+            artifact.task_id === null ? [] : [artifact.task_id],
+          ),
+        ),
+      ],
+      repository_binding_ids: repositories.rows.map((repository) => repository.id),
+      context_manifest: contextManifest,
+    });
+
+    const sourceMessages = await tx.query<{
+      id: string;
+      sequence: number | string;
+      role: string;
+      parts: unknown;
+    }>(
+      `SELECT id, sequence, role, parts
+         FROM work_messages
+        WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3
+          AND visibility_status='complete'
+        ORDER BY sequence, id`,
+      [action.project_id, action.work_item_id, action.conversation_id],
+    );
+    if (sourceMessages.rows.length > 0) {
+      const firstSourceMessage = sourceMessages.rows[0];
+      const lastSourceMessage = sourceMessages.rows.at(-1);
+      if (!firstSourceMessage || !lastSourceMessage) {
+        throw new Error("conversation summary source range disappeared");
+      }
+      const sourceMessageIds = sourceMessages.rows.map((message) => message.id);
+      const canonicalSourceMessages = sourceMessages.rows.map((message) =>
+        canonicalJson({
+          sequence: Number(message.sequence),
+          role: message.role,
+          parts: json(message.parts),
+        }),
+      );
+      const sourceMessageHashes = canonicalSourceMessages.map((message) =>
+        canonicalSha256(JSON.parse(message)),
+      );
+      const summary = {
+        objective: version.plan.plan.objective,
+        constraints: bindingRules,
+        decisions: decisions.rows.map((decision) => ({
+          id: decision.id,
+          summary: decision.title,
+          rationale: decision.rationale,
+        })),
+        risks: version.plan.plan.risks.map((risk) => risk.description),
+        open_questions: [...version.plan.open_decisions],
+        artifact_ids: artifactRows.rows.map((artifact) => artifact.id),
+      };
+      const nextSummaryVersion = Number(
+        (
+          await tx.query<{ version: number | string }>(
+            `SELECT coalesce(max(version),0)+1 AS version
+                 FROM conversation_summaries
+                WHERE conversation_id=$1`,
+            [action.conversation_id],
+          )
+        ).rows[0]?.version ?? 1,
+      );
+      await tx.query(
+        `INSERT INTO conversation_summaries (
+           id, project_id, work_item_id, conversation_id, created_by_user_id,
+           version, from_message_sequence, through_message_sequence,
+           summary, content_hash, created_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11)`,
+        [
+          summaryId,
+          action.project_id,
+          action.work_item_id,
+          action.conversation_id,
+          userId,
+          nextSummaryVersion,
+          Number(firstSourceMessage.sequence),
+          Number(lastSourceMessage.sequence),
+          JSON.stringify(summary),
+          canonicalSha256(summary),
+          now,
+        ],
+      );
+      await tx.query(
+        `INSERT INTO conversation_compaction_receipts (
+           id, project_id, work_item_id, conversation_id, summary_id, milestone,
+           source_message_ids, source_message_hashes, canonical_source_messages,
+           canonical_summary, created_at
+         ) VALUES ($1,$2,$3,$4,$5,'plan_approved',$6::jsonb,$7::jsonb,$8::jsonb,$9,$10)`,
+        [
+          receiptId,
+          action.project_id,
+          action.work_item_id,
+          action.conversation_id,
+          summaryId,
+          JSON.stringify(sourceMessageIds),
+          JSON.stringify(sourceMessageHashes),
+          JSON.stringify(canonicalSourceMessages),
+          canonicalJson(summary),
+          now,
+        ],
+      );
+    }
+    await this.checkpoint("summary_created");
+    await tx.query(
+      `UPDATE work_conversations
+          SET status='archived', archived_at=$2, updated_at=$2
+        WHERE id=$1 AND status='active' AND kind='planning'`,
+      [action.conversation_id, now],
+    );
+    await this.checkpoint("planning_archived");
+    await tx.query(
+      `INSERT INTO work_conversations (
+         id, project_id, work_item_id, created_by_user_id, kind, status,
+         provider, model, next_message_sequence, created_at, updated_at
+       ) VALUES ($1,$2,$3,$4,'execution_pm','active',$5,$6,1,$7,$7)`,
+      [
+        executionConversationId,
+        action.project_id,
+        action.work_item_id,
+        userId,
+        pin.provider,
+        pin.model,
+        now,
+      ],
+    );
+    await this.checkpoint("execution_conversation_created");
+    const canonicalPackage = canonicalJson(handoffPackage);
+    await tx.query(
+      `INSERT INTO conversation_handoffs (
+         id, project_id, work_item_id, source_conversation_id,
+         target_conversation_id, approved_plan_version_id, created_by_user_id,
+         kind, package, canonical_package, content_hash, created_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,'planning_to_execution',$8::jsonb,$9,$10,$11)`,
+      [
+        handoffId,
+        action.project_id,
+        action.work_item_id,
+        action.conversation_id,
+        executionConversationId,
+        version.id,
+        userId,
+        canonicalPackage,
+        canonicalPackage,
+        canonicalSha256(handoffPackage),
+        now,
+      ],
+    );
+    await this.checkpoint("handoff_created");
+    for (const module of version.plan.plan.modules) {
+      const staffing = version.plan.staffing.find((entry) => entry.module_id === module.id);
+      if (!staffing) throw new Error(`approved module "${module.id}" has no staffing`);
+      const taskPackage = {
+        approved_plan_version_id: version.id,
+        approved_plan_content_hash: version.content_hash,
+        objective: version.plan.plan.objective,
+        module,
+        staffing,
+        budget: version.plan.estimated_budget,
+        binding_rules: bindingRules,
+        human_decisions: handoffPackage.human_decisions,
+        artifact_ids: artifactRows.rows.map((artifact) => artifact.id),
+        repository_binding_ids: repositories.rows.map((repository) => repository.id),
+        context_manifest: handoffPackage.context_manifest,
+      };
+      const canonicalTaskPackage = canonicalJson(taskPackage);
+      await tx.query(
+        `INSERT INTO conversation_task_packages (
+           id, project_id, work_item_id, conversation_id, handoff_id,
+           approved_plan_version_id, module_id, package, canonical_package,
+           content_hash, created_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)`,
+        [
+          this.makeId("task_package"),
+          action.project_id,
+          action.work_item_id,
+          executionConversationId,
+          handoffId,
+          version.id,
+          module.id,
+          canonicalTaskPackage,
+          canonicalTaskPackage,
+          canonicalSha256(taskPackage),
+          now,
+        ],
+      );
+    }
+    await this.checkpoint("task_packages_created");
+    const seedMessageId = this.makeId("message");
+    await tx.query(
+      `INSERT INTO work_messages (
+         id, project_id, work_item_id, conversation_id, initiated_by_user_id,
+         actor_type, actor_id, role, visibility_status, sequence, parts, created_at
+       ) VALUES ($1,$2,$3,$4,$5,'system',NULL,'system','complete',1,$6::jsonb,$7)`,
+      [
+        seedMessageId,
+        action.project_id,
+        action.work_item_id,
+        executionConversationId,
+        userId,
+        JSON.stringify([
+          {
+            type: "text",
+            format: "markdown",
+            text: "Execution is ready from the approved compact handoff. The planning transcript has not been replayed.",
+          },
+          { type: "handoff", handoff_id: handoffId },
+        ]),
+        now,
+      ],
+    );
+    await tx.query("UPDATE work_conversations SET next_message_sequence=2 WHERE id=$1", [
+      executionConversationId,
+    ]);
+    await this.checkpoint("execution_seeded");
+    await tx.query(
+      `INSERT INTO conversation_kickoff_intents (
+         id, project_id, work_item_id, source_conversation_id,
+         execution_conversation_id, action_id, approved_plan_version_id,
+         plan_review_id, planning_run_id, handoff_id, decided_by_user_id,
+         status, created_at, updated_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$12)`,
+      [
+        kickoffIntentId,
+        action.project_id,
+        action.work_item_id,
+        action.conversation_id,
+        executionConversationId,
+        action.id,
+        version.id,
+        review.id,
+        review.planning_run_id,
+        handoffId,
+        userId,
+        now,
+      ],
+    );
+    await this.checkpoint("kickoff_intent_created");
+    return { executionConversationId, handoffId, kickoffIntentId };
+  }
+
+  async reconcileKickoffIntents(): Promise<number> {
+    const ids = await this.transactions.transaction(async (tx) => {
+      await tx.query(
+        `UPDATE conversation_kickoff_intents
+            SET status='pending', lease_token=NULL, lease_expires_at=NULL, updated_at=now()
+          WHERE status='leased' AND lease_expires_at<=now()`,
+      );
+      return (
+        await tx.query<{ id: string }>(
+          `SELECT id FROM conversation_kickoff_intents
+            WHERE status='pending' ORDER BY created_at, id LIMIT 100`,
+        )
+      ).rows.map((row) => row.id);
+    });
+    for (const id of ids) await this.dispatchKickoffIntent(id);
+    return ids.length;
+  }
+
+  private async dispatchKickoffIntent(intentId: string): Promise<void> {
+    await this.options.kickoffDispatchCheckpoint?.();
+    const claimed = await this.transactions.transaction(async (tx) => {
+      const leaseToken = this.makeId("kickoff_lease");
+      const row = (
+        await tx.query<{
+          id: string;
+          project_id: string;
+          planning_run_id: string;
+          action_id: string;
+          handoff_id: string;
+          decided_by_user_id: string;
+          approved_plan_version_id: string;
+        }>(
+          `UPDATE conversation_kickoff_intents
+              SET status='leased', lease_token=$2,
+                  lease_expires_at=now()+interval '5 minutes',
+                  attempt_count=attempt_count+1, updated_at=now()
+            WHERE id=$1 AND status='pending'
+            RETURNING id, project_id, planning_run_id, action_id,
+                      handoff_id, decided_by_user_id, approved_plan_version_id`,
+          [intentId, leaseToken],
+        )
+      ).rows[0];
+      if (!row) return null;
+      const plan = await this.planById(tx, row.approved_plan_version_id, false);
+      return { ...row, leaseToken, staffing: this.approvedStaffing(plan.plan) };
+    });
+    if (!claimed) return;
     if (!this.options.executionKickoff) {
-      await this.settleKickoff(input.actionId, {
+      await this.settleKickoffIntent(claimed.id, claimed.leaseToken, {
         started: false,
         detail: "Execution kickoff is not configured.",
       });
       return;
     }
+    let report: PlanningRunExecutionDto;
     try {
-      const report = await this.options.executionKickoff.kickoff({
-        projectId: input.projectId,
-        planningRunId: input.planningRunId,
-        staffing: input.staffing,
-        decidedBy: input.decidedBy,
+      report = await this.options.executionKickoff.kickoff({
+        projectId: claimed.project_id,
+        planningRunId: claimed.planning_run_id,
+        handoffId: claimed.handoff_id,
+        staffing: claimed.staffing,
+        decidedBy: claimed.decided_by_user_id,
       });
-      await this.settleKickoff(input.actionId, report);
     } catch (error) {
-      await this.settleKickoff(
-        input.actionId,
+      await this.settleKickoffIntent(
+        claimed.id,
+        claimed.leaseToken,
         { started: false, detail: error instanceof Error ? error.message : String(error) },
         true,
       );
+      return;
     }
+    await this.options.kickoffSettlementCheckpoint?.();
+    await this.settleKickoffIntent(claimed.id, claimed.leaseToken, report);
   }
 
-  private async settleKickoff(
-    actionId: string,
+  private async settleKickoffIntent(
+    intentId: string,
+    leaseToken: string,
     report: PlanningRunExecutionDto,
     failed = false,
   ): Promise<void> {
     await this.transactions.transaction(async (tx) => {
-      const effect = await this.effectByAction(tx, actionId, true);
+      const intent = (
+        await tx.query<{
+          action_id: string;
+          project_id: string;
+          work_item_id: string;
+          planning_run_id: string;
+        }>(
+          `SELECT action_id, project_id, work_item_id, planning_run_id
+             FROM conversation_kickoff_intents
+            WHERE id=$1 AND status='leased' AND lease_token=$2
+            FOR UPDATE`,
+          [intentId, leaseToken],
+        )
+      ).rows[0];
+      if (!intent) return;
+      const effect = await this.effectByAction(tx, intent.action_id, true);
       if (!effect || effect.execution_status !== "pending") return;
       const now = this.now().toISOString();
       let phaseId: string | null = null;
-      if (report.started && effect.planning_run_id) {
+      if (report.started) {
         phaseId =
           (
             await tx.query<{ id: string }>(
               `SELECT id FROM phases
                 WHERE project_id=$1 AND planning_run_id=$2
                 ORDER BY created_at DESC, id DESC LIMIT 1`,
-              [effect.project_id, effect.planning_run_id],
+              [intent.project_id, intent.planning_run_id],
             )
           ).rows[0]?.id ?? null;
       }
@@ -1256,11 +1825,27 @@ export class ConversationPlanWorkflowService {
         ? "Execution kickoff reported started but created no execution phase."
         : report.detail;
       await tx.query(
+        `UPDATE conversation_kickoff_intents
+            SET status=$3, lease_token=NULL, lease_expires_at=NULL,
+                execution_started=$4, execution_detail=$5, phase_id=$6,
+                settled_at=$7, updated_at=$7
+          WHERE id=$1 AND lease_token=$2 AND status='leased'`,
+        [
+          intentId,
+          leaseToken,
+          status === "started" ? "succeeded" : status,
+          report.started && !missingPhase,
+          detail,
+          phaseId,
+          now,
+        ],
+      );
+      await tx.query(
         `UPDATE conversation_plan_action_effects
             SET execution_status=$2, execution_started=$3,
                 execution_detail=$4, updated_at=$5
           WHERE action_id=$1 AND execution_status='pending'`,
-        [actionId, status, report.started && !missingPhase, detail, now],
+        [intent.action_id, status, report.started && !missingPhase, detail, now],
       );
       if (report.started && phaseId) {
         await tx.query(
@@ -1269,7 +1854,7 @@ export class ConversationPlanWorkflowService {
                   execution_started_at=coalesce(execution_started_at,$4),
                   aggregate_version=aggregate_version+1, updated_at=$4
             WHERE project_id=$1 AND id=$2`,
-          [effect.project_id, effect.work_item_id, phaseId, now],
+          [intent.project_id, intent.work_item_id, phaseId, now],
         );
       }
     });
@@ -1324,12 +1909,39 @@ export class ConversationPlanWorkflowService {
     planReviewId: string | null,
     planningRunId: string | null,
     executionStatus: EffectRow["execution_status"],
+    transition: {
+      executionConversationId: string;
+      handoffId: string;
+      kickoffIntentId: string;
+    } | null = null,
   ): Promise<void> {
+    if (!transition) {
+      await tx.query(
+        `INSERT INTO conversation_plan_action_effects (
+           id, project_id, work_item_id, conversation_id, action_id, effect_kind,
+           plan_version_id, plan_review_id, planning_run_id, execution_status
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [
+          this.makeId("plan_effect"),
+          action.project_id,
+          action.work_item_id,
+          action.conversation_id,
+          action.id,
+          kind,
+          planVersionId,
+          planReviewId,
+          planningRunId,
+          executionStatus,
+        ],
+      );
+      return;
+    }
     await tx.query(
       `INSERT INTO conversation_plan_action_effects (
          id, project_id, work_item_id, conversation_id, action_id, effect_kind,
-         plan_version_id, plan_review_id, planning_run_id, execution_status
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+         plan_version_id, plan_review_id, planning_run_id, execution_status,
+         execution_conversation_id, handoff_id, kickoff_intent_id
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         this.makeId("plan_effect"),
         action.project_id,
@@ -1341,6 +1953,9 @@ export class ConversationPlanWorkflowService {
         planReviewId,
         planningRunId,
         executionStatus,
+        transition.executionConversationId,
+        transition.handoffId,
+        transition.kickoffIntentId,
       ],
     );
   }
@@ -1379,6 +1994,13 @@ export class ConversationPlanWorkflowService {
           plan_version: plan,
           plan_review_id: row.plan_review_id,
           planning_run_id: row.planning_run_id,
+          transition_status:
+            row.execution_conversation_id && row.handoff_id && row.kickoff_intent_id
+              ? "created"
+              : "legacy_unavailable",
+          execution_conversation_id: row.execution_conversation_id,
+          handoff_id: row.handoff_id,
+          kickoff_intent_id: row.kickoff_intent_id,
           execution: {
             status: row.execution_status,
             started: row.execution_started,
@@ -1653,6 +2275,8 @@ export class ConversationPlanWorkflowService {
     workItemId: string,
     conversationId: string,
     lock: boolean,
+    requireActive = true,
+    requirePlanning = true,
   ): Promise<{ status: string; kind: string; provider: string; model: string }> {
     const row = (
       await tx.query<{ status: string; kind: string; provider: string; model: string }>(
@@ -1668,7 +2292,10 @@ export class ConversationPlanWorkflowService {
         "conversation not found in the requested scope",
       );
     }
-    if (row.status !== "active" || row.kind !== "planning") {
+    if (
+      (requireActive && row.status !== "active") ||
+      (requirePlanning && row.kind !== "planning")
+    ) {
       throw new ConversationPlanWorkflowError(
         "conversation_inactive",
         "plan actions require an active planning conversation",
@@ -1848,21 +2475,6 @@ export class ConversationPlanWorkflowService {
         )
       ).rows[0] ?? null
     );
-  }
-
-  private async kickoffInput(tx: V2SqlExecutor, effect: EffectRow, userId: string) {
-    if (!effect.planning_run_id || !effect.plan_review_id) {
-      throw new Error("approved plan effect is missing its review/run scope");
-    }
-    const plan = await this.planById(tx, effect.plan_version_id, false);
-    return {
-      projectId: effect.project_id,
-      planningRunId: effect.planning_run_id,
-      planReviewId: effect.plan_review_id,
-      actionId: effect.action_id,
-      staffing: this.approvedStaffing(plan.plan),
-      decidedBy: userId,
-    };
   }
 
   private async lockWork(tx: V2SqlExecutor, projectId: string, workItemId: string) {

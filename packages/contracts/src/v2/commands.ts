@@ -467,6 +467,15 @@ export const V2DispatchCommand = z
     model: V2NonEmptyString,
     reasoning_effort: CodexReasoningEffort.optional(),
     context_refs: z.array(V2ContentAddressedReference).min(1),
+    /**
+     * Present for conversation-first execution. These fields bind the
+     * dispatched run to the immutable, module-scoped package whose exact
+     * canonical bytes are one of context_refs. Legacy/manual dispatches omit
+     * them together.
+     */
+    task_package_id: V2EntityId.optional(),
+    task_package_content_hash: V2Sha256Hex.optional(),
+    task_package_context_ref: V2ContentAddressedReference.optional(),
     budget_reservation_id: V2EntityId,
     max_charge_usd: z.number().nonnegative(),
     max_input_tokens: z.number().int().nonnegative(),
@@ -534,6 +543,36 @@ export const V2DispatchCommand = z
         code: z.ZodIssueCode.custom,
         path: ["expires_at"],
         message: "expires_at must be after issued_at",
+      });
+    }
+    const packageFields = [
+      command.task_package_id,
+      command.task_package_content_hash,
+      command.task_package_context_ref,
+    ];
+    const hasPackage = packageFields.every((value) => value !== undefined);
+    if (packageFields.some((value) => value !== undefined) !== hasPackage) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["task_package_id"],
+        message: "task package id, content hash, and context ref must be provided together",
+      });
+    }
+    if (
+      hasPackage &&
+      (command.task_package_context_ref?.content_hash !== command.task_package_content_hash ||
+        !command.context_refs.some(
+          (reference) =>
+            reference.artifact_id === command.task_package_context_ref?.artifact_id &&
+            reference.content_hash === command.task_package_context_ref.content_hash &&
+            reference.byte_size === command.task_package_context_ref.byte_size &&
+            reference.storage_ref === command.task_package_context_ref.storage_ref,
+        ))
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["task_package_context_ref"],
+        message: "task package hash must identify one exact dispatched context reference",
       });
     }
   });

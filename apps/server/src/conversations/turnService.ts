@@ -181,10 +181,10 @@ export class ConversationTurnService {
     if (scope.work_item.id !== input.workItemId) {
       throw new ConversationTurnError("conversation_scope_mismatch", "conversation scope mismatch");
     }
-    if (scope.conversation.kind !== "planning") {
+    if (!["planning", "execution_pm"].includes(scope.conversation.kind)) {
       throw new ConversationTurnError(
         "conversation_kind_forbidden",
-        "Phase 2 streaming is limited to planning conversations",
+        "streaming is limited to planning and execution PM conversations",
       );
     }
     if (scope.conversation.status !== "active") {

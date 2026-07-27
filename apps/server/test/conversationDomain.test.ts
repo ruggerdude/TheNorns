@@ -2,7 +2,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PostgresConversationRepository } from "../src/conversations/repository.js";
 import { ConversationService } from "../src/conversations/service.js";
-import { canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
+import { canonicalJson, canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
 import { assertCurrentRuntimeSchema } from "../src/persistence/postgresConnection.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
@@ -177,7 +177,7 @@ describe.sequential("conversation-first durable domain", () => {
     ).resolves.toBeUndefined();
     const replay = await runCurrentV2Migrations(asMigrationDatabase(pg));
     expect(replay.at(-1)).toMatchObject({
-      name: "0037_conversation_plan_workflow",
+      name: "0038_conversation_execution_handoff",
       applied: false,
     });
   });
@@ -700,21 +700,36 @@ describe.sequential("conversation-first durable domain", () => {
       phase_ids: [],
       task_ids: [],
       repository_binding_ids: [],
+      context_manifest: [
+        {
+          kind: "approved_plan",
+          ref: "work-plan-1",
+          content_hash: approved.rows[0]?.content_hash,
+        },
+      ],
     };
+    await pg.query(
+      `UPDATE work_conversations
+          SET status='archived', archived_at=now()
+        WHERE id=$1`,
+      [conversationId],
+    );
+    const canonicalPackage = canonicalJson(handoffPackage);
     await pg.query(
       `INSERT INTO conversation_handoffs (
          id, project_id, work_item_id, source_conversation_id,
          target_conversation_id, approved_plan_version_id, created_by_user_id,
-         kind, package, content_hash
+         kind, package, canonical_package, content_hash
        ) VALUES (
          'handoff-1','conversation-project',$1,$2,$3,'work-plan-1',
-         'conversation-owner','planning_to_execution',$4::jsonb,$5
+         'conversation-owner','planning_to_execution',$4::jsonb,$5,$6
        )`,
       [
         workItemId,
         conversationId,
         execution.id,
-        JSON.stringify(handoffPackage),
+        canonicalPackage,
+        canonicalPackage,
         canonicalSha256(handoffPackage),
       ],
     );
@@ -749,16 +764,17 @@ describe.sequential("conversation-first durable domain", () => {
         `INSERT INTO conversation_handoffs (
            id, project_id, work_item_id, source_conversation_id,
            target_conversation_id, approved_plan_version_id, created_by_user_id,
-           kind, package, content_hash
+           kind, package, canonical_package, content_hash
          ) VALUES (
            'handoff-bad','conversation-project',$1,$2,$3,'work-plan-1',
-           'conversation-owner','planning_to_execution',$4::jsonb,$5
+           'conversation-owner','planning_to_execution',$4::jsonb,$5,$6
          )`,
         [
           workItemId,
           conversationId,
           execution.id,
-          JSON.stringify(badPackage),
+          canonicalJson(badPackage),
+          canonicalJson(badPackage),
           canonicalSha256(badPackage),
         ],
       ),
@@ -773,20 +789,21 @@ describe.sequential("conversation-first durable domain", () => {
         `INSERT INTO conversation_handoffs (
            id, project_id, work_item_id, source_conversation_id,
            target_conversation_id, approved_plan_version_id, created_by_user_id,
-           kind, package, content_hash
+           kind, package, canonical_package, content_hash
          ) VALUES (
            'handoff-contradictory','conversation-project',$1,$2,$3,'work-plan-1',
-           'conversation-owner','planning_to_execution',$4::jsonb,$5
+           'conversation-owner','planning_to_execution',$4::jsonb,$5,$6
          )`,
         [
           workItemId,
           conversationId,
           execution.id,
-          JSON.stringify(contradictoryPackage),
+          canonicalJson(contradictoryPackage),
+          canonicalJson(contradictoryPackage),
           canonicalSha256(contradictoryPackage),
         ],
       ),
-    ).rejects.toThrow(/must project the approved plan/);
+    ).rejects.toThrow(/must equal the approved plan/);
 
     const contradictoryObjectivePackage = {
       ...handoffPackage,
@@ -797,20 +814,21 @@ describe.sequential("conversation-first durable domain", () => {
         `INSERT INTO conversation_handoffs (
            id, project_id, work_item_id, source_conversation_id,
            target_conversation_id, approved_plan_version_id, created_by_user_id,
-           kind, package, content_hash
+           kind, package, canonical_package, content_hash
          ) VALUES (
            'handoff-contradictory-objective','conversation-project',$1,$2,$3,'work-plan-1',
-           'conversation-owner','planning_to_execution',$4::jsonb,$5
+           'conversation-owner','planning_to_execution',$4::jsonb,$5,$6
          )`,
         [
           workItemId,
           conversationId,
           execution.id,
-          JSON.stringify(contradictoryObjectivePackage),
+          canonicalJson(contradictoryObjectivePackage),
+          canonicalJson(contradictoryObjectivePackage),
           canonicalSha256(contradictoryObjectivePackage),
         ],
       ),
-    ).rejects.toThrow(/must project the approved plan/);
+    ).rejects.toThrow(/must equal the approved plan/);
   });
 
   it("pins turn attempts to provider/model and canonical usage telemetry", async () => {

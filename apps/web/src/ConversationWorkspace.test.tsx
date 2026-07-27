@@ -9,6 +9,7 @@ import type {
 } from "@norns/contracts";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationWorkspace } from "./ConversationWorkspace";
 import { makeCoreApiModule, makePlan } from "./test/fixtures";
@@ -51,6 +52,18 @@ const conversation: V2WorkConversationT = {
   updated_at: now,
   archived_at: null,
 };
+
+function executionConversation(overrides: Partial<V2WorkConversationT> = {}): V2WorkConversationT {
+  return {
+    ...conversation,
+    id: "execution-conversation-1",
+    kind: "execution_pm",
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    next_message_sequence: 2,
+    ...overrides,
+  };
+}
 
 function planVersion(overrides: Partial<V2WorkPlanVersionT> = {}): V2WorkPlanVersionT {
   const module = makeCoreApiModule();
@@ -95,6 +108,81 @@ function planVersion(overrides: Partial<V2WorkPlanVersionT> = {}): V2WorkPlanVer
     created_at: now,
     updated_at: now,
     ...overrides,
+  };
+}
+
+function handoffFor(
+  version: V2WorkPlanVersionT,
+  targetConversationId = "execution-conversation-1",
+) {
+  return {
+    schema_version: 2 as const,
+    id: "handoff-1",
+    project_id: projectId,
+    work_item_id: workItemId,
+    source_conversation_id: conversationId,
+    target_conversation_id: targetConversationId,
+    approved_plan_version_id: version.id,
+    created_by_user_id: "user-1",
+    kind: "planning_to_execution" as const,
+    package: {
+      approved_plan_version_id: version.id,
+      approved_plan_content_hash: version.content_hash,
+      approved_plan: version.plan,
+      objective: version.plan.plan.objective,
+      binding_rules: ["Keep the execution conversation task-scoped."],
+      human_decisions: [
+        {
+          id: "decision-1",
+          summary: "Use the existing coordinator.",
+          rationale: "It already owns delivery state.",
+        },
+      ],
+      qc_findings_and_dispositions: [],
+      unresolved_risks_and_questions: ["Confirm the production rollout window."],
+      task_sequence: version.plan.plan.modules.map((module) => module.id),
+      staffing: version.plan.staffing,
+      budget: version.plan.estimated_budget,
+      required_mockup_artifact_ids: [],
+      acceptance_evidence: ["Focused and repository-wide tests pass."],
+      artifact_ids: ["artifact-approved-mockup"],
+      phase_ids: [],
+      task_ids: [],
+      repository_binding_ids: ["repository-main"],
+      context_manifest: [
+        {
+          kind: "approved_plan" as const,
+          ref: version.id,
+          content_hash: version.content_hash,
+        },
+      ],
+    },
+    content_hash: "e".repeat(64),
+    created_at: now,
+  };
+}
+
+function compactSummary(targetConversationId = "execution-conversation-1") {
+  return {
+    schema_version: 2 as const,
+    id: "summary-1",
+    project_id: projectId,
+    work_item_id: workItemId,
+    conversation_id: targetConversationId,
+    created_by_user_id: "user-1",
+    version: 1,
+    from_message_sequence: 1,
+    through_message_sequence: 7,
+    summary: {
+      objective: "Deliver conversation-first planning without replaying the full transcript.",
+      constraints: ["Use the existing provider gateway.", "Keep explicit action cards."],
+      decisions: [],
+      risks: ["Execution kickoff can fail after approval."],
+      open_questions: [],
+      artifact_ids: ["artifact-approved-mockup"],
+    },
+    content_hash: "f".repeat(64),
+    created_at: now,
   };
 }
 
@@ -216,15 +304,20 @@ function detailResponse(
   retryableAttempt: unknown = null,
   resources: {
     workItem?: V2WorkItemT;
+    conversation?: V2WorkConversationT;
     planVersions?: V2WorkPlanVersionT[];
     actions?: V2ConversationActionT[];
     reviews?: V2ConversationPlanReviewT[];
     effects?: V2ConversationPlanActionEffectT[];
+    handoff?: unknown;
+    latestSummary?: unknown;
+    usage?: unknown;
+    excerptReceipts?: unknown[];
   } = {},
 ): Response {
   return Response.json({
     work_item: resources.workItem ?? workItem,
-    conversation,
+    conversation: resources.conversation ?? conversation,
     messages,
     active_attempt: activeAttempt,
     retryable_attempt: retryableAttempt,
@@ -232,6 +325,19 @@ function detailResponse(
     actions: resources.actions ?? [],
     plan_reviews: resources.reviews ?? [],
     action_effects: resources.effects ?? [],
+    handoff: resources.handoff ?? null,
+    latest_summary: resources.latestSummary ?? null,
+    usage:
+      resources.usage ??
+      ({
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: null,
+        exact_cost: false,
+        usage_status: "unavailable",
+        attempt_count: 0,
+      } as const),
+    planning_excerpt_receipts: resources.excerptReceipts ?? [],
   });
 }
 
@@ -1026,6 +1132,10 @@ describe("conversation workspace", () => {
         plan_version: approvedVersion,
         plan_review_id: "review-1",
         planning_run_id: "planning-run-1",
+        transition_status: "created",
+        execution_conversation_id: "execution-conversation-pending",
+        handoff_id: "handoff-pending",
+        kickoff_intent_id: "kickoff-intent-pending",
         execution:
           status === "pending"
             ? { status: "pending", started: null, detail: null }
@@ -1069,6 +1179,10 @@ describe("conversation workspace", () => {
     expect(
       screen.getByText("The plan is approved. Coding kickoff is still pending."),
     ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open execution PM conversation" })).toHaveAttribute(
+      "href",
+      `/projects/${projectId}/work/execution-conversation-pending`,
+    );
     expect(screen.getByRole("button", { name: "Update plan proposal" })).toBeDisabled();
     expect(
       screen.getByText("The approved plan is locked. Continue from the current execution state."),
@@ -1079,6 +1193,10 @@ describe("conversation workspace", () => {
     });
     expect(detailCalls).toBe(2);
     expect(screen.getByText(/coding kickoff failed/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open execution PM conversation" })).toHaveAttribute(
+      "href",
+      `/projects/${projectId}/work/execution-conversation-pending`,
+    );
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5_000);
     });
@@ -1448,6 +1566,10 @@ describe("conversation workspace", () => {
         plan_version: approvedVersion,
         plan_review_id: "review-1",
         planning_run_id: "planning-run-1",
+        transition_status: "created",
+        execution_conversation_id: "execution-conversation-failed",
+        handoff_id: "handoff-failed",
+        kickoff_intent_id: "kickoff-intent-failed",
         execution: {
           status: "failed",
           started: false,
@@ -1627,6 +1749,659 @@ describe("conversation workspace", () => {
     expect(JSON.parse(String(retry?.init?.body))).toEqual({});
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "Retry response" })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("opens the exact fresh execution PM conversation returned by approval", async () => {
+    const approvedVersion = planVersion({
+      status: "approved",
+      approved_by_user_id: "user-1",
+      approved_at: now,
+    });
+    const proposed = planAction({
+      id: "action-approve-exact",
+      action_type: "approve_plan",
+      payload: {
+        parameters: {
+          plan_version_id: approvedVersion.id,
+          content_hash: approvedVersion.content_hash,
+          plan_review_id: "review-1",
+        },
+      },
+    });
+    const applied = planAction({
+      ...proposed,
+      status: "applied",
+      confirmation_idempotency_key: "confirm-approval-exact",
+    });
+    const execution = executionConversation();
+    const handoff = handoffFor(approvedVersion, execution.id);
+    const planningHistory = [
+      message({
+        id: "message-approve-exact",
+        role: "assistant",
+        sequence: 1,
+        parts: [{ type: "action", action_id: proposed.id }],
+      }),
+    ];
+    const executionHistory = [
+      message({
+        id: "message-execution-seed",
+        role: "system",
+        sequence: 1,
+        conversation_id: execution.id,
+        parts: [
+          {
+            type: "text",
+            format: "markdown",
+            text: "Execution starts from the compact approved handoff.",
+          },
+          { type: "handoff", handoff_id: handoff.id },
+        ],
+      }),
+    ];
+    const effect = {
+      kind: "plan_approved" as const,
+      plan_version: approvedVersion,
+      plan_review_id: "review-1",
+      planning_run_id: "planning-run-1",
+      transition_status: "created" as const,
+      execution_conversation_id: execution.id,
+      handoff_id: handoff.id,
+      kickoff_intent_id: "kickoff-intent-exact",
+      execution: { status: "pending" as const, started: null, detail: null },
+    };
+    let approved = false;
+    const selected = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [
+              {
+                work_item: workItem,
+                conversations: approved ? [conversation, execution] : [conversation],
+              },
+            ],
+          });
+        }
+        if (
+          url.endsWith(`/conversations/${conversationId}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return detailResponse(planningHistory, null, null, {
+            actions: [proposed],
+            planVersions: [approvedVersion],
+          });
+        }
+        if (url.endsWith(`/actions/${proposed.id}/confirm`) && init?.method === "POST") {
+          approved = true;
+          return Response.json({ action: applied, effect });
+        }
+        if (
+          url.endsWith(`/conversations/${execution.id}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return detailResponse(executionHistory, null, null, {
+            workItem: { ...workItem, status: "executing" },
+            conversation: execution,
+            planVersions: [approvedVersion],
+            handoff,
+            latestSummary: compactSummary(execution.id),
+            usage: {
+              input_tokens: 120,
+              output_tokens: 30,
+              cost_usd: 0.0123,
+              exact_cost: true,
+              usage_status: "exact",
+              attempt_count: 1,
+            },
+          });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    function RoutedWorkspace(): React.ReactElement {
+      const [routedConversationId, setRoutedConversationId] = useState(conversationId);
+      return (
+        <ConversationWorkspace
+          projectId={projectId}
+          initialConversationId={routedConversationId}
+          onConversationSelected={(nextConversationId) => {
+            selected(nextConversationId);
+            setRoutedConversationId(nextConversationId);
+          }}
+          onUnauthorized={() => undefined}
+        />
+      );
+    }
+    render(<RoutedWorkspace />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Confirm action: Approve and begin" }),
+    );
+
+    expect(
+      await screen.findByText("Execution starts from the compact approved handoff."),
+    ).toBeInTheDocument();
+    expect(selected).toHaveBeenCalledWith(execution.id);
+    expect(screen.getByRole("region", { name: "Execution PM conversation" })).toBeInTheDocument();
+    expect(screen.getByTestId("conversation-handoff-card")).toHaveTextContent(
+      approvedVersion.content_hash.slice(0, 12),
+    );
+    expect(screen.getByTestId("conversation-handoff-receipt")).toBeInTheDocument();
+    expect(screen.getByTestId("conversation-summary-indicator")).toHaveTextContent(
+      "Compacted summary v1",
+    );
+    expect(screen.getByTestId("conversation-total-usage")).toHaveTextContent(
+      "150 tokens · $0.0123 · 1 request",
+    );
+  });
+
+  it("replays a lost approval response into the exact durable execution target once", async () => {
+    const approvedVersion = planVersion({
+      status: "approved",
+      approved_by_user_id: "user-1",
+      approved_at: now,
+    });
+    const approval = planAction({
+      id: "action-approve-lost-response",
+      action_type: "approve_plan",
+      status: "applied",
+      payload: {
+        parameters: {
+          plan_version_id: approvedVersion.id,
+          content_hash: approvedVersion.content_hash,
+          plan_review_id: "review-1",
+        },
+      },
+    });
+    const execution = executionConversation({ id: "execution-after-lost-response" });
+    const handoff = handoffFor(approvedVersion, execution.id);
+    const effect: V2ConversationPlanActionEffectT = {
+      schema_version: 2,
+      id: "effect-approval-lost-response",
+      project_id: projectId,
+      work_item_id: workItemId,
+      conversation_id: conversationId,
+      action_id: approval.id,
+      effect: {
+        kind: "plan_approved",
+        plan_version: approvedVersion,
+        plan_review_id: "review-1",
+        planning_run_id: "planning-run-1",
+        transition_status: "created",
+        execution_conversation_id: execution.id,
+        handoff_id: handoff.id,
+        kickoff_intent_id: "kickoff-after-lost-response",
+        execution: { status: "pending", started: null, detail: null },
+      },
+      created_at: now,
+      updated_at: now,
+    };
+    window.sessionStorage.setItem(
+      `norns:conversation-approval-transition:${conversationId}`,
+      approval.id,
+    );
+    const selected = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [{ work_item: workItem, conversations: [conversation, execution] }],
+          });
+        }
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse([], null, null, {
+            conversation: { ...conversation, status: "archived", archived_at: now },
+            actions: [approval],
+            effects: [effect],
+          });
+        }
+        if (url.endsWith(`/conversations/${execution.id}`)) {
+          return detailResponse(
+            [
+              message({
+                id: "message-execution-recovered",
+                role: "system",
+                sequence: 1,
+                conversation_id: execution.id,
+                parts: [
+                  {
+                    type: "text",
+                    format: "markdown",
+                    text: "Recovered the fresh execution conversation.",
+                  },
+                  { type: "handoff", handoff_id: handoff.id },
+                ],
+              }),
+            ],
+            null,
+            null,
+            { conversation: execution, handoff },
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    function RoutedWorkspace(): React.ReactElement {
+      const [routedConversationId, setRoutedConversationId] = useState(conversationId);
+      return (
+        <ConversationWorkspace
+          projectId={projectId}
+          initialConversationId={routedConversationId}
+          onConversationSelected={(nextConversationId) => {
+            selected(nextConversationId);
+            setRoutedConversationId(nextConversationId);
+          }}
+          onUnauthorized={() => undefined}
+        />
+      );
+    }
+    render(<RoutedWorkspace />);
+
+    expect(
+      await screen.findByText("Recovered the fresh execution conversation."),
+    ).toBeInTheDocument();
+    expect(selected).toHaveBeenCalledTimes(1);
+    expect(selected).toHaveBeenCalledWith(execution.id);
+    expect(
+      window.sessionStorage.getItem(`norns:conversation-approval-transition:${conversationId}`),
+    ).toBeNull();
+  });
+
+  it("keeps archived planning readable and exposes truthful linked-conversation usage", async () => {
+    const approvedVersion = planVersion({
+      status: "approved",
+      approved_by_user_id: "user-1",
+      approved_at: now,
+    });
+    const archived = { ...conversation, status: "archived" as const, archived_at: now };
+    const execution = executionConversation();
+    const handoff = handoffFor(approvedVersion, execution.id);
+    const planningSentinel = "PLANNING_SENTINEL remains readable only in the archived thread.";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [
+              {
+                work_item: { ...workItem, status: "executing" },
+                conversations: [archived, execution],
+                conversation_usage: {
+                  [archived.id]: {
+                    input_tokens: 44,
+                    output_tokens: 6,
+                    cost_usd: null,
+                    exact_cost: false,
+                    usage_status: "pending",
+                    attempt_count: 1,
+                  },
+                  [execution.id]: {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost_usd: null,
+                    exact_cost: false,
+                    usage_status: "unavailable",
+                    attempt_count: 0,
+                  },
+                },
+              },
+            ],
+          });
+        }
+        if (url.endsWith(`/conversations/${archived.id}`)) {
+          return detailResponse(
+            [
+              message({
+                id: "message-planning-sentinel",
+                role: "assistant",
+                sequence: 1,
+                parts: [{ type: "text", format: "markdown", text: planningSentinel }],
+              }),
+            ],
+            null,
+            null,
+            {
+              conversation: archived,
+              planVersions: [approvedVersion],
+              handoff,
+            },
+          );
+        }
+        if (url.endsWith(`/conversations/${execution.id}`)) {
+          return detailResponse([], null, null, { conversation: execution, handoff });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const selected = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={archived.id}
+        onConversationSelected={selected}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText(planningSentinel)).toBeInTheDocument();
+    expect(screen.getByText("This planning conversation is archived.")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "Message the project PM" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: `Open Planning conversation for ${workItem.title} (archived)`,
+      }),
+    ).toHaveTextContent("Usage is still settling");
+    expect(
+      screen.getByRole("button", {
+        name: `Open Execution PM conversation for ${workItem.title} (active)`,
+      }),
+    ).toHaveTextContent("Usage is unavailable");
+
+    await user.click(screen.getByRole("button", { name: "Open execution PM conversation" }));
+    expect(await screen.findByRole("textbox", { name: "Message the execution PM" })).toBeEnabled();
+    expect(selected).toHaveBeenCalledWith(execution.id);
+  });
+
+  it("retrieves only explicitly selected planning messages and caps one receipt at 20", async () => {
+    const approvedVersion = planVersion({
+      status: "approved",
+      approved_by_user_id: "user-1",
+      approved_at: now,
+    });
+    const archived = { ...conversation, status: "archived" as const, archived_at: now };
+    const execution = executionConversation();
+    const handoff = handoffFor(approvedVersion, execution.id);
+    const planningMessages = Array.from({ length: 21 }, (_, index) =>
+      message({
+        id: `planning-message-${index + 1}`,
+        role: "assistant",
+        sequence: index + 1,
+        parts: [
+          {
+            type: "text",
+            format: "markdown",
+            text:
+              index === 0
+                ? "PLANNING_SENTINEL is available only after an explicit planning read."
+                : `Planning detail ${index + 1}`,
+          },
+        ],
+      }),
+    );
+    const receipt = {
+      schema_version: 2 as const,
+      id: "excerpt-receipt-1",
+      project_id: projectId,
+      work_item_id: workItemId,
+      source_conversation_id: archived.id,
+      target_conversation_id: execution.id,
+      handoff_id: handoff.id,
+      requested_by_user_id: "user-1",
+      idempotency_key: "excerpt-request-1",
+      request_fingerprint: "1".repeat(64),
+      source_message_ids: planningMessages.slice(0, 20).map((item) => item.id),
+      source_message_hashes: planningMessages.slice(0, 20).map(() => "2".repeat(64)),
+      result_message_id: "message-excerpt-result",
+      created_at: now,
+    };
+    const seed = message({
+      id: "message-execution-handoff-only",
+      role: "system",
+      sequence: 1,
+      conversation_id: execution.id,
+      parts: [
+        { type: "text", format: "markdown", text: "Start only from the compact handoff." },
+        { type: "handoff", handoff_id: handoff.id },
+      ],
+    });
+    const excerptResult = message({
+      id: receipt.result_message_id,
+      role: "system",
+      sequence: 2,
+      conversation_id: execution.id,
+      parts: [
+        {
+          type: "text",
+          format: "markdown",
+          text: "Explicitly retrieved 20 planning messages.",
+        },
+        { type: "planning_excerpt", excerpt_receipt_id: receipt.id },
+      ],
+    });
+    let delivered = false;
+    let planningReads = 0;
+    let excerptBody: {
+      idempotency_key: string;
+      source_conversation_id: string;
+      message_ids: string[];
+    } | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [
+              {
+                work_item: { ...workItem, status: "executing" },
+                conversations: [archived, execution],
+              },
+            ],
+          });
+        }
+        if (
+          url.endsWith(`/conversations/${execution.id}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return detailResponse(delivered ? [seed, excerptResult] : [seed], null, null, {
+            conversation: execution,
+            handoff,
+            latestSummary: compactSummary(execution.id),
+            excerptReceipts: delivered ? [receipt] : [],
+          });
+        }
+        if (
+          url.endsWith(`/conversations/${archived.id}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          planningReads += 1;
+          return detailResponse(planningMessages, null, null, {
+            conversation: archived,
+            handoff,
+          });
+        }
+        if (
+          url.endsWith(`/conversations/${execution.id}/planning-excerpts`) &&
+          init?.method === "POST"
+        ) {
+          excerptBody = JSON.parse(String(init.body));
+          delivered = true;
+          return Response.json({ message: excerptResult, receipt });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={execution.id}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("Start only from the compact handoff.")).toBeInTheDocument();
+    expect(screen.queryByText(/PLANNING_SENTINEL/)).not.toBeInTheDocument();
+    expect(planningReads).toBe(0);
+
+    await user.click(screen.getByRole("button", { name: "Retrieve planning excerpt" }));
+    expect(planningReads).toBe(0);
+    await user.click(screen.getByRole("button", { name: "Load planning messages" }));
+    expect(await screen.findByText(/PLANNING_SENTINEL/)).toBeInTheDocument();
+    expect(planningReads).toBe(1);
+
+    const checkboxes = screen.getAllByRole("checkbox");
+    for (const checkbox of checkboxes.slice(0, 20)) {
+      await user.click(checkbox);
+    }
+    expect(screen.getByText("20 of 20 messages selected")).toBeInTheDocument();
+    expect(checkboxes[20]).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Add selected excerpt to execution" }));
+
+    expect(
+      await screen.findByText("Explicitly retrieved 20 planning messages."),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("conversation-planning-excerpt-receipt")).toHaveTextContent(
+      "20 planning messages added",
+    );
+    expect(excerptBody).toMatchObject({
+      idempotency_key: expect.any(String),
+      source_conversation_id: archived.id,
+      message_ids: planningMessages
+        .slice(0, 20)
+        .map((item) => item.id)
+        .sort(),
+    });
+  });
+
+  it("shows historical approval truthfully without routing to a null execution thread", async () => {
+    const approvedVersion = planVersion({
+      status: "approved",
+      approved_by_user_id: "user-1",
+      approved_at: now,
+    });
+    const approval = planAction({
+      id: "action-approval-before-handoffs",
+      action_type: "approve_plan",
+      status: "applied",
+      payload: {
+        parameters: {
+          plan_version_id: approvedVersion.id,
+          content_hash: approvedVersion.content_hash,
+          plan_review_id: "review-1",
+        },
+      },
+    });
+    const legacyEffect: V2ConversationPlanActionEffectT = {
+      schema_version: 2,
+      id: "effect-approval-before-handoffs",
+      project_id: projectId,
+      work_item_id: workItemId,
+      conversation_id: conversationId,
+      action_id: approval.id,
+      effect: {
+        kind: "plan_approved",
+        plan_version: approvedVersion,
+        plan_review_id: "review-1",
+        planning_run_id: "planning-run-legacy",
+        transition_status: "legacy_unavailable",
+        execution_conversation_id: null,
+        handoff_id: null,
+        kickoff_intent_id: null,
+        execution: {
+          status: "started",
+          started: true,
+          detail: "Historical execution started before conversation handoffs existed.",
+        },
+      },
+      created_at: now,
+      updated_at: now,
+    };
+    window.sessionStorage.setItem(
+      `norns:conversation-approval-transition:${conversationId}`,
+      approval.id,
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse(
+            [
+              message({
+                id: "message-legacy-approval",
+                role: "assistant",
+                sequence: 1,
+                parts: [{ type: "action", action_id: approval.id }],
+              }),
+            ],
+            null,
+            null,
+            {
+              planVersions: [approvedVersion],
+              actions: [approval],
+              effects: [legacyEffect],
+            },
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const selected = vi.fn();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onConversationSelected={selected}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(
+      await screen.findByText(/approved before execution conversation handoffs were recorded/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("conversation-execution-link")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /execution pm conversation/i }),
+    ).not.toBeInTheDocument();
+    expect(selected).not.toHaveBeenCalled();
+  });
+
+  it("does not resolve a conversation ID outside the current project scope", async () => {
+    const foreignConversationId = "conversation-from-another-project";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.endsWith("/work-items")) return listResponse();
+      if (url.endsWith(`/projects/${projectId}/conversations/${foreignConversationId}`)) {
+        return Response.json(
+          { error: "conversation_not_found", message: "Conversation not found." },
+          { status: 404 },
+        );
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const selected = vi.fn();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={foreignConversationId}
+        onConversationSelected={selected}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByTestId("conversation-error")).toHaveTextContent(
+      "Conversation not found.",
+    );
+    expect(selected).not.toHaveBeenCalled();
+    expect(screen.queryByText("PLANNING_SENTINEL")).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v2/projects/${projectId}/conversations/${foreignConversationId}`,
+      expect.objectContaining({ credentials: "include" }),
     );
   });
 });

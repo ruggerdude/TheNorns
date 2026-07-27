@@ -7,6 +7,7 @@ import {
 } from "@norns/contracts";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ConversationContextAssembler } from "../src/conversations/contextAssembler.js";
+import { ExecutionConversationService } from "../src/conversations/executionConversation.js";
 import { ConversationPlanChangeProposalService } from "../src/conversations/planChangeProposal.js";
 import { ConversationPlanProposalService } from "../src/conversations/planProposal.js";
 import {
@@ -15,11 +16,20 @@ import {
 } from "../src/conversations/planWorkflow.js";
 import { PostgresConversationRepository } from "../src/conversations/repository.js";
 import { ConversationService } from "../src/conversations/service.js";
-import { canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
+import { DispatchContextScopeRepository } from "../src/coordinator/dispatchContextScope.js";
+import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
+import { PhaseLaunchService } from "../src/coordinator/phaseLaunchService.js";
+import { RelationalTaskContextAssembler, TaskContextStore } from "../src/execution/index.js";
+import { canonicalJson, canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
+import { ExecutionKickoffService } from "../src/planning/executionKickoff.js";
 import type { ReviewOnlyPlanningResult } from "../src/planning/reviewOnlySession.js";
 import type { ApprovedPlanExecutionKickoffInput } from "../src/planning/runService.js";
+import { PhaseWorkflowService } from "../src/projects/phaseWorkflowService.js";
+import { StrategyBridgeService } from "../src/projects/strategyBridgeService.js";
+import { StrategyWorkflowService } from "../src/projects/strategyWorkflowService.js";
+import { RelayStores } from "../src/stores.js";
 
 const projectId = "conversation-plan-project";
 const owner = { id: "conversation-plan-owner" };
@@ -78,6 +88,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
   let workflow: ConversationPlanWorkflowService;
   let proposals: ConversationPlanProposalService;
   let changes: ConversationPlanChangeProposalService;
+  let executionConversations: ExecutionConversationService;
   let proposalAdapter: LlmAdapter;
   let idSequence = 0;
   let dispatches: string[];
@@ -85,6 +96,9 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
   let kickoff: (
     input: ApprovedPlanExecutionKickoffInput,
   ) => Promise<{ started: boolean; detail: string }>;
+  let approvalFailureAt: string | null;
+  let failKickoffClaim: boolean;
+  let failKickoffSettlement: boolean;
 
   const newId = (prefix: string): string => `${prefix}-phase3-${++idSequence}`;
 
@@ -145,6 +159,17 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
           return kickoff(input);
         },
       },
+      approvalTransitionCheckpoint: (checkpoint) => {
+        if (checkpoint === approvalFailureAt) {
+          throw new Error(`injected approval failure at ${checkpoint}`);
+        }
+      },
+      kickoffDispatchCheckpoint: () => {
+        if (failKickoffClaim) throw new Error("injected kickoff claim failure");
+      },
+      kickoffSettlementCheckpoint: () => {
+        if (failKickoffSettlement) throw new Error("injected kickoff settlement failure");
+      },
     });
     proposals = new ConversationPlanProposalService(
       transactions,
@@ -158,12 +183,19 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       },
     );
     changes = new ConversationPlanChangeProposalService(transactions, workflow, newId);
+    executionConversations = new ExecutionConversationService(transactions, {
+      newId,
+      now: () => new Date("2026-07-27T16:00:00.000Z"),
+    });
   }, 60_000);
 
   beforeEach(() => {
     dispatches = [];
     kickoffInputs = [];
     kickoff = async () => ({ started: false, detail: "test refused execution" });
+    approvalFailureAt = null;
+    failKickoffClaim = false;
+    failKickoffSettlement = false;
     proposalAdapter = new FakeAdapter("anthropic", "claude-sonnet-5");
   });
 
@@ -171,7 +203,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     await pg.close();
   });
 
-  async function workspace(label: string, withArtifact = false) {
+  async function workspace(label: string, withArtifact = false, withAttachment = false) {
     const created = await conversations.createPlanningWorkspace(
       owner,
       {
@@ -183,6 +215,8 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     );
     const artifactId = withArtifact ? `artifact-${label}` : null;
     const artifactHash = "c".repeat(64);
+    const attachmentId = withAttachment ? `attachment-${label}` : null;
+    const attachmentHash = "d".repeat(64);
     if (artifactId) {
       await pg.query(
         `INSERT INTO artifacts (
@@ -195,6 +229,19 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         [artifactId, projectId, artifactHash, owner.id],
       );
     }
+    if (attachmentId) {
+      await pg.query(
+        `INSERT INTO attachment_blobs (sha256, content)
+         VALUES ($1,$2)`,
+        [attachmentHash, Buffer.from("phase4-image-bytes")],
+      );
+      await pg.query(
+        `INSERT INTO attachments (
+           id, project_id, sha256, mime, bytes, width, height, purpose, created_by
+         ) VALUES ($1,$2,$3,'image/png',$4,20,20,'conversation',$5)`,
+        [attachmentId, projectId, attachmentHash, 18, owner.id],
+      );
+    }
     const initial = await conversations.submitUserMessage(owner, {
       project_id: projectId,
       work_item_id: created.work_item.id,
@@ -204,7 +251,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         {
           type: "text",
           format: "markdown",
-          text: `BRAINSTORM-${label}: compare several abandoned approaches before planning.`,
+          text: `${["isolated-qc", "production-package"].includes(label) ? "PLANNING_TRANSCRIPT_SENTINEL_DO_NOT_FORWARD " : ""}BRAINSTORM-${label}: compare several abandoned approaches before planning.`,
         },
         ...(artifactId
           ? [
@@ -212,6 +259,16 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
                 type: "artifact" as const,
                 artifact_id: artifactId,
                 label: "Approved checkout mockup",
+                media_type: "image/png",
+              },
+            ]
+          : []),
+        ...(attachmentId
+          ? [
+              {
+                type: "attachment" as const,
+                attachment_id: attachmentId,
+                name: "approved-interface.png",
                 media_type: "image/png",
               },
             ]
@@ -224,6 +281,8 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       initialMessageId: initial.id,
       artifactId,
       artifactHash,
+      attachmentId,
+      attachmentHash,
     };
   }
 
@@ -280,6 +339,150 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     );
     if (!action) throw new Error(`missing proposed ${type} action`);
     return action;
+  }
+
+  async function reviewReady(
+    scope: { workItemId: string; conversationId: string },
+    candidate: V2WorkPlanContractT,
+    key: string,
+  ) {
+    const saved = await proposeAndSave(scope, candidate, key);
+    const qcAction = await proposedAction(scope, "send_plan_to_qc");
+    const qc = await workflow.confirm(owner.id, confirmation(scope, qcAction.id, `${key}-qc`));
+    if (qc.effect.kind !== "qc_started") throw new Error("expected QC effect");
+    const seed = await workflow.loadReviewOnlySeed(qc.effect.planning_run_id);
+    await workflow.markReviewOnlyStarted(seed.reviewId);
+    await workflow.completeReviewOnly({
+      reviewId: seed.reviewId,
+      planningRunId: qc.effect.planning_run_id,
+      result: {
+        status: "converged",
+        rounds: 1,
+        seed_plan: candidate,
+        final_plan: candidate,
+        result_plan_content_hash: canonicalSha256(candidate),
+        review_rounds: [
+          {
+            round: 1,
+            reviewed_plan: candidate,
+            findings: [],
+            responses: null,
+          },
+        ],
+        usage: [],
+      },
+      totalCostUsd: 0,
+    });
+    const approval = await proposedAction(scope, "approve_plan");
+    return { saved, qc, seed, approval };
+  }
+
+  async function productionExecutionKickoff(): Promise<{
+    kickoff: ExecutionKickoffService;
+    coordinator: Phase4Coordinator;
+    assembler: RelationalTaskContextAssembler;
+  }> {
+    const bindingId = "conversation-package-binding";
+    const runnerId = "conversation-package-runner";
+    await pg.query(
+      `INSERT INTO repository_bindings (
+         id, project_id, binding_type, status, runner_id, workspace_id,
+         repository_id, repository_display_name, granted_permissions,
+         default_branch, observed_head, verification_policy_ref,
+         repository_health, created_by_actor_type, created_by_actor_id
+       ) VALUES (
+         $1,$2,'local_runner','connected',$3,'conversation-workspace',
+         'conversation-repository','Conversation repository','{}'::jsonb,
+         'main','conversation-head','verification/strict','healthy','human',$4
+       ) ON CONFLICT (id) DO NOTHING`,
+      [bindingId, projectId, runnerId, owner.id],
+    );
+    await pg.query("UPDATE projects SET primary_repository_binding_id=$1 WHERE id=$2", [
+      bindingId,
+      projectId,
+    ]);
+    await pg.query(
+      `INSERT INTO artifacts (
+         id, project_id, kind, label, media_type, storage_ref, content_hash, byte_size,
+         provenance_actor_type, provenance_actor_id, redaction_status
+       ) VALUES (
+         'conversation-package-architecture-artifact',$1,'architecture',
+         'Conversation architecture','text/markdown','https://example.com/architecture',
+         $2,10,'human',$3,'reviewed'
+       ) ON CONFLICT (id) DO NOTHING`,
+      [projectId, "e".repeat(64), owner.id],
+    );
+    await pg.query(
+      `INSERT INTO architecture_revisions (
+         id, project_id, revision, title, summary, architecture_artifact_id,
+         repository_revision, provenance_actor_type, provenance_actor_id
+       ) VALUES (
+         'conversation-package-architecture',$1,1,'Monorepo',
+         'pnpm workspace','conversation-package-architecture-artifact',
+         'conversation-head','human',$2
+       ) ON CONFLICT (id) DO NOTHING`,
+      [projectId, owner.id],
+    );
+    await pg.query("UPDATE projects SET current_architecture_revision_id=$1 WHERE id=$2", [
+      "conversation-package-architecture",
+      projectId,
+    ]);
+    for (const [key, value] of [
+      ["build_command", "pnpm build"],
+      ["test_command", "pnpm test"],
+      ["lint_command", "pnpm biome check ."],
+    ] as const) {
+      await pg.query(
+        `INSERT INTO project_memory_entries (
+           id, project_id, category, content, provenance, confidence,
+           version, status
+         ) VALUES ($1,$2,'repository_fact',$3,'repository_ingestion',1,1,'active')
+         ON CONFLICT (id) DO NOTHING`,
+        [`conversation-package-${key}`, projectId, `${key}: ${value}`],
+      );
+    }
+    await pg.query(
+      `INSERT INTO project_memory_entries (
+         id, project_id, category, content, provenance, source_ref, confidence,
+         version, status, approved_by_human, approved_by, approved_at
+       ) VALUES (
+         'conversation-package-rule',$1,'directive',
+         'PACKAGE_RULE_SENTINEL: verify the immutable package.',
+         'project_rules','{"kind":"project_rules_file"}'::jsonb,1,1,'active',
+         true,$2,'2026-07-27T15:00:00Z'
+       ) ON CONFLICT (id) DO NOTHING`,
+      [projectId, owner.id],
+    );
+    const stores = new RelayStores();
+    stores.registerRunner(runnerId, "test-public-key");
+    const coordinator = new Phase4Coordinator(transactions);
+    const assembler = new RelationalTaskContextAssembler(
+      transactions,
+      new TaskContextStore(transactions),
+      { baseUrl: "https://norns.example.com" },
+    );
+    const phaseLaunch = new PhaseLaunchService(
+      transactions,
+      coordinator,
+      assembler,
+      new DispatchContextScopeRepository(transactions),
+      (id) => {
+        const runner = stores.runner(id);
+        return runner
+          ? { runner_id: runner.runner_id, runner_generation: runner.generation }
+          : null;
+      },
+    );
+    const bridge = new StrategyBridgeService({
+      transactions,
+      phases: new PhaseWorkflowService(transactions),
+      strategies: new StrategyWorkflowService(transactions),
+    });
+    return {
+      kickoff: new ExecutionKickoffService({ transactions, bridge, phaseLaunch }),
+      coordinator,
+      assembler,
+    };
   }
 
   it("keeps generation inert, replays it idempotently, and emits reachable follow-ups on save", async () => {
@@ -745,6 +948,8 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       {
         projectId,
         planningRunId: qc.effect.planning_run_id,
+        handoffId:
+          approved.effect.kind === "plan_approved" ? approved.effect.handoff_id : "missing-handoff",
         staffing: [
           {
             node_id: "conversation-api",
@@ -758,6 +963,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     ]);
     expect(approved.effect).toMatchObject({
       kind: "plan_approved",
+      transition_status: "created",
       plan_version: {
         id: saved.id,
         status: "approved",
@@ -771,9 +977,936 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         detail: "runner unavailable after approval",
       },
     });
+    if (approved.effect.kind !== "plan_approved") throw new Error("expected approved effect");
+    expect(approved.effect.execution_conversation_id).toBeTruthy();
+    expect(approved.effect.handoff_id).toBeTruthy();
+    expect(approved.effect.kickoff_intent_id).toBeTruthy();
+    const transition = await pg.query<{
+      planning_status: string;
+      planning_archived_at: string | null;
+      execution_kind: string;
+      execution_status: string;
+      seed_parts: unknown;
+      handoff_package: unknown;
+      kickoff_status: string;
+      task_package_count: number | string;
+      task_packages: unknown;
+      summary_count: number | string;
+    }>(
+      `SELECT planning.status AS planning_status,
+              planning.archived_at AS planning_archived_at,
+              execution.kind AS execution_kind,
+              execution.status AS execution_status,
+              seed.parts AS seed_parts,
+              handoff.package AS handoff_package,
+              intent.status AS kickoff_status,
+              (
+                SELECT count(*) FROM conversation_task_packages package
+                 WHERE package.handoff_id=handoff.id
+              ) AS task_package_count,
+              (
+                SELECT coalesce(jsonb_agg(package.package ORDER BY package.module_id), '[]'::jsonb)
+                  FROM conversation_task_packages package
+                 WHERE package.handoff_id=handoff.id
+              ) AS task_packages,
+              (
+                SELECT count(*) FROM conversation_compaction_receipts receipt
+                 WHERE receipt.conversation_id=planning.id
+              ) AS summary_count
+         FROM work_conversations planning
+         JOIN conversation_handoffs handoff
+           ON handoff.source_conversation_id=planning.id
+         JOIN work_conversations execution
+           ON execution.id=handoff.target_conversation_id
+         JOIN work_messages seed
+           ON seed.conversation_id=execution.id AND seed.sequence=1
+         JOIN conversation_kickoff_intents intent
+           ON intent.handoff_id=handoff.id
+        WHERE planning.id=$1`,
+      [scope.conversationId],
+    );
+    expect(transition.rows[0]).toMatchObject({
+      planning_status: "archived",
+      execution_kind: "execution_pm",
+      execution_status: "active",
+      kickoff_status: "failed",
+      task_package_count: 1,
+      summary_count: 1,
+    });
+    expect(transition.rows[0]?.planning_archived_at).toBeTruthy();
+    expect(JSON.stringify(transition.rows[0]?.seed_parts)).not.toContain(
+      "PLANNING_TRANSCRIPT_SENTINEL_DO_NOT_FORWARD",
+    );
+    expect(JSON.stringify(transition.rows[0]?.handoff_package)).not.toContain(
+      "PLANNING_TRANSCRIPT_SENTINEL_DO_NOT_FORWARD",
+    );
+    expect(JSON.stringify(transition.rows[0]?.task_packages)).not.toContain(
+      "PLANNING_TRANSCRIPT_SENTINEL_DO_NOT_FORWARD",
+    );
+    const executionConversationId = approved.effect.execution_conversation_id;
+    if (!executionConversationId) throw new Error("missing execution conversation");
+    const executionPrompt = await conversations.submitUserMessage(owner, {
+      project_id: projectId,
+      work_item_id: scope.workItemId,
+      conversation_id: executionConversationId,
+      client_message_id: "execution-context-sentinel-check",
+      parts: [{ type: "text", format: "plain", text: "Begin the approved work." }],
+    });
+    const isolatedContext = await new ConversationContextAssembler(transactions).assemble(
+      projectId,
+      scope.workItemId,
+      executionConversationId,
+      executionPrompt.id,
+    );
+    expect(isolatedContext.manifest.entries[0]?.ref).toBe("execution-pm-v1");
+    expect(JSON.stringify(isolatedContext)).not.toContain(
+      "PLANNING_TRANSCRIPT_SENTINEL_DO_NOT_FORWARD",
+    );
+    const excerpt = await executionConversations.createPlanningExcerpt(
+      owner.id,
+      projectId,
+      scope.workItemId,
+      executionConversationId,
+      {
+        idempotency_key: "explicit-planning-excerpt",
+        source_conversation_id: scope.conversationId,
+        message_ids: [scope.initialMessageId],
+      },
+    );
+    expect(excerpt.receipt.source_message_ids).toEqual([scope.initialMessageId]);
+    const afterExcerpt = await conversations.submitUserMessage(owner, {
+      project_id: projectId,
+      work_item_id: scope.workItemId,
+      conversation_id: executionConversationId,
+      client_message_id: "execution-context-with-explicit-excerpt",
+      parts: [{ type: "text", format: "plain", text: "Use that requested excerpt." }],
+    });
+    const explicitContext = await new ConversationContextAssembler(transactions).assemble(
+      projectId,
+      scope.workItemId,
+      executionConversationId,
+      afterExcerpt.id,
+    );
+    expect(JSON.stringify(explicitContext)).toContain(
+      "PLANNING_TRANSCRIPT_SENTINEL_DO_NOT_FORWARD",
+    );
+    expect(
+      explicitContext.manifest.entries.filter((entry) => entry.kind === "planning_excerpt"),
+    ).toHaveLength(1);
+
+    const durable = await pg.query<{
+      handoff_package: unknown;
+      task_package: unknown;
+      planning_run_id: string;
+      plan_review_id: string;
+      approved_plan_version_id: string;
+      source_message_ids: unknown;
+      source_message_hashes: unknown;
+      canonical_source_messages: unknown;
+      result_message_id: string;
+      summary_id: string;
+      summary_source_ids: unknown;
+      summary_source_hashes: unknown;
+      summary_canonical_sources: unknown;
+      canonical_summary: string;
+    }>(
+      `SELECT handoff.package AS handoff_package,
+              task_package.package AS task_package,
+              intent.planning_run_id, intent.plan_review_id,
+              intent.approved_plan_version_id,
+              excerpt.source_message_ids, excerpt.source_message_hashes,
+              excerpt.canonical_source_messages, excerpt.result_message_id,
+              compaction.summary_id,
+              compaction.source_message_ids AS summary_source_ids,
+              compaction.source_message_hashes AS summary_source_hashes,
+              compaction.canonical_source_messages AS summary_canonical_sources,
+              compaction.canonical_summary
+         FROM conversation_handoffs handoff
+         JOIN conversation_task_packages task_package
+           ON task_package.handoff_id=handoff.id
+         JOIN conversation_kickoff_intents intent ON intent.handoff_id=handoff.id
+         JOIN conversation_planning_excerpt_receipts excerpt
+           ON excerpt.handoff_id=handoff.id
+         JOIN conversation_compaction_receipts compaction
+           ON compaction.conversation_id=handoff.source_conversation_id
+        WHERE handoff.id=$1`,
+      [approved.effect.handoff_id],
+    );
+    const evidence = durable.rows[0];
+    if (!evidence) throw new Error("missing Phase 4 durable evidence");
+    const malformedHandoff = {
+      ...(evidence.handoff_package as Record<string, unknown>),
+      planning_transcript: "must never be embedded",
+    };
+    const malformedCanonical = canonicalJson(malformedHandoff);
+    await expect(
+      pg.query(
+        `INSERT INTO conversation_handoffs (
+           id, project_id, work_item_id, source_conversation_id,
+           target_conversation_id, approved_plan_version_id, created_by_user_id,
+           kind, package, canonical_package, content_hash
+         ) VALUES (
+           'malformed-handoff-phase4',$1,$2,$3,$4,$5,$6,
+           'planning_to_execution',$7::jsonb,$8,$9
+         )`,
+        [
+          projectId,
+          scope.workItemId,
+          scope.conversationId,
+          executionConversationId,
+          saved.id,
+          owner.id,
+          malformedCanonical,
+          malformedCanonical,
+          canonicalSha256(malformedHandoff),
+        ],
+      ),
+    ).rejects.toThrow(/missing required structured transition evidence/);
+    const malformedManifestHandoff = {
+      ...(evidence.handoff_package as Record<string, unknown>),
+      context_manifest: (
+        (evidence.handoff_package as { context_manifest: Array<Record<string, unknown>> })
+          .context_manifest ?? []
+      ).map((reference, index) =>
+        index === 0 ? { ...reference, hidden_prompt: "must be rejected" } : reference,
+      ),
+    };
+    const malformedManifestCanonical = canonicalJson(malformedManifestHandoff);
+    await expect(
+      pg.query(
+        `INSERT INTO conversation_handoffs (
+           id, project_id, work_item_id, source_conversation_id,
+           target_conversation_id, approved_plan_version_id, created_by_user_id,
+           kind, package, canonical_package, content_hash
+         ) VALUES (
+           'malformed-manifest-handoff-phase4',$1,$2,$3,$4,$5,$6,
+           'planning_to_execution',$7::jsonb,$8,$9
+         )`,
+        [
+          projectId,
+          scope.workItemId,
+          scope.conversationId,
+          executionConversationId,
+          saved.id,
+          owner.id,
+          malformedManifestCanonical,
+          malformedManifestCanonical,
+          canonicalSha256(malformedManifestHandoff),
+        ],
+      ),
+    ).rejects.toThrow(/manifest must uniquely bind the exact approved plan/);
+    const leakyTaskPackage = {
+      ...(evidence.task_package as Record<string, unknown>),
+      planning_transcript: "must never reach a worker",
+    };
+    const leakyTaskCanonical = canonicalJson(leakyTaskPackage);
+    await expect(
+      pg.query(
+        `INSERT INTO conversation_task_packages (
+           id, project_id, work_item_id, conversation_id, handoff_id,
+           approved_plan_version_id, module_id, package, canonical_package,
+           content_hash
+         ) VALUES (
+           'leaky-task-package-phase4',$1,$2,$3,$4,$5,'conversation-api',
+           $6::jsonb,$7,$8
+         )`,
+        [
+          projectId,
+          scope.workItemId,
+          executionConversationId,
+          approved.effect.handoff_id,
+          saved.id,
+          leakyTaskCanonical,
+          leakyTaskCanonical,
+          canonicalSha256(leakyTaskPackage),
+        ],
+      ),
+    ).rejects.toThrow(/exact module-scoped handoff projection/);
+    const badTaskPackage = {
+      ...(evidence.task_package as Record<string, unknown>),
+      module: {
+        ...((evidence.task_package as { module: Record<string, unknown> }).module ?? {}),
+        id: "arbitrary-module",
+      },
+      staffing: {
+        ...((evidence.task_package as { staffing: Record<string, unknown> }).staffing ?? {}),
+        module_id: "arbitrary-module",
+      },
+    };
+    const badTaskCanonical = canonicalJson(badTaskPackage);
+    await expect(
+      pg.query(
+        `INSERT INTO conversation_task_packages (
+           id, project_id, work_item_id, conversation_id, handoff_id,
+           approved_plan_version_id, module_id, package, canonical_package,
+           content_hash
+         ) VALUES (
+           'bad-task-package-phase4',$1,$2,$3,$4,$5,'arbitrary-module',
+           $6::jsonb,$7,$8
+         )`,
+        [
+          projectId,
+          scope.workItemId,
+          executionConversationId,
+          approved.effect.handoff_id,
+          saved.id,
+          badTaskCanonical,
+          badTaskCanonical,
+          canonicalSha256(badTaskPackage),
+        ],
+      ),
+    ).rejects.toThrow(/exact module-scoped handoff projection/);
+    await expect(
+      pg.query(
+        `INSERT INTO conversation_kickoff_intents (
+           id, project_id, work_item_id, source_conversation_id,
+           execution_conversation_id, action_id, approved_plan_version_id,
+           plan_review_id, planning_run_id, handoff_id, decided_by_user_id
+         ) VALUES (
+           'bad-kickoff-intent-phase4',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10
+         )`,
+        [
+          projectId,
+          scope.workItemId,
+          scope.conversationId,
+          executionConversationId,
+          approval.id,
+          evidence.approved_plan_version_id,
+          evidence.plan_review_id,
+          evidence.planning_run_id,
+          approved.effect.handoff_id,
+          member.id,
+        ],
+      ),
+    ).rejects.toThrow(/scope must equal its approved action/);
+    const duplicateIds = [
+      ...(evidence.source_message_ids as string[]),
+      (evidence.source_message_ids as string[])[0],
+    ];
+    const duplicateHashes = [
+      ...(evidence.source_message_hashes as string[]),
+      (evidence.source_message_hashes as string[])[0],
+    ];
+    const duplicateCanonical = [
+      ...(evidence.canonical_source_messages as string[]),
+      (evidence.canonical_source_messages as string[])[0],
+    ];
+    const badExcerptSequence = await pg.query<{ sequence: number | string }>(
+      `UPDATE work_conversations
+          SET next_message_sequence=next_message_sequence+1
+        WHERE id=$1
+        RETURNING next_message_sequence-1 AS sequence`,
+      [executionConversationId],
+    );
+    await pg.query(
+      `INSERT INTO work_messages (
+         id, project_id, work_item_id, conversation_id, initiated_by_user_id,
+         actor_type, role, visibility_status, sequence, parts
+       ) VALUES (
+         'bad-excerpt-result-phase4',$1,$2,$3,$4,'system','system','complete',
+         $5,$6::jsonb
+       )`,
+      [
+        projectId,
+        scope.workItemId,
+        executionConversationId,
+        owner.id,
+        Number(badExcerptSequence.rows[0]?.sequence),
+        JSON.stringify([
+          {
+            type: "planning_excerpt",
+            excerpt_receipt_id: "bad-excerpt-phase4",
+          },
+        ]),
+      ],
+    );
+    await expect(
+      pg.query(
+        `INSERT INTO conversation_planning_excerpt_receipts (
+           id, project_id, work_item_id, source_conversation_id,
+           target_conversation_id, handoff_id, requested_by_user_id,
+           idempotency_key, request_fingerprint, source_message_ids,
+           source_message_hashes, canonical_source_messages, result_message_id
+         ) VALUES (
+           'bad-excerpt-phase4',$1,$2,$3,$4,$5,$6,'bad-excerpt-key',$7,
+           $8::jsonb,$9::jsonb,$10::jsonb,$11
+         )`,
+        [
+          projectId,
+          scope.workItemId,
+          scope.conversationId,
+          executionConversationId,
+          approved.effect.handoff_id,
+          owner.id,
+          "a".repeat(64),
+          JSON.stringify(duplicateIds),
+          JSON.stringify(duplicateHashes),
+          JSON.stringify(duplicateCanonical),
+          "bad-excerpt-result-phase4",
+        ],
+      ),
+    ).rejects.toThrow(/exact linked complete messages/);
+    const summaryIds = evidence.summary_source_ids as string[];
+    const summaryHashes = evidence.summary_source_hashes as string[];
+    const summaryCanonical = evidence.summary_canonical_sources as string[];
+    await expect(
+      pg.query(
+        `INSERT INTO conversation_compaction_receipts (
+           id, project_id, work_item_id, conversation_id, summary_id, milestone,
+           source_message_ids, source_message_hashes, canonical_source_messages,
+           canonical_summary
+         ) VALUES (
+           'bad-compaction-phase4',$1,$2,$3,$4,'semantic_milestone',
+           $5::jsonb,$6::jsonb,$7::jsonb,$8
+         )`,
+        [
+          projectId,
+          scope.workItemId,
+          scope.conversationId,
+          evidence.summary_id,
+          JSON.stringify(summaryIds.slice(0, 1)),
+          JSON.stringify(summaryHashes.slice(0, 1)),
+          JSON.stringify(summaryCanonical.slice(0, 1)),
+          evidence.canonical_summary,
+        ],
+      ),
+    ).rejects.toThrow(/exact summary and complete source range/);
+    const qcUsageRequestId = `${seed.reviewId}:review:1`;
+    await pg.query(
+      `INSERT INTO ai_usage_events (
+         id, request_id, sequence, event_type, status, occurred_at, provider,
+         model, endpoint, request_type, retry_group_id, retry_attempt,
+         initiated_by_user_id, project_id, usage_source, confidence,
+         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+         cost_usd, cost_classification, adjusts_event_id
+       ) VALUES
+       (
+         'phase4-qc-start',$1,1,'request_started','started',now(),'openai',
+         'gpt-5.6-sol','responses','planning_review',$1,0,$2,$3,
+         'provider_api',1,NULL,NULL,NULL,NULL,NULL,'unavailable',NULL
+       ),
+       (
+         'phase4-qc-usage-old',$1,2,'usage_observed','in_progress',now(),'openai',
+         'gpt-5.6-sol','responses','planning_review',$1,0,$2,$3,
+         'provider_api',1,10,5,0,0,0.10,'actual',NULL
+       ),
+       (
+         'phase4-qc-usage-latest',$1,3,'usage_observed','in_progress',now(),'openai',
+         'gpt-5.6-sol','responses','planning_review',$1,0,$2,$3,
+         'provider_api',1,20,6,0,0,0.20,'actual',NULL
+       ),
+       (
+         'phase4-qc-adjustment',$1,4,'adjustment','adjusted',now(),'openai',
+         'gpt-5.6-sol','responses','planning_review',$1,0,$2,$3,
+         'manual_adjustment',1,2,1,0,0,0.03,'actual','phase4-qc-usage-latest'
+       ),
+       (
+         'phase4-qc-complete',$1,5,'request_completed','succeeded',now(),'openai',
+         'gpt-5.6-sol','responses','planning_review',$1,0,$2,$3,
+         'provider_api',1,NULL,NULL,NULL,NULL,NULL,'unavailable',NULL
+       )`,
+      [qcUsageRequestId, owner.id, projectId],
+    );
+    const proposalUsage = await pg.query<{
+      input_tokens: number | string;
+      output_tokens: number | string;
+      cost_usd: number | string;
+    }>(
+      `SELECT input_tokens, output_tokens, cost_usd
+         FROM conversation_plan_proposal_attempts
+        WHERE conversation_id=$1 AND status='succeeded'`,
+      [scope.conversationId],
+    );
+    const usageDetail = await executionConversations.detail(
+      owner.id,
+      projectId,
+      scope.workItemId,
+      scope.conversationId,
+    );
+    expect(usageDetail.usage).toMatchObject({
+      input_tokens: Number(proposalUsage.rows[0]?.input_tokens) + 22,
+      output_tokens: Number(proposalUsage.rows[0]?.output_tokens) + 7,
+      exact_cost: true,
+      usage_status: "exact",
+      attempt_count: 2,
+    });
+    expect(usageDetail.usage.cost_usd).toBeCloseTo(
+      Number(proposalUsage.rows[0]?.cost_usd) + 0.23,
+      9,
+    );
     expect(
       await workflow.confirm(owner.id, confirmation(scope, approval.id, "approve-exact-qc-result")),
     ).toEqual(approved);
+    expect(kickoffInputs).toHaveLength(1);
+  });
+
+  it("binds the real conversation package through kickoff, worker context, run, and dispatch", async () => {
+    const scope = await workspace("production-package", false, true);
+    const firstMessage = (
+      await pg.query<{
+        id: string;
+        sequence: number | string;
+        role: string;
+        parts: unknown;
+      }>(
+        `SELECT id, sequence, role, parts FROM work_messages
+          WHERE conversation_id=$1 ORDER BY sequence LIMIT 1`,
+        [scope.conversationId],
+      )
+    ).rows[0];
+    if (!firstMessage) throw new Error("missing planning message");
+    const priorSummary = {
+      objective: "Early semantic checkpoint",
+      constraints: [],
+      decisions: [],
+      risks: [],
+      open_questions: [],
+      artifact_ids: scope.attachmentId ? [scope.attachmentId] : [],
+    };
+    const priorCanonicalMessage = canonicalJson({
+      sequence: Number(firstMessage.sequence),
+      role: firstMessage.role,
+      parts: firstMessage.parts,
+    });
+    await pg.query(
+      `INSERT INTO conversation_summaries (
+         id, project_id, work_item_id, conversation_id, created_by_user_id,
+         version, from_message_sequence, through_message_sequence,
+         summary, content_hash
+       ) VALUES (
+         'production-prior-summary',$1,$2,$3,$4,1,$5,$5,$6::jsonb,$7
+       )`,
+      [
+        projectId,
+        scope.workItemId,
+        scope.conversationId,
+        owner.id,
+        Number(firstMessage.sequence),
+        JSON.stringify(priorSummary),
+        canonicalSha256(priorSummary),
+      ],
+    );
+    await pg.query(
+      `INSERT INTO conversation_compaction_receipts (
+         id, project_id, work_item_id, conversation_id, summary_id, milestone,
+         source_message_ids, source_message_hashes, canonical_source_messages,
+         canonical_summary
+       ) VALUES (
+         'production-prior-receipt',$1,$2,$3,'production-prior-summary',
+         'semantic_milestone',$4::jsonb,$5::jsonb,$6::jsonb,$7
+       )`,
+      [
+        projectId,
+        scope.workItemId,
+        scope.conversationId,
+        JSON.stringify([firstMessage.id]),
+        JSON.stringify([canonicalSha256(JSON.parse(priorCanonicalMessage))]),
+        JSON.stringify([priorCanonicalMessage]),
+        canonicalJson(priorSummary),
+      ],
+    );
+    if (!scope.attachmentId) throw new Error("missing production image attachment");
+    await conversations.submitUserMessage(owner, {
+      project_id: projectId,
+      work_item_id: scope.workItemId,
+      conversation_id: scope.conversationId,
+      client_message_id: "production-package-image-rereference",
+      parts: [
+        {
+          type: "text",
+          format: "markdown",
+          text: "Use this approved image as an explicit implementation reference.",
+        },
+        {
+          type: "attachment",
+          attachment_id: scope.attachmentId,
+          name: "approved-interface.png",
+          media_type: "image/png",
+        },
+      ],
+    });
+
+    const real = await productionExecutionKickoff();
+    kickoff = (input) => real.kickoff.kickoff(input);
+    const ready = await reviewReady(scope, plan(), "production-package");
+    if (ready.qc.effect.kind !== "qc_started") throw new Error("expected QC kickoff");
+    const productionPlanningRunId = ready.qc.effect.planning_run_id;
+    failKickoffSettlement = true;
+    await expect(
+      workflow.confirm(
+        owner.id,
+        confirmation(scope, ready.approval.id, "production-package-approve"),
+      ),
+    ).rejects.toThrow("injected kickoff settlement failure");
+    failKickoffSettlement = false;
+
+    const pending = (
+      await pg.query<{
+        id: string;
+        status: string;
+        handoff_id: string;
+        lease_token: string;
+      }>(
+        `SELECT id, status, handoff_id, lease_token
+           FROM conversation_kickoff_intents
+          WHERE work_item_id=$1`,
+        [scope.workItemId],
+      )
+    ).rows[0];
+    expect(pending).toMatchObject({ status: "leased" });
+    if (!pending) throw new Error("missing leased kickoff intent");
+    const beforeRecovery = await pg.query<{ count: number | string }>(
+      `SELECT count(*) AS count FROM agent_runs run
+        JOIN phases phase ON phase.id=run.phase_id
+       WHERE phase.planning_run_id=$1`,
+      [productionPlanningRunId],
+    );
+    if (Number(beforeRecovery.rows[0]?.count) !== 1) {
+      const diagnostics = await pg.query(
+        `SELECT phase.id, phase.status, phase.planning_run_id,
+                (SELECT count(*) FROM conversation_task_package_bindings binding
+                  WHERE binding.phase_id=phase.id) AS package_bindings
+           FROM phases phase WHERE phase.project_id=$1`,
+        [projectId],
+      );
+      throw new Error(`kickoff did not dispatch: ${JSON.stringify(diagnostics.rows)}`);
+    }
+    await pg.query(
+      `UPDATE conversation_kickoff_intents
+          SET lease_expires_at='2020-01-01T00:00:00Z'
+        WHERE id=$1`,
+      [pending.id],
+    );
+    expect(await workflow.reconcileKickoffIntents()).toBeGreaterThanOrEqual(1);
+
+    const afterRecovery = await pg.query<{
+      status: string;
+      execution_started: boolean;
+      phase_id: string;
+      attempt_count: number | string;
+    }>(
+      `SELECT status, execution_started, phase_id, attempt_count
+         FROM conversation_kickoff_intents WHERE id=$1`,
+      [pending.id],
+    );
+    expect(afterRecovery.rows[0]).toMatchObject({
+      status: "succeeded",
+      execution_started: true,
+    });
+    expect(Number(afterRecovery.rows[0]?.attempt_count)).toBe(2);
+    expect(
+      Number(
+        (
+          await pg.query<{ count: number | string }>(
+            `SELECT count(*) AS count FROM agent_runs run
+              JOIN phases phase ON phase.id=run.phase_id
+             WHERE phase.planning_run_id=$1`,
+            [productionPlanningRunId],
+          )
+        ).rows[0]?.count,
+      ),
+    ).toBe(1);
+
+    const evidence = (
+      await pg.query<{
+        package_id: string;
+        package: unknown;
+        canonical_package: string;
+        package_hash: string;
+        task_id: string;
+        context_document_id: string;
+        served_bytes: Buffer | Uint8Array;
+        run_id: string;
+        run_package_hash: string;
+        envelope: Record<string, unknown>;
+      }>(
+        `SELECT package.id AS package_id, package.package,
+                package.canonical_package, package.content_hash AS package_hash,
+                binding.task_id, binding.context_document_id,
+                blob.content AS served_bytes,
+                package_run.run_id, package_run.content_hash AS run_package_hash,
+                command.envelope
+           FROM conversation_task_packages package
+           JOIN conversation_task_package_bindings binding
+             ON binding.package_id=package.id
+           JOIN task_context_documents document
+             ON document.id=binding.context_document_id
+           JOIN task_context_blobs blob ON blob.sha256=document.sha256
+           JOIN conversation_task_package_runs package_run
+             ON package_run.package_id=package.id
+           JOIN commands command
+             ON command.envelope->>'run_id'=package_run.run_id
+          WHERE package.handoff_id=$1`,
+        [pending.handoff_id],
+      )
+    ).rows[0];
+    if (!evidence) throw new Error("missing production package execution evidence");
+    const taskPackage =
+      typeof evidence.package === "string" ? JSON.parse(evidence.package) : evidence.package;
+    const packageRecord = taskPackage as {
+      approved_plan_version_id: string;
+      approved_plan_content_hash: string;
+      budget: unknown;
+      binding_rules: string[];
+      artifact_ids: string[];
+      context_manifest: Array<{ kind: string; ref: string; content_hash: string }>;
+    };
+    expect(evidence.canonical_package).not.toContain("PLANNING_TRANSCRIPT_SENTINEL_DO_NOT_FORWARD");
+    expect(Buffer.from(evidence.served_bytes).toString("utf8")).toBe(evidence.canonical_package);
+    expect(canonicalSha256(taskPackage)).toBe(evidence.package_hash);
+    expect(packageRecord.approved_plan_version_id).toBe(ready.saved.id);
+    expect(packageRecord.approved_plan_content_hash).toBe(ready.saved.content_hash);
+    expect(packageRecord.budget).toEqual(plan().estimated_budget);
+    expect(packageRecord.binding_rules).toContain(
+      "PACKAGE_RULE_SENTINEL: verify the immutable package.",
+    );
+    expect(packageRecord.artifact_ids).toContain(scope.attachmentId);
+    expect(packageRecord.context_manifest).toContainEqual({
+      kind: "artifact",
+      ref: scope.attachmentId,
+      content_hash: scope.attachmentHash,
+    });
+    expect(evidence.run_package_hash).toBe(evidence.package_hash);
+    const envelope = evidence.envelope as {
+      context_refs: Array<{
+        artifact_id: string;
+        content_hash: string;
+        byte_size: number;
+        storage_ref: string;
+      }>;
+      task_package_id: string;
+      task_package_content_hash: string;
+      task_package_context_ref: {
+        artifact_id: string;
+        content_hash: string;
+        byte_size: number;
+        storage_ref: string;
+      };
+    };
+    expect(envelope.task_package_id).toBe(evidence.package_id);
+    expect(envelope.task_package_content_hash).toBe(evidence.package_hash);
+    expect(envelope.task_package_context_ref).toEqual(
+      envelope.context_refs.find(
+        (reference) => reference.artifact_id === evidence.context_document_id,
+      ),
+    );
+
+    const summaryVersions = await pg.query<{
+      version: number | string;
+      from_message_sequence: number | string;
+      through_message_sequence: number | string;
+    }>(
+      `SELECT version, from_message_sequence, through_message_sequence
+         FROM conversation_summaries
+        WHERE conversation_id=$1 ORDER BY version`,
+      [scope.conversationId],
+    );
+    expect(summaryVersions.rows.map((row) => Number(row.version))).toEqual([1, 2]);
+    expect(Number(summaryVersions.rows[1]?.from_message_sequence)).toBe(
+      Number(firstMessage.sequence),
+    );
+    expect(Number(summaryVersions.rows[1]?.through_message_sequence)).toBeGreaterThan(
+      Number(firstMessage.sequence),
+    );
+
+    const originalBytes = Buffer.from(evidence.served_bytes);
+    await pg.query("UPDATE task_context_blobs SET content=$2 WHERE sha256=$1", [
+      evidence.package_hash,
+      Buffer.from("tampered"),
+    ]);
+    await expect(real.assembler.assembleForTask(evidence.task_id)).rejects.toMatchObject({
+      code: "task_package_mismatch",
+    });
+    await pg.query("UPDATE task_context_blobs SET content=$2 WHERE sha256=$1", [
+      evidence.package_hash,
+      originalBytes,
+    ]);
+
+    const missingTaskId = `${evidence.task_id}:missing-binding`;
+    const missingAssignmentId = "conversation-package-missing-assignment";
+    const recoveredPhaseId = afterRecovery.rows[0]?.phase_id;
+    if (!recoveredPhaseId) throw new Error("kickoff recovery did not retain its phase");
+    await pg.query(
+      `INSERT INTO tasks (
+         id, project_id, phase_id, objective_id, strategy_version_id, title,
+         description, deliverables, acceptance_criteria, complexity, risk,
+         required_roles, required_capabilities, required_inputs, expected_outputs,
+         environment_policy_ref, verification_policy_ref, state,
+         review_evidence, completion_evidence, lifecycle_version, aggregate_version
+       )
+       SELECT $1, project_id, phase_id, objective_id, strategy_version_id,
+              title || ' missing binding', description, deliverables,
+              acceptance_criteria, complexity, risk, required_roles,
+              required_capabilities, required_inputs, expected_outputs,
+              environment_policy_ref, verification_policy_ref, 'pending',
+              '[]'::jsonb, '[]'::jsonb, 0, 1
+         FROM tasks WHERE id=$2`,
+      [missingTaskId, evidence.task_id],
+    );
+    await pg.query(
+      `INSERT INTO agent_assignments (
+         id, project_id, phase_id, task_id, agent_profile_id, status,
+         rationale, rationale_factors, budget_limit_usd,
+         reviewer_agent_profile_id, allocation_policy_ref
+       )
+       SELECT $1, project_id, phase_id, $2, agent_profile_id, 'active',
+              rationale, rationale_factors, budget_limit_usd,
+              reviewer_agent_profile_id, allocation_policy_ref
+         FROM agent_assignments WHERE task_id=$3 LIMIT 1`,
+      [missingAssignmentId, missingTaskId, evidence.task_id],
+    );
+    const beforeMissingDispatch = await pg.query<{ count: number | string }>(
+      "SELECT count(*) AS count FROM agent_runs",
+    );
+    await expect(
+      real.coordinator.schedule({
+        project_id: projectId,
+        phase_id: recoveredPhaseId,
+        task_id: missingTaskId,
+        assignment_id: missingAssignmentId,
+        runner_id: "conversation-package-runner",
+        runner_generation: 1,
+        authorized_by: { actor_type: "human", actor_id: owner.id },
+        authorized_by_session_id: "production-package-missing-binding",
+        correlation_id: "production-package-missing-binding",
+        causation_id: null,
+        context_refs: envelope.context_refs,
+        target_branch: "norns/missing-package",
+        worktree_policy_ref: "policy:worktree:default",
+        sandbox_policy_ref: "policy:sandbox:default",
+        max_input_tokens: 1000,
+        max_output_tokens: 1000,
+        max_duration_seconds: 60,
+        issued_at: "2026-07-27T16:01:00.000Z",
+        expires_at: "2026-07-27T16:06:00.000Z",
+      }),
+    ).rejects.toThrow(/missing its immutable task package binding/);
+    expect(
+      Number(
+        (await pg.query<{ count: number | string }>("SELECT count(*) AS count FROM agent_runs"))
+          .rows[0]?.count,
+      ),
+    ).toBe(Number(beforeMissingDispatch.rows[0]?.count));
+  }, 30_000);
+
+  it("rolls back every planning-to-execution boundary before retrying exactly once", async () => {
+    const scope = await workspace("approval-rollback");
+    const ready = await reviewReady(
+      scope,
+      plan("Atomically transition only after every durable boundary succeeds"),
+      "approval-rollback",
+    );
+    const input = confirmation(scope, ready.approval.id, "approval-rollback-idempotency");
+    const checkpoints = [
+      "plan_frozen",
+      "planning_message_appended",
+      "summary_created",
+      "planning_archived",
+      "execution_conversation_created",
+      "handoff_created",
+      "task_packages_created",
+      "execution_seeded",
+      "kickoff_intent_created",
+      "effect_created",
+    ] as const;
+    for (const checkpoint of checkpoints) {
+      approvalFailureAt = checkpoint;
+      await expect(workflow.confirm(owner.id, input)).rejects.toThrow(
+        `injected approval failure at ${checkpoint}`,
+      );
+      const state = await pg.query<{
+        conversation_status: string;
+        plan_status: string;
+        handoffs: number | string;
+        execution_conversations: number | string;
+        kickoff_intents: number | string;
+        approval_effects: number | string;
+      }>(
+        `SELECT conversation.status AS conversation_status,
+                plan.status AS plan_status,
+                (
+                  SELECT count(*) FROM conversation_handoffs
+                   WHERE source_conversation_id=conversation.id
+                ) AS handoffs,
+                (
+                  SELECT count(*) FROM work_conversations candidate
+                   WHERE candidate.work_item_id=conversation.work_item_id
+                     AND candidate.kind='execution_pm'
+                ) AS execution_conversations,
+                (
+                  SELECT count(*) FROM conversation_kickoff_intents intent
+                   WHERE intent.source_conversation_id=conversation.id
+                ) AS kickoff_intents,
+                (
+                  SELECT count(*) FROM conversation_plan_action_effects effect
+                   WHERE effect.action_id=$3
+                ) AS approval_effects
+           FROM work_conversations conversation
+           JOIN work_plan_versions plan ON plan.id=$2
+          WHERE conversation.id=$1`,
+        [scope.conversationId, ready.saved.id, ready.approval.id],
+      );
+      expect(state.rows[0]).toEqual({
+        conversation_status: "active",
+        plan_status: "in_qc",
+        handoffs: 0,
+        execution_conversations: 0,
+        kickoff_intents: 0,
+        approval_effects: 0,
+      });
+    }
+    approvalFailureAt = null;
+    const approved = await workflow.confirm(owner.id, input);
+    expect(approved.effect).toMatchObject({
+      kind: "plan_approved",
+      transition_status: "created",
+      plan_version: { id: ready.saved.id, status: "approved" },
+    });
+    expect(kickoffInputs).toHaveLength(1);
+    expect(await workflow.confirm(owner.id, input)).toEqual(approved);
+    expect(kickoffInputs).toHaveLength(1);
+  });
+
+  it("recovers a committed pending kickoff after the immediate claim is lost", async () => {
+    const scope = await workspace("kickoff-recovery");
+    const ready = await reviewReady(
+      scope,
+      plan("Recover the durable kickoff intent without a second approval"),
+      "kickoff-recovery",
+    );
+    const input = confirmation(scope, ready.approval.id, "kickoff-recovery-approval");
+    failKickoffClaim = true;
+    await expect(workflow.confirm(owner.id, input)).rejects.toThrow(
+      "injected kickoff claim failure",
+    );
+    const pending = await pg.query<{
+      status: string;
+      attempt_count: number | string;
+      effect_status: string;
+    }>(
+      `SELECT intent.status, intent.attempt_count,
+              effect.execution_status AS effect_status
+         FROM conversation_kickoff_intents intent
+         JOIN conversation_plan_action_effects effect
+           ON effect.kickoff_intent_id=intent.id
+        WHERE intent.action_id=$1`,
+      [ready.approval.id],
+    );
+    expect(pending.rows[0]).toEqual({
+      status: "pending",
+      attempt_count: 0,
+      effect_status: "pending",
+    });
+    expect(kickoffInputs).toHaveLength(0);
+    failKickoffClaim = false;
+    expect(await workflow.reconcileKickoffIntents()).toBeGreaterThanOrEqual(1);
+    expect(kickoffInputs).toHaveLength(1);
+    const recovered = await workflow.confirm(owner.id, input);
+    expect(recovered.effect).toMatchObject({
+      kind: "plan_approved",
+      transition_status: "created",
+      execution: { status: "refused", started: false },
+    });
     expect(kickoffInputs).toHaveLength(1);
   });
 

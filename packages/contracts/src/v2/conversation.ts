@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PlanContract, validatePlan } from "../plan.js";
+import { PlanContract, PlanModule, validatePlan } from "../plan.js";
 import {
   V2Actor,
   V2EntityId,
@@ -153,6 +153,20 @@ export const V2MessagePlanPart = z
   })
   .strict();
 
+export const V2MessageHandoffPart = z
+  .object({
+    type: z.literal("handoff"),
+    handoff_id: V2EntityId,
+  })
+  .strict();
+
+export const V2MessagePlanningExcerptPart = z
+  .object({
+    type: z.literal("planning_excerpt"),
+    excerpt_receipt_id: V2EntityId,
+  })
+  .strict();
+
 /**
  * Deliberately excludes reasoning/thought parts. Durable conversation history
  * contains only content shown to the user.
@@ -164,6 +178,8 @@ export const V2WorkMessagePart = z.discriminatedUnion("type", [
   V2MessageArtifactPart,
   V2MessageActionPart,
   V2MessagePlanPart,
+  V2MessageHandoffPart,
+  V2MessagePlanningExcerptPart,
 ]);
 export type V2WorkMessagePartT = z.infer<typeof V2WorkMessagePart>;
 
@@ -270,6 +286,8 @@ export const V2ConversationContextEntry = z
       "message",
       "artifact",
       "handoff",
+      "planning_excerpt",
+      "task_package",
     ]),
     ref: V2EntityId,
     content_hash: V2Sha256Hex,
@@ -501,21 +519,19 @@ export const V2ConversationAction = z
   });
 export type V2ConversationActionT = z.infer<typeof V2ConversationAction>;
 
+export const V2WorkPlanStaffingChoice = z
+  .object({
+    module_id: V2EntityId,
+    agent_role: V2NonEmptyString,
+    provider: z.enum(["anthropic", "openai"]),
+    model: V2NonEmptyString,
+  })
+  .strict();
+
 export const V2WorkPlanContract = z
   .object({
     plan: PlanContract.strict(),
-    staffing: z
-      .array(
-        z
-          .object({
-            module_id: V2EntityId,
-            agent_role: V2NonEmptyString,
-            provider: z.enum(["anthropic", "openai"]),
-            model: V2NonEmptyString,
-          })
-          .strict(),
-      )
-      .min(1),
+    staffing: z.array(V2WorkPlanStaffingChoice).min(1),
     verification_requirements: z.array(V2NonEmptyString).min(1),
     open_decisions: z.array(V2NonEmptyString),
     estimated_budget: z
@@ -946,42 +962,66 @@ export const V2ConversationPlanExecution = z
   });
 export type V2ConversationPlanExecutionT = z.infer<typeof V2ConversationPlanExecution>;
 
-export const V2ConversationPlanActionEffectValue = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("plan_saved"),
-      plan_version: V2WorkPlanVersion,
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("qc_started"),
-      plan_review: V2ConversationPlanReview,
-      planning_run_id: V2EntityId,
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("changes_requested"),
-      plan_version: V2WorkPlanVersion,
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("plan_approved"),
-      plan_version: V2WorkPlanVersion,
-      plan_review_id: V2EntityId,
-      planning_run_id: V2EntityId,
-      execution: V2ConversationPlanExecution,
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("plan_rejected"),
-      plan_version: V2WorkPlanVersion,
-    })
-    .strict(),
-]);
+export const V2ConversationPlanActionEffectValue = z
+  .discriminatedUnion("kind", [
+    z
+      .object({
+        kind: z.literal("plan_saved"),
+        plan_version: V2WorkPlanVersion,
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("qc_started"),
+        plan_review: V2ConversationPlanReview,
+        planning_run_id: V2EntityId,
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("changes_requested"),
+        plan_version: V2WorkPlanVersion,
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("plan_approved"),
+        plan_version: V2WorkPlanVersion,
+        plan_review_id: V2EntityId,
+        planning_run_id: V2EntityId,
+        transition_status: z.enum(["created", "legacy_unavailable"]),
+        execution_conversation_id: V2EntityId.nullable(),
+        handoff_id: V2EntityId.nullable(),
+        kickoff_intent_id: V2EntityId.nullable(),
+        execution: V2ConversationPlanExecution,
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("plan_rejected"),
+        plan_version: V2WorkPlanVersion,
+      })
+      .strict(),
+  ])
+  .superRefine((effect, ctx) => {
+    if (effect.kind !== "plan_approved") return;
+    const transitionIds = [
+      effect.execution_conversation_id,
+      effect.handoff_id,
+      effect.kickoff_intent_id,
+    ];
+    const hasTransition = transitionIds.every((id) => id !== null);
+    if (
+      transitionIds.some((id) => id !== null) !== hasTransition ||
+      (effect.transition_status === "created") !== hasTransition
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["transition_status"],
+        message: "approval transition status must agree with all transition IDs",
+      });
+    }
+  });
 export type V2ConversationPlanActionEffectValueT = z.infer<
   typeof V2ConversationPlanActionEffectValue
 >;
@@ -1006,6 +1046,24 @@ const attributedNarrative = z
     id: V2EntityId,
     summary: V2NonEmptyString,
     rationale: V2NonEmptyString,
+  })
+  .strict();
+
+export const V2ConversationHandoffContextReference = z
+  .object({
+    kind: z.enum([
+      "approved_plan",
+      "global_rules",
+      "project_rules",
+      "decision",
+      "qc_review",
+      "artifact",
+      "phase",
+      "task",
+      "repository",
+    ]),
+    ref: V2EntityId,
+    content_hash: V2Sha256Hex,
   })
   .strict();
 
@@ -1042,6 +1100,7 @@ export const V2ConversationHandoffPackage = z
     phase_ids: z.array(V2EntityId),
     task_ids: z.array(V2EntityId),
     repository_binding_ids: z.array(V2EntityId),
+    context_manifest: z.array(V2ConversationHandoffContextReference),
   })
   .strict()
   .superRefine((handoff, ctx) => {
@@ -1074,7 +1133,32 @@ export const V2ConversationHandoffPackage = z
         message: "handoff task sequence must follow the approved plan module order",
       });
     }
+    const manifestKeys = handoff.context_manifest.map(
+      (reference) => `${reference.kind}:${reference.ref}`,
+    );
+    if (new Set(manifestKeys).size !== manifestKeys.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["context_manifest"],
+        message: "handoff context references must be unique by kind and ref",
+      });
+    }
+    const approvedPlanReferences = handoff.context_manifest.filter(
+      (reference) => reference.kind === "approved_plan",
+    );
+    if (
+      approvedPlanReferences.length !== 1 ||
+      approvedPlanReferences[0]?.ref !== handoff.approved_plan_version_id ||
+      approvedPlanReferences[0]?.content_hash !== handoff.approved_plan_content_hash
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["context_manifest"],
+        message: "handoff manifest must bind the exact approved plan once",
+      });
+    }
   });
+export type V2ConversationHandoffPackageT = z.infer<typeof V2ConversationHandoffPackage>;
 
 export const V2ConversationHandoff = z
   .object({
@@ -1097,6 +1181,95 @@ export const V2ConversationHandoff = z
     message: "handoff source and target conversations must differ",
   });
 export type V2ConversationHandoffT = z.infer<typeof V2ConversationHandoff>;
+
+export const V2ConversationTaskPackage = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    work_item_id: V2EntityId,
+    conversation_id: V2EntityId,
+    handoff_id: V2EntityId,
+    approved_plan_version_id: V2EntityId,
+    module_id: V2EntityId,
+    package: z
+      .object({
+        approved_plan_version_id: V2EntityId,
+        approved_plan_content_hash: V2Sha256Hex,
+        objective: V2NonEmptyString,
+        module: PlanModule.strict(),
+        staffing: V2WorkPlanStaffingChoice,
+        budget: z
+          .object({
+            currency: z.string().regex(/^[A-Z]{3}$/),
+            amount: z.number().nonnegative(),
+          })
+          .strict(),
+        binding_rules: z.array(V2NonEmptyString),
+        human_decisions: z.array(attributedNarrative),
+        artifact_ids: z.array(V2EntityId),
+        repository_binding_ids: z.array(V2EntityId),
+        context_manifest: z.array(V2ConversationHandoffContextReference),
+      })
+      .strict(),
+    content_hash: V2Sha256Hex,
+    created_at: V2IsoDateTime,
+  })
+  .strict()
+  .superRefine((taskPackage, ctx) => {
+    if (
+      taskPackage.package.module.id !== taskPackage.module_id ||
+      taskPackage.package.staffing.module_id !== taskPackage.module_id ||
+      taskPackage.package.approved_plan_version_id !== taskPackage.approved_plan_version_id
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["package", "module"],
+        message: "task package plan, module, and staffing must match its immutable scope",
+      });
+    }
+    const approvedPlanReferences = taskPackage.package.context_manifest.filter(
+      (reference) => reference.kind === "approved_plan",
+    );
+    if (
+      approvedPlanReferences.length !== 1 ||
+      approvedPlanReferences[0]?.ref !== taskPackage.approved_plan_version_id ||
+      approvedPlanReferences[0]?.content_hash !== taskPackage.package.approved_plan_content_hash
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["package", "context_manifest"],
+        message: "task package manifest must bind the exact approved plan once",
+      });
+    }
+  });
+export type V2ConversationTaskPackageT = z.infer<typeof V2ConversationTaskPackage>;
+
+export const V2ConversationPlanningExcerptReceipt = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    work_item_id: V2EntityId,
+    source_conversation_id: V2EntityId,
+    target_conversation_id: V2EntityId,
+    handoff_id: V2EntityId,
+    requested_by_user_id: V2EntityId,
+    idempotency_key: V2EntityId,
+    request_fingerprint: V2Sha256Hex,
+    source_message_ids: z.array(V2EntityId).min(1).max(20),
+    source_message_hashes: z.array(V2Sha256Hex).min(1).max(20),
+    result_message_id: V2EntityId,
+    created_at: V2IsoDateTime,
+  })
+  .strict()
+  .refine((receipt) => receipt.source_message_ids.length === receipt.source_message_hashes.length, {
+    path: ["source_message_hashes"],
+    message: "planning excerpt message IDs and hashes must align",
+  });
+export type V2ConversationPlanningExcerptReceiptT = z.infer<
+  typeof V2ConversationPlanningExcerptReceipt
+>;
 
 export const V2ConversationSummaryContent = z
   .object({
@@ -1130,6 +1303,34 @@ export const V2ConversationSummary = z
     message: "summary sequence range must be ordered",
   });
 export type V2ConversationSummaryT = z.infer<typeof V2ConversationSummary>;
+
+export const V2ConversationUsage = z
+  .object({
+    input_tokens: nonNegativeInteger,
+    output_tokens: nonNegativeInteger,
+    cost_usd: z.number().nonnegative().nullable(),
+    exact_cost: z.boolean(),
+    usage_status: V2ConversationUsageStatus,
+    attempt_count: nonNegativeInteger,
+  })
+  .strict()
+  .superRefine((usage, ctx) => {
+    if (usage.exact_cost !== (usage.usage_status === "exact")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["exact_cost"],
+        message: "exact_cost must agree with usage_status",
+      });
+    }
+    if ((usage.usage_status === "exact") !== (usage.cost_usd !== null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["cost_usd"],
+        message: "only exact aggregate usage exposes a cost",
+      });
+    }
+  });
+export type V2ConversationUsageT = z.infer<typeof V2ConversationUsage>;
 
 export const V2CreateWorkItemInput = z
   .object({
@@ -1214,6 +1415,21 @@ export const V2ConfirmConversationPlanActionResponse = z
   .strict();
 export type V2ConfirmConversationPlanActionResponseT = z.infer<
   typeof V2ConfirmConversationPlanActionResponse
+>;
+
+export const V2CreateConversationPlanningExcerptInput = z
+  .object({
+    idempotency_key: V2EntityId,
+    source_conversation_id: V2EntityId,
+    message_ids: z.array(V2EntityId).min(1).max(20),
+  })
+  .strict()
+  .refine((input) => new Set(input.message_ids).size === input.message_ids.length, {
+    path: ["message_ids"],
+    message: "planning excerpt message IDs must be unique",
+  });
+export type V2CreateConversationPlanningExcerptInputT = z.infer<
+  typeof V2CreateConversationPlanningExcerptInput
 >;
 
 export const V2CreateConversationPlanProposalInput = z

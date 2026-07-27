@@ -264,6 +264,11 @@ export const CONVERSATION_PLAN_WORKFLOW_MIGRATION_URL = new URL(
   "../../../drizzle/0037_conversation_plan_workflow.sql",
   import.meta.url,
 );
+export const CONVERSATION_EXECUTION_HANDOFF_MIGRATION_NAME = "0038_conversation_execution_handoff";
+export const CONVERSATION_EXECUTION_HANDOFF_MIGRATION_URL = new URL(
+  "../../../drizzle/0038_conversation_execution_handoff.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -443,6 +448,10 @@ export async function loadConversationStreamLifecycleMigrationSql(): Promise<str
 
 export async function loadConversationPlanWorkflowMigrationSql(): Promise<string> {
   return readFile(CONVERSATION_PLAN_WORKFLOW_MIGRATION_URL, "utf8");
+}
+
+export async function loadConversationExecutionHandoffMigrationSql(): Promise<string> {
+  return readFile(CONVERSATION_EXECUTION_HANDOFF_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -700,6 +709,10 @@ export async function runCurrentV2Migrations(
     {
       name: CONVERSATION_PLAN_WORKFLOW_MIGRATION_NAME,
       sql: await loadConversationPlanWorkflowMigrationSql(),
+    },
+    {
+      name: CONVERSATION_EXECUTION_HANDOFF_MIGRATION_NAME,
+      sql: await loadConversationExecutionHandoffMigrationSql(),
     },
   ]);
 }

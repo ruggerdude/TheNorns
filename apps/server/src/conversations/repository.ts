@@ -31,7 +31,10 @@ export type ConversationPersistenceErrorCode =
   | "action_not_found"
   | "action_already_confirmed"
   | "idempotency_conflict"
-  | "request_fingerprint_mismatch";
+  | "request_fingerprint_mismatch"
+  | "conversation_scope_mismatch"
+  | "message_not_found"
+  | "excerpt_too_large";
 
 export class ConversationPersistenceError extends Error {
   readonly httpStatus: number;
@@ -45,11 +48,13 @@ export class ConversationPersistenceError extends Error {
     this.httpStatus =
       code === "forbidden"
         ? 403
-        : code.endsWith("_not_found")
-          ? 404
-          : code === "identity_inactive"
-            ? 401
-            : 409;
+        : code === "excerpt_too_large"
+          ? 422
+          : code.endsWith("_not_found")
+            ? 404
+            : code === "identity_inactive"
+              ? 401
+              : 409;
   }
 }
 

@@ -57,13 +57,14 @@ export class TaskContextStore {
    */
   async put(
     tx: V2SqlExecutor,
-    input: { projectId: string; section: string; content: Buffer },
+    input: { projectId: string; section: string; content: Buffer; mediaType?: string },
   ): Promise<StoredTaskContextDocument> {
     if (input.content.byteLength === 0) {
       throw new Error(`task context section "${input.section}" produced no bytes`);
     }
     const sha256 = createHash("sha256").update(input.content).digest("hex");
     const id = taskContextDocumentId(input.projectId, input.section, sha256);
+    const mediaType = input.mediaType ?? TASK_CONTEXT_MEDIA_TYPE;
     await tx.query(
       `INSERT INTO task_context_blobs (sha256, content) VALUES ($1, $2)
          ON CONFLICT (sha256) DO NOTHING`,
@@ -74,14 +75,7 @@ export class TaskContextStore {
          (id, project_id, section, sha256, byte_size, media_type)
        VALUES ($1,$2,$3,$4,$5,$6)
        ON CONFLICT (id) DO NOTHING`,
-      [
-        id,
-        input.projectId,
-        input.section,
-        sha256,
-        input.content.byteLength,
-        TASK_CONTEXT_MEDIA_TYPE,
-      ],
+      [id, input.projectId, input.section, sha256, input.content.byteLength, mediaType],
     );
     return {
       id,
@@ -89,7 +83,7 @@ export class TaskContextStore {
       section: input.section,
       sha256,
       byte_size: input.content.byteLength,
-      media_type: TASK_CONTEXT_MEDIA_TYPE,
+      media_type: mediaType,
     };
   }
 
