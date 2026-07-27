@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 const workspace = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const read = (path: string) => readFileSync(resolve(workspace, path), "utf8");
 
-describe("Windows local-agent packaging", () => {
+describe("desktop local-agent packaging", () => {
   it("bundles its own Node runtime and digest-pinned MinGit payload", () => {
     const script = read("scripts/package-windows-agent.ps1");
     expect(script).toContain("Copy-Item -Force (Get-Command node.exe).Source");
@@ -31,9 +31,34 @@ describe("Windows local-agent packaging", () => {
   it("never publishes an unsigned installer as a release", () => {
     const workflow = read(".github/workflows/local-agent-installer.yml");
     expect(workflow).toContain("Publishing requires WINDOWS_CODESIGN_PFX_BASE64");
-    expect(workflow).toContain(
-      "if: inputs.publish_release && steps.signing.outputs.signed == 'true'",
-    );
+    expect(workflow).toContain("needs.windows.outputs.signed == 'true'");
+    expect(workflow).toContain("needs.macos.outputs.notarized == 'true'");
     expect(workflow).toContain("actions/upload-artifact@v4");
+  });
+
+  it("builds one universal macOS app with pairing and launch-agent integration", () => {
+    const packaging = read("scripts/package-macos-agent.sh");
+    expect(packaging).toContain("node-v$NODE_VERSION-darwin-$ARCH.tar.gz");
+    expect(packaging).toContain("EXPECTED_SHA256");
+    expect(packaging).toContain("-target arm64-apple-macos13.0");
+    expect(packaging).toContain("-target x86_64-apple-macos13.0");
+    expect(packaging).toContain("lipo -create");
+
+    const info = read("packaging/macos/Info.plist.in");
+    expect(info).toContain("<string>norns-agent</string>");
+    const agent = read("packaging/macos/agent.sh");
+    expect(agent).toContain("com.thenorns.local-agent.plist");
+    expect(agent).toContain("NORNS_AGENT_ALLOWED_ORIGIN=");
+    expect(agent).toContain("xcode-select --install");
+  });
+
+  it("requires Developer ID signing and Apple notarization before Mac publication", () => {
+    const signing = read("scripts/sign-notarize-macos-agent.sh");
+    expect(signing).toContain("APPLICATION_IDENTITY");
+    expect(signing).toContain("INSTALLER_IDENTITY");
+    expect(signing).toContain("codesign --verify --deep --strict");
+    expect(signing).toContain("notarytool submit");
+    expect(signing).toContain("stapler staple");
+    expect(signing).toContain("notarized=true");
   });
 });

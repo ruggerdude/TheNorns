@@ -202,7 +202,7 @@ describe("workspace connections settings", () => {
           "norns-agent://pair?server=https%3A%2F%2Fnorns.example&code=a1b2c3d4&runner_id=runner-1",
         downloads: {
           windows: "https://downloads.example/Norns-Local-Agent-Setup.exe",
-          macos: null,
+          macos: "https://downloads.example/Norns-Local-Agent-macOS.pkg",
         },
         install_command: "curl https://norns.example/install | sh",
         install_command_windows: "Install-NornsHelper",
@@ -219,6 +219,10 @@ describe("workspace connections settings", () => {
     expect(await screen.findByRole("link", { name: "Download for Windows" })).toHaveAttribute(
       "href",
       "https://downloads.example/Norns-Local-Agent-Setup.exe",
+    );
+    expect(screen.getByRole("link", { name: "Download for Mac" })).toHaveAttribute(
+      "href",
+      "https://downloads.example/Norns-Local-Agent-macOS.pkg",
     );
     expect(screen.getByRole("link", { name: "Connect installed agent" })).toHaveAttribute(
       "href",

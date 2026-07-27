@@ -19,6 +19,8 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    outputs:
+      signed: ${{ steps.signing.outputs.signed }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -81,20 +83,72 @@ jobs:
           name: norns-local-agent-windows-${{ inputs.version }}
           path: dist-agent/windows/installer/Norns-Local-Agent-Setup.exe
           if-no-files-found: error
-      - name: Publish signed prerelease
-        if: inputs.publish_release && steps.signing.outputs.signed == 'true'
+
+  macos:
+    runs-on: macos-15
+    outputs:
+      notarized: ${{ steps.notarization.outputs.notarized }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @norns/runner... run build
+      - run: pnpm --filter @norns/runner pack:tarball
+      - name: Build universal macOS installer
+        run: ./scripts/package-macos-agent.sh '${{ inputs.version }}'
+      - name: Developer ID sign and notarize installer
+        id: notarization
+        env:
+          APPLICATION_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          INSTALLER_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLICATION_IDENTITY: ${{ vars.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY }}
+          INSTALLER_IDENTITY: ${{ vars.APPLE_DEVELOPER_ID_INSTALLER_IDENTITY }}
+          NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
+        run: ./scripts/sign-notarize-macos-agent.sh '${{ inputs.version }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: norns-local-agent-macos-${{ inputs.version }}
+          path: dist-agent/macos/installer/Norns-Local-Agent-macOS.pkg
+          if-no-files-found: error
+
+  release:
+    needs: [windows, macos]
+    if: >-
+      inputs.publish_release &&
+      needs.windows.outputs.signed == 'true' &&
+      needs.macos.outputs.notarized == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: norns-local-agent-*-${{ inputs.version }}
+          path: release-assets
+          merge-multiple: true
+      - name: Publish signed and notarized prerelease
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ inputs.version }}
         run: |
           tag="agent-v${VERSION}"
-          asset="dist-agent/windows/installer/Norns-Local-Agent-Setup.exe"
+          windows_asset="release-assets/Norns-Local-Agent-Setup.exe"
+          macos_asset="release-assets/Norns-Local-Agent-macOS.pkg"
+          test -f "$windows_asset"
+          test -f "$macos_asset"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$asset" --clobber
+            gh release upload "$tag" "$windows_asset" "$macos_asset" --clobber
           else
-            gh release create "$tag" "$asset" \
+            gh release create "$tag" "$windows_asset" "$macos_asset" \
               --prerelease \
               --title "Norns Local Agent ${VERSION}" \
-              --notes "Signed Windows beta of Norns Local Agent."
+              --notes "Signed Windows and signed, notarized universal macOS beta of Norns Local Agent."
           fi

@@ -150,10 +150,11 @@ describe("local helper installer", () => {
     expect(
       localAgentDownloadsFromEnvironment({
         NORNS_WINDOWS_AGENT_DOWNLOAD_URL: "https://downloads.example/Norns-Local-Agent-Setup.exe",
+        NORNS_MACOS_AGENT_DOWNLOAD_URL: "https://downloads.example/Norns-Local-Agent-macOS.pkg",
       }),
     ).toEqual({
       windows: "https://downloads.example/Norns-Local-Agent-Setup.exe",
-      macos: null,
+      macos: "https://downloads.example/Norns-Local-Agent-macOS.pkg",
     });
     expect(() =>
       localAgentDownloadsFromEnvironment({
