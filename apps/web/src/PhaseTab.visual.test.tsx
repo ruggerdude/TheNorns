@@ -1,9 +1,10 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { PhaseTab } from "./PhaseTab";
 import type { PhasePlanningRunDto } from "./phaseTabApi";
 import { MockFetch } from "./test/mockFetch";
+import { preloadConversationWorkspaceForTest } from "./test/preloadConversationWorkspace";
 
 const projectId = "project-visual";
 const runUrl = `/api/v2/projects/${projectId}/planning-runs/run-visual`;
@@ -58,6 +59,7 @@ const readyRun = makeRun({
 describe("existing-project planning journey visual contract", () => {
   let mock: MockFetch;
 
+  beforeAll(preloadConversationWorkspaceForTest);
   afterEach(() => mock.restore());
 
   it("shows one three-step journey and keeps staffing secondary when the plan is ready", async () => {

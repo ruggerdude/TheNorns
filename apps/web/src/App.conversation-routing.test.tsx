@@ -1,5 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   App,
   projectIdFromLocation,
@@ -9,6 +9,7 @@ import {
 import { setToken } from "./auth";
 import { fullyAllocatedGraph, projectAlpha } from "./test/fixtures";
 import { MockFetch } from "./test/mockFetch";
+import { preloadConversationWorkspaceForTest } from "./test/preloadConversationWorkspace";
 
 const conversationId = "conversation-route-1";
 const workItemId = "work-route-1";
@@ -52,6 +53,8 @@ afterEach(() => {
 });
 
 describe("conversation deep links", () => {
+  beforeAll(preloadConversationWorkspaceForTest);
+
   it("parses encoded conversation and explicit new-work routes", () => {
     window.history.replaceState(null, "", "/projects/project%20one/work/conversation%2Ftwo");
     expect(projectIdFromLocation()).toBe("project one");

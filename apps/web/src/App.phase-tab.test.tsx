@@ -13,13 +13,14 @@
 // carries `execution: { started, detail } | null`.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent, { type UserEvent } from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { App } from "./App";
 import type { ProjectSummary } from "./Projects";
 import { setToken } from "./auth";
 import type { PhasePlanningRunDto } from "./phaseTabApi";
 import { fullyAllocatedGraph, projectAlpha } from "./test/fixtures";
 import { MockFetch, type RecordedCall } from "./test/mockFetch";
+import { preloadConversationWorkspaceForTest } from "./test/preloadConversationWorkspace";
 
 const projectId = projectAlpha.id;
 const runsUrl = `/api/v2/projects/${projectId}/planning-runs`;
@@ -200,6 +201,7 @@ function postCalls(mock: MockFetch, urlSuffix: string): RecordedCall[] {
 describe("PHASE TAB (P2)", () => {
   let mock: MockFetch;
 
+  beforeAll(preloadConversationWorkspaceForTest);
   afterEach(() => mock.restore());
 
   it("appears in the workspace nav and switches to a panel with the goal form and defaults", async () => {
