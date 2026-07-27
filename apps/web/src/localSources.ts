@@ -8,6 +8,7 @@ export interface LocalHelperStatus {
   downloads: {
     windows: string | null;
     macos: string | null;
+    macos_release: "notarized" | "unsigned_preview" | null;
   };
   install_command: string;
   install_command_windows: string;

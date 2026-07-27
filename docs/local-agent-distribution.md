@@ -52,8 +52,23 @@ After publishing, configure the server with:
 ```text
 NORNS_WINDOWS_AGENT_DOWNLOAD_URL=https://github.com/ruggerdude/TheNorns/releases/download/agent-v0.1.0/Norns-Local-Agent-Setup.exe
 NORNS_MACOS_AGENT_DOWNLOAD_URL=https://github.com/ruggerdude/TheNorns/releases/download/agent-v0.1.0/Norns-Local-Agent-macOS.pkg
+NORNS_MACOS_AGENT_RELEASE_CHANNEL=notarized
 ```
 
 The Connections page will then offer **Download for Windows**, **Download for Mac**, and a one-use
 **Connect installed agent** link. Without configured signed downloads, it honestly retains the
 existing command-line installers under **Advanced command-line setup**.
+
+## Temporary unsigned Mac preview
+
+An unsigned preview may be published as a clearly marked GitHub prerelease while Developer ID
+credentials are being established. Use a release asset whose filename includes `UNSIGNED`, then set:
+
+```text
+NORNS_MACOS_AGENT_DOWNLOAD_URL=https://github.com/ruggerdude/TheNorns/releases/download/<preview-tag>/Norns-Local-Agent-macOS-UNSIGNED.pkg
+NORNS_MACOS_AGENT_RELEASE_CHANNEL=unsigned_preview
+```
+
+Connections must retain the unsigned warning and Gatekeeper instructions for as long as that channel
+is enabled. Never relabel an unsigned artifact as notarized. Replace the URL and channel after the
+signed package passes `notarytool`, stapling, and Gatekeeper validation.

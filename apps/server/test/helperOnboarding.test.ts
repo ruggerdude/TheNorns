@@ -151,15 +151,23 @@ describe("local helper installer", () => {
       localAgentDownloadsFromEnvironment({
         NORNS_WINDOWS_AGENT_DOWNLOAD_URL: "https://downloads.example/Norns-Local-Agent-Setup.exe",
         NORNS_MACOS_AGENT_DOWNLOAD_URL: "https://downloads.example/Norns-Local-Agent-macOS.pkg",
+        NORNS_MACOS_AGENT_RELEASE_CHANNEL: "unsigned_preview",
       }),
     ).toEqual({
       windows: "https://downloads.example/Norns-Local-Agent-Setup.exe",
       macos: "https://downloads.example/Norns-Local-Agent-macOS.pkg",
+      macos_release: "unsigned_preview",
     });
     expect(() =>
       localAgentDownloadsFromEnvironment({
         NORNS_WINDOWS_AGENT_DOWNLOAD_URL: "http://downloads.example/agent.exe",
       }),
     ).toThrow(/HTTPS/);
+    expect(() =>
+      localAgentDownloadsFromEnvironment({
+        NORNS_MACOS_AGENT_DOWNLOAD_URL: "https://downloads.example/Norns.pkg",
+        NORNS_MACOS_AGENT_RELEASE_CHANNEL: "apple_approved",
+      }),
+    ).toThrow(/unsigned_preview/);
   });
 });

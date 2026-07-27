@@ -14,6 +14,7 @@ export type HelperConnectionState = "connected" | "degraded" | "disconnected" | 
 export interface LocalAgentDownloads {
   windows: string | null;
   macos: string | null;
+  macos_release: "notarized" | "unsigned_preview" | null;
 }
 
 function optionalHttpsDownload(value: string | undefined, name: string): string | null {
@@ -28,15 +29,27 @@ function optionalHttpsDownload(value: string | undefined, name: string): string 
 export function localAgentDownloadsFromEnvironment(
   environment: NodeJS.ProcessEnv,
 ): LocalAgentDownloads {
+  const macos = optionalHttpsDownload(
+    environment.NORNS_MACOS_AGENT_DOWNLOAD_URL,
+    "NORNS_MACOS_AGENT_DOWNLOAD_URL",
+  );
+  const configuredRelease = environment.NORNS_MACOS_AGENT_RELEASE_CHANNEL?.trim();
+  if (
+    configuredRelease &&
+    configuredRelease !== "notarized" &&
+    configuredRelease !== "unsigned_preview"
+  ) {
+    throw new Error("NORNS_MACOS_AGENT_RELEASE_CHANNEL must be notarized or unsigned_preview");
+  }
   return {
     windows: optionalHttpsDownload(
       environment.NORNS_WINDOWS_AGENT_DOWNLOAD_URL,
       "NORNS_WINDOWS_AGENT_DOWNLOAD_URL",
     ),
-    macos: optionalHttpsDownload(
-      environment.NORNS_MACOS_AGENT_DOWNLOAD_URL,
-      "NORNS_MACOS_AGENT_DOWNLOAD_URL",
-    ),
+    macos,
+    macos_release: macos
+      ? ((configuredRelease || "unsigned_preview") as "notarized" | "unsigned_preview")
+      : null,
   };
 }
 

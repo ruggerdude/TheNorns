@@ -26,7 +26,7 @@ describe("workspace connections settings", () => {
         runner_id: null,
         workspace_clone_ready: false,
         message: "Set up the local helper once.",
-        downloads: { windows: null, macos: null },
+        downloads: { windows: null, macos: null, macos_release: null },
         install_command: "install-helper",
         install_command_windows: "install-helper-windows",
         repositories: [],
@@ -203,6 +203,7 @@ describe("workspace connections settings", () => {
         downloads: {
           windows: "https://downloads.example/Norns-Local-Agent-Setup.exe",
           macos: "https://downloads.example/Norns-Local-Agent-macOS.pkg",
+          macos_release: "unsigned_preview",
         },
         install_command: "curl https://norns.example/install | sh",
         install_command_windows: "Install-NornsHelper",
@@ -220,10 +221,11 @@ describe("workspace connections settings", () => {
       "href",
       "https://downloads.example/Norns-Local-Agent-Setup.exe",
     );
-    expect(screen.getByRole("link", { name: "Download for Mac" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Download unsigned Mac preview" })).toHaveAttribute(
       "href",
       "https://downloads.example/Norns-Local-Agent-macOS.pkg",
     );
+    expect(screen.getByText(/not yet Developer ID signed or notarized/i)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Connect installed agent" })).toHaveAttribute(
       "href",
       expect.stringMatching(/^norns-agent:\/\/pair/),
