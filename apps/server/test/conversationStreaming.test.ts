@@ -26,6 +26,17 @@ import { AiInvocationTelemetry } from "../src/usage-intelligence/telemetry.js";
 const asMigrationDatabase = (database: PGlite): V2MigrationDatabase =>
   database as unknown as V2MigrationDatabase;
 
+function pngBase64(width = 3, height = 2): string {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ihdrLength = Buffer.from([0, 0, 0, 13]);
+  const ihdr = Buffer.from("IHDR", "ascii");
+  const dimensions = Buffer.alloc(8);
+  dimensions.writeUInt32BE(width, 0);
+  dimensions.writeUInt32BE(height, 4);
+  const trailer = Buffer.from([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+  return Buffer.concat([signature, ihdrLength, ihdr, dimensions, trailer]).toString("base64");
+}
+
 describe.sequential("persistent planning conversation streaming", () => {
   let pg: PGlite;
   let conversations: ConversationService;
@@ -723,6 +734,83 @@ describe.sequential("persistent planning conversation streaming", () => {
     expect(usage.rows).toEqual([
       { event_type: "request_started", error_category: null },
       { event_type: "request_failed", error_category: "conversation_recovery" },
+    ]);
+  });
+
+  it("streams uploaded attachment bytes through the durable message reference", async () => {
+    const base64 = pngBase64();
+    const uploaded = await attachments.create("stream-project", {
+      mime: "image/png",
+      base64,
+      purpose: "conversation",
+      createdBy: owner.id,
+    });
+    const stored = await attachments.content("stream-project", uploaded.id);
+    expect(stored.mime).toBe("image/png");
+    expect(stored.bytes.equals(Buffer.from(base64, "base64"))).toBe(true);
+
+    const trigger = await conversations.submitUserMessage(owner, {
+      project_id: "stream-project",
+      work_item_id: workItemId,
+      conversation_id: conversationId,
+      client_message_id: "stream-client-image-integration",
+      parts: [
+        { type: "text", format: "plain", text: "Review this uploaded mockup." },
+        {
+          type: "attachment",
+          attachment_id: uploaded.id,
+          name: "mockup.png",
+          media_type: "image/png",
+        },
+      ],
+    });
+    const captured = new FakeAdapter("openai", "mock-openai");
+    captured.enqueue("The uploaded mockup is visible.");
+    currentAdapter = captured as ConversationLlmAdapter;
+    const prepared = await turnService.prepare({
+      actor: owner,
+      projectId: "stream-project",
+      workItemId,
+      conversationId,
+      triggeringMessageId: trigger.id,
+    });
+    await prepared.run({
+      started: () => undefined,
+      text: () => undefined,
+      finished: () => undefined,
+    });
+
+    expect(captured.requests).toHaveLength(1);
+    expect(captured.requests[0]?.images).toEqual([{ type: "image", mime: "image/png", base64 }]);
+    expect(captured.requests[0]?.messages?.at(-1)).toEqual({
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: [
+            "Review this uploaded mockup.",
+            `[Attachment: mockup.png (image/png), id=${uploaded.id}]`,
+          ].join("\n\n"),
+        },
+        { type: "image", mime: "image/png", base64 },
+      ],
+    });
+    const refs = await pg.query<{
+      message_id: string;
+      attachment_id: string;
+      created_by_user_id: string;
+    }>(
+      `SELECT message_id, attachment_id, created_by_user_id
+         FROM work_message_attachment_refs
+        WHERE message_id=$1`,
+      [trigger.id],
+    );
+    expect(refs.rows).toEqual([
+      {
+        message_id: trigger.id,
+        attachment_id: uploaded.id,
+        created_by_user_id: owner.id,
+      },
     ]);
   });
 });

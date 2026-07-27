@@ -100,6 +100,7 @@ export class OpenAiAdapter implements LlmAdapter {
     return (async function* streamVisibleConversation() {
       const startedAt = Date.now();
       let providerExecutionId: string | null = null;
+      let visibleText = "";
       try {
         const stream = await adapter.client.responses.create(
           {
@@ -124,7 +125,10 @@ export class OpenAiAdapter implements LlmAdapter {
             continue;
           }
           if (event.type === "response.output_text.delta") {
-            if (event.delta.length > 0) yield { type: "text_delta", delta: event.delta };
+            if (event.delta.length > 0) {
+              visibleText += event.delta;
+              yield { type: "text_delta", delta: event.delta };
+            }
             continue;
           }
           if (event.type === "response.completed" || event.type === "response.incomplete") {
@@ -150,10 +154,14 @@ export class OpenAiAdapter implements LlmAdapter {
             }
             const finishReason =
               response.incomplete_details?.reason ?? response.status ?? "completed";
+            const terminalText =
+              typeof response.output_text === "string" && response.output_text.length > 0
+                ? response.output_text
+                : visibleText;
             yield {
               type: "finish",
               result: {
-                text: response.output_text,
+                text: terminalText,
                 usage: adapter.usageOf(response, request),
                 provider_execution_id: executionId,
                 finish_reason: finishReason,

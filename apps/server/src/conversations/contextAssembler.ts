@@ -7,7 +7,7 @@ import {
   V2WorkMessagePart,
   type V2WorkMessagePartT,
 } from "@norns/contracts";
-import { canonicalSha256 } from "../persistence/migration/canonicalJson.js";
+import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   CONVERSATIONAL_PM_INSTRUCTIONS,
@@ -19,6 +19,10 @@ import {
 } from "./prompt.js";
 
 const MAX_RECENT_MESSAGES = 50;
+const RETAIN_RECENT_MESSAGES_AFTER_COMPACTION = 40;
+const MAX_VISIBLE_DIGEST_ENTRIES = 24;
+const MAX_VISIBLE_DIGEST_CHARACTERS = 280;
+const VISIBLE_DIGEST_PREFIX = "Visible conversation message #";
 
 interface ContextMaterial {
   kind: V2ConversationContextManifestT["entries"][number]["kind"];
@@ -30,8 +34,11 @@ interface ContextMaterial {
 
 interface SummaryRow {
   id: string;
+  version?: number | string;
+  from_message_sequence?: number | string;
   through_message_sequence: number | string;
   summary: unknown;
+  content_hash?: string;
 }
 
 interface MessageRow {
@@ -106,6 +113,10 @@ function visibleText(messageParts: readonly V2WorkMessagePartT[]): string {
           return `[Execution handoff: ${part.handoff_id}]`;
         case "planning_excerpt":
           return `[Requested planning excerpt: ${part.excerpt_receipt_id}]`;
+        case "human_wait":
+          return `[Human decision requested: ${part.human_wait_id}]`;
+        case "human_wait_update":
+          return `[Human decision ${part.human_wait_id}: ${part.status}]`;
       }
     })
     .join("\n\n");
@@ -115,13 +126,60 @@ function section(label: string, content: string): string {
   return `## ${label}\n${content}`;
 }
 
+function unique<T>(values: readonly T[]): T[] {
+  return [...new Set(values)];
+}
+
+function boundedVisibleDigest(messages: readonly MessageRow[]): string[] {
+  const entries = messages.map((message) => {
+    const rendered = visibleText(parts(message.parts)).replace(/\s+/gu, " ").trim();
+    const shortened =
+      rendered.length > MAX_VISIBLE_DIGEST_CHARACTERS
+        ? `${rendered.slice(0, MAX_VISIBLE_DIGEST_CHARACTERS - 1)}…`
+        : rendered;
+    return `${VISIBLE_DIGEST_PREFIX}${Number(message.sequence)} [${message.role}]: ${
+      shortened || "[structured visible content]"
+    }`;
+  });
+  if (entries.length <= MAX_VISIBLE_DIGEST_ENTRIES) return entries;
+  const edge = MAX_VISIBLE_DIGEST_ENTRIES / 2;
+  return [...entries.slice(0, edge), ...entries.slice(-edge)];
+}
+
+function planRisks(value: unknown): string[] {
+  const raw = jsonValue(value);
+  if (!raw || typeof raw !== "object") return [];
+  const envelope = raw as Record<string, unknown>;
+  const nested =
+    envelope.plan && typeof envelope.plan === "object"
+      ? (envelope.plan as Record<string, unknown>)
+      : undefined;
+  const risks = Array.isArray(envelope.risks)
+    ? envelope.risks
+    : Array.isArray(nested?.risks)
+      ? nested.risks
+      : [];
+  return risks.map((risk) => (typeof risk === "string" ? risk : JSON.stringify(risk)));
+}
+
+export type ConversationCompactionCheckpoint = (
+  checkpoint: "summary_inserted",
+) => void | Promise<void>;
+
 /**
  * A bounded, provider-neutral context receipt. The SQL order below is the
  * product priority order; manifest entries and rendered system sections are
  * derived from the same exact strings so their hashes remain auditable.
  */
 export class ConversationContextAssembler {
-  constructor(private readonly transactions: V2TransactionRunner) {}
+  private readonly checkpoint: ConversationCompactionCheckpoint;
+
+  constructor(
+    private readonly transactions: V2TransactionRunner,
+    options: { checkpoint?: ConversationCompactionCheckpoint } = {},
+  ) {
+    this.checkpoint = options.checkpoint ?? (() => undefined);
+  }
 
   assemble(
     projectId: string,
@@ -135,9 +193,11 @@ export class ConversationContextAssembler {
         objective: string;
         kind: "planning" | "execution_pm" | "task";
         triggering_message_sequence: number | string;
+        triggering_user_id: string;
       }>(
         `SELECT item.id, item.objective, conversation.kind,
-                triggering_message.sequence AS triggering_message_sequence
+                triggering_message.sequence AS triggering_message_sequence,
+                triggering_message.initiated_by_user_id AS triggering_user_id
            FROM work_items item
            JOIN work_conversations conversation
              ON conversation.project_id=item.project_id
@@ -147,11 +207,21 @@ export class ConversationContextAssembler {
             AND triggering_message.work_item_id=item.id
             AND triggering_message.conversation_id=conversation.id
             AND triggering_message.id=$4
-          WHERE item.project_id=$1 AND item.id=$2 AND conversation.id=$3`,
+          WHERE item.project_id=$1 AND item.id=$2 AND conversation.id=$3
+          FOR UPDATE OF conversation`,
         [projectId, workItemId, conversationId, triggeringMessageId],
       );
       const work = scope.rows[0];
       if (!work) throw new Error("conversation scope not found");
+      await this.compactAtContextThreshold(
+        tx,
+        projectId,
+        workItemId,
+        conversationId,
+        Number(work.triggering_message_sequence),
+        work.triggering_user_id,
+        work.objective,
+      );
 
       const materials: ContextMaterial[] = [];
       const systemSections: string[] = [];
@@ -262,6 +332,186 @@ export class ConversationContextAssembler {
         triggering_message_index: triggeringMessageIndex,
       };
     });
+  }
+
+  private async compactAtContextThreshold(
+    tx: V2SqlExecutor,
+    projectId: string,
+    workItemId: string,
+    conversationId: string,
+    triggeringSequence: number,
+    triggeringUserId: string,
+    objective: string,
+  ): Promise<void> {
+    const locked = await tx.query<{ id: string }>(
+      `SELECT id
+         FROM work_conversations
+        WHERE project_id=$1 AND work_item_id=$2 AND id=$3
+        FOR UPDATE`,
+      [projectId, workItemId, conversationId],
+    );
+    if (!locked.rows[0]) throw new Error("conversation scope disappeared during compaction");
+
+    const previous = (
+      await tx.query<SummaryRow>(
+        `SELECT id, version, from_message_sequence, through_message_sequence, summary
+           FROM conversation_summaries
+          WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3
+            AND through_message_sequence<=$4
+          ORDER BY version DESC
+          LIMIT 1`,
+        [projectId, workItemId, conversationId, triggeringSequence],
+      )
+    ).rows[0];
+    const unsummarized = await tx.query<MessageRow>(
+      `SELECT id, role, sequence, parts
+         FROM work_messages
+        WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3
+          AND visibility_status='complete'
+          AND sequence>$4 AND sequence<=$5
+        ORDER BY sequence, id`,
+      [
+        projectId,
+        workItemId,
+        conversationId,
+        Number(previous?.through_message_sequence ?? 0),
+        triggeringSequence,
+      ],
+    );
+    if (unsummarized.rows.length <= MAX_RECENT_MESSAGES) return;
+
+    const compactedDeltaCount = unsummarized.rows.length - RETAIN_RECENT_MESSAGES_AFTER_COMPACTION;
+    const throughSequence = Number(
+      unsummarized.rows[compactedDeltaCount - 1]?.sequence ?? triggeringSequence,
+    );
+    const sources = await tx.query<MessageRow>(
+      `SELECT id, role, sequence, parts
+         FROM work_messages
+        WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3
+          AND visibility_status='complete' AND sequence<=$4
+        ORDER BY sequence, id`,
+      [projectId, workItemId, conversationId, throughSequence],
+    );
+    const firstSource = sources.rows[0];
+    const lastSource = sources.rows.at(-1);
+    if (!firstSource || !lastSource) {
+      throw new Error("conversation compaction source range disappeared");
+    }
+
+    const constraints = await tx.query<{ content: string }>(
+      `SELECT content
+         FROM project_memory_entries
+        WHERE project_id=$1 AND status='active' AND approved_by_human=TRUE
+          AND category IN ('constraint','directive')
+        ORDER BY created_at, id`,
+      [projectId],
+    );
+    const decisions = await tx.query<{ id: string; title: string; rationale: string }>(
+      `SELECT id, title, rationale
+         FROM decision_records
+        WHERE project_id=$1 AND status='active'
+        ORDER BY created_at, id`,
+      [projectId],
+    );
+    const questions = await tx.query<{ question: string; context: string }>(
+      `SELECT question, context
+         FROM decision_points
+        WHERE project_id=$1 AND status='open'
+        ORDER BY created_at, id`,
+      [projectId],
+    );
+    const latestPlan = await tx.query<{ plan: unknown }>(
+      `SELECT plan
+         FROM work_plan_versions
+        WHERE project_id=$1 AND work_item_id=$2
+        ORDER BY version DESC
+        LIMIT 1`,
+      [projectId, workItemId],
+    );
+
+    const artifactIds = unique(
+      sources.rows.flatMap((message) =>
+        parts(message.parts).flatMap((part) => {
+          if (part.type === "attachment") return [part.attachment_id];
+          if (part.type === "artifact") return [part.artifact_id];
+          return [];
+        }),
+      ),
+    );
+    const summary = V2ConversationSummaryContent.parse({
+      objective,
+      constraints: unique([
+        ...constraints.rows.map((row) => row.content.trim()).filter(Boolean),
+        ...boundedVisibleDigest(sources.rows),
+      ]),
+      decisions: decisions.rows.map((decision) => ({
+        id: decision.id,
+        summary: decision.title,
+        rationale: decision.rationale,
+      })),
+      risks: planRisks(latestPlan.rows[0]?.plan),
+      open_questions: questions.rows.map(
+        (question) => `${question.question} — ${question.context}`,
+      ),
+      artifact_ids: artifactIds,
+    });
+    const canonicalSources = sources.rows.map((message) =>
+      canonicalJson({
+        sequence: Number(message.sequence),
+        role: message.role,
+        parts: jsonValue(message.parts),
+      }),
+    );
+    const sourceIds = sources.rows.map((message) => message.id);
+    const sourceHashes = canonicalSources.map((message) => canonicalSha256(JSON.parse(message)));
+    const version = Number(previous?.version ?? 0) + 1;
+    const identity = canonicalSha256({
+      conversation_id: conversationId,
+      through_message_sequence: throughSequence,
+      source_message_hashes: sourceHashes,
+    });
+    const summaryId = `conversation_summary_${identity.slice(0, 32)}`;
+    const receiptId = `compaction_receipt_${identity.slice(32)}`;
+    const canonicalSummary = canonicalJson(summary);
+
+    await tx.query(
+      `INSERT INTO conversation_summaries (
+         id, project_id, work_item_id, conversation_id, created_by_user_id,
+         version, from_message_sequence, through_message_sequence,
+         summary, content_hash
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)`,
+      [
+        summaryId,
+        projectId,
+        workItemId,
+        conversationId,
+        triggeringUserId,
+        version,
+        Number(firstSource.sequence),
+        Number(lastSource.sequence),
+        JSON.stringify(summary),
+        canonicalSha256(summary),
+      ],
+    );
+    await this.checkpoint("summary_inserted");
+    await tx.query(
+      `INSERT INTO conversation_compaction_receipts (
+         id, project_id, work_item_id, conversation_id, summary_id, milestone,
+         source_message_ids, source_message_hashes, canonical_source_messages,
+         canonical_summary
+       ) VALUES ($1,$2,$3,$4,$5,'context_threshold',$6::jsonb,$7::jsonb,$8::jsonb,$9)`,
+      [
+        receiptId,
+        projectId,
+        workItemId,
+        conversationId,
+        summaryId,
+        JSON.stringify(sourceIds),
+        JSON.stringify(sourceHashes),
+        JSON.stringify(canonicalSources),
+        canonicalSummary,
+      ],
+    );
   }
 
   private async addExecutionHandoff(
@@ -459,7 +709,7 @@ export class ConversationContextAssembler {
   ): Promise<SummaryRow | null> {
     const row = (
       await tx.query<SummaryRow>(
-        `SELECT id, through_message_sequence, summary
+        `SELECT id, through_message_sequence, summary, content_hash
           FROM conversation_summaries
           WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3
             AND through_message_sequence<=$4
@@ -472,7 +722,12 @@ export class ConversationContextAssembler {
       typeof row.summary === "string" ? JSON.parse(row.summary) : row.summary,
     );
     const content = JSON.stringify(summary);
-    materials.push({ kind: "conversation_summary", ref: row.id, content });
+    materials.push({
+      kind: "conversation_summary",
+      ref: row.id,
+      content,
+      ...(row.content_hash ? { contentHash: row.content_hash } : {}),
+    });
     sections.push(section("Latest compacted conversation summary", content));
     return row;
   }
@@ -565,6 +820,7 @@ export class ConversationContextAssembler {
            SELECT id, role, sequence, parts
              FROM work_messages
             WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3
+              AND visibility_status='complete'
               AND sequence>$4
               AND sequence<=(
                 SELECT sequence FROM work_messages

@@ -195,3 +195,29 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
     ).toBe(false);
   });
 });
+
+it("OpenAI streaming uses visible deltas when response.completed omits output_text", async () => {
+  const adapter = new OpenAiAdapter({
+    apiKey: "mock-key",
+    model: "mock-openai",
+    baseURL: `${mock.url}/v1`,
+  });
+  const stream = await adapter.streamConversation({
+    messages: [{ role: "user", content: "TRIGGER_STREAM_NO_OUTPUT_TEXT" }],
+    ...attribution,
+  });
+  const deltas: string[] = [];
+  let terminal: Extract<ConversationStreamEvent, { type: "finish" }> | undefined;
+  for await (const event of stream) {
+    if (event.type === "text_delta") deltas.push(event.delta);
+    if (event.type === "finish") terminal = event;
+  }
+
+  expect(deltas.join("")).toBe("hello from the mock provider");
+  expect(terminal?.result.text).toBe(deltas.join(""));
+  expect(terminal?.result.usage).toMatchObject({
+    input_tokens: 120,
+    output_tokens: 45,
+    usage_source: "provider_api",
+  });
+});

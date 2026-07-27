@@ -121,6 +121,7 @@ export async function startMockProvider(): Promise<MockProvider> {
         });
       } else if (req.url?.includes("/responses")) {
         if (streaming) {
+          const omitTerminalOutputText = body.includes("TRIGGER_STREAM_NO_OUTPUT_TEXT");
           const response = {
             id: "resp_mock",
             object: "response",
@@ -129,7 +130,7 @@ export async function startMockProvider(): Promise<MockProvider> {
             status: "completed",
             error: null,
             incomplete_details: null,
-            output_text: text,
+            ...(omitTerminalOutputText ? {} : { output_text: text }),
             output: [
               {
                 id: "msg_mock",
