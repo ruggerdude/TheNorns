@@ -1042,10 +1042,10 @@ decision and is deliberately untouched.
   bottom-pinned layout bug; remove login/index.html "AI" copy.
 - [x] ✅ DES-P2a — Usage suite sweep (branch worktree-agent-ad9edeafdb865dffd @ 0fb936a).
 - [x] ✅ DES-P2b — Settings/Admin/Login sweep (branch worktree-agent-a3f7fc0e0a3a130dc @ 4342f27).
-- [ ] 🔄 DES-P2c — Portfolio (Projects.tsx) sweep.
-- [ ] 🔄 DES-P2d — Project workspace sweep (App.tsx shell, PhaseTab,
-  ConversationWorkspace, operations dashboard) incl. "AI pick"/staffing copy.
-- [ ] 📋 DES-P3 — Integration, full verification gate, browser walkthrough.
+- [x] ✅ DES-P2c — Portfolio sweep (worktree-agent-a1ea8378a5a1d7736 @ 373bc9e).
+- [x] ✅ DES-P2d — Project workspace sweep (worktree-agent-a80a9a7be3bd38355
+  @ f8e49d5): shell reorder, 43-site micro-text purge, AI copy neutralized.
+- [ ] 🔄 DES-P3 — Integration, full verification gate, browser walkthrough.
 
 ## Design overhaul (Phase 2 — 2026-07-27)
 
