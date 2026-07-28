@@ -1045,7 +1045,7 @@ decision and is deliberately untouched.
 - [x] ✅ DES-P2c — Portfolio sweep (worktree-agent-a1ea8378a5a1d7736 @ 373bc9e).
 - [x] ✅ DES-P2d — Project workspace sweep (worktree-agent-a80a9a7be3bd38355
   @ f8e49d5): shell reorder, 43-site micro-text purge, AI copy neutralized.
-- [ ] 🔄 DES-P3 — Integration, full verification gate, browser walkthrough.
+- [x] ✅ DES-P3 — Integration, full verification gate (biome/tsc/271 unit/26 e2e/build), browser walkthrough light+dark. Light-first theme default. Branch design-overhaul.
 
 ## Design overhaul (Phase 2 — 2026-07-27)
 

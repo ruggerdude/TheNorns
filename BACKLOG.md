@@ -158,3 +158,28 @@ Minor debt from the P5 review (all assessed non-blocking):
 - An approve whose staffing names a node the plan lacks refuses after the
   phase + proposed strategy were created (state consistent and recoverable;
   route-level 422 catches registry-invalid entries first) (PHTAB-B7).
+
+## Design overhaul (2026-07-27) — deferred items for scoping
+
+### Missed scope / follow-ups
+- Overlay screens (Usage hub, Settings, Admin) still use their own "Close"
+  header variant and a floating theme toggle instead of the canonical topbar
+  actions; unify onto one shell API.
+- Graph canvas node renderer (App.tsx) keeps inline 10px fonts and hex node
+  colors — explicitly excluded from the sweep to avoid touching graph logic.
+- Legacy CSS alias variables (--muted, --text, --raised, --accent, …) still
+  bridge old page rules to the new tokens; retire them page-by-page per the
+  migration table in docs/DESIGN-SYSTEM.md.
+- ~30 media queries still use ad-hoc breakpoints (520/720/760/850/900) rather
+  than the standard 640/900/1200 set.
+
+### Recommendations
+- Wizard source-card selected state uses the legacy warm cream tint; consider
+  moving to --brand-100 for full palette coherence.
+- Settings sidebar tab card stretches full viewport height; cap it.
+- Usage Analytics "Optimization recommendations" section is unboxed while
+  sibling sections are cards; card it for rhythm.
+- Dead screens src/Dashboard.tsx and src/PlanReview.tsx are referenced only by
+  their tests — delete them (with tests) or route to them.
+- The e2e phase6-dashboard-mockup webkit test is flaky under parallel load
+  (passed in isolation, failed in a full parallel run once).
