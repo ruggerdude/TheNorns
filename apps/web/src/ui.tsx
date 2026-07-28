@@ -6,6 +6,7 @@ import type {
   SelectHTMLAttributes,
   TextareaHTMLAttributes,
 } from "react";
+import { BraidMark } from "./BraidMark";
 export function Button({
   variant = "default",
   className = "",
@@ -128,51 +129,42 @@ export function Badge({
   return <span className={`badge badge-${tone}`}>{children}</span>;
 }
 /**
- * DESIGN P1 — the "converging threads" mark: two strands sweeping into one
- * continuous gold thread (the Norns weaving fate). Strands render in
- * `currentColor` so the mark adapts to its context; the thread is always
- * gold. Use `BrandMark` raw (e.g. a large login rendition) or `Brand` for
- * the standard topbar lockup (26px gradient tile + wordmark).
+ * DESIGN R2 — the braided-threads mark (see BraidMark.tsx): three strands
+ * — indigo, gold, silver — woven with true over/under crossings. `BrandMark`
+ * keeps its legacy `{ size }` API by scaling the topbar braid recipe
+ * (64×26, lead 14, period 34) so existing call sites keep working.
  */
-export function BrandMark({ size = 20, className }: { size?: number; className?: string }) {
+export function BrandMark({ size = 26, className }: { size?: number; className?: string }) {
+  const scale = size / 26;
   return (
-    <svg
-      viewBox="0 0 48 48"
-      width={size}
+    <BraidMark
+      width={Math.round(64 * scale)}
       height={size}
+      lead={14 * scale}
+      period={34 * scale}
+      strokeWidth={4.5 * scale}
       className={className}
-      fill="none"
-      role="img"
-      aria-hidden="true"
-    >
-      <path
-        d="M7 12.5 C 16 12.5, 21 21.5, 28.5 23.2"
-        stroke="currentColor"
-        strokeWidth="3.8"
-        strokeLinecap="round"
-      />
-      <path
-        d="M7 35.5 C 16 35.5, 21 26.5, 28.5 24.8"
-        stroke="currentColor"
-        strokeWidth="3.8"
-        strokeLinecap="round"
-      />
-      <path
-        d="M7 24 L 41 24"
-        stroke="var(--gold, #ffb600)"
-        strokeWidth="3.8"
-        strokeLinecap="round"
-      />
-    </svg>
+    />
   );
 }
-export function Brand() {
+/**
+ * DESIGN R2 — the brand lockup. `topbar` (default): a compact 64×26 braid
+ * beside the uncial wordmark at 20px. `hero` (login-scale): the wordmark at
+ * 40px stacked above a 300×34 braid with a long lead-in.
+ */
+export function Brand({ variant = "topbar" }: { variant?: "topbar" | "hero" }) {
+  if (variant === "hero") {
+    return (
+      <div className="brand brand-hero">
+        <span className="brand-word">The Norns</span>
+        <BraidMark width={300} height={34} lead={96} period={78} strokeWidth={6} />
+      </div>
+    );
+  }
   return (
     <div className="brand">
-      <span className="brand-mark" aria-hidden="true">
-        <BrandMark />
-      </span>
-      <span>The Norns</span>
+      <BraidMark width={64} height={26} lead={14} period={34} strokeWidth={4.5} />
+      <span className="brand-word">The Norns</span>
     </div>
   );
 }

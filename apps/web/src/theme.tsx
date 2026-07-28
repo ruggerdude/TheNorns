@@ -64,7 +64,6 @@ export function ThemeToggle(): React.ReactElement {
       title={`Switch to ${nextTheme} mode`}
     >
       <span aria-hidden="true">{theme === "dark" ? "☀" : "☾"}</span>
-      <span>{theme === "dark" ? "Light" : "Dark"}</span>
     </button>
   );
 }
