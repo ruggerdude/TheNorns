@@ -3752,7 +3752,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
       const OnboardingFields = {
         name: z.string().trim().min(1),
-        description: z.string().trim().min(1),
+        // DESIGN R2 starts planning in the project conversation, so a project
+        // may be created before the user has written a brief.
+        description: z.string().trim(),
         connection_id: z.string().min(1),
         idempotency_key: z.string().trim().min(1).max(200),
       };
@@ -3797,9 +3799,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         const pm = PmBody.safeParse(req.body);
         if (!scenario.success || !pm.success) {
           const issue = scenario.success ? pm.error?.issues[0] : scenario.error?.issues[0];
-          return reply
-            .code(400)
-            .send({ error: "bad_request", detail: issue?.message ?? "invalid body" });
+          const field = issue?.path.map(String).join(".") || "request";
+          return reply.code(400).send({
+            error: "bad_request",
+            field,
+            message:
+              field === "request"
+                ? "Check the project setup details and try again."
+                : `Check ${field.replaceAll("_", " ")}: ${issue?.message ?? "invalid value"}`,
+          });
         }
         const base = {
           name: scenario.data.name,

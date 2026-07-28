@@ -615,7 +615,28 @@ describe.sequential("ONBOARDING O2: route wiring", () => {
   it("validates the body before touching GitHub", async () => {
     const response = await post({ scenario: "new_repo", name: "x" });
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toMatchObject({ error: "bad_request" });
+    expect(response.json()).toMatchObject({
+      error: "bad_request",
+      field: "description",
+      message: expect.stringContaining("description"),
+    });
+  });
+
+  it("allows a project to be created without a filler description", async () => {
+    const response = await post({
+      scenario: "new_repo",
+      name: "Test",
+      description: "",
+      pm_provider: "anthropic",
+      connection_id: "connection-1",
+      idempotency_key: "empty-description",
+      repository_name: "test",
+    });
+
+    // The unconfigured GitHub port is the next expected refusal. A 400 here
+    // would mean route validation rejected the intentionally empty brief.
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ error: "github_not_configured" });
   });
 
   it("refuses honestly when no GitHub App is configured", async () => {
