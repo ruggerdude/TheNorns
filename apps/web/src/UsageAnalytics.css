@@ -3,7 +3,6 @@
 .usage-analytics-page {
   display: grid;
   gap: 20px;
-  padding: 24px;
 }
 
 .usage-analytics-filters {
@@ -85,10 +84,6 @@
 }
 
 @media (max-width: 560px) {
-  .usage-analytics-page {
-    padding: 16px;
-  }
-
   .usage-analytics-filters,
   .usage-analytics-summary,
   .usage-analytics-forecast {

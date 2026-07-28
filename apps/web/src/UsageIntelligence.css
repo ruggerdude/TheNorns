@@ -1,7 +1,11 @@
 .usage-page {
   display: grid;
   gap: 20px;
-  padding: 24px;
+}
+
+.usage-toolbar {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .usage-filters {
@@ -118,10 +122,6 @@
 }
 
 @media (max-width: 560px) {
-  .usage-page {
-    padding: 16px;
-  }
-
   .usage-filters,
   .usage-summary {
     grid-template-columns: 1fr;

@@ -466,14 +466,19 @@ test("administrator completes portfolio analytics and project access journeys", 
   await page.goto("/");
 
   await openPortfolioUsage(page);
-  await expect(page.getByRole("heading", { name: "User usage" })).toBeVisible();
+  // DESIGN R2: the hub keeps one "Usage" H1 for every sub-page; the old
+  // per-scope H1s ("User usage", "All usage", "Project usage", "Analytics
+  // and optimization") were removed, and the .page-subnav marks the scope.
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
   await expect(page.getByRole("button", { name: "My usage" })).toHaveAttribute(
     "aria-current",
     "page",
   );
 
   await page.getByRole("button", { name: "All usage" }).click();
-  await expect(page.getByRole("heading", { name: "All usage" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Provider, model, project, and user usage" }),
+  ).toBeVisible();
   await page.getByRole("textbox", { name: "From", exact: true }).fill("2026-07-01");
   await page.getByRole("textbox", { name: "To", exact: true }).fill("2026-07-20");
   await page.getByRole("textbox", { name: "Provider", exact: true }).fill("anthropic");
@@ -506,9 +511,9 @@ test("administrator completes portfolio analytics and project access journeys", 
   await downloadPromise;
 
   await page.getByRole("button", { name: "My usage" }).click();
-  await expect(page.getByRole("heading", { name: "User usage" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
   await page.getByRole("button", { name: "Analytics" }).click();
-  await expect(page.getByRole("heading", { name: "Analytics and optimization" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Hot spots by provider" })).toBeVisible();
   await expect(page.getByText(/Mean absolute error:/)).toContainText("8.2%");
   await page.getByRole("textbox", { name: "From", exact: true }).fill("2026-07-01");
   await page.getByRole("textbox", { name: "To", exact: true }).fill("2026-07-20");
@@ -534,7 +539,10 @@ test("administrator completes portfolio analytics and project access journeys", 
   await page.getByRole("button", { name: "Close" }).click();
   await openProject(page);
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Project usage" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Project users, models, providers, and phases" }),
+  ).toBeVisible();
   await expect(page.getByRole("button", { name: project.name })).toHaveAttribute(
     "aria-current",
     "page",
@@ -575,7 +583,7 @@ test("standard member can inspect personal and project usage without admin contr
   await page.goto("/");
 
   await openPortfolioUsage(page);
-  await expect(page.getByRole("heading", { name: "User usage" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
   await expectNoHorizontalPageOverflow(page);
   await expect(page.getByRole("button", { name: "My usage" })).toBeVisible();
   await expect(page.getByRole("button", { name: "All usage" })).toHaveCount(0);
@@ -584,7 +592,7 @@ test("standard member can inspect personal and project usage without admin contr
 
   await openProject(page);
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Project usage" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
   await expect(page.getByRole("button", { name: project.name })).toBeVisible();
   await expect(page.getByRole("button", { name: "My usage" })).toBeVisible();
   await expect(page.getByRole("button", { name: "All usage" })).toHaveCount(0);
