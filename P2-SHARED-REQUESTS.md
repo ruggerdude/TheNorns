@@ -262,3 +262,51 @@ styles.css:
    `var(--text-xs)` (also flagged in DESIGN-SYSTEM.md's per-page list;
    the strip is rendered by ProjectTabs in Projects.tsx, which P2d does
    not own).
+
+## R2 portfolio/wizard
+
+Round-2 punch-list items on Projects.tsx that need shared CSS. Everything
+below is currently implemented with inline `style={}` in
+`apps/web/src/Projects.tsx` (search for "DESIGN R2") so the owner sees the
+change now; lifting each into styles.css should delete the matching inline
+style in the same commit.
+
+1. **Portfolio page header.** New markup
+   `header.page-header.portfolio-page-header` with a gold accent rule under
+   the H1 (inline: 48×3px, `border-radius: 999px`, `background: var(--gold)`,
+   `margin-top: var(--space-2)`). Suggest a `.page-header-rule` class (or a
+   `.page-header--accent h1::after`).
+2. **Centered primary action.** `div.portfolio-primary-action` under the page
+   header (inline: `display: flex; justify-content: center;
+   margin: 0 0 var(--space-5)`). A generic `.page-primary-action` class would
+   serve other pages too.
+3. **Stat tiles centered.** `.project-stats div { text-align: center }` —
+   currently inline on each tile (both the main TOTAL / ACTIVE RUNS /
+   DECISIONS / BLOCKED grid and the new `.pulse-foot-tiles` row).
+4. **Pulse foot tiles.** The old `.pulse-foot` text row is now a second
+   `.project-stats` grid with class `pulse-foot-tiles` (inline
+   `margin: 0 0 .8rem` to defeat `.portfolio-pulse-panel .project-stats`'s
+   `margin: auto 0 .8rem` on the second instance). `.pulse-foot` CSS
+   (~line 4830) is now unreferenced and can be deleted.
+5. **Project card title.** `.pr-title-btn` should be
+   `font-size: var(--text-lg); font-weight: 700` (currently 1.1rem in CSS,
+   overridden inline).
+6. **Side-panel tiles.** `.pr-agg` (column, centered, padded, `1px solid
+   var(--line)`, `border-radius: var(--radius-sm)`, `background:
+   color-mix(in srgb, var(--bg) 52%, transparent)`) and `.pr-facts` as a
+   3-column tile grid with each `.pr-fact` a centered column tile (same
+   border/background). All inline today. `.pr-cta` (~line 3308) is now
+   unreferenced (replaced by a `.btn-primary.btn-small`).
+7. **Gold accents.** Quick-access ready dot: `.quick-project-state.is-ready i
+   { background: var(--gold) }` (inline today; the box-shadow halo still
+   comes from the `--info` rule and could be re-tinted). Decisions stat
+   number when > 0: gold — inline conditional today; could be an `.is-attn`
+   class on the tile.
+8. **Pulse panel head row.** `.focus-panel-head` on the pulse panel now holds
+   only the Badge (inline `justify-content: flex-end`); a modifier class
+   would be cleaner.
+9. **Cleanup after the wizard changes** (no longer referenced from
+   Projects.tsx): `.wizard-attach-step`; `.page-container-narrow` is no
+   longer used by the wizard (`main.page-container.wizard-page` now). The
+   `.project-setup-view .textarea { min-height: 150px }` rule now only
+   affects the Existing flow's optional-direction textarea.

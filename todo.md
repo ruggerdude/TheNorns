@@ -1112,3 +1112,31 @@ decision and is deliberately untouched.
   toggle, gold accent pass.
 - [ ] 🔄 R2-E — Diagnose "Project setup couldn't finish" + verify create →
   coordinator chat → Approve plan → Reviewer flow.
+
+## Design overhaul — Round 2 (2026-07-28)
+
+- [x] ✅ DES-R2 — portfolio + wizard punch list (this worktree,
+  `apps/web/src/Projects.tsx` + its tests only). Portfolio: "Portfolio" H1
+  page title with gold rule; eyebrows/ledes collapsed to plain section h2s
+  ("Quick access", "All projects"; attention panel retitled "Status";
+  "Portfolio status" heading removed); quiet-state subtext removed; stat
+  tiles centered; planned/drafts/open/runner text row became a second tile
+  grid; project card names at --text-lg/700 with filler descriptions
+  suppressed; side panel restructured into badge / progress tile / 3-tile
+  fact grid / actions; "+ New project" moved to top-center; subtle gold
+  accents (title rule, ready dot, waiting-decisions count). Wizard:
+  "Project setup" heading removed, wide container; name-first form
+  (single-line "Project name" replaces the objective textarea; no wizard
+  planning kickoff — planning starts in the conversation; description empty
+  at creation); "Project type" / "Working location" / "Project location"
+  renames; "Options" (name-override + reference-images removed); review
+  rounds allow 0 with "Plan review is off" copy. Shared-CSS lifts logged in
+  P2-SHARED-REQUESTS.md ("R2 portfolio/wizard").
+- [ ] 🟡 DES-R2-FOLLOWUP — wizard "Plan review rounds" (incl. the new 0
+  value) is not persisted anywhere since the wizard no longer starts a
+  planning run; conversation planning (PhaseTab) uses its own reviewRounds
+  default. Needs a per-project planning-rounds preference (server route +
+  read in PhaseTab) for the wizard setting to be honest end-to-end.
+- [ ] 🟡 DES-R2-FLAKY — two pre-existing e2e failures reproduce on base
+  de367e5 (unrelated to R2): frontdoor "centered responsive shell" work-tab
+  background assertion, and phase6 mockup approval (intermittent).

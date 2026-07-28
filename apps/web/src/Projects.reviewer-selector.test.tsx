@@ -2,7 +2,9 @@
 // GET/PATCH/DELETE /api/v2/projects/:id/planning-reviewer. Picking an
 // explicit model PATCHes it; leaving it on "Automatic" DELETEs any override
 // (a no-op the first time, but a deterministic "apply the selection" either
-// way) — both happen right after project creation, before any planning run.
+// way) — both happen right after project creation, so the preference is in
+// place before planning starts in the conversation (DESIGN R2: the wizard
+// itself no longer kicks off a planning run).
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -95,7 +97,7 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
     );
   }
 
-  it("PATCHes an explicit reviewer model right after creation, before the planning run starts", async () => {
+  it("PATCHes an explicit reviewer model right after creation", async () => {
     setup();
     mock.patch("/api/v2/projects/project-created/planning-reviewer", { status: 204 });
     mock.install();
@@ -103,13 +105,9 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
 
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.type(screen.getByTestId("project-name"), "Ravel search index");
-    await user.type(
-      screen.getByTestId("project-description"),
-      "Stand up a hybrid vector + keyword index.",
-    );
     await user.selectOptions(screen.getByTestId("reviewer-model"), "openai:gpt-5.6-sol");
     await user.type(await screen.findByTestId("github-new-repository-name"), "ravel-search-index");
-    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
+    await user.click(screen.getByRole("button", { name: /create project/i }));
 
     await waitFor(() =>
       expect(
@@ -138,13 +136,12 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
 
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.type(screen.getByTestId("project-name"), "Helm mobile onboarding");
-    await user.type(screen.getByTestId("project-description"), "Rebuild the first-run flow.");
     // Reviewer left at its default "Automatic" value — no selectOptions call.
     await user.type(
       await screen.findByTestId("github-new-repository-name"),
       "helm-mobile-onboarding",
     );
-    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
+    await user.click(screen.getByRole("button", { name: /create project/i }));
 
     await waitFor(() =>
       expect(
@@ -175,10 +172,9 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
 
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.type(screen.getByTestId("project-name"), "Nimbus API gateway");
-    await user.type(screen.getByTestId("project-description"), "Consolidate the edge gateways.");
     await user.selectOptions(screen.getByTestId("reviewer-model"), "anthropic:claude-opus-4-8");
     await user.type(await screen.findByTestId("github-new-repository-name"), "nimbus-api-gateway");
-    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
+    await user.click(screen.getByRole("button", { name: /create project/i }));
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
   });
 });

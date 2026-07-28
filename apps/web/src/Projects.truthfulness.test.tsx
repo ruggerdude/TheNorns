@@ -111,7 +111,11 @@ describe("portfolio truthfulness", () => {
     expect(await screen.findByTestId("proj-row")).toHaveClass("s-red");
     expect(screen.getByText("Run failed", { selector: ".badge" })).toBeVisible();
     expect(await screen.findByText("failed — review")).toBeVisible();
-    expect(screen.getByTestId("runner-freshness")).toHaveTextContent("No runner registered");
+    // DESIGN R2: the runner fact is a tile — bare state value + label. With
+    // no runner registered it truthfully reads "None", never a healthy state.
+    expect(screen.getByTestId("runner-freshness")).toHaveTextContent("None");
+    expect(screen.getByTestId("runner-freshness")).toHaveTextContent("Runner heartbeat");
+    expect(screen.getByTestId("runner-freshness")).not.toHaveTextContent("Online");
   });
 
   it("shows a failed quick kickoff as restart-needed instead of Ready or Draft", async () => {
