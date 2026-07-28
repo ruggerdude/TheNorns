@@ -176,7 +176,7 @@ describe("Phase 6 project operations dashboard", () => {
     expect(await screen.findByRole("heading", { name: "Project operations" })).toBeInTheDocument();
     for (const heading of [
       "Active work and progress",
-      "Needs Your Attention",
+      "Status",
       "Open decisions and blockers",
       "Spend and projected budget",
       "Deployments and verification",
