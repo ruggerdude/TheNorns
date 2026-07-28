@@ -1112,15 +1112,15 @@ decision and is deliberately untouched.
 
 ## DESIGN R2 — feedback punch list (dispatched 2026-07-27)
 
-- [ ] 🔄 R2-A — Portfolio dashboard punch list (headers, removals, tiles,
+- [x] ✅ R2-A — Portfolio dashboard punch list (headers, removals, tiles,
   centered stats, apollo card, side box, New Project button top-center).
-- [ ] 🔄 R2-B — New Project wizard restructure (name-first, renames, Options,
+- [x] ✅ R2-B — New Project wizard restructure (name-first, renames, Options,
   zero review rounds, standard width).
-- [ ] 🔄 R2-C — Usage + Settings: persistent main header with sub-tabs below,
+- [x] ✅ R2-C — Usage + Settings: persistent main header with sub-tabs below,
   renames, lede removals.
-- [ ] 🔄 R2-D — Braided logo lockup (user-supplied design), icon-only theme
+- [x] ✅ R2-D — Braided logo lockup (user-supplied design), icon-only theme
   toggle, gold accent pass.
-- [ ] 🔄 R2-E — Diagnose "Project setup couldn't finish" + verify create →
+- [x] ✅ R2-E — Diagnose "Project setup couldn't finish" + verify create →
   coordinator chat → Approve plan → Reviewer flow.
 
 ## Design overhaul — Round 2 (2026-07-28)

@@ -183,3 +183,20 @@ Minor debt from the P5 review (all assessed non-blocking):
   their tests — delete them (with tests) or route to them.
 - The e2e phase6-dashboard-mockup webkit test is flaky under parallel load
   (passed in isolation, failed in a full parallel run once).
+
+## Design R2 (2026-07-28) — deferred items
+
+- Lift the R2 portfolio/wizard inline styles into styles.css per
+  P2-SHARED-REQUESTS.md § "R2 portfolio/wizard" (9 items, incl. dead-rule
+  deletions). Visuals already correct; this is hygiene.
+- Wizard "Plan review rounds" value is collected but not persisted server-side
+  (planning moved to conversations) — needs a per-project preference route
+  (DES-R2-FOLLOWUP).
+- 3 pre-existing @norns/server test failures (2× conversationStreaming
+  inference-reservation tests, 1× conversationExecutionHandoffPhase4
+  pre-0038 approval-effect test) — fail on base de367e5 too; triage separately.
+- Consider auto-creating the first planning conversation on entry_flow="new"
+  so a fresh project lands directly in the chat composer instead of the
+  "New planning conversation" form.
+- FOR UPDATE lock in reserveRepositoryIntent is advisory and likely droppable
+  (see comment at projectOnboardingService.ts ~546).
