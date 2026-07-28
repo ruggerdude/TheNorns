@@ -12,7 +12,7 @@
 }
 
 .operations-header p {
-  color: var(--muted);
+  color: var(--ink-muted);
   margin: 4px 0 0;
 }
 
@@ -25,7 +25,7 @@
 .operations-section {
   background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   display: grid;
   gap: 12px;
   min-width: 0;
@@ -38,7 +38,7 @@
 
 .operations-section > small,
 .operations-section li > small {
-  color: var(--muted);
+  color: var(--ink-muted);
 }
 
 .operations-unavailable {
@@ -47,12 +47,12 @@
 
 .operations-empty,
 .operations-inline-unavailable {
-  color: var(--muted);
+  color: var(--ink-muted);
   margin: 0;
 }
 
 .operations-inline-unavailable {
-  border-left: 3px solid var(--warning);
+  border-left: 3px solid var(--warn);
   padding-left: 10px;
 }
 
@@ -67,7 +67,7 @@
 .operations-list li {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
   display: grid;
   gap: 6px;
   min-width: 0;
@@ -118,12 +118,12 @@
 }
 
 .operations-metrics dt {
-  color: var(--muted);
-  font-size: 12px;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
 }
 
 .operations-metrics dd {
-  font-size: 22px;
+  font-size: var(--text-lg);
   font-weight: 700;
   margin: 0;
 }
@@ -155,7 +155,7 @@
   aspect-ratio: 16 / 10;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
   object-fit: contain;
   width: 100%;
 }
@@ -166,8 +166,8 @@
   aspect-ratio: 16 / 10;
   background: var(--surface);
   border: 1px dashed var(--line);
-  border-radius: 10px;
-  color: var(--muted);
+  border-radius: var(--radius);
+  color: var(--ink-muted);
   display: flex;
   justify-content: center;
   padding: 12px;
