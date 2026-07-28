@@ -546,7 +546,7 @@ export class ProjectOnboardingService {
     return this.transactions.transaction(async (tx) => {
       // NOTE: `FOR UPDATE` requires the UPDATE table privilege, which the
       // restricted production role holds only via the dedicated grant
-      // migration (NNNN_onboarding_intents_update_grant.sql). The lock is an
+      // migration (0044_onboarding_intents_update_grant.sql). The lock is an
       // advisory serialization guard around the ON CONFLICT DO NOTHING insert
       // below: rows here are never updated, and FOR UPDATE on an absent row
       // locks nothing, so concurrent first-time submissions are already

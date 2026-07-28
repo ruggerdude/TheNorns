@@ -295,6 +295,13 @@ export const CONVERSATION_INFERENCE_BUDGET_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const ONBOARDING_INTENTS_UPDATE_GRANT_MIGRATION_NAME =
+  "0044_onboarding_intents_update_grant";
+export const ONBOARDING_INTENTS_UPDATE_GRANT_MIGRATION_URL = new URL(
+  "../../../drizzle/0044_onboarding_intents_update_grant.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -497,6 +504,10 @@ export async function loadPhase6AcceptanceCorrectionsMigrationSql(): Promise<str
 
 export async function loadConversationInferenceBudgetMigrationSql(): Promise<string> {
   return readFile(CONVERSATION_INFERENCE_BUDGET_MIGRATION_URL, "utf8");
+}
+
+export async function loadOnboardingIntentsUpdateGrantMigrationSql(): Promise<string> {
+  return readFile(ONBOARDING_INTENTS_UPDATE_GRANT_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -782,6 +793,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: CONVERSATION_INFERENCE_BUDGET_MIGRATION_NAME,
       sql: await loadConversationInferenceBudgetMigrationSql(),
+    },
+    {
+      name: ONBOARDING_INTENTS_UPDATE_GRANT_MIGRATION_NAME,
+      sql: await loadOnboardingIntentsUpdateGrantMigrationSql(),
     },
   ];
 }

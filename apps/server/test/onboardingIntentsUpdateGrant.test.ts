@@ -15,13 +15,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { assertCurrentRuntimeSchema } from "../src/persistence/postgresConnection.js";
 import {
   type V2MigrationDatabase,
+  currentV2MigrationSources,
   runCurrentV2Migrations,
   runV2Migrations,
 } from "../src/persistence/v2/migrate.js";
 
-const MIGRATION_NAME = "NNNN_onboarding_intents_update_grant";
+const MIGRATION_NAME = "0044_onboarding_intents_update_grant";
 const MIGRATION_URL = new URL(
-  "../drizzle/NNNN_onboarding_intents_update_grant.sql",
+  "../drizzle/0044_onboarding_intents_update_grant.sql",
   import.meta.url,
 );
 
@@ -51,7 +52,13 @@ describe("onboarding intents UPDATE grant migration", () => {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
     `);
-    await runCurrentV2Migrations(asMigrationDatabase(pg));
+    // Model the pre-fix production database: every migration EXCEPT 0044
+    // (0044 is now registered in currentV2MigrationSources, so the full
+    // runner would pre-grant UPDATE and hide the gap this suite proves).
+    const priorSources = (await currentV2MigrationSources()).filter(
+      (source) => source.name !== MIGRATION_NAME,
+    );
+    await runV2Migrations(asMigrationDatabase(pg), priorSources);
   });
 
   afterEach(async () => {
@@ -77,6 +84,8 @@ describe("onboarding intents UPDATE grant migration", () => {
   });
 
   it("boot guard accepts the fully-migrated schema and rejects a half-migrated one", async () => {
+    // Bring the database fully current (including 0044) for the guard check.
+    await runCurrentV2Migrations(asMigrationDatabase(pg));
     const pool = pg as unknown as Parameters<typeof assertCurrentRuntimeSchema>[0];
     await expect(assertCurrentRuntimeSchema(pool)).resolves.toBeUndefined();
 
