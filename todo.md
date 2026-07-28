@@ -1099,3 +1099,16 @@ decision and is deliberately untouched.
   ProjectOperationsDashboard / KnowledgeStatusPanel CSS, "AI" copy
   neutralized in PhaseTab, header/token normalization across operations
   dashboard, run log, debates, members.
+
+## DESIGN R2 — feedback punch list (dispatched 2026-07-27)
+
+- [ ] 🔄 R2-A — Portfolio dashboard punch list (headers, removals, tiles,
+  centered stats, apollo card, side box, New Project button top-center).
+- [ ] 🔄 R2-B — New Project wizard restructure (name-first, renames, Options,
+  zero review rounds, standard width).
+- [ ] 🔄 R2-C — Usage + Settings: persistent main header with sub-tabs below,
+  renames, lede removals.
+- [ ] 🔄 R2-D — Braided logo lockup (user-supplied design), icon-only theme
+  toggle, gold accent pass.
+- [ ] 🔄 R2-E — Diagnose "Project setup couldn't finish" + verify create →
+  coordinator chat → Approve plan → Reviewer flow.
