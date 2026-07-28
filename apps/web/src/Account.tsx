@@ -5,7 +5,7 @@ import {
   chooseLocalRepository,
   loadLocalRepositories,
 } from "./localSources";
-import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner } from "./ui";
+import { Alert, Badge, Brand, Button, Field, Input, PageHeader, Select, Spinner } from "./ui";
 
 interface SessionSummary {
   id: string;
@@ -333,14 +333,12 @@ export function Account({
           Close
         </Button>
       </header>
-      <main className="page settings-page">
-        <div className="section-head settings-head full-page-intro">
-          <div>
-            <div className="eyebrow">Workspace</div>
-            <h1>Settings</h1>
-            <p className="muted">Manage your profile, integrations, and active sessions.</p>
-          </div>
-        </div>
+      <main className="page-container page-container-narrow settings-page">
+        <PageHeader
+          eyebrow="Workspace"
+          title="Settings"
+          lede="Manage your profile, integrations, and active sessions."
+        />
         <div className="settings-layout">
           <nav className="settings-nav" aria-label="Settings sections">
             <button
@@ -385,9 +383,12 @@ export function Account({
                     <Badge tone={user.role === "admin" ? "info" : "default"}>{user.role}</Badge>
                   </p>
                 </div>
-                <Button variant="danger" onClick={onSignOut}>
-                  Sign out
-                </Button>
+                <div className="session-row">
+                  <span className="muted">End your session on this device.</span>
+                  <Button variant="danger" onClick={onSignOut}>
+                    Sign out
+                  </Button>
+                </div>
               </div>
             ) : null}
 
@@ -822,9 +823,9 @@ export function Account({
                 >
                   <div className="connection-card-head">
                     <div className="connection-brand">
-                      <span className="connection-icon">AI</span>
+                      <span className="connection-icon">MP</span>
                       <div>
-                        <h4>AI providers</h4>
+                        <h4>Model providers</h4>
                         <p>OpenAI and Anthropic execution credentials</p>
                       </div>
                     </div>
