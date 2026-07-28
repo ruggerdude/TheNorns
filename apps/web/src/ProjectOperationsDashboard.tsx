@@ -204,14 +204,14 @@ export function ProjectOperationsDashboard({
         )}
 
         {dashboard.needs_attention.availability === "unavailable" ? (
-          <SectionUnavailable title="Needs Your Attention" section={dashboard.needs_attention} />
+          <SectionUnavailable title="Status" section={dashboard.needs_attention} />
         ) : (
           <section
             className="operations-section is-attention"
             aria-labelledby="operations-attention"
           >
             <div className="operations-section-heading">
-              <h3 id="operations-attention">Needs Your Attention</h3>
+              <h3 id="operations-attention">Status</h3>
               <Badge tone={dashboard.needs_attention.data.length > 0 ? "danger" : "success"}>
                 {dashboard.needs_attention.data.length}
               </Badge>
