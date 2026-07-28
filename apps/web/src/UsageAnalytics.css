@@ -3,8 +3,6 @@
 .usage-analytics-page {
   display: grid;
   gap: 20px;
-  width: min(1180px, 100%);
-  margin: 0 auto;
   padding: 24px;
 }
 
@@ -36,15 +34,15 @@
 
 .usage-forecast-at_risk,
 .usage-forecast-exhausted {
-  color: var(--danger, #bc2e3b);
+  color: var(--danger);
 }
 
 .usage-forecast-on_track {
-  color: var(--success, #238754);
+  color: var(--success);
 }
 
 .usage-forecast-insufficient_data {
-  color: var(--text-muted, #687083);
+  color: var(--ink-muted);
 }
 
 .usage-recommendations {
@@ -59,24 +57,24 @@
 .usage-priority {
   border-radius: 999px;
   padding: 3px 9px;
-  font-size: 0.75rem;
+  font-size: var(--text-xs);
   font-weight: 700;
   text-transform: uppercase;
 }
 
 .usage-priority-high {
-  color: var(--danger, #bc2e3b);
-  background: color-mix(in srgb, var(--danger, #bc2e3b) 12%, transparent);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
 .usage-priority-medium {
-  color: #8a5b00;
-  background: #fff2cf;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
 }
 
 .usage-priority-low {
-  color: var(--text-muted, #687083);
-  background: var(--surface-subtle, #eef0f5);
+  color: var(--ink-muted);
+  background: var(--surface-2);
 }
 
 @media (max-width: 900px) {
