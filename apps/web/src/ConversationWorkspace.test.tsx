@@ -1095,140 +1095,155 @@ describe("conversation workspace", () => {
     ).toBeInTheDocument();
   });
 
-  it('turns "Use this" into a saved plan and advances to the QC handoff', async () => {
-    const version = planVersion({ created_by_action_id: "action-save-natural-plan" });
-    const saveAction = planAction({
-      id: "action-save-natural-plan",
-      source_message_id: "message-plan-proposal-natural",
-      action_type: "save_plan_candidate",
-      payload: {
-        parameters: {
-          plan: version.plan,
-          predecessor_plan_version_id: null,
-          predecessor_content_hash: null,
+  it.each(["typed command", "Plan button"] as const)(
+    "turns the conversation into a saved plan via the %s and advances to the QC handoff",
+    async (trigger) => {
+      const intentText = trigger === "typed command" ? "Use this" : "Use this as the plan.";
+      const version = planVersion({ created_by_action_id: "action-save-natural-plan" });
+      const saveAction = planAction({
+        id: "action-save-natural-plan",
+        source_message_id: "message-plan-proposal-natural",
+        action_type: "save_plan_candidate",
+        payload: {
+          parameters: {
+            plan: version.plan,
+            predecessor_plan_version_id: null,
+            predecessor_content_hash: null,
+          },
         },
-      },
-    });
-    const appliedSaveAction = planAction({
-      ...saveAction,
-      status: "applied",
-      confirmed_by_user_id: "user-1",
-      confirmation_idempotency_key: "confirm-natural-plan",
-      confirmation_request_fingerprint: "c".repeat(64),
-      confirmed_at: now,
-      recorded_at: now,
-      sent_at: now,
-      acknowledged_at: now,
-      applied_at: now,
-    });
-    const sendQcAction = planAction({
-      id: "action-send-natural-plan-to-qc",
-      source_message_id: "message-plan-followups-natural",
-    });
-    const intentMessage = message({
-      id: "message-plan-intent-natural",
-      role: "user",
-      sequence: 1,
-      parts: [{ type: "text", format: "plain", text: "Use this" }],
-    });
-    const proposalMessage = message({
-      id: "message-plan-proposal-natural",
-      role: "assistant",
-      sequence: 2,
-      parts: [
-        { type: "text", format: "markdown", text: "I prepared and saved the plan." },
-        { type: "action", action_id: saveAction.id },
-      ],
-    });
-    const followupMessage = message({
-      id: "message-plan-followups-natural",
-      role: "assistant",
-      sequence: 3,
-      parts: [
-        { type: "plan", plan_version_id: version.id },
-        { type: "action", action_id: sendQcAction.id },
-      ],
-    });
-    const saveEffectValue = { kind: "plan_saved" as const, plan_version: version };
-    const saveEffect: V2ConversationPlanActionEffectT = {
-      schema_version: 2,
-      id: "effect-save-natural-plan",
-      project_id: projectId,
-      work_item_id: workItemId,
-      conversation_id: conversationId,
-      action_id: saveAction.id,
-      effect: saveEffectValue,
-      created_at: now,
-      updated_at: now,
-    };
-    let generated = false;
-    let saved = false;
-    const proposalBodies: Array<{ idempotency_key: string; intent_message?: string }> = [];
-    const messagePosts: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = urlOf(input);
-        if (url.endsWith("/work-items")) return listResponse();
-        if (
-          url.endsWith(`/conversations/${conversationId}`) &&
-          (!init?.method || init.method === "GET")
-        ) {
-          return detailResponse(
-            generated
-              ? saved
-                ? [intentMessage, proposalMessage, followupMessage]
-                : [intentMessage, proposalMessage]
-              : [],
-            null,
-            null,
-            {
-              planVersions: saved ? [version] : [],
-              actions: generated ? (saved ? [appliedSaveAction, sendQcAction] : [saveAction]) : [],
-              effects: saved ? [saveEffect] : [],
-            },
-          );
-        }
-        if (url.endsWith(`/conversations/${conversationId}/plan-proposals`)) {
-          proposalBodies.push(JSON.parse(String(init?.body)));
-          generated = true;
-          return Response.json({ message: proposalMessage, action: saveAction });
-        }
-        if (url.endsWith(`/actions/${saveAction.id}/confirm`) && init?.method === "POST") {
-          saved = true;
-          return Response.json({ action: appliedSaveAction, effect: saveEffectValue });
-        }
-        if (url.endsWith(`/conversations/${conversationId}/messages`)) {
-          messagePosts.push(url);
-        }
-        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
-      }),
-    );
-    const user = userEvent.setup();
-    render(
-      <ConversationWorkspace
-        projectId={projectId}
-        initialConversationId={conversationId}
-        onUnauthorized={() => undefined}
-      />,
-    );
+      });
+      const appliedSaveAction = planAction({
+        ...saveAction,
+        status: "applied",
+        confirmed_by_user_id: "user-1",
+        confirmation_idempotency_key: "confirm-natural-plan",
+        confirmation_request_fingerprint: "c".repeat(64),
+        confirmed_at: now,
+        recorded_at: now,
+        sent_at: now,
+        acknowledged_at: now,
+        applied_at: now,
+      });
+      const sendQcAction = planAction({
+        id: "action-send-natural-plan-to-qc",
+        source_message_id: "message-plan-followups-natural",
+      });
+      const intentMessage = message({
+        id: "message-plan-intent-natural",
+        role: "user",
+        sequence: 1,
+        parts: [{ type: "text", format: "plain", text: intentText }],
+      });
+      const proposalMessage = message({
+        id: "message-plan-proposal-natural",
+        role: "assistant",
+        sequence: 2,
+        parts: [
+          { type: "text", format: "markdown", text: "I prepared and saved the plan." },
+          { type: "action", action_id: saveAction.id },
+        ],
+      });
+      const followupMessage = message({
+        id: "message-plan-followups-natural",
+        role: "assistant",
+        sequence: 3,
+        parts: [
+          { type: "plan", plan_version_id: version.id },
+          { type: "action", action_id: sendQcAction.id },
+        ],
+      });
+      const saveEffectValue = { kind: "plan_saved" as const, plan_version: version };
+      const saveEffect: V2ConversationPlanActionEffectT = {
+        schema_version: 2,
+        id: "effect-save-natural-plan",
+        project_id: projectId,
+        work_item_id: workItemId,
+        conversation_id: conversationId,
+        action_id: saveAction.id,
+        effect: saveEffectValue,
+        created_at: now,
+        updated_at: now,
+      };
+      let generated = false;
+      let saved = false;
+      const proposalBodies: Array<{ idempotency_key: string; intent_message?: string }> = [];
+      const messagePosts: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = urlOf(input);
+          if (url.endsWith("/work-items")) return listResponse();
+          if (
+            url.endsWith(`/conversations/${conversationId}`) &&
+            (!init?.method || init.method === "GET")
+          ) {
+            return detailResponse(
+              generated
+                ? saved
+                  ? [intentMessage, proposalMessage, followupMessage]
+                  : [intentMessage, proposalMessage]
+                : [],
+              null,
+              null,
+              {
+                planVersions: saved ? [version] : [],
+                actions: generated
+                  ? saved
+                    ? [appliedSaveAction, sendQcAction]
+                    : [saveAction]
+                  : [],
+                effects: saved ? [saveEffect] : [],
+              },
+            );
+          }
+          if (url.endsWith(`/conversations/${conversationId}/plan-proposals`)) {
+            proposalBodies.push(JSON.parse(String(init?.body)));
+            generated = true;
+            return Response.json({ message: proposalMessage, action: saveAction });
+          }
+          if (url.endsWith(`/actions/${saveAction.id}/confirm`) && init?.method === "POST") {
+            saved = true;
+            return Response.json({ action: appliedSaveAction, effect: saveEffectValue });
+          }
+          if (url.endsWith(`/conversations/${conversationId}/messages`)) {
+            messagePosts.push(url);
+          }
+          throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+        }),
+      );
+      const user = userEvent.setup();
+      render(
+        <ConversationWorkspace
+          projectId={projectId}
+          initialConversationId={conversationId}
+          onUnauthorized={() => undefined}
+        />,
+      );
 
-    const input = await screen.findByRole("textbox", { name: "Message the project PM" });
-    expect(input).toHaveAttribute("placeholder", "Message the PM, or say “Use this as the plan”…");
-    await user.type(input, "Use this");
-    await user.keyboard("{Enter}");
+      const input = await screen.findByRole("textbox", { name: "Message the project PM" });
+      expect(input).toHaveAttribute(
+        "placeholder",
+        "Message the PM, or say “Use this as the plan”…",
+      );
+      if (trigger === "typed command") {
+        await user.type(input, intentText);
+        await user.keyboard("{Enter}");
+      } else {
+        await user.click(screen.getByRole("button", { name: "Use conversation as plan" }));
+      }
 
-    expect(await screen.findByText("Use this")).toBeInTheDocument();
-    expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Send to QC" })).toBeInTheDocument();
-    expect(proposalBodies).toEqual([
-      {
-        idempotency_key: expect.any(String),
-        intent_message: "Use this",
-      },
-    ]);
-    expect(messagePosts).toEqual([]);
-  });
+      expect(await screen.findByText(intentText)).toBeInTheDocument();
+      expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Send to QC" })).toBeInTheDocument();
+      expect(proposalBodies).toEqual([
+        {
+          idempotency_key: expect.any(String),
+          intent_message: intentText,
+        },
+      ]);
+      expect(messagePosts).toEqual([]);
+    },
+  );
 
   it("shows proposal generation conflicts and safely retries the same request", async () => {
     const version = planVersion();

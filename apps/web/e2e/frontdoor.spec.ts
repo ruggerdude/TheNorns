@@ -689,6 +689,7 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
     "placeholder",
     "Message the PM, or say “Use this as the plan”…",
   );
+  await expect(page.getByRole("button", { name: "Use conversation as plan" })).toHaveText("Plan");
   const planningWorkflow = page.getByRole("region", { name: "Planning workflow" });
   await expect(planningWorkflow).toBeVisible();
   await expect(planningWorkflow.locator('[aria-current="step"]')).toHaveText("Chat");

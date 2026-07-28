@@ -13,6 +13,7 @@ import {
   ComposerPrimitive,
   MessagePrimitive,
   ThreadPrimitive,
+  useComposer,
   useComposerRuntime,
 } from "@assistant-ui/react";
 import { AssistantChatTransport, useAISDKChat, useChatRuntime } from "@assistant-ui/react-ai-sdk";
@@ -2288,14 +2289,20 @@ function isPlanAdoptionIntent(value: string): boolean {
 
 function ConversationComposer({
   isExecution,
+  isPlanning,
   planIntentEnabled,
+  planIntentBusy,
   onUseAsPlan,
 }: {
   isExecution: boolean;
+  isPlanning: boolean;
   planIntentEnabled: boolean;
+  planIntentBusy: boolean;
   onUseAsPlan: (message: string) => void;
 }): React.ReactElement {
   const composer = useComposerRuntime();
+  const hasDraft = useComposer((state) => state.text.trim().length > 0);
+  const hasAttachments = useComposer((state) => state.attachments.length > 0);
   const interceptPlanIntent = (event: FormEvent<HTMLFormElement>) => {
     const state = composer.getState();
     if (!planIntentEnabled || state.attachments.length > 0 || !isPlanAdoptionIntent(state.text)) {
@@ -2335,6 +2342,22 @@ function ConversationComposer({
         <ComposerPrimitive.Cancel className="conversation-stop-button" aria-label="Stop response">
           Stop
         </ComposerPrimitive.Cancel>
+        {isPlanning ? (
+          <button
+            type="button"
+            className="conversation-plan-button"
+            aria-label="Use conversation as plan"
+            disabled={!planIntentEnabled || hasDraft || hasAttachments}
+            title={
+              hasDraft || hasAttachments
+                ? "Send or clear the current draft before creating the plan."
+                : "Create and save a plan from this conversation."
+            }
+            onClick={() => onUseAsPlan("Use this as the plan.")}
+          >
+            {planIntentBusy ? "Planning…" : "Plan"}
+          </button>
+        ) : null}
         <ComposerPrimitive.Send className="conversation-send-button" aria-label="Send message">
           Send
         </ComposerPrimitive.Send>
@@ -3501,7 +3524,9 @@ function ConversationThread({
                 ) : (
                   <ConversationComposer
                     isExecution={isExecution}
+                    isPlanning={isPlanning}
                     planIntentEnabled={planIntentEnabled}
+                    planIntentBusy={proposalBusy || busyActionId !== null}
                     onUseAsPlan={(message) => {
                       if (pendingSaveAction) {
                         void confirmAction(pendingSaveAction);

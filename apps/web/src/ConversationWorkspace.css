@@ -1707,6 +1707,7 @@
 }
 
 .conversation-icon-button,
+.conversation-plan-button,
 .conversation-stop-button,
 .conversation-send-button {
   min-height: 2rem;
@@ -1717,6 +1718,12 @@
   background: transparent;
   font-size: var(--text-sm);
   font-weight: 700;
+}
+
+.conversation-plan-button {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 
 .conversation-send-button {
