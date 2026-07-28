@@ -1,15 +1,14 @@
-# Design overhaul — status (2026-07-27)
-
-Program: full visual/UX overhaul of apps/web — one design system, one header
-pattern, consistent widths/type/colors, new logo, remove "AI" filler copy,
-fix flow bugs (New Project layout).
+# Design R2 — final status (2026-07-28)
 
 | Phase | Phase Name | % Complete | Est. Completion | Notes |
 |-------|-----------|------------|-----------------|-------|
-| P0 | Recon & design audit | 100% | done | Full browser tour + code map complete |
-| P1 | Design foundation (tokens, shell, logo, headers) | 100% | done | 5 commits, head 76e4ae1. 271/271 web tests, tsc/biome/build clean. Logo+favicon shipped; wizard bug fixed (verified in-browser) |
-| P2 | Page sweeps (usage / settings-admin-login / portfolio / workspace) | 100% | done | All four sweeps merged: A2 0fb936a, A3 4342f27, A4 373bc9e, A5 f8e49d5 |
-| P3 | Integration, full verification, browser walkthrough | 100% | done | Gate: biome 601 files clean; tsc clean; web unit 58 files/271 tests; e2e 26/26; pnpm run build clean (entry 154.9 KiB gzip vs 161 budget). Browser walkthrough light+dark complete |
+| R2-A | Portfolio punch list | 100% | done | All owner items incl. tiles, centered stats, top-center New project |
+| R2-B | Wizard restructure | 100% | done | Name-first, renames, Options, 0 review rounds, lands in coordinator chat |
+| R2-C | Usage + Settings subnav | 100% | done | Persistent H1 + shared gold-underline subnav |
+| R2-D | Braided logo (owner design) | 100% | done | BraidMark component, uncial wordmark, favicon, icon-only toggle |
+| R2-E/F | Onboarding 500 root cause + fix | 100% | done | 0044 grant applied to prod via NornsOps; boot guard; logged refusals; 'Approve plan' label |
+| R2-G | Integration, gate, deploy | 100% | done | Web 278/278, e2e 26/26, build clean; prod deploy SUCCESS c918717, healthz 200 |
 
-**Final branch:** design-overhaul (main untouched). Light mode is the first-run default.
-**Backlog:** BACKLOG.md, "Design overhaul" section.
+**Live:** https://thenorns.up.railway.app @ c918717. Migration 0044 applied (1 newly applied, 43 unchanged).
+**Server suite:** 1162 passed, 3 pre-existing failures (proven on base; BACKLOG.md).
+**Backlog:** BACKLOG.md § Design R2.
