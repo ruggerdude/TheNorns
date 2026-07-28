@@ -1747,13 +1747,9 @@ function ProjectGraph({
 
   return (
     <div className="workspace-shell">
-      <ProjectTabs
-        projects={openProjects}
-        activeId={project.id}
-        onSelect={onOpenProject}
-        onClose={onCloseProject}
-      />
-      <header className="workspace-topbar">
+      {/* DESIGN P2: brand topbar first (canonical .topbar, matching every
+          other screen), then the open-project tabs strip below it. */}
+      <header className="topbar">
         <div className="workspace-nav-start">
           <Brand />
           <Button className="btn-small" variant="ghost" onClick={onBack}>
@@ -1770,6 +1766,12 @@ function ProjectGraph({
           />
         ) : null}
       </header>
+      <ProjectTabs
+        projects={openProjects}
+        activeId={project.id}
+        onSelect={onOpenProject}
+        onClose={onCloseProject}
+      />
       <main className="page workspace-page">
         <div className="project-heading workspace-header">
           <div className="eyebrow">Workspace</div>
@@ -1964,9 +1966,7 @@ function ProjectGraph({
                   {resume.architecture ? (
                     <div data-testid="resume-architecture">
                       <strong>{resume.architecture.title}</strong>
-                      <p className="muted" style={{ fontSize: 12 }}>
-                        {resume.architecture.summary}
-                      </p>
+                      <p className="muted">{resume.architecture.summary}</p>
                     </div>
                   ) : null}
                   {/* POLISH P3: `next_recommended_action` is guidance, not a
@@ -2012,7 +2012,7 @@ function ProjectGraph({
                     <div className="project-row" key={phase.id}>
                       <div>
                         <strong>{phase.objective_summary}</strong>
-                        <div className="muted" style={{ fontSize: 12 }}>
+                        <div className="muted">
                           {phase.status} · {phase.completed_tasks}/{phase.tasks} tasks complete
                         </div>
                       </div>
@@ -2045,7 +2045,7 @@ function ProjectGraph({
                     >
                       <div>
                         <strong>{relationalPhaseFallback.title}</strong>
-                        <div className="muted" style={{ fontSize: 12 }}>
+                        <div className="muted">
                           {relationalPhaseFallback.statusLabel} ·{" "}
                           {relationalPhaseFallback.completedTasks}/
                           {relationalPhaseFallback.taskCount} tasks complete
@@ -2301,7 +2301,7 @@ function ProjectGraph({
                     <Badge tone={planningRun?.status === "failed" ? "danger" : "info"}>
                       {planningRun?.status ?? "queued"}
                     </Badge>
-                    <p className="muted" style={{ fontSize: 12 }}>
+                    <p className="muted">
                       Round {planningRun?.round ?? 0} of {planningRun?.max_rounds ?? "—"}
                     </p>
                     {planningRun?.result ? (
@@ -2497,7 +2497,7 @@ function ProjectGraph({
                         <option value="cost">Cost · leanest viable models</option>
                       </Select>
                     </Field>
-                    <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                    <p className="muted" style={{ margin: 0 }}>
                       {strategy === "pm"
                         ? "Asks the selected PM to choose workers, models, reviewers, and budgets for this graph."
                         : strategy === "quality"
@@ -2534,7 +2534,7 @@ function ProjectGraph({
                 <details className="card side-section" open>
                   <summary>03 · Approve</summary>
                   <div className="side-body">
-                    <p className="muted" style={{ fontSize: 12 }}>
+                    <p className="muted">
                       Locks the current graph and budget with a verifiable content hash. Every node
                       must be allocated first.
                     </p>
@@ -2687,7 +2687,7 @@ function ProjectGraph({
                       <div className="divider" />
                       <div>
                         <div className="field-label">Delete node</div>
-                        <p className="muted" style={{ fontSize: 12 }}>
+                        <p className="muted">
                           Re-parent preserves dependents. Cascade also removes everything that
                           depends on this node.
                         </p>
@@ -3019,7 +3019,11 @@ export function App(): React.ReactElement {
           : "login";
     return (
       <>
-        <ThemeToggle />
+        {/* DESIGN P1: the toggle lives in topbar actions on shell screens; the
+            login screen has no topbar yet, so it keeps a floating fallback. */}
+        <div className="floating-theme-toggle">
+          <ThemeToggle />
+        </div>
         <Login
           mode={mode}
           inviteToken={inviteToken}
@@ -3034,7 +3038,15 @@ export function App(): React.ReactElement {
 
   return (
     <>
-      <ThemeToggle />
+      {/* DESIGN P1: Projects/ProjectGraph topbars carry the toggle inline via
+          AuthenticatedHeaderActions; the full-page overlays (Account, Admin,
+          Usage) don't render those actions yet, so they keep the floating
+          fallback until Phase 2 adopts the shared topbar there. */}
+      {showAccount || showAdmin || showUsage ? (
+        <div className="floating-theme-toggle">
+          <ThemeToggle />
+        </div>
+      ) : null}
       {showAccount && user ? (
         <Suspense fallback={<Spinner label="Loading settings…" />}>
           <Account

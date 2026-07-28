@@ -13,16 +13,16 @@
   min-height: 76px;
   padding: 0.9rem 1rem;
   border: 1px solid var(--line);
-  border-radius: 13px;
-  color: var(--text);
-  background: color-mix(in srgb, var(--raised) 68%, transparent);
+  border-radius: var(--radius);
+  color: var(--ink);
+  background: color-mix(in srgb, var(--surface-2) 68%, transparent);
   text-align: left;
   cursor: pointer;
 }
 
 .phase-mode-option:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
-  background: color-mix(in srgb, var(--accent) 7%, var(--raised));
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
 }
 
 .phase-mode-option.is-selected {
@@ -32,12 +32,12 @@
 }
 
 .phase-mode-option strong {
-  font-size: 0.88rem;
+  font-size: var(--text-base);
 }
 
 .phase-mode-option span {
-  color: var(--muted);
-  font-size: 0.72rem;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
   line-height: 1.45;
 }
 
@@ -48,7 +48,7 @@
   align-items: start;
   padding: 0.75rem 0.85rem;
   border: 1px solid color-mix(in srgb, var(--success) 28%, var(--line));
-  border-radius: 11px;
+  border-radius: var(--radius);
   background: color-mix(in srgb, var(--success) 7%, var(--surface));
 }
 
@@ -57,7 +57,7 @@
   place-items: center;
   width: 1.75rem;
   height: 1.75rem;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   color: var(--success);
   background: color-mix(in srgb, var(--success) 14%, transparent);
   font-weight: 700;
@@ -65,8 +65,8 @@
 
 .phase-quick-summary p {
   margin: 0;
-  color: var(--muted);
-  font-size: 0.76rem;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
   line-height: 1.55;
 }
 
@@ -78,16 +78,16 @@
   width: 100%;
   padding: 0.7rem 0.8rem;
   border: 1px solid var(--line);
-  border-radius: 11px;
-  color: var(--text);
+  border-radius: var(--radius);
+  color: var(--ink);
   background: transparent;
   text-align: left;
   cursor: pointer;
 }
 
 .phase-team-toggle:hover:not(:disabled) {
-  border-color: var(--line2);
-  background: color-mix(in srgb, var(--raised) 60%, transparent);
+  border-color: var(--line-strong);
+  background: color-mix(in srgb, var(--surface-2) 60%, transparent);
 }
 
 .phase-team-toggle > span:first-child {
@@ -96,24 +96,24 @@
 }
 
 .phase-team-toggle strong {
-  font-size: 0.8rem;
+  font-size: var(--text-sm);
 }
 
 .phase-team-toggle small {
-  color: var(--muted);
-  font-size: 0.68rem;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
 }
 
 .phase-team-toggle > span:last-child {
   color: var(--accent2);
-  font: 600 1rem "DM Mono", monospace;
+  font: 600 var(--text-md) "DM Mono", monospace;
 }
 
 .phase-team-fields {
   padding: 0.85rem;
   border: 1px solid var(--line);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--raised) 52%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface-2) 52%, transparent);
 }
 
 .phase-plan-badges {
@@ -131,7 +131,7 @@
 }
 
 .phase-agent-recommendation strong {
-  font-size: 0.78rem;
+  font-size: var(--text-sm);
 }
 
 .phase-agent-recommendation span {
@@ -139,12 +139,12 @@
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
   border-radius: 999px;
   color: var(--accent2);
-  font: 600 0.63rem "DM Mono", monospace;
+  font: 600 var(--text-xs) "DM Mono", monospace;
 }
 
 .phase-agent-rationale {
-  color: var(--muted);
-  font-size: 0.7rem;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
 }
 
 .phase-staffing-controls {
@@ -162,19 +162,19 @@
   gap: 0.45rem;
   padding: 0.75rem 0.85rem;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--raised) 68%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface-2) 68%, transparent);
 }
 
 .phase-execution-team > div {
   display: flex;
   justify-content: space-between;
   gap: 0.75rem;
-  font-size: 0.75rem;
+  font-size: var(--text-xs);
 }
 
 .phase-execution-team span {
-  color: var(--muted);
+  color: var(--ink-muted);
 }
 
 .phase-execution-team strong {

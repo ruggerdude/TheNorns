@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
-import { Alert, Badge, Brand, Button, Field, Input, Select, TextArea } from "./ui";
+import { Alert, Badge, Brand, Button, Field, Input, PageHeader, Select, TextArea } from "./ui";
 
 interface UserSummary {
   id: string;
@@ -208,12 +208,12 @@ export function Admin({
           Close
         </Button>
       </header>
-      <main className="page admin-page">
-        <div className="full-page-intro">
-          <div className="eyebrow">Workspace controls</div>
-          <h1>Administration</h1>
-          <p className="muted">Manage global agent rules, members, roles, and invitations.</p>
-        </div>
+      <main className="page-container admin-page">
+        <PageHeader
+          eyebrow="Workspace controls"
+          title="Administration"
+          lede="Manage global agent rules, members, roles, and invitations."
+        />
         {error ? <Alert testId="admin-error">{error}</Alert> : null}
 
         <section className="admin-global-rules" aria-labelledby="global-rules-heading">
@@ -262,7 +262,7 @@ export function Admin({
         </section>
 
         <div className="admin-layout">
-          <section>
+          <section className="card">
             <h3>Users</h3>
             {users === null ? (
               <p className="muted">Loading…</p>
@@ -291,7 +291,7 @@ export function Admin({
             )}
           </section>
 
-          <section className="form-stack">
+          <section className="card form-stack">
             <h3>Add a user manually</h3>
             <Field label="Email">
               <Input
@@ -332,7 +332,7 @@ export function Admin({
             </Button>
           </section>
 
-          <section className="form-stack">
+          <section className="card form-stack">
             <h3>Invite by email</h3>
             <Field label="Email">
               <Input

@@ -13,11 +13,13 @@ function themeStorage(): Storage | null {
   }
 }
 
+// Light is the product default: first-time visitors get light regardless of
+// OS preference; an explicit toggle choice is stored and always wins.
 function preferredTheme(): Theme {
-  if (typeof window === "undefined") return "dark";
+  if (typeof window === "undefined") return "light";
   const stored = themeStorage()?.getItem(STORAGE_KEY);
   if (stored === "light" || stored === "dark") return stored;
-  return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  return "light";
 }
 
 function applyTheme(theme: Theme): void {

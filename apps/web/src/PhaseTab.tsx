@@ -874,7 +874,7 @@ function LegacyPhaseTab({
             >
               <span>
                 <strong>Override PM or agent</strong>
-                <small>Optional · AI staffing is ready by default</small>
+                <small>Optional · Recommended staffing is ready by default</small>
               </span>
               <span aria-hidden="true">{customizeTeam ? "−" : "+"}</span>
             </button>
@@ -923,7 +923,7 @@ function LegacyPhaseTab({
                     disabled={starting || executionModels === null}
                     onChange={(event) => setAgentSelection(event.target.value)}
                   >
-                    <option value="">AI recommendation for each task</option>
+                    <option value="">Recommended model for each task</option>
                     {(Object.keys(PM_MODEL_OPTIONS) as Provider[]).map((provider) => (
                       <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
                         {executionParticipantOptions
@@ -967,7 +967,7 @@ function LegacyPhaseTab({
               · Agent:{" "}
               {participantLabel(
                 agentSelection,
-                "AI recommendation for each task",
+                "Recommended model for each task",
                 executionParticipantOptions,
               )}
               {participantFor(agentSelection, executionParticipantOptions)?.provider === "openai"
@@ -1184,7 +1184,7 @@ function LegacyPhaseTab({
                       <h4>{phase.name ?? phase.node_id}</h4>
                     </div>
                     <div className="phase-plan-badges">
-                      <Badge tone="success">AI pick</Badge>
+                      <Badge tone="success">Recommended</Badge>
                       <Badge tone="info">
                         {phase.worker_count} worker{phase.worker_count === 1 ? "" : "s"}
                       </Badge>

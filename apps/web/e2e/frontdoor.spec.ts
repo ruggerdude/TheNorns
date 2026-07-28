@@ -386,11 +386,16 @@ test("New project goes from one brief to the first coding task", async ({ page }
   await page.getByRole("button", { name: /new project/i }).click();
 
   await expect(page.getByRole("heading", { name: "Project setup", level: 1 })).toBeVisible();
-  await expect(page.locator(".topbar")).toBeHidden();
-  await expect(page.locator(".project-setup-header")).toBeVisible();
+  // Design overhaul 2026-07: the wizard uses the canonical sticky topbar
+  // (brand + "New project" location) and the narrow focused container —
+  // the bespoke .project-setup-header and full-width layout are gone.
+  await expect(page.locator(".full-page-header")).toBeVisible();
+  await expect(page.locator(".full-page-header")).toContainText("New project");
   await expect(page.getByText("Guided setup")).toHaveCount(0);
   const setupPage = await page.getByRole("main", { name: "New project" }).boundingBox();
-  expect(setupPage?.width ?? 0).toBeGreaterThan(900);
+  const setupWidth = setupPage?.width ?? 0;
+  expect(setupWidth).toBeGreaterThan(600);
+  expect(setupWidth).toBeLessThanOrEqual(760);
 
   await expect(page.getByTestId("automatic-github-destination")).toContainText("octocat");
   await page

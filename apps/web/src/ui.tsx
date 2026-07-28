@@ -127,15 +127,79 @@ export function Badge({
 }: { children: ReactNode; tone?: "default" | "success" | "warn" | "danger" | "info" }) {
   return <span className={`badge badge-${tone}`}>{children}</span>;
 }
+/**
+ * DESIGN P1 — the "converging threads" mark: two strands sweeping into one
+ * continuous gold thread (the Norns weaving fate). Strands render in
+ * `currentColor` so the mark adapts to its context; the thread is always
+ * gold. Use `BrandMark` raw (e.g. a large login rendition) or `Brand` for
+ * the standard topbar lockup (26px gradient tile + wordmark).
+ */
+export function BrandMark({ size = 20, className }: { size?: number; className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 48 48"
+      width={size}
+      height={size}
+      className={className}
+      fill="none"
+      role="img"
+      aria-hidden="true"
+    >
+      <path
+        d="M7 12.5 C 16 12.5, 21 21.5, 28.5 23.2"
+        stroke="currentColor"
+        strokeWidth="3.8"
+        strokeLinecap="round"
+      />
+      <path
+        d="M7 35.5 C 16 35.5, 21 26.5, 28.5 24.8"
+        stroke="currentColor"
+        strokeWidth="3.8"
+        strokeLinecap="round"
+      />
+      <path
+        d="M7 24 L 41 24"
+        stroke="var(--gold, #ffb600)"
+        strokeWidth="3.8"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
 export function Brand() {
   return (
     <div className="brand">
       <span className="brand-mark" aria-hidden="true">
-        <i />
-        <i />
-        <i />
+        <BrandMark />
       </span>
       <span>The Norns</span>
+    </div>
+  );
+}
+/**
+ * DESIGN P1 — canonical page intro. Every page header converges on this:
+ * eyebrow (uppercase brand ink), h1 (--text-2xl / 800), optional lede, and
+ * an optional right-aligned actions slot.
+ */
+export function PageHeader({
+  eyebrow,
+  title,
+  lede,
+  actions,
+}: {
+  eyebrow?: ReactNode;
+  title: ReactNode;
+  lede?: ReactNode;
+  actions?: ReactNode;
+}) {
+  return (
+    <div className="page-header">
+      <div className="page-header-copy">
+        {eyebrow ? <div className="eyebrow">{eyebrow}</div> : null}
+        <h1>{title}</h1>
+        {lede ? <p className="page-header-lede">{lede}</p> : null}
+      </div>
+      {actions ? <div className="page-header-actions">{actions}</div> : null}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
-import { Alert, Button, Field, Input, Select, Spinner } from "./ui";
+import { Alert, Button, Field, Input, PageHeader, Select, Spinner } from "./ui";
 import "./UsageIntelligence.css";
 
 export type UsageScope =
@@ -187,7 +187,7 @@ function UsageChart({
         role="img"
         aria-labelledby={titleId}
       >
-        <title id={titleId}>{intervalLabel(interval)} AI cost in US dollars</title>
+        <title id={titleId}>{intervalLabel(interval)} cost in US dollars</title>
         <line x1="0" y1={chartHeight} x2={width} y2={chartHeight} className="usage-axis" />
         {points.map((point, index) => {
           const height = max === 0 ? 0 : (point.known_cost_usd / max) * (chartHeight - 12);
@@ -310,19 +310,17 @@ export function UsageIntelligence({
   const phaseFocused = scope.kind === "phase" || filters.phase.trim().length > 0;
 
   return (
-    <main className="usage-page" data-testid="usage-intelligence">
-      <header className="usage-heading">
-        <div>
-          <p className="usage-eyebrow">AI usage intelligence</p>
-          <h1>{phaseFocused ? "Phase usage" : scopeLabel(scope)}</h1>
-          <p className="muted">
-            Requests, tokens, cost, performance, and failures from the usage ledger.
-          </p>
-        </div>
-        <a className="btn btn-default" href={exportHref} download>
-          Export CSV
-        </a>
-      </header>
+    <main className="usage-page page-container" data-testid="usage-intelligence">
+      <PageHeader
+        eyebrow="Usage intelligence"
+        title={phaseFocused ? "Phase usage" : scopeLabel(scope)}
+        lede="Requests, tokens, cost, performance, and failures from the usage ledger."
+        actions={
+          <a className="btn btn-default" href={exportHref} download>
+            Export CSV
+          </a>
+        }
+      />
 
       <form
         className="usage-filters card"

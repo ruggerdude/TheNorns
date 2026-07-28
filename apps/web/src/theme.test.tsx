@@ -27,7 +27,7 @@ describe("application theme", () => {
     delete document.documentElement.dataset.theme;
   });
 
-  it("switches to light mode and restores the persisted preference", async () => {
+  it("defaults to light, switches to dark, and restores the persisted preference", async () => {
     const user = userEvent.setup();
     const first = render(
       <ThemeProvider>
@@ -35,10 +35,10 @@ describe("application theme", () => {
       </ThemeProvider>,
     );
 
-    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
-    await user.click(screen.getByRole("button", { name: /switch to light mode/i }));
     expect(document.documentElement).toHaveAttribute("data-theme", "light");
-    expect(storage.getItem("norns_theme")).toBe("light");
+    await user.click(screen.getByRole("button", { name: /switch to dark mode/i }));
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    expect(storage.getItem("norns_theme")).toBe("dark");
 
     first.unmount();
     render(
@@ -46,7 +46,7 @@ describe("application theme", () => {
         <ThemeToggle />
       </ThemeProvider>,
     );
-    expect(document.documentElement).toHaveAttribute("data-theme", "light");
-    expect(screen.getByRole("button", { name: /switch to dark mode/i })).toBeInTheDocument();
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    expect(screen.getByRole("button", { name: /switch to light mode/i })).toBeInTheDocument();
   });
 });

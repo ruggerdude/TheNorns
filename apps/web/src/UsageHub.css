@@ -1,6 +1,6 @@
 .usage-hub {
   min-height: 100vh;
-  background: var(--page-bg, #f6f7fa);
+  background: var(--bg);
 }
 
 .usage-hub-header {
@@ -12,8 +12,8 @@
   align-items: center;
   gap: 20px;
   padding: 12px 24px;
-  border-bottom: 1px solid var(--border, #d8dce5);
-  background: var(--surface, #fff);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
 }
 
 .usage-hub-scopes {
@@ -26,8 +26,8 @@
 .usage-hub-scopes button {
   padding: 7px 12px;
   border: 0;
-  border-radius: 7px;
-  color: var(--text-muted, #687083);
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
   background: transparent;
   white-space: nowrap;
   cursor: pointer;
@@ -35,8 +35,8 @@
 
 .usage-hub-scopes button:hover,
 .usage-hub-scopes button.on {
-  color: var(--text, #202534);
-  background: var(--surface-subtle, #eef0f5);
+  color: var(--ink);
+  background: var(--surface-2);
 }
 
 @media (max-width: 680px) {

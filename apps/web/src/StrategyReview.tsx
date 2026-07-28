@@ -214,7 +214,7 @@ export function StrategyReview({
 
       <div className="section-head">
         <h2>Staffing</h2>
-        <span className="muted" style={{ fontSize: 13 }}>
+        <span className="muted">
           Mix providers per task — every field is editable before launch.
         </span>
       </div>
