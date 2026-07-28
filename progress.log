@@ -89,3 +89,4 @@
 2026-07-28T02:46Z | DES-P1 | design foundation: single token system, canonical shell/PageHeader, converging-threads logo+favicon, New Project layout fix
 2026-07-28T02:46Z | DES-P2 | four parallel page sweeps merged: usage, settings/admin/login, portfolio, workspace; micro-text purge; AI filler copy removed
 2026-07-28T02:46Z | DES-P3 | integration + full gate green (biome, tsc, 271 unit, 26 e2e, build); light-first default; branch design-overhaul
+2026-07-28T03:49Z | DES-R2-ONBOARD | onboarding 500 fixed: UPDATE grant migration (NNNN, unassigned) for intents FOR UPDATE lock; boot guard asserts onboarding relations; refusals + catch-all now diagnosable; send_plan_to_qc relabeled Approve plan
