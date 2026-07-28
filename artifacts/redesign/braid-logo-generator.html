@@ -1,0 +1,88 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Uncial+Antiqua&display=swap" rel="stylesheet">
+<style>
+  body { margin:0; font-family:sans-serif; }
+  .panel { padding:28px 36px; }
+  .light { background:#f4f5fb; color:#0b1020; }
+  .dark { background:#0b1020; color:#f4f5fb; }
+  .lockup { display:inline-flex; flex-direction:column; align-items:stretch; gap:6px; margin:12px 40px 24px 0; }
+  .word { font-family:"Uncial Antiqua", serif; letter-spacing:.04em; }
+  .cap { font-size:11px; opacity:.55; margin-top:4px }
+  .topbar-sim { display:flex; align-items:center; gap:10px; height:64px; border-bottom:1px solid rgba(127,127,127,.25); padding:0 16px; }
+</style>
+</head>
+<body>
+<div class="panel light" id="light"></div>
+<div class="panel dark" id="dark"></div>
+<script>
+// 3-strand braid generator with true over/under alternation.
+// Strands: sinusoids after a straight lead-in. Split into segments at
+// crossings; render under-segments first, over-segments last.
+function braidSVG({W=300, H=40, lead=88, sw=6, A, P=88, colors, id}) {
+  A = A ?? (H/2 - sw/2 - 1);
+  const mid = H/2;
+  const phases = [0, 2*Math.PI/3, 4*Math.PI/3];
+  const N = 400;
+  const xs = [], ys = [[],[],[]];
+  for (let i=0;i<=N;i++){
+    const x = 4 + (W-8)*i/N;
+    xs.push(x);
+    for (let k=0;k<3;k++){
+      if (x <= lead) {
+        // straight lead-in at the strand's start height (sin at t=0 ordering)
+        ys[k].push(mid + A*Math.sin(phases[k]));
+      } else {
+        const t = (x-lead)/P*2*Math.PI;
+        ys[k].push(mid + A*Math.sin(t + phases[k]));
+      }
+    }
+  }
+  // find crossing x-indices between each pair; segment boundaries per strand
+  const bounds = [[],[],[]];
+  for (let a=0;a<3;a++) for (let b=a+1;b<3;b++){
+    for (let i=1;i<=N;i++){
+      const d0 = ys[a][i-1]-ys[b][i-1], d1 = ys[a][i]-ys[b][i];
+      if (d0===0) continue;
+      if ((d0<0)!==(d1<0)) { bounds[a].push(i); bounds[b].push(i); }
+    }
+  }
+  // build segments per strand, assign depth alternating per segment index
+  const segs = []; // {k, from, to, over}
+  for (let k=0;k<3;k++){
+    const bs = [0, ...bounds[k].sort((x,y)=>x-y), N];
+    for (let s=0;s<bs.length-1;s++){
+      segs.push({k, from:bs[s], to:bs[s+1], over: s%2===1});
+    }
+  }
+  const path = (k, from, to) => {
+    let d = `M ${xs[from].toFixed(1)} ${ys[k][from].toFixed(1)}`;
+    for (let i=from+1;i<=to;i++) d += ` L ${xs[i].toFixed(1)} ${ys[k][i].toFixed(1)}`;
+    return d;
+  };
+  const draw = (list) => list.map(s =>
+    `<path d="${path(s.k, s.from, s.to)}" fill="none" stroke="${colors[s.k]}" stroke-width="${sw}" stroke-linecap="round"/>`).join("");
+  // unders first, overs after; extend each over segment slightly is handled by round caps
+  const svg = `<svg id="${id||''}" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">` +
+    draw(segs.filter(s=>!s.over)) + draw(segs.filter(s=>s.over)) + `</svg>`;
+  return svg;
+}
+function render(panel, ink) {
+  const el = document.getElementById(panel);
+  const gold = "#ffb600", silver = panel==="dark" ? "#9aa3b5" : "#8b93a5";
+  const indigo = panel==="dark" ? "#7d8fe8" : "#001689";
+  let h = "";
+  // Full lockup (login/hero)
+  h += `<div class="lockup"><div class="word" style="font-size:44px">The Norns</div>${braidSVG({W:300,H:34,lead:96,sw:6,P:78,colors:[indigo,gold,silver]})}<div class="cap">hero lockup</div></div>`;
+  // Medium
+  h += `<div class="lockup"><div class="word" style="font-size:26px">The Norns</div>${braidSVG({W:180,H:22,lead:56,sw:4,P:52,colors:[indigo,gold,silver]})}<div class="cap">medium</div></div>`;
+  // Topbar: horizontal braid + wordmark side by side
+  h += `<div class="topbar-sim"><span>${braidSVG({W:64,H:26,lead:14,sw:4.5,P:34,colors:[indigo,gold,silver]})}</span><span class="word" style="font-size:20px">The Norns</span><span class="cap">topbar 64px</span></div>`;
+  el.innerHTML += h;
+}
+render("light"); render("dark");
+</script>
+</body>
+</html>
