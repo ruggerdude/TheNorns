@@ -3187,6 +3187,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     }
   });
 
+  const GitHubAuthorizeQuery = z.object({
+    next: z.literal("install").optional(),
+  });
   app.get("/api/integrations/github/authorize", async (req, reply) => {
     const user = await resolveUser(req);
     if (!user) return reply.code(401).send({ error: "unauthorized" });
@@ -3195,9 +3198,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         .code(503)
         .send({ error: "github_not_configured", message: "GitHub App is not configured" });
     }
-    reply
-      .header("Cache-Control", "no-store")
-      .send({ authorization_url: github.authorizationUrl(user.id) });
+    const query = GitHubAuthorizeQuery.safeParse(req.query);
+    if (!query.success) return reply.code(400).send({ error: "bad_request" });
+    reply.header("Cache-Control", "no-store").send({
+      authorization_url: github.authorizationUrl(user.id, query.data.next ?? null),
+    });
   });
 
   app.get("/api/integrations/github/install", async (req, reply) => {

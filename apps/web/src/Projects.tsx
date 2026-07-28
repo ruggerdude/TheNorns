@@ -519,6 +519,7 @@ export function Projects({
   const [repositoryName, setRepositoryName] = useState("");
   const [repositoryPrivate, setRepositoryPrivate] = useState(true);
   const [sourceError, setSourceError] = useState<string | null>(null);
+  const [githubSetupBusy, setGitHubSetupBusy] = useState(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [localSources, setLocalSources] = useState<LocalRepositoryInventory | null>(null);
   const [localSourcesError, setLocalSourcesError] = useState<string | null>(null);
@@ -690,6 +691,29 @@ export function Projects({
   }, [onUnauthorized]);
 
   useEffect(() => void refreshGitHub(), [refreshGitHub]);
+
+  const continueGitHubSetup = useCallback(async (): Promise<void> => {
+    if (!githubStatus?.configured) {
+      onOpenAccount("connections");
+      return;
+    }
+    setGitHubSetupBusy(true);
+    setSourceError(null);
+    try {
+      const response = await request<{ authorization_url: string } | { installation_url: string }>(
+        githubStatus.user_authorization.connected
+          ? "/api/integrations/github/install"
+          : "/api/integrations/github/authorize?next=install",
+      );
+      const url =
+        "authorization_url" in response ? response.authorization_url : response.installation_url;
+      window.location.assign(url);
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setSourceError(error instanceof Error ? error.message : String(error));
+      setGitHubSetupBusy(false);
+    }
+  }, [githubStatus, onOpenAccount, onUnauthorized]);
 
   const loadRepositories = useCallback(async () => {
     if (!selectedConnectionId) {
@@ -2352,20 +2376,27 @@ export function Projects({
                       ) : !githubConnected ? (
                         <div className="connection-required">
                           <div>
-                            <strong>Connect GitHub to continue</strong>
+                            <strong>
+                              {githubStatus.user_authorization.connected
+                                ? "Finish GitHub setup"
+                                : "Connect GitHub to continue"}
+                            </strong>
                             <p>
                               {githubStatus.user_authorization.connected
-                                ? "Add a personal account or organization to create or select repositories."
-                                : "Authorize GitHub, then add a personal account or organization."}
+                                ? `Your identity is authorized as ${githubStatus.user_authorization.login}. Install The Norns for the personal account or organization where it should create and select repositories.`
+                                : "Authorize your identity, then choose the personal account or organization where Norns can work."}
                             </p>
                           </div>
                           <Button
                             type="button"
                             variant="primary"
                             className="btn-small"
-                            onClick={() => onOpenAccount("connections")}
+                            disabled={githubSetupBusy}
+                            onClick={() => void continueGitHubSetup()}
                           >
-                            Open Connections
+                            {githubStatus.user_authorization.connected
+                              ? "Install The Norns on GitHub"
+                              : "Connect GitHub"}
                           </Button>
                         </div>
                       ) : (

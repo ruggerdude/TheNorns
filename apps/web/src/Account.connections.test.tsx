@@ -66,13 +66,36 @@ describe("workspace connections settings", () => {
 
     render(<Account user={admin} initialTab="connections" onClose={vi.fn()} onSignOut={vi.fn()} />);
 
-    expect(await screen.findByText("Authorized as octocat")).toBeInTheDocument();
+    expect(await screen.findByText("1 GitHub destination ready")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Manage GitHub" }));
     expect(screen.getByText("octocat")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /add github account or organization/i }),
+      screen.getByRole("button", { name: /add another github destination/i }),
     ).toBeInTheDocument();
     expect(screen.queryByText(/token/i)).not.toBeInTheDocument();
+  });
+
+  it("does not call an authorized identity ready until a GitHub destination is installed", async () => {
+    mock = accountMock();
+    mock.get("/api/auth/sessions", { body: { sessions: [] } });
+    mock.get("/api/integrations/github/status", {
+      body: {
+        configured: true,
+        setup_available: false,
+        configuration_source: "manifest",
+        user_authorization: { connected: true, login: "octocat" },
+        connections: [],
+      },
+    });
+    mock.install();
+
+    render(<Account user={admin} initialTab="connections" onClose={vi.fn()} onSignOut={vi.fn()} />);
+
+    expect(await screen.findByText("Setup incomplete")).toBeInTheDocument();
+    expect(screen.getByText(/one step left: choose where norns can work/i)).toBeInTheDocument();
+    expect(screen.getByText(/identity is authorized as/i)).toHaveTextContent("octocat");
+    expect(screen.getByRole("button", { name: "Install The Norns on GitHub" })).toBeInTheDocument();
+    expect(screen.queryByText(/destination ready/i)).not.toBeInTheDocument();
   });
 
   it("explains when the deployment has not configured a GitHub App", async () => {
@@ -249,7 +272,7 @@ describe("workspace connections settings", () => {
     );
     expect(call?.body).toBeUndefined();
     expect(call?.headers["content-type"]).toBeUndefined();
-    expect(await screen.findByText("Authorization required")).toBeInTheDocument();
+    expect(await screen.findByText("Not connected")).toBeInTheDocument();
     expect(screen.queryByText(/Bad credentials/i)).not.toBeInTheDocument();
   });
 

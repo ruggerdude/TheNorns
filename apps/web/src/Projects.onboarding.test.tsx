@@ -591,7 +591,7 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     expect(screen.queryByTestId("project-name")).not.toBeInTheDocument();
   });
 
-  it("routes GitHub setup to reusable Connections instead of running it in the wizard", async () => {
+  it("starts the complete GitHub connection journey from the wizard", async () => {
     mock.get("/api/integrations/github/status", {
       body: {
         configured: true,
@@ -618,9 +618,29 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     await user.click(await screen.findByRole("button", { name: /new project/i }));
 
     expect(await screen.findByText(/connect github to continue/i)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /open connections/i }));
-    expect(openAccount).toHaveBeenCalledWith("connections");
+    expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /open connections/i })).not.toBeInTheDocument();
+    expect(openAccount).not.toHaveBeenCalled();
     expect(mock.calls.some((call) => call.url.includes("/authorize"))).toBe(false);
+  });
+
+  it("distinguishes an authorized identity from a usable GitHub installation", async () => {
+    mock.get("/api/integrations/github/status", {
+      body: {
+        configured: true,
+        user_authorization: { connected: true, login: "octocat" },
+        connections: [],
+      },
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+
+    expect(await screen.findByText("Finish GitHub setup")).toBeInTheDocument();
+    expect(screen.getByText(/identity is authorized as octocat/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Install The Norns on GitHub" })).toBeInTheDocument();
+    expect(screen.queryByText(/connect github to continue/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /create project/i })).toBeDisabled();
   });
 
   it("sends the human to Settings only when the GitHub App itself isn't configured (an admin-only setup step)", async () => {

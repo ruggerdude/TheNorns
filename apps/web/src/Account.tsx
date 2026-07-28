@@ -166,7 +166,12 @@ export function Account({
         "/api/integrations/github/status",
       );
       setGitHub(status);
-      if (status.refresh_error) {
+      if (
+        status.refresh_error ||
+        (status.configured &&
+          status.user_authorization.connected &&
+          !status.connections.some((connection) => connection.status === "connected"))
+      ) {
         setCallbackError(null);
         setOpenConnection("github");
       }
@@ -216,13 +221,20 @@ export function Account({
     loadSessions();
   };
 
-  const openGitHubFlow = async (kind: "authorize" | "install"): Promise<void> => {
+  const openGitHubFlow = async (
+    kind: "authorize" | "install",
+    continueToInstall = false,
+  ): Promise<void> => {
     setConnectionBusy(kind);
     setConnectionError(null);
     try {
       const response = await integrationRequest<
         { authorization_url: string } | { installation_url: string }
-      >(`/api/integrations/github/${kind}`);
+      >(
+        `/api/integrations/github/${kind}${
+          kind === "authorize" && continueToInstall ? "?next=install" : ""
+        }`,
+      );
       const url =
         "authorization_url" in response ? response.authorization_url : response.installation_url;
       window.location.assign(url);
@@ -232,6 +244,10 @@ export function Account({
       setConnectionBusy(null);
     }
   };
+
+  const connectedGitHubAccounts =
+    github?.connections.filter((connection) => connection.status === "connected") ?? [];
+  const githubReady = connectedGitHubAccounts.length > 0;
 
   const disconnect = async (connection: GitHubConnection): Promise<void> => {
     setConnectionBusy(connection.id);
@@ -479,7 +495,7 @@ export function Account({
                             ? "default"
                             : github.refresh_error
                               ? "danger"
-                              : github.user_authorization.connected
+                              : githubReady
                                 ? "success"
                                 : "warn"
                         }
@@ -488,9 +504,13 @@ export function Account({
                           ? "Not configured"
                           : github.refresh_error
                             ? "Connection needs attention"
-                            : github.user_authorization.connected
-                              ? `Authorized as ${github.user_authorization.login}`
-                              : "Authorization required"}
+                            : githubReady
+                              ? `${connectedGitHubAccounts.length} GitHub destination${
+                                  connectedGitHubAccounts.length === 1 ? "" : "s"
+                                } ready`
+                              : github.user_authorization.connected
+                                ? "Setup incomplete"
+                                : "Not connected"}
                       </Badge>
                       <Button
                         variant={github.configured ? "ghost" : "primary"}
@@ -502,7 +522,9 @@ export function Account({
                         {openConnection === "github"
                           ? "Hide"
                           : github.configured
-                            ? "Manage GitHub"
+                            ? github.user_authorization.connected && !githubReady
+                              ? "Finish setup"
+                              : "Manage GitHub"
                             : "Set up GitHub"}
                       </Button>
                     </div>
@@ -594,12 +616,37 @@ export function Account({
                         </div>
                       ) : (
                         <>
+                          {github.user_authorization.connected && !githubReady ? (
+                            <div className="connection-required">
+                              <div>
+                                <strong>One step left: choose where Norns can work</strong>
+                                <p>
+                                  Your identity is authorized as{" "}
+                                  <strong>{github.user_authorization.login}</strong>, but no GitHub
+                                  account or organization has installed The Norns yet.
+                                </p>
+                              </div>
+                              <Button
+                                variant="primary"
+                                className="btn-small"
+                                disabled={connectionBusy !== null}
+                                onClick={() => void openGitHubFlow("install")}
+                              >
+                                Install The Norns on GitHub
+                              </Button>
+                            </div>
+                          ) : null}
                           <div className="connection-actions">
                             <Button
                               variant={github.user_authorization.connected ? "ghost" : "primary"}
                               className="btn-small"
                               disabled={connectionBusy !== null}
-                              onClick={() => void openGitHubFlow("authorize")}
+                              onClick={() =>
+                                void openGitHubFlow(
+                                  "authorize",
+                                  !github.user_authorization.connected,
+                                )
+                              }
                             >
                               {github.user_authorization.connected
                                 ? "Reconnect identity"
@@ -615,13 +662,13 @@ export function Account({
                                 Delete GitHub identity
                               </Button>
                             ) : null}
-                            {github.user_authorization.connected ? (
+                            {github.user_authorization.connected && githubReady ? (
                               <Button
                                 className="btn-small"
                                 disabled={connectionBusy !== null}
                                 onClick={() => void openGitHubFlow("install")}
                               >
-                                Add GitHub account or organization
+                                Add another GitHub destination
                               </Button>
                             ) : null}
                             <Button
@@ -682,8 +729,9 @@ export function Account({
                             </div>
                           ) : (
                             <p className="muted">
-                              Authorize GitHub, then install The Norns for the account or
-                              organization you want to use.
+                              {github.user_authorization.connected
+                                ? "Installation is still required before projects can create or select repositories."
+                                : "Connect GitHub once; setup will continue directly to choosing the account or organization where Norns can work."}
                             </p>
                           )}
                         </>

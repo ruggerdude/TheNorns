@@ -255,6 +255,62 @@ describe("DELETE /api/integrations/github/authorization", () => {
   });
 });
 
+describe("GET /api/integrations/github/authorize", () => {
+  it("can continue first-time authorization directly into GitHub App installation", async () => {
+    const authorizationUrl = vi.fn(
+      (_userId: string, next: "install" | null = null) =>
+        `https://github.com/login/oauth/authorize?next=${next ?? "settings"}`,
+    );
+    const github = {
+      isConfigured: vi.fn(() => true),
+      authorizationUrl,
+    } as unknown as GitHubIntegrationService;
+    const s = await start({ deployToken: "deploy-secret", github });
+    const bootstrap = await inject(s, "POST", "/api/auth/bootstrap", {
+      deploy_token: "deploy-secret",
+      email: "root@x.com",
+      password: "password123",
+      name: "Root",
+    });
+    const token = (bootstrap.json() as { token: string }).token;
+
+    const firstConnection = await inject(
+      s,
+      "GET",
+      "/api/integrations/github/authorize?next=install",
+      undefined,
+      token,
+    );
+    expect(firstConnection.statusCode).toBe(200);
+    expect(firstConnection.json()).toEqual({
+      authorization_url: "https://github.com/login/oauth/authorize?next=install",
+    });
+    expect(authorizationUrl).toHaveBeenLastCalledWith(expect.any(String), "install");
+
+    const reconnect = await inject(
+      s,
+      "GET",
+      "/api/integrations/github/authorize",
+      undefined,
+      token,
+    );
+    expect(reconnect.statusCode).toBe(200);
+    expect(authorizationUrl).toHaveBeenLastCalledWith(expect.any(String), null);
+
+    expect(
+      (
+        await inject(
+          s,
+          "GET",
+          "/api/integrations/github/authorize?next=unexpected",
+          undefined,
+          token,
+        )
+      ).statusCode,
+    ).toBe(400);
+  });
+});
+
 describe("legacy control-page authentication", () => {
   it("redirects /control to account login and serves no manual token prompt", async () => {
     const s = await start();

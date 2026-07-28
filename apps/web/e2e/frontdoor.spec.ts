@@ -103,10 +103,16 @@ async function fulfill(route: Route, payload: unknown, status = 200) {
   });
 }
 
-async function prepare(page: Page, mode: "github" | "local" | "new") {
+async function prepare(
+  page: Page,
+  mode: "github" | "local" | "new",
+  options: { githubInitiallyInstalled?: boolean } = {},
+) {
   let projects: ReturnType<typeof project>[] = [];
   let planningCreated = false;
+  let githubInstalled = options.githubInitiallyInstalled ?? true;
   const observed = {
+    installRequests: 0,
     onboardingRequests: [] as unknown[],
     localProjectRequests: [] as unknown[],
     planningRequests: [] as unknown[],
@@ -133,7 +139,16 @@ async function prepare(page: Page, mode: "github" | "local" | "new") {
       return fulfill(route, projects);
     }
     if (path === "/api/v2/attention") return fulfill(route, {}, 404);
-    if (path === "/api/integrations/github/status") return fulfill(route, githubStatus);
+    if (path === "/api/integrations/github/status") {
+      return fulfill(route, githubInstalled ? githubStatus : { ...githubStatus, connections: [] });
+    }
+    if (path === "/api/integrations/github/install") {
+      observed.installRequests += 1;
+      githubInstalled = true;
+      return fulfill(route, {
+        installation_url: `${url.origin}/?github=installed`,
+      });
+    }
     if (
       path.startsWith("/api/integrations/github/connections/") &&
       path.endsWith("/repositories")
@@ -419,6 +434,34 @@ test("New project creates from a name and lands in the workspace", async ({ page
     }),
   ]);
   expect(observed.planningRequests).toEqual([]);
+});
+
+test("Authorized-only GitHub setup finishes installation before creating a new project", async ({
+  page,
+}) => {
+  const observed = await prepare(page, "new", { githubInitiallyInstalled: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: /new project/i }).click();
+
+  await expect(page.getByText("Finish GitHub setup", { exact: true })).toBeVisible();
+  await expect(page.getByText(/identity is authorized as octocat/i)).toBeVisible();
+  await page.getByRole("button", { name: "Install The Norns on GitHub" }).click();
+  await page.waitForURL("/");
+
+  await page.getByRole("button", { name: /new project/i }).click();
+  await expect(page.getByTestId("automatic-github-destination")).toContainText("octocat");
+  await page.getByTestId("project-name").fill("Verified setup journey");
+  await page.getByRole("button", { name: /create project/i }).click();
+
+  await expectWorkspaceNavigation(page);
+  expect(observed.installRequests).toBe(1);
+  expect(observed.onboardingRequests).toEqual([
+    expect.objectContaining({
+      scenario: "new_repo",
+      name: "Verified setup journey",
+      repository_name: "verified-setup-journey",
+    }),
+  ]);
 });
 
 test("Workspace uses a centered responsive shell, current navigation, and one Work composer", async ({
