@@ -24,18 +24,7 @@ import {
   describeSetup,
   parseGitHubRepoRef,
 } from "./projectSourceRequest";
-import {
-  Alert,
-  Badge,
-  Brand,
-  Button,
-  Field,
-  Input,
-  PageHeader,
-  Select,
-  Spinner,
-  TextArea,
-} from "./ui";
+import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 import { useSingleFlightPolling } from "./useSingleFlightPolling";
 
 export interface ProjectSummary {
@@ -111,31 +100,6 @@ export function deriveProjectIdentity(
       .slice(0, 100)
       .replace(/[._-]+$/g, "") || "new-project";
   return { projectName, repositorySlug };
-}
-
-async function uploadObjectiveAttachment(projectId: string, file: File): Promise<string> {
-  const response = await fetch(`/api/v2/projects/${projectId}/attachments`, {
-    method: "POST",
-    headers: {
-      ...authHeaders(),
-      "content-type": file.type,
-      "x-attachment-purpose": "objective",
-    },
-    credentials: "include",
-    body: file,
-  });
-  if (response.status === 401) throw new UnauthorizedError();
-  const payload = (await response.json().catch(() => ({}))) as {
-    id?: string;
-    message?: string;
-  };
-  if (!response.ok || !payload.id) {
-    throw new ApiError(
-      payload.message ?? `Attachment upload failed: ${response.status}`,
-      response.status,
-    );
-  }
-  return payload.id;
 }
 
 // ---------------------------------------------------------------------------
@@ -554,7 +518,6 @@ export function Projects({
   const repositoryRequestEpoch = useRef(0);
   const [repositoryName, setRepositoryName] = useState("");
   const [repositoryPrivate, setRepositoryPrivate] = useState(true);
-  const [pendingAttachmentFiles, setPendingAttachmentFiles] = useState<File[]>([]);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [localSources, setLocalSources] = useState<LocalRepositoryInventory | null>(null);
@@ -571,17 +534,14 @@ export function Projects({
   // (the server's automatic opposite-provider default); any other value is
   // "provider:model" as offered by MODEL_CHOICES below.
   const [reviewerSelection, setReviewerSelection] = useState("auto");
-  // A new project's single submit creates the repository/project, uploads
-  // any locally staged references, and starts planning. The "attach" step is
-  // now a progress/recovery state only: no second confirmation is required.
-  // "blocker" means creation succeeded but repository activation needs human
-  // attention before the same recoverable continuation can run.
-  const [wizardStep, setWizardStep] = useState<"form" | "blocker" | "attach" | "adopting">("form");
+  // DESIGN R2 semantic change: the wizard's single submit creates the
+  // repository/project and opens it — planning now begins in the conversation
+  // after creation, so there is no wizard planning kickoff or attachment
+  // upload step anymore. "blocker" means creation succeeded but repository
+  // activation needs human attention before the continuation can run.
+  const [wizardStep, setWizardStep] = useState<"form" | "blocker" | "adopting">("form");
   const [draftProject, setDraftProject] = useState<ProjectSummary | null>(null);
-  const [wizardAttachmentIds, setWizardAttachmentIds] = useState<string[]>([]);
   const [wizardObjective, setWizardObjective] = useState("");
-  const [planningStarting, setPlanningStarting] = useState(false);
-  const [planningError, setPlanningError] = useState<string | null>(null);
   const [adoptionStage, setAdoptionStage] = useState<"analyzing" | "planning">("analyzing");
   const [adoptionError, setAdoptionError] = useState<string | null>(null);
   // O1: onboarding blockers (e.g. installation_not_ready) surfaced after a
@@ -593,9 +553,12 @@ export function Projects({
   // failed-attempt retry, so a double-click or a retried request replays the
   // same outcome instead of creating a second project/repository.
   const [idempotencyKey, setIdempotencyKey] = useState(() => globalThis.crypto.randomUUID());
+  // DESIGN R2: the project name comes directly from the "Project name" field;
+  // deriveProjectIdentity is used only for normalization and the repository
+  // slug (with the optional slug override).
   const derivedIdentity = useMemo(
-    () => deriveProjectIdentity(description, name, repositoryName),
-    [description, name, repositoryName],
+    () => deriveProjectIdentity("", name, repositoryName),
+    [name, repositoryName],
   );
   // Per-project phase/progress read model for the dashboard rows (P5's
   // tracking additions to GET .../resume). Best-effort: a project whose
@@ -950,10 +913,7 @@ export function Projects({
       setDialog(false);
       setWizardStep("form");
       setDraftProject(null);
-      setWizardAttachmentIds([]);
       setWizardObjective("");
-      setPendingAttachmentFiles([]);
-      setPlanningError(null);
       setOnboardingBlockers([]);
       setName("");
       setDescription("");
@@ -1032,91 +992,27 @@ export function Projects({
     [reviewerSelection],
   );
 
+  /** DESIGN R2: a new project opens straight into the workspace after
+   *  creation — planning begins in the conversation there, so the wizard no
+   *  longer starts a planning run or uploads objective attachments. The
+   *  entry_flow flag is kept: App.tsx uses it to route the canonical
+   *  planning journey. */
   const finishNewProject = useCallback(
-    async (
-      project: ProjectSummary,
-      objective: string,
-      queuedFiles: File[],
-      uploadedAttachmentIds: string[],
-    ): Promise<void> => {
-      setDraftProject(project);
-      setWizardObjective(objective);
-      setWizardStep("attach");
-      setPlanningStarting(true);
-      setPlanningError(null);
-      let remainingFiles = [...queuedFiles];
-      const attachmentIds = [...uploadedAttachmentIds];
-      try {
-        for (const file of queuedFiles) {
-          const attachmentId = await uploadObjectiveAttachment(project.id, file);
-          attachmentIds.push(attachmentId);
-          remainingFiles = remainingFiles.slice(1);
-          setWizardAttachmentIds([...attachmentIds]);
-          setPendingAttachmentFiles([...remainingFiles]);
-        }
-        const run = await request<{ planning_run_id: string }>(
-          `/api/v2/projects/${project.id}/planning-runs`,
-          {
-            objective,
-            max_rounds: roundsCount,
-            attachment_ids: attachmentIds,
-            pm: {
-              provider: pmProvider,
-              model: pmModel,
-              ...(pmProvider === "openai" ? { reasoning_effort: pmEffort } : {}),
-            },
-          },
-        );
-        proceedAfterCreate({
-          ...project,
-          focus_planning_run_id: run.planning_run_id,
-          entry_flow: "new",
-        });
-      } catch (error) {
-        if (error instanceof UnauthorizedError) onUnauthorized();
-        else {
-          // The planning POST may have committed even if its response was
-          // lost. Resolve that ambiguity from durable state before asking the
-          // human to retry, which avoids creating a duplicate planning run.
-          try {
-            const latest = await request<{ planning_run: { id: string } | null }>(
-              `/api/v2/projects/${project.id}/planning-runs/latest`,
-            );
-            if (latest.planning_run) {
-              proceedAfterCreate({
-                ...project,
-                focus_planning_run_id: latest.planning_run.id,
-                entry_flow: "new",
-              });
-              return;
-            }
-          } catch {
-            // Preserve the original actionable failure below.
-          }
-          setPlanningError(error instanceof Error ? error.message : String(error));
-        }
-      } finally {
-        setPlanningStarting(false);
-      }
+    (project: ProjectSummary): void => {
+      proceedAfterCreate({ ...project, entry_flow: "new" });
     },
-    [onUnauthorized, pmEffort, pmModel, pmProvider, proceedAfterCreate, roundsCount],
+    [proceedAfterCreate],
   );
 
   const prepareNewLocalProject = useCallback(
-    async (
-      project: ProjectSummary,
-      objective: string,
-      queuedFiles: File[],
-      uploadedAttachmentIds: string[],
-    ): Promise<void> => {
+    async (project: ProjectSummary): Promise<void> => {
       setDraftProject(project);
-      setWizardObjective(objective);
       setAdoptionError(null);
       setAdoptionStage("analyzing");
       setWizardStep("adopting");
       try {
         await request(`/api/v2/projects/${project.id}/analyze-repository`, {});
-        await finishNewProject(project, objective, queuedFiles, uploadedAttachmentIds);
+        finishNewProject(project);
       } catch (error) {
         if (error instanceof UnauthorizedError) onUnauthorized();
         else setAdoptionError(error instanceof Error ? error.message : String(error));
@@ -1137,13 +1033,15 @@ export function Projects({
           return;
         }
         const isNewLocalProject = startingPoint === "new";
+        // DESIGN R2: no auto-filled filler description — a new project's
+        // description is empty at creation (planning happens in the
+        // conversation); an adoption records only the human's optional
+        // direction.
         const completedProject = await request<ProjectSummary>("/api/v2/projects/local", {
           name: isNewLocalProject
             ? derivedIdentity.projectName
             : localSelection.repository.repository_display_name,
-          description:
-            description.trim() ||
-            `Continue development of ${localSelection.repository.repository_display_name}`,
+          description: description.trim(),
           pm_provider: pmProvider,
           pm_model: pmModel,
           selection_token: localSelection.selection_token,
@@ -1151,12 +1049,7 @@ export function Projects({
         });
         if (isNewLocalProject) {
           await applyReviewerPreference(completedProject.id);
-          await prepareNewLocalProject(
-            completedProject,
-            description.trim(),
-            pendingAttachmentFiles,
-            wizardAttachmentIds,
-          );
+          await prepareNewLocalProject(completedProject);
           return;
         }
         await completeAdoption(completedProject, description.trim());
@@ -1194,11 +1087,11 @@ export function Projects({
         startingPoint === "existing"
           ? (repository?.name ?? "Untitled project")
           : derivedIdentity.projectName;
-      const projectDescription =
-        description.trim() ||
-        (repository
-          ? repository.description || `Continue development of ${repository.full_name}`
-          : "New project");
+      // DESIGN R2: no auto-filled filler description. New projects start with
+      // an empty description (planning happens in the conversation after
+      // creation); adoptions keep the human's optional direction or the
+      // repository's own GitHub description.
+      const projectDescription = description.trim() || repository?.description || "";
       const onboarding = await request<OnboardingResponse>("/api/v2/projects/onboarding", {
         name: projectName,
         description: projectDescription,
@@ -1236,12 +1129,7 @@ export function Projects({
         await completeAdoption(completedProject, description.trim());
         return;
       }
-      await finishNewProject(
-        completedProject,
-        description.trim(),
-        pendingAttachmentFiles,
-        wizardAttachmentIds,
-      );
+      finishNewProject(completedProject);
     } catch (e) {
       e instanceof UnauthorizedError
         ? onUnauthorized()
@@ -1268,32 +1156,17 @@ export function Projects({
     completeAdoption,
     finishNewProject,
     prepareNewLocalProject,
-    pendingAttachmentFiles,
-    wizardAttachmentIds,
     onUnauthorized,
   ]);
 
   const retryAdoption = useCallback(() => {
     if (!draftProject) return;
     if (startingPoint === "new") {
-      void prepareNewLocalProject(
-        draftProject,
-        wizardObjective,
-        pendingAttachmentFiles,
-        wizardAttachmentIds,
-      );
+      void prepareNewLocalProject(draftProject);
       return;
     }
     void completeAdoption(draftProject, wizardObjective);
-  }, [
-    completeAdoption,
-    draftProject,
-    pendingAttachmentFiles,
-    prepareNewLocalProject,
-    startingPoint,
-    wizardAttachmentIds,
-    wizardObjective,
-  ]);
+  }, [completeAdoption, draftProject, prepareNewLocalProject, startingPoint, wizardObjective]);
 
   const openAdoptedProject = useCallback(() => {
     if (draftProject) proceedAfterCreate(draftProject);
@@ -1315,17 +1188,15 @@ export function Projects({
       void completeAdoption(project, wizardObjective);
       return;
     }
-    void finishNewProject(project, wizardObjective, pendingAttachmentFiles, wizardAttachmentIds);
+    finishNewProject(project);
   }, [
     completeAdoption,
     create,
     draftProject,
     executionLocation,
     finishNewProject,
-    pendingAttachmentFiles,
     startingPoint,
     sourceKind,
-    wizardAttachmentIds,
     wizardObjective,
   ]);
 
@@ -1333,10 +1204,7 @@ export function Projects({
     setDialog(false);
     setWizardStep("form");
     setDraftProject(null);
-    setWizardAttachmentIds([]);
-    setPendingAttachmentFiles([]);
     setWizardObjective("");
-    setPlanningError(null);
     setOnboardingBlockers([]);
     setName("");
     setDescription("");
@@ -1355,32 +1223,6 @@ export function Projects({
     setRoundsCount(3);
     setIdempotencyKey(globalThis.crypto.randomUUID());
   }, []);
-
-  // Recovery action after attachment upload or planning kickoff failed. Files
-  // already uploaded stay as ids; only the remaining local files are retried.
-  const startPlanningRun = useCallback(async () => {
-    if (!draftProject) return;
-    await finishNewProject(
-      draftProject,
-      wizardObjective,
-      pendingAttachmentFiles,
-      wizardAttachmentIds,
-    );
-  }, [
-    draftProject,
-    finishNewProject,
-    pendingAttachmentFiles,
-    wizardObjective,
-    wizardAttachmentIds,
-  ]);
-
-  /** Planning could not start, but project/repository creation succeeded. */
-  const skipPlanning = useCallback(() => {
-    if (!draftProject) return;
-    const project = draftProject;
-    closeWizard();
-    onOpenProject(project);
-  }, [draftProject, closeWizard, onOpenProject]);
 
   const visible = useMemo(
     () =>
@@ -1479,7 +1321,7 @@ export function Projects({
   const canCreate =
     !creating &&
     (isLocalSource || githubConnected) &&
-    (description.trim().length > 0 || startingPoint === "existing") &&
+    (name.trim().length > 0 || startingPoint === "existing") &&
     sourceReady &&
     localCloneReady;
   // The confirmation step's one honest passage about where the human's code
@@ -1489,7 +1331,7 @@ export function Projects({
     ? null
     : scenario === "existing_repo"
       ? (selectedRepository?.full_name ?? null)
-      : selectedConnection && description.trim()
+      : selectedConnection && name.trim()
         ? `${selectedConnection.owner_login}/${derivedIdentity.repositorySlug}`
         : null;
   const confirmationText = isLocalSource
@@ -1627,9 +1469,7 @@ export function Projects({
                         {/* DESIGN R2: subtle gold accent on the ready dot. */}
                         <i
                           style={
-                            stateClass === "is-ready"
-                              ? { background: "var(--gold)" }
-                              : undefined
+                            stateClass === "is-ready" ? { background: "var(--gold)" } : undefined
                           }
                         />
                         {state}
@@ -2256,34 +2096,12 @@ export function Projects({
               ← Dashboard
             </Button>
           </header>
-          <main
-            className="page-container page-container-narrow wizard-page"
-            aria-label="New project"
-          >
-            <PageHeader eyebrow="New project" title="Project setup" />
+          {/* DESIGN R2: no in-page "Project setup" heading (the topbar
+              location "New project" is the title) and the standard wide
+              container instead of the narrow one. */}
+          <main className="page-container wizard-page" aria-label="New project">
             <section className="wizard-shell">
-              {wizardStep === "attach" && draftProject ? (
-                <div className="form-stack wizard-attach-step" data-testid="wizard-attach-step">
-                  <Alert>
-                    <strong>{draftProject.name}</strong> was created. Norns is preparing the plan
-                    you'll review before any agent starts coding.
-                  </Alert>
-                  {planningError ? (
-                    <Alert testId="planning-run-error">{planningError}</Alert>
-                  ) : null}
-                  {planningStarting ? <Spinner label="Starting the planning journey…" /> : null}
-                  {planningError ? (
-                    <div className="actions">
-                      <Button variant="ghost" onClick={skipPlanning}>
-                        Open project
-                      </Button>
-                      <Button variant="primary" onClick={() => void startPlanningRun()}>
-                        Retry planning
-                      </Button>
-                    </div>
-                  ) : null}
-                </div>
-              ) : wizardStep === "adopting" && draftProject ? (
+              {wizardStep === "adopting" && draftProject ? (
                 <div className="form-stack" data-testid="wizard-adoption-step">
                   <div>
                     <div className="eyebrow">
@@ -2345,8 +2163,22 @@ export function Projects({
                 </div>
               ) : (
                 <div className="form-stack">
+                  {/* DESIGN R2: the project name is the first field and IS the
+                      name (used for folder/repo naming) — the old objective
+                      textarea is gone; planning happens in the conversation
+                      after creation. */}
+                  {startingPoint === "new" ? (
+                    <Field label="Project name">
+                      <Input
+                        data-testid="project-name"
+                        value={name}
+                        onChange={(event) => setName(event.target.value)}
+                        placeholder="e.g. Apollo customer portal"
+                      />
+                    </Field>
+                  ) : null}
                   <fieldset className="source-picker">
-                    <legend>Is this new, or existing work?</legend>
+                    <legend>Project type</legend>
                     <div className="source-options">
                       <button
                         type="button"
@@ -2384,9 +2216,7 @@ export function Projects({
 
                   <fieldset className="source-picker">
                     <legend>
-                      {startingPoint === "new"
-                        ? "Where should Norns work?"
-                        : "Where is the existing code?"}
+                      {startingPoint === "new" ? "Working location" : "Where is the existing code?"}
                     </legend>
                     <div className="source-options">
                       <button
@@ -2630,7 +2460,7 @@ export function Projects({
 
                   {!isLocalSource && startingPoint === "new" && githubConnected ? (
                     <fieldset className="source-picker" data-testid="execution-location-picker">
-                      <legend>Where should approved work run?</legend>
+                      <legend>Project location</legend>
                       <div className="source-options">
                         <button
                           type="button"
@@ -2711,15 +2541,7 @@ export function Projects({
 
                   {startingPoint === "new" ? (
                     <>
-                      <Field label="What should The Norns build?">
-                        <TextArea
-                          data-testid="project-description"
-                          value={description}
-                          onChange={(event) => setDescription(event.target.value)}
-                          placeholder="Describe the product, outcome, and any important constraints."
-                        />
-                      </Field>
-                      {description.trim() ? (
+                      {name.trim() ? (
                         <div className="policy" data-testid="derived-project-summary">
                           <strong>{derivedIdentity.projectName}</strong>
                           <br />
@@ -2733,68 +2555,20 @@ export function Projects({
                         </div>
                       ) : null}
                       <details>
-                        <summary>Optional details</summary>
+                        <summary>Options</summary>
                         <div className="form-stack">
-                          <div className="project-create-grid">
-                            <Field label="Project name override">
-                              <Input
-                                data-testid="project-name"
-                                value={name}
-                                onChange={(event) => setName(event.target.value)}
-                                placeholder={deriveProjectIdentity(description).projectName}
-                              />
-                            </Field>
-                            {!isLocalSource ? (
+                          {!isLocalSource ? (
+                            <div className="project-create-grid">
                               <Field label="Repository slug override">
                                 <Input
                                   data-testid="github-new-repository-name"
                                   value={repositoryName}
                                   onChange={(event) => setRepositoryName(event.target.value)}
-                                  placeholder={deriveProjectIdentity(description).repositorySlug}
+                                  placeholder={deriveProjectIdentity("", name).repositorySlug}
                                 />
                               </Field>
-                            ) : null}
-                          </div>
-                          <Field label="Reference images">
-                            <Input
-                              data-testid="new-project-attachment-input"
-                              type="file"
-                              accept="image/png,image/jpeg,image/webp,image/gif"
-                              multiple
-                              disabled={pendingAttachmentFiles.length >= 8}
-                              onChange={(event) => {
-                                const files = Array.from(event.target.files ?? []).filter((file) =>
-                                  ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(
-                                    file.type,
-                                  ),
-                                );
-                                setPendingAttachmentFiles((current) =>
-                                  [...current, ...files].slice(0, 8),
-                                );
-                                event.target.value = "";
-                              }}
-                            />
-                            {pendingAttachmentFiles.length ? (
-                              <ul data-testid="new-project-attachment-list">
-                                {pendingAttachmentFiles.map((file, index) => (
-                                  <li key={`${file.name}-${file.size}-${index}`}>
-                                    {file.name}{" "}
-                                    <button
-                                      type="button"
-                                      aria-label={`Remove ${file.name}`}
-                                      onClick={() =>
-                                        setPendingAttachmentFiles((current) =>
-                                          current.filter((_, candidate) => candidate !== index),
-                                        )
-                                      }
-                                    >
-                                      ×
-                                    </button>
-                                  </li>
-                                ))}
-                              </ul>
-                            ) : null}
-                          </Field>
+                            </div>
+                          ) : null}
                           {!isLocalSource ? (
                             <Field label="Visibility">
                               <Select
@@ -2886,12 +2660,14 @@ export function Projects({
                             </Field>
                           </div>
                           <Field label="Plan review rounds">
+                            {/* DESIGN R2: zero rounds is allowed — it means
+                                review is off. */}
                             <div className="rounds-stepper" data-testid="rounds-stepper">
                               <Button
                                 type="button"
                                 className="btn-small"
-                                disabled={roundsCount <= 1}
-                                onClick={() => setRoundsCount((count) => Math.max(1, count - 1))}
+                                disabled={roundsCount <= 0}
+                                onClick={() => setRoundsCount((count) => Math.max(0, count - 1))}
                                 aria-label="Fewer rounds"
                               >
                                 −
@@ -2908,13 +2684,22 @@ export function Projects({
                               </Button>
                             </div>
                           </Field>
-                          <div className="policy">
-                            <strong>Cross-provider review is on.</strong>
-                            <br />
-                            {selectedModel?.label} will lead planning.{" "}
-                            {pmProvider === "anthropic" ? "OpenAI" : "Anthropic"} will independently
-                            review the plan.
-                          </div>
+                          {roundsCount > 0 ? (
+                            <div className="policy">
+                              <strong>Cross-provider review is on.</strong>
+                              <br />
+                              {selectedModel?.label} will lead planning.{" "}
+                              {pmProvider === "anthropic" ? "OpenAI" : "Anthropic"} will
+                              independently review the plan.
+                            </div>
+                          ) : (
+                            <div className="policy">
+                              <strong>Plan review is off.</strong>
+                              <br />
+                              {selectedModel?.label} will lead planning with no independent review
+                              rounds.
+                            </div>
+                          )}
                         </div>
                       </details>
                     </>
@@ -2943,13 +2728,11 @@ export function Projects({
                         sourceKind === "github" &&
                         executionLocation === "local"
                         ? "Creating GitHub repository and local folder…"
-                        : startingPoint === "new" && sourceKind === "local"
-                          ? "Creating project and starting planning…"
-                          : scenario === "new_repo"
-                            ? "Creating repository and project…"
-                            : "Creating…"
+                        : scenario === "new_repo"
+                          ? "Creating repository and project…"
+                          : "Creating…"
                       : startingPoint === "new"
-                        ? "Create & start planning →"
+                        ? "Create project →"
                         : "Adopt project →"}
                   </Button>
                 </div>
