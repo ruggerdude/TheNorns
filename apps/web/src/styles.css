@@ -998,7 +998,7 @@ button:disabled {
 .phase-task-meta,
 .run-line {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 .phase-task p {
   margin: 0;
@@ -1023,7 +1023,7 @@ button:disabled {
   border-radius: 9px;
   padding: 8px 10px;
   background: color-mix(in srgb, #ff6b6b 7%, transparent);
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 .verification-failures > summary {
   cursor: pointer;
@@ -1048,7 +1048,7 @@ button:disabled {
   border-radius: 7px;
   background: var(--bg);
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--text-xs);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1057,7 +1057,7 @@ button:disabled {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 .cost-line .cost-amount {
@@ -1076,7 +1076,7 @@ button:disabled {
 .run-log > summary {
   cursor: pointer;
   padding: 6px 10px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 .run-log-body {
@@ -1093,7 +1093,7 @@ button:disabled {
   border-radius: 7px;
   background: var(--surface);
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--text-xs);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1101,7 +1101,7 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  font-size: 10.5px;
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 .dismissible-note {
@@ -1146,7 +1146,7 @@ button:disabled {
 }
 .agent-identity-card > span:not(.eyebrow) {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 .task-qc-details {
   padding-top: 4px;
@@ -1665,14 +1665,14 @@ button:disabled {
 }
 .project-tab.is-active {
   border-color: #765a34;
-  background: #211b13;
+  background: var(--surface-2);
 }
 .project-tab button {
   border: 0;
   background: transparent;
-  color: #cbd0d5;
+  color: var(--ink-muted);
   padding: .4rem .3rem .4rem .6rem;
-  font-size: .7rem;
+  font-size: var(--text-xs);
 }
 .project-tab-close {
   color: var(--muted) !important;
@@ -1854,12 +1854,6 @@ button:disabled {
 .workspace-shell {
   min-height: 100vh;
 }
-/* .workspace-topbar inherits the canonical .topbar pattern (top of file);
-   it only offsets below the sticky project-tabs strip. */
-.workspace-topbar {
-  top: 42px;
-  z-index: 19;
-}
 .workspace-page {
   width: min(1500px, calc(100% - clamp(2rem, 6vw, 6rem)));
   max-width: none;
@@ -1878,7 +1872,7 @@ button:disabled {
    topbar (64px). */
 .workspace-tabs {
   position: sticky;
-  top: 106px;
+  top: 64px;
   z-index: 17;
   display: flex;
   gap: .45rem;
@@ -4503,7 +4497,7 @@ button:disabled {
 
 .project-tab button {
   color: var(--muted);
-  font-size: .68rem;
+  font-size: var(--text-xs);
 }
 
 .project-tab.is-active button {
@@ -5435,10 +5429,6 @@ button:disabled {
     display: none;
   }
 
-  .workspace-topbar {
-    top: 42px;
-  }
-
   .workspace-nav-start .brand {
     display: none;
   }
@@ -5455,7 +5445,7 @@ button:disabled {
   }
 
   .workspace-tabs {
-    top: 104px;
+    top: 62px;
     overflow-x: auto;
     flex-wrap: nowrap;
     scrollbar-width: none;
@@ -5629,15 +5619,15 @@ h4 {
 }
 
 .workspace-shell h2 {
-  font-size: var(--heading-section-size);
+  font-size: var(--text-lg);
 }
 
 .workspace-shell h3 {
-  font-size: var(--heading-subsection-size);
+  font-size: var(--text-md);
 }
 
 .workspace-shell h4 {
-  font-size: var(--heading-detail-size);
+  font-size: var(--text-base);
 }
 
 .workspace-shell p,
