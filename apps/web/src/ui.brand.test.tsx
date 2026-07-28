@@ -17,9 +17,7 @@ describe("BraidMark", () => {
     // Crossings split the strands: more path segments than the 3 raw strands.
     expect(paths.length).toBeGreaterThan(3);
     const strokes = new Set(paths.map((p) => p.getAttribute("stroke")));
-    expect(strokes).toEqual(
-      new Set(["var(--brand-ink)", "var(--gold)", "var(--ink-muted)"]),
-    );
+    expect(strokes).toEqual(new Set(["var(--brand-ink)", "var(--gold)", "var(--ink-muted)"]));
     for (const p of paths) {
       expect(p.getAttribute("fill")).toBe("none");
       expect(p.getAttribute("stroke-width")).toBe("4.5");

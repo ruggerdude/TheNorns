@@ -38,7 +38,12 @@ interface Segment {
 }
 
 const SAMPLES = 240;
-const PHASES = [0, (2 * Math.PI) / 3, (4 * Math.PI) / 3];
+const PHASES: [number, number, number] = [0, (2 * Math.PI) / 3, (4 * Math.PI) / 3];
+
+/** Safe indexed access (noUncheckedIndexedAccess): every index we use is in range. */
+function at(arr: number[], i: number): number {
+  return arr[i] ?? 0;
+}
 
 function computeSegments(
   width: number,
@@ -46,34 +51,34 @@ function computeSegments(
   lead: number,
   period: number,
   amplitude: number,
-): { xs: number[]; ys: number[][]; segments: Segment[] } {
+): { xs: number[]; ys: [number[], number[], number[]]; segments: Segment[] } {
   const mid = height / 2;
   const xs: number[] = [];
-  const ys: number[][] = [[], [], []];
+  const ys: [number[], number[], number[]] = [[], [], []];
   for (let i = 0; i <= SAMPLES; i++) {
     const x = 4 + ((width - 8) * i) / SAMPLES;
     xs.push(x);
     for (let k = 0; k < 3; k++) {
       if (x <= lead) {
         // Straight lead-in at the strand's start height (sin at t=0 ordering).
-        ys[k].push(mid + amplitude * Math.sin(PHASES[k]));
+        ys[k]?.push(mid + amplitude * Math.sin(at(PHASES, k)));
       } else {
         const t = ((x - lead) / period) * 2 * Math.PI;
-        ys[k].push(mid + amplitude * Math.sin(t + PHASES[k]));
+        ys[k]?.push(mid + amplitude * Math.sin(t + at(PHASES, k)));
       }
     }
   }
   // Crossing x-indices between each strand pair become segment boundaries.
-  const bounds: number[][] = [[], [], []];
+  const bounds: [number[], number[], number[]] = [[], [], []];
   for (let a = 0; a < 3; a++) {
     for (let b = a + 1; b < 3; b++) {
       for (let i = 1; i <= SAMPLES; i++) {
-        const d0 = ys[a][i - 1] - ys[b][i - 1];
-        const d1 = ys[a][i] - ys[b][i];
+        const d0 = at(ys[a] ?? [], i - 1) - at(ys[b] ?? [], i - 1);
+        const d1 = at(ys[a] ?? [], i) - at(ys[b] ?? [], i);
         if (d0 === 0) continue;
         if (d0 < 0 !== d1 < 0) {
-          bounds[a].push(i);
-          bounds[b].push(i);
+          bounds[a]?.push(i);
+          bounds[b]?.push(i);
         }
       }
     }
@@ -81,18 +86,19 @@ function computeSegments(
   // Build segments per strand; depth alternates per segment index.
   const segments: Segment[] = [];
   for (let k = 0; k < 3; k++) {
-    const bs = [0, ...bounds[k].sort((x, y) => x - y), SAMPLES];
+    const bs = [0, ...(bounds[k] ?? []).sort((x, y) => x - y), SAMPLES];
     for (let s = 0; s < bs.length - 1; s++) {
-      segments.push({ strand: k, from: bs[s], to: bs[s + 1], over: s % 2 === 1 });
+      segments.push({ strand: k, from: at(bs, s), to: at(bs, s + 1), over: s % 2 === 1 });
     }
   }
   return { xs, ys, segments };
 }
 
-function segmentPath(xs: number[], ys: number[][], seg: Segment): string {
-  let d = `M ${xs[seg.from].toFixed(1)} ${ys[seg.strand][seg.from].toFixed(1)}`;
+function segmentPath(xs: number[], ys: [number[], number[], number[]], seg: Segment): string {
+  const strand = ys[seg.strand] ?? [];
+  let d = `M ${at(xs, seg.from).toFixed(1)} ${at(strand, seg.from).toFixed(1)}`;
   for (let i = seg.from + 1; i <= seg.to; i++) {
-    d += ` L ${xs[i].toFixed(1)} ${ys[seg.strand][i].toFixed(1)}`;
+    d += ` L ${at(xs, i).toFixed(1)} ${at(strand, i).toFixed(1)}`;
   }
   return d;
 }
@@ -111,7 +117,7 @@ export function BraidMark({
 }: BraidMarkProps) {
   const a = amplitude ?? height / 2 - strokeWidth / 2 - 1;
   const { xs, ys, segments } = computeSegments(width, height, lead, period, a);
-  const colors = [strand1, strand2, strand3];
+  const colors: [string, string, string] = [strand1, strand2, strand3];
   // Unders first, overs after, so overs visually cross on top.
   const ordered = [...segments.filter((s) => !s.over), ...segments.filter((s) => s.over)];
   return (
@@ -129,7 +135,7 @@ export function BraidMark({
           key={`${seg.strand}-${seg.from}-${seg.to}-${seg.over ? "o" : "u"}`}
           d={segmentPath(xs, ys, seg)}
           fill="none"
-          stroke={colors[seg.strand]}
+          stroke={colors[seg.strand] ?? strand1}
           strokeWidth={strokeWidth}
           strokeLinecap="round"
         />
