@@ -13,17 +13,17 @@
   gap: 0.2rem;
   padding: 0.75rem;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--raised) 52%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface-2) 52%, transparent);
 }
 
 .knowledge-status-stat strong {
-  font-size: 1rem;
+  font-size: var(--text-md);
 }
 
 .knowledge-status-stat span {
-  color: var(--muted);
-  font-size: 0.68rem;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
   line-height: 1.35;
 }
 
@@ -36,11 +36,12 @@
 .knowledge-status-group {
   padding: 0.8rem;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
 }
 
 .knowledge-status-group h4 {
   margin: 0 0 0.45rem;
+  font-size: var(--text-base);
 }
 
 .knowledge-status-list {
@@ -48,8 +49,8 @@
   gap: 0.35rem;
   margin: 0;
   padding-left: 1.1rem;
-  color: var(--muted);
-  font-size: 0.76rem;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
   line-height: 1.45;
 }
 
@@ -65,8 +66,8 @@
   display: flex;
   align-items: flex-start;
   gap: 0.5rem;
-  color: var(--muted);
-  font-size: 0.76rem;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
   line-height: 1.45;
 }
 

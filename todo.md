@@ -1091,3 +1091,11 @@ decision and is deliberately untouched.
   server was serving a different checkout (title mismatch confirmed it
   wasn't this worktree's `index.html`), so relied on the full automated
   verification bar instead.
+
+## Design overhaul — Phase 2 (per docs/DESIGN-SYSTEM.md)
+
+- [x] ✅ DESIGN-P2d — workspace sweep: App.tsx shell reorder (brand topbar
+  first), micro-text purge in ConversationWorkspace / PhaseTab /
+  ProjectOperationsDashboard / KnowledgeStatusPanel CSS, "AI" copy
+  neutralized in PhaseTab, header/token normalization across operations
+  dashboard, run log, debates, members.
