@@ -298,6 +298,45 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     });
   });
 
+  it("keeps a Local Agent check failure beside the execution choice and out of GitHub destination", async () => {
+    mock.get("/api/runners/helper/repositories", {
+      status: 500,
+      body: { message: "request failed: 500" },
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /^this computer \+ github/i }));
+
+    const localError = await screen.findByTestId("local-source-error");
+    expect(localError).toHaveTextContent(
+      "Norns couldn't check the Local Agent. Try again, or open Connections to verify it.",
+    );
+    expect(screen.queryByText("request failed: 500")).not.toBeInTheDocument();
+    expect(screen.getByTestId("github-connection")).toHaveValue("github:42");
+  });
+
+  it("shows the server's actionable onboarding message instead of a raw 500", async () => {
+    mock.post("/api/v2/projects/onboarding", {
+      status: 500,
+      body: {
+        error: "onboarding_failed",
+        message:
+          "Project setup couldn't finish. Try again; if it continues, verify GitHub and the Local Agent in Connections.",
+      },
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.type(screen.getByTestId("project-description"), "Build a fresh application");
+    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
+
+    expect(await screen.findByTestId("onboarding-submit-error")).toHaveTextContent(
+      "Project setup couldn't finish. Try again; if it continues, verify GitHub and the Local Agent in Connections.",
+    );
+    expect(screen.queryByText("request failed: 500")).not.toBeInTheDocument();
+  });
+
   it("adopts an existing project from the reusable local repository inventory", async () => {
     mock.get("/api/runners/helper/repositories", {
       body: {

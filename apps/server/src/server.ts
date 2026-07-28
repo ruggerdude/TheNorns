@@ -4050,13 +4050,21 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           if (error instanceof RemoteRepositoryVerificationError) {
             return reply.code(error.status).send({ error: error.code, message: error.message });
           }
+          if (error instanceof GitHubIntegrationError) {
+            return reply.code(error.status).send({ error: error.code, message: error.message });
+          }
           if (error instanceof OnboardingValidationError) {
             return reply.code(409).send({ error: error.code, message: error.message });
           }
           if (error instanceof RelationalCompositionConflictError) {
             return reply.code(409).send(error.diagnostic());
           }
-          return reply.code(500).send({ error: "onboarding_failed", detail: String(error) });
+          console.error("project onboarding failed", error);
+          return reply.code(500).send({
+            error: "onboarding_failed",
+            message:
+              "Project setup couldn't finish. Try again; if it continues, verify GitHub and the Local Agent in Connections.",
+          });
         }
       });
 

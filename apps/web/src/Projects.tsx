@@ -294,8 +294,13 @@ async function request<T>(path: string, body?: unknown, signal?: AbortSignal): P
     signal,
   });
   if (res.status === 401) throw new UnauthorizedError();
-  const json = (await res.json()) as T & { message?: string };
-  if (!res.ok) throw new ApiError(json.message ?? `request failed: ${res.status}`, res.status);
+  const json = (await res.json()) as T & { detail?: string; message?: string };
+  if (!res.ok) {
+    throw new ApiError(
+      json.message ?? json.detail ?? `Request failed (${res.status}). Try again.`,
+      res.status,
+    );
+  }
   return json;
 }
 
@@ -522,7 +527,9 @@ export function Projects({
   const [repositoryPrivate, setRepositoryPrivate] = useState(true);
   const [pendingAttachmentFiles, setPendingAttachmentFiles] = useState<File[]>([]);
   const [sourceError, setSourceError] = useState<string | null>(null);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [localSources, setLocalSources] = useState<LocalRepositoryInventory | null>(null);
+  const [localSourcesError, setLocalSourcesError] = useState<string | null>(null);
   const [localSelection, setLocalSelection] = useState<LocalRepositorySelection | null>(null);
   const [creating, setCreating] = useState(false);
   const [removingProjectId, setRemovingProjectId] = useState<string | null>(null);
@@ -735,6 +742,7 @@ export function Projects({
     resourceKey: "local-sources",
     load: () => loadLocalRepositories(),
     onSuccess: (inventory) => {
+      setLocalSourcesError(null);
       setLocalSources(inventory);
       setLocalSelection((current) =>
         current
@@ -747,7 +755,7 @@ export function Projects({
     },
     onError: (pollError) => {
       if (pollError instanceof UnauthorizedError) onUnauthorized();
-      else setSourceError(pollError.message);
+      else setLocalSourcesError(pollError.message);
     },
   });
 
@@ -927,6 +935,8 @@ export function Projects({
       setRepositoryQuery("");
       setLocalSelection(null);
       setLocalSources(null);
+      setLocalSourcesError(null);
+      setSubmissionError(null);
       setAdoptionError(null);
       setIdempotencyKey(globalThis.crypto.randomUUID());
       onOpenProject(completedProject);
@@ -1090,6 +1100,7 @@ export function Projects({
     setCreating(true);
     setError(null);
     setSourceError(null);
+    setSubmissionError(null);
     try {
       if (sourceKind === "local") {
         if (!localSelection) {
@@ -1205,7 +1216,7 @@ export function Projects({
     } catch (e) {
       e instanceof UnauthorizedError
         ? onUnauthorized()
-        : setSourceError(e instanceof Error ? e.message : String(e));
+        : setSubmissionError(e instanceof Error ? e.message : String(e));
     } finally {
       setCreating(false);
     }
@@ -1308,6 +1319,8 @@ export function Projects({
     setRepositoryQuery("");
     setLocalSelection(null);
     setLocalSources(null);
+    setLocalSourcesError(null);
+    setSubmissionError(null);
     setAdoptionError(null);
     setReviewerSelection("auto");
     setRoundsCount(3);
@@ -1496,6 +1509,9 @@ export function Projects({
                   className="btn-small"
                   onClick={() => {
                     setIdempotencyKey(globalThis.crypto.randomUUID());
+                    setSourceError(null);
+                    setLocalSourcesError(null);
+                    setSubmissionError(null);
                     setDialog(true);
                   }}
                 >
@@ -2208,6 +2224,9 @@ export function Projects({
                       onClick={() => {
                         setStartingPoint("new");
                         setSelectedRepositoryId("");
+                        setSourceError(null);
+                        setLocalSourcesError(null);
+                        setSubmissionError(null);
                       }}
                     >
                       <strong>New</strong>
@@ -2222,6 +2241,9 @@ export function Projects({
                         setStartingPoint("existing");
                         setExecutionLocation("github_actions");
                         setRepositoryName("");
+                        setSourceError(null);
+                        setLocalSourcesError(null);
+                        setSubmissionError(null);
                       }}
                     >
                       <strong>Existing</strong>
@@ -2247,6 +2269,8 @@ export function Projects({
                         }
                         setLocalSelection(null);
                         setSourceError(null);
+                        setLocalSourcesError(null);
+                        setSubmissionError(null);
                       }}
                     >
                       <strong>GitHub repository</strong>
@@ -2264,6 +2288,8 @@ export function Projects({
                         setExecutionLocation("github_actions");
                         setSelectedRepositoryId("");
                         setSourceError(null);
+                        setLocalSourcesError(null);
+                        setSubmissionError(null);
                       }}
                     >
                       <strong>Approved local Git repository</strong>
@@ -2277,6 +2303,9 @@ export function Projects({
 
                 {isLocalSource ? (
                   <div className="repository-picker local-folder-picker">
+                    {localSourcesError ? (
+                      <Alert testId="local-source-error">{localSourcesError}</Alert>
+                    ) : null}
                     {sourceError ? <Alert>{sourceError}</Alert> : null}
                     {localSources === null ? (
                       <Spinner label="Loading approved local repositories…" />
@@ -2479,6 +2508,8 @@ export function Projects({
                         onClick={() => {
                           setExecutionLocation("local");
                           setSourceError(null);
+                          setLocalSourcesError(null);
+                          setSubmissionError(null);
                         }}
                       >
                         <strong>This computer + GitHub</strong>
@@ -2493,6 +2524,8 @@ export function Projects({
                         onClick={() => {
                           setExecutionLocation("github_actions");
                           setSourceError(null);
+                          setLocalSourcesError(null);
+                          setSubmissionError(null);
                         }}
                       >
                         <strong>GitHub Actions</strong>
@@ -2500,7 +2533,9 @@ export function Projects({
                       </button>
                     </div>
                     {executionLocation === "local" ? (
-                      localSources === null ? (
+                      localSourcesError ? (
+                        <Alert testId="local-source-error">{localSourcesError}</Alert>
+                      ) : localSources === null ? (
                         <Spinner label="Checking Norns Local Agent…" />
                       ) : localSources.state !== "connected" ? (
                         <div className="connection-required">
@@ -2765,6 +2800,9 @@ export function Projects({
                     </span>
                   </Field>
                 )}
+                {submissionError ? (
+                  <Alert testId="onboarding-submit-error">{submissionError}</Alert>
+                ) : null}
                 <p className="setup-confirmation" data-testid="setup-confirmation">
                   {confirmationText}
                 </p>

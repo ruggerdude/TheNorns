@@ -38,9 +38,22 @@ async function localSourceRequest<T>(path: string, method: "GET" | "POST"): Prom
     ...(method === "POST" ? { body: JSON.stringify({}) } : {}),
   });
   if (response.status === 401) throw new UnauthorizedError();
-  const body = (await response.json().catch(() => ({}))) as T & { message?: string };
+  const body = (await response.json().catch(() => ({}))) as T & {
+    detail?: string;
+    message?: string;
+  };
   if (!response.ok) {
-    throw new Error(body.message ?? `Local source request failed (${response.status})`);
+    const serverMessage = body.message?.trim() || body.detail?.trim();
+    const usefulMessage =
+      serverMessage && !/^request failed(?::|\s|\()/i.test(serverMessage)
+        ? serverMessage
+        : undefined;
+    throw new Error(
+      usefulMessage ??
+        (response.status >= 500
+          ? "Norns couldn't check the Local Agent. Try again, or open Connections to verify it."
+          : `Local Agent request failed (${response.status}).`),
+    );
   }
   return body;
 }
