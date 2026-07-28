@@ -429,12 +429,12 @@ button:disabled {
   align-items: center;
   flex-wrap: wrap;
   gap: .6rem;
-  border: 1px solid var(--line);
-  background: var(--raised);
-  color: var(--text);
-  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--brand-600) 30%, var(--line));
+  background: color-mix(in srgb, var(--brand-600) 7%, var(--surface-2));
+  color: var(--ink);
+  border-radius: var(--radius);
   padding: .7rem .85rem;
-  font-size: .82rem;
+  font-size: var(--text-sm);
   line-height: 1.4;
   margin: .7rem 0;
 }
@@ -1853,13 +1853,11 @@ button:disabled {
 .workspace-shell {
   min-height: 100vh;
 }
+/* .workspace-topbar inherits the canonical .topbar pattern (top of file);
+   it only offsets below the sticky project-tabs strip. */
 .workspace-topbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: .5rem;
-  padding: .6rem clamp(1rem, 3vw, 2.5rem);
-  border-bottom: 1px solid var(--line);
+  top: 42px;
+  z-index: 19;
 }
 .workspace-page {
   width: min(1500px, calc(100% - clamp(2rem, 6vw, 6rem)));
@@ -1874,35 +1872,82 @@ button:disabled {
   gap: .5rem;
   flex-wrap: wrap;
 }
+/* Canonical workspace tab bar (single definition; the numbered chips come
+   from the ::before content below). Sticky offset = project tabs (42px) +
+   topbar (64px). */
 .workspace-tabs {
+  position: sticky;
+  top: 106px;
+  z-index: 17;
   display: flex;
-  gap: 1.35rem;
-  margin: 1.2rem 0 1.6rem;
-  padding: 0;
-  border-bottom: 1px solid var(--line);
+  gap: .45rem;
+  margin: 0 0 1.35rem;
+  padding: .62rem;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  backdrop-filter: blur(20px);
   width: 100%;
 }
 .workspace-tabs button {
   position: relative;
-  min-height: 42px;
-  margin: 0 0 -1px;
-  padding: .25rem .1rem .75rem;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
+  min-height: 44px;
+  margin: 0;
+  padding: .55rem .92rem;
+  border: 1px solid transparent;
+  border-radius: 9px;
   background: transparent;
-  font-size: .82rem;
-  font-weight: 600;
-  color: var(--muted);
+  font-size: var(--text-base);
+  font-weight: 700;
+  color: var(--ink-muted);
   letter-spacing: .01em;
-  transition: border-color .14s ease, color .14s ease;
+  transition: border-color .14s ease, color .14s ease, background .14s ease;
+}
+.workspace-tabs button::before {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: .42rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink-muted);
+  font: 500 var(--text-xs) "DM Mono", monospace;
+  vertical-align: middle;
+}
+.workspace-tabs button:nth-child(1)::before {
+  content: "01";
+}
+.workspace-tabs button:nth-child(2)::before {
+  content: "02";
+}
+.workspace-tabs button:nth-child(3)::before {
+  content: "03";
+}
+.workspace-tabs button:nth-child(4)::before {
+  content: "04";
+}
+.workspace-tabs button:nth-child(5)::before {
+  content: "••";
+}
+.workspace-tabs button:nth-child(6)::before {
+  content: "••";
 }
 .workspace-tabs button:hover {
-  color: var(--text);
+  color: var(--ink);
+  background: var(--surface-2);
 }
 .workspace-tabs button.on {
-  color: var(--text);
-  border-bottom-color: var(--accent);
+  color: var(--ink);
+  border-color: rgba(0, 22, 137, 0.35);
+  background: var(--brand-wash);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.workspace-tabs button.on::before {
+  color: var(--brand-ink);
+  border-color: rgba(0, 22, 137, 0.45);
+  background: rgba(0, 22, 137, 0.15);
 }
 .workspace-tab-panel {
   display: flex;
@@ -2624,72 +2669,37 @@ button:disabled {
   background: #111419;
 }
 
-/* Light mode keeps the same hierarchy and status language while replacing
-   every major dark surface with a high-contrast daylight equivalent. */
-:root[data-theme="light"] body {
-  background: radial-gradient(circle at 20% 0%, #f4dfc2 0, transparent 32rem), var(--bg);
-}
-:root[data-theme="light"] .btn:hover:not(:disabled) {
-  border-color: #8f8a80;
-  background: #e5e1d8;
-}
-:root[data-theme="light"] .btn-primary,
-:root[data-theme="light"] .btn-primary:hover:not(:disabled) {
-  color: #fffaf2;
-}
-:root[data-theme="light"] .btn-danger {
-  background: #fff0f1;
-  border-color: #e5aeb4;
-}
-:root[data-theme="light"] .field-label,
+/* Light-mode page overrides. Primitive theming now flows entirely from the
+   canonical tokens; only page-specific surfaces keep explicit overrides
+   (Phase 2 retires these as pages are swept). */
 :root[data-theme="light"] .source-picker legend,
 :root[data-theme="light"] .project-tab button {
   color: #414b55;
 }
-:root[data-theme="light"] .input,
-:root[data-theme="light"] .select,
-:root[data-theme="light"] .textarea,
 :root[data-theme="light"] .repository-picker,
 :root[data-theme="light"] .project-source,
 :root[data-theme="light"] .project-tabs {
   background: #fff;
 }
-:root[data-theme="light"] .card,
 :root[data-theme="light"] .project-card,
 :root[data-theme="light"] .project-stats {
   background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 18px 60px rgba(74, 60, 39, 0.08);
+  box-shadow: 0 18px 60px rgba(28, 38, 65, 0.08);
 }
-:root[data-theme="light"] .badge {
-  color: #4d5964;
-  background: #f1efe9;
-}
-:root[data-theme="light"] .badge-success,
 :root[data-theme="light"] .plan-status-converged {
   color: #1f6d40;
   background: #e7f5ec;
   border-color: #9fcdb0;
 }
-:root[data-theme="light"] .badge-warn,
 :root[data-theme="light"] .demo-banner {
   color: #75470f;
   background: #fff4df;
   border-color: #dfbf83;
 }
-:root[data-theme="light"] .badge-danger,
-:root[data-theme="light"] .plan-status-capped,
-:root[data-theme="light"] .alert {
+:root[data-theme="light"] .plan-status-capped {
   color: #982331;
   background: #fff0f1;
   border-color: #e5aeb4;
-}
-:root[data-theme="light"] .badge-info {
-  color: #245f91;
-  background: #eaf4fc;
-  border-color: #a9cce8;
-}
-:root[data-theme="light"] .topbar {
-  background: rgba(245, 243, 237, 0.88);
 }
 :root[data-theme="light"] .settings-nav button:hover,
 :root[data-theme="light"] .settings-nav button.is-active,
@@ -4338,209 +4348,17 @@ button:disabled {
    preserving every interaction while unifying the whole app.
    ============================================================ */
 
-::selection {
-  color: var(--text);
-  background: color-mix(in srgb, var(--accent) 42%, transparent);
-}
+/* (Primitive re-declarations that used to live here — brand, eyebrow,
+   buttons, inputs, cards, badges, alert, topbar — were folded into the
+   canonical definitions at the top of the file.) */
 
-:focus-visible {
-  outline-color: color-mix(in srgb, var(--accent) 78%, white);
-  outline-width: 2px;
-}
-
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: .65rem;
-  font-size: .96rem;
-  font-weight: 750;
-  letter-spacing: -.025em;
-  white-space: nowrap;
-}
-
-.brand-mark {
-  display: flex;
-  align-items: end;
-  justify-content: center;
-  gap: 2px;
-  width: 30px;
-  height: 30px;
-  margin: 0;
-  padding: 7px;
-  border: 1px solid color-mix(in srgb, var(--accent) 62%, var(--line));
-  border-radius: 9px;
-  background: linear-gradient(
-    145deg,
-    color-mix(in srgb, var(--accent) 30%, var(--raised)),
-    var(--raised)
-  );
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.11);
-}
-
-.brand-mark i {
-  display: block;
-  width: 3px;
-  border-radius: 99px;
-  background: var(--accent2);
-}
-
-.brand-mark i:nth-child(1) {
-  height: 8px;
-}
-
-.brand-mark i:nth-child(2) {
-  height: 14px;
-}
-
-.brand-mark i:nth-child(3) {
-  height: 11px;
-}
-
-.eyebrow {
-  color: var(--accent2);
-  font-size: .66rem;
-  font-weight: 750;
-  letter-spacing: .14em;
-}
-
-.btn {
-  min-height: 40px;
-  padding: .55rem 1rem;
-  border-color: var(--line);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--raised) 86%, transparent);
-  box-shadow: none;
-  font-size: .78rem;
-  font-weight: 700;
-}
-
-.btn:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--accent) 48%, var(--line2));
-  background: color-mix(in srgb, var(--accent) 8%, var(--raised));
-  box-shadow: 0 8px 22px rgba(3, 7, 18, 0.16);
-}
-
-.btn-primary {
-  color: #fff;
-  border-color: color-mix(in srgb, var(--accent) 78%, white);
-  background: linear-gradient(135deg, #7665e8, #8d7cf6);
-  box-shadow: 0 10px 28px rgba(111, 91, 224, 0.25);
-}
-
-.btn-primary:hover:not(:disabled) {
-  color: #fff;
-  border-color: #a99cff;
-  background: linear-gradient(135deg, #8372ef, #9a8afb);
-  box-shadow: 0 14px 32px rgba(111, 91, 224, 0.32);
-}
-
-.btn-danger {
-  color: var(--danger);
-  border-color: color-mix(in srgb, var(--danger) 30%, var(--line));
-  background: color-mix(in srgb, var(--danger) 7%, var(--surface));
-}
-
-.btn-ghost {
-  color: var(--muted);
-  background: transparent;
-  border-color: transparent;
-}
-
-.btn-small {
-  min-height: 34px;
-  padding: .38rem .72rem;
-  font-size: .73rem;
-}
-
-.input,
-.select,
-.textarea {
-  min-height: 44px;
-  padding: .72rem .85rem;
-  color: var(--text);
-  border-color: var(--line);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--bg) 68%, var(--surface));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
-}
-
-.input::placeholder,
-.textarea::placeholder {
-  color: color-mix(in srgb, var(--muted) 72%, transparent);
-}
-
-.input:focus,
-.select:focus,
-.textarea:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 13%, transparent);
-}
-
-.field-label {
-  color: color-mix(in srgb, var(--text) 82%, var(--muted));
-}
-
-.card,
 .phase-journey,
 .gantt,
 .debate-list-item,
 .settings-card {
   border-color: var(--line);
   background: color-mix(in srgb, var(--surface) 95%, transparent);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.025), 0 16px 46px rgba(2, 6, 23, 0.1);
-}
-
-.badge {
-  min-height: 23px;
-  padding: .22rem .5rem;
-  border-color: var(--line);
-  background: color-mix(in srgb, var(--raised) 88%, transparent);
-  font-size: .61rem;
-  letter-spacing: .055em;
-}
-
-.badge-success {
-  color: var(--success);
-  border-color: color-mix(in srgb, var(--success) 28%, var(--line));
-  background: color-mix(in srgb, var(--success) 9%, var(--surface));
-}
-
-.badge-warn {
-  color: var(--warning);
-  border-color: color-mix(in srgb, var(--warning) 30%, var(--line));
-  background: color-mix(in srgb, var(--warning) 9%, var(--surface));
-}
-
-.badge-danger {
-  color: var(--danger);
-  border-color: color-mix(in srgb, var(--danger) 30%, var(--line));
-  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
-}
-
-.badge-info {
-  color: var(--info);
-  border-color: color-mix(in srgb, var(--info) 30%, var(--line));
-  background: color-mix(in srgb, var(--info) 8%, var(--surface));
-}
-
-.alert {
-  color: var(--text);
-  border-color: color-mix(in srgb, var(--danger) 34%, var(--line));
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
-}
-
-.alert::before {
-  color: var(--danger);
-}
-
-.topbar,
-.workspace-topbar {
-  height: 72px;
-  padding-inline: clamp(1rem, 3vw, 2.5rem);
-  border-color: color-mix(in srgb, var(--line) 78%, transparent);
-  background: color-mix(in srgb, var(--bg) 80%, transparent);
-  backdrop-filter: blur(22px) saturate(1.35);
+  box-shadow: var(--shadow-sm);
 }
 
 .topbar-main,
@@ -4698,18 +4516,6 @@ button:disabled {
 
 .project-tab.is-active button {
   color: var(--text);
-}
-
-.theme-toggle {
-  right: 1.1rem;
-  bottom: 1.1rem;
-  border-color: var(--line);
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
-  backdrop-filter: blur(16px);
-}
-
-.page {
-  width: min(1280px, calc(100% - clamp(2rem, 6vw, 5rem)));
 }
 
 .project-dashboard {
@@ -5210,12 +5016,6 @@ button:disabled {
     ), transparent;
 }
 
-.workspace-topbar {
-  position: sticky;
-  top: 42px;
-  z-index: 19;
-}
-
 .workspace-page {
   width: min(1360px, calc(100% - clamp(2rem, 6vw, 5rem)));
   padding-top: 1.7rem;
@@ -5259,85 +5059,6 @@ button:disabled {
   margin-top: .2rem;
 }
 
-.workspace-tabs {
-  position: sticky;
-  top: 114px;
-  z-index: 17;
-  gap: .35rem;
-  margin: 0 0 1.35rem;
-  padding: .48rem;
-  border: 1px solid var(--line);
-  border-top: 0;
-  border-radius: 0 0 18px 18px;
-  background: color-mix(in srgb, var(--surface) 90%, transparent);
-  backdrop-filter: blur(20px);
-}
-
-.workspace-tabs button {
-  min-height: 38px;
-  margin: 0;
-  padding: .45rem .82rem;
-  border: 1px solid transparent;
-  border-radius: 9px;
-  color: var(--muted);
-  font-size: .72rem;
-}
-
-.workspace-tabs button::before {
-  display: inline-grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  margin-right: .42rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  color: var(--muted);
-  font: 500 .53rem "DM Mono", monospace;
-  vertical-align: middle;
-}
-
-.workspace-tabs button:nth-child(1)::before {
-  content: "01";
-}
-
-.workspace-tabs button:nth-child(2)::before {
-  content: "02";
-}
-
-.workspace-tabs button:nth-child(3)::before {
-  content: "03";
-}
-
-.workspace-tabs button:nth-child(4)::before {
-  content: "04";
-}
-
-.workspace-tabs button:nth-child(5)::before {
-  content: "↗";
-}
-
-.workspace-tabs button:nth-child(6)::before {
-  content: "••";
-}
-
-.workspace-tabs button:hover {
-  color: var(--text);
-  background: var(--raised);
-}
-
-.workspace-tabs button.on {
-  color: var(--text);
-  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
-  background: color-mix(in srgb, var(--accent) 11%, var(--raised));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-}
-
-.workspace-tabs button.on::before {
-  color: var(--accent2);
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
 .workspace-tab-panel {
   gap: 1rem;
 }
@@ -5355,12 +5076,6 @@ button:disabled {
 
 .side-section summary::after {
   color: var(--muted);
-}
-
-.next-step {
-  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--accent) 7%, var(--raised));
 }
 
 .graph-canvas {
@@ -5443,20 +5158,7 @@ button:disabled {
     ), var(--bg);
 }
 
-.full-page-header {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 72px;
-  padding-inline: clamp(1rem, 3vw, 2.5rem);
-  border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
-  background: color-mix(in srgb, var(--bg) 80%, transparent);
-  backdrop-filter: blur(22px) saturate(1.35);
-}
-
+/* .full-page-header inherits the canonical .topbar pattern (top of file). */
 .full-page-header-title {
   display: flex;
   align-items: center;
@@ -5590,30 +5292,11 @@ button:disabled {
   letter-spacing: -.04em;
 }
 
-:root[data-theme="light"] body {
-  background: radial-gradient(circle at 8% -5%, rgba(104, 87, 217, 0.1), transparent 30rem),
-    radial-gradient(circle at 92% 15%, rgba(40, 126, 197, 0.07), transparent 28rem), var(--bg);
-}
-
-:root[data-theme="light"] .topbar,
-:root[data-theme="light"] .workspace-topbar,
-:root[data-theme="light"] .workspace-tabs,
-:root[data-theme="light"] .project-tabs {
-  background: rgba(248, 250, 253, 0.86);
-}
-
-:root[data-theme="light"] .card,
 :root[data-theme="light"] .focus-panel,
 :root[data-theme="light"] .attention-center,
 :root[data-theme="light"] .proj-row,
 :root[data-theme="light"] .workspace-header {
-  box-shadow: 0 18px 54px rgba(34, 45, 75, 0.07);
-}
-
-:root[data-theme="light"] .input,
-:root[data-theme="light"] .select,
-:root[data-theme="light"] .textarea {
-  background: #f8f9fc;
+  box-shadow: var(--shadow-sm);
 }
 
 :root[data-theme="light"] .login-panel {
@@ -5655,7 +5338,8 @@ button:disabled {
 
 @media (max-width: 760px) {
   .topbar,
-  .workspace-topbar {
+  .workspace-topbar,
+  .full-page-header {
     height: 62px;
     padding-inline: .8rem;
   }
@@ -5939,15 +5623,6 @@ h4 {
     radial-gradient(circle at 94% 8%, rgba(255, 182, 0, 0.045), transparent 24rem), var(--bg);
 }
 
-:focus-visible {
-  outline-color: rgba(255, 182, 0, 0.62);
-}
-
-::selection {
-  color: var(--text);
-  background: rgba(0, 22, 137, 0.3);
-}
-
 .workspace-shell {
   background: radial-gradient(circle at 50% -15%, rgba(0, 22, 137, 0.2), transparent 38rem),
     transparent;
@@ -5986,10 +5661,6 @@ h4 {
   line-height: 1.55;
 }
 
-.eyebrow {
-  font-size: 0.74rem;
-}
-
 .workspace-header {
   padding: 1.55rem 1.7rem;
   background: linear-gradient(100deg, rgba(0, 22, 137, 0.15), transparent 56%),
@@ -5998,90 +5669,6 @@ h4 {
 
 .workspace-header h1 {
   font-size: var(--heading-page-size);
-}
-
-.workspace-tabs {
-  gap: 0.45rem;
-  padding: 0.62rem;
-}
-
-.workspace-tabs button {
-  min-height: 44px;
-  padding: 0.55rem 0.92rem;
-  font-size: 0.88rem;
-  font-weight: 700;
-}
-
-.workspace-tabs button::before {
-  width: 21px;
-  height: 21px;
-  font-size: 0.58rem;
-}
-
-.workspace-tabs button:nth-child(5)::before {
-  content: "••";
-}
-
-.workspace-tabs button.on {
-  border-color: rgba(0, 22, 137, 0.35);
-  background: var(--brand-wash);
-}
-
-.workspace-tabs button.on::before {
-  color: var(--accent2);
-  border-color: rgba(0, 22, 137, 0.45);
-  background: rgba(0, 22, 137, 0.15);
-}
-
-.btn {
-  font-size: 0.88rem;
-}
-
-.btn-small {
-  min-height: 36px;
-  font-size: 0.82rem;
-}
-
-.btn-primary {
-  color: #fff;
-  border-color: color-mix(in srgb, var(--brand-primary) 78%, white);
-  background: linear-gradient(135deg, #001689, #233ba6);
-  box-shadow: 0 10px 28px rgba(0, 22, 137, 0.24);
-}
-
-.btn-primary:hover:not(:disabled) {
-  color: #fff;
-  border-color: #5367c0;
-  background: linear-gradient(135deg, #0b238f, #3049b2);
-  box-shadow: 0 14px 32px rgba(0, 22, 137, 0.3);
-}
-
-.field-label {
-  font-size: 0.86rem;
-}
-
-.field-help {
-  font-size: 0.8rem;
-}
-
-.input,
-.select,
-.textarea {
-  font-size: 0.94rem;
-}
-
-.badge {
-  min-height: 26px;
-  font-size: 0.68rem;
-}
-
-.brand-mark {
-  border-color: rgba(0, 22, 137, 0.55);
-  background: linear-gradient(145deg, rgba(0, 22, 137, 0.5), var(--raised));
-}
-
-.brand-mark i:nth-child(2) {
-  background: var(--gold-accent);
 }
 
 .project-tab button {
