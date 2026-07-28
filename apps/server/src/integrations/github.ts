@@ -1173,6 +1173,12 @@ export class GitHubIntegrationService {
     });
   }
 
+  async removeAuthorization(userId: string): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      await tx.query("DELETE FROM github_user_authorizations WHERE user_id = $1", [userId]);
+    });
+  }
+
   async reconnect(connectionId: string): Promise<void> {
     await this.transactions.transaction(async (tx) => {
       const result = await tx.query(

@@ -7,7 +7,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { App } from "./App";
-import { getToken, setToken } from "./auth";
+import { consumeGitHubCallback, getToken, setToken } from "./auth";
 import { MockFetch } from "./test/mockFetch";
 
 describe("App — pre-auth screen selection", () => {
@@ -49,6 +49,20 @@ describe("App — pre-auth screen selection", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: /accept your invite/i })).toBeInTheDocument();
     expect(mock.calls.find((c) => c.url.includes("/api/auth/status"))).toBeUndefined();
+  });
+});
+
+describe("GitHub callback URL cleanup", () => {
+  afterEach(() => {
+    window.history.replaceState({}, "", "/");
+  });
+
+  test("consumes the callback once while preserving the Settings route", () => {
+    window.history.replaceState({}, "", "/?settings=connections&github=failed");
+
+    expect(consumeGitHubCallback()).toBe("failed");
+    expect(window.location.search).toBe("?settings=connections");
+    expect(consumeGitHubCallback()).toBeNull();
   });
 });
 

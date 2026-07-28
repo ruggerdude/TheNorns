@@ -361,6 +361,24 @@ describe.sequential("workspace GitHub integration", () => {
       connections: [{ id: "github:42", status: "connected" }],
     });
   });
+
+  it("deletes a broken saved user authorization without removing workspace installations", async () => {
+    const privilege = await pg.query<{ can_delete: boolean }>(
+      "SELECT has_table_privilege('norns_app','github_user_authorizations','DELETE') AS can_delete",
+    );
+    expect(privilege.rows[0]?.can_delete).toBe(true);
+
+    await service.removeAuthorization("norns-user-1");
+    await expect(service.status("norns-user-1")).resolves.toMatchObject({
+      refresh_error: null,
+      user_authorization: { connected: false, login: null },
+      connections: [{ id: "github:42", status: "connected" }],
+    });
+    const stored = await pg.query(
+      "SELECT user_id FROM github_user_authorizations WHERE user_id = 'norns-user-1'",
+    );
+    expect(stored.rows).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------

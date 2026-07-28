@@ -194,6 +194,65 @@ describe("workspace connections settings", () => {
     expect(call?.headers["content-type"]).toBeUndefined();
   });
 
+  it("lets a user delete a broken saved identity when no installations were discovered", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let identityDeleted = false;
+    mock = accountMock();
+    mock.get("/api/auth/sessions", { body: { sessions: [] } });
+    mock.get("/api/integrations/github/status", () => ({
+      body: identityDeleted
+        ? {
+            configured: true,
+            setup_available: false,
+            configuration_source: "manifest",
+            refresh_error: null,
+            user_authorization: { connected: false, login: null },
+            connections: [],
+          }
+        : {
+            configured: true,
+            setup_available: false,
+            configuration_source: "manifest",
+            refresh_error: "Bad credentials.",
+            user_authorization: { connected: true, login: "octocat" },
+            connections: [],
+          },
+    }));
+    mock.del("/api/integrations/github/authorization", () => {
+      identityDeleted = true;
+      return { status: 204 };
+    });
+    mock.install();
+
+    render(
+      <Account
+        user={admin}
+        initialTab="connections"
+        githubCallback="failed"
+        onClose={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText(/could not refresh the saved connections/i)).toHaveTextContent(
+      "Bad credentials.",
+    );
+    expect(
+      screen.queryByText(/could not save the GitHub App configuration/i),
+    ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Delete GitHub identity" }));
+
+    expect(confirm).toHaveBeenCalled();
+    const call = mock.calls.find(
+      (entry) =>
+        entry.method === "DELETE" && entry.url === "/api/integrations/github/authorization",
+    );
+    expect(call?.body).toBeUndefined();
+    expect(call?.headers["content-type"]).toBeUndefined();
+    expect(await screen.findByText("Authorization required")).toBeInTheDocument();
+    expect(screen.queryByText(/Bad credentials/i)).not.toBeInTheDocument();
+  });
+
   it("surfaces manifest callback failures and opens the GitHub setup details", async () => {
     mock = accountMock();
     mock.get("/api/auth/sessions", { body: { sessions: [] } });

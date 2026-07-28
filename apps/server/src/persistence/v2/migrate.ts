@@ -308,6 +308,12 @@ export const GITHUB_CONNECTION_REMOVAL_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME = "0046_github_authorization_removal";
+export const GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_URL = new URL(
+  "../../../drizzle/0046_github_authorization_removal.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -518,6 +524,10 @@ export async function loadOnboardingIntentsUpdateGrantMigrationSql(): Promise<st
 
 export async function loadGitHubConnectionRemovalMigrationSql(): Promise<string> {
   return readFile(GITHUB_CONNECTION_REMOVAL_MIGRATION_URL, "utf8");
+}
+
+export async function loadGitHubAuthorizationRemovalMigrationSql(): Promise<string> {
+  return readFile(GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -811,6 +821,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: GITHUB_CONNECTION_REMOVAL_MIGRATION_NAME,
       sql: await loadGitHubConnectionRemovalMigrationSql(),
+    },
+    {
+      name: GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME,
+      sql: await loadGitHubAuthorizationRemovalMigrationSql(),
     },
   ];
 }

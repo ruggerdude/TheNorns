@@ -130,6 +130,9 @@ export function Account({
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [github, setGitHub] = useState<GitHubIntegrationStatus | null>(null);
+  const [callbackError, setCallbackError] = useState<string | null>(() =>
+    githubCallbackError(githubCallback),
+  );
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [connectionBusy, setConnectionBusy] = useState<string | null>(null);
   const [openConnection, setOpenConnection] = useState<ConnectionPanel | null>(
@@ -163,7 +166,10 @@ export function Account({
         "/api/integrations/github/status",
       );
       setGitHub(status);
-      if (status.refresh_error) setOpenConnection("github");
+      if (status.refresh_error) {
+        setCallbackError(null);
+        setOpenConnection("github");
+      }
     } catch (error) {
       if (error instanceof UnauthorizedError) onUnauthorized();
       else setConnectionError(error instanceof Error ? error.message : String(error));
@@ -256,6 +262,27 @@ export function Account({
         `/api/integrations/github/connections/${encodeURIComponent(connection.id)}`,
         { method: "DELETE" },
       );
+      await loadGitHub();
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setConnectionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setConnectionBusy(null);
+    }
+  };
+
+  const deleteGitHubIdentity = async (): Promise<void> => {
+    const confirmed = window.confirm(
+      "Delete your saved GitHub identity? Norns will forget the stored authorization. Workspace installations remain available to other authorized users.",
+    );
+    if (!confirmed) return;
+    setConnectionBusy("github-identity-delete");
+    setConnectionError(null);
+    setCallbackError(null);
+    try {
+      await integrationRequest<void>("/api/integrations/github/authorization", {
+        method: "DELETE",
+      });
       await loadGitHub();
     } catch (error) {
       if (error instanceof UnauthorizedError) onUnauthorized();
@@ -423,15 +450,12 @@ export function Account({
                   Authorize providers once, then select their resources while creating projects.
                 </p>
               </div>
-              {githubCallbackError(githubCallback) ? (
-                <Alert>{githubCallbackError(githubCallback)}</Alert>
-              ) : null}
+              {callbackError ? <Alert>{callbackError}</Alert> : null}
               {connectionError ? <Alert>{connectionError}</Alert> : null}
               {github?.refresh_error ? (
                 <Alert>
                   GitHub could not refresh the saved connections: {github.refresh_error} Reconnect
-                  the identity
-                  {github.connections.length ? " or delete a connection below." : "."}
+                  the identity or delete the saved identity below.
                 </Alert>
               ) : null}
               {github === null ? (
@@ -581,6 +605,16 @@ export function Account({
                                 ? "Reconnect identity"
                                 : "Connect GitHub"}
                             </Button>
+                            {github.user_authorization.connected ? (
+                              <Button
+                                variant="danger"
+                                className="btn-small"
+                                disabled={connectionBusy !== null}
+                                onClick={() => void deleteGitHubIdentity()}
+                              >
+                                Delete GitHub identity
+                              </Button>
+                            ) : null}
                             {github.user_authorization.connected ? (
                               <Button
                                 className="btn-small"

@@ -3213,6 +3213,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       .send({ installation_url: github.installationUrl(user.id) });
   });
 
+  app.delete("/api/integrations/github/authorization", async (req, reply) => {
+    const user = await resolveUser(req);
+    if (!user) return reply.code(401).send({ error: "unauthorized" });
+    if (!github) {
+      return reply
+        .code(503)
+        .send({ error: "github_not_configured", message: "GitHub App is not configured" });
+    }
+    await github.removeAuthorization(user.id);
+    stores.audit(user.email, "integration.github.authorization_deleted", user.id, now());
+    reply.code(204).send();
+  });
+
   const GitHubAuthorizationCallback = z.object({
     code: z.string().min(1).optional(),
     state: z.string().min(1).optional(),

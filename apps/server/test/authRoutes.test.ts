@@ -225,6 +225,36 @@ describe("GitHub App manifest setup routes", () => {
   });
 });
 
+describe("DELETE /api/integrations/github/authorization", () => {
+  it("lets an authenticated user remove only their saved GitHub identity", async () => {
+    const removeAuthorization = vi.fn(async () => undefined);
+    const github = { removeAuthorization } as unknown as GitHubIntegrationService;
+    const s = await start({ deployToken: "deploy-secret", github });
+
+    expect((await inject(s, "DELETE", "/api/integrations/github/authorization")).statusCode).toBe(
+      401,
+    );
+
+    const bootstrap = await inject(s, "POST", "/api/auth/bootstrap", {
+      deploy_token: "deploy-secret",
+      email: "root@x.com",
+      password: "password123",
+      name: "Root",
+    });
+    const token = (bootstrap.json() as { token: string }).token;
+    const response = await inject(
+      s,
+      "DELETE",
+      "/api/integrations/github/authorization",
+      undefined,
+      token,
+    );
+
+    expect(response.statusCode).toBe(204);
+    expect(removeAuthorization).toHaveBeenCalledWith(expect.any(String));
+  });
+});
+
 describe("legacy control-page authentication", () => {
   it("redirects /control to account login and serves no manual token prompt", async () => {
     const s = await start();

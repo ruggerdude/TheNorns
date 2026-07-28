@@ -85,6 +85,19 @@ export function consumeRecoveryToken(): string | null {
   return recovery;
 }
 
+/** GitHub redirects back with a one-time result code. Retain it for the
+ * current Settings render, then remove it from the address bar so a refresh
+ * cannot repeat a stale callback failure. */
+export function consumeGitHubCallback(): string | null {
+  const params = new URLSearchParams(window.location.search);
+  const callback = params.get("github");
+  if (!callback) return null;
+  params.delete("github");
+  const query = params.toString();
+  window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
+  return callback;
+}
+
 const ERROR_MESSAGES: Record<string, string> = {
   invalid_credentials: "Incorrect email or password.",
   already_bootstrapped: "Setup has already been completed — sign in instead.",

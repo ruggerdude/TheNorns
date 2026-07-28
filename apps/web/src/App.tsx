@@ -43,6 +43,7 @@ import {
   UnauthorizedError,
   authHeaders,
   clearToken,
+  consumeGitHubCallback,
   consumeInviteToken,
   consumeRecoveryToken,
   fetchAuthStatus,
@@ -2829,10 +2830,9 @@ export function App(): React.ReactElement {
     typeof window === "undefined"
       ? null
       : new URLSearchParams(window.location.search).get("settings");
-  const githubCallback =
-    typeof window === "undefined"
-      ? null
-      : new URLSearchParams(window.location.search).get("github");
+  const [githubCallback] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : consumeGitHubCallback(),
+  );
   const [showAccount, setShowAccount] = useState(requestedSettingsTab !== null);
   const [accountTab, setAccountTab] = useState<SettingsTab>(
     requestedSettingsTab === "connections" ? "connections" : "profile",
