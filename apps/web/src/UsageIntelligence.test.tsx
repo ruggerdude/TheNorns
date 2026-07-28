@@ -161,7 +161,11 @@ describe("UsageIntelligence", () => {
       expect(url).toContain("status=failed");
     }
     expect(refreshUrls.some((url) => url.includes("interval=month"))).toBe(true);
-    expect(await screen.findByRole("heading", { name: "Phase usage" })).toBeInTheDocument();
+    // DESIGN R2: the per-scope H1 ("Phase usage") was removed; the phase
+    // filter still swaps the breakdown heading to the phase-focused wording.
+    expect(
+      await screen.findByRole("heading", { name: "Phase users, models, and providers" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Monthly cost trend" })).toBeInTheDocument();
     expect(screen.getByText(/2 completed/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Export CSV" }).getAttribute("href")).toContain(

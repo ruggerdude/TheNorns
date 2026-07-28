@@ -97,6 +97,9 @@ interface RuntimeSchemaPosture {
   usage_budget_policies: string | null;
   ai_usage_calibration_observations: string | null;
   shadow_read_recorded_order: boolean;
+  onboarding_submissions: string | null;
+  onboarding_repository_intents: string | null;
+  onboarding_candidate_columns: boolean;
   conversation_domain_complete: boolean;
   conversation_stream_lifecycle: string | null;
   conversation_plan_workflow: string | null;
@@ -153,6 +156,24 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                  AND table_name='shadow_read_comparisons'
                  AND column_name='recorded_order'
             ) AS shadow_read_recorded_order,
+            to_regclass('public.project_onboarding_submissions')::text
+              AS onboarding_submissions,
+            to_regclass('public.project_onboarding_repository_intents')::text
+              AS onboarding_repository_intents,
+            (
+              SELECT count(*) = 6
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='repository_binding_candidates'
+                 AND column_name IN (
+                   'role',
+                   'installation_ready',
+                   'workflow_installed',
+                   'service_connection_id',
+                   'push_credential_strategy',
+                   'remote_provisioning'
+                 )
+            ) AS onboarding_candidate_columns,
             (
               SELECT count(*) = 9
                 FROM unnest(ARRAY[
@@ -196,6 +217,11 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.usage_budget_policies ? ["usage_budget_policies"] : []),
     ...(!posture?.ai_usage_calibration_observations ? ["ai_usage_calibration_observations"] : []),
     ...(!posture?.shadow_read_recorded_order ? ["shadow_read_comparisons.recorded_order"] : []),
+    ...(!posture?.onboarding_submissions ? ["project_onboarding_submissions"] : []),
+    ...(!posture?.onboarding_repository_intents ? ["project_onboarding_repository_intents"] : []),
+    ...(!posture?.onboarding_candidate_columns
+      ? ["repository_binding_candidates onboarding columns"]
+      : []),
     ...(!posture?.conversation_domain_complete ? ["conversation domain tables"] : []),
     ...(!posture?.conversation_stream_lifecycle ? ["conversation_stream_lifecycle_v1"] : []),
     ...(!posture?.conversation_plan_workflow ? ["conversation_plan_workflow_v1"] : []),

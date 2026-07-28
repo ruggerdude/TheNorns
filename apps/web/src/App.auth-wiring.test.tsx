@@ -189,7 +189,7 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
 
     await user.click(await screen.findByRole("button", { name: "Usage" }));
 
-    expect(await screen.findByRole("heading", { name: "User usage" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Usage", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "My usage" })).toHaveAttribute(
       "aria-current",
       "page",

@@ -71,14 +71,39 @@ canonical name; when every reference is gone the alias block gets deleted.
   actions={<Button …/>}          // optional right-aligned slot
 />
 
-<Brand />                 // topbar lockup: 26px gradient tile + "The Norns"
-<BrandMark size={56} />   // raw converging-threads SVG mark, currentColor
-                          // strands + gold thread (login-scale usage)
+<Brand />                  // topbar lockup: 64×26 braid + uncial "The Norns" (20px)
+<Brand variant="hero" />   // login-scale: 40px wordmark above a 300×34 braid
+<BrandMark size={52} />    // legacy size API — scales the topbar braid recipe
+
+<BraidMark                 // apps/web/src/BraidMark.tsx — the mark itself
+  width={64} height={26}   // svg box
+  lead={14} period={34}    // straight lead-in length; sinusoid wavelength
+  strokeWidth={4.5}
+  amplitude={…}            // optional; defaults to filling the height
+  strand1="var(--brand-ink)"  // indigo
+  strand2="var(--gold)"       // gold
+  strand3="var(--ink-muted)"  // silver
+/>
 ```
 
-CSS: `.page-header`, `.page-header-lede`, `.page-header-actions`,
-`.brand`, `.brand-mark`. The favicon (`apps/web/public/favicon.svg`) is the
-same mark on the full 48px indigo tile — keep them in sync.
+**Brand (Round 2)**: the mark is a 3-strand braid with true over/under
+crossings — the Norns weaving fate — ported from the owner's design source
+(`artifacts/redesign/braid-logo-generator.html`) into `BraidMark`, a pure
+component (strands split at each crossing; under-segments render first,
+over-segments after). The wordmark is uncial: "Uncial Antiqua" (Google Fonts,
+`font-display: swap`, weight 400 only) via `.brand-word`
+(letter-spacing .04em). Strand colors default to theme vars so the lockup
+adapts to light/dark.
+
+**Gold accent rules** (use gold sparingly, and only these): the braid's gold
+strand; a short 40px × 2px gold underline on `.page-header h1` (::after); the
+`.topbar-location` left marker; the existing focus outline. Do not add gold
+to per-page rules.
+
+CSS: `.page-header`, `.page-header-lede`, `.page-header-actions`, `.brand`,
+`.brand-word`, `.brand-hero`. The favicon (`apps/web/public/favicon.svg`) is
+a static braid segment (white/gold/silver strands, same algorithm) on the
+48px indigo-gradient tile — keep it in sync with `BraidMark`.
 
 ## Phase 2 must clean up per page
 

@@ -544,6 +544,15 @@ export class ProjectOnboardingService {
   ): Promise<{ retry_of_this_submission: boolean }> {
     const idempotencyId = submissionId(command.actor, command.idempotency_key);
     return this.transactions.transaction(async (tx) => {
+      // NOTE: `FOR UPDATE` requires the UPDATE table privilege, which the
+      // restricted production role holds only via the dedicated grant
+      // migration (0044_onboarding_intents_update_grant.sql). The lock is an
+      // advisory serialization guard around the ON CONFLICT DO NOTHING insert
+      // below: rows here are never updated, and FOR UPDATE on an absent row
+      // locks nothing, so concurrent first-time submissions are already
+      // resolved by the insert's conflict clause, not by this lock. It is
+      // likely droppable, but that is a deliberate follow-up decision — the
+      // locking semantics are intentionally unchanged in this pass.
       const existing = await tx.query<{ connection_id: string; repository_name: string }>(
         `SELECT connection_id, repository_name
          FROM project_onboarding_repository_intents

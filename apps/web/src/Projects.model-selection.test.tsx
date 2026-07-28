@@ -108,12 +108,11 @@ describe("project manager model selection", () => {
 
   async function submit(name: string) {
     await userEvent.type(screen.getByTestId("project-name"), name);
-    await userEvent.type(screen.getByTestId("project-description"), "Plan the delivery");
     await userEvent.type(
       await screen.findByTestId("github-new-repository-name"),
       "plan-the-delivery",
     );
-    await userEvent.click(screen.getByRole("button", { name: /create & start planning/i }));
+    await userEvent.click(screen.getByRole("button", { name: /create project/i }));
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     return mock.calls.find(
       (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
@@ -154,18 +153,12 @@ describe("project manager model selection", () => {
         pm_model: "gpt-5.6-sol",
       },
     });
+    // DESIGN R2: the wizard no longer starts a planning run — planning (and
+    // the PM participant with its reasoning effort) begins in the
+    // conversation after creation.
     expect(
-      mock.calls.find(
-        (call) =>
-          call.method === "POST" && call.url === "/api/v2/projects/proj_created/planning-runs",
-      )?.body,
-    ).toMatchObject({
-      pm: {
-        provider: "openai",
-        model: "gpt-5.6-sol",
-        reasoning_effort: "xhigh",
-      },
-    });
+      mock.calls.some((call) => call.method === "POST" && call.url.endsWith("/planning-runs")),
+    ).toBe(false);
   });
 
   it("shows the selected PM model on project cards", async () => {

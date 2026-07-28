@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
-import { Alert, Button, Field, Input, PageHeader, Select, Spinner } from "./ui";
+import { Alert, Button, Field, Input, Select, Spinner } from "./ui";
 import "./UsageIntelligence.css";
 
 export type UsageScope =
@@ -154,11 +154,6 @@ function formatCost(value: number | null, knownValue = 0): string {
   return value === null ? `${formatUsd(knownValue)} known` : formatUsd(value);
 }
 
-function scopeLabel(scope: UsageScope): string {
-  if (scope.kind === "global") return "All usage";
-  return `${scope.kind[0]?.toUpperCase()}${scope.kind.slice(1)} usage`;
-}
-
 function intervalLabel(interval: UsageFilters["interval"]): string {
   return interval === "day" ? "Daily" : interval === "week" ? "Weekly" : "Monthly";
 }
@@ -310,17 +305,15 @@ export function UsageIntelligence({
   const phaseFocused = scope.kind === "phase" || filters.phase.trim().length > 0;
 
   return (
-    <main className="usage-page page-container" data-testid="usage-intelligence">
-      <PageHeader
-        eyebrow="Usage intelligence"
-        title={phaseFocused ? "Phase usage" : scopeLabel(scope)}
-        lede="Requests, tokens, cost, performance, and failures from the usage ledger."
-        actions={
-          <a className="btn btn-default" href={exportHref} download>
-            Export CSV
-          </a>
-        }
-      />
+    <section className="usage-page" data-testid="usage-intelligence">
+      {/* DESIGN R2: the per-scope H1 ("User usage", "Project usage", …) was
+          removed — the .page-subnav one level up communicates where you
+          are. Export CSV keeps its own small toolbar row. */}
+      <div className="usage-toolbar">
+        <a className="btn btn-default" href={exportHref} download>
+          Export CSV
+        </a>
+      </div>
 
       <form
         className="usage-filters card"
@@ -588,6 +581,6 @@ export function UsageIntelligence({
           </table>
         </div>
       </section>
-    </main>
+    </section>
   );
 }

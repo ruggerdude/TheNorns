@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "node apps/server/dist/main.js",
+    "startCommand": "node apps/server/dist/applyMigrations.js && node apps/server/dist/main.js",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE"

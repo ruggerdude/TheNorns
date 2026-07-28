@@ -1,53 +1,7 @@
-.usage-hub {
-  min-height: 100vh;
-  background: var(--bg);
-}
-
-.usage-hub-header {
-  position: sticky;
-  z-index: 10;
-  top: 0;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 20px;
-  padding: 12px 24px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface);
-}
-
-.usage-hub-scopes {
-  display: flex;
-  justify-content: center;
-  gap: 4px;
-  overflow-x: auto;
-}
-
-.usage-hub-scopes button {
-  padding: 7px 12px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  color: var(--ink-muted);
-  background: transparent;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.usage-hub-scopes button:hover,
-.usage-hub-scopes button.on {
-  color: var(--ink);
-  background: var(--surface-2);
-}
-
-@media (max-width: 680px) {
-  .usage-hub-header {
-    grid-template-columns: minmax(0, 1fr) auto;
-    padding: 10px 16px;
-  }
-
-  .usage-hub-scopes {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    justify-content: flex-start;
-  }
+/* DESIGN R2: the hub's own header/scope-switcher rules were removed —
+   the app topbar and the shared .page-subnav (styles.css) now cover that.
+   Only page-local body spacing lives here. */
+.usage-hub-body {
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-7);
 }

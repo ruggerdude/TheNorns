@@ -195,6 +195,16 @@
   progress.log entry for why.
 
 ## In Progress
+- [x] DES-R2-ONBOARD — ✅ **Onboarding 500 fix + "Approve plan" label** (opened and closed in the
+  same push): production `POST /api/v2/projects/onboarding` 500 traced to 0018 granting only
+  SELECT, INSERT on `project_onboarding_repository_intents` while the service locks rows with
+  `SELECT ... FOR UPDATE` (needs UPDATE) under the restricted `norns_app` role. New UNASSIGNED
+  migration `NNNN_onboarding_intents_update_grant.sql` (audit of 0016/0018 found no other gaps);
+  boot guard `assertCurrentRuntimeSchema` now asserts the onboarding relations + candidate
+  columns so a half-migrated deploy fails loudly at boot; onboarding catch-all logs pg
+  code/detail/table and the silent 409/503 refusal branches now log reason + status; web
+  `send_plan_to_qc` action relabeled "Approve plan" ("Approve and begin" unchanged). Pglite
+  test proves the grant with a real `norns_app` role.
 - [ ] NORN-041 — 🔄 **UI Integrity Remediation Program** (multi-phase, human-directed): resolving 7 accepted UI findings (UI-1 stale approval, UI-2 QC-edit loss on failed commit, UI-3 hidden convergence/cost/findings, UI-4 empty-acceptance-set bypass, UI-5 accordion reset, UI-6 wrong-project dashboard, UI-7 cross-node override drafts) without regressing the plan→graph→allocation→approval product contract. Phase 0 discovery complete: found and merged an out-of-band OpenAI Codex redesign (`codex/ui-design-pass` branch, commit `63d4bfc`, fast-forwarded into `main` 2026-07-14 with human approval) — dark theme now consistent app-wide, responsive layout, risk-colored graph nodes, node-delete confirmations, but fixes 0 of 4 Critical findings and introduces one new bug (UI-4's empty-module check is vacuously-true on an empty array). Live-reproduced all 7 findings in-browser against real endpoints; confirmed UI-5 already resolved by the redesign, UI-6 partially mitigated (disclosure banner only, still fetches/renders the wrong project's data). Root cause for UI-1: `approveAllocation()` computes a hash and returns it but persists nothing server-side; `graph.version` never bumps on allocate/override so it can't alone serve as the staleness fingerprint. Three ADRs decided (human-approved): approval binds to graph version **+ a new separate allocation fingerprint** (not reusing graph.version); non-converged plans **block with no override** (no unaudited exception path); dashboard gets **immediate containment only** (hide the entry for real projects) with durable per-project dashboard deferred as its own follow-on. **Phase 2 complete and merged to main** (2026-07-14): Agent D (sonnet, worktree) added Vitest+RTL+jsdom+Playwright to apps/web (was zero frontend test tooling), a mock-fetch helper, contracts-validated fixtures, and 9 baseline regression tests across all 7 findings — independently re-verified by the program manager (not just trusted): 7 fail for the documented reason, 2 pass (UI-5 already correct; UI-6 intentionally documents today's bug rather than a not-yet-decided fix, will need rewriting not flipping). Merged `worktree-agent-a516b9e1ef7880e3d` → main (`b77d63a`), pushed. **Phase 3/4/5A + Phase 6 (Integration) complete** (2026-07-15): Agent A (opus, App.tsx + server approval persistence), Agent B (sonnet, PlanReview.tsx presentation + UI-4 fix), Agent C (opus, dashboard route separation) all completed in parallel worktrees, each independently re-verified by the program manager by reading the actual diffs and re-running lint/typecheck/tests myself — not trusting summaries. All 7 findings resolved: UI-1 (server-authoritative approval bound to graph.version + a new separate `allocationFingerprint`, persisted through Tier-2), UI-2 (QC edits survive failed commits, with retry), UI-3 (full convergence/rounds/cost/outstanding-findings surfaced, ADR-2's no-override enforced structurally — the load path doesn't render at all when capped), UI-4 (empty-acceptance-set modules correctly block commit), UI-5 (confirmed still correct), UI-6 (Dashboard entry removed entirely for real projects; demo data isolated to `/api/demo/dashboard`, containment proven structural not just naming), UI-7 (override drafts keyed per node, explicit Save/Cancel). Integration required real conflict resolution: Agent A and Agent B each independently touched `PlanReview.tsx` (Agent A's was a minimal contract-only stub without the actual UI-4 fix; Agent B's was the complete, correct implementation) — resolved by taking Agent B's version wholesale. Agent A and Agent C's overlapping `server.ts` edits auto-merged cleanly (no conflict) since both stayed localized to their sections as instructed. Full monorepo CI green (contracts 31, adapters 10+2skipped, server 109+1skipped, web 12 — all 7 findings' regression tests passing). Live browser-verified post-integration: UI-1's staleness banner ("⚠ Approval out of date...") and UI-6's absent Dashboard entry both confirmed in a real running instance, not just component tests. Merged to main (`270a417`). **Phase 7 (Adversarial Review) attempted and killed** (2026-07-15): Agent E (Explore, no edit tools by design) ran ~12 hours and stalled — its last checkpoint matched one from minutes into the run, indicating a loop rather than progress. Killed via `TaskStop` rather than left running indefinitely. Only one finding survived independent verification: UI-7 isolation reconfirmed via direct DOM inspection (a draft on node A did not leak to node B and back). Treated as genuinely incomplete, not padded with unverified claims. **Not yet done**: a proper Phase 7 re-run (smaller scope per agent, or a different reviewer pattern) and Phase 9 (Closure — resolution matrix, human acceptance)
 
 - [x] NORN-034 — **Railway Tier-1 deploy scaffold**: single-service Docker build (server serves built web + API), host/token prod-hardening, /health, railway.json, ADR-002 amended to Railway, [DEPLOY.md](DEPLOY.md) with the 3-tier path. Verified locally in the prod model
@@ -1099,3 +1109,44 @@ decision and is deliberately untouched.
   ProjectOperationsDashboard / KnowledgeStatusPanel CSS, "AI" copy
   neutralized in PhaseTab, header/token normalization across operations
   dashboard, run log, debates, members.
+
+## DESIGN R2 — feedback punch list (dispatched 2026-07-27)
+
+- [x] ✅ R2-A — Portfolio dashboard punch list (headers, removals, tiles,
+  centered stats, apollo card, side box, New Project button top-center).
+- [x] ✅ R2-B — New Project wizard restructure (name-first, renames, Options,
+  zero review rounds, standard width).
+- [x] ✅ R2-C — Usage + Settings: persistent main header with sub-tabs below,
+  renames, lede removals.
+- [x] ✅ R2-D — Braided logo lockup (user-supplied design), icon-only theme
+  toggle, gold accent pass.
+- [x] ✅ R2-E — Diagnose "Project setup couldn't finish" + verify create →
+  coordinator chat → Approve plan → Reviewer flow.
+
+## Design overhaul — Round 2 (2026-07-28)
+
+- [x] ✅ DES-R2 — portfolio + wizard punch list (this worktree,
+  `apps/web/src/Projects.tsx` + its tests only). Portfolio: "Portfolio" H1
+  page title with gold rule; eyebrows/ledes collapsed to plain section h2s
+  ("Quick access", "All projects"; attention panel retitled "Status";
+  "Portfolio status" heading removed); quiet-state subtext removed; stat
+  tiles centered; planned/drafts/open/runner text row became a second tile
+  grid; project card names at --text-lg/700 with filler descriptions
+  suppressed; side panel restructured into badge / progress tile / 3-tile
+  fact grid / actions; "+ New project" moved to top-center; subtle gold
+  accents (title rule, ready dot, waiting-decisions count). Wizard:
+  "Project setup" heading removed, wide container; name-first form
+  (single-line "Project name" replaces the objective textarea; no wizard
+  planning kickoff — planning starts in the conversation; description empty
+  at creation); "Project type" / "Working location" / "Project location"
+  renames; "Options" (name-override + reference-images removed); review
+  rounds allow 0 with "Plan review is off" copy. Shared-CSS lifts logged in
+  P2-SHARED-REQUESTS.md ("R2 portfolio/wizard").
+- [ ] 🟡 DES-R2-FOLLOWUP — wizard "Plan review rounds" (incl. the new 0
+  value) is not persisted anywhere since the wizard no longer starts a
+  planning run; conversation planning (PhaseTab) uses its own reviewRounds
+  default. Needs a per-project planning-rounds preference (server route +
+  read in PhaseTab) for the wizard setting to be honest end-to-end.
+- [ ] 🟡 DES-R2-FLAKY — two pre-existing e2e failures reproduce on base
+  de367e5 (unrelated to R2): frontdoor "centered responsive shell" work-tab
+  background assertion, and phase6 mockup approval (intermittent).
