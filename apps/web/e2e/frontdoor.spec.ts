@@ -328,36 +328,36 @@ test("Local front door uses the helper selection and opens a nonblank workspace"
   await expectWorkspaceNavigation(page);
 });
 
-test("New work can use an approved local Git repository and start planning", async ({ page }) => {
+// DESIGN R2: the wizard is name-first and never starts a planning run —
+// planning begins in the conversation after creation, so this journey ends at
+// the opened workspace.
+test("New work can use an approved local Git repository and open the workspace", async ({
+  page,
+}) => {
   const observed = await prepare(page, "local");
   await page.goto("/");
   await page.getByRole("button", { name: /new project/i }).click();
+  await page.getByTestId("project-name").fill("Local release readiness dashboard");
   await page.getByRole("button", { name: /^approved local git repository/i }).click();
   await expect(page.getByTestId("setup-confirmation")).toContainText(
     "will not create a folder or initialize Git",
   );
   await page.getByRole("button", { name: /local-front-door/i }).click();
-  await page.getByTestId("project-description").fill("Build a local release readiness dashboard");
   await expect(page.getByTestId("derived-project-summary")).toContainText(
     "New Norns project in local-front-door",
   );
-  await page.getByRole("button", { name: /create & start planning/i }).click();
+  await page.getByRole("button", { name: /create project/i }).click();
 
-  await expect(page.getByTestId("phase-decision-panel")).toBeVisible();
+  await expectWorkspaceNavigation(page);
   expect(observed.onboardingRequests).toEqual([]);
   expect(observed.localProjectRequests).toEqual([
     expect.objectContaining({
       name: "Local release readiness dashboard",
-      description: "Build a local release readiness dashboard",
+      description: "",
       selection_token: "selection:e2e",
     }),
   ]);
-  expect(observed.planningRequests).toEqual([
-    expect.objectContaining({
-      objective: "Build a local release readiness dashboard",
-      attachment_ids: [],
-    }),
-  ]);
+  expect(observed.planningRequests).toEqual([]);
 });
 
 test("Directed adoption reaches one approval and starts the first coding task", async ({
@@ -380,46 +380,47 @@ test("Directed adoption reaches one approval and starts the first coding task", 
   expect(observed.planningDecisions).toEqual([expect.objectContaining({ decision: "approve" })]);
 });
 
-test("New project goes from one brief to the first coding task", async ({ page }) => {
+// DESIGN R2: the wizard collects only the project name and creates the
+// project — planning (and the approval that used to follow in this spec)
+// now happens in the conversation workspace after creation, so this journey
+// is create-with-name → land in the workspace. The directed-adoption test
+// above still covers the plan-approval → first-coding-task leg.
+test("New project creates from a name and lands in the workspace", async ({ page }) => {
   const observed = await prepare(page, "new");
   await page.goto("/");
   await page.getByRole("button", { name: /new project/i }).click();
 
-  await expect(page.getByRole("heading", { name: "Project setup", level: 1 })).toBeVisible();
-  // Design overhaul 2026-07: the wizard uses the canonical sticky topbar
-  // (brand + "New project" location) and the narrow focused container —
-  // the bespoke .project-setup-header and full-width layout are gone.
+  // DESIGN R2: no in-page "Project setup" heading — the topbar location
+  // "New project" is the title — and the standard wide container replaces
+  // the narrow one.
+  await expect(page.getByRole("heading", { name: "Project setup" })).toHaveCount(0);
   await expect(page.locator(".full-page-header")).toBeVisible();
   await expect(page.locator(".full-page-header")).toContainText("New project");
   await expect(page.getByText("Guided setup")).toHaveCount(0);
   const setupPage = await page.getByRole("main", { name: "New project" }).boundingBox();
   const setupWidth = setupPage?.width ?? 0;
-  expect(setupWidth).toBeGreaterThan(600);
-  expect(setupWidth).toBeLessThanOrEqual(760);
+  expect(setupWidth).toBeGreaterThan(900);
+  expect(setupWidth).toBeLessThanOrEqual(1216);
 
   await expect(page.getByTestId("automatic-github-destination")).toContainText("octocat");
   await page
-    .getByTestId("project-description")
-    .fill("Build a deployment workflow dashboard for release managers.");
+    .getByTestId("project-name")
+    .fill("Deployment workflow dashboard for release managers");
   await expect(page.getByTestId("derived-project-summary")).toContainText(
     "Deployment workflow dashboard for release managers",
   );
-  await page.getByRole("button", { name: /create & start planning/i }).click();
+  await page.getByRole("button", { name: /create project/i }).click();
 
-  await expect(page.getByTestId("phase-decision-panel")).toBeVisible();
-  await page.getByRole("button", { name: /approve & start coding/i }).click();
-  await expect(page.getByTestId("phase-execution-kickoff-note")).toContainText(
-    "Execution started automatically",
-  );
-  await expect(page.getByTestId("phase-execution-table")).toContainText("active");
+  await expectWorkspaceNavigation(page);
   expect(observed.onboardingRequests).toEqual([
     expect.objectContaining({
       scenario: "new_repo",
       name: "Deployment workflow dashboard for release managers",
+      description: "",
       repository_name: "deployment-workflow-dashboard-for-release-managers",
     }),
   ]);
-  expect(observed.planningDecisions).toEqual([expect.objectContaining({ decision: "approve" })]);
+  expect(observed.planningRequests).toEqual([]);
 });
 
 test("Workspace uses a centered responsive shell, current navigation, and one Work composer", async ({
