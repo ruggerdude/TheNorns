@@ -612,6 +612,9 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await expect
     .poll(async () => workTab.evaluate((element) => getComputedStyle(element).backgroundColor))
     .not.toBe("rgba(0, 0, 0, 0)");
+  expect(await workTab.evaluate((element) => getComputedStyle(element, "::before").content)).toBe(
+    "none",
+  );
 
   await expect(page.getByText("I mapped the release workflow")).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message the project PM" })).toBeVisible();

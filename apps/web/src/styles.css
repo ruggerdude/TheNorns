@@ -1883,8 +1883,7 @@ button:disabled {
   gap: .5rem;
   flex-wrap: wrap;
 }
-/* Canonical workspace tab bar (single definition; the numbered chips come
-   from the ::before content below). Sticky offset = project tabs (42px) +
+/* Canonical workspace tab bar. Sticky offset = project tabs (42px) +
    topbar (64px). */
 .workspace-tabs {
   position: sticky;
@@ -1915,36 +1914,6 @@ button:disabled {
   letter-spacing: .01em;
   transition: border-color .14s ease, color .14s ease, background .14s ease;
 }
-.workspace-tabs button::before {
-  display: inline-grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  margin-right: .42rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  color: var(--ink-muted);
-  font: 500 var(--text-xs) "DM Mono", monospace;
-  vertical-align: middle;
-}
-.workspace-tabs button:nth-child(1)::before {
-  content: "01";
-}
-.workspace-tabs button:nth-child(2)::before {
-  content: "02";
-}
-.workspace-tabs button:nth-child(3)::before {
-  content: "03";
-}
-.workspace-tabs button:nth-child(4)::before {
-  content: "04";
-}
-.workspace-tabs button:nth-child(5)::before {
-  content: "••";
-}
-.workspace-tabs button:nth-child(6)::before {
-  content: "••";
-}
 .workspace-tabs button:hover {
   color: var(--ink);
   background: var(--surface-2);
@@ -1954,11 +1923,6 @@ button:disabled {
   border-color: rgba(0, 22, 137, 0.35);
   background: var(--brand-wash);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-}
-.workspace-tabs button.on::before {
-  color: var(--brand-ink);
-  border-color: rgba(0, 22, 137, 0.45);
-  background: rgba(0, 22, 137, 0.15);
 }
 .workspace-tab-panel {
   display: flex;
