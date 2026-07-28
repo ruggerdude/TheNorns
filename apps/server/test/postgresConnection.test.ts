@@ -107,6 +107,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
             usage_budget_policies: "usage_budget_policies",
             ai_usage_calibration_observations: "ai_usage_calibration_observations",
             shadow_read_recorded_order: true,
+            onboarding_submissions: "project_onboarding_submissions",
+            onboarding_repository_intents: "project_onboarding_repository_intents",
+            onboarding_candidate_columns: true,
             conversation_domain_complete: true,
             conversation_stream_lifecycle: "conversation_stream_lifecycle_v1",
             conversation_plan_workflow: "conversation_plan_workflow_v1",
@@ -140,6 +143,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
             usage_budget_policies: "usage_budget_policies",
             ai_usage_calibration_observations: null,
             shadow_read_recorded_order: false,
+            onboarding_submissions: "project_onboarding_submissions",
+            onboarding_repository_intents: null,
+            onboarding_candidate_columns: false,
             conversation_domain_complete: false,
             conversation_stream_lifecycle: null,
             conversation_plan_workflow: null,
@@ -159,6 +165,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "planning_runs.mode, knowledge_packages, agent_handoffs, " +
         "agent_profiles.reasoning_effort, ai_usage_events, project_members, " +
         "ai_usage_calibration_observations, shadow_read_comparisons.recorded_order, " +
+        "project_onboarding_repository_intents, " +
+        "repository_binding_candidates onboarding columns, " +
         "conversation domain tables, conversation_stream_lifecycle_v1, " +
         "conversation_plan_workflow_v1, conversation_execution_handoff_v1, " +
         "conversation_human_steering_v1, conversation_mockups_dashboard_v1, " +
@@ -184,6 +192,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
             usage_budget_policies: "usage_budget_policies",
             ai_usage_calibration_observations: "ai_usage_calibration_observations",
             shadow_read_recorded_order: true,
+            onboarding_submissions: "project_onboarding_submissions",
+            onboarding_repository_intents: "project_onboarding_repository_intents",
+            onboarding_candidate_columns: true,
             conversation_domain_complete: true,
             conversation_stream_lifecycle: null,
             conversation_plan_workflow: null,

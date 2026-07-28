@@ -3820,6 +3820,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             | undefined;
           if (scenario.data.scenario === "new_repo" && scenario.data.local_working_copy) {
             if (!github || !options.phase3) {
+              console.error(
+                "project onboarding refused: local_working_copy_unavailable (503) — GitHub integration or local execution services not configured",
+              );
               return reply.code(503).send({
                 error: "local_working_copy_unavailable",
                 message:
@@ -3841,9 +3844,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               reconciled.socket !== runnerSockets.get(runnerId) ||
               reconciled.generation !== runner.generation
             ) {
+              const refusal =
+                status.state === "connected" ? "runner_upgrade_required" : "runner_unavailable";
+              console.error(
+                `project onboarding refused: ${refusal} (409) — local helper not ready for a working copy`,
+              );
               return reply.code(409).send({
-                error:
-                  status.state === "connected" ? "runner_upgrade_required" : "runner_unavailable",
+                error: refusal,
                 message:
                   status.state === "connected"
                     ? "Update the local helper before creating a GitHub working copy."
@@ -3921,6 +3928,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           };
           if (scenario.data.scenario === "new_repo" && scenario.data.local_working_copy) {
             if (!activated) {
+              console.error(
+                `project onboarding refused: local_working_copy_unavailable (409) — activation unavailable for ${result.project_id}`,
+              );
               return reply.code(409).send({
                 error: "local_working_copy_unavailable",
                 message:
@@ -3936,6 +3946,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               });
             }
             if (!github || !options.phase3 || !localRunner) {
+              console.error(
+                `project onboarding refused: local_working_copy_unavailable (503) — GitHub or local execution services vanished mid-request for ${result.project_id}`,
+              );
               return reply.code(503).send({ error: "local_working_copy_unavailable" });
             }
             const repositoryName = scenario.data.repository_name;
@@ -3948,6 +3961,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               (candidate) => candidate.name.toLowerCase() === repositoryName.toLowerCase(),
             );
             if (!repository) {
+              console.error(
+                `project onboarding refused: local_working_copy_unavailable (409) — repository not visible to the GitHub App for ${result.project_id}`,
+              );
               return reply.code(409).send({
                 error: "local_working_copy_unavailable",
                 message:
@@ -3977,6 +3993,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                   : clone.status === "destination_exists"
                     ? `A folder named ${credential.repository.name} already exists in that location. Choose a different parent folder.`
                     : "The GitHub repository was created, but the local helper could not clone it. Check this computer's Git access and try again.";
+              console.error(
+                `project onboarding refused: local_working_copy_${clone.status} (409) — helper clone did not complete for ${result.project_id}`,
+              );
               return reply.code(409).send({
                 error: `local_working_copy_${clone.status}`,
                 message,
@@ -3989,6 +4008,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               current.generation !== localRunner.generation ||
               runnerSockets.get(localRunner.runner_id) !== localRunner.socket
             ) {
+              console.error(
+                `project onboarding refused: runner_unavailable (409) — helper reconnected before the clone could be bound for ${result.project_id}`,
+              );
               return reply.code(409).send({
                 error: "runner_unavailable",
                 message:
@@ -4059,7 +4081,20 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           if (error instanceof RelationalCompositionConflictError) {
             return reply.code(409).send(error.diagnostic());
           }
-          console.error("project onboarding failed", error);
+          // Include the PostgreSQL error surface when present (code/detail/
+          // table), so a permission or schema failure under the restricted
+          // production role is diagnosable from this line alone.
+          const pgError =
+            error && typeof error === "object"
+              ? (error as { code?: unknown; detail?: unknown; table?: unknown })
+              : undefined;
+          console.error(
+            "project onboarding failed",
+            error,
+            ...(pgError?.code || pgError?.detail || pgError?.table
+              ? [{ code: pgError.code, detail: pgError.detail, table: pgError.table }]
+              : []),
+          );
           return reply.code(500).send({
             error: "onboarding_failed",
             message:
