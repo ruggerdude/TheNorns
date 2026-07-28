@@ -48,6 +48,7 @@ import {
 import type { ChatRequestOptions, CreateUIMessage, UIMessage, UIMessageChunk } from "ai";
 import {
   type FormEvent,
+  type ReactNode,
   createContext,
   useCallback,
   useContext,
@@ -199,6 +200,10 @@ function conversationKindLabel(kind: V2WorkConversationT["kind"]): string {
   if (kind === "planning") return "Planning";
   if (kind === "execution_pm") return "Execution PM";
   return "Task";
+}
+
+function displayConversationTitle(title: string): string {
+  return title.replace(/^#{1,6}\s+/, "").trim() || "Untitled conversation";
 }
 
 function attachmentIdFromUrl(url: string): string | null {
@@ -2260,6 +2265,7 @@ function confirmationKeyFor(action: V2ConversationActionT, memory: Map<string, s
 }
 
 function ConversationThread({
+  header,
   detail,
   initialMessage,
   onInitialMessageStarted,
@@ -2267,6 +2273,7 @@ function ConversationThread({
   onRefresh,
   onUnauthorized,
 }: {
+  header: ReactNode;
   detail: ConversationDetail;
   initialMessage?: string | null;
   onInitialMessageStarted?: () => void;
@@ -3045,50 +3052,53 @@ function ConversationThread({
           className="conversation-thread"
           aria-label={`${conversationKindLabel(detail.conversation.kind)} conversation`}
         >
-          {(detail.conversation.kind === "planning" && detail.conversation.status === "active") ||
-          ((isPlanning || isExecution) && !isReadOnly) ? (
-            <div className="conversation-thread-tools" aria-label="Conversation tools">
-              {detail.conversation.kind === "planning" &&
-              detail.conversation.status === "active" ? (
-                <div className="conversation-plan-proposal-control">
-                  <span className="sr-only" id={proposalHelpId}>
-                    {proposalBlockedReason ??
-                      "The PM will create a structured draft from this conversation. Saving it remains a separate confirmation."}
-                  </span>
-                  <Button
-                    className="btn-small"
-                    disabled={
-                      proposalBusy ||
-                      detail.active_attempt !== null ||
-                      proposalBlockedReason !== null
+          <div className="conversation-thread-chrome">
+            {header}
+            {(detail.conversation.kind === "planning" && detail.conversation.status === "active") ||
+            ((isPlanning || isExecution) && !isReadOnly) ? (
+              <div className="conversation-thread-tools" aria-label="Conversation tools">
+                {detail.conversation.kind === "planning" &&
+                detail.conversation.status === "active" ? (
+                  <div className="conversation-plan-proposal-control">
+                    <span className="sr-only" id={proposalHelpId}>
+                      {proposalBlockedReason ??
+                        "The PM will create a structured draft from this conversation. Saving it remains a separate confirmation."}
+                    </span>
+                    <Button
+                      className="btn-small"
+                      disabled={
+                        proposalBusy ||
+                        detail.active_attempt !== null ||
+                        proposalBlockedReason !== null
+                      }
+                      aria-describedby={proposalHelpId}
+                      aria-label={hasPlanProposal ? "Update plan proposal" : "Create plan proposal"}
+                      onClick={() => void generatePlanProposal()}
+                    >
+                      {proposalBusy
+                        ? "Generating proposal…"
+                        : hasPlanProposal
+                          ? "Update plan proposal"
+                          : "Create plan proposal"}
+                    </Button>
+                  </div>
+                ) : null}
+                {(isPlanning || isExecution) && !isReadOnly ? (
+                  <MockupRequestComposer
+                    taskOptions={taskOptions}
+                    planningPlanVersionId={isPlanning ? (latestPlan?.id ?? null) : null}
+                    artifactOptions={artifactOptions}
+                    busy={executionProposalBusy}
+                    error={executionProposalError}
+                    disabledReason={
+                      lockedExecutionRequest ? "Retry the locked exact request first." : null
                     }
-                    aria-describedby={proposalHelpId}
-                    aria-label={hasPlanProposal ? "Update plan proposal" : "Create plan proposal"}
-                    onClick={() => void generatePlanProposal()}
-                  >
-                    {proposalBusy
-                      ? "Generating proposal…"
-                      : hasPlanProposal
-                        ? "Update plan proposal"
-                        : "Create plan proposal"}
-                  </Button>
-                </div>
-              ) : null}
-              {(isPlanning || isExecution) && !isReadOnly ? (
-                <MockupRequestComposer
-                  taskOptions={taskOptions}
-                  planningPlanVersionId={isPlanning ? (latestPlan?.id ?? null) : null}
-                  artifactOptions={artifactOptions}
-                  busy={executionProposalBusy}
-                  error={executionProposalError}
-                  disabledReason={
-                    lockedExecutionRequest ? "Retry the locked exact request first." : null
-                  }
-                  onPrepare={(parameters) => proposeExecutionAction("create_mockup", parameters)}
-                />
-              ) : null}
-            </div>
-          ) : null}
+                    onPrepare={(parameters) => proposeExecutionAction("create_mockup", parameters)}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+          </div>
           {isExecution && !isReadOnly ? (
             <section className="execution-conversation-controls" aria-label="Execution controls">
               <details>
@@ -3656,6 +3666,100 @@ export function ConversationWorkspace({
     void Promise.all([loadDetail(true), loadGroups()]);
   }, [loadDetail, loadGroups]);
 
+  const conversationHeader = (
+    <header className="conversation-header">
+      <Button
+        className="btn-small conversation-sidebar-toggle"
+        aria-expanded={conversationListOpen}
+        aria-controls="project-conversations"
+        aria-label="Open conversations"
+        disabled={conversationListOpen}
+        onClick={() => setConversationListOpen(true)}
+      >
+        Conversations
+      </Button>
+      {!showNew && detail ? (
+        <>
+          <div className="conversation-header-title">
+            <span className="conversation-context-label">Conversation</span>
+            {renaming ? (
+              <form className="conversation-title-editor" onSubmit={renameWork}>
+                <Input
+                  aria-label="Conversation title"
+                  value={renameTitle}
+                  maxLength={120}
+                  disabled={renameBusy}
+                  autoFocus
+                  onChange={(event) => setRenameTitle(event.target.value)}
+                />
+                <Button
+                  className="btn-small"
+                  variant="primary"
+                  type="submit"
+                  disabled={renameBusy || !renameTitle.trim()}
+                >
+                  {renameBusy ? "Saving…" : "Save"}
+                </Button>
+                <Button
+                  className="btn-small"
+                  type="button"
+                  disabled={renameBusy}
+                  onClick={() => setRenaming(false)}
+                >
+                  Cancel
+                </Button>
+              </form>
+            ) : (
+              <div className="conversation-title-row">
+                <h2 title={detail.work_item.title}>
+                  {displayConversationTitle(detail.work_item.title)}
+                </h2>
+                <Button
+                  className="btn-small conversation-rename-button"
+                  type="button"
+                  onClick={() => {
+                    setRenameTitle(detail.work_item.title);
+                    setRenaming(true);
+                  }}
+                >
+                  Rename
+                </Button>
+              </div>
+            )}
+          </div>
+          <div className="conversation-header-actions">
+            {hasRecordedUsage(detail.usage) ? (
+              <output className="conversation-total-usage" data-testid="conversation-total-usage">
+                {usageSummary(detail.usage)}
+              </output>
+            ) : null}
+            <div
+              className="conversation-model-pin"
+              data-testid="conversation-model-pin"
+              title="PM pinned for this conversation"
+            >
+              <span aria-hidden="true">●</span>
+              <strong>
+                {detail.conversation.provider} · {detail.conversation.model}
+              </strong>
+            </div>
+            <Badge tone={detail.conversation.status === "active" ? "success" : "default"}>
+              {detail.conversation.status}
+            </Badge>
+            <Button
+              className="btn-small"
+              disabled={loadingDetail}
+              onClick={refresh}
+              aria-label="Refresh conversation"
+            >
+              {loadingDetail ? "Refreshing…" : "Refresh"}
+            </Button>
+          </div>
+        </>
+      ) : null}
+    </header>
+  );
+
   return (
     <div className="conversation-workspace" data-testid="conversation-workspace">
       {conversationListOpen ? (
@@ -3707,7 +3811,9 @@ export function ConversationWorkspace({
             <div className="conversation-list">
               {groups?.map((group) => (
                 <section className="conversation-work-group" key={group.work_item.id}>
-                  <h3 title={group.work_item.objective}>{group.work_item.title}</h3>
+                  <h3 title={group.work_item.title}>
+                    {displayConversationTitle(group.work_item.title)}
+                  </h3>
                   {group.conversations.map((conversation) => {
                     const active = selected?.conversationId === conversation.id && !showNew;
                     const usage = group.conversation_usage?.[conversation.id];
@@ -3741,102 +3847,13 @@ export function ConversationWorkspace({
             <Alert testId="conversation-error">{error}</Alert>
           </div>
         ) : null}
-        <header className="conversation-header">
-          <Button
-            className="btn-small conversation-sidebar-toggle"
-            aria-expanded={conversationListOpen}
-            aria-controls="project-conversations"
-            aria-label="Open conversations"
-            disabled={conversationListOpen}
-            onClick={() => setConversationListOpen(true)}
-          >
-            Conversations
-          </Button>
-          {!showNew && detail ? (
-            <>
-              <div className="conversation-header-title">
-                {renaming ? (
-                  <form className="conversation-title-editor" onSubmit={renameWork}>
-                    <Input
-                      aria-label="Conversation title"
-                      value={renameTitle}
-                      maxLength={120}
-                      disabled={renameBusy}
-                      autoFocus
-                      onChange={(event) => setRenameTitle(event.target.value)}
-                    />
-                    <Button
-                      className="btn-small"
-                      variant="primary"
-                      type="submit"
-                      disabled={renameBusy || !renameTitle.trim()}
-                    >
-                      {renameBusy ? "Saving…" : "Save"}
-                    </Button>
-                    <Button
-                      className="btn-small"
-                      type="button"
-                      disabled={renameBusy}
-                      onClick={() => setRenaming(false)}
-                    >
-                      Cancel
-                    </Button>
-                  </form>
-                ) : (
-                  <div className="conversation-title-row">
-                    <h2 title={detail.work_item.objective}>{detail.work_item.title}</h2>
-                    <Button
-                      className="btn-small conversation-rename-button"
-                      type="button"
-                      onClick={() => {
-                        setRenameTitle(detail.work_item.title);
-                        setRenaming(true);
-                      }}
-                    >
-                      Rename
-                    </Button>
-                  </div>
-                )}
-              </div>
-              <div className="conversation-header-actions">
-                {hasRecordedUsage(detail.usage) ? (
-                  <output
-                    className="conversation-total-usage"
-                    data-testid="conversation-total-usage"
-                  >
-                    {usageSummary(detail.usage)}
-                  </output>
-                ) : null}
-                <div
-                  className="conversation-model-pin"
-                  data-testid="conversation-model-pin"
-                  title="PM pinned for this conversation"
-                >
-                  <span aria-hidden="true">●</span>
-                  <strong>
-                    {detail.conversation.provider} · {detail.conversation.model}
-                  </strong>
-                </div>
-                <Badge tone={detail.conversation.status === "active" ? "success" : "default"}>
-                  {detail.conversation.status}
-                </Badge>
-                <Button
-                  className="btn-small"
-                  disabled={loadingDetail}
-                  onClick={refresh}
-                  aria-label="Refresh conversation"
-                >
-                  {loadingDetail ? "Refreshing…" : "Refresh"}
-                </Button>
-              </div>
-            </>
-          ) : null}
-        </header>
+        {showNew ? conversationHeader : null}
         {showNew ? <NewWorkForm busy={creating} onCreate={createWork} /> : null}
         {!showNew && detail ? (
           <>
             <ConversationThread
               key={`${detail.conversation.id}:${threadVersion}`}
+              header={conversationHeader}
               detail={detail}
               initialMessage={
                 initialMessage?.conversationId === detail.conversation.id

@@ -420,44 +420,6 @@ export function AttentionDecisionForm({
   );
 }
 
-export function ProjectTabs({
-  projects,
-  activeId,
-  onSelect,
-  onClose,
-}: {
-  projects: ProjectSummary[];
-  activeId?: string | null;
-  onSelect: (project: ProjectSummary) => void;
-  onClose: (id: string) => void;
-}): React.ReactElement | null {
-  if (!projects.length) return null;
-  return (
-    <nav className="project-tabs" aria-label="Open projects">
-      <span className="project-tabs-label">Open</span>
-      {projects.map((project) => (
-        <div
-          className={`project-tab ${activeId === project.id ? "is-active" : ""}`}
-          key={project.id}
-        >
-          <button type="button" onClick={() => onSelect(project)} title={`Open ${project.name}`}>
-            <span className={`status-dot status-${project.status}`} />
-            {project.name}
-          </button>
-          <button
-            type="button"
-            className="project-tab-close"
-            aria-label={`Close ${project.name}`}
-            onClick={() => onClose(project.id)}
-          >
-            ×
-          </button>
-        </div>
-      ))}
-    </nav>
-  );
-}
-
 export function Projects({
   onOpenProject,
   openProjects,
@@ -1384,9 +1346,6 @@ export function Projects({
           />
         ) : null}
       </header>
-      {!dialog ? (
-        <ProjectTabs projects={openProjects} onSelect={onOpenProject} onClose={onCloseProject} />
-      ) : null}
       <main className="page-container project-dashboard" hidden={dialog}>
         {error ? <Alert testId="projects-error">{error}</Alert> : null}
         {/* DESIGN R2: one true page title — largest text on the page — with a
@@ -1604,8 +1563,8 @@ export function Projects({
                 <span>Drafts</span>
               </div>
               <div style={{ textAlign: "center" }}>
-                <strong>{openProjects.length}</strong>
-                <span>Open now</span>
+                <strong>{projects?.length ?? 0}</strong>
+                <span>Projects</span>
               </div>
               <div
                 style={{ textAlign: "center" }}

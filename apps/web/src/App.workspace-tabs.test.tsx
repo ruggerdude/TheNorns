@@ -146,7 +146,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
       "page",
     );
     expect(screen.getByRole("button", { name: "Usage" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("navigation", { name: "Open projects" })).toBeVisible();
+    expect(screen.queryByRole("navigation", { name: "Open projects" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: `Return to ${projectAlpha.name}` }));

@@ -314,7 +314,7 @@ async function prepare(
               id: "work-e2e",
               project_id: "project-github",
               created_by_user_id: "user-e2e",
-              title: "Release readiness",
+              title: "# Release readiness",
               objective: "Plan the release dashboard and deployment health workflow.",
               status: "planning",
               planning_run_id: null,
@@ -357,7 +357,7 @@ async function prepare(
           id: "work-e2e",
           project_id: "project-github",
           created_by_user_id: "user-e2e",
-          title: "Release readiness",
+          title: "# Release readiness",
           objective: "Plan the release dashboard and deployment health workflow.",
           status: "planning",
           planning_run_id: null,
@@ -644,6 +644,10 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   expect(railBox?.x).toBe(0);
   expect(railBox?.width).toBe(248);
   expect(railBox?.height).toBe(1080);
+  const projectContext = page.getByTestId("workspace-project-context");
+  await expect(projectContext.getByText("Project", { exact: true })).toBeVisible();
+  await expect(projectContext.getByText("front-door-app", { exact: true })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Open projects" })).toHaveCount(0);
 
   const workspaceNavigation = page.getByRole("navigation", { name: "Workspace sections" });
   const workTab = workspaceNavigation.getByRole("button", { name: /work$/i });
@@ -659,6 +663,9 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   );
 
   await expect(page.getByText("I mapped the release workflow")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Release readiness" })).toBeVisible();
+  await expect(page.getByText("# Release readiness", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Conversation", { exact: true })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message the project PM" })).toBeVisible();
   await expect(page.locator(".conversation-sidebar")).toHaveCount(0);
   await expect(
@@ -667,14 +674,18 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
 
   const conversationBox = await page.locator(".conversation-workspace").boundingBox();
   const conversationMainBox = await page.locator(".conversation-main").boundingBox();
-  const conversationHeaderBox = await page.locator(".conversation-header").boundingBox();
+  const conversationChromeBox = await page.locator(".conversation-thread-chrome").boundingBox();
   const conversationToolsBox = await page.locator(".conversation-thread-tools").boundingBox();
   const transcriptBox = await page.locator(".conversation-thread-viewport").boundingBox();
   expect(conversationBox?.height ?? 0).toBeGreaterThan(1020);
   expect(conversationMainBox?.width ?? 0).toBeGreaterThan((conversationBox?.width ?? 0) - 3);
-  expect(conversationHeaderBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(76);
+  expect(conversationChromeBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(76);
   expect(conversationToolsBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(56);
-  expect(transcriptBox?.height ?? 0).toBeGreaterThan(700);
+  expect(conversationToolsBox?.y ?? 0).toBeGreaterThanOrEqual(conversationChromeBox?.y ?? 0);
+  expect((conversationToolsBox?.y ?? 0) + (conversationToolsBox?.height ?? 0)).toBeLessThanOrEqual(
+    (conversationChromeBox?.y ?? 0) + (conversationChromeBox?.height ?? 0) + 1,
+  );
+  expect(transcriptBox?.height ?? 0).toBeGreaterThan(740);
 
   await page.getByRole("button", { name: "Open conversations" }).click();
   const conversationDrawer = page.getByRole("complementary", { name: "Project conversations" });
@@ -707,7 +718,7 @@ test("Usage, Settings, and Admin use the regular application sidebar", async ({ 
     "aria-current",
     "page",
   );
-  await expect(page.getByRole("navigation", { name: "Open projects" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Open projects" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Close", exact: true })).toHaveCount(0);
 
   const globalRail = page.locator(".global-page-shell > .topbar");
@@ -737,7 +748,7 @@ test("Usage, Settings, and Admin use the regular application sidebar", async ({ 
   await expect(page.getByRole("navigation", { name: "Workspace sections" })).toBeVisible();
 
   await page.setViewportSize({ width: 1280, height: 720 });
-  await expect(page.locator(".workspace-shell > .project-tabs")).toBeHidden();
+  await expect(page.locator(".project-tabs")).toHaveCount(0);
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(page.getByTestId("usage-panel")).toBeVisible();
 });

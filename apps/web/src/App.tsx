@@ -29,7 +29,6 @@ import {
   type AttentionItemDto,
   type PortfolioAttentionDto,
   type ProjectSummary,
-  ProjectTabs,
   Projects,
 } from "./Projects";
 import { RunLog } from "./RunLog";
@@ -783,9 +782,6 @@ function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
 function ProjectGraph({
   project,
   onBack,
-  openProjects,
-  onOpenProject,
-  onCloseProject,
   onLogout,
   user,
   onOpenAccount,
@@ -799,9 +795,6 @@ function ProjectGraph({
 }: {
   project: ProjectSummary;
   onBack: () => void;
-  openProjects: ProjectSummary[];
-  onOpenProject: (project: ProjectSummary) => void;
-  onCloseProject: (id: string) => void;
   onLogout: (message: string) => void;
   user: CurrentUser | null;
   onOpenAccount: () => void;
@@ -1749,17 +1742,18 @@ function ProjectGraph({
 
   return (
     <div className="workspace-shell">
-      {/* DESIGN P2: brand topbar first (canonical .topbar, matching every
-          other screen), then the open-project tabs strip below it. */}
+      {/* The shared rail names the active project explicitly; project
+          switching stays in Portfolio instead of duplicating browser tabs. */}
       <header className="topbar">
         <div className="workspace-nav-start">
           <Brand />
           <Button className="btn-small" variant="ghost" onClick={onBack}>
             ← Portfolio
           </Button>
-          <span className="workspace-rail-project" title={project.name}>
-            {project.name}
-          </span>
+          <div className="workspace-rail-project" data-testid="workspace-project-context">
+            <span>Project</span>
+            <strong title={project.name}>{project.name}</strong>
+          </div>
         </div>
         {user ? (
           <AuthenticatedHeaderActions
@@ -1771,12 +1765,6 @@ function ProjectGraph({
           />
         ) : null}
       </header>
-      <ProjectTabs
-        projects={openProjects}
-        activeId={project.id}
-        onSelect={onOpenProject}
-        onClose={onCloseProject}
-      />
       <main className={`page workspace-page workspace-page-${workspaceTab}`}>
         <div className="project-heading workspace-header">
           <div className="eyebrow">Workspace</div>
@@ -2821,10 +2809,7 @@ function GlobalPageShell({
   page,
   user,
   activeProject,
-  openProjects,
   onReturn,
-  onOpenProject,
-  onCloseProject,
   onOpenUsage,
   onOpenAccount,
   onOpenAdmin,
@@ -2834,10 +2819,7 @@ function GlobalPageShell({
   page: GlobalPage;
   user: CurrentUser;
   activeProject: ProjectSummary | null;
-  openProjects: ProjectSummary[];
   onReturn: () => void;
-  onOpenProject: (project: ProjectSummary) => void;
-  onCloseProject: (id: string) => void;
   onOpenUsage: () => void;
   onOpenAccount: (tab?: SettingsTab) => void;
   onOpenAdmin: () => void;
@@ -2867,12 +2849,6 @@ function GlobalPageShell({
           onSignOut={onSignOut}
         />
       </header>
-      <ProjectTabs
-        projects={openProjects}
-        activeId={activeProject?.id}
-        onSelect={onOpenProject}
-        onClose={onCloseProject}
-      />
       <div className="global-page-content">{children}</div>
     </div>
   );
@@ -3135,13 +3111,7 @@ export function App(): React.ReactElement {
         page={globalPage}
         user={user}
         activeProject={activeProject}
-        openProjects={openProjects}
         onReturn={closeGlobalPage}
-        onOpenProject={(project) => {
-          closeGlobalPage();
-          openProject(project);
-        }}
-        onCloseProject={closeProject}
         onOpenUsage={openUsage}
         onOpenAccount={openAccount}
         onOpenAdmin={openAdmin}
@@ -3205,9 +3175,6 @@ export function App(): React.ReactElement {
         setRoutedProjectId(null);
         window.history.pushState(null, "", "/");
       }}
-      openProjects={openProjects}
-      onOpenProject={openProject}
-      onCloseProject={closeProject}
       onLogout={logout}
       user={user}
       onOpenAccount={openAccount}

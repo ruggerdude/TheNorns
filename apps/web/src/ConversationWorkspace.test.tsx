@@ -32,7 +32,7 @@ const workItem: V2WorkItemT = {
   id: workItemId,
   project_id: projectId,
   created_by_user_id: "user-1",
-  title: "Conversation-first planning",
+  title: "# Conversation-first planning",
   objective: "Plan a durable project conversation.",
   status: "planning",
   planning_run_id: null,
@@ -564,6 +564,18 @@ describe("conversation workspace", () => {
     expect(screen.getByTestId("conversation-model-pin")).toHaveTextContent(
       "anthropic · claude-sonnet-5",
     );
+    expect(
+      screen.getByRole("heading", { name: "Conversation-first planning" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("# Conversation-first planning", { exact: true }),
+    ).not.toBeInTheDocument();
+    const combinedHeader = document.querySelector(".conversation-thread-chrome");
+    expect(combinedHeader).toContainElement(
+      screen.getByRole("button", { name: "Create plan proposal" }),
+    );
+    expect(combinedHeader).toContainElement(screen.getByText("Create Mockup", { exact: true }));
+    expect(combinedHeader).toContainElement(screen.getByTestId("conversation-model-pin"));
     expect(screen.queryByTestId("conversation-welcome")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry response" })).not.toBeInTheDocument();
 
@@ -1648,7 +1660,7 @@ describe("conversation workspace", () => {
 
     const composer = await screen.findByRole("textbox", { name: "Message the project PM" });
     expect(screen.getByTestId("conversation-welcome")).toBeInTheDocument();
-    expect(screen.getAllByText(workItem.title)).toHaveLength(1);
+    expect(screen.getAllByText("Conversation-first planning")).toHaveLength(1);
     expect(screen.queryByText(workItem.objective)).not.toBeInTheDocument();
     expect(screen.queryByTestId("conversation-summary-empty")).not.toBeInTheDocument();
     expect(screen.queryByTestId("conversation-total-usage")).not.toBeInTheDocument();

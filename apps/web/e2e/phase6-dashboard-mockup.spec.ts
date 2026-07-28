@@ -348,7 +348,7 @@ test("project operations and exact mockup approval work on desktop and mobile", 
 
   const dashboard = page.getByTestId("project-operations-dashboard");
   await expect(dashboard).toBeVisible();
-  await expect(dashboard.getByRole("heading", { name: "Needs Your Attention" })).toBeVisible();
+  await expect(dashboard.getByRole("heading", { name: "Status" })).toBeVisible();
   await expect(dashboard.getByText("Review checkout mockup")).toBeVisible();
   await expect(dashboard.getByText("$8.00")).toBeVisible();
   const desktopColumns = await dashboard
