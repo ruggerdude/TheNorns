@@ -215,14 +215,14 @@ describe("PHASE TAB (P2)", () => {
     expect(screen.getByTestId("phase-mode-quick")).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByTestId("phase-quick-summary")).toHaveTextContent("no reviewer");
     expect(screen.getByTestId("phase-identity-line")).toHaveTextContent(
-      "PM: Project default · Agent: AI recommendation for each task · No reviewer",
+      "PM: Project default · Agent: Recommended model for each task · No reviewer",
     );
 
     await user.click(screen.getByTestId("phase-mode-planned"));
     expect(screen.getByTestId("phase-agents")).toHaveValue("both");
     expect(screen.getByTestId("phase-rounds")).toHaveValue("2");
     expect(screen.getByTestId("phase-identity-line")).toHaveTextContent(
-      "PM: Project default · Agent: AI recommendation for each task · Reviewer: Automatic cross-provider",
+      "PM: Project default · Agent: Recommended model for each task · Reviewer: Automatic cross-provider",
     );
     expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
