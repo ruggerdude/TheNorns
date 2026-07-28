@@ -1036,7 +1036,7 @@ decision and is deliberately untouched.
 
 ## Design overhaul — Phase 2 (per docs/DESIGN-SYSTEM.md)
 
-- [ ] 🔄 DESIGN-P2d — workspace sweep: App.tsx shell reorder (brand topbar
+- [x] ✅ DESIGN-P2d — workspace sweep: App.tsx shell reorder (brand topbar
   first), micro-text purge in ConversationWorkspace / PhaseTab /
   ProjectOperationsDashboard / KnowledgeStatusPanel CSS, "AI" copy
   neutralized in PhaseTab, header/token normalization across operations
