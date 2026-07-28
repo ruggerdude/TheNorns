@@ -125,7 +125,13 @@ describe("UsageHub", () => {
       />,
     );
 
-    expect(await screen.findByRole("heading", { name: "Project usage" })).toBeInTheDocument();
+    // DESIGN R2: the hub keeps one "Usage" H1 visible for every sub-page —
+    // the old per-scope H1s ("Project usage", "User usage", "Analytics and
+    // optimization") were removed; the .page-subnav communicates the view.
+    expect(await screen.findByRole("heading", { name: "Usage", level: 1 })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Project users, models, providers, and phases" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Project One" })).toHaveAttribute(
       "aria-current",
       "page",
@@ -141,6 +147,7 @@ describe("UsageHub", () => {
     expect(
       await screen.findByRole("heading", { name: "Most-used models and providers" }),
     ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Usage", level: 1 })).toBeInTheDocument();
     expect(screen.queryByLabelText("User")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Phase")).not.toBeInTheDocument();
 
@@ -154,8 +161,9 @@ describe("UsageHub", () => {
 
     await user.click(screen.getByRole("button", { name: "Analytics" }));
     expect(
-      await screen.findByRole("heading", { name: "Analytics and optimization" }),
+      await screen.findByRole("heading", { name: "Hot spots by provider" }),
     ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Usage", level: 1 })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Close" }));
     expect(onClose).toHaveBeenCalledOnce();
   });
@@ -177,7 +185,10 @@ describe("UsageHub", () => {
       />,
     );
 
-    expect(await screen.findByRole("heading", { name: "User usage" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Usage", level: 1 })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Most-used models and providers" }),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "All usage" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Analytics" })).not.toBeInTheDocument();
   });

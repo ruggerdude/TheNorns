@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
-import { Alert, Button, Field, Input, PageHeader, Select, Spinner } from "./ui";
+import { Alert, Button, Field, Input, Select, Spinner } from "./ui";
 import "./UsageAnalytics.css";
 
 interface Signals {
@@ -206,13 +206,7 @@ export function UsageAnalytics({
   }, [load]);
 
   return (
-    <main className="usage-analytics-page page-container" data-testid="usage-analytics">
-      <PageHeader
-        eyebrow="Usage intelligence"
-        title="Analytics and optimization"
-        lede="Deterministic trend, calibration, reliability, and efficiency signals from canonical usage."
-      />
-
+    <section className="usage-analytics-page" data-testid="usage-analytics">
       <form
         className="usage-analytics-filters card"
         aria-label="Analytics filters"
@@ -410,6 +404,6 @@ export function UsageAnalytics({
           ))
         )}
       </section>
-    </main>
+    </section>
   );
 }

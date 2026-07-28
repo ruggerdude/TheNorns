@@ -334,591 +334,585 @@ export function Account({
         </Button>
       </header>
       <main className="page-container page-container-narrow settings-page">
-        <PageHeader
-          eyebrow="Workspace"
-          title="Settings"
-          lede="Manage your profile, integrations, and active sessions."
-        />
-        <div className="settings-layout">
-          <nav className="settings-nav" aria-label="Settings sections">
-            <button
-              type="button"
-              className={tab === "profile" ? "is-active" : ""}
-              onClick={() => setTab("profile")}
-            >
-              Profile
-            </button>
-            <button
-              type="button"
-              className={tab === "connections" ? "is-active" : ""}
-              onClick={() => setTab("connections")}
-            >
-              Connections
-            </button>
-            <button
-              type="button"
-              className={tab === "security" ? "is-active" : ""}
-              onClick={() => setTab("security")}
-            >
-              Security & sessions
-            </button>
-          </nav>
+        <PageHeader title="Settings" />
+        <nav className="page-subnav" aria-label="Settings sections">
+          <button
+            type="button"
+            aria-current={tab === "profile" ? "page" : undefined}
+            className={tab === "profile" ? "is-active" : ""}
+            onClick={() => setTab("profile")}
+          >
+            Profile
+          </button>
+          <button
+            type="button"
+            aria-current={tab === "connections" ? "page" : undefined}
+            className={tab === "connections" ? "is-active" : ""}
+            onClick={() => setTab("connections")}
+          >
+            Connections
+          </button>
+          <button
+            type="button"
+            aria-current={tab === "security" ? "page" : undefined}
+            className={tab === "security" ? "is-active" : ""}
+            onClick={() => setTab("security")}
+          >
+            Security & sessions
+          </button>
+        </nav>
 
-          <section className="settings-content">
-            {tab === "profile" ? (
-              <div className="form-stack">
-                <div>
-                  <div className="field-label">Email</div>
-                  <p className="mono">{user.email}</p>
-                </div>
-                {user.name ? (
-                  <div>
-                    <div className="field-label">Name</div>
-                    <p>{user.name}</p>
-                  </div>
-                ) : null}
-                <div>
-                  <div className="field-label">Workspace role</div>
-                  <p>
-                    <Badge tone={user.role === "admin" ? "info" : "default"}>{user.role}</Badge>
-                  </p>
-                </div>
-                <div className="session-row">
-                  <span className="muted">End your session on this device.</span>
-                  <Button variant="danger" onClick={onSignOut}>
-                    Sign out
-                  </Button>
-                </div>
+        <section className="settings-content">
+          {tab === "profile" ? (
+            <div className="form-stack">
+              <div>
+                <div className="field-label">Email</div>
+                <p className="mono">{user.email}</p>
               </div>
-            ) : null}
-
-            {tab === "connections" ? (
-              <div className="form-stack" data-testid="connections-panel">
+              {user.name ? (
                 <div>
-                  <div className="eyebrow">Workspace integrations</div>
-                  <h3>Connected services</h3>
-                  <p className="muted">
-                    Authorize providers once, then select their resources while creating projects.
-                  </p>
+                  <div className="field-label">Name</div>
+                  <p>{user.name}</p>
                 </div>
-                {githubCallbackError(githubCallback) ? (
-                  <Alert>{githubCallbackError(githubCallback)}</Alert>
-                ) : null}
-                {connectionError ? <Alert>{connectionError}</Alert> : null}
-                {github === null ? (
-                  <Spinner label="Loading GitHub connection…" />
-                ) : (
-                  <article
-                    className={`connection-card ${openConnection === "github" ? "is-open" : ""}`}
-                  >
-                    <div className="connection-card-head">
-                      <div className="connection-brand">
-                        <span className="connection-icon">GH</span>
-                        <div>
-                          <h4>GitHub</h4>
-                          <p>Repository discovery, creation, branches, and pull requests</p>
-                        </div>
-                      </div>
-                      <div className="connection-card-controls">
-                        <Badge
-                          tone={
-                            !github.configured
-                              ? "default"
-                              : github.user_authorization.connected
-                                ? "success"
-                                : "warn"
-                          }
-                        >
-                          {!github.configured
-                            ? "Not configured"
-                            : github.user_authorization.connected
-                              ? `Authorized as ${github.user_authorization.login}`
-                              : "Authorization required"}
-                        </Badge>
-                        <Button
-                          variant={github.configured ? "ghost" : "primary"}
-                          className="btn-small"
-                          aria-expanded={openConnection === "github"}
-                          aria-controls="github-connection-details"
-                          onClick={() => void toggleConnection("github")}
-                        >
-                          {openConnection === "github"
-                            ? "Hide"
-                            : github.configured
-                              ? "Manage GitHub"
-                              : "Set up GitHub"}
-                        </Button>
-                      </div>
-                    </div>
-                    {openConnection === "github" ? (
-                      <div className="connection-details" id="github-connection-details">
-                        {!github.configured ? (
-                          <div className="connection-setup">
-                            <div>
-                              <strong>Connect GitHub with guided setup</strong>
-                              <p className="muted">
-                                The Norns will preconfigure the App, securely store the credentials,
-                                and continue directly into repository access.
-                              </p>
-                            </div>
-                            {github.setup_available && user.role === "admin" ? (
-                              <form
-                                className="github-manifest-form"
-                                action="/api/integrations/github/manifest/start"
-                                method="get"
-                              >
-                                <Field label="Create the GitHub App under">
-                                  <Select
-                                    name="owner_type"
-                                    value={githubOwnerType}
-                                    onChange={(event) =>
-                                      setGitHubOwnerType(
-                                        event.currentTarget.value as "personal" | "organization",
-                                      )
-                                    }
-                                  >
-                                    <option value="personal">My personal GitHub account</option>
-                                    <option value="organization">A GitHub organization</option>
-                                  </Select>
-                                </Field>
-                                {githubOwnerType === "organization" ? (
-                                  <Field label="Organization name">
-                                    <Input
-                                      name="organization"
-                                      value={githubOrganization}
-                                      onChange={(event) =>
-                                        setGitHubOrganization(event.currentTarget.value)
-                                      }
-                                      placeholder="your-organization"
-                                      autoComplete="off"
-                                      required
-                                    />
-                                  </Field>
-                                ) : null}
-                                <Button
-                                  type="submit"
-                                  variant="primary"
-                                  disabled={
-                                    githubOwnerType === "organization" &&
-                                    githubOrganization.trim().length === 0
-                                  }
-                                >
-                                  Continue with GitHub
-                                </Button>
-                                <p className="field-help">
-                                  GitHub will show the prefilled App for confirmation. No keys or
-                                  callback URLs need to be copied.
-                                </p>
-                              </form>
-                            ) : (
-                              <Alert>
-                                {user.role === "admin"
-                                  ? "Guided setup needs relational identity persistence on this deployment."
-                                  : "A workspace administrator must connect the GitHub App."}
-                              </Alert>
-                            )}
-                            <details>
-                              <summary>Advanced: manage the GitHub App manually</summary>
-                              <p className="muted">
-                                Environment-managed configuration remains available for operators
-                                who do not want The Norns to store App credentials.
-                              </p>
-                              <div className="connection-actions">
-                                <a
-                                  className="btn btn-ghost btn-small"
-                                  href="https://github.com/settings/apps/new"
-                                  target="_blank"
-                                  rel="noreferrer"
-                                >
-                                  Create GitHub App manually ↗
-                                </a>
-                              </div>
-                            </details>
-                          </div>
-                        ) : (
-                          <>
-                            <div className="connection-actions">
-                              <Button
-                                variant={github.user_authorization.connected ? "ghost" : "primary"}
-                                className="btn-small"
-                                disabled={connectionBusy !== null}
-                                onClick={() => void openGitHubFlow("authorize")}
-                              >
-                                {github.user_authorization.connected
-                                  ? "Reconnect identity"
-                                  : "Connect GitHub"}
-                              </Button>
-                              {github.user_authorization.connected ? (
-                                <Button
-                                  className="btn-small"
-                                  disabled={connectionBusy !== null}
-                                  onClick={() => void openGitHubFlow("install")}
-                                >
-                                  Add GitHub account or organization
-                                </Button>
-                              ) : null}
-                              <Button
-                                variant="ghost"
-                                className="btn-small"
-                                disabled={connectionBusy !== null}
-                                onClick={() => void loadGitHub()}
-                              >
-                                Refresh
-                              </Button>
-                            </div>
-                            {github.connections.length ? (
-                              <div className="connection-list">
-                                {github.connections.map((connection) => (
-                                  <div className="connection-row" key={connection.id}>
-                                    <div>
-                                      <strong>{connection.owner_login}</strong>
-                                      <span>
-                                        {connection.owner_type} · {connection.repository_selection}{" "}
-                                        repositories
-                                      </span>
-                                    </div>
-                                    <Badge
-                                      tone={connection.status === "connected" ? "success" : "warn"}
-                                    >
-                                      {connection.status.replaceAll("_", " ")}
-                                    </Badge>
-                                    {user.role === "admin" && connection.status === "connected" ? (
-                                      <Button
-                                        variant="ghost"
-                                        className="btn-small"
-                                        disabled={connectionBusy !== null}
-                                        onClick={() => void disconnect(connection)}
-                                      >
-                                        Disconnect
-                                      </Button>
-                                    ) : user.role === "admin" ? (
-                                      <Button
-                                        className="btn-small"
-                                        disabled={connectionBusy !== null}
-                                        onClick={() => void reconnect(connection)}
-                                      >
-                                        Reconnect
-                                      </Button>
-                                    ) : null}
-                                  </div>
-                                ))}
-                              </div>
-                            ) : (
-                              <p className="muted">
-                                Authorize GitHub, then install The Norns for the account or
-                                organization you want to use.
-                              </p>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    ) : null}
-                  </article>
-                )}
+              ) : null}
+              <div>
+                <div className="field-label">Workspace role</div>
+                <p>
+                  <Badge tone={user.role === "admin" ? "info" : "default"}>{user.role}</Badge>
+                </p>
+              </div>
+              <div className="session-row">
+                <span className="muted">End your session on this device.</span>
+                <Button variant="danger" onClick={onSignOut}>
+                  Sign out
+                </Button>
+              </div>
+            </div>
+          ) : null}
 
+          {tab === "connections" ? (
+            <div className="form-stack" data-testid="connections-panel">
+              <div>
+                <div className="eyebrow">Workspace integrations</div>
+                <h3>Connected services</h3>
+                <p className="muted">
+                  Authorize providers once, then select their resources while creating projects.
+                </p>
+              </div>
+              {githubCallbackError(githubCallback) ? (
+                <Alert>{githubCallbackError(githubCallback)}</Alert>
+              ) : null}
+              {connectionError ? <Alert>{connectionError}</Alert> : null}
+              {github === null ? (
+                <Spinner label="Loading GitHub connection…" />
+              ) : (
                 <article
-                  className={`connection-card ${openConnection === "local" ? "is-open" : ""}`}
+                  className={`connection-card ${openConnection === "github" ? "is-open" : ""}`}
                 >
                   <div className="connection-card-head">
                     <div className="connection-brand">
-                      <span className="connection-icon">⌂</span>
+                      <span className="connection-icon">GH</span>
                       <div>
-                        <h4>Norns Local Agent</h4>
-                        <p>Local coding and approved project folders on this computer</p>
+                        <h4>GitHub</h4>
+                        <p>Repository discovery, creation, branches, and pull requests</p>
                       </div>
                     </div>
                     <div className="connection-card-controls">
-                      <Badge tone={localSources?.state === "connected" ? "success" : "warn"}>
-                        {localSources?.state === "connected"
-                          ? `${localSources.repositories.length} ready`
-                          : (localSources?.state.replaceAll("_", " ") ?? "Checking")}
+                      <Badge
+                        tone={
+                          !github.configured
+                            ? "default"
+                            : github.user_authorization.connected
+                              ? "success"
+                              : "warn"
+                        }
+                      >
+                        {!github.configured
+                          ? "Not configured"
+                          : github.user_authorization.connected
+                            ? `Authorized as ${github.user_authorization.login}`
+                            : "Authorization required"}
                       </Badge>
                       <Button
-                        variant="ghost"
+                        variant={github.configured ? "ghost" : "primary"}
                         className="btn-small"
-                        aria-expanded={openConnection === "local"}
-                        aria-controls="local-connection-details"
-                        onClick={() => void toggleConnection("local")}
+                        aria-expanded={openConnection === "github"}
+                        aria-controls="github-connection-details"
+                        onClick={() => void toggleConnection("github")}
                       >
-                        {openConnection === "local" ? "Hide" : "Manage agent"}
+                        {openConnection === "github"
+                          ? "Hide"
+                          : github.configured
+                            ? "Manage GitHub"
+                            : "Set up GitHub"}
                       </Button>
                     </div>
                   </div>
-                  {openConnection === "local" ? (
-                    <div className="connection-details" id="local-connection-details">
-                      {localSources === null ? (
-                        <Spinner label="Checking Norns Local Agent…" />
+                  {openConnection === "github" ? (
+                    <div className="connection-details" id="github-connection-details">
+                      {!github.configured ? (
+                        <div className="connection-setup">
+                          <div>
+                            <strong>Connect GitHub with guided setup</strong>
+                            <p className="muted">
+                              The Norns will preconfigure the App, securely store the credentials,
+                              and continue directly into repository access.
+                            </p>
+                          </div>
+                          {github.setup_available && user.role === "admin" ? (
+                            <form
+                              className="github-manifest-form"
+                              action="/api/integrations/github/manifest/start"
+                              method="get"
+                            >
+                              <Field label="Create the GitHub App under">
+                                <Select
+                                  name="owner_type"
+                                  value={githubOwnerType}
+                                  onChange={(event) =>
+                                    setGitHubOwnerType(
+                                      event.currentTarget.value as "personal" | "organization",
+                                    )
+                                  }
+                                >
+                                  <option value="personal">My personal GitHub account</option>
+                                  <option value="organization">A GitHub organization</option>
+                                </Select>
+                              </Field>
+                              {githubOwnerType === "organization" ? (
+                                <Field label="Organization name">
+                                  <Input
+                                    name="organization"
+                                    value={githubOrganization}
+                                    onChange={(event) =>
+                                      setGitHubOrganization(event.currentTarget.value)
+                                    }
+                                    placeholder="your-organization"
+                                    autoComplete="off"
+                                    required
+                                  />
+                                </Field>
+                              ) : null}
+                              <Button
+                                type="submit"
+                                variant="primary"
+                                disabled={
+                                  githubOwnerType === "organization" &&
+                                  githubOrganization.trim().length === 0
+                                }
+                              >
+                                Continue with GitHub
+                              </Button>
+                              <p className="field-help">
+                                GitHub will show the prefilled App for confirmation. No keys or
+                                callback URLs need to be copied.
+                              </p>
+                            </form>
+                          ) : (
+                            <Alert>
+                              {user.role === "admin"
+                                ? "Guided setup needs relational identity persistence on this deployment."
+                                : "A workspace administrator must connect the GitHub App."}
+                            </Alert>
+                          )}
+                          <details>
+                            <summary>Advanced: manage the GitHub App manually</summary>
+                            <p className="muted">
+                              Environment-managed configuration remains available for operators who
+                              do not want The Norns to store App credentials.
+                            </p>
+                            <div className="connection-actions">
+                              <a
+                                className="btn btn-ghost btn-small"
+                                href="https://github.com/settings/apps/new"
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                Create GitHub App manually ↗
+                              </a>
+                            </div>
+                          </details>
+                        </div>
                       ) : (
                         <>
-                          <p className="muted">{localSources.message}</p>
-                          {localSources.state === "connected" ? (
-                            <>
-                              <div className="connection-actions">
-                                <Button
-                                  className="btn-small"
-                                  disabled={connectionBusy !== null}
-                                  onClick={() => void addLocalRepository()}
-                                >
-                                  {connectionBusy === "local-choose"
-                                    ? "Opening folder picker…"
-                                    : "Add local repository"}
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  className="btn-small"
-                                  disabled={connectionBusy !== null}
-                                  onClick={() => void loadLocalSources()}
-                                >
-                                  Refresh
-                                </Button>
-                              </div>
-                              {localSources.repositories.length ? (
-                                <div className="connection-list">
-                                  {localSources.repositories.map(({ repository }) => (
-                                    <div className="connection-row" key={repository.repository_id}>
-                                      <div>
-                                        <strong>{repository.repository_display_name}</strong>
-                                        <span>
-                                          {repository.default_branch} · committed{" "}
-                                          {repository.observed_head.slice(0, 8)}
-                                        </span>
-                                      </div>
-                                      <Badge tone="success">Ready</Badge>
-                                    </div>
-                                  ))}
+                          <div className="connection-actions">
+                            <Button
+                              variant={github.user_authorization.connected ? "ghost" : "primary"}
+                              className="btn-small"
+                              disabled={connectionBusy !== null}
+                              onClick={() => void openGitHubFlow("authorize")}
+                            >
+                              {github.user_authorization.connected
+                                ? "Reconnect identity"
+                                : "Connect GitHub"}
+                            </Button>
+                            {github.user_authorization.connected ? (
+                              <Button
+                                className="btn-small"
+                                disabled={connectionBusy !== null}
+                                onClick={() => void openGitHubFlow("install")}
+                              >
+                                Add GitHub account or organization
+                              </Button>
+                            ) : null}
+                            <Button
+                              variant="ghost"
+                              className="btn-small"
+                              disabled={connectionBusy !== null}
+                              onClick={() => void loadGitHub()}
+                            >
+                              Refresh
+                            </Button>
+                          </div>
+                          {github.connections.length ? (
+                            <div className="connection-list">
+                              {github.connections.map((connection) => (
+                                <div className="connection-row" key={connection.id}>
+                                  <div>
+                                    <strong>{connection.owner_login}</strong>
+                                    <span>
+                                      {connection.owner_type} · {connection.repository_selection}{" "}
+                                      repositories
+                                    </span>
+                                  </div>
+                                  <Badge
+                                    tone={connection.status === "connected" ? "success" : "warn"}
+                                  >
+                                    {connection.status.replaceAll("_", " ")}
+                                  </Badge>
+                                  {user.role === "admin" && connection.status === "connected" ? (
+                                    <Button
+                                      variant="ghost"
+                                      className="btn-small"
+                                      disabled={connectionBusy !== null}
+                                      onClick={() => void disconnect(connection)}
+                                    >
+                                      Disconnect
+                                    </Button>
+                                  ) : user.role === "admin" ? (
+                                    <Button
+                                      className="btn-small"
+                                      disabled={connectionBusy !== null}
+                                      onClick={() => void reconnect(connection)}
+                                    >
+                                      Reconnect
+                                    </Button>
+                                  ) : null}
                                 </div>
-                              ) : (
-                                <p className="muted">
-                                  Add a Git repository once; it will then appear in every adoption
-                                  workflow on this computer.
-                                </p>
-                              )}
-                            </>
+                              ))}
+                            </div>
                           ) : (
-                            <>
-                              <div className="connection-actions">
-                                <Button
-                                  className="btn-small"
-                                  disabled={connectionBusy !== null}
-                                  onClick={() => void prepareLocalHelper()}
-                                >
-                                  {connectionBusy === "local-setup"
-                                    ? "Preparing…"
-                                    : localSources.state === "degraded"
-                                      ? "Update Norns Local Agent"
-                                      : "Set up Norns Local Agent"}
-                                </Button>
-                              </div>
-                              {localAgentSetup ? (
-                                <div className="local-agent-setup">
-                                  {localAgentSetup.downloads.windows ||
-                                  localAgentSetup.downloads.macos ? (
-                                    <>
-                                      <div>
-                                        <strong>1. Install Norns Local Agent</strong>
-                                        <p className="muted">
-                                          The installer includes everything the agent needs.
-                                        </p>
-                                      </div>
-                                      <div className="connection-actions">
-                                        {localAgentSetup.downloads.windows ? (
-                                          <a
-                                            className="btn btn-primary btn-small"
-                                            href={localAgentSetup.downloads.windows}
-                                          >
-                                            Download for Windows
-                                          </a>
-                                        ) : null}
-                                        {localAgentSetup.downloads.macos ? (
-                                          <a
-                                            className="btn btn-primary btn-small"
-                                            href={localAgentSetup.downloads.macos}
-                                          >
-                                            {localAgentSetup.downloads.macos_release ===
-                                            "unsigned_preview"
-                                              ? "Download unsigned Mac preview"
-                                              : "Download for Mac"}
-                                          </a>
-                                        ) : null}
-                                      </div>
-                                      {localAgentSetup.downloads.macos_release ===
-                                      "unsigned_preview" ? (
-                                        <Alert>
-                                          This Mac preview is not yet Developer ID signed or
-                                          notarized. macOS may block it. Only use the release from
-                                          the official Norns GitHub repository; if prompted, open
-                                          System Settings → Privacy &amp; Security and choose Open
-                                          Anyway.
-                                        </Alert>
-                                      ) : null}
-                                      <div>
-                                        <strong>2. Connect this computer</strong>
-                                        <p className="muted">
-                                          After installation, this one-use link securely pairs the
-                                          agent with your account.
-                                        </p>
-                                      </div>
-                                      <div className="connection-actions">
-                                        <a
-                                          className="btn btn-primary btn-small"
-                                          href={localAgentSetup.pairing_uri}
-                                        >
-                                          Connect installed agent
-                                        </a>
-                                      </div>
-                                    </>
-                                  ) : (
-                                    <Alert>
-                                      Downloadable installers are not published for this deployment
-                                      yet. Advanced setup remains available below.
-                                    </Alert>
-                                  )}
-                                  <details>
-                                    <summary>Advanced command-line setup</summary>
-                                    <div className="local-helper-command">
-                                      <code>{localAgentSetup.install_command}</code>
-                                      <Button
-                                        variant="ghost"
-                                        className="btn-small"
-                                        onClick={() =>
-                                          void navigator.clipboard.writeText(
-                                            localAgentSetup.install_command,
-                                          )
-                                        }
-                                      >
-                                        Copy Mac/Linux command
-                                      </Button>
-                                    </div>
-                                    <div className="local-helper-command">
-                                      <code>{localAgentSetup.install_command_windows}</code>
-                                      <Button
-                                        variant="ghost"
-                                        className="btn-small"
-                                        onClick={() =>
-                                          void navigator.clipboard.writeText(
-                                            localAgentSetup.install_command_windows,
-                                          )
-                                        }
-                                      >
-                                        Copy Windows command
-                                      </Button>
-                                    </div>
-                                  </details>
-                                </div>
-                              ) : null}
-                            </>
+                            <p className="muted">
+                              Authorize GitHub, then install The Norns for the account or
+                              organization you want to use.
+                            </p>
                           )}
-                          <p className="meta">
-                            Folder paths stay on this computer. The Norns receives an opaque
-                            repository handle and reads only bounded files from committed revisions.
-                          </p>
                         </>
                       )}
                     </div>
                   ) : null}
                 </article>
+              )}
 
-                <article
-                  className={`connection-card is-secondary ${openConnection === "ai" ? "is-open" : ""}`}
-                >
-                  <div className="connection-card-head">
-                    <div className="connection-brand">
-                      <span className="connection-icon">MP</span>
-                      <div>
-                        <h4>Model providers</h4>
-                        <p>OpenAI and Anthropic execution credentials</p>
-                      </div>
-                    </div>
-                    <div className="connection-card-controls">
-                      <Badge tone={aiStatus?.cross_provider_ready ? "success" : "default"}>
-                        {aiStatus?.cross_provider_ready ? "Ready" : "Deployment managed"}
-                      </Badge>
-                      <Button
-                        variant="ghost"
-                        className="btn-small"
-                        aria-expanded={openConnection === "ai"}
-                        aria-controls="ai-connection-details"
-                        onClick={() => void toggleConnection("ai")}
-                      >
-                        {openConnection === "ai" ? "Hide" : "Manage providers"}
-                      </Button>
-                    </div>
-                  </div>
-                  {openConnection === "ai" ? (
-                    <div className="connection-details" id="ai-connection-details">
-                      <p className="muted">
-                        Keys remain in the server secret store. This page shows configuration status
-                        and model routing without exposing secret values.
-                      </p>
-                      <div className="connection-actions">
-                        <Button
-                          variant="ghost"
-                          className="btn-small"
-                          disabled={connectionBusy !== null}
-                          onClick={() => void refreshAiStatus()}
-                        >
-                          Refresh status
-                        </Button>
-                      </div>
-                      {aiStatus === null || connectionBusy === "ai" ? (
-                        <Spinner label="Checking provider configuration…" />
-                      ) : (
-                        <div className="connection-list">
-                          {aiStatus.providers.map((provider) => (
-                            <div className="connection-row provider-row" key={provider.id}>
-                              <div>
-                                <strong>{provider.name}</strong>
-                                <span className="mono">{provider.model}</span>
-                                {!provider.configured ? (
-                                  <span>Required: {provider.required_environment.join(", ")}</span>
-                                ) : null}
-                              </div>
-                              <Badge tone={provider.configured ? "success" : "warn"}>
-                                {provider.configured ? "Configured" : "Action required"}
-                              </Badge>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ) : null}
-                </article>
-              </div>
-            ) : null}
-
-            {tab === "security" ? (
-              <div className="form-stack">
-                <div>
-                  <div className="eyebrow">Account security</div>
-                  <h3>Active sessions</h3>
-                </div>
-                {sessions.length === 0 ? (
-                  <p className="muted">No session inventory available.</p>
-                ) : null}
-                {sessions.map((session) => (
-                  <div className="session-row" key={session.id}>
+              <article className={`connection-card ${openConnection === "local" ? "is-open" : ""}`}>
+                <div className="connection-card-head">
+                  <div className="connection-brand">
+                    <span className="connection-icon">⌂</span>
                     <div>
-                      <Badge tone={session.status === "active" ? "success" : "default"}>
-                        {session.current ? "This session" : session.status}
-                      </Badge>
-                      <p className="muted mono">{session.id.slice(0, 12)}</p>
+                      <h4>Norns Local Agent</h4>
+                      <p>Local coding and approved project folders on this computer</p>
                     </div>
-                    {session.status === "active" && !session.current ? (
+                  </div>
+                  <div className="connection-card-controls">
+                    <Badge tone={localSources?.state === "connected" ? "success" : "warn"}>
+                      {localSources?.state === "connected"
+                        ? `${localSources.repositories.length} ready`
+                        : (localSources?.state.replaceAll("_", " ") ?? "Checking")}
+                    </Badge>
+                    <Button
+                      variant="ghost"
+                      className="btn-small"
+                      aria-expanded={openConnection === "local"}
+                      aria-controls="local-connection-details"
+                      onClick={() => void toggleConnection("local")}
+                    >
+                      {openConnection === "local" ? "Hide" : "Manage agent"}
+                    </Button>
+                  </div>
+                </div>
+                {openConnection === "local" ? (
+                  <div className="connection-details" id="local-connection-details">
+                    {localSources === null ? (
+                      <Spinner label="Checking Norns Local Agent…" />
+                    ) : (
+                      <>
+                        <p className="muted">{localSources.message}</p>
+                        {localSources.state === "connected" ? (
+                          <>
+                            <div className="connection-actions">
+                              <Button
+                                className="btn-small"
+                                disabled={connectionBusy !== null}
+                                onClick={() => void addLocalRepository()}
+                              >
+                                {connectionBusy === "local-choose"
+                                  ? "Opening folder picker…"
+                                  : "Add local repository"}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                className="btn-small"
+                                disabled={connectionBusy !== null}
+                                onClick={() => void loadLocalSources()}
+                              >
+                                Refresh
+                              </Button>
+                            </div>
+                            {localSources.repositories.length ? (
+                              <div className="connection-list">
+                                {localSources.repositories.map(({ repository }) => (
+                                  <div className="connection-row" key={repository.repository_id}>
+                                    <div>
+                                      <strong>{repository.repository_display_name}</strong>
+                                      <span>
+                                        {repository.default_branch} · committed{" "}
+                                        {repository.observed_head.slice(0, 8)}
+                                      </span>
+                                    </div>
+                                    <Badge tone="success">Ready</Badge>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="muted">
+                                Add a Git repository once; it will then appear in every adoption
+                                workflow on this computer.
+                              </p>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <div className="connection-actions">
+                              <Button
+                                className="btn-small"
+                                disabled={connectionBusy !== null}
+                                onClick={() => void prepareLocalHelper()}
+                              >
+                                {connectionBusy === "local-setup"
+                                  ? "Preparing…"
+                                  : localSources.state === "degraded"
+                                    ? "Update Norns Local Agent"
+                                    : "Set up Norns Local Agent"}
+                              </Button>
+                            </div>
+                            {localAgentSetup ? (
+                              <div className="local-agent-setup">
+                                {localAgentSetup.downloads.windows ||
+                                localAgentSetup.downloads.macos ? (
+                                  <>
+                                    <div>
+                                      <strong>1. Install Norns Local Agent</strong>
+                                      <p className="muted">
+                                        The installer includes everything the agent needs.
+                                      </p>
+                                    </div>
+                                    <div className="connection-actions">
+                                      {localAgentSetup.downloads.windows ? (
+                                        <a
+                                          className="btn btn-primary btn-small"
+                                          href={localAgentSetup.downloads.windows}
+                                        >
+                                          Download for Windows
+                                        </a>
+                                      ) : null}
+                                      {localAgentSetup.downloads.macos ? (
+                                        <a
+                                          className="btn btn-primary btn-small"
+                                          href={localAgentSetup.downloads.macos}
+                                        >
+                                          {localAgentSetup.downloads.macos_release ===
+                                          "unsigned_preview"
+                                            ? "Download unsigned Mac preview"
+                                            : "Download for Mac"}
+                                        </a>
+                                      ) : null}
+                                    </div>
+                                    {localAgentSetup.downloads.macos_release ===
+                                    "unsigned_preview" ? (
+                                      <Alert>
+                                        This Mac preview is not yet Developer ID signed or
+                                        notarized. macOS may block it. Only use the release from the
+                                        official Norns GitHub repository; if prompted, open System
+                                        Settings → Privacy &amp; Security and choose Open Anyway.
+                                      </Alert>
+                                    ) : null}
+                                    <div>
+                                      <strong>2. Connect this computer</strong>
+                                      <p className="muted">
+                                        After installation, this one-use link securely pairs the
+                                        agent with your account.
+                                      </p>
+                                    </div>
+                                    <div className="connection-actions">
+                                      <a
+                                        className="btn btn-primary btn-small"
+                                        href={localAgentSetup.pairing_uri}
+                                      >
+                                        Connect installed agent
+                                      </a>
+                                    </div>
+                                  </>
+                                ) : (
+                                  <Alert>
+                                    Downloadable installers are not published for this deployment
+                                    yet. Advanced setup remains available below.
+                                  </Alert>
+                                )}
+                                <details>
+                                  <summary>Advanced command-line setup</summary>
+                                  <div className="local-helper-command">
+                                    <code>{localAgentSetup.install_command}</code>
+                                    <Button
+                                      variant="ghost"
+                                      className="btn-small"
+                                      onClick={() =>
+                                        void navigator.clipboard.writeText(
+                                          localAgentSetup.install_command,
+                                        )
+                                      }
+                                    >
+                                      Copy Mac/Linux command
+                                    </Button>
+                                  </div>
+                                  <div className="local-helper-command">
+                                    <code>{localAgentSetup.install_command_windows}</code>
+                                    <Button
+                                      variant="ghost"
+                                      className="btn-small"
+                                      onClick={() =>
+                                        void navigator.clipboard.writeText(
+                                          localAgentSetup.install_command_windows,
+                                        )
+                                      }
+                                    >
+                                      Copy Windows command
+                                    </Button>
+                                  </div>
+                                </details>
+                              </div>
+                            ) : null}
+                          </>
+                        )}
+                        <p className="meta">
+                          Folder paths stay on this computer. The Norns receives an opaque
+                          repository handle and reads only bounded files from committed revisions.
+                        </p>
+                      </>
+                    )}
+                  </div>
+                ) : null}
+              </article>
+
+              <article
+                className={`connection-card is-secondary ${openConnection === "ai" ? "is-open" : ""}`}
+              >
+                <div className="connection-card-head">
+                  <div className="connection-brand">
+                    <span className="connection-icon">MP</span>
+                    <div>
+                      <h4>Model providers</h4>
+                      <p>OpenAI and Anthropic execution credentials</p>
+                    </div>
+                  </div>
+                  <div className="connection-card-controls">
+                    <Badge tone={aiStatus?.cross_provider_ready ? "success" : "default"}>
+                      {aiStatus?.cross_provider_ready ? "Ready" : "Deployment managed"}
+                    </Badge>
+                    <Button
+                      variant="ghost"
+                      className="btn-small"
+                      aria-expanded={openConnection === "ai"}
+                      aria-controls="ai-connection-details"
+                      onClick={() => void toggleConnection("ai")}
+                    >
+                      {openConnection === "ai" ? "Hide" : "Manage providers"}
+                    </Button>
+                  </div>
+                </div>
+                {openConnection === "ai" ? (
+                  <div className="connection-details" id="ai-connection-details">
+                    <p className="muted">
+                      Keys remain in the server secret store. This page shows configuration status
+                      and model routing without exposing secret values.
+                    </p>
+                    <div className="connection-actions">
                       <Button
                         variant="ghost"
                         className="btn-small"
-                        onClick={() => void revoke(session.id)}
+                        disabled={connectionBusy !== null}
+                        onClick={() => void refreshAiStatus()}
                       >
-                        Revoke
+                        Refresh status
                       </Button>
-                    ) : null}
+                    </div>
+                    {aiStatus === null || connectionBusy === "ai" ? (
+                      <Spinner label="Checking provider configuration…" />
+                    ) : (
+                      <div className="connection-list">
+                        {aiStatus.providers.map((provider) => (
+                          <div className="connection-row provider-row" key={provider.id}>
+                            <div>
+                              <strong>{provider.name}</strong>
+                              <span className="mono">{provider.model}</span>
+                              {!provider.configured ? (
+                                <span>Required: {provider.required_environment.join(", ")}</span>
+                              ) : null}
+                            </div>
+                            <Badge tone={provider.configured ? "success" : "warn"}>
+                              {provider.configured ? "Configured" : "Action required"}
+                            </Badge>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                ))}
-                {sessionError ? <Alert>{sessionError}</Alert> : null}
+                ) : null}
+              </article>
+            </div>
+          ) : null}
+
+          {tab === "security" ? (
+            <div className="form-stack">
+              <div>
+                <div className="eyebrow">Account security</div>
+                <h3>Active sessions</h3>
               </div>
-            ) : null}
-          </section>
-        </div>
+              {sessions.length === 0 ? (
+                <p className="muted">No session inventory available.</p>
+              ) : null}
+              {sessions.map((session) => (
+                <div className="session-row" key={session.id}>
+                  <div>
+                    <Badge tone={session.status === "active" ? "success" : "default"}>
+                      {session.current ? "This session" : session.status}
+                    </Badge>
+                    <p className="muted mono">{session.id.slice(0, 12)}</p>
+                  </div>
+                  {session.status === "active" && !session.current ? (
+                    <Button
+                      variant="ghost"
+                      className="btn-small"
+                      onClick={() => void revoke(session.id)}
+                    >
+                      Revoke
+                    </Button>
+                  ) : null}
+                </div>
+              ))}
+              {sessionError ? <Alert>{sessionError}</Alert> : null}
+            </div>
+          ) : null}
+        </section>
       </main>
     </div>
   );

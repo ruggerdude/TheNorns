@@ -137,7 +137,9 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     );
     await user.click(screen.getByRole("button", { name: "Usage" }));
 
-    expect(await screen.findByRole("heading", { name: "Project usage" })).toBeInTheDocument();
+    // DESIGN R2: the per-scope H1 ("Project usage") was removed; the hub
+    // keeps one "Usage" H1 and the .page-subnav marks the active scope.
+    expect(await screen.findByRole("heading", { name: "Usage", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: projectAlpha.name })).toHaveAttribute(
       "aria-current",
       "page",

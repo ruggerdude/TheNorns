@@ -5972,3 +5972,54 @@ h4 {
 .workspace-settings-card {
   width: 100%;
 }
+
+/* ============================================================
+   DESIGN R2 — shared sub-navigation pattern (.page-subnav)
+   A horizontal tab strip that sits BELOW a page's PageHeader (not
+   inside the topbar): pill/underline tabs, active tab in
+   --brand-600 with a 2px --gold underline, inactive in
+   --ink-muted. Used by UsageHub and Account (settings) — keep both
+   surfaces visually identical when this block changes.
+   ============================================================ */
+.page-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-5);
+  border-bottom: 1px solid var(--line);
+}
+
+.page-subnav button,
+.page-subnav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: var(--space-2) var(--space-1);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.page-subnav button:hover,
+.page-subnav a:hover {
+  color: var(--ink);
+}
+
+.page-subnav button.is-active,
+.page-subnav a.is-active {
+  color: var(--brand-600);
+  border-bottom-color: var(--gold);
+}
+
+@media (max-width: 640px) {
+  .page-subnav {
+    gap: var(--space-1);
+  }
+}
