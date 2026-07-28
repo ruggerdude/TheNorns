@@ -3780,7 +3780,7 @@ export function ConversationWorkspace({
               <h2>Conversations</h2>
               <div>
                 <Button
-                  className="btn-small"
+                  className="btn-small conversation-sidebar-new"
                   aria-label="Start new work"
                   onClick={() => {
                     setSelected(null);
@@ -3792,15 +3792,16 @@ export function ConversationWorkspace({
                     callbacks.current.onNewConversation?.();
                   }}
                 >
-                  New
+                  + New
                 </Button>
                 <Button
-                  className="btn-small"
+                  className="btn-small conversation-sidebar-close"
+                  variant="ghost"
                   aria-label="Close conversations"
                   autoFocus
                   onClick={() => setConversationListOpen(false)}
                 >
-                  Close
+                  <span aria-hidden="true">×</span>
                 </Button>
               </div>
             </div>
@@ -3810,31 +3811,33 @@ export function ConversationWorkspace({
             ) : null}
             <div className="conversation-list">
               {groups?.map((group) => (
-                <section className="conversation-work-group" key={group.work_item.id}>
-                  <h3 title={group.work_item.title}>
-                    {displayConversationTitle(group.work_item.title)}
-                  </h3>
+                <div className="conversation-work-group" key={group.work_item.id}>
                   {group.conversations.map((conversation) => {
                     const active = selected?.conversationId === conversation.id && !showNew;
-                    const usage = group.conversation_usage?.[conversation.id];
                     return (
                       <button
                         type="button"
                         className={`conversation-list-item${active ? " is-active" : ""}`}
+                        data-status={conversation.status}
                         aria-current={active ? "page" : undefined}
                         aria-label={`Open ${conversationKindLabel(conversation.kind)} conversation for ${group.work_item.title} (${conversation.status})`}
                         key={conversation.id}
                         onClick={() => chooseConversation(group.work_item.id, conversation)}
                       >
-                        <span>{conversationKindLabel(conversation.kind)}</span>
-                        <small>
-                          {conversation.status}
-                          {usage && hasRecordedUsage(usage) ? ` · ${usageSummary(usage)}` : ""}
-                        </small>
+                        <strong title={group.work_item.title}>
+                          {displayConversationTitle(group.work_item.title)}
+                        </strong>
+                        <span
+                          className={`conversation-list-status is-${conversation.status}`}
+                          aria-hidden="true"
+                        />
+                        {group.conversations.length > 1 ? (
+                          <small>{conversationKindLabel(conversation.kind)}</small>
+                        ) : null}
                       </button>
                     );
                   })}
-                </section>
+                </div>
               ))}
             </div>
           </aside>

@@ -708,7 +708,11 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   const conversationDrawer = page.getByRole("complementary", { name: "Project conversations" });
   await expect(conversationDrawer).toBeVisible();
   const drawerBox = await conversationDrawer.boundingBox();
-  expect(drawerBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(288);
+  expect(drawerBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(256);
+  await expect(conversationDrawer).not.toContainText(/tokens|requests|\$/i);
+  const conversationPickerRow = conversationDrawer.locator(".conversation-list-item").first();
+  const conversationPickerRowBox = await conversationPickerRow.boundingBox();
+  expect(conversationPickerRowBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(48);
   await page.keyboard.press("Escape");
   await expect(conversationDrawer).toHaveCount(0);
 

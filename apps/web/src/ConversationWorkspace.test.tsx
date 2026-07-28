@@ -2657,16 +2657,16 @@ describe("conversation workspace", () => {
       screen.queryByRole("textbox", { name: "Message the project PM" }),
     ).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Open conversations" }));
-    expect(
-      screen.getByRole("button", {
-        name: `Open Planning conversation for ${workItem.title} (archived)`,
-      }),
-    ).toHaveTextContent("Usage is still settling");
+    const archivedConversationButton = screen.getByRole("button", {
+      name: `Open Planning conversation for ${workItem.title} (archived)`,
+    });
+    expect(archivedConversationButton).toHaveAttribute("data-status", "archived");
+    expect(archivedConversationButton).not.toHaveTextContent(/tokens|requests|usage|\$/i);
     const executionConversationButton = screen.getByRole("button", {
       name: `Open Execution PM conversation for ${workItem.title} (active)`,
     });
-    expect(executionConversationButton).toHaveTextContent("active");
-    expect(executionConversationButton).not.toHaveTextContent("Usage is unavailable");
+    expect(executionConversationButton).toHaveAttribute("data-status", "active");
+    expect(executionConversationButton).not.toHaveTextContent(/tokens|requests|usage|\$/i);
 
     await user.click(screen.getByRole("button", { name: "Close conversations" }));
     await user.click(screen.getByRole("button", { name: "Open execution PM conversation" }));
