@@ -123,7 +123,7 @@ export function Login({
   return (
     <main className="login">
       <section className="login-art">
-        <Brand />
+        <Brand variant="hero" />
         <div className="login-copy">
           <div className="eyebrow">Program management</div>
           <h1>

@@ -49,4 +49,14 @@ describe("application theme", () => {
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
     expect(screen.getByRole("button", { name: /switch to light mode/i })).toBeInTheDocument();
   });
+
+  it("renders the toggle icon-only: no visible Dark/Light text, label via aria-label", () => {
+    render(
+      <ThemeProvider>
+        <ThemeToggle />
+      </ThemeProvider>,
+    );
+    const button = screen.getByRole("button", { name: /switch to dark mode/i });
+    expect(button.textContent).not.toMatch(/dark|light/i);
+  });
 });
