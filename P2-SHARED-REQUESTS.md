@@ -132,7 +132,11 @@ idea applies to these un-namespaced duplicate primitives).
 Append-only. Each entry names the requesting agent, the rule(s), and the exact
 change wanted. The integrating PM applies these to `apps/web/src/styles.css`.
 
-## From P2c (Projects.tsx / portfolio + wizard sweep)
+## From P2c (Projects.tsx / portfolio + wizard sweep) — APPLIED
+
+All items below have been applied to `apps/web/src/styles.css`; the
+matching `TYPE_FLOOR` inline-style workaround has been removed from
+`apps/web/src/Projects.tsx`.
 
 Projects.tsx now carries inline `style={TYPE_FLOOR}` (fontSize: var(--text-xs))
 workarounds on the labels below. Once an item below lands in styles.css, the
