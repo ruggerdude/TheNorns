@@ -93,7 +93,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     expect(screen.queryByTestId("graph-canvas")).not.toBeInTheDocument();
   });
 
-  it("opens project usage as a top-level overlay and returns to the same workspace", async () => {
+  it("opens project usage in the shared sidebar and returns to the same workspace", async () => {
     setToken("present");
     mock = new MockFetch();
     mock.get("/api/projects", { body: [projectAlpha] });
@@ -140,12 +140,16 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     // DESIGN R2: the per-scope H1 ("Project usage") was removed; the hub
     // keeps one "Usage" H1 and the .page-subnav marks the active scope.
     expect(await screen.findByRole("heading", { name: "Usage", level: 1 })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: projectAlpha.name })).toHaveAttribute(
+    const usageScope = screen.getByRole("navigation", { name: "Usage scope" });
+    expect(within(usageScope).getByRole("button", { name: projectAlpha.name })).toHaveAttribute(
       "aria-current",
       "page",
     );
+    expect(screen.getByRole("button", { name: "Usage" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("navigation", { name: "Open projects" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Close" }));
+    await user.click(screen.getByRole("button", { name: `Return to ${projectAlpha.name}` }));
     const workspaceNav = await screen.findByRole("navigation", { name: "Workspace sections" });
     expect(workspaceNav).toBeVisible();
     expect(within(workspaceNav).getByRole("button", { name: "Overview" })).toHaveClass("on");

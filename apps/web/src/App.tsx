@@ -16,6 +16,7 @@ import { pmModelOption } from "@norns/contracts";
 // dormant behind the "No plan yet" hint.
 import type { Connection, Edge, Node } from "@xyflow/react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { SettingsTab } from "./Account";
 import { AnalyzeRepositoryControl } from "./AnalyzeRepositoryControl";
 import { Debates } from "./Debates";
@@ -2814,6 +2815,69 @@ function ProjectGraph({
   );
 }
 
+type GlobalPage = "usage" | "settings" | "admin";
+
+function GlobalPageShell({
+  page,
+  user,
+  activeProject,
+  openProjects,
+  onReturn,
+  onOpenProject,
+  onCloseProject,
+  onOpenUsage,
+  onOpenAccount,
+  onOpenAdmin,
+  onSignOut,
+  children,
+}: {
+  page: GlobalPage;
+  user: CurrentUser;
+  activeProject: ProjectSummary | null;
+  openProjects: ProjectSummary[];
+  onReturn: () => void;
+  onOpenProject: (project: ProjectSummary) => void;
+  onCloseProject: (id: string) => void;
+  onOpenUsage: () => void;
+  onOpenAccount: (tab?: SettingsTab) => void;
+  onOpenAdmin: () => void;
+  onSignOut: () => void;
+  children: ReactNode;
+}): React.ReactElement {
+  return (
+    <div className="app-shell global-page-shell">
+      <header className="topbar">
+        <div className="topbar-main">
+          <Brand />
+          <Button
+            className="btn-small"
+            variant="ghost"
+            aria-label={activeProject ? `Return to ${activeProject.name}` : "Return to Portfolio"}
+            onClick={onReturn}
+          >
+            {activeProject ? "← Project" : "← Portfolio"}
+          </Button>
+        </div>
+        <AuthenticatedHeaderActions
+          user={user}
+          activeView={page}
+          onOpenUsage={onOpenUsage}
+          onOpenAccount={onOpenAccount}
+          onOpenAdmin={onOpenAdmin}
+          onSignOut={onSignOut}
+        />
+      </header>
+      <ProjectTabs
+        projects={openProjects}
+        activeId={activeProject?.id}
+        onSelect={onOpenProject}
+        onClose={onCloseProject}
+      />
+      <div className="global-page-content">{children}</div>
+    </div>
+  );
+}
+
 export function App(): React.ReactElement {
   const [token, setTok] = useState<string | null>(getToken());
   const [authError, setAuthError] = useState<string | null>(null);
@@ -3012,6 +3076,32 @@ export function App(): React.ReactElement {
     setShowAccount(true);
   }, []);
 
+  const openAdmin = useCallback(() => {
+    setShowAccount(false);
+    setShowUsage(false);
+    setShowAdmin(true);
+  }, []);
+
+  const openUsage = useCallback(() => {
+    setShowAccount(false);
+    setShowAdmin(false);
+    setShowUsage(true);
+  }, []);
+
+  const closeGlobalPage = useCallback(() => {
+    setShowAccount(false);
+    setShowAdmin(false);
+    setShowUsage(false);
+  }, []);
+
+  const globalPage: GlobalPage | null = showAccount
+    ? "settings"
+    : showAdmin && user?.role === "admin"
+      ? "admin"
+      : showUsage
+        ? "usage"
+        : null;
+
   if (!token) {
     const mode: LoginMode = recoveryToken
       ? "recovery"
@@ -3039,104 +3129,101 @@ export function App(): React.ReactElement {
     );
   }
 
-  return (
-    <>
-      {/* DESIGN P1: Projects/ProjectGraph topbars carry the toggle inline via
-          AuthenticatedHeaderActions; the full-page overlays (Account, Admin,
-          Usage) don't render those actions yet, so they keep the floating
-          fallback until Phase 2 adopts the shared topbar there. */}
-      {showAccount || showAdmin || showUsage ? (
-        <div className="floating-theme-toggle">
-          <ThemeToggle />
-        </div>
-      ) : null}
-      {showAccount && user ? (
-        <Suspense fallback={<Spinner label="Loading settings…" />}>
-          <Account
-            user={user}
-            onClose={() => setShowAccount(false)}
-            onSignOut={() => logout("Signed out.")}
-            onUnauthorized={() => logout("Session expired. Sign in again.")}
-            initialTab={accountTab}
-            githubCallback={githubCallback}
-          />
-        </Suspense>
-      ) : showAdmin && user?.role === "admin" ? (
-        <Suspense fallback={<Spinner label="Loading administration…" />}>
-          <Admin
-            onClose={() => setShowAdmin(false)}
-            onUnauthorized={() => logout("Session expired. Sign in again.")}
-          />
-        </Suspense>
-      ) : showUsage && user ? (
-        <Suspense fallback={<Spinner label="Loading usage intelligence…" />}>
-          <UsageHub
-            user={user}
-            {...(activeProject
-              ? { project: { id: activeProject.id, name: activeProject.name } }
-              : {})}
-            onClose={() => setShowUsage(false)}
-            onUnauthorized={() => logout("Session expired. Sign in again.")}
-          />
-        </Suspense>
-      ) : !activeProject ? (
-        <Projects
-          onOpenProject={openProject}
-          openProjects={openProjects}
-          onCloseProject={closeProject}
-          onUnauthorized={() => logout("Session expired. Sign in again.")}
-          onSignOut={() => logout("Signed out.")}
-          user={user}
-          onOpenAccount={openAccount}
-          onOpenAdmin={() => {
-            setShowAccount(false);
-            setShowUsage(false);
-            setShowAdmin(true);
-          }}
-          onOpenUsage={() => {
-            setShowAccount(false);
-            setShowAdmin(false);
-            setShowUsage(true);
-          }}
-        />
-      ) : (
-        <ProjectGraph
-          project={activeProject}
-          onBack={() => {
-            setActiveProject(null);
-            setWorkConversationRoute(null);
-            setRoutedProjectId(null);
-            window.history.pushState(null, "", "/");
-          }}
-          openProjects={openProjects}
-          onOpenProject={openProject}
-          onCloseProject={closeProject}
-          onLogout={logout}
-          user={user}
-          onOpenAccount={openAccount}
-          onOpenAdmin={() => {
-            setShowAccount(false);
-            setShowUsage(false);
-            setShowAdmin(true);
-          }}
-          onOpenUsage={() => {
-            setShowAccount(false);
-            setShowAdmin(false);
-            setShowUsage(true);
-          }}
-          initialWorkRoute={workConversationRoute?.projectId === activeProject.id}
-          initialConversationId={
-            workConversationRoute?.projectId === activeProject.id
-              ? workConversationRoute.conversationId
-              : null
-          }
-          onConversationSelected={(conversationId, replace) =>
-            openConversation(activeProject.id, conversationId, replace)
-          }
-          onNewConversation={() => openNewConversation(activeProject.id)}
-          onConversationRouteCleared={() => clearConversationRoute(activeProject.id)}
-        />
-      )}
-    </>
+  if (globalPage && user) {
+    return (
+      <GlobalPageShell
+        page={globalPage}
+        user={user}
+        activeProject={activeProject}
+        openProjects={openProjects}
+        onReturn={closeGlobalPage}
+        onOpenProject={(project) => {
+          closeGlobalPage();
+          openProject(project);
+        }}
+        onCloseProject={closeProject}
+        onOpenUsage={openUsage}
+        onOpenAccount={openAccount}
+        onOpenAdmin={openAdmin}
+        onSignOut={() => logout("Signed out.")}
+      >
+        {globalPage === "settings" ? (
+          <Suspense fallback={<Spinner label="Loading settings…" />}>
+            <Account
+              embedded
+              user={user}
+              onClose={closeGlobalPage}
+              onSignOut={() => logout("Signed out.")}
+              onUnauthorized={() => logout("Session expired. Sign in again.")}
+              initialTab={accountTab}
+              githubCallback={githubCallback}
+            />
+          </Suspense>
+        ) : globalPage === "admin" ? (
+          <Suspense fallback={<Spinner label="Loading administration…" />}>
+            <Admin
+              embedded
+              onClose={closeGlobalPage}
+              onUnauthorized={() => logout("Session expired. Sign in again.")}
+            />
+          </Suspense>
+        ) : (
+          <Suspense fallback={<Spinner label="Loading usage intelligence…" />}>
+            <UsageHub
+              embedded
+              user={user}
+              {...(activeProject
+                ? { project: { id: activeProject.id, name: activeProject.name } }
+                : {})}
+              onClose={closeGlobalPage}
+              onUnauthorized={() => logout("Session expired. Sign in again.")}
+            />
+          </Suspense>
+        )}
+      </GlobalPageShell>
+    );
+  }
+
+  return !activeProject ? (
+    <Projects
+      onOpenProject={openProject}
+      openProjects={openProjects}
+      onCloseProject={closeProject}
+      onUnauthorized={() => logout("Session expired. Sign in again.")}
+      onSignOut={() => logout("Signed out.")}
+      user={user}
+      onOpenAccount={openAccount}
+      onOpenAdmin={openAdmin}
+      onOpenUsage={openUsage}
+    />
+  ) : (
+    <ProjectGraph
+      project={activeProject}
+      onBack={() => {
+        setActiveProject(null);
+        setWorkConversationRoute(null);
+        setRoutedProjectId(null);
+        window.history.pushState(null, "", "/");
+      }}
+      openProjects={openProjects}
+      onOpenProject={openProject}
+      onCloseProject={closeProject}
+      onLogout={logout}
+      user={user}
+      onOpenAccount={openAccount}
+      onOpenAdmin={openAdmin}
+      onOpenUsage={openUsage}
+      initialWorkRoute={workConversationRoute?.projectId === activeProject.id}
+      initialConversationId={
+        workConversationRoute?.projectId === activeProject.id
+          ? workConversationRoute.conversationId
+          : null
+      }
+      onConversationSelected={(conversationId, replace) =>
+        openConversation(activeProject.id, conversationId, replace)
+      }
+      onNewConversation={() => openNewConversation(activeProject.id)}
+      onConversationRouteCleared={() => clearConversationRoute(activeProject.id)}
+    />
   );
 }

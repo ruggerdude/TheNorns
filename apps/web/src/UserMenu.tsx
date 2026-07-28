@@ -72,23 +72,40 @@ export function AuthenticatedHeaderActions({
   onOpenAccount,
   onOpenAdmin,
   onSignOut,
+  activeView = null,
 }: {
   user: CurrentUser;
   onOpenUsage: () => void;
   onOpenAccount: (tab?: SettingsTab) => void;
   onOpenAdmin: () => void;
   onSignOut: () => void;
+  activeView?: "usage" | "settings" | "admin" | null;
 }): React.ReactElement {
   return (
     <div className="header-actions">
-      <Button className="btn-small" variant="ghost" onClick={onOpenUsage}>
+      <Button
+        className={`btn-small${activeView === "usage" ? " is-active" : ""}`}
+        variant="ghost"
+        aria-current={activeView === "usage" ? "page" : undefined}
+        onClick={onOpenUsage}
+      >
         Usage
       </Button>
-      <Button className="btn-small" variant="ghost" onClick={() => onOpenAccount()}>
+      <Button
+        className={`btn-small${activeView === "settings" ? " is-active" : ""}`}
+        variant="ghost"
+        aria-current={activeView === "settings" ? "page" : undefined}
+        onClick={() => onOpenAccount()}
+      >
         Settings
       </Button>
       {user.role === "admin" ? (
-        <Button className="btn-small" variant="ghost" onClick={onOpenAdmin}>
+        <Button
+          className={`btn-small${activeView === "admin" ? " is-active" : ""}`}
+          variant="ghost"
+          aria-current={activeView === "admin" ? "page" : undefined}
+          onClick={onOpenAdmin}
+        >
           Admin
         </Button>
       ) : null}

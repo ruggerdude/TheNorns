@@ -127,7 +127,18 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     expect(headerButtons[4]).toHaveAccessibleName("admin@x.com");
     await user.click(adminButton);
     expect(await screen.findByTestId("admin-panel")).toBeInTheDocument();
-    expect(screen.getByTestId("admin-panel")).toHaveClass("full-page-view");
+    expect(screen.getByTestId("admin-panel")).toHaveClass("embedded-page-view");
+    expect(screen.getByRole("button", { name: "Admin" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Usage" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByTestId("account-panel")).toHaveClass("embedded-page-view");
+    expect(screen.getByRole("button", { name: "Settings" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
     expect(screen.queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument();
   });
 
@@ -162,7 +173,11 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     expect(screen.getByRole("menuitem", { name: "Sign out" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("menuitem", { name: "User settings" }));
-    expect(await screen.findByTestId("account-panel")).toHaveClass("full-page-view");
+    expect(await screen.findByTestId("account-panel")).toHaveClass("embedded-page-view");
+    expect(screen.getByRole("button", { name: "Settings" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
   test("opens personal usage from the authenticated portfolio navigation", async () => {
@@ -204,9 +219,14 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     await user.click(await screen.findByRole("button", { name: "Usage" }));
 
     expect(await screen.findByRole("heading", { name: "Usage", level: 1 })).toBeInTheDocument();
+    expect(screen.getByTestId("usage-panel")).toHaveClass("embedded-page-view");
     expect(screen.getByRole("button", { name: "My usage" })).toHaveAttribute(
       "aria-current",
       "page",
     );
+    expect(screen.getByRole("button", { name: "Usage" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Return to Portfolio" })).toBeInTheDocument();
   });
 });

@@ -536,18 +536,19 @@ test("administrator completes portfolio analytics and project access journeys", 
     )
     .toBe(true);
 
-  await page.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: "Return to Portfolio" }).click();
   await openProject(page);
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Project users, models, providers, and phases" }),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: project.name })).toHaveAttribute(
-    "aria-current",
-    "page",
-  );
-  await page.getByRole("button", { name: "Close" }).click();
+  await expect(
+    page
+      .getByRole("navigation", { name: "Usage scope" })
+      .getByRole("button", { name: project.name }),
+  ).toHaveAttribute("aria-current", "page");
+  await page.getByRole("button", { name: `Return to ${project.name}` }).click();
 
   await page.getByRole("button", { name: "Members" }).click();
   await expect(page.getByRole("heading", { name: "Project members" })).toBeVisible();
@@ -588,16 +589,20 @@ test("standard member can inspect personal and project usage without admin contr
   await expect(page.getByRole("button", { name: "My usage" })).toBeVisible();
   await expect(page.getByRole("button", { name: "All usage" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Analytics" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: "Return to Portfolio" }).click();
 
   await openProject(page);
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
-  await expect(page.getByRole("button", { name: project.name })).toBeVisible();
+  await expect(
+    page
+      .getByRole("navigation", { name: "Usage scope" })
+      .getByRole("button", { name: project.name }),
+  ).toBeVisible();
   await expect(page.getByRole("button", { name: "My usage" })).toBeVisible();
   await expect(page.getByRole("button", { name: "All usage" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Analytics" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: `Return to ${project.name}` }).click();
 
   await page.getByRole("button", { name: "Members" }).click();
   await expect(page.getByRole("heading", { name: "Project members" })).toBeVisible();
@@ -638,7 +643,7 @@ test("administrator edits global NORN.md without losing the current workspace", 
     { content: "# Global rules\n\n- Report blockers every five minutes." },
   ]);
 
-  await adminPanel.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: `Return to ${project.name}` }).click();
   await expect(workspaceNavigation).toBeVisible();
   await expect(workspaceNavigation.getByRole("button", { name: "Overview" })).toHaveAttribute(
     "aria-current",

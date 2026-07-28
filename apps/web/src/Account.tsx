@@ -118,6 +118,7 @@ export function Account({
   onUnauthorized = onSignOut,
   initialTab = "profile",
   githubCallback = null,
+  embedded = false,
 }: {
   user: CurrentUser;
   onClose: () => void;
@@ -125,6 +126,7 @@ export function Account({
   onUnauthorized?: () => void;
   initialTab?: SettingsTab;
   githubCallback?: string | null;
+  embedded?: boolean;
 }): React.ReactElement {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -390,16 +392,18 @@ export function Account({
   };
 
   return (
-    <div className="full-page-view" data-testid="account-panel">
-      <header className="full-page-header">
-        <div className="full-page-header-title">
-          <Brand />
-          <span>Settings</span>
-        </div>
-        <Button variant="ghost" className="btn-small" onClick={onClose}>
-          Close
-        </Button>
-      </header>
+    <div className={embedded ? "embedded-page-view" : "full-page-view"} data-testid="account-panel">
+      {!embedded ? (
+        <header className="full-page-header">
+          <div className="full-page-header-title">
+            <Brand />
+            <span>Settings</span>
+          </div>
+          <Button variant="ghost" className="btn-small" onClick={onClose}>
+            Close
+          </Button>
+        </header>
+      ) : null}
       <main className="page-container page-container-narrow settings-page">
         <PageHeader title="Settings" />
         <nav className="page-subnav" aria-label="Settings sections">

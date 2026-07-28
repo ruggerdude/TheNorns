@@ -12,11 +12,13 @@ export function UsageHub({
   project,
   onClose,
   onUnauthorized,
+  embedded = false,
 }: {
   user: CurrentUser;
   project?: { id: string; name: string };
   onClose: () => void;
   onUnauthorized: () => void;
+  embedded?: boolean;
 }): React.ReactElement {
   const [view, setView] = useState<UsageView>(project ? "project" : "personal");
   const scope: UsageScope =
@@ -27,19 +29,20 @@ export function UsageHub({
         : { kind: "user", id: user.id };
 
   return (
-    <div className="full-page-view">
-      {/* DESIGN R2: the app topbar stays put (brand + location + Close) —
-          it no longer doubles as the sub-page switcher. The scope tabs
-          move into the shared .page-subnav below the "Usage" H1. */}
-      <header className="full-page-header">
-        <div className="full-page-header-title">
-          <Brand />
-          <span>Usage</span>
-        </div>
-        <Button className="btn-small" variant="ghost" onClick={onClose}>
-          Close
-        </Button>
-      </header>
+    <div className={embedded ? "embedded-page-view" : "full-page-view"} data-testid="usage-panel">
+      {/* Scope tabs remain local to Usage while the application shell owns
+          global navigation. Standalone renders retain their close header. */}
+      {!embedded ? (
+        <header className="full-page-header">
+          <div className="full-page-header-title">
+            <Brand />
+            <span>Usage</span>
+          </div>
+          <Button className="btn-small" variant="ghost" onClick={onClose}>
+            Close
+          </Button>
+        </header>
+      ) : null}
       <main className="page-container usage-hub-body">
         <PageHeader title="Usage" />
         <nav aria-label="Usage scope" className="page-subnav">

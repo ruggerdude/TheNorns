@@ -71,9 +71,11 @@ async function inviteRequest(body: unknown): Promise<InviteOutcome> {
 export function Admin({
   onClose,
   onUnauthorized,
+  embedded = false,
 }: {
   onClose: () => void;
   onUnauthorized: () => void;
+  embedded?: boolean;
 }): React.ReactElement {
   const [users, setUsers] = useState<UserSummary[] | null>(null);
   const [globalRules, setGlobalRules] = useState<GlobalRulesDto | null>(null);
@@ -198,16 +200,18 @@ export function Admin({
   }, [fail, globalRulesDraft]);
 
   return (
-    <div className="full-page-view" data-testid="admin-panel">
-      <header className="full-page-header">
-        <div className="full-page-header-title">
-          <Brand />
-          <span>Administration</span>
-        </div>
-        <Button variant="ghost" className="btn-small" onClick={onClose}>
-          Close
-        </Button>
-      </header>
+    <div className={embedded ? "embedded-page-view" : "full-page-view"} data-testid="admin-panel">
+      {!embedded ? (
+        <header className="full-page-header">
+          <div className="full-page-header-title">
+            <Brand />
+            <span>Administration</span>
+          </div>
+          <Button variant="ghost" className="btn-small" onClick={onClose}>
+            Close
+          </Button>
+        </header>
+      ) : null}
       <main className="page-container admin-page">
         <PageHeader
           eyebrow="Workspace controls"

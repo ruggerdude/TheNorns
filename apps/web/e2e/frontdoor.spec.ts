@@ -135,6 +135,20 @@ async function prepare(
         status: "active",
       });
     }
+    if (path === "/api/auth/sessions") {
+      return fulfill(route, { sessions: [] });
+    }
+    if (path === "/api/admin/users") {
+      return fulfill(route, []);
+    }
+    if (path === "/api/v2/admin/rules") {
+      return fulfill(route, {
+        filename: "NORN.md",
+        content: "",
+        version: 1,
+        updated_at: null,
+      });
+    }
     if (path === "/api/projects" && request.method() === "GET") {
       return fulfill(route, projects);
     }
@@ -177,6 +191,34 @@ async function prepare(
           },
         ],
       });
+    }
+    if (path.startsWith("/api/usage/") && path.endsWith("/summary")) {
+      return fulfill(route, {
+        requests: 1,
+        succeeded_requests: 1,
+        failed_requests: 0,
+        in_progress_requests: 0,
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        cost_usd: 0.01,
+        known_cost_usd: 0.01,
+        priced_requests: 1,
+        unpriced_requests: 0,
+        average_latency_ms: 200,
+        average_output_tokens: 20,
+        average_known_cost_usd: 0.01,
+      });
+    }
+    if (path.startsWith("/api/usage/") && path.endsWith("/timeseries")) {
+      return fulfill(route, { interval: "day", points: [] });
+    }
+    if (path.startsWith("/api/usage/") && path.endsWith("/events")) {
+      return fulfill(route, { events: [], limit: 100, offset: 0, has_more: false });
+    }
+    if (path.startsWith("/api/usage/") && path.endsWith("/breakdown")) {
+      return fulfill(route, { breakdowns: [] });
     }
     if (path === "/api/v2/projects/onboarding") {
       const body = request.postDataJSON() as {
@@ -649,4 +691,53 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   expect(compactHeaderBox?.width).toBe(820);
   expect(compactHeaderBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(100);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(820);
+});
+
+test("Usage, Settings, and Admin use the regular application sidebar", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await prepare(page, "github");
+  await page.goto("/");
+  await selectExistingGitHubRepository(page);
+  await page.getByRole("button", { name: /adopt project/i }).click();
+  await expectWorkspaceNavigation(page);
+
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect(page.getByTestId("usage-panel")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Usage", exact: true })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await expect(page.getByRole("navigation", { name: "Open projects" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Close", exact: true })).toHaveCount(0);
+
+  const globalRail = page.locator(".global-page-shell > .topbar");
+  const globalRailBox = await globalRail.boundingBox();
+  expect(globalRailBox).not.toBeNull();
+  expect(globalRailBox?.x).toBe(0);
+  expect(globalRailBox?.width).toBe(248);
+  expect(globalRailBox?.height).toBe(1080);
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.getByTestId("account-panel")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Settings", exact: true })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await expect(globalRail).toBeVisible();
+
+  await page.getByRole("button", { name: "Admin", exact: true }).click();
+  await expect(page.getByTestId("admin-panel")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Admin", exact: true })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await expect(globalRail).toBeVisible();
+
+  await page.getByRole("button", { name: "Return to front-door-app" }).click();
+  await expect(page.getByRole("navigation", { name: "Workspace sections" })).toBeVisible();
+
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await expect(page.locator(".workspace-shell > .project-tabs")).toBeHidden();
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect(page.getByTestId("usage-panel")).toBeVisible();
 });
