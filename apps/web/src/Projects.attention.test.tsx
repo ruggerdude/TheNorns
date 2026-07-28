@@ -136,9 +136,8 @@ describe("Phase 5 attention-first portfolio", () => {
   afterEach(() => mock.restore());
 
   it("leads with strategic attention and opens the affected project", async () => {
-    expect(
-      await screen.findByRole("heading", { name: "What needs your attention?" }),
-    ).toBeVisible();
+    // DESIGN R2: the attention panel is titled just "Status".
+    expect(await screen.findByRole("heading", { name: "Status", level: 2 })).toBeVisible();
     expect(screen.getByText("Retry the stalled release run?")).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Open project" }));
     expect(onOpenProject).toHaveBeenCalledWith({

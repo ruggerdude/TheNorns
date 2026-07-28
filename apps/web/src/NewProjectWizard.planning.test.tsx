@@ -1,3 +1,7 @@
+// DESIGN R2: the wizard is name-first. The single required field is the
+// project name (used directly for the project and repo slug); the project is
+// created with an empty description and NO wizard planning kickoff — planning
+// begins in the conversation after creation.
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -17,7 +21,7 @@ const connection = (id: string, owner: string) => ({
   last_validated_at: "2026-07-16T20:00:00Z",
 });
 
-describe("new project: one brief to canonical planning", () => {
+describe("new project: name-first creation, planning in the conversation", () => {
   let mock = new MockFetch();
   const onOpenProject = vi.fn<(project: ProjectSummary) => void>();
   const onOpenAccount = vi.fn();
@@ -69,21 +73,6 @@ describe("new project: one brief to canonical planning", () => {
       };
     });
     mock.del("/api/v2/projects/proj_wizard/planning-reviewer", { status: 204 });
-    mock.post("/api/v2/projects/proj_wizard/planning-runs", {
-      status: 202,
-      body: { planning_run_id: "run_1" },
-    });
-    mock.post("/api/v2/projects/proj_wizard/attachments", {
-      status: 201,
-      body: {
-        id: "att_1",
-        mime: "image/png",
-        bytes: 4,
-        width: 1,
-        height: 1,
-        purpose: "objective",
-      },
-    });
     mock.install();
     render(
       <Projects
@@ -103,7 +92,7 @@ describe("new project: one brief to canonical planning", () => {
     await userEvent.click(await screen.findByRole("button", { name: /new project/i }));
   }
 
-  it("derives a concise name and valid repository slug from the brief", () => {
+  it("derives a concise name and valid repository slug", () => {
     expect(
       deriveProjectIdentity("Build a lightweight habit tracker for distributed teams."),
     ).toEqual({
@@ -116,23 +105,20 @@ describe("new project: one brief to canonical planning", () => {
     });
   });
 
-  it("uses the sole destination automatically and needs only the brief", async () => {
+  it("uses the sole destination automatically and needs only the project name", async () => {
     setup();
     const user = userEvent.setup();
     await openWizard();
 
     expect(screen.getByTestId("automatic-github-destination")).toHaveTextContent("octocat");
     expect(screen.queryByTestId("github-connection")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /create & start planning/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /create project/i })).toBeDisabled();
 
-    await user.type(
-      screen.getByTestId("project-description"),
-      "Build a lightweight habit tracker for distributed teams.",
-    );
+    await user.type(screen.getByTestId("project-name"), "Lightweight habit tracker");
     expect(screen.getByTestId("derived-project-summary")).toHaveTextContent(
-      "Lightweight habit tracker for distributed teams",
+      "Lightweight habit tracker",
     );
-    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
+    await user.click(screen.getByRole("button", { name: /create project/i }));
 
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     expect(
@@ -142,20 +128,33 @@ describe("new project: one brief to canonical planning", () => {
     ).toMatchObject({
       body: {
         scenario: "new_repo",
-        name: "Lightweight habit tracker for distributed teams",
-        description: "Build a lightweight habit tracker for distributed teams.",
+        name: "Lightweight habit tracker",
+        description: "",
         connection_id: "github:42",
-        repository_name: "lightweight-habit-tracker-for-distributed-teams",
+        repository_name: "lightweight-habit-tracker",
         private: true,
       },
     });
     expect(onOpenProject).toHaveBeenCalledWith(
       expect.objectContaining({
         id: "proj_wizard",
-        focus_planning_run_id: "run_1",
         entry_flow: "new",
       }),
     );
+  });
+
+  it("does not start a planning run at creation — planning happens in the conversation", async () => {
+    setup();
+    const user = userEvent.setup();
+    await openWizard();
+    await user.type(screen.getByTestId("project-name"), "Incident timeline");
+    await user.click(screen.getByRole("button", { name: /create project/i }));
+
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
+    expect(
+      mock.calls.some((call) => call.method === "POST" && call.url.endsWith("/planning-runs")),
+    ).toBe(false);
+    expect(onOpenProject.mock.calls[0]?.[0]?.focus_planning_run_id).toBeUndefined();
   });
 
   it("shows destination choice only when it changes repository ownership", async () => {
@@ -163,8 +162,8 @@ describe("new project: one brief to canonical planning", () => {
     const user = userEvent.setup();
     await openWizard();
     await user.selectOptions(screen.getByTestId("github-connection"), "github:84");
-    await user.type(screen.getByTestId("project-description"), "Create an incident timeline.");
-    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
+    await user.type(screen.getByTestId("project-name"), "Incident timeline");
+    await user.click(screen.getByRole("button", { name: /create project/i }));
 
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     expect(
@@ -174,21 +173,16 @@ describe("new project: one brief to canonical planning", () => {
     ).toMatchObject({ body: { connection_id: "github:84" } });
   });
 
-  it("applies identity, visibility, rounds, and attachment overrides downstream", async () => {
+  it("applies slug and visibility overrides, without a reference-images input", async () => {
     setup();
     const user = userEvent.setup();
     await openWizard();
-    await user.type(screen.getByTestId("project-description"), "Build a searchable docs corpus.");
-    await user.click(screen.getByText("Optional details"));
     await user.type(screen.getByTestId("project-name"), "Ravel Search");
+    await user.click(screen.getByText("Options"));
+    expect(screen.queryByTestId("new-project-attachment-input")).not.toBeInTheDocument();
     await user.type(screen.getByTestId("github-new-repository-name"), "ravel-index");
     await user.selectOptions(screen.getByTestId("github-repository-visibility"), "public");
-    await user.click(screen.getByRole("button", { name: /more rounds/i }));
-    const file = new File([new Uint8Array([1, 2, 3, 4])], "reference.png", {
-      type: "image/png",
-    });
-    await user.upload(screen.getByTestId("new-project-attachment-input"), file);
-    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
+    await user.click(screen.getByRole("button", { name: /create project/i }));
 
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
     expect(
@@ -202,71 +196,30 @@ describe("new project: one brief to canonical planning", () => {
         private: false,
       },
     });
-    expect(
-      mock.calls.find((call) => call.method === "POST" && call.url.endsWith("/planning-runs")),
-    ).toMatchObject({
-      body: {
-        objective: "Build a searchable docs corpus.",
-        max_rounds: 4,
-        attachment_ids: ["att_1"],
-      },
-    });
   });
 
-  it("retains the created project and retries planning without creating again", async () => {
+  it("allows zero plan review rounds and says review is off", async () => {
     setup();
-    mock.post("/api/v2/projects/proj_wizard/planning-runs", {
-      status: 500,
-      body: { message: "planning worker unavailable" },
-    });
     const user = userEvent.setup();
     await openWizard();
-    await user.type(screen.getByTestId("project-description"), "Rebuild mobile onboarding.");
-    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
+    await user.type(screen.getByTestId("project-name"), "Ravel Search");
+    await user.click(screen.getByText("Options"));
 
-    expect(await screen.findByTestId("planning-run-error")).toHaveTextContent(
-      "planning worker unavailable",
-    );
-    expect(screen.getAllByText("Rebuild mobile onboarding").length).toBeGreaterThan(0);
-    expect(onOpenProject).not.toHaveBeenCalled();
+    expect(screen.getByText("Cross-provider review is on.")).toBeInTheDocument();
+    const fewer = screen.getByRole("button", { name: /fewer rounds/i });
+    await user.click(fewer);
+    await user.click(fewer);
+    await user.click(fewer);
+    expect(screen.getByTestId("rounds-stepper")).toHaveTextContent("0");
+    expect(fewer).toBeDisabled();
+    expect(screen.getByText("Plan review is off.")).toBeInTheDocument();
+    expect(screen.queryByText("Cross-provider review is on.")).not.toBeInTheDocument();
 
-    mock.post("/api/v2/projects/proj_wizard/planning-runs", {
-      status: 202,
-      body: { planning_run_id: "run_1" },
-    });
-    await user.click(screen.getByRole("button", { name: /retry planning/i }));
-    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
-    expect(
-      mock.calls.filter(
-        (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
-      ),
-    ).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: /more rounds/i }));
+    expect(screen.getByText("Cross-provider review is on.")).toBeInTheDocument();
   });
 
-  it("recovers a planning run whose successful response was lost", async () => {
-    setup();
-    mock.networkError(
-      "POST",
-      "/api/v2/projects/proj_wizard/planning-runs",
-      "connection reset after commit",
-    );
-    mock.get("/api/v2/projects/proj_wizard/planning-runs/latest", {
-      body: { planning_run: { id: "run_recovered", status: "queued" } },
-    });
-    const user = userEvent.setup();
-    await openWizard();
-    await user.type(screen.getByTestId("project-description"), "Create an incident timeline.");
-    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
-
-    await waitFor(() =>
-      expect(onOpenProject).toHaveBeenCalledWith(
-        expect.objectContaining({ focus_planning_run_id: "run_recovered", entry_flow: "new" }),
-      ),
-    );
-    expect(screen.queryByTestId("planning-run-error")).not.toBeInTheDocument();
-  });
-
-  it("does not show success or start planning when repository creation fails", async () => {
+  it("does not show success or navigate when repository creation fails", async () => {
     setup();
     mock.post("/api/v2/projects/onboarding", {
       status: 503,
@@ -274,14 +227,13 @@ describe("new project: one brief to canonical planning", () => {
     });
     const user = userEvent.setup();
     await openWizard();
-    await user.type(screen.getByTestId("project-description"), "Create an incident timeline.");
-    await user.click(screen.getByRole("button", { name: /create & start planning/i }));
+    await user.type(screen.getByTestId("project-name"), "Incident timeline");
+    await user.click(screen.getByRole("button", { name: /create project/i }));
 
     expect(await screen.findByText("GitHub repository creation unavailable")).toBeInTheDocument();
     expect(onOpenProject).not.toHaveBeenCalled();
     expect(
       mock.calls.some((call) => call.method === "POST" && call.url.endsWith("/planning-runs")),
     ).toBe(false);
-    expect(screen.queryByTestId("wizard-attach-step")).not.toBeInTheDocument();
   });
 });

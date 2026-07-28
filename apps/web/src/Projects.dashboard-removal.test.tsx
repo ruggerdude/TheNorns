@@ -52,18 +52,26 @@ describe("project dashboard entry and removal", () => {
     );
   }
 
-  it("starts with project content and puts New project in Quick access", async () => {
+  it("starts with a Portfolio page title and New project centered at the top of the page", async () => {
     setup();
     await screen.findByRole("link", { name: "Enter Alpha" });
 
     expect(screen.queryByText("Keep every project in motion.")).not.toBeInTheDocument();
     expect(screen.queryByText("Portfolio command center")).not.toBeInTheDocument();
+    // DESIGN R2: "Portfolio" is the page's one true H1; the eyebrow/lede
+    // helper copy around the section headings is gone.
+    expect(screen.getByRole("heading", { name: "Portfolio", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText("Your open and recent projects")).not.toBeInTheDocument();
+    expect(screen.queryByText("Delivery detail")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Phase-by-phase progress, ownership, and next action."),
+    ).not.toBeInTheDocument();
+    // DESIGN R2: the create action moved out of Quick access to the top of
+    // the page (not in the topbar, not inside any section).
     const createButton = screen.getByRole("button", { name: "+ New project" });
-    expect(createButton.closest("section")).toHaveAttribute(
-      "aria-labelledby",
-      "quick-access-heading",
-    );
+    expect(createButton.closest("section")).toBeNull();
     expect(createButton.closest("header")).toBeNull();
+    expect(createButton.closest(".portfolio-primary-action")).not.toBeNull();
   });
 
   it("opens project setup as a dedicated page and returns to the dashboard", async () => {
@@ -73,7 +81,9 @@ describe("project dashboard entry and removal", () => {
     await userEvent.click(screen.getByRole("button", { name: "+ New project" }));
 
     expect(screen.getByRole("main", { name: "New project" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Project setup", level: 1 })).toBeInTheDocument();
+    // DESIGN R2: no in-page "Project setup" heading — the topbar location
+    // "New project" is the page title.
+    expect(screen.queryByRole("heading", { name: "Project setup" })).not.toBeInTheDocument();
     expect(screen.queryByText("Guided setup")).not.toBeInTheDocument();
     expect(screen.queryByText("Let's set the brief")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Quick access" })).not.toBeInTheDocument();

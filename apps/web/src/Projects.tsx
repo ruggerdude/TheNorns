@@ -1493,12 +1493,11 @@ export function Projects({
             )}
           </section>
 
-          <section
-            className="focus-panel portfolio-pulse-panel"
-            aria-labelledby="portfolio-pulse-heading"
-          >
-            <div className="focus-panel-head">
-              <h2 id="portfolio-pulse-heading">Status</h2>
+          {/* DESIGN R2: the "Portfolio status" heading is removed — the panel
+              keeps its content and leads with the state badge; the section
+              stays labelled for assistive tech only. */}
+          <section className="focus-panel portfolio-pulse-panel" aria-label="Portfolio status">
+            <div className="focus-panel-head" style={{ justifyContent: "flex-end" }}>
               <Badge
                 tone={
                   portfolioState === "Needs attention"
