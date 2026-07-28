@@ -1966,9 +1966,7 @@ function ProjectGraph({
                   {resume.architecture ? (
                     <div data-testid="resume-architecture">
                       <strong>{resume.architecture.title}</strong>
-                      <p className="muted">
-                        {resume.architecture.summary}
-                      </p>
+                      <p className="muted">{resume.architecture.summary}</p>
                     </div>
                   ) : null}
                   {/* POLISH P3: `next_recommended_action` is guidance, not a
