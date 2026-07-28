@@ -6003,7 +6003,8 @@ h4 {
     display: grid;
     min-width: 0;
     gap: 0.15rem;
-    padding: 0.25rem 0;
+    padding: 0.25rem 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--line);
   }
 
   .workspace-rail-project > strong {
@@ -6018,15 +6019,20 @@ h4 {
   .workspace-nav-start > .btn,
   .global-page-shell .topbar-main > .btn,
   .full-page-header > .btn {
+    display: flex;
+    align-items: center;
     width: 100%;
     justify-content: flex-start;
+    text-align: left;
   }
 
   .topbar .header-actions {
     display: grid;
     width: 100%;
     margin-top: auto;
-    gap: 0.3rem;
+    padding-top: 0.75rem;
+    gap: 0.25rem;
+    border-top: 1px solid var(--line);
   }
 
   .topbar .header-actions > .btn,
@@ -6039,7 +6045,10 @@ h4 {
 
   .topbar .header-actions > .btn,
   .topbar .user-chip {
+    display: flex;
+    align-items: center;
     justify-content: flex-start;
+    text-align: left;
   }
 
   .topbar .header-actions > .btn.is-active {
@@ -6060,12 +6069,9 @@ h4 {
   }
 
   .workspace-tabs {
-    position: fixed;
-    top: 9.2rem;
-    left: 1rem;
-    z-index: 35;
+    position: static;
     display: grid;
-    width: calc(var(--app-navigation-width) - 2rem);
+    width: 100%;
     gap: 0.25rem;
     margin: 0;
     padding: 0;
@@ -6112,5 +6118,36 @@ h4 {
     height: 100%;
     min-height: 0;
     max-height: none;
+  }
+}
+
+@media (max-width: 900px) {
+  /* On compact screens the same navigation stays in the sticky header as a
+     second row. The project rail therefore has one structural order at every
+     size instead of maintaining a separate, position-dependent copy. */
+  .workspace-shell > .topbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    height: auto;
+    min-height: 64px;
+    padding-block: 0.5rem 0;
+    gap: 0.45rem 0.75rem;
+  }
+
+  .workspace-shell > .topbar > .workspace-tabs {
+    position: static;
+    grid-column: 1 / -1;
+    width: 100%;
+    margin: 0;
+    padding: 0.35rem 0 0.5rem;
+    border: 0;
+    border-top: 1px solid var(--line);
+    border-radius: 0;
+    background: transparent;
+    backdrop-filter: none;
+  }
+
+  .workspace-shell > .topbar > .workspace-tabs button {
+    min-height: 40px;
   }
 }

@@ -650,6 +650,23 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await expect(page.getByRole("navigation", { name: "Open projects" })).toHaveCount(0);
 
   const workspaceNavigation = page.getByRole("navigation", { name: "Workspace sections" });
+  const projectContextBox = await projectContext.boundingBox();
+  const workspaceNavigationBox = await workspaceNavigation.boundingBox();
+  expect(projectContextBox).not.toBeNull();
+  expect(workspaceNavigationBox).not.toBeNull();
+  expect(workspaceNavigationBox?.y ?? 0).toBeGreaterThanOrEqual(
+    (projectContextBox?.y ?? 0) + (projectContextBox?.height ?? 0) + 8,
+  );
+
+  const portfolioButtonBox = await page.getByRole("button", { name: "← Portfolio" }).boundingBox();
+  const usageButtonBox = await page
+    .getByRole("button", { name: "Usage", exact: true })
+    .boundingBox();
+  expect(portfolioButtonBox?.x).toBe(16);
+  expect(usageButtonBox?.x).toBe(16);
+  expect(portfolioButtonBox?.width ?? 0).toBeGreaterThanOrEqual(214);
+  expect(usageButtonBox?.width).toBe(portfolioButtonBox?.width);
+
   const workTab = workspaceNavigation.getByRole("button", { name: /work$/i });
   await workTab.click();
   await expect(workTab).toHaveAttribute("aria-current", "page");
@@ -695,12 +712,18 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await page.keyboard.press("Escape");
   await expect(conversationDrawer).toHaveCount(0);
 
+  await page.setViewportSize({ width: 1280, height: 720 });
+  const shortRailBox = await navigationRail.boundingBox();
+  const userMenuBox = await page.locator(".user-chip").boundingBox();
+  expect(shortRailBox?.height).toBe(720);
+  expect((userMenuBox?.y ?? 0) + (userMenuBox?.height ?? 0)).toBeLessThanOrEqual(704);
+
   await page.setViewportSize({ width: 820, height: 900 });
   const compactHeaderBox = await navigationRail.boundingBox();
   expect(compactHeaderBox).not.toBeNull();
   expect(compactHeaderBox?.x).toBe(0);
   expect(compactHeaderBox?.width).toBe(820);
-  expect(compactHeaderBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(100);
+  expect(compactHeaderBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(160);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(820);
 });
 

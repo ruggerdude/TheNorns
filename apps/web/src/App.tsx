@@ -1755,46 +1755,8 @@ function ProjectGraph({
             <strong title={project.name}>{project.name}</strong>
           </div>
         </div>
-        {user ? (
-          <AuthenticatedHeaderActions
-            user={user}
-            onOpenUsage={onOpenUsage}
-            onOpenAccount={onOpenAccount}
-            onOpenAdmin={onOpenAdmin}
-            onSignOut={() => onLogout("Signed out.")}
-          />
-        ) : null}
-      </header>
-      <main className={`page workspace-page workspace-page-${workspaceTab}`}>
-        <div className="project-heading workspace-header">
-          <div className="eyebrow">Workspace</div>
-          <h1>{project.name}</h1>
-          <div className="meta">
-            <Badge
-              tone={
-                projectNeedsAttention ? "danger" : project.status === "planned" ? "success" : "warn"
-              }
-            >
-              {projectNeedsAttention ? "needs attention" : project.status}
-            </Badge>
-            <span className="chip model-c">
-              {project.pm_model
-                ? (pmModelOption(project.pm_model)?.label ?? project.pm_model)
-                : `${project.pm_provider} default (legacy)`}{" "}
-              · Coordinator
-            </span>
-            <span className="chip model-g">{project.reviewer_provider} · Reviewer</span>
-          </div>
-          {project.source_location ? (
-            <div className="project-detail-source" title={project.source_location}>
-              <span>{project.source_type === "github" ? "GitHub" : "Local"}</span>
-              {project.source_location}
-            </div>
-          ) : null}
-        </div>
-
-        {/* Project navigation keeps optional planning inside Overview and
-         * treats Work, Members, and Debates as first-class workspace subpages. */}
+        {/* Keep project identity and its sections in one rail flow. This avoids
+            the title and navigation drifting into each other as copy changes. */}
         <nav className="workspace-tabs" aria-label="Workspace sections">
           <button
             type="button"
@@ -1845,6 +1807,43 @@ function ProjectGraph({
             Settings
           </button>
         </nav>
+        {user ? (
+          <AuthenticatedHeaderActions
+            user={user}
+            onOpenUsage={onOpenUsage}
+            onOpenAccount={onOpenAccount}
+            onOpenAdmin={onOpenAdmin}
+            onSignOut={() => onLogout("Signed out.")}
+          />
+        ) : null}
+      </header>
+      <main className={`page workspace-page workspace-page-${workspaceTab}`}>
+        <div className="project-heading workspace-header">
+          <div className="eyebrow">Workspace</div>
+          <h1>{project.name}</h1>
+          <div className="meta">
+            <Badge
+              tone={
+                projectNeedsAttention ? "danger" : project.status === "planned" ? "success" : "warn"
+              }
+            >
+              {projectNeedsAttention ? "needs attention" : project.status}
+            </Badge>
+            <span className="chip model-c">
+              {project.pm_model
+                ? (pmModelOption(project.pm_model)?.label ?? project.pm_model)
+                : `${project.pm_provider} default (legacy)`}{" "}
+              · Coordinator
+            </span>
+            <span className="chip model-g">{project.reviewer_provider} · Reviewer</span>
+          </div>
+          {project.source_location ? (
+            <div className="project-detail-source" title={project.source_location}>
+              <span>{project.source_type === "github" ? "GitHub" : "Local"}</span>
+              {project.source_location}
+            </div>
+          ) : null}
+        </div>
 
         {workspaceTab === "overview" ? (
           <div className="workspace-tab-panel" data-testid="workspace-tab-overview">
