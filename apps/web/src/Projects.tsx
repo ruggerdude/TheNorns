@@ -497,6 +497,13 @@ export function Projects({
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [dialog, setDialog] = useState(false);
+  // DESIGN P1 bug fix: the New Project view is a full page swapped in-place,
+  // so the document keeps whatever scroll offset the dashboard had (and the
+  // objective textarea's old autoFocus used to yank it further down). Land at
+  // the top like a real page navigation.
+  useEffect(() => {
+    if (dialog) window.scrollTo(0, 0);
+  }, [dialog]);
   // Starting point and source are independent. New work can create a GitHub
   // repository or use an already-initialized local Git repository approved in
   // Connections; Existing work can adopt either source.
@@ -2119,8 +2126,11 @@ export function Projects({
       </main>
 
       {dialog ? (
-        <main className="page wizard-page" aria-label="New project">
-          <header className="full-page-header project-setup-header">
+        <>
+          {/* DESIGN P1 bug fix: the header sits OUTSIDE the width-constrained
+              main so the canonical sticky .full-page-header spans the full
+              viewport like every other screen's top strip. */}
+          <header className="full-page-header">
             <div className="full-page-header-title">
               <Brand />
               <span>New project</span>
@@ -2129,7 +2139,8 @@ export function Projects({
               ← Dashboard
             </Button>
           </header>
-          <div className="project-setup-title">
+          <main className="page wizard-page" aria-label="New project">
+            <div className="project-setup-title">
             <div className="eyebrow">New project</div>
             <h1>Project setup</h1>
           </div>
@@ -2585,7 +2596,6 @@ export function Projects({
                         value={description}
                         onChange={(event) => setDescription(event.target.value)}
                         placeholder="Describe the product, outcome, and any important constraints."
-                        autoFocus
                       />
                     </Field>
                     {description.trim() ? (
@@ -2824,7 +2834,8 @@ export function Projects({
               </div>
             )}
           </section>
-        </main>
+          </main>
+        </>
       ) : null}
     </div>
   );

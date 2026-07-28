@@ -3019,7 +3019,11 @@ export function App(): React.ReactElement {
           : "login";
     return (
       <>
-        <ThemeToggle />
+        {/* DESIGN P1: the toggle lives in topbar actions on shell screens; the
+            login screen has no topbar yet, so it keeps a floating fallback. */}
+        <div className="floating-theme-toggle">
+          <ThemeToggle />
+        </div>
         <Login
           mode={mode}
           inviteToken={inviteToken}
@@ -3034,7 +3038,15 @@ export function App(): React.ReactElement {
 
   return (
     <>
-      <ThemeToggle />
+      {/* DESIGN P1: Projects/ProjectGraph topbars carry the toggle inline via
+          AuthenticatedHeaderActions; the full-page overlays (Account, Admin,
+          Usage) don't render those actions yet, so they keep the floating
+          fallback until Phase 2 adopts the shared topbar there. */}
+      {showAccount || showAdmin || showUsage ? (
+        <div className="floating-theme-toggle">
+          <ThemeToggle />
+        </div>
+      ) : null}
       {showAccount && user ? (
         <Suspense fallback={<Spinner label="Loading settings…" />}>
           <Account
