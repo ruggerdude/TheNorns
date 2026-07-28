@@ -11,6 +11,18 @@
   justify-content: space-between;
 }
 
+/* DESIGN P2: section header at --text-lg, card headings at --text-md
+   (overrides the legacy .workspace-shell heading ramp). */
+.operations-header h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.operations-section-heading h3,
+.operations-section h3 {
+  font-size: var(--text-md);
+}
+
 .operations-header p {
   color: var(--ink-muted);
   margin: 4px 0 0;

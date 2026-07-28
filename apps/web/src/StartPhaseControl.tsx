@@ -139,12 +139,12 @@ export function StartPhaseControl({
         {starting ? "Starting…" : "Start phase"}
       </Button>
       {disabledReason ? (
-        <span className="muted" data-testid="start-phase-blocked-reason" style={{ fontSize: 12 }}>
+        <span className="muted" data-testid="start-phase-blocked-reason">
           {disabledReason}
         </span>
       ) : null}
       {result ? (
-        <span className="muted" data-testid="start-phase-result" style={{ fontSize: 12 }}>
+        <span className="muted" data-testid="start-phase-result">
           {result.scheduled.length} scheduled, {result.blocked.length} blocked
         </span>
       ) : null}

@@ -29,3 +29,28 @@ Requested styles.css changes:
 Until these land, behavior is only mildly degraded: the workspace tab bar
 sticks 42px lower than the topbar, showing a gap after scroll. Nothing is
 broken at rest.
+
+## P2d (workspace) — styles.css heading ramp + run-log micro text
+
+The workspace views draw their heading sizes from the legacy ramp in
+styles.css, and the run log has sub-floor px sizes there. I overrode the
+views that own a scoped CSS file (operations dashboard, members, knowledge
+panel); the rest (debates, debate builder/run, settings, strategy review,
+run log) have no scoped stylesheet, so the canonical fix has to land in
+styles.css:
+
+1. `.workspace-shell h2` (~line 5638): `var(--heading-section-size)` →
+   `var(--text-lg)`. `.workspace-shell h3` (~5642):
+   `var(--heading-subsection-size)` → `var(--text-md)`.
+   `.workspace-shell h4` (~5646): `var(--heading-detail-size)` →
+   `var(--text-base)`. (Design intent: one page-level header per view;
+   section headers at --text-lg.)
+2. Run log micro text (all sub-floor): `.run-log > summary` (~1078)
+   `font-size: 11px` → `var(--text-xs)`; `.run-log-output` (~1095)
+   `font-size: 11px` → `var(--text-xs)`; `.run-log-meta` (~1103)
+   `font-size: 10.5px` → `var(--text-xs)`.
+3. `.project-tabs-label` .6rem (~1654) and its duplicate .58rem (~4492),
+   `.project-tab button` .7rem/.68rem (~1673/~4512): raise to
+   `var(--text-xs)` (also flagged in DESIGN-SYSTEM.md's per-page list;
+   the strip is rendered by ProjectTabs in Projects.tsx, which P2d does
+   not own).
