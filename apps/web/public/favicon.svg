@@ -1,4 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- DESIGN R2: braided-threads mark — a 3-strand braid segment (white,
+       gold, silver) generated with the BraidMark algorithm (W44 H22 lead6
+       P58 sw4.2), unders first, overs after. Keep in sync with BraidMark. -->
   <defs>
     <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#1b2f9e"/>
@@ -6,7 +9,15 @@
     </linearGradient>
   </defs>
   <rect width="48" height="48" rx="12" fill="url(#tile)"/>
-  <path d="M7 12.5 C 16 12.5, 21 21.5, 28.5 23.2" fill="none" stroke="#ffffff" stroke-width="3.8" stroke-linecap="round"/>
-  <path d="M7 35.5 C 16 35.5, 21 26.5, 28.5 24.8" fill="none" stroke="#ffffff" stroke-width="3.8" stroke-linecap="round"/>
-  <path d="M7 24 L 41 24" fill="none" stroke="#ffb600" stroke-width="3.8" stroke-linecap="round"/>
+  <g transform="translate(2 13)">
+    <path d="M 4.0 11.0 L 5.2 11.0 L 6.4 11.3 L 7.6 12.4 L 8.8 13.4 L 10.0 14.3 L 10.9 15.0" fill="none" stroke="#ffffff" stroke-width="4.2" stroke-linecap="round"/>
+    <path d="M 30.4 14.8 L 31.6 13.8 L 32.8 12.9 L 34.0 11.9 L 35.2 10.8 L 36.4 9.8 L 37.6 8.8 L 38.8 7.8 L 40.0 6.9" fill="none" stroke="#ffffff" stroke-width="4.2" stroke-linecap="round"/>
+    <path d="M 4.0 17.8 L 5.2 17.8 L 6.4 17.7 L 7.6 17.1 L 8.8 16.3 L 10.0 15.6 L 10.9 14.9" fill="none" stroke="#ffb600" stroke-width="4.2" stroke-linecap="round"/>
+    <path d="M 20.8 6.8 L 22.0 6.0 L 23.2 5.2 L 24.4 4.6 L 25.6 4.0 L 26.8 3.6 L 28.0 3.3 L 29.2 3.1 L 30.4 3.1 L 31.6 3.2 L 32.8 3.4 L 34.0 3.8 L 35.2 4.2 L 36.4 4.8 L 37.6 5.5 L 38.8 6.3 L 40.0 7.2" fill="none" stroke="#ffb600" stroke-width="4.2" stroke-linecap="round"/>
+    <path d="M 4.0 4.2 L 5.2 4.2 L 6.4 4.0 L 7.6 3.6 L 8.8 3.3 L 10.0 3.1 L 11.2 3.1 L 12.4 3.2 L 13.6 3.5 L 14.8 3.8 L 16.0 4.3 L 17.2 4.9 L 18.4 5.6 L 19.6 6.4 L 20.8 7.3" fill="none" stroke="#9aa3b5" stroke-width="4.2" stroke-linecap="round"/>
+    <path d="M 30.4 15.1 L 31.6 16.0 L 32.8 16.7 L 34.0 17.4 L 35.2 17.9 L 36.4 18.4 L 37.6 18.7 L 38.8 18.9 L 40.0 18.9" fill="none" stroke="#9aa3b5" stroke-width="4.2" stroke-linecap="round"/>
+    <path d="M 10.9 15.0 L 12.1 15.8 L 13.3 16.6 L 14.5 17.3 L 15.7 17.9 L 16.9 18.3 L 18.1 18.6 L 19.3 18.8 L 20.5 18.9 L 21.7 18.8 L 22.9 18.6 L 24.1 18.3 L 25.3 17.9 L 26.5 17.3 L 27.7 16.6 L 28.9 15.8 L 30.1 15.0 L 30.4 14.8" fill="none" stroke="#ffffff" stroke-width="4.2" stroke-linecap="round"/>
+    <path d="M 10.9 14.9 L 12.1 14.0 L 13.3 13.0 L 14.5 12.0 L 15.7 11.0 L 16.9 9.9 L 18.1 8.9 L 19.3 8.0 L 20.5 7.1 L 20.8 6.8" fill="none" stroke="#ffb600" stroke-width="4.2" stroke-linecap="round"/>
+    <path d="M 20.8 7.3 L 22.0 8.2 L 23.2 9.2 L 24.4 10.2 L 25.6 11.2 L 26.8 12.2 L 28.0 13.3 L 29.2 14.2 L 30.4 15.1" fill="none" stroke="#9aa3b5" stroke-width="4.2" stroke-linecap="round"/>
+  </g>
 </svg>
