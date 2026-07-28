@@ -24,8 +24,27 @@ import {
   describeSetup,
   parseGitHubRepoRef,
 } from "./projectSourceRequest";
-import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
+import {
+  Alert,
+  Badge,
+  Brand,
+  Button,
+  Field,
+  Input,
+  PageHeader,
+  Select,
+  Spinner,
+  TextArea,
+} from "./ui";
 import { useSingleFlightPolling } from "./useSingleFlightPolling";
+
+/** DESIGN P2c: type-floor enforcement (visual only). Several page-specific
+ * rules in styles.css still set label text below the var(--text-xs) floor
+ * (e.g. `.project-stats span` .56rem, `.attention-summary span` .58rem).
+ * styles.css is outside this sweep's scope, so the floor is applied inline
+ * here; each usage can be dropped once the matching P2-SHARED-REQUESTS.md
+ * item lands in styles.css. */
+const TYPE_FLOOR = { fontSize: "var(--text-xs)" } as const;
 
 export interface ProjectSummary {
   id: string;
@@ -402,7 +421,7 @@ export function AttentionDecisionForm({
           />
         </Field>
       </div>
-      <p className="meta">
+      <p className="meta" style={TYPE_FLOOR}>
         {recoveryDecision
           ? "Retry starts a fresh fenced attempt. Cancel phase closes the phase and every unfinished task."
           : "Direction is recorded in project memory. Delivery to the selected agent remains pending until a coordinator context-assembly step consumes it; active runs are not interrupted."}
@@ -448,7 +467,9 @@ export function ProjectTabs({
   if (!projects.length) return null;
   return (
     <nav className="project-tabs" aria-label="Open projects">
-      <span className="project-tabs-label">Open</span>
+      <span className="project-tabs-label" style={TYPE_FLOOR}>
+        Open
+      </span>
       {projects.map((project) => (
         <div
           className={`project-tab ${activeId === project.id ? "is-active" : ""}`}
@@ -1497,7 +1518,7 @@ export function Projects({
       {!dialog ? (
         <ProjectTabs projects={openProjects} onSelect={onOpenProject} onClose={onCloseProject} />
       ) : null}
-      <main className="page project-dashboard" hidden={dialog}>
+      <main className="page-container project-dashboard" hidden={dialog}>
         {error ? <Alert testId="projects-error">{error}</Alert> : null}
         <div className="dashboard-focus-grid">
           <section
@@ -1506,11 +1527,13 @@ export function Projects({
           >
             <div className="focus-panel-head">
               <div>
-                <div className="eyebrow">01 · Get to work</div>
+                <div className="eyebrow">Portfolio</div>
                 <h2 id="quick-access-heading">Quick access</h2>
               </div>
               <div className="quick-access-actions">
-                <span className="focus-hint">Your open and recent projects</span>
+                <span className="focus-hint" style={TYPE_FLOOR}>
+                  Your open and recent projects
+                </span>
                 <Button
                   variant="primary"
                   className="btn-small"
@@ -1575,15 +1598,17 @@ export function Projects({
                           <span>{project.name.slice(0, 1)}</span>
                           <span>{project.name.slice(1)}</span>
                         </strong>
-                        <small>{project.description || "No project brief yet"}</small>
+                        <small style={TYPE_FLOOR}>
+                          {project.description || "No project brief yet"}
+                        </small>
                       </span>
-                      <span className={`quick-project-state ${stateClass}`}>
+                      <span className={`quick-project-state ${stateClass}`} style={TYPE_FLOOR}>
                         <i />
                         {state}
                       </span>
                       <span className="quick-project-progress">
                         <strong>{resume ? `${resume.overall_percent_complete}%` : "—"}</strong>
-                        <small>complete</small>
+                        <small style={TYPE_FLOOR}>complete</small>
                       </span>
                       <span className="quick-project-enter" aria-hidden="true">
                         →
@@ -1595,7 +1620,9 @@ export function Projects({
             ) : (
               <div className="quick-access-empty">
                 <strong>{query ? "No matching projects" : "No projects yet"}</strong>
-                <span>{query ? "Try a broader search." : "Create a project to get started."}</span>
+                <span style={TYPE_FLOOR}>
+                  {query ? "Try a broader search." : "Create a project to get started."}
+                </span>
               </div>
             )}
           </section>
@@ -1606,7 +1633,7 @@ export function Projects({
           >
             <div className="focus-panel-head">
               <div>
-                <div className="eyebrow">02 · Read the room</div>
+                <div className="eyebrow">Status</div>
                 <h2 id="portfolio-pulse-heading">Portfolio status</h2>
               </div>
               <Badge
@@ -1655,22 +1682,22 @@ export function Projects({
             <div className="project-stats" aria-label="Project overview">
               <div>
                 <strong>{projects?.length ?? "—"}</strong>
-                <span>Total</span>
+                <span style={TYPE_FLOOR}>Total</span>
               </div>
               <div>
                 <strong>{activeAgents}</strong>
-                <span>Active runs</span>
+                <span style={TYPE_FLOOR}>Active runs</span>
               </div>
               <div>
                 <strong>{waitingDecisions}</strong>
-                <span>Decisions</span>
+                <span style={TYPE_FLOOR}>Decisions</span>
               </div>
               <div>
                 <strong>{blockedProjects}</strong>
-                <span>Blocked</span>
+                <span style={TYPE_FLOOR}>Blocked</span>
               </div>
             </div>
-            <div className="pulse-foot">
+            <div className="pulse-foot" style={TYPE_FLOOR}>
               <span>{planned} planned</span>
               <span>{(projects?.length ?? 0) - planned} drafts</span>
               <span>{openProjects.length} open now</span>
@@ -1723,23 +1750,23 @@ export function Projects({
             <div className="attention-summary" aria-label="Portfolio attention summary">
               <div className={attention.counts.critical ? "is-critical" : ""}>
                 <strong>{attention.counts.critical}</strong>
-                <span>Critical</span>
+                <span style={TYPE_FLOOR}>Critical</span>
               </div>
               <div>
                 <strong>{attention.counts.decisions}</strong>
-                <span>Decisions</span>
+                <span style={TYPE_FLOOR}>Decisions</span>
               </div>
               <div>
                 <strong>{attention.counts.approvals}</strong>
-                <span>Approvals</span>
+                <span style={TYPE_FLOOR}>Approvals</span>
               </div>
               <div>
                 <strong>{attention.counts.blockers}</strong>
-                <span>Blockers</span>
+                <span style={TYPE_FLOOR}>Blockers</span>
               </div>
               <div>
                 <strong>{attention.counts.active_runs}</strong>
-                <span>Active runs</span>
+                <span style={TYPE_FLOOR}>Active runs</span>
               </div>
             </div>
             {attention.items.length ? (
@@ -1777,7 +1804,7 @@ export function Projects({
                         <p>
                           <strong>Intended outcome:</strong> {item.resumes}
                         </p>
-                        <p className="meta">
+                        <p className="meta" style={TYPE_FLOOR}>
                           The decision is recorded immediately. Any task-state change or resumed
                           work occurs through a subsequent coordinator handoff.
                         </p>
@@ -1880,7 +1907,9 @@ export function Projects({
             <h2>All projects</h2>
             <span className="muted">Phase-by-phase progress, ownership, and next action.</span>
           </div>
-          <span className="project-count">{visible?.length ?? 0} shown</span>
+          <span className="project-count" style={TYPE_FLOOR}>
+            {visible?.length ?? 0} shown
+          </span>
         </div>
         {projects === null ? (
           <Spinner label="Loading projects…" />
@@ -1957,18 +1986,24 @@ export function Projects({
                         >
                           {project.name}
                         </button>
-                        <div className="desc">{project.description}</div>
+                        <div className="desc" style={TYPE_FLOOR}>
+                          {project.description}
+                        </div>
                       </div>
                     </div>
                     <div className="pr-staffing">
-                      <span className="role-lbl">Coordinator</span>
-                      <span className="chip model-c">
+                      <span className="role-lbl" style={TYPE_FLOOR}>
+                        Coordinator
+                      </span>
+                      <span className="chip model-c" style={TYPE_FLOOR}>
                         {project.pm_model
                           ? (pmModelOption(project.pm_model)?.label ?? project.pm_model)
                           : `${project.pm_provider} default`}
                       </span>
-                      <span className="role-lbl">Reviewer</span>
-                      <span className="chip model-g">
+                      <span className="role-lbl" style={TYPE_FLOOR}>
+                        Reviewer
+                      </span>
+                      <span className="chip model-g" style={TYPE_FLOOR}>
                         {pmModelOption(DEFAULT_PM_MODEL[project.reviewer_provider])?.label ??
                           project.reviewer_provider}
                       </span>
@@ -1978,12 +2013,20 @@ export function Projects({
                      *  fall back to the legacy source_location display for
                      *  projects that predate the onboarding endpoint. */}
                     {resume?.onboardingSummaryLine ? (
-                      <div className="project-source" title={resume.onboardingSummaryLine}>
+                      <div
+                        className="project-source"
+                        style={TYPE_FLOOR}
+                        title={resume.onboardingSummaryLine}
+                      >
                         <span>{projectSourceLabel(project)}</span>
                         <strong>{resume.onboardingSummaryLine}</strong>
                       </div>
                     ) : project.source_location ? (
-                      <div className="project-source" title={project.source_location}>
+                      <div
+                        className="project-source"
+                        style={TYPE_FLOOR}
+                        title={project.source_location}
+                      >
                         <span>{projectSourceLabel(project)}</span>
                         <strong>{project.source_location}</strong>
                       </div>
@@ -2004,10 +2047,12 @@ export function Projects({
                               key={phase.id}
                               data-testid="pr-phase"
                             >
-                              <span className="pp-num">P{index + 1}</span>
+                              <span className="pp-num" style={TYPE_FLOOR}>
+                                P{index + 1}
+                              </span>
                               <span className="pp-name">{phase.objective_summary}</span>
                               {phaseNeedsAttention ? (
-                                <span className="pp-blocked">
+                                <span className="pp-blocked" style={TYPE_FLOOR}>
                                   {phase.blocked ? "blocked — needs you" : "failed — review"}
                                 </span>
                               ) : (
@@ -2015,18 +2060,23 @@ export function Projects({
                                   <span className="track thin">
                                     <i style={{ width: `${phase.percent_complete}%` }} />
                                   </span>
-                                  <span className="pp-pct">{phase.percent_complete}%</span>
+                                  <span className="pp-pct" style={TYPE_FLOOR}>
+                                    {phase.percent_complete}%
+                                  </span>
                                 </span>
                               )}
                               {!phaseNeedsAttention ? (
-                                <span className="pp-eta">
-                                  <span className="lbl">ETA</span>
+                                <span className="pp-eta" style={TYPE_FLOOR}>
+                                  <span className="lbl" style={TYPE_FLOOR}>
+                                    ETA
+                                  </span>
                                   {formatEta(phase.eta_at)}
                                 </span>
                               ) : null}
                               <button
                                 type="button"
                                 className="pp-open"
+                                style={TYPE_FLOOR}
                                 data-testid="pp-open"
                                 onClick={(event) => {
                                   event.stopPropagation();
@@ -2047,7 +2097,9 @@ export function Projects({
                     ) : (
                       <div className="pr-phases">
                         <div className="pr-phase queued no-plan">
-                          <span className="pp-num">—</span>
+                          <span className="pp-num" style={TYPE_FLOOR}>
+                            —
+                          </span>
                           <span className="pp-name muted">
                             No plan drafted yet — phases appear once the coordinator drafts one.
                           </span>
@@ -2073,22 +2125,22 @@ export function Projects({
                       <span className="big tnum">
                         {resume ? `${resume.overall_percent_complete}%` : "—"}
                       </span>
-                      <span className="lbl">
+                      <span className="lbl" style={TYPE_FLOOR}>
                         overall
                         <br />
                         complete
                       </span>
                     </div>
                     <div className="pr-facts">
-                      <div className="pr-fact">
+                      <div className="pr-fact" style={TYPE_FLOOR}>
                         <span className="k">Blended ETA</span>
                         <span className="v">{formatEtaDate(resume?.blended_eta_at)}</span>
                       </div>
-                      <div className="pr-fact">
+                      <div className="pr-fact" style={TYPE_FLOOR}>
                         <span className="k">Agents active</span>
                         <span className="v">{resume?.agents_active ?? 0}</span>
                       </div>
-                      <div className="pr-fact">
+                      <div className="pr-fact" style={TYPE_FLOOR}>
                         <span className="k">Decisions</span>
                         <span className={`v${(resume?.decisions_waiting ?? 0) > 0 ? " warn" : ""}`}>
                           {resume?.decisions_waiting
@@ -2139,11 +2191,11 @@ export function Projects({
               ← Dashboard
             </Button>
           </header>
-          <main className="page wizard-page" aria-label="New project">
-            <div className="project-setup-title">
-              <div className="eyebrow">New project</div>
-              <h1>Project setup</h1>
-            </div>
+          <main
+            className="page-container page-container-narrow wizard-page"
+            aria-label="New project"
+          >
+            <PageHeader eyebrow="New project" title="Project setup" />
             <section className="wizard-shell">
               {wizardStep === "attach" && draftProject ? (
                 <div className="form-stack wizard-attach-step" data-testid="wizard-attach-step">
@@ -2357,9 +2409,11 @@ export function Projects({
                             >
                               <span>
                                 <strong>{selection.repository.repository_display_name}</strong>
-                                <small>{selection.repository.default_branch}</small>
+                                <small style={TYPE_FLOOR}>
+                                  {selection.repository.default_branch}
+                                </small>
                               </span>
-                              <span className="repository-meta">
+                              <span className="repository-meta" style={TYPE_FLOOR}>
                                 {selection.repository.observed_head.slice(0, 8)}
                               </span>
                             </button>
@@ -2487,11 +2541,11 @@ export function Projects({
                                     >
                                       <span>
                                         <strong>{repository.full_name}</strong>
-                                        <small>
+                                        <small style={TYPE_FLOOR}>
                                           {repository.description || "No repository description"}
                                         </small>
                                       </span>
-                                      <span className="repository-meta">
+                                      <span className="repository-meta" style={TYPE_FLOOR}>
                                         {repository.private ? "Private" : "Public"}
                                         {repository.language ? ` · ${repository.language}` : ""}
                                         {repository.archived ? " · Archived" : ""}
