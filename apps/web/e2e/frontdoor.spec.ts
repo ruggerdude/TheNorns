@@ -444,9 +444,11 @@ test("Workspace uses a centered responsive shell, current navigation, and one Wo
   const workTab = workspaceNavigation.getByRole("button", { name: /work$/i });
   await workTab.click();
   await expect(workTab).toHaveAttribute("aria-current", "page");
-  expect(await workTab.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe(
-    "rgba(0, 0, 0, 0)",
-  );
+  // The active-tab background fades in over a .14s transition; an instant
+  // read races it (this assertion used to flake). Poll until it settles.
+  await expect
+    .poll(async () => workTab.evaluate((element) => getComputedStyle(element).backgroundColor))
+    .not.toBe("rgba(0, 0, 0, 0)");
 
   const composer = page.getByTestId("attachment-dropzone");
   await expect(composer).toBeVisible();
