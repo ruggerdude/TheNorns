@@ -22,6 +22,8 @@ const PLAN_PROPOSAL_SYSTEM = [
   "You are the conversational PM proposing a structured Work Plan Contract from the visible project conversation and binding context.",
   "Return only the strict provider-neutral Work Plan Contract envelope requested by the schema.",
   "The proposal is inert: do not claim that it was saved, reviewed, approved, or started.",
+  "Treat the conversation as source evidence, not as the plan itself. Extract the latest agreed direction and explicit human decisions; do not turn greetings, exploration, abandoned alternatives, repeated explanations, or the mechanics of creating the plan into plan modules.",
+  "When later messages revise or reject earlier ideas, keep only the latest accepted direction. Put genuinely unresolved choices in open_decisions instead of silently treating them as commitments.",
   "Preserve established human decisions, surface unresolved decisions, pin one OpenAI or Anthropic staffing choice per module, and include concrete verification requirements and budget.",
 ].join("\n\n");
 
@@ -233,6 +235,7 @@ export class ConversationPlanProposalService {
       model: scope.conversation.model,
       predecessor_plan_version_id: predecessor?.id ?? null,
       predecessor_content_hash: predecessor?.content_hash ?? null,
+      handoff: input.handoff ?? null,
     });
     const attemptId = this.makeId("plan_proposal");
     const usageRequestId = this.makeId("ai_request");
@@ -346,8 +349,16 @@ export class ConversationPlanProposalService {
       const generated = await adapter.completeStructured(
         {
           system: `${PLAN_PROPOSAL_SYSTEM}\n\n${assembled.system}`,
-          prompt:
-            "Propose the complete Work Plan Contract envelope now. Use the current objective, visible discussion, decisions, risks, and referenced artifacts. Return the strict structured result only.",
+          prompt: [
+            "Propose the complete Work Plan Contract envelope now.",
+            "Use the current objective, visible discussion, decisions, risks, and referenced artifacts to synthesize only the current agreed plan.",
+            input.handoff
+              ? `The human selected ${input.handoff.execution_agent.provider}:${input.handoff.execution_agent.model} as the execution agent. Use that exact provider and model for every module staffing choice.`
+              : null,
+            "Return the strict structured result only.",
+          ]
+            .filter((line): line is string => line !== null)
+            .join("\n"),
           projectId,
           initiatedByUserId: userId,
           telemetryRequestId: usageRequestId,
@@ -357,7 +368,21 @@ export class ConversationPlanProposalService {
         V2WorkPlanContract,
         "conversation_work_plan_contract",
       );
-      const plan = V2WorkPlanContract.parse(generated.value);
+      const plan = V2WorkPlanContract.parse(
+        input.handoff
+          ? {
+              ...generated.value,
+              staffing: generated.value.plan.modules.map((module) => ({
+                module_id: module.id,
+                agent_role:
+                  generated.value.staffing.find((choice) => choice.module_id === module.id)
+                    ?.agent_role ?? "implementation agent",
+                provider: input.handoff?.execution_agent.provider,
+                model: input.handoff?.execution_agent.model,
+              })),
+            }
+          : generated.value,
+      );
       exactUsage = {
         input_tokens: generated.usage.input_tokens,
         output_tokens: generated.usage.output_tokens,
@@ -376,6 +401,7 @@ export class ConversationPlanProposalService {
         sourceMessageId: assembled.source_message_id,
         predecessor,
         plan,
+        handoff: input.handoff,
         usage: exactUsage,
         providerRequestId,
       });
@@ -397,6 +423,7 @@ export class ConversationPlanProposalService {
     sourceMessageId: string;
     predecessor: { id: string; content_hash: string } | null;
     plan: ReturnType<typeof V2WorkPlanContract.parse>;
+    handoff: V2CreateConversationPlanProposalInputT["handoff"];
     usage: {
       input_tokens: number;
       output_tokens: number;
@@ -460,6 +487,7 @@ export class ConversationPlanProposalService {
       const payload = {
         parameters: {
           plan: input.plan,
+          ...(input.handoff ? { handoff: input.handoff } : {}),
           predecessor_plan_version_id: input.predecessor?.id ?? null,
           predecessor_content_hash: input.predecessor?.content_hash ?? null,
           referenced_artifacts: this.proposalArtifactReferences(attempt),

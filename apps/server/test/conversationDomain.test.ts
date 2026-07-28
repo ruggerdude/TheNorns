@@ -6,6 +6,7 @@ import { canonicalJson, canonicalSha256 } from "../src/persistence/migration/can
 import { assertCurrentRuntimeSchema } from "../src/persistence/postgresConnection.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import {
+  CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME,
   GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME,
   PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
   type V2MigrationDatabase,
@@ -182,7 +183,7 @@ describe.sequential("conversation-first durable domain", () => {
     ).resolves.toBeUndefined();
     const replay = await runCurrentV2Migrations(asMigrationDatabase(pg));
     expect(replay.at(-1)).toMatchObject({
-      name: GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME,
+      name: CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME,
       applied: false,
     });
   });
@@ -743,7 +744,9 @@ describe.sequential("conversation-first durable domain", () => {
                 approved_at=now()
           WHERE id='work-plan-2'`,
       ),
-    ).rejects.toThrow(/candidate approval requires an exact successful QC result revision/);
+    ).rejects.toThrow(
+      /candidate approval requires exact successful QC or an attributable QC waiver/,
+    );
   });
 
   it("freezes the exact approved plan in handoffs and keeps summaries immutable", async () => {

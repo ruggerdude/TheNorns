@@ -1095,9 +1095,11 @@ describe("conversation workspace", () => {
     ).toBeInTheDocument();
   });
 
-  it.each(["typed command", "Plan button"] as const)(
+  it.each(["typed command", "Plan button", "Plan button — skip QC"] as const)(
     "turns the conversation into a saved plan via the %s and advances to the QC handoff",
     async (trigger) => {
+      const openedFromPlanButton = trigger !== "typed command";
+      const skipsQc = trigger === "Plan button — skip QC";
       const intentText = trigger === "typed command" ? "Use this" : "Use this as the plan.";
       const version = planVersion({ created_by_action_id: "action-save-natural-plan" });
       const saveAction = planAction({
@@ -1127,6 +1129,77 @@ describe("conversation workspace", () => {
       const sendQcAction = planAction({
         id: "action-send-natural-plan-to-qc",
         source_message_id: "message-plan-followups-natural",
+        payload: {
+          parameters: {
+            plan_version_id: version.id,
+            content_hash: version.content_hash,
+            ...(openedFromPlanButton
+              ? {
+                  review: skipsQc
+                    ? { mode: "skip_qc" }
+                    : {
+                        mode: "qc",
+                        reviewer: { provider: "openai", model: "gpt-5.6-terra" },
+                        rounds: 2,
+                      },
+                }
+              : {}),
+          },
+        },
+      });
+      const appliedSendQcAction = planAction({
+        ...sendQcAction,
+        status: "applied",
+        confirmed_by_user_id: "user-1",
+        confirmation_idempotency_key: "confirm-natural-plan-qc",
+        confirmation_request_fingerprint: "d".repeat(64),
+        confirmed_at: now,
+        recorded_at: now,
+        sent_at: now,
+        acknowledged_at: now,
+        applied_at: now,
+      });
+      const selectedReview = planReview({
+        id: "review-natural-plan",
+        action_id: sendQcAction.id,
+        plan_version_id: version.id,
+        status: skipsQc ? "converged" : "queued",
+        findings: [],
+        dispositions: [],
+        review_mode: skipsQc ? "waived" : "qc",
+        reviewer_model: skipsQc ? "qc-waived-by-human" : "gpt-5.6-terra",
+        started_at: skipsQc ? now : null,
+        completed_at: skipsQc ? now : null,
+      });
+      const approvalAction = planAction({
+        id: "action-approve-natural-plan",
+        source_message_id: "message-plan-followups-natural",
+        action_type: "approve_plan",
+        payload: {
+          parameters: {
+            plan_version_id: version.id,
+            content_hash: version.content_hash,
+            plan_review_id: selectedReview.id,
+          },
+        },
+      });
+      const appliedApprovalAction = planAction({
+        ...approvalAction,
+        status: "applied",
+        confirmed_by_user_id: "user-1",
+        confirmation_idempotency_key: "confirm-natural-plan-approval",
+        confirmation_request_fingerprint: "e".repeat(64),
+        confirmed_at: now,
+        recorded_at: now,
+        sent_at: now,
+        acknowledged_at: now,
+        applied_at: now,
+      });
+      const approvedVersion = planVersion({
+        ...version,
+        status: "approved",
+        approved_by_user_id: "user-1",
+        approved_at: now,
       });
       const intentMessage = message({
         id: "message-plan-intent-natural",
@@ -1164,15 +1237,78 @@ describe("conversation workspace", () => {
         created_at: now,
         updated_at: now,
       };
+      const qcEffectValue = {
+        kind: "qc_started" as const,
+        plan_review: selectedReview,
+        planning_run_id: selectedReview.planning_run_id,
+      };
+      const qcEffect: V2ConversationPlanActionEffectT = {
+        schema_version: 2,
+        id: "effect-natural-plan-qc",
+        project_id: projectId,
+        work_item_id: workItemId,
+        conversation_id: conversationId,
+        action_id: sendQcAction.id,
+        effect: qcEffectValue,
+        created_at: now,
+        updated_at: now,
+      };
+      const approvalEffectValue = {
+        kind: "plan_approved" as const,
+        plan_version: approvedVersion,
+        plan_review_id: selectedReview.id,
+        planning_run_id: selectedReview.planning_run_id,
+        transition_status: "legacy_unavailable" as const,
+        execution_conversation_id: null,
+        handoff_id: null,
+        kickoff_intent_id: null,
+        execution: {
+          status: "refused" as const,
+          started: false,
+          detail: "The test isolates the automatic approval request.",
+        },
+      };
+      const approvalEffect: V2ConversationPlanActionEffectT = {
+        schema_version: 2,
+        id: "effect-natural-plan-approval",
+        project_id: projectId,
+        work_item_id: workItemId,
+        conversation_id: conversationId,
+        action_id: approvalAction.id,
+        effect: approvalEffectValue,
+        created_at: now,
+        updated_at: now,
+      };
       let generated = false;
       let saved = false;
-      const proposalBodies: Array<{ idempotency_key: string; intent_message?: string }> = [];
+      let handedOff = false;
+      let approved = false;
+      const proposalBodies: Array<{
+        idempotency_key: string;
+        intent_message?: string;
+        handoff?: unknown;
+      }> = [];
       const messagePosts: string[] = [];
       vi.stubGlobal(
         "fetch",
         vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
           const url = urlOf(input);
           if (url.endsWith("/work-items")) return listResponse();
+          if (url.endsWith("/api/v2/capabilities/execution-models")) {
+            return Response.json({
+              ready: true,
+              required_environment: [],
+              models: [
+                {
+                  id: "claude-sonnet-5",
+                  provider: "anthropic",
+                  label: "Claude Sonnet 5",
+                  available: true,
+                  unavailable_reason: null,
+                },
+              ],
+            });
+          }
           if (
             url.endsWith(`/conversations/${conversationId}`) &&
             (!init?.method || init.method === "GET")
@@ -1186,13 +1322,26 @@ describe("conversation workspace", () => {
               null,
               null,
               {
-                planVersions: saved ? [version] : [],
+                planVersions: saved ? [approved ? approvedVersion : version] : [],
                 actions: generated
                   ? saved
-                    ? [appliedSaveAction, sendQcAction]
+                    ? [
+                        appliedSaveAction,
+                        handedOff ? appliedSendQcAction : sendQcAction,
+                        ...(skipsQc && handedOff
+                          ? [approved ? appliedApprovalAction : approvalAction]
+                          : []),
+                      ]
                     : [saveAction]
                   : [],
-                effects: saved ? [saveEffect] : [],
+                reviews: handedOff ? [selectedReview] : [],
+                effects: saved
+                  ? [
+                      saveEffect,
+                      ...(handedOff ? [qcEffect] : []),
+                      ...(approved ? [approvalEffect] : []),
+                    ]
+                  : [],
               },
             );
           }
@@ -1204,6 +1353,17 @@ describe("conversation workspace", () => {
           if (url.endsWith(`/actions/${saveAction.id}/confirm`) && init?.method === "POST") {
             saved = true;
             return Response.json({ action: appliedSaveAction, effect: saveEffectValue });
+          }
+          if (url.endsWith(`/actions/${sendQcAction.id}/confirm`) && init?.method === "POST") {
+            handedOff = true;
+            return Response.json({ action: appliedSendQcAction, effect: qcEffectValue });
+          }
+          if (url.endsWith(`/actions/${approvalAction.id}/confirm`) && init?.method === "POST") {
+            approved = true;
+            return Response.json({
+              action: appliedApprovalAction,
+              effect: approvalEffectValue,
+            });
           }
           if (url.endsWith(`/conversations/${conversationId}/messages`)) {
             messagePosts.push(url);
@@ -1230,15 +1390,46 @@ describe("conversation workspace", () => {
         await user.keyboard("{Enter}");
       } else {
         await user.click(screen.getByRole("button", { name: "Use conversation as plan" }));
+        if (skipsQc) {
+          await user.click(await screen.findByRole("radio", { name: /Skip QC/ }));
+          expect(screen.queryByRole("combobox", { name: "QC agent" })).not.toBeInTheDocument();
+          await user.click(screen.getByRole("button", { name: "Create plan & start" }));
+        } else {
+          await user.selectOptions(await screen.findByRole("combobox", { name: "QC agent" }), [
+            "gpt-5.6-terra",
+          ]);
+          await user.selectOptions(screen.getByRole("combobox", { name: "QC rounds" }), ["2"]);
+          await user.click(screen.getByRole("button", { name: "Create plan & send to QC" }));
+        }
       }
 
       expect(await screen.findByText(intentText)).toBeInTheDocument();
       expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Send to QC" })).toBeInTheDocument();
+      if (trigger === "typed command") {
+        expect(screen.getByRole("button", { name: "Send to QC" })).toBeInTheDocument();
+      } else if (skipsQc) {
+        await waitFor(() => expect(approved).toBe(true));
+      } else {
+        expect(await screen.findByText("QC queued")).toBeInTheDocument();
+      }
       expect(proposalBodies).toEqual([
         {
           idempotency_key: expect.any(String),
           intent_message: intentText,
+          ...(openedFromPlanButton
+            ? {
+                handoff: {
+                  execution_agent: { provider: "anthropic", model: "claude-sonnet-5" },
+                  review: skipsQc
+                    ? { mode: "skip_qc" }
+                    : {
+                        mode: "qc",
+                        reviewer: { provider: "openai", model: "gpt-5.6-terra" },
+                        rounds: 2,
+                      },
+                },
+              }
+            : {}),
         },
       ]);
       expect(messagePosts).toEqual([]);

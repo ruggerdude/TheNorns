@@ -502,7 +502,7 @@ export function ConversationActionCard({
 
   const planAction = isPlanAction(action);
   const executionAction = isExecutionAction(action);
-  const copy = planAction
+  const defaultCopy = planAction
     ? PLAN_ACTIONS[action.action_type]
     : EXECUTION_ACTIONS[action.action_type];
   const reference = planAction ? targetReference(action) : null;
@@ -518,6 +518,19 @@ export function ConversationActionCard({
     : null;
   const reason =
     action.action_type === "reject_plan" ? (parameters as V2RejectPlanParametersT).reason : null;
+  const reviewPreference =
+    action.action_type === "send_plan_to_qc"
+      ? (parameters as V2SendPlanToQcParametersT).review
+      : undefined;
+  const copy =
+    reviewPreference?.mode === "skip_qc"
+      ? {
+          title: "Skip QC",
+          button: "Skip QC and continue",
+          description:
+            "Records the explicit QC waiver for this exact plan before approval and kickoff.",
+        }
+      : defaultCopy;
   const recoverable =
     effect === null &&
     ["confirmed", "recorded", "sent", "agent_acknowledged"].includes(action.status);
@@ -569,6 +582,13 @@ export function ConversationActionCard({
             </dd>
           </div>
         </dl>
+      ) : null}
+      {reviewPreference ? (
+        <p>
+          {reviewPreference.mode === "skip_qc"
+            ? "QC was explicitly skipped for this exact plan."
+            : `QC agent: ${reviewPreference.reviewer.provider} · ${reviewPreference.reviewer.model} · ${reviewPreference.rounds} round${reviewPreference.rounds === 1 ? "" : "s"}`}
+        </p>
       ) : null}
       {direction ? (
         <blockquote>

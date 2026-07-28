@@ -5022,6 +5022,7 @@ export const conversationPlanReviews = pgTable(
     pmModel: text("pm_model").notNull(),
     reviewerProvider: text("reviewer_provider").notNull(),
     reviewerModel: text("reviewer_model").notNull(),
+    reviewMode: text("review_mode").notNull().default("qc"),
     usageRequestGroupId: text("usage_request_group_id").notNull(),
     status: text("status").notNull().default("queued"),
     seedPlan: jsonb("seed_plan").notNull(),

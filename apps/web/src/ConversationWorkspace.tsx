@@ -33,6 +33,7 @@ import type {
   V2CreateHumanWaitAnswerProposalInputT,
   V2HumanWaitT,
   V2ImplementationVisualEvidenceT,
+  V2PlanHandoffPreferenceT,
   V2RequestPlanChangesParametersT,
   V2VisualComparisonReceiptT,
   V2WorkConversationT,
@@ -41,6 +42,7 @@ import type {
   V2WorkPlanVersionT,
 } from "@norns/contracts";
 import {
+  PM_MODEL_OPTIONS,
   V2ConversationMockupVersion,
   V2CreateExecutionActionProposalInput,
   V2CreateHumanWaitAnswerProposalInput,
@@ -92,7 +94,8 @@ import {
   retrieveConversationPlanningExcerpt,
   updateConversationPmSettings,
 } from "./conversationApi";
-import { Alert, Badge, Button, Field, Input, Spinner, TextArea } from "./ui";
+import { type ExecutionModelCapability, getExecutionModelCapabilities } from "./phaseTabApi";
+import { Alert, Badge, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 import "./ConversationWorkspace.css";
 
 type ArtifactData = {
@@ -2287,20 +2290,211 @@ function isPlanAdoptionIntent(value: string): boolean {
   ].includes(normalized);
 }
 
+function PlanHandoffDialog({
+  busy,
+  pmProvider,
+  onCancel,
+  onSubmit,
+}: {
+  busy: boolean;
+  pmProvider: "anthropic" | "openai";
+  onCancel: () => void;
+  onSubmit: (handoff: V2PlanHandoffPreferenceT) => void;
+}): React.ReactElement {
+  const [reviewMode, setReviewMode] = useState<"qc" | "skip_qc">("qc");
+  const [rounds, setRounds] = useState(3);
+  const reviewerProvider = pmProvider === "anthropic" ? "openai" : "anthropic";
+  const reviewerOptions = PM_MODEL_OPTIONS[reviewerProvider];
+  const [reviewerModel, setReviewerModel] = useState<string>(reviewerOptions[0].id);
+  const [executionModels, setExecutionModels] = useState<ExecutionModelCapability[] | null>(null);
+  const [executionModel, setExecutionModel] = useState("");
+  const [capabilityError, setCapabilityError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let current = true;
+    void getExecutionModelCapabilities()
+      .then((response) => {
+        if (!current) return;
+        const available = response.models.filter((model) => model.available);
+        setExecutionModels(available);
+        setExecutionModel(
+          (selected) =>
+            selected || (available[0] ? `${available[0].provider}:${available[0].id}` : ""),
+        );
+      })
+      .catch((caught) => {
+        if (!current) return;
+        setExecutionModels([]);
+        setCapabilityError(
+          caught instanceof Error ? caught.message : "Execution agents could not be loaded.",
+        );
+      });
+    return () => {
+      current = false;
+    };
+  }, []);
+
+  const selectedExecution =
+    executionModels?.find((model) => `${model.provider}:${model.id}` === executionModel) ?? null;
+  const canSubmit = !busy && selectedExecution !== null;
+
+  return (
+    <div className="plan-handoff-backdrop" role="presentation" onMouseDown={onCancel}>
+      <dialog
+        open
+        className="plan-handoff-dialog"
+        aria-labelledby="plan-handoff-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div>
+            <div className="eyebrow">Plan handoff</div>
+            <h2 id="plan-handoff-title">How should this plan proceed?</h2>
+            <p className="plan-handoff-summary">
+              The PM uses the whole chat as context, then keeps only the latest agreed plan and
+              unresolved decisions.
+            </p>
+          </div>
+          <Button type="button" variant="ghost" disabled={busy} onClick={onCancel}>
+            Cancel
+          </Button>
+        </header>
+
+        <div className="plan-handoff-modes" role="radiogroup" aria-label="Quality control">
+          <label className={reviewMode === "qc" ? "is-selected" : undefined}>
+            <input
+              type="radio"
+              name="plan-review-mode"
+              checked={reviewMode === "qc"}
+              onChange={() => setReviewMode("qc")}
+            />
+            <span>
+              <strong>Run QC</strong>
+              <small>An independent agent reviews the exact plan before execution.</small>
+            </span>
+          </label>
+          <label className={reviewMode === "skip_qc" ? "is-selected" : undefined}>
+            <input
+              type="radio"
+              name="plan-review-mode"
+              checked={reviewMode === "skip_qc"}
+              onChange={() => setReviewMode("skip_qc")}
+            />
+            <span>
+              <strong>Skip QC</strong>
+              <small>Approve this plan directly and begin with the selected agent.</small>
+            </span>
+          </label>
+        </div>
+
+        <div className="plan-handoff-fields">
+          <Field label="Execution agent">
+            <Select
+              aria-label="Execution agent"
+              value={executionModel}
+              disabled={busy || executionModels === null}
+              onChange={(event) => setExecutionModel(event.target.value)}
+            >
+              {executionModels === null ? <option value="">Loading agents…</option> : null}
+              {(executionModels ?? []).map((model) => (
+                <option
+                  key={`${model.provider}:${model.id}`}
+                  value={`${model.provider}:${model.id}`}
+                >
+                  {model.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          {reviewMode === "qc" ? (
+            <>
+              <Field label="QC agent">
+                <Select
+                  aria-label="QC agent"
+                  value={reviewerModel}
+                  disabled={busy}
+                  onChange={(event) => setReviewerModel(event.target.value)}
+                >
+                  {reviewerOptions.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.label}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="QC rounds">
+                <Select
+                  aria-label="QC rounds"
+                  value={String(rounds)}
+                  disabled={busy}
+                  onChange={(event) => setRounds(Number(event.target.value))}
+                >
+                  {[1, 2, 3, 4, 5].map((round) => (
+                    <option key={round} value={round}>
+                      {round}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </>
+          ) : null}
+        </div>
+
+        {capabilityError ? <Alert>{capabilityError}</Alert> : null}
+        {executionModels?.length === 0 && !capabilityError ? (
+          <Alert>No execution agents are currently available.</Alert>
+        ) : null}
+
+        <Button
+          type="button"
+          variant="primary"
+          disabled={!canSubmit}
+          onClick={() => {
+            if (!selectedExecution) return;
+            onSubmit({
+              execution_agent: {
+                provider: selectedExecution.provider,
+                model: selectedExecution.id,
+              },
+              review:
+                reviewMode === "qc"
+                  ? {
+                      mode: "qc",
+                      reviewer: { provider: reviewerProvider, model: reviewerModel },
+                      rounds,
+                    }
+                  : { mode: "skip_qc" },
+            });
+          }}
+        >
+          {busy
+            ? "Preparing plan…"
+            : reviewMode === "qc"
+              ? "Create plan & send to QC"
+              : "Create plan & start"}
+        </Button>
+      </dialog>
+    </div>
+  );
+}
+
 function ConversationComposer({
   isExecution,
   isPlanning,
+  pmProvider,
   planIntentEnabled,
   planIntentBusy,
   onUseAsPlan,
 }: {
   isExecution: boolean;
   isPlanning: boolean;
+  pmProvider: "anthropic" | "openai";
   planIntentEnabled: boolean;
   planIntentBusy: boolean;
-  onUseAsPlan: (message: string) => void;
+  onUseAsPlan: (message: string, handoff?: V2PlanHandoffPreferenceT) => void;
 }): React.ReactElement {
   const composer = useComposerRuntime();
+  const [handoffOpen, setHandoffOpen] = useState(false);
   const hasDraft = useComposer((state) => state.text.trim().length > 0);
   const hasAttachments = useComposer((state) => state.attachments.length > 0);
   const interceptPlanIntent = (event: FormEvent<HTMLFormElement>) => {
@@ -2353,7 +2547,7 @@ function ConversationComposer({
                 ? "Send or clear the current draft before creating the plan."
                 : "Create and save a plan from this conversation."
             }
-            onClick={() => onUseAsPlan("Use this as the plan.")}
+            onClick={() => setHandoffOpen(true)}
           >
             {planIntentBusy ? "Planning…" : "Plan"}
           </button>
@@ -2362,6 +2556,17 @@ function ConversationComposer({
           Send
         </ComposerPrimitive.Send>
       </div>
+      {handoffOpen ? (
+        <PlanHandoffDialog
+          busy={planIntentBusy}
+          pmProvider={pmProvider}
+          onCancel={() => setHandoffOpen(false)}
+          onSubmit={(handoff) => {
+            setHandoffOpen(false);
+            onUseAsPlan("Use this as the plan.", handoff);
+          }}
+        />
+      ) : null}
     </ComposerPrimitive.Root>
   );
 }
@@ -2767,7 +2972,7 @@ function ConversationThread({
   }, [awaitingBackgroundSettlement, onRefresh]);
 
   const generatePlanProposal = useCallback(
-    async (intentMessage?: string, saveWhenReady = false) => {
+    async (intentMessage?: string, saveWhenReady = false, handoff?: V2PlanHandoffPreferenceT) => {
       if (proposalBusy) return;
       const conversationId = detail.conversation.id;
       const idempotencyKey = proposalKeyFor(conversationId, proposalKeys.current);
@@ -2785,6 +2990,7 @@ function ConversationThread({
           conversationId,
           idempotencyKey,
           intentMessage,
+          handoff,
         );
         proposalKeys.current.delete(conversationId);
         try {
@@ -2815,13 +3021,78 @@ function ConversationThread({
             } catch {
               // The plan is already durably saved.
             }
+            if (handoff) {
+              const afterSave = await getConversation(
+                detail.work_item.project_id,
+                detail.work_item.id,
+                conversationId,
+              );
+              const handoffAction = afterSave.actions.find(
+                (action) =>
+                  action.action_type === "send_plan_to_qc" && action.status === "proposed",
+              );
+              if (!handoffAction) {
+                throw new Error("The saved plan is missing its QC or start handoff.");
+              }
+              const handoffConfirmationKey = confirmationKeyFor(
+                handoffAction,
+                confirmationKeys.current,
+              );
+              const handedOff = await confirmConversationAction(
+                detail.work_item.project_id,
+                detail.work_item.id,
+                conversationId,
+                handoffAction.id,
+                handoffConfirmationKey,
+              );
+              setActionOverrides((current) =>
+                new Map(current).set(handoffAction.id, handedOff.action),
+              );
+              setEffectOverrides((current) =>
+                new Map(current).set(handoffAction.id, handedOff.effect),
+              );
+              confirmationKeys.current.delete(handoffAction.id);
+              if (handoff.review.mode === "skip_qc") {
+                const afterWaiver = await getConversation(
+                  detail.work_item.project_id,
+                  detail.work_item.id,
+                  conversationId,
+                );
+                const approvalAction = afterWaiver.actions.find(
+                  (action) => action.action_type === "approve_plan" && action.status === "proposed",
+                );
+                if (!approvalAction) {
+                  throw new Error("QC was skipped, but the plan is missing its start action.");
+                }
+                const approvalKey = confirmationKeyFor(approvalAction, confirmationKeys.current);
+                const approved = await confirmConversationAction(
+                  detail.work_item.project_id,
+                  detail.work_item.id,
+                  conversationId,
+                  approvalAction.id,
+                  approvalKey,
+                );
+                confirmationKeys.current.delete(approvalAction.id);
+                setActionOverrides((current) =>
+                  new Map(current).set(approvalAction.id, approved.action),
+                );
+                setEffectOverrides((current) =>
+                  new Map(current).set(approvalAction.id, approved.effect),
+                );
+                const targetId = executionConversationId(approved.effect);
+                if (targetId) {
+                  onOpenConversation(targetId);
+                  return;
+                }
+              }
+            }
           } catch (caught) {
             if (caught instanceof UnauthorizedError) {
               onUnauthorized();
               return;
             }
             setProposalError(
-              `The plan was created, but it could not be saved. Use Save plan to retry. ${
+              `The plan was created, but its handoff did not finish. Use the visible workflow action to retry. ${
                 caught instanceof Error ? caught.message : String(caught)
               }`,
             );
@@ -2864,6 +3135,7 @@ function ConversationThread({
       detail.conversation.id,
       detail.work_item.id,
       detail.work_item.project_id,
+      onOpenConversation,
       onRefresh,
       onUnauthorized,
       proposalBusy,
@@ -3317,9 +3589,10 @@ function ConversationThread({
     ) ?? null;
   const planIntentEnabled =
     isPlanning &&
-    (pendingSaveAction !== null
-      ? busyActionId === null
-      : proposalBusy === false && detail.active_attempt === null && proposalBlockedReason === null);
+    pendingSaveAction === null &&
+    proposalBusy === false &&
+    detail.active_attempt === null &&
+    proposalBlockedReason === null;
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -3525,14 +3798,15 @@ function ConversationThread({
                   <ConversationComposer
                     isExecution={isExecution}
                     isPlanning={isPlanning}
+                    pmProvider={detail.conversation.provider === "openai" ? "openai" : "anthropic"}
                     planIntentEnabled={planIntentEnabled}
                     planIntentBusy={proposalBusy || busyActionId !== null}
-                    onUseAsPlan={(message) => {
+                    onUseAsPlan={(message, handoff) => {
                       if (pendingSaveAction) {
                         void confirmAction(pendingSaveAction);
                         return;
                       }
-                      void generatePlanProposal(message, true);
+                      void generatePlanProposal(message, true, handoff);
                     }}
                   />
                 )}

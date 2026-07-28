@@ -1715,6 +1715,39 @@ export const V2WorkPlanStaffingChoice = z
   })
   .strict();
 
+export const V2PlanExecutionAgent = z
+  .object({
+    provider: z.enum(["anthropic", "openai"]),
+    model: V2NonEmptyString,
+  })
+  .strict();
+export type V2PlanExecutionAgentT = z.infer<typeof V2PlanExecutionAgent>;
+
+export const V2PlanReviewPreference = z.discriminatedUnion("mode", [
+  z
+    .object({
+      mode: z.literal("qc"),
+      reviewer: z
+        .object({
+          provider: z.enum(["anthropic", "openai"]),
+          model: V2NonEmptyString,
+        })
+        .strict(),
+      rounds: z.number().int().min(1).max(5),
+    })
+    .strict(),
+  z.object({ mode: z.literal("skip_qc") }).strict(),
+]);
+export type V2PlanReviewPreferenceT = z.infer<typeof V2PlanReviewPreference>;
+
+export const V2PlanHandoffPreference = z
+  .object({
+    execution_agent: V2PlanExecutionAgent,
+    review: V2PlanReviewPreference,
+  })
+  .strict();
+export type V2PlanHandoffPreferenceT = z.infer<typeof V2PlanHandoffPreference>;
+
 export const V2WorkPlanContract = z
   .object({
     plan: PlanContract.strict(),
@@ -1837,6 +1870,7 @@ export type V2WorkPlanVersionT = z.infer<typeof V2WorkPlanVersion>;
 export const V2SavePlanCandidateParameters = z
   .object({
     plan: V2WorkPlanContract,
+    handoff: V2PlanHandoffPreference.optional(),
     predecessor_plan_version_id: V2EntityId.nullable(),
     predecessor_content_hash: V2Sha256Hex.nullable(),
     referenced_artifacts: z
@@ -1866,7 +1900,12 @@ const planVersionReferenceParameters = {
   content_hash: V2Sha256Hex,
 };
 
-export const V2SendPlanToQcParameters = z.object(planVersionReferenceParameters).strict();
+export const V2SendPlanToQcParameters = z
+  .object({
+    ...planVersionReferenceParameters,
+    review: V2PlanReviewPreference.optional(),
+  })
+  .strict();
 export type V2SendPlanToQcParametersT = z.infer<typeof V2SendPlanToQcParameters>;
 
 export const V2RequestPlanChangesParameters = z
@@ -1957,6 +1996,7 @@ export const V2ConversationPlanReview = z
     pm_model: V2NonEmptyString,
     reviewer_provider: z.enum(["anthropic", "openai"]),
     reviewer_model: V2NonEmptyString,
+    review_mode: z.enum(["qc", "waived"]).optional(),
     usage_request_group_id: V2EntityId,
     status: V2ConversationPlanReviewStatus,
     plan_content_hash: V2Sha256Hex,
@@ -2733,6 +2773,7 @@ export const V2CreateConversationPlanProposalInput = z
   .object({
     idempotency_key: V2EntityId,
     intent_message: z.string().trim().min(1).max(200).optional(),
+    handoff: V2PlanHandoffPreference.optional(),
   })
   .strict();
 export type V2CreateConversationPlanProposalInputT = z.infer<

@@ -13,7 +13,10 @@ import {
   type V2ConversationPlanReviewDispositionT,
   type V2ConversationPlanReviewFindingT,
   type V2ConversationPlanReviewT,
+  type V2PlanHandoffPreferenceT,
   V2ProposeConversationActionInput,
+  V2SavePlanCandidateParameters,
+  V2SendPlanToQcParameters,
   V2WorkPlanContract,
   type V2WorkPlanContractT,
   V2WorkPlanVersion,
@@ -168,6 +171,7 @@ interface ReviewRow {
   pm_model: string;
   reviewer_provider: ProviderName;
   reviewer_model: string;
+  review_mode: "qc" | "waived";
   usage_request_group_id: string;
   status: V2ConversationPlanReviewT["status"];
   seed_plan: unknown;
@@ -230,7 +234,7 @@ const planColumns = `schema_version, id, project_id, work_item_id, conversation_
   created_at, updated_at`;
 const reviewColumns = `schema_version, id, project_id, work_item_id, conversation_id,
   action_id, plan_version_id, planning_run_id, initiated_by_user_id, attempt_number,
-  pm_provider, pm_model, reviewer_provider, reviewer_model, status, seed_plan,
+  pm_provider, pm_model, reviewer_provider, reviewer_model, review_mode, status, seed_plan,
   usage_request_group_id,
   plan_content_hash, result_plan_content_hash, context_receipt, context_manifest,
   context_hash, findings, dispositions, revised_plan, revised_plan_content_hash,
@@ -313,6 +317,7 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
     pm_model: row.pm_model,
     reviewer_provider: row.reviewer_provider,
     reviewer_model: row.reviewer_model,
+    review_mode: row.review_mode,
     usage_request_group_id: row.usage_request_group_id,
     status: row.status,
     plan_content_hash: row.plan_content_hash,
@@ -458,6 +463,7 @@ export class ConversationPlanWorkflowService {
     });
     let models: ConversationPlanReviewModels | null = null;
     if (preview.action_type === "send_plan_to_qc") {
+      const parameters = V2SendPlanToQcParameters.parse(preview.payload.parameters);
       const conversation = await this.transactions.transaction((tx) =>
         this.assertConversation(
           tx,
@@ -467,10 +473,16 @@ export class ConversationPlanWorkflowService {
           false,
         ),
       );
-      models = await this.options.resolveReviewModels(input.project_id, {
-        provider: this.provider(conversation.provider),
-        model: conversation.model,
-      });
+      if (parameters.review?.mode !== "skip_qc") {
+        const pm = {
+          provider: this.provider(conversation.provider),
+          model: conversation.model,
+        };
+        models =
+          parameters.review?.mode === "qc"
+            ? { pm, reviewer: parameters.review.reviewer }
+            : await this.options.resolveReviewModels(input.project_id, pm);
+      }
     }
 
     const applied = await this.transactions.transaction((tx) =>
@@ -845,10 +857,11 @@ export class ConversationPlanWorkflowService {
     const parameters = parsedProposal.payload.parameters as Record<string, unknown>;
     switch (action.action_type) {
       case "save_plan_candidate": {
-        const plan = V2WorkPlanContract.parse(parameters.plan);
+        const saveParameters = V2SavePlanCandidateParameters.parse(parameters);
+        const plan = saveParameters.plan;
         const prior = await this.latestPlan(tx, action.project_id, action.work_item_id, true);
-        const priorId = parameters.predecessor_plan_version_id as string | null;
-        const priorHash = parameters.predecessor_content_hash as string | null;
+        const priorId = saveParameters.predecessor_plan_version_id;
+        const priorHash = saveParameters.predecessor_content_hash;
         if ((prior?.id ?? null) !== priorId) {
           throw new ConversationPlanWorkflowError(
             "stale_plan_version",
@@ -900,23 +913,27 @@ export class ConversationPlanWorkflowService {
           `Saved immutable Plan v${version.version} (${version.content_hash.slice(0, 12)}…).`,
           version.id,
           action.id,
-          this.candidateFollowUps(version),
+          this.candidateFollowUps(version, saveParameters.handoff),
         );
         break;
       }
       case "send_plan_to_qc": {
-        if (!models) throw new Error("QC model pins were not resolved");
+        const sendParameters = V2SendPlanToQcParameters.parse(parameters);
+        const reviewPreference = sendParameters.review;
+        const skipQc = reviewPreference?.mode === "skip_qc";
         if (
-          models.pm.provider !== this.provider(conversation.provider) ||
-          models.pm.model !== conversation.model ||
-          models.pm.provider === models.reviewer.provider
+          !skipQc &&
+          (!models ||
+            models.pm.provider !== this.provider(conversation.provider) ||
+            models.pm.model !== conversation.model ||
+            models.pm.provider === models.reviewer.provider)
         ) {
           throw new ConversationPlanWorkflowError(
             "invalid_plan_state",
             "QC model pins do not match the immutable conversation PM and opposite-provider policy",
           );
         }
-        const version = await this.boundLatestPlan(tx, action, parameters, "candidate");
+        const version = await this.boundLatestPlan(tx, action, sendParameters, "candidate");
         const active = (
           await tx.query<{ id: string }>(
             `SELECT id FROM conversation_plan_reviews
@@ -942,16 +959,113 @@ export class ConversationPlanWorkflowService {
           ).rows[0]?.attempt ?? 1,
         );
         const context = await this.freezeQcContext(tx, action);
-        const maxRounds = Number(
-          (
-            await tx.query<{ default_max_rounds: number | string }>(
-              `SELECT default_max_rounds FROM planning_reviewer_settings
-                WHERE project_id=$1`,
-              [action.project_id],
-            )
-          ).rows[0]?.default_max_rounds ?? 3,
-        );
         const now = this.now().toISOString();
+        if (skipQc) {
+          const pm = {
+            provider: this.provider(conversation.provider),
+            model: conversation.model,
+          };
+          const reviewerProvider: ProviderName =
+            pm.provider === "anthropic" ? "openai" : "anthropic";
+          const waivedReviewerModel = "qc-waived-by-human";
+          const result = {
+            plan: version.plan.plan,
+            content_hash: planContentHash(version.plan.plan),
+            total_cost_usd: 0,
+            staffing_proposal: this.staffingProposal(version.plan),
+            qc_waived: true,
+          };
+          await tx.query(
+            `INSERT INTO planning_runs (
+               id, project_id, status, round, max_rounds, objective, transcript,
+               result, total_cost_usd, error, created_at, updated_at, attachment_ids,
+               worker_providers, mode, requested_by, initiated_by_user_id,
+               pm_provider, pm_model, agent_provider, agent_model
+             ) VALUES (
+               $1,$2,'converged',0,1,$3,'[]'::jsonb,$4::jsonb,0,NULL,$5,$5,'[]'::jsonb,
+               'both','review_only',$6,$6,$7,$8,$9,$10
+             )`,
+            [
+              runId,
+              action.project_id,
+              version.plan.plan.objective,
+              JSON.stringify(result),
+              now,
+              userId,
+              pm.provider,
+              pm.model,
+              reviewerProvider,
+              waivedReviewerModel,
+            ],
+          );
+          await tx.query(
+            `INSERT INTO conversation_plan_reviews (
+               id, project_id, work_item_id, conversation_id, action_id,
+               plan_version_id, planning_run_id, initiated_by_user_id, attempt_number,
+               pm_provider, pm_model, reviewer_provider, reviewer_model, review_mode,
+               usage_request_group_id, seed_plan, status,
+               plan_content_hash, result_plan_content_hash, context_receipt,
+               context_manifest, context_hash, started_at, completed_at
+             ) VALUES (
+               $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'waived',
+               $14,$15::jsonb,'converged',$16,$16,$17::jsonb,$18::jsonb,$19,$20,$20
+             )`,
+            [
+              reviewId,
+              action.project_id,
+              action.work_item_id,
+              action.conversation_id,
+              action.id,
+              version.id,
+              runId,
+              userId,
+              attempt,
+              pm.provider,
+              pm.model,
+              reviewerProvider,
+              waivedReviewerModel,
+              reviewId,
+              JSON.stringify(version.plan),
+              version.content_hash,
+              JSON.stringify(context.receipt),
+              JSON.stringify(context.manifest),
+              context.hash,
+              now,
+            ],
+          );
+          await tx.query(
+            `UPDATE work_items
+                SET status='awaiting_approval', planning_run_id=$3,
+                    aggregate_version=aggregate_version+1, updated_at=$4
+              WHERE project_id=$1 AND id=$2`,
+            [action.project_id, action.work_item_id, runId, now],
+          );
+          await this.insertEffect(tx, action, "qc_started", version.id, reviewId, runId, null);
+          await this.finishLocalAction(tx, action.id);
+          await this.appendVisibleMessage(
+            tx,
+            action,
+            userId,
+            `QC was explicitly skipped for Plan v${version.version}. The selected execution staffing is preserved and the exact plan is ready to start.`,
+            version.id,
+            action.id,
+            this.reviewFollowUps(version, reviewId),
+          );
+          return { dispatchRunId: null, kickoffIntentId: null };
+        }
+        if (!models) throw new Error("QC model pins were not resolved");
+        const maxRounds =
+          reviewPreference?.mode === "qc"
+            ? reviewPreference.rounds
+            : Number(
+                (
+                  await tx.query<{ default_max_rounds: number | string }>(
+                    `SELECT default_max_rounds FROM planning_reviewer_settings
+                      WHERE project_id=$1`,
+                    [action.project_id],
+                  )
+                ).rows[0]?.default_max_rounds ?? 3,
+              );
         await tx.query(
           `INSERT INTO planning_runs (
              id, project_id, status, round, max_rounds, objective, transcript,
@@ -979,12 +1093,12 @@ export class ConversationPlanWorkflowService {
           `INSERT INTO conversation_plan_reviews (
              id, project_id, work_item_id, conversation_id, action_id,
              plan_version_id, planning_run_id, initiated_by_user_id, attempt_number,
-             pm_provider, pm_model, reviewer_provider, reviewer_model,
+             pm_provider, pm_model, reviewer_provider, reviewer_model, review_mode,
              usage_request_group_id, seed_plan,
              plan_content_hash, result_plan_content_hash, context_receipt,
              context_manifest, context_hash
            ) VALUES (
-             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'qc',$14,$15::jsonb,
              $16,$16,$17::jsonb,$18::jsonb,$19
            )`,
           [
@@ -2630,11 +2744,18 @@ export class ConversationPlanWorkflowService {
     }
   }
 
-  private candidateFollowUps(plan: V2WorkPlanVersionT): FollowUpActionProposal[] {
+  private candidateFollowUps(
+    plan: V2WorkPlanVersionT,
+    handoff?: V2PlanHandoffPreferenceT,
+  ): FollowUpActionProposal[] {
     return [
       {
         action_type: "send_plan_to_qc",
-        parameters: { plan_version_id: plan.id, content_hash: plan.content_hash },
+        parameters: {
+          plan_version_id: plan.id,
+          content_hash: plan.content_hash,
+          ...(handoff ? { review: handoff.review } : {}),
+        },
       },
       {
         action_type: "reject_plan",

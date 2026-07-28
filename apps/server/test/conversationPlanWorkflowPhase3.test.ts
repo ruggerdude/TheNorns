@@ -2,6 +2,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { FakeAdapter, type LlmAdapter } from "@norns/adapters";
 import {
   type V2ConversationActionT,
+  V2SavePlanCandidateParameters,
   V2WorkPlanContract,
   type V2WorkPlanContractT,
 } from "@norns/contracts";
@@ -587,13 +588,28 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     );
   });
 
-  it("records a natural-language plan handoff once and makes it the proposal source", async () => {
+  it("extracts the agreed plan and durably binds the selected handoff", async () => {
     const scope = await workspace("natural-plan-handoff");
     const adapter = proposalAdapter as FakeAdapter;
     adapter.enqueue(plan("Use the agreed conversation as the plan"));
+    const handoff = {
+      execution_agent: {
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+      },
+      review: {
+        mode: "qc",
+        reviewer: {
+          provider: "openai",
+          model: "gpt-5.6-terra",
+        },
+        rounds: 2,
+      },
+    } as const;
     const request = {
       idempotency_key: "natural-plan-handoff",
       intent_message: "Use this as the plan.",
+      handoff,
     };
 
     const first = await proposals.propose(
@@ -613,6 +629,22 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
 
     expect(replay).toEqual(first);
     expect(adapter.requests).toHaveLength(1);
+    expect(adapter.requests[0]?.system).toContain(
+      "Extract the latest agreed direction and explicit human decisions",
+    );
+    expect(adapter.requests[0]?.prompt).toContain(
+      "anthropic:claude-sonnet-5 as the execution agent",
+    );
+    const proposedParameters = V2SavePlanCandidateParameters.parse(first.action.payload.parameters);
+    expect(proposedParameters.plan.staffing).toEqual([
+      {
+        module_id: "conversation-api",
+        agent_role: "implementation",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+      },
+    ]);
+    expect(proposedParameters.handoff).toEqual(handoff);
     const messages = await conversations.listMessages(
       owner,
       projectId,
@@ -632,6 +664,14 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       [scope.conversationId, request.idempotency_key],
     );
     expect(attempt.rows[0]?.source_message_id).toBe(intentMessages[0]?.id);
+
+    const saved = await workflow.confirm(
+      owner.id,
+      confirmation(scope, first.action.id, "natural-plan-handoff-save"),
+    );
+    expect(saved.effect.kind).toBe("plan_saved");
+    const sendToQc = await proposedAction(scope, "send_plan_to_qc");
+    expect(sendToQc.payload.parameters.review).toEqual(handoff.review);
   });
 
   it("settles adapter-construction failure once and replays the terminal failure without spend", async () => {

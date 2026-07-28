@@ -149,6 +149,28 @@ async function prepare(
         updated_at: null,
       });
     }
+    if (path === "/api/v2/capabilities/execution-models") {
+      return fulfill(route, {
+        ready: true,
+        required_environment: [],
+        models: [
+          {
+            id: "claude-sonnet-5",
+            provider: "anthropic",
+            label: "Claude Sonnet 5",
+            available: true,
+            unavailable_reason: null,
+          },
+          {
+            id: "gpt-5.6-sol",
+            provider: "openai",
+            label: "GPT-5.6 Sol",
+            available: true,
+            unavailable_reason: null,
+          },
+        ],
+      });
+    }
     if (path === "/api/projects" && request.method() === "GET") {
       return fulfill(route, projects);
     }
@@ -690,6 +712,19 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
     "Message the PM, or say “Use this as the plan”…",
   );
   await expect(page.getByRole("button", { name: "Use conversation as plan" })).toHaveText("Plan");
+  await page.getByRole("button", { name: "Use conversation as plan" }).click();
+  const planHandoff = page.getByRole("dialog", { name: "How should this plan proceed?" });
+  await expect(planHandoff).toContainText(
+    "The PM uses the whole chat as context, then keeps only the latest agreed plan",
+  );
+  await expect(planHandoff.getByRole("combobox", { name: "Execution agent" })).toBeVisible();
+  await expect(planHandoff.getByRole("combobox", { name: "QC agent" })).toBeVisible();
+  await expect(planHandoff.getByRole("combobox", { name: "QC rounds" })).toBeVisible();
+  await planHandoff.getByRole("radio", { name: /Skip QC/ }).check();
+  await expect(planHandoff.getByRole("combobox", { name: "QC agent" })).toHaveCount(0);
+  await expect(planHandoff.getByRole("button", { name: "Create plan & start" })).toBeVisible();
+  await planHandoff.getByRole("button", { name: "Cancel" }).click();
+  await expect(planHandoff).toHaveCount(0);
   const planningWorkflow = page.getByRole("region", { name: "Planning workflow" });
   await expect(planningWorkflow).toBeVisible();
   await expect(planningWorkflow.locator('[aria-current="step"]')).toHaveText("Chat");

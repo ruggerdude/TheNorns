@@ -314,6 +314,13 @@ export const GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME =
+  "0047_conversation_plan_handoff_choices";
+export const CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_URL = new URL(
+  "../../../drizzle/0047_conversation_plan_handoff_choices.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -528,6 +535,10 @@ export async function loadGitHubConnectionRemovalMigrationSql(): Promise<string>
 
 export async function loadGitHubAuthorizationRemovalMigrationSql(): Promise<string> {
   return readFile(GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_URL, "utf8");
+}
+
+export async function loadConversationPlanHandoffChoicesMigrationSql(): Promise<string> {
+  return readFile(CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -825,6 +836,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME,
       sql: await loadGitHubAuthorizationRemovalMigrationSql(),
+    },
+    {
+      name: CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME,
+      sql: await loadConversationPlanHandoffChoicesMigrationSql(),
     },
   ];
 }

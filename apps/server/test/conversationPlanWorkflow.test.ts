@@ -148,7 +148,19 @@ describe.sequential("conversation plan workflow", () => {
     return { ...created, message };
   }
 
-  async function saveCandidate(label: string) {
+  async function saveCandidate(
+    label: string,
+    handoff?: {
+      execution_agent: { provider: "anthropic" | "openai"; model: string };
+      review:
+        | {
+            mode: "qc";
+            reviewer: { provider: "anthropic" | "openai"; model: string };
+            rounds: number;
+          }
+        | { mode: "skip_qc" };
+    },
+  ) {
     const created = await workspace(label);
     const envelope = plan();
     const action = await conversations.proposeAction(owner, {
@@ -160,6 +172,7 @@ describe.sequential("conversation plan workflow", () => {
       payload: {
         parameters: {
           plan: envelope,
+          ...(handoff ? { handoff } : {}),
           predecessor_plan_version_id: null,
           predecessor_content_hash: null,
           referenced_artifacts: [],
@@ -260,6 +273,56 @@ describe.sequential("conversation plan workflow", () => {
       status: "awaiting_approval",
       approved_plan_version_id: saved.version.id,
     });
+  });
+
+  it("records an explicit QC waiver and proceeds without calling a reviewer", async () => {
+    const saved = await saveCandidate("skip-qc", {
+      execution_agent: { provider: "openai", model: "gpt-5.6-sol" },
+      review: { mode: "skip_qc" },
+    });
+    let detail = await workflow.detail(
+      owner.id,
+      projectId,
+      saved.work_item.id,
+      saved.conversation.id,
+    );
+    const skip = detail.actions.find(
+      (action) => action.action_type === "send_plan_to_qc" && action.status === "proposed",
+    );
+    if (!skip) throw new Error("save must emit the selected handoff");
+    expect(skip.payload.parameters).toMatchObject({
+      review: { mode: "skip_qc" },
+    });
+
+    const waived = await workflow.confirm(owner.id, {
+      project_id: projectId,
+      work_item_id: saved.work_item.id,
+      conversation_id: saved.conversation.id,
+      action_id: skip.id,
+      idempotency_key: "skip-qc",
+    });
+    expect(waived.effect.kind).toBe("qc_started");
+    if (waived.effect.kind !== "qc_started") throw new Error("expected waiver effect");
+    expect(waived.effect.plan_review).toMatchObject({
+      review_mode: "waived",
+      status: "converged",
+      findings: [],
+      dispositions: [],
+    });
+
+    detail = await workflow.detail(owner.id, projectId, saved.work_item.id, saved.conversation.id);
+    const approve = detail.actions.find(
+      (action) => action.action_type === "approve_plan" && action.status === "proposed",
+    );
+    if (!approve) throw new Error("QC waiver must emit the exact approval action");
+    const approved = await workflow.confirm(owner.id, {
+      project_id: projectId,
+      work_item_id: saved.work_item.id,
+      conversation_id: saved.conversation.id,
+      action_id: approve.id,
+      idempotency_key: "approve-after-qc-waiver",
+    });
+    expect(approved.effect.kind).toBe("plan_approved");
   });
 
   it("persists an exact human change intent idempotently and mutates only on confirmation", async () => {

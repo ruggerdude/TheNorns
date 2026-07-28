@@ -16,6 +16,7 @@ import type {
   V2HumanWaitAnswerT,
   V2HumanWaitContinuationT,
   V2HumanWaitT,
+  V2PlanHandoffPreferenceT,
   V2WorkConversationT,
   V2WorkItemT,
   V2WorkMessagePartT,
@@ -207,6 +208,7 @@ export function generateConversationPlanProposal(
   conversationId: string,
   idempotencyKey: string,
   intentMessage?: string,
+  handoff?: V2PlanHandoffPreferenceT,
 ): Promise<{
   message: V2WorkMessageT;
   action: V2ConversationActionT;
@@ -216,6 +218,7 @@ export function generateConversationPlanProposal(
     body: JSON.stringify({
       idempotency_key: idempotencyKey,
       ...(intentMessage ? { intent_message: intentMessage } : {}),
+      ...(handoff ? { handoff } : {}),
     }),
   });
 }

@@ -6,6 +6,8 @@ import {
   V2ConversationTurnAttempt,
   V2ConversationUsage,
   V2CreateConversationPlanningExcerptInput,
+  V2PlanHandoffPreference,
+  V2SendPlanToQcParameters,
   V2WorkMessage,
   V2WorkPlanContract,
   V2WorkPlanVersion,
@@ -218,6 +220,37 @@ describe("V2 conversation contracts", () => {
         approved_at: null,
         created_at: at,
         updated_at: at,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("binds either an exact QC configuration or an explicit QC waiver", () => {
+    const qc = {
+      execution_agent: { provider: "anthropic", model: "claude-sonnet-5" },
+      review: {
+        mode: "qc",
+        reviewer: { provider: "openai", model: "gpt-5.6-terra" },
+        rounds: 3,
+      },
+    };
+    const waiver = {
+      execution_agent: { provider: "openai", model: "gpt-5.6-sol" },
+      review: { mode: "skip_qc" },
+    };
+
+    expect(V2PlanHandoffPreference.safeParse(qc).success).toBe(true);
+    expect(V2PlanHandoffPreference.safeParse(waiver).success).toBe(true);
+    expect(
+      V2SendPlanToQcParameters.safeParse({
+        plan_version_id: "plan-1",
+        content_hash: hash,
+        review: qc.review,
+      }).success,
+    ).toBe(true);
+    expect(
+      V2PlanHandoffPreference.safeParse({
+        ...qc,
+        review: { ...qc.review, rounds: 6 },
       }).success,
     ).toBe(false);
   });

@@ -62,6 +62,7 @@ export function ConversationQcCard({
 }): React.ReactElement {
   const titleId = `conversation-qc-${review.id}`;
   const terminal = ["converged", "cap_reached", "failed"].includes(review.status);
+  const waived = review.review_mode === "waived";
 
   return (
     <article
@@ -71,7 +72,11 @@ export function ConversationQcCard({
     >
       <header>
         <div>
-          <div className="eyebrow">Cross-provider QC · Attempt {review.attempt_number}</div>
+          <div className="eyebrow">
+            {waived
+              ? "QC skipped by human choice"
+              : `Cross-provider QC · Attempt ${review.attempt_number}`}
+          </div>
           <h3 id={titleId}>
             Plan {planVersion ? `version ${planVersion.version}` : review.plan_version_id}
           </h3>
@@ -92,12 +97,14 @@ export function ConversationQcCard({
             {review.pm_provider} · {review.pm_model}
           </dd>
         </div>
-        <div>
-          <dt>Reviewer</dt>
-          <dd>
-            {review.reviewer_provider} · {review.reviewer_model}
-          </dd>
-        </div>
+        {!waived ? (
+          <div>
+            <dt>Reviewer</dt>
+            <dd>
+              {review.reviewer_provider} · {review.reviewer_model}
+            </dd>
+          </div>
+        ) : null}
         <div>
           <dt>Context receipt</dt>
           <dd>
@@ -143,7 +150,11 @@ export function ConversationQcCard({
         );
       })}
 
-      {terminal && review.findings.length === 0 && review.status !== "failed" ? (
+      {waived ? (
+        <p className="conversation-qc-clear">
+          No reviewer was called. You explicitly chose to proceed with the selected execution agent.
+        </p>
+      ) : terminal && review.findings.length === 0 && review.status !== "failed" ? (
         <p className="conversation-qc-clear">
           QC returned no findings for this exact plan version.
         </p>
