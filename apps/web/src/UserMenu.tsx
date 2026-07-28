@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { SettingsTab } from "./Account";
 import type { CurrentUser } from "./auth";
+import { ThemeToggle } from "./theme";
 import { Button } from "./ui";
 
 export function HeaderUserMenu({
@@ -91,6 +92,7 @@ export function AuthenticatedHeaderActions({
           Admin
         </Button>
       ) : null}
+      <ThemeToggle />
       <HeaderUserMenu user={user} onOpenAccount={onOpenAccount} onSignOut={onSignOut} />
     </div>
   );
