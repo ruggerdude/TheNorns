@@ -684,6 +684,10 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await expect(page.getByText("# Release readiness", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Conversation", { exact: true })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message the project PM" })).toBeVisible();
+  const planningWorkflow = page.getByRole("region", { name: "Planning workflow" });
+  await expect(planningWorkflow).toBeVisible();
+  await expect(planningWorkflow.locator('[aria-current="step"]')).toHaveText("Chat");
+  await expect(planningWorkflow.getByRole("button", { name: "Create plan" })).toBeVisible();
   await expect(page.locator(".conversation-sidebar")).toHaveCount(0);
   await expect(
     page.getByText("Plan the release dashboard and deployment health workflow.", { exact: true }),

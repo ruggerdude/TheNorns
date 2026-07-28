@@ -572,7 +572,7 @@ describe("conversation workspace", () => {
     ).not.toBeInTheDocument();
     const combinedHeader = document.querySelector(".conversation-thread-chrome");
     expect(combinedHeader).toContainElement(
-      screen.getByRole("button", { name: "Create plan proposal" }),
+      screen.getByRole("button", { name: "Create plan" }),
     );
     expect(combinedHeader).toContainElement(screen.getByText("Create Mockup", { exact: true }));
     expect(combinedHeader).toContainElement(screen.getByTestId("conversation-model-pin"));
@@ -873,11 +873,10 @@ describe("conversation workspace", () => {
     expect(
       screen.getByRole("button", { name: "Confirm action: Approve and begin" }),
     ).toBeInTheDocument();
+    const workflow = screen.getByRole("region", { name: "Planning workflow" });
+    expect(workflow.querySelector('[aria-current="step"]')).toHaveTextContent("QC");
+    expect(screen.getByRole("button", { name: "Approve and start" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Change direction" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Update plan proposal" })).toBeDisabled();
-    expect(
-      screen.getByText("Plan proposal updates are unavailable while work is awaiting approval."),
-    ).toBeInTheDocument();
   });
 
   it("generates and hydrates an inert plan proposal before any immutable version exists", async () => {
@@ -1046,17 +1045,24 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Create plan proposal" }));
-    expect(screen.getByRole("button", { name: "Create plan proposal" })).toHaveTextContent(
-      "Generating proposal…",
-    );
+    const workflow = await screen.findByRole("region", { name: "Planning workflow" });
+    expect(workflow.querySelector('[aria-current="step"]')).toHaveTextContent("Chat");
+    await user.click(await screen.findByRole("button", { name: "Create plan" }));
+    expect(screen.getByRole("button", { name: "Create plan" })).toHaveTextContent("Creating…");
     generated = true;
     resolveProposal(Response.json({ message: proposalMessage, action: saveAction }));
 
     expect(await screen.findByText("I drafted a structured plan proposal.")).toBeInTheDocument();
     expect(screen.getByText("Proposed Plan Contract")).toBeInTheDocument();
     expect(screen.getByText("Not saved")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Update plan proposal" })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("region", { name: "Planning workflow" })
+          .querySelector('[aria-current="step"]'),
+      ).toHaveTextContent("Plan"),
+    );
+    expect(screen.getByRole("button", { name: "Save plan" })).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Confirm action: Save plan candidate" }),
     ).toBeInTheDocument();
@@ -1067,8 +1073,9 @@ describe("conversation workspace", () => {
     await user.click(screen.getByRole("button", { name: "Confirm action: Save plan candidate" }));
     expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Confirm action: Approve plan" }),
+      screen.getByRole("button", { name: "Confirm action: Send to QC" }),
     ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send to QC" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Confirm action: Reject plan" })).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Confirm action: Request changes" }),
@@ -1153,11 +1160,11 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Create plan proposal" }));
+    await user.click(await screen.findByRole("button", { name: "Create plan" }));
     expect(await screen.findByTestId("conversation-plan-proposal-error")).toHaveTextContent(
       "A plan proposal request is already in progress.",
     );
-    await user.click(screen.getByRole("button", { name: "Create plan proposal" }));
+    await user.click(screen.getByRole("button", { name: "Create plan" }));
 
     expect(await screen.findByText("Proposed Plan Contract")).toBeInTheDocument();
     expect(submittedKeys).toHaveLength(2);
@@ -1225,11 +1232,11 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Create plan proposal" }));
+    await user.click(await screen.findByRole("button", { name: "Create plan" }));
     expect(await screen.findByTestId("conversation-plan-proposal-error")).toHaveTextContent(
       "could not produce a valid Plan Contract",
     );
-    await user.click(screen.getByRole("button", { name: "Create plan proposal" }));
+    await user.click(screen.getByRole("button", { name: "Create plan" }));
 
     expect(await screen.findByText("Proposed Plan Contract")).toBeInTheDocument();
     expect(keys).toHaveLength(2);
@@ -1469,10 +1476,7 @@ describe("conversation workspace", () => {
         "QC is queued. Findings and PM dispositions will appear here after the review settles.",
       ),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Update plan proposal" })).toBeDisabled();
-    expect(
-      screen.getByText("Plan proposal updates are unavailable while QC is queued."),
-    ).toBeInTheDocument();
+    expect(screen.getByText("QC queued", { exact: true })).toBeInTheDocument();
     expect(detailCalls).toBe(1);
 
     await act(async () => {
@@ -1578,10 +1582,9 @@ describe("conversation workspace", () => {
       "href",
       `/projects/${projectId}/work/execution-conversation-pending`,
     );
-    expect(screen.getByRole("button", { name: "Update plan proposal" })).toBeDisabled();
-    expect(
-      screen.getByText("The approved plan is locked. Continue from the current execution state."),
-    ).toBeInTheDocument();
+    const workflow = screen.getByRole("region", { name: "Planning workflow" });
+    expect(workflow.querySelector('[aria-current="step"]')).toHaveTextContent("Execute");
+    expect(screen.getByRole("button", { name: "Open execution" })).toBeInTheDocument();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2_500);
@@ -1795,14 +1798,14 @@ describe("conversation workspace", () => {
     );
 
     const confirm = await screen.findByRole("button", {
-      name: "Confirm action: Approve plan",
+      name: "Confirm action: Send to QC",
     });
     await user.click(confirm);
     expect(await screen.findByRole("alert")).toHaveTextContent("Confirmation status is uncertain.");
     expect(
       window.sessionStorage.getItem(`norns:conversation-action-confirmation:${proposed.id}`),
     ).toBe(confirmationBodies[0]?.idempotency_key);
-    await user.click(screen.getByRole("button", { name: "Confirm action: Approve plan" }));
+    await user.click(screen.getByRole("button", { name: "Confirm action: Send to QC" }));
 
     await waitFor(() => expect(confirmationBodies).toHaveLength(2));
     expect(confirmationBodies[0]?.idempotency_key).toEqual(expect.any(String));
@@ -1848,7 +1851,7 @@ describe("conversation workspace", () => {
       />,
     );
     const confirm = await screen.findByRole("button", {
-      name: "Confirm action: Approve plan",
+      name: "Confirm action: Send to QC",
     });
     vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new Error("storage disabled");
@@ -1859,7 +1862,7 @@ describe("conversation workspace", () => {
 
     await user.click(confirm);
     expect(await screen.findByRole("alert")).toHaveTextContent("Confirmation status is uncertain.");
-    await user.click(screen.getByRole("button", { name: "Confirm action: Approve plan" }));
+    await user.click(screen.getByRole("button", { name: "Confirm action: Send to QC" }));
     await waitFor(() => expect(confirmationBodies).toHaveLength(2));
     expect(confirmationBodies[1]?.idempotency_key).toBe(confirmationBodies[0]?.idempotency_key);
   });
@@ -1918,7 +1921,7 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Continue action: Approve plan" }));
+    await user.click(await screen.findByRole("button", { name: "Continue action: Send to QC" }));
     expect(submittedKey).toBe("original-confirmation-key");
   });
 
@@ -1972,11 +1975,11 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Confirm action: Approve plan" }));
+    await user.click(await screen.findByRole("button", { name: "Confirm action: Send to QC" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("stale plan hash");
     expect(screen.getByText("Plan Contract · Version 1")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Confirm action: Approve plan" }),
+      screen.getByRole("button", { name: "Confirm action: Send to QC" }),
     ).toBeInTheDocument();
   });
 

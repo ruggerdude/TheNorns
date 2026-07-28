@@ -2264,6 +2264,146 @@ function confirmationKeyFor(action: V2ConversationActionT, memory: Map<string, s
   }
 }
 
+const PLANNING_WORKFLOW_STEPS = ["Chat", "Plan", "QC", "Execute"] as const;
+
+function PlanningWorkflowBar({
+  detail,
+  proposalBusy,
+  proposalBlockedReason,
+  onCreateProposal,
+  onOpenConversation,
+}: {
+  detail: ConversationDetail;
+  proposalBusy: boolean;
+  proposalBlockedReason: string | null;
+  onCreateProposal: () => void;
+  onOpenConversation: (conversationId: string) => void;
+}): React.ReactElement {
+  const context = useContext(ConversationActionContext);
+  if (!context) return <></>;
+
+  const actions = [...context.actions.values()];
+  const proposedAction = (actionType: V2ConversationActionT["action_type"]) =>
+    actions.find((action) => action.action_type === actionType && action.status === "proposed") ??
+    null;
+  const saveAction = proposedAction("save_plan_candidate");
+  const qcAction = proposedAction("send_plan_to_qc");
+  const approveAction = proposedAction("approve_plan");
+  const activeReview = detail.plan_reviews.find(
+    (review) => review.status === "queued" || review.status === "running",
+  );
+  const hasSavedPlan = detail.plan_versions.length > 0;
+  const approved =
+    detail.conversation.kind === "execution_pm" ||
+    detail.plan_versions.some((version) => version.status === "approved") ||
+    [...context.effects.values()].some((effect) => effect.kind === "plan_approved");
+  const hasReview = detail.plan_reviews.length > 0;
+  const currentStep = approved
+    ? 3
+    : hasReview || activeReview
+      ? 2
+      : hasSavedPlan || saveAction
+        ? 1
+        : 0;
+  const executionTarget =
+    detail.handoff?.target_conversation_id ??
+    [...context.effects.values()]
+      .map((effect) => executionConversationId(effect))
+      .find((conversationId) => conversationId !== null) ??
+    null;
+  const busy = context.busyActionId !== null || proposalBusy;
+
+  let action: ReactNode;
+  if (executionTarget && detail.conversation.kind !== "execution_pm") {
+    action = (
+      <Button
+        className="btn-small conversation-workflow-action"
+        variant="primary"
+        aria-label="Open execution"
+        onClick={() => onOpenConversation(executionTarget)}
+      >
+        Open execution
+      </Button>
+    );
+  } else if (detail.conversation.kind === "execution_pm") {
+    action = <Badge tone="success">Execution active</Badge>;
+  } else if (detail.conversation.status !== "active") {
+    action = <Badge>Planning closed</Badge>;
+  } else if (saveAction) {
+    action = (
+      <Button
+        className="btn-small conversation-workflow-action"
+        variant="primary"
+        aria-label="Save plan"
+        disabled={busy}
+        onClick={() => void context.confirm(saveAction)}
+      >
+        {context.busyActionId === saveAction.id ? "Saving…" : "Save plan"}
+      </Button>
+    );
+  } else if (approveAction) {
+    action = (
+      <Button
+        className="btn-small conversation-workflow-action"
+        variant="primary"
+        aria-label="Approve and start"
+        disabled={busy}
+        onClick={() => void context.confirm(approveAction)}
+      >
+        {context.busyActionId === approveAction.id ? "Starting…" : "Approve & start"}
+      </Button>
+    );
+  } else if (qcAction) {
+    action = (
+      <Button
+        className="btn-small conversation-workflow-action"
+        variant="primary"
+        aria-label="Send to QC"
+        disabled={busy}
+        onClick={() => void context.confirm(qcAction)}
+      >
+        {context.busyActionId === qcAction.id ? "Sending…" : "Send to QC"}
+      </Button>
+    );
+  } else if (activeReview) {
+    action = <Badge tone="info">QC {activeReview.status.replaceAll("_", " ")}</Badge>;
+  } else {
+    const update = hasSavedPlan;
+    action = (
+      <Button
+        className="btn-small conversation-workflow-action"
+        variant="primary"
+        aria-label={update ? "Update plan" : "Create plan"}
+        disabled={busy || proposalBlockedReason !== null}
+        title={proposalBlockedReason ?? undefined}
+        onClick={onCreateProposal}
+      >
+        {proposalBusy ? "Creating…" : update ? "Update plan" : "Create plan"}
+      </Button>
+    );
+  }
+
+  return (
+    <section className="conversation-workflow" aria-label="Planning workflow">
+      <ol aria-label="Chat to execution progress">
+        {PLANNING_WORKFLOW_STEPS.map((step, index) => {
+          const state = index < currentStep ? "complete" : index === currentStep ? "current" : "next";
+          return (
+            <li
+              className={`is-${state}`}
+              aria-current={state === "current" ? "step" : undefined}
+              key={step}
+            >
+              {step}
+            </li>
+          );
+        })}
+      </ol>
+      <div className="conversation-workflow-next">{action}</div>
+    </section>
+  );
+}
+
 function ConversationThread({
   header,
   detail,
@@ -2988,11 +3128,6 @@ function ConversationThread({
     resources.actions,
   ]);
 
-  const hasPlanProposal =
-    detail.plan_versions.length > 0 ||
-    detail.actions.some(
-      (action) => action.action_type === "save_plan_candidate" && action.status === "proposed",
-    );
   const activePlanReview = detail.plan_reviews.find(
     (review) => review.status === "queued" || review.status === "running",
   );
@@ -3004,7 +3139,6 @@ function ConversationThread({
       : detail.work_item.status !== "planning"
         ? `Plan proposal updates are unavailable while work is ${detail.work_item.status.replaceAll("_", " ")}.`
         : null;
-  const proposalHelpId = `conversation-plan-proposal-help-${detail.conversation.id}`;
   const isPlanning = detail.conversation.kind === "planning";
   const isExecution = detail.conversation.kind === "execution_pm";
   const isReadOnly = detail.conversation.status !== "active";
@@ -3054,36 +3188,16 @@ function ConversationThread({
         >
           <div className="conversation-thread-chrome">
             {header}
-            {(detail.conversation.kind === "planning" && detail.conversation.status === "active") ||
-            ((isPlanning || isExecution) && !isReadOnly) ? (
+            {isPlanning || isExecution ? (
               <div className="conversation-thread-tools" aria-label="Conversation tools">
-                {detail.conversation.kind === "planning" &&
-                detail.conversation.status === "active" ? (
-                  <div className="conversation-plan-proposal-control">
-                    <span className="sr-only" id={proposalHelpId}>
-                      {proposalBlockedReason ??
-                        "The PM will create a structured draft from this conversation. Saving it remains a separate confirmation."}
-                    </span>
-                    <Button
-                      className="btn-small"
-                      disabled={
-                        proposalBusy ||
-                        detail.active_attempt !== null ||
-                        proposalBlockedReason !== null
-                      }
-                      aria-describedby={proposalHelpId}
-                      aria-label={hasPlanProposal ? "Update plan proposal" : "Create plan proposal"}
-                      onClick={() => void generatePlanProposal()}
-                    >
-                      {proposalBusy
-                        ? "Generating proposal…"
-                        : hasPlanProposal
-                          ? "Update plan proposal"
-                          : "Create plan proposal"}
-                    </Button>
-                  </div>
-                ) : null}
-                {(isPlanning || isExecution) && !isReadOnly ? (
+                <PlanningWorkflowBar
+                  detail={detail}
+                  proposalBusy={proposalBusy || detail.active_attempt !== null}
+                  proposalBlockedReason={proposalBlockedReason}
+                  onCreateProposal={() => void generatePlanProposal()}
+                  onOpenConversation={onOpenConversation}
+                />
+                {!isReadOnly ? (
                   <MockupRequestComposer
                     taskOptions={taskOptions}
                     planningPlanVersionId={isPlanning ? (latestPlan?.id ?? null) : null}

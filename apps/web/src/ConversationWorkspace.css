@@ -522,10 +522,6 @@
   font-size: var(--text-sm);
 }
 
-.conversation-plan-proposal-control {
-  flex: 0 0 auto;
-}
-
 .conversation-thread-tools {
   position: relative;
   z-index: 4;
@@ -545,6 +541,66 @@
   padding: 0;
   border: 0;
   background: transparent;
+}
+
+.conversation-workflow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.conversation-workflow ol {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conversation-workflow li {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.conversation-workflow li + li::before {
+  content: "›";
+  color: color-mix(in srgb, var(--ink-muted) 58%, transparent);
+  font-weight: 500;
+}
+
+.conversation-workflow li.is-complete {
+  color: var(--success);
+}
+
+.conversation-workflow li.is-current {
+  color: var(--ink);
+}
+
+.conversation-workflow li.is-current::after {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--gold);
+}
+
+.conversation-workflow-next {
+  display: flex;
+  flex: none;
+  align-items: center;
+}
+
+.conversation-workflow-action {
+  min-height: 34px;
+  white-space: nowrap;
 }
 
 .conversation-thread-chrome .conversation-header-actions {
@@ -1972,6 +2028,19 @@
 
   .conversation-thread-chrome > .conversation-thread-tools {
     order: 4;
+  }
+
+  .conversation-workflow {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .conversation-workflow ol {
+    gap: 0.2rem;
+  }
+
+  .conversation-workflow li {
+    gap: 0.2rem;
   }
 
   .conversation-handoff-card > header {
