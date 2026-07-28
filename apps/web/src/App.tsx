@@ -1747,13 +1747,9 @@ function ProjectGraph({
 
   return (
     <div className="workspace-shell">
-      <ProjectTabs
-        projects={openProjects}
-        activeId={project.id}
-        onSelect={onOpenProject}
-        onClose={onCloseProject}
-      />
-      <header className="workspace-topbar">
+      {/* DESIGN P2: brand topbar first (canonical .topbar, matching every
+          other screen), then the open-project tabs strip below it. */}
+      <header className="topbar">
         <div className="workspace-nav-start">
           <Brand />
           <Button className="btn-small" variant="ghost" onClick={onBack}>
@@ -1770,6 +1766,12 @@ function ProjectGraph({
           />
         ) : null}
       </header>
+      <ProjectTabs
+        projects={openProjects}
+        activeId={project.id}
+        onSelect={onOpenProject}
+        onClose={onCloseProject}
+      />
       <main className="page workspace-page">
         <div className="project-heading workspace-header">
           <div className="eyebrow">Workspace</div>

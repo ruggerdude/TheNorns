@@ -1033,3 +1033,11 @@ decision and is deliberately untouched.
   re-loads the run itself); (4) `assignmentLocalId()` exported from
   strategyBridgeService and shared by executionKickoff instead of a
   re-derived `assignment-${node_id}`.
+
+## Design overhaul — Phase 2 (per docs/DESIGN-SYSTEM.md)
+
+- [ ] 🔄 DESIGN-P2d — workspace sweep: App.tsx shell reorder (brand topbar
+  first), micro-text purge in ConversationWorkspace / PhaseTab /
+  ProjectOperationsDashboard / KnowledgeStatusPanel CSS, "AI" copy
+  neutralized in PhaseTab, header/token normalization across operations
+  dashboard, run log, debates, members.
