@@ -1,14 +1,12 @@
-# Phase tab build — final status (2026-07-22)
+# Design overhaul — status (2026-07-27)
+
+Program: full visual/UX overhaul of apps/web — one design system, one header
+pattern, consistent widths/type/colors, new logo, remove "AI" filler copy,
+fix flow bugs (New Project layout).
 
 | Phase | Phase Name | % Complete | Est. Completion | Notes |
 |-------|-----------|------------|-----------------|-------|
-| P1 | Backend: rounds, decision endpoint, staffing | 100% | done | server 861/12 at phase close |
-| P2 | Web: "Phase" workspace tab UI | 100% | done | web 132 at phase close |
-| P3 | Integration, migration 0025, API reconciliation | 100% | done | branch phase-tab/integration @ b899793 |
-| P4 | Auto-start execution on Approve (owner decision) | 100% | done | kickoff wired in main.ts |
-| P5 | Independent review | 100% | done | Verdict SHIP, 0 blockers |
-| P5b | Review fixes (audit actor, provider constraint, 2 cleanups) | 100% | done | — |
-
-**Final branch:** worktree-agent-a7882fb56ab5bf1d0 @ 151d8f3 (contains everything; main untouched).
-**Final verification:** server 869 passed / 12 skipped; web 133 passed; contracts 122; adapters 25/2 skipped; tsc, biome, build all clean.
-**Landed:** merged to main (772bdd8), pushed, Railway deploy SUCCESS, migration 0025 applied and verified live (site/healthz 200, new routes 401-not-404). Backlog in BACKLOG.md ("Phase tab build" section).
+| P0 | Recon & design audit | 100% | done | Full browser tour + code map complete |
+| P1 | Design foundation (tokens, shell, logo, headers) | 100% | done | 5 commits, head 76e4ae1. 271/271 web tests, tsc/biome/build clean. Logo+favicon shipped; wizard bug fixed (verified in-browser) |
+| P2 | Page sweeps (usage / settings-admin-login / portfolio / workspace) | 45% | ~25 min | A2 DONE (0fb936a, suite green). A3 running. A4+A5 dispatched (Fable, worktrees) |
+| P3 | Integration, full verification, browser walkthrough | 0% | ~20 min after P2 | Merge, full test gate, screenshots |

@@ -1033,3 +1033,16 @@ decision and is deliberately untouched.
   re-loads the run itself); (4) `assignmentLocalId()` exported from
   strategyBridgeService and shared by executionKickoff instead of a
   re-derived `assignment-${node_id}`.
+
+## DESIGN program — visual/UX overhaul (dispatched 2026-07-27)
+
+- [x] ✅ DES-P1 — Design foundation: collapse the three stacked CSS layers in
+  apps/web/src/styles.css into one token set; canonical type scale, container
+  widths, header pattern; new logo mark + favicon; fix New Project
+  bottom-pinned layout bug; remove login/index.html "AI" copy.
+- [x] ✅ DES-P2a — Usage suite sweep (branch worktree-agent-ad9edeafdb865dffd @ 0fb936a).
+- [ ] 🔄 DES-P2b — Settings/Admin/Login sweep.
+- [ ] 🔄 DES-P2c — Portfolio (Projects.tsx) sweep.
+- [ ] 🔄 DES-P2d — Project workspace sweep (App.tsx shell, PhaseTab,
+  ConversationWorkspace, operations dashboard) incl. "AI pick"/staffing copy.
+- [ ] 📋 DES-P3 — Integration, full verification gate, browser walkthrough.
