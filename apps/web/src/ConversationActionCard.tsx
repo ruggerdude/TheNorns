@@ -20,9 +20,9 @@ const PLAN_ACTIONS = {
     description: "Create an immutable, versioned candidate from this proposed Plan Contract.",
   },
   send_plan_to_qc: {
-    title: "Send to QC",
-    button: "Send to QC",
-    description: "Start a cross-provider review of this exact plan version and content hash.",
+    title: "Approve plan",
+    button: "Approve plan",
+    description: "Sends this exact plan version to the cross-provider reviewer.",
   },
   request_plan_changes: {
     title: "Request changes",

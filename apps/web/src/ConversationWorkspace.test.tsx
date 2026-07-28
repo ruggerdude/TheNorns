@@ -1054,7 +1054,7 @@ describe("conversation workspace", () => {
 
     await user.click(screen.getByRole("button", { name: "Confirm action: Save plan candidate" }));
     expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Confirm action: Send to QC" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm action: Approve plan" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Confirm action: Reject plan" })).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Confirm action: Request changes" }),
@@ -1734,14 +1734,14 @@ describe("conversation workspace", () => {
     );
 
     const confirm = await screen.findByRole("button", {
-      name: "Confirm action: Send to QC",
+      name: "Confirm action: Approve plan",
     });
     await user.click(confirm);
     expect(await screen.findByRole("alert")).toHaveTextContent("Confirmation status is uncertain.");
     expect(
       window.sessionStorage.getItem(`norns:conversation-action-confirmation:${proposed.id}`),
     ).toBe(confirmationBodies[0]?.idempotency_key);
-    await user.click(screen.getByRole("button", { name: "Confirm action: Send to QC" }));
+    await user.click(screen.getByRole("button", { name: "Confirm action: Approve plan" }));
 
     await waitFor(() => expect(confirmationBodies).toHaveLength(2));
     expect(confirmationBodies[0]?.idempotency_key).toEqual(expect.any(String));
@@ -1787,7 +1787,7 @@ describe("conversation workspace", () => {
       />,
     );
     const confirm = await screen.findByRole("button", {
-      name: "Confirm action: Send to QC",
+      name: "Confirm action: Approve plan",
     });
     vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new Error("storage disabled");
@@ -1798,7 +1798,7 @@ describe("conversation workspace", () => {
 
     await user.click(confirm);
     expect(await screen.findByRole("alert")).toHaveTextContent("Confirmation status is uncertain.");
-    await user.click(screen.getByRole("button", { name: "Confirm action: Send to QC" }));
+    await user.click(screen.getByRole("button", { name: "Confirm action: Approve plan" }));
     await waitFor(() => expect(confirmationBodies).toHaveLength(2));
     expect(confirmationBodies[1]?.idempotency_key).toBe(confirmationBodies[0]?.idempotency_key);
   });
@@ -1857,7 +1857,7 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Continue action: Send to QC" }));
+    await user.click(await screen.findByRole("button", { name: "Continue action: Approve plan" }));
     expect(submittedKey).toBe("original-confirmation-key");
   });
 
@@ -1911,10 +1911,10 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Confirm action: Send to QC" }));
+    await user.click(await screen.findByRole("button", { name: "Confirm action: Approve plan" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("stale plan hash");
     expect(screen.getByText("Plan Contract · Version 1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Confirm action: Send to QC" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm action: Approve plan" })).toBeInTheDocument();
   });
 
   it("restores a failed approval kickoff outcome from durable effect data", async () => {
