@@ -117,7 +117,7 @@ describe("UsageIntelligence", () => {
     expect(screen.getByText(/average across 2 priced requests/)).toBeInTheDocument();
     expect(screen.getByText(/1 unpriced/)).toBeInTheDocument();
     expect(screen.getByText("107 average per request")).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "Daily AI cost in US dollars" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Daily cost in US dollars" })).toBeInTheDocument();
     expect(screen.getAllByText("claude-sonnet-5")).toHaveLength(2);
     expect(screen.getByRole("heading", { name: /Project users, models/i })).toBeInTheDocument();
     expect(screen.getByText(/rate_limit/)).toBeInTheDocument();

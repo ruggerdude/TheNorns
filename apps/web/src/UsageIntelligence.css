@@ -1,29 +1,7 @@
 .usage-page {
   display: grid;
   gap: 20px;
-  width: min(1180px, 100%);
-  margin: 0 auto;
   padding: 24px;
-}
-
-.usage-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-}
-
-.usage-heading h1 {
-  margin: 2px 0 6px;
-}
-
-.usage-eyebrow {
-  margin: 0;
-  color: var(--accent, #5f69ff);
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 
 .usage-filters {
@@ -48,7 +26,7 @@
 
 .usage-stat > span,
 .usage-stat > small {
-  color: var(--text-muted, #687083);
+  color: var(--ink-muted);
 }
 
 .usage-stat > strong {
@@ -74,58 +52,58 @@
 }
 
 .usage-axis {
-  stroke: var(--border, #d8dce5);
+  stroke: var(--line);
 }
 
 .usage-bar {
-  fill: var(--accent, #5f69ff);
+  fill: var(--brand-600);
 }
 
 .usage-chart-label {
-  fill: var(--text-muted, #687083);
-  font-size: 9px;
+  fill: var(--ink-muted);
+  font-size: var(--text-xs);
 }
 
 .usage-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.875rem;
+  font-size: var(--text-base);
 }
 
 .usage-table th,
 .usage-table td {
   padding: 10px 12px;
-  border-bottom: 1px solid var(--border, #d8dce5);
+  border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
   white-space: nowrap;
 }
 
 .usage-table th {
-  color: var(--text-muted, #687083);
-  font-size: 0.75rem;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
 .usage-model {
   display: block;
-  color: var(--text-muted, #687083);
+  color: var(--ink-muted);
 }
 
 .usage-failed {
-  color: var(--danger, #bc2e3b);
+  color: var(--danger);
   font-weight: 700;
 }
 
 .usage-error-code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.75rem;
+  font-size: var(--text-xs);
 }
 
 .usage-empty {
   padding: 24px;
-  color: var(--text-muted, #687083);
+  color: var(--ink-muted);
   text-align: center;
 }
 
@@ -142,10 +120,6 @@
 @media (max-width: 560px) {
   .usage-page {
     padding: 16px;
-  }
-
-  .usage-heading {
-    flex-direction: column;
   }
 
   .usage-filters,
