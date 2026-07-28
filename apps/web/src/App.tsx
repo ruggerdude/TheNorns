@@ -1756,6 +1756,9 @@ function ProjectGraph({
           <Button className="btn-small" variant="ghost" onClick={onBack}>
             ← Portfolio
           </Button>
+          <span className="workspace-rail-project" title={project.name}>
+            {project.name}
+          </span>
         </div>
         {user ? (
           <AuthenticatedHeaderActions
@@ -1773,7 +1776,7 @@ function ProjectGraph({
         onSelect={onOpenProject}
         onClose={onCloseProject}
       />
-      <main className="page workspace-page">
+      <main className={`page workspace-page workspace-page-${workspaceTab}`}>
         <div className="project-heading workspace-header">
           <div className="eyebrow">Workspace</div>
           <h1>{project.name}</h1>

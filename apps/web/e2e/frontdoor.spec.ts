@@ -106,7 +106,7 @@ async function fulfill(route: Route, payload: unknown, status = 200) {
 async function prepare(
   page: Page,
   mode: "github" | "local" | "new",
-  options: { githubInitiallyInstalled?: boolean } = {},
+  options: { githubInitiallyInstalled?: boolean; conversationWorkspace?: boolean } = {},
 ) {
   let projects: ReturnType<typeof project>[] = [];
   let planningCreated = false;
@@ -257,6 +257,121 @@ async function prepare(
             notes: "1 run active",
           },
         ],
+      });
+    }
+    if (
+      options.conversationWorkspace &&
+      /^\/api\/v2\/projects\/project-[^/]+\/work-items$/.test(path) &&
+      request.method() === "GET"
+    ) {
+      return fulfill(route, {
+        work_items: [
+          {
+            work_item: {
+              schema_version: 2,
+              id: "work-e2e",
+              project_id: "project-github",
+              created_by_user_id: "user-e2e",
+              title: "Release readiness",
+              objective: "Plan the release dashboard and deployment health workflow.",
+              status: "planning",
+              planning_run_id: null,
+              phase_id: null,
+              approved_plan_version_id: null,
+              aggregate_version: 1,
+              created_at: "2026-07-28T12:00:00.000Z",
+              updated_at: "2026-07-28T12:00:00.000Z",
+              execution_started_at: null,
+              completed_at: null,
+            },
+            conversations: [
+              {
+                schema_version: 2,
+                id: "conversation-e2e",
+                project_id: "project-github",
+                work_item_id: "work-e2e",
+                created_by_user_id: "user-e2e",
+                kind: "planning",
+                status: "active",
+                provider: "anthropic",
+                model: "claude-sonnet-5",
+                next_message_sequence: 2,
+                created_at: "2026-07-28T12:00:00.000Z",
+                updated_at: "2026-07-28T12:00:00.000Z",
+                archived_at: null,
+              },
+            ],
+          },
+        ],
+      });
+    }
+    if (
+      options.conversationWorkspace &&
+      path.endsWith("/work-items/work-e2e/conversations/conversation-e2e")
+    ) {
+      return fulfill(route, {
+        work_item: {
+          schema_version: 2,
+          id: "work-e2e",
+          project_id: "project-github",
+          created_by_user_id: "user-e2e",
+          title: "Release readiness",
+          objective: "Plan the release dashboard and deployment health workflow.",
+          status: "planning",
+          planning_run_id: null,
+          phase_id: null,
+          approved_plan_version_id: null,
+          aggregate_version: 1,
+          created_at: "2026-07-28T12:00:00.000Z",
+          updated_at: "2026-07-28T12:00:00.000Z",
+          execution_started_at: null,
+          completed_at: null,
+        },
+        conversation: {
+          schema_version: 2,
+          id: "conversation-e2e",
+          project_id: "project-github",
+          work_item_id: "work-e2e",
+          created_by_user_id: "user-e2e",
+          kind: "planning",
+          status: "active",
+          provider: "anthropic",
+          model: "claude-sonnet-5",
+          next_message_sequence: 2,
+          created_at: "2026-07-28T12:00:00.000Z",
+          updated_at: "2026-07-28T12:00:00.000Z",
+          archived_at: null,
+        },
+        messages: [
+          {
+            schema_version: 2,
+            id: "message-e2e",
+            project_id: "project-github",
+            work_item_id: "work-e2e",
+            conversation_id: "conversation-e2e",
+            initiated_by_user_id: "user-e2e",
+            actor: { actor_type: "agent", actor_id: "project-pm" },
+            role: "assistant",
+            visibility_status: "complete",
+            sequence: 1,
+            parts: [
+              {
+                type: "text",
+                format: "markdown",
+                text: "I mapped the release workflow and the remaining deployment risks.",
+              },
+            ],
+            client_message_id: null,
+            request_fingerprint: null,
+            created_at: "2026-07-28T12:00:00.000Z",
+          },
+        ],
+        active_attempt: null,
+        retryable_attempt: null,
+        plan_versions: [],
+        actions: [],
+        plan_reviews: [],
+        action_effects: [],
       });
     }
     if (/^\/api\/projects\/project-[^/]+$/.test(path) && request.method() === "GET") {
@@ -464,11 +579,11 @@ test("Authorized-only GitHub setup finishes installation before creating a new p
   ]);
 });
 
-test("Workspace uses a centered responsive shell, current navigation, and one Work composer", async ({
+test("Workspace uses left navigation and gives the conversation nearly the full viewport", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
-  await prepare(page, "github");
+  await prepare(page, "github", { conversationWorkspace: true });
   await page.goto("/");
   await selectExistingGitHubRepository(page);
   await page.getByRole("button", { name: /adopt project/i }).click();
@@ -479,9 +594,14 @@ test("Workspace uses a centered responsive shell, current navigation, and one Wo
   expect(workspaceBox).not.toBeNull();
   expect(workspaceBox?.width ?? 0).toBeGreaterThanOrEqual(1280);
   expect(workspaceBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(1360);
-  expect(Math.abs((workspaceBox?.x ?? 0) - (1920 - (workspaceBox?.width ?? 0)) / 2)).toBeLessThan(
-    1,
-  );
+  expect(workspaceBox?.x ?? 0).toBeGreaterThan(248);
+
+  const navigationRail = page.locator(".workspace-shell > .topbar");
+  const railBox = await navigationRail.boundingBox();
+  expect(railBox).not.toBeNull();
+  expect(railBox?.x).toBe(0);
+  expect(railBox?.width).toBe(248);
+  expect(railBox?.height).toBe(1080);
 
   const workspaceNavigation = page.getByRole("navigation", { name: "Workspace sections" });
   const workTab = workspaceNavigation.getByRole("button", { name: /work$/i });
@@ -493,10 +613,19 @@ test("Workspace uses a centered responsive shell, current navigation, and one Wo
     .poll(async () => workTab.evaluate((element) => getComputedStyle(element).backgroundColor))
     .not.toBe("rgba(0, 0, 0, 0)");
 
-  const composer = page.getByTestId("attachment-dropzone");
-  await expect(composer).toBeVisible();
-  await expect(composer).toHaveCount(1);
-  await expect(page.getByTestId("phase-goal")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Add images or files" })).toBeVisible();
-  await expect(page.getByText("Attach screenshots")).toHaveCount(0);
+  await expect(page.getByText("I mapped the release workflow")).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Message the project PM" })).toBeVisible();
+
+  const conversationBox = await page.locator(".conversation-workspace").boundingBox();
+  const transcriptBox = await page.locator(".conversation-thread-viewport").boundingBox();
+  expect(conversationBox?.height ?? 0).toBeGreaterThan(1020);
+  expect(transcriptBox?.height ?? 0).toBeGreaterThan(700);
+
+  await page.setViewportSize({ width: 820, height: 900 });
+  const compactHeaderBox = await navigationRail.boundingBox();
+  expect(compactHeaderBox).not.toBeNull();
+  expect(compactHeaderBox?.x).toBe(0);
+  expect(compactHeaderBox?.width).toBe(820);
+  expect(compactHeaderBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(100);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(820);
 });
