@@ -94,12 +94,15 @@ export interface GitHubIntegrationStatus {
   configured: boolean;
   setup_available: boolean;
   configuration_source: "environment" | "manifest" | null;
+  refresh_error: string | null;
   user_authorization: {
     connected: boolean;
     login: string | null;
   };
   connections: GitHubConnectionSummary[];
 }
+
+type StoredGitHubConnectionStatus = GitHubConnectionSummary["status"] | "deleted";
 
 interface AuthorizationRow {
   user_id: string;
@@ -115,7 +118,7 @@ interface ConnectionRow {
   id: string;
   provider: "github";
   display_name: string;
-  status: GitHubConnectionSummary["status"];
+  status: StoredGitHubConnectionStatus;
   owner_type: GitHubConnectionSummary["owner_type"];
   owner_login: string;
   installation_id: string;
@@ -541,6 +544,9 @@ function iso(value: Date | string | null): string | null {
 }
 
 function connectionSummary(row: ConnectionRow): GitHubConnectionSummary {
+  if (row.status === "deleted") {
+    throw new Error("Deleted GitHub connections must not be exposed");
+  }
   return {
     id: row.id,
     provider: row.provider,
@@ -879,18 +885,25 @@ export class GitHubIntegrationService {
     return { next: context.next };
   }
 
-  async completeInstallation(userId: string, state: string | undefined): Promise<void> {
+  async completeInstallation(
+    userId: string,
+    state: string | undefined,
+    installationId?: string,
+  ): Promise<void> {
     if (state) verifyState(state, userId, "install", this.requireConfig().stateSecret);
-    await this.syncConnections(userId);
+    await this.syncConnections(userId, installationId);
   }
 
   async status(userId: string, refresh = true): Promise<GitHubIntegrationStatus> {
     if (!this.config) return disabledGitHubStatus(this.setupAvailable());
+    let refreshError: string | null = null;
     if (refresh) {
       try {
         await this.syncConnections(userId);
       } catch (error) {
-        if (!(error instanceof GitHubIntegrationError && error.code === "github_not_connected")) {
+        if (error instanceof GitHubIntegrationError) {
+          if (error.code !== "github_not_connected") refreshError = error.message;
+        } else {
           throw error;
         }
       }
@@ -905,6 +918,7 @@ export class GitHubIntegrationService {
         configured: true,
         setup_available: false,
         configuration_source: this.configurationSource,
+        refresh_error: refreshError,
         user_authorization: {
           connected: authorization.rows.length > 0,
           login: authorization.rows[0]?.github_login ?? null,
@@ -914,7 +928,10 @@ export class GitHubIntegrationService {
     });
   }
 
-  async syncConnections(userId: string): Promise<GitHubConnectionSummary[]> {
+  async syncConnections(
+    userId: string,
+    restoreInstallationId?: string,
+  ): Promise<GitHubConnectionSummary[]> {
     const token = await this.userAccessToken(userId);
     const response = await this.github<{ installations: GitHubInstallation[] }>(
       "/user/installations?per_page=100",
@@ -933,7 +950,10 @@ export class GitHubIntegrationService {
            ON CONFLICT (provider, installation_id) DO UPDATE SET
              display_name = EXCLUDED.display_name,
              status = CASE
-               WHEN service_connections.status = 'disconnected' THEN 'disconnected'
+               WHEN service_connections.status = 'deleted'
+                 AND service_connections.installation_id = $9 THEN 'connected'
+               WHEN service_connections.status IN ('disconnected', 'deleted')
+                 THEN service_connections.status
                ELSE 'connected'
              END,
              owner_type = EXCLUDED.owner_type,
@@ -951,6 +971,7 @@ export class GitHubIntegrationService {
             String(installation.id),
             installation.repository_selection,
             userId,
+            restoreInstallationId ?? null,
           ],
         );
       }
@@ -1131,6 +1152,27 @@ export class GitHubIntegrationService {
     });
   }
 
+  async remove(connectionId: string): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      const result = await tx.query<Pick<ConnectionRow, "installation_id">>(
+        `UPDATE service_connections
+         SET status = 'deleted', updated_at = now()
+         WHERE id = $1 AND provider = 'github'
+         RETURNING installation_id`,
+        [connectionId],
+      );
+      const installationId = result.rows[0]?.installation_id;
+      if (!installationId) {
+        throw new GitHubIntegrationError(
+          "connection_not_found",
+          "GitHub connection not found",
+          404,
+        );
+      }
+      this.forgetInstallationTokens(installationId);
+    });
+  }
+
   async reconnect(connectionId: string): Promise<void> {
     await this.transactions.transaction(async (tx) => {
       const result = await tx.query(
@@ -1246,7 +1288,7 @@ export class GitHubIntegrationService {
         `SELECT id, provider, display_name, status, owner_type, owner_login,
                 installation_id, repository_selection, last_validated_at
          FROM service_connections
-         WHERE provider = 'github'
+         WHERE provider = 'github' AND status <> 'deleted'
          ORDER BY owner_login`,
       )
     ).rows;
@@ -1690,6 +1732,7 @@ export function disabledGitHubStatus(setupAvailable = false): GitHubIntegrationS
     configured: false,
     setup_available: setupAvailable,
     configuration_source: null,
+    refresh_error: null,
     user_authorization: { connected: false, login: null },
     connections: [],
   };

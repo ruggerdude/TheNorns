@@ -3,7 +3,7 @@ import { Pool, type PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { NodePgTransactionRunner } from "../src/persistence/v2/database.js";
 import {
-  CONVERSATION_INFERENCE_BUDGET_MIGRATION_NAME,
+  GITHUB_CONNECTION_REMOVAL_MIGRATION_NAME,
   type V2MigrationDatabase,
   runCurrentV2Migrations,
 } from "../src/persistence/v2/migrate.js";
@@ -131,7 +131,7 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
     `);
     const applied = await runCurrentV2Migrations(migrationDatabase);
     expect(applied.at(-1)).toMatchObject({
-      name: CONVERSATION_INFERENCE_BUDGET_MIGRATION_NAME,
+      name: GITHUB_CONNECTION_REMOVAL_MIGRATION_NAME,
       applied: true,
     });
     await applicationPool.query(`
@@ -214,7 +214,7 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
     };
     const replay = await runCurrentV2Migrations(migrationDatabase);
     expect(replay.at(-1)).toMatchObject({
-      name: CONVERSATION_INFERENCE_BUDGET_MIGRATION_NAME,
+      name: GITHUB_CONNECTION_REMOVAL_MIGRATION_NAME,
       applied: false,
     });
 

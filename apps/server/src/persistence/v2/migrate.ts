@@ -302,6 +302,12 @@ export const ONBOARDING_INTENTS_UPDATE_GRANT_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const GITHUB_CONNECTION_REMOVAL_MIGRATION_NAME = "0045_github_connection_removal";
+export const GITHUB_CONNECTION_REMOVAL_MIGRATION_URL = new URL(
+  "../../../drizzle/0045_github_connection_removal.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -508,6 +514,10 @@ export async function loadConversationInferenceBudgetMigrationSql(): Promise<str
 
 export async function loadOnboardingIntentsUpdateGrantMigrationSql(): Promise<string> {
   return readFile(ONBOARDING_INTENTS_UPDATE_GRANT_MIGRATION_URL, "utf8");
+}
+
+export async function loadGitHubConnectionRemovalMigrationSql(): Promise<string> {
+  return readFile(GITHUB_CONNECTION_REMOVAL_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -797,6 +807,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: ONBOARDING_INTENTS_UPDATE_GRANT_MIGRATION_NAME,
       sql: await loadOnboardingIntentsUpdateGrantMigrationSql(),
+    },
+    {
+      name: GITHUB_CONNECTION_REMOVAL_MIGRATION_NAME,
+      sql: await loadGitHubConnectionRemovalMigrationSql(),
     },
   ];
 }

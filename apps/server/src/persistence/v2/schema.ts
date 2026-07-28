@@ -210,7 +210,7 @@ export const serviceConnections = pgTable(
     check("service_connections_provider_check", sql`${table.provider} IN ('github')`),
     check(
       "service_connections_status_check",
-      sql`${table.status} IN ('connected', 'action_required', 'disconnected')`,
+      sql`${table.status} IN ('connected', 'action_required', 'disconnected', 'deleted')`,
     ),
     check(
       "service_connections_owner_type_check",

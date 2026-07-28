@@ -31,6 +31,7 @@ export interface GitHubIntegrationStatus {
   configured: boolean;
   setup_available: boolean;
   configuration_source: "environment" | "manifest" | null;
+  refresh_error: string | null;
   user_authorization: { connected: boolean; login: string | null };
   connections: GitHubConnection[];
 }
@@ -94,8 +95,8 @@ async function integrationRequest<T>(path: string, init?: RequestInit): Promise<
       // `content-type: application/json` onto body-less DELETEs, and Fastify
       // runs the JSON body parser for DELETE too (`bodywith` method set) —
       // rejecting the empty body with 400 FST_ERR_CTP_EMPTY_JSON_BODY before
-      // the route handler runs, so "Disconnect" on a GitHub connection always
-      // failed (POLISH P3 hotfix sweep, same defect as the Analyze /
+      // the route handler runs, so deleting a GitHub connection would always
+      // fail (POLISH P3 hotfix sweep, same defect as the Analyze /
       // Start-phase / session-revoke buttons).
       ...authHeaders(Boolean(init?.body)),
       ...init?.headers,
@@ -158,9 +159,11 @@ export function Account({
   const loadGitHub = useCallback(async (): Promise<void> => {
     setConnectionError(null);
     try {
-      setGitHub(
-        await integrationRequest<GitHubIntegrationStatus>("/api/integrations/github/status"),
+      const status = await integrationRequest<GitHubIntegrationStatus>(
+        "/api/integrations/github/status",
       );
+      setGitHub(status);
+      if (status.refresh_error) setOpenConnection("github");
     } catch (error) {
       if (error instanceof UnauthorizedError) onUnauthorized();
       else setConnectionError(error instanceof Error ? error.message : String(error));
@@ -225,6 +228,27 @@ export function Account({
   };
 
   const disconnect = async (connection: GitHubConnection): Promise<void> => {
+    setConnectionBusy(connection.id);
+    setConnectionError(null);
+    try {
+      await integrationRequest<void>(
+        `/api/integrations/github/connections/${encodeURIComponent(connection.id)}/disconnect`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+      await loadGitHub();
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setConnectionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setConnectionBusy(null);
+    }
+  };
+
+  const deleteConnection = async (connection: GitHubConnection): Promise<void> => {
+    const confirmed = window.confirm(
+      `Delete the saved GitHub connection for ${connection.owner_login}? Projects using it will no longer be able to access GitHub until another connection is selected.`,
+    );
+    if (!confirmed) return;
     setConnectionBusy(connection.id);
     setConnectionError(null);
     try {
@@ -403,6 +427,13 @@ export function Account({
                 <Alert>{githubCallbackError(githubCallback)}</Alert>
               ) : null}
               {connectionError ? <Alert>{connectionError}</Alert> : null}
+              {github?.refresh_error ? (
+                <Alert>
+                  GitHub could not refresh the saved connections: {github.refresh_error} Reconnect
+                  the identity
+                  {github.connections.length ? " or delete a connection below." : "."}
+                </Alert>
+              ) : null}
               {github === null ? (
                 <Spinner label="Loading GitHub connection…" />
               ) : (
@@ -422,16 +453,20 @@ export function Account({
                         tone={
                           !github.configured
                             ? "default"
-                            : github.user_authorization.connected
-                              ? "success"
-                              : "warn"
+                            : github.refresh_error
+                              ? "danger"
+                              : github.user_authorization.connected
+                                ? "success"
+                                : "warn"
                         }
                       >
                         {!github.configured
                           ? "Not configured"
-                          : github.user_authorization.connected
-                            ? `Authorized as ${github.user_authorization.login}`
-                            : "Authorization required"}
+                          : github.refresh_error
+                            ? "Connection needs attention"
+                            : github.user_authorization.connected
+                              ? `Authorized as ${github.user_authorization.login}`
+                              : "Authorization required"}
                       </Badge>
                       <Button
                         variant={github.configured ? "ghost" : "primary"}
@@ -596,6 +631,16 @@ export function Account({
                                       onClick={() => void reconnect(connection)}
                                     >
                                       Reconnect
+                                    </Button>
+                                  ) : null}
+                                  {user.role === "admin" ? (
+                                    <Button
+                                      variant="danger"
+                                      className="btn-small"
+                                      disabled={connectionBusy !== null}
+                                      onClick={() => void deleteConnection(connection)}
+                                    >
+                                      Delete connection
                                     </Button>
                                   ) : null}
                                 </div>

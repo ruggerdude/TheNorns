@@ -3282,7 +3282,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           `${externalOrigin(req)}/?settings=connections&github=invalid_oauth_state`,
         );
       }
-      await github.completeInstallation(stateUserId, query.data.state);
+      await github.completeInstallation(stateUserId, query.data.state, query.data.installation_id);
       stores.audit(
         currentUser?.email ?? stateUserId,
         "integration.github.installed",
@@ -3360,9 +3360,27 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     }
     const { id } = req.params as { id: string };
     try {
+      await github.remove(id);
+      stores.audit(user.email, "integration.github.deleted", id, now());
+      reply.code(204).send();
+    } catch (error) {
+      githubError(reply, error);
+    }
+  });
+
+  app.post("/api/integrations/github/connections/:id/disconnect", async (req, reply) => {
+    const user = await requireAdmin(req, reply);
+    if (!user) return;
+    if (!github) {
+      return reply
+        .code(503)
+        .send({ error: "github_not_configured", message: "GitHub App is not configured" });
+    }
+    const { id } = req.params as { id: string };
+    try {
       await github.disconnect(id);
       stores.audit(user.email, "integration.github.disconnected", id, now());
-      reply.code(204).send();
+      reply.send({ status: "disconnected" });
     } catch (error) {
       githubError(reply, error);
     }

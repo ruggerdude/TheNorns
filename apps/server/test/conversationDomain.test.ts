@@ -6,7 +6,7 @@ import { canonicalJson, canonicalSha256 } from "../src/persistence/migration/can
 import { assertCurrentRuntimeSchema } from "../src/persistence/postgresConnection.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import {
-  CONVERSATION_INFERENCE_BUDGET_MIGRATION_NAME,
+  GITHUB_CONNECTION_REMOVAL_MIGRATION_NAME,
   PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
   type V2MigrationDatabase,
   runCurrentV2Migrations,
@@ -182,7 +182,7 @@ describe.sequential("conversation-first durable domain", () => {
     ).resolves.toBeUndefined();
     const replay = await runCurrentV2Migrations(asMigrationDatabase(pg));
     expect(replay.at(-1)).toMatchObject({
-      name: CONVERSATION_INFERENCE_BUDGET_MIGRATION_NAME,
+      name: GITHUB_CONNECTION_REMOVAL_MIGRATION_NAME,
       applied: false,
     });
   });

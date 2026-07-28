@@ -22,6 +22,7 @@ describe.sequential("workspace GitHub integration", () => {
   let http: ReturnType<typeof vi.fn>;
   let manifestPrivateKey: string;
   let transientAccessTokenFailures = 0;
+  let rejectInstallationRefresh = false;
 
   beforeAll(async () => {
     pg = new PGlite();
@@ -77,6 +78,7 @@ describe.sequential("workspace GitHub integration", () => {
         return json({ id: 101, login: "octocat" });
       }
       if (url === "https://api.github.com/user/installations?per_page=100") {
+        if (rejectInstallationRefresh) return json({ message: "Bad credentials" }, 401);
         return json({
           installations: [
             {
@@ -330,6 +332,34 @@ describe.sequential("workspace GitHub integration", () => {
     expect(new URL(reloaded.authorizationUrl("manifest-admin")).searchParams.get("client_id")).toBe(
       "Iv1.guided",
     );
+  });
+
+  it("returns cached connections when GitHub rejects a live refresh", async () => {
+    rejectInstallationRefresh = true;
+    await expect(service.status("norns-user-1")).resolves.toMatchObject({
+      refresh_error: "Bad credentials.",
+      user_authorization: { connected: true, login: "octocat" },
+      connections: [{ id: "github:42", owner_login: "octocat" }],
+    });
+    rejectInstallationRefresh = false;
+  });
+
+  it("keeps a deleted connection hidden across refreshes until it is explicitly installed again", async () => {
+    await service.remove("github:42");
+    await expect(service.status("norns-user-1", false)).resolves.toMatchObject({
+      connections: [],
+    });
+
+    await expect(service.syncConnections("norns-user-1")).resolves.toEqual([]);
+    const removed = await pg.query<{ status: string }>(
+      "SELECT status FROM service_connections WHERE id = 'github:42'",
+    );
+    expect(removed.rows[0]?.status).toBe("deleted");
+
+    await service.completeInstallation("norns-user-1", undefined, "42");
+    await expect(service.status("norns-user-1", false)).resolves.toMatchObject({
+      connections: [{ id: "github:42", status: "connected" }],
+    });
   });
 });
 
