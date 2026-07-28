@@ -805,7 +805,7 @@ button:disabled {
 .connection-brand p,
 .connection-row span {
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: var(--text-xs);
 }
 .connection-icon {
   display: grid;
@@ -1787,8 +1787,8 @@ button:disabled {
   line-height: 1.45;
 }
 .meta {
-  font: 400 .69rem "DM Mono", monospace;
-  color: #7f8993;
+  font: 400 var(--text-xs) "DM Mono", monospace;
+  color: var(--ink-muted);
 }
 .empty {
   display: grid;
@@ -4372,7 +4372,7 @@ button:disabled {
   padding-left: 1.1rem;
   border-left: 1px solid var(--line);
   color: var(--muted);
-  font-size: .73rem;
+  font-size: var(--text-xs);
   font-weight: 650;
 }
 
@@ -5169,7 +5169,7 @@ button:disabled {
   padding-left: 1.1rem;
   border-left: 1px solid var(--line);
   color: var(--muted);
-  font-size: .73rem;
+  font-size: var(--text-xs);
   font-weight: 650;
 }
 
@@ -5281,8 +5281,8 @@ button:disabled {
 }
 
 .login-card {
-  padding: 1.6rem;
-  border-radius: 22px;
+  padding: var(--space-6);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
 }
 
