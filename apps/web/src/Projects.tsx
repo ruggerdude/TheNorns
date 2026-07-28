@@ -2191,11 +2191,11 @@ export function Projects({
               ← Dashboard
             </Button>
           </header>
-          <main className="page wizard-page" aria-label="New project">
-            <div className="project-setup-title">
-              <div className="eyebrow">New project</div>
-              <h1>Project setup</h1>
-            </div>
+          <main
+            className="page-container page-container-narrow wizard-page"
+            aria-label="New project"
+          >
+            <PageHeader eyebrow="New project" title="Project setup" />
             <section className="wizard-shell">
               {wizardStep === "attach" && draftProject ? (
                 <div className="form-stack wizard-attach-step" data-testid="wizard-attach-step">
@@ -2409,9 +2409,11 @@ export function Projects({
                             >
                               <span>
                                 <strong>{selection.repository.repository_display_name}</strong>
-                                <small>{selection.repository.default_branch}</small>
+                                <small style={TYPE_FLOOR}>
+                                  {selection.repository.default_branch}
+                                </small>
                               </span>
-                              <span className="repository-meta">
+                              <span className="repository-meta" style={TYPE_FLOOR}>
                                 {selection.repository.observed_head.slice(0, 8)}
                               </span>
                             </button>
@@ -2539,11 +2541,11 @@ export function Projects({
                                     >
                                       <span>
                                         <strong>{repository.full_name}</strong>
-                                        <small>
+                                        <small style={TYPE_FLOOR}>
                                           {repository.description || "No repository description"}
                                         </small>
                                       </span>
-                                      <span className="repository-meta">
+                                      <span className="repository-meta" style={TYPE_FLOOR}>
                                         {repository.private ? "Private" : "Public"}
                                         {repository.language ? ` · ${repository.language}` : ""}
                                         {repository.archived ? " · Archived" : ""}
