@@ -1054,7 +1054,9 @@ describe("conversation workspace", () => {
 
     await user.click(screen.getByRole("button", { name: "Confirm action: Save plan candidate" }));
     expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Confirm action: Approve plan" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Confirm action: Approve plan" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Confirm action: Reject plan" })).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Confirm action: Request changes" }),
@@ -1914,7 +1916,9 @@ describe("conversation workspace", () => {
     await user.click(await screen.findByRole("button", { name: "Confirm action: Approve plan" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("stale plan hash");
     expect(screen.getByText("Plan Contract · Version 1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Confirm action: Approve plan" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Confirm action: Approve plan" }),
+    ).toBeInTheDocument();
   });
 
   it("restores a failed approval kickoff outcome from durable effect data", async () => {
