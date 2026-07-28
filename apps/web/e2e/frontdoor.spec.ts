@@ -615,11 +615,29 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
 
   await expect(page.getByText("I mapped the release workflow")).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message the project PM" })).toBeVisible();
+  await expect(page.locator(".conversation-sidebar")).toHaveCount(0);
+  await expect(
+    page.getByText("Plan the release dashboard and deployment health workflow.", { exact: true }),
+  ).toHaveCount(0);
 
   const conversationBox = await page.locator(".conversation-workspace").boundingBox();
+  const conversationMainBox = await page.locator(".conversation-main").boundingBox();
+  const conversationHeaderBox = await page.locator(".conversation-header").boundingBox();
+  const conversationToolsBox = await page.locator(".conversation-thread-tools").boundingBox();
   const transcriptBox = await page.locator(".conversation-thread-viewport").boundingBox();
   expect(conversationBox?.height ?? 0).toBeGreaterThan(1020);
+  expect(conversationMainBox?.width ?? 0).toBeGreaterThan((conversationBox?.width ?? 0) - 3);
+  expect(conversationHeaderBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(76);
+  expect(conversationToolsBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(56);
   expect(transcriptBox?.height ?? 0).toBeGreaterThan(700);
+
+  await page.getByRole("button", { name: "Open conversations" }).click();
+  const conversationDrawer = page.getByRole("complementary", { name: "Project conversations" });
+  await expect(conversationDrawer).toBeVisible();
+  const drawerBox = await conversationDrawer.boundingBox();
+  expect(drawerBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(288);
+  await page.keyboard.press("Escape");
+  await expect(conversationDrawer).toHaveCount(0);
 
   await page.setViewportSize({ width: 820, height: 900 });
   const compactHeaderBox = await navigationRail.boundingBox();

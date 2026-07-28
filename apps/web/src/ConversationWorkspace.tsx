@@ -1486,6 +1486,18 @@ function usageSummary(usage: ConversationUsageSummary): string {
   }`;
 }
 
+function hasRecordedUsage(
+  usage: ConversationUsageSummary | null | undefined,
+): usage is ConversationUsageSummary {
+  return Boolean(
+    usage &&
+      (usage.attempt_count > 0 ||
+        usage.input_tokens > 0 ||
+        usage.output_tokens > 0 ||
+        usage.cost_usd !== null),
+  );
+}
+
 function ConversationSummaryIndicator({
   summary,
 }: {
@@ -3033,46 +3045,49 @@ function ConversationThread({
           className="conversation-thread"
           aria-label={`${conversationKindLabel(detail.conversation.kind)} conversation`}
         >
-          {detail.conversation.kind === "planning" && detail.conversation.status === "active" ? (
-            <div className="conversation-plan-proposal-control">
-              <div>
-                <strong>
-                  {hasPlanProposal ? "Update the plan proposal" : "Ready for a plan?"}
-                </strong>
-                <span id={proposalHelpId}>
-                  {proposalBlockedReason ??
-                    "The PM will create a structured draft from this conversation. Saving it remains a separate confirmation."}
-                </span>
-              </div>
-              <Button
-                className="btn-small"
-                disabled={
-                  proposalBusy || detail.active_attempt !== null || proposalBlockedReason !== null
-                }
-                aria-describedby={proposalHelpId}
-                aria-label={hasPlanProposal ? "Update plan proposal" : "Create plan proposal"}
-                onClick={() => void generatePlanProposal()}
-              >
-                {proposalBusy
-                  ? "Generating proposal…"
-                  : hasPlanProposal
-                    ? "Update plan proposal"
-                    : "Create plan proposal"}
-              </Button>
+          {(detail.conversation.kind === "planning" && detail.conversation.status === "active") ||
+          ((isPlanning || isExecution) && !isReadOnly) ? (
+            <div className="conversation-thread-tools" aria-label="Conversation tools">
+              {detail.conversation.kind === "planning" &&
+              detail.conversation.status === "active" ? (
+                <div className="conversation-plan-proposal-control">
+                  <span className="sr-only" id={proposalHelpId}>
+                    {proposalBlockedReason ??
+                      "The PM will create a structured draft from this conversation. Saving it remains a separate confirmation."}
+                  </span>
+                  <Button
+                    className="btn-small"
+                    disabled={
+                      proposalBusy ||
+                      detail.active_attempt !== null ||
+                      proposalBlockedReason !== null
+                    }
+                    aria-describedby={proposalHelpId}
+                    aria-label={hasPlanProposal ? "Update plan proposal" : "Create plan proposal"}
+                    onClick={() => void generatePlanProposal()}
+                  >
+                    {proposalBusy
+                      ? "Generating proposal…"
+                      : hasPlanProposal
+                        ? "Update plan proposal"
+                        : "Create plan proposal"}
+                  </Button>
+                </div>
+              ) : null}
+              {(isPlanning || isExecution) && !isReadOnly ? (
+                <MockupRequestComposer
+                  taskOptions={taskOptions}
+                  planningPlanVersionId={isPlanning ? (latestPlan?.id ?? null) : null}
+                  artifactOptions={artifactOptions}
+                  busy={executionProposalBusy}
+                  error={executionProposalError}
+                  disabledReason={
+                    lockedExecutionRequest ? "Retry the locked exact request first." : null
+                  }
+                  onPrepare={(parameters) => proposeExecutionAction("create_mockup", parameters)}
+                />
+              ) : null}
             </div>
-          ) : null}
-          {(isPlanning || isExecution) && !isReadOnly ? (
-            <MockupRequestComposer
-              taskOptions={taskOptions}
-              planningPlanVersionId={isPlanning ? (latestPlan?.id ?? null) : null}
-              artifactOptions={artifactOptions}
-              busy={executionProposalBusy}
-              error={executionProposalError}
-              disabledReason={
-                lockedExecutionRequest ? "Retry the locked exact request first." : null
-              }
-              onPrepare={(parameters) => proposeExecutionAction("create_mockup", parameters)}
-            />
           ) : null}
           {isExecution && !isReadOnly ? (
             <section className="execution-conversation-controls" aria-label="Execution controls">
@@ -3163,7 +3178,7 @@ function ConversationThread({
               ) : null}
             </div>
           ) : null}
-          {detail.handoff || detail.latest_summary || detail.usage ? (
+          {detail.handoff || detail.latest_summary ? (
             <section
               className="conversation-context-receipt"
               aria-label="Conversation context and usage"
@@ -3178,14 +3193,6 @@ function ConversationThread({
               <div className="conversation-context-indicators">
                 {detail.latest_summary ? (
                   <ConversationSummaryIndicator summary={detail.latest_summary} />
-                ) : (
-                  <span data-testid="conversation-summary-empty">No compacted summary</span>
-                )}
-                {detail.usage ? (
-                  <output data-testid="conversation-total-usage">
-                    <strong>Conversation usage</strong>
-                    <span>{usageSummary(detail.usage)}</span>
-                  </output>
                 ) : null}
               </div>
               <PlanningExcerptControl
@@ -3205,18 +3212,10 @@ function ConversationThread({
             >
               <AuiIf condition={(state) => state.thread.messages.length === 0}>
                 <div className="conversation-welcome" data-testid="conversation-welcome">
-                  <div className="eyebrow">
-                    {isExecution ? "Execution PM conversation" : "Planning conversation"}
-                  </div>
-                  <h2>
-                    {isExecution
-                      ? "Continue delivery with your PM"
-                      : "Talk through the work with your PM"}
-                  </h2>
                   <p>
                     {isExecution
-                      ? "This fresh conversation starts from the approved compact handoff. Planning discussion is available only when you explicitly retrieve an excerpt."
-                      : "Discuss the objective, constraints, risks, or possible approaches. Project state changes will always appear as explicit actions for you to confirm."}
+                      ? "Continue delivery with your PM. Planning context is available from the approved handoff."
+                      : "Ask your PM about the work, constraints, risks, or next steps."}
                   </p>
                 </div>
               </AuiIf>
@@ -3387,6 +3386,7 @@ export function ConversationWorkspace({
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [creating, setCreating] = useState(false);
   const [showNew, setShowNew] = useState(initialNewConversation);
+  const [conversationListOpen, setConversationListOpen] = useState(false);
   const [initialMessage, setInitialMessage] = useState<{
     conversationId: string;
     text: string;
@@ -3397,6 +3397,15 @@ export function ConversationWorkspace({
   const [renameBusy, setRenameBusy] = useState(false);
   const [threadVersion, setThreadVersion] = useState(0);
   const initialSelectionHandled = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!conversationListOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setConversationListOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [conversationListOpen]);
 
   const handleUnauthorized = useCallback(() => callbacks.current.onUnauthorized(), []);
 
@@ -3436,6 +3445,7 @@ export function ConversationWorkspace({
     setSelected(null);
     setDetail(null);
     setShowNew(initialNewConversation);
+    setConversationListOpen(false);
     setInitialMessage(null);
     setRenaming(false);
     initialSelectionHandled.current = null;
@@ -3532,6 +3542,7 @@ export function ConversationWorkspace({
 
   const chooseConversation = (workItemId: string, conversation: V2WorkConversationT) => {
     setShowNew(false);
+    setConversationListOpen(false);
     setInitialMessage(null);
     setRenaming(false);
     setDetail(null);
@@ -3589,6 +3600,7 @@ export function ConversationWorkspace({
       });
       await loadGroups();
       setShowNew(false);
+      setConversationListOpen(false);
       setInitialMessage({ conversationId: created.conversation.id, text: message });
       setDetail({
         work_item: created.work_item,
@@ -3646,63 +3658,82 @@ export function ConversationWorkspace({
 
   return (
     <div className="conversation-workspace" data-testid="conversation-workspace">
-      <aside className="conversation-sidebar" aria-label="Project conversations">
-        <div className="conversation-sidebar-head">
-          <div>
-            <div className="eyebrow">Work</div>
-            <h2>Conversations</h2>
-          </div>
-          <Button
-            className="btn-small"
-            aria-label="Start new work"
-            onClick={() => {
-              setSelected(null);
-              setDetail(null);
-              setInitialMessage(null);
-              setRenaming(false);
-              setShowNew(true);
-              callbacks.current.onNewConversation?.();
-            }}
+      {conversationListOpen ? (
+        <>
+          <button
+            type="button"
+            className="conversation-sidebar-backdrop"
+            aria-hidden="true"
+            tabIndex={-1}
+            onClick={() => setConversationListOpen(false)}
+          />
+          <aside
+            className="conversation-sidebar"
+            id="project-conversations"
+            aria-label="Project conversations"
           >
-            New
-          </Button>
-        </div>
-        {groups === null ? <Spinner label="Loading conversations…" /> : null}
-        {groups?.length === 0 ? (
-          <p className="conversation-list-empty">No conversations yet.</p>
-        ) : null}
-        <div className="conversation-list">
-          {groups?.map((group) => (
-            <section className="conversation-work-group" key={group.work_item.id}>
-              <h3>{group.work_item.title}</h3>
-              <p>{group.work_item.objective}</p>
-              {group.conversations.map((conversation) => {
-                const active = selected?.conversationId === conversation.id && !showNew;
-                const usage = group.conversation_usage?.[conversation.id];
-                return (
-                  <button
-                    type="button"
-                    className={`conversation-list-item${active ? " is-active" : ""}`}
-                    aria-current={active ? "page" : undefined}
-                    aria-label={`Open ${conversationKindLabel(conversation.kind)} conversation for ${group.work_item.title} (${conversation.status})`}
-                    key={conversation.id}
-                    onClick={() => chooseConversation(group.work_item.id, conversation)}
-                  >
-                    <span>{conversationKindLabel(conversation.kind)}</span>
-                    <strong>
-                      {conversation.provider} · {conversation.model}
-                    </strong>
-                    <small>
-                      {conversation.status}
-                      {usage ? ` · ${usageSummary(usage)}` : " · usage unavailable"}
-                    </small>
-                  </button>
-                );
-              })}
-            </section>
-          ))}
-        </div>
-      </aside>
+            <div className="conversation-sidebar-head">
+              <h2>Conversations</h2>
+              <div>
+                <Button
+                  className="btn-small"
+                  aria-label="Start new work"
+                  onClick={() => {
+                    setSelected(null);
+                    setDetail(null);
+                    setInitialMessage(null);
+                    setRenaming(false);
+                    setShowNew(true);
+                    setConversationListOpen(false);
+                    callbacks.current.onNewConversation?.();
+                  }}
+                >
+                  New
+                </Button>
+                <Button
+                  className="btn-small"
+                  aria-label="Close conversations"
+                  autoFocus
+                  onClick={() => setConversationListOpen(false)}
+                >
+                  Close
+                </Button>
+              </div>
+            </div>
+            {groups === null ? <Spinner label="Loading conversations…" /> : null}
+            {groups?.length === 0 ? (
+              <p className="conversation-list-empty">No conversations yet.</p>
+            ) : null}
+            <div className="conversation-list">
+              {groups?.map((group) => (
+                <section className="conversation-work-group" key={group.work_item.id}>
+                  <h3 title={group.work_item.objective}>{group.work_item.title}</h3>
+                  {group.conversations.map((conversation) => {
+                    const active = selected?.conversationId === conversation.id && !showNew;
+                    const usage = group.conversation_usage?.[conversation.id];
+                    return (
+                      <button
+                        type="button"
+                        className={`conversation-list-item${active ? " is-active" : ""}`}
+                        aria-current={active ? "page" : undefined}
+                        aria-label={`Open ${conversationKindLabel(conversation.kind)} conversation for ${group.work_item.title} (${conversation.status})`}
+                        key={conversation.id}
+                        onClick={() => chooseConversation(group.work_item.id, conversation)}
+                      >
+                        <span>{conversationKindLabel(conversation.kind)}</span>
+                        <small>
+                          {conversation.status}
+                          {usage && hasRecordedUsage(usage) ? ` · ${usageSummary(usage)}` : ""}
+                        </small>
+                      </button>
+                    );
+                  })}
+                </section>
+              ))}
+            </div>
+          </aside>
+        </>
+      ) : null}
 
       <main className="conversation-main">
         {error ? (
@@ -3710,14 +3741,20 @@ export function ConversationWorkspace({
             <Alert testId="conversation-error">{error}</Alert>
           </div>
         ) : null}
-        {showNew ? <NewWorkForm busy={creating} onCreate={createWork} /> : null}
-        {!showNew && detail ? (
-          <>
-            <header className="conversation-header">
-              <div>
-                <div className="eyebrow">
-                  {conversationKindLabel(detail.conversation.kind)} conversation
-                </div>
+        <header className="conversation-header">
+          <Button
+            className="btn-small conversation-sidebar-toggle"
+            aria-expanded={conversationListOpen}
+            aria-controls="project-conversations"
+            aria-label="Open conversations"
+            disabled={conversationListOpen}
+            onClick={() => setConversationListOpen(true)}
+          >
+            Conversations
+          </Button>
+          {!showNew && detail ? (
+            <>
+              <div className="conversation-header-title">
                 {renaming ? (
                   <form className="conversation-title-editor" onSubmit={renameWork}>
                     <Input
@@ -3747,7 +3784,7 @@ export function ConversationWorkspace({
                   </form>
                 ) : (
                   <div className="conversation-title-row">
-                    <h2>{detail.work_item.title}</h2>
+                    <h2 title={detail.work_item.objective}>{detail.work_item.title}</h2>
                     <Button
                       className="btn-small conversation-rename-button"
                       type="button"
@@ -3760,17 +3797,25 @@ export function ConversationWorkspace({
                     </Button>
                   </div>
                 )}
-                <p>{detail.work_item.objective}</p>
               </div>
               <div className="conversation-header-actions">
-                <div className="conversation-model-pin" data-testid="conversation-model-pin">
+                {hasRecordedUsage(detail.usage) ? (
+                  <output
+                    className="conversation-total-usage"
+                    data-testid="conversation-total-usage"
+                  >
+                    {usageSummary(detail.usage)}
+                  </output>
+                ) : null}
+                <div
+                  className="conversation-model-pin"
+                  data-testid="conversation-model-pin"
+                  title="PM pinned for this conversation"
+                >
                   <span aria-hidden="true">●</span>
-                  <span>
-                    <small>PM pinned for this conversation</small>
-                    <strong>
-                      {detail.conversation.provider} · {detail.conversation.model}
-                    </strong>
-                  </span>
+                  <strong>
+                    {detail.conversation.provider} · {detail.conversation.model}
+                  </strong>
                 </div>
                 <Badge tone={detail.conversation.status === "active" ? "success" : "default"}>
                   {detail.conversation.status}
@@ -3784,7 +3829,12 @@ export function ConversationWorkspace({
                   {loadingDetail ? "Refreshing…" : "Refresh"}
                 </Button>
               </div>
-            </header>
+            </>
+          ) : null}
+        </header>
+        {showNew ? <NewWorkForm busy={creating} onCreate={createWork} /> : null}
+        {!showNew && detail ? (
+          <>
             <ConversationThread
               key={`${detail.conversation.id}:${threadVersion}`}
               detail={detail}

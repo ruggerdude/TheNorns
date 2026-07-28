@@ -1648,6 +1648,10 @@ describe("conversation workspace", () => {
 
     const composer = await screen.findByRole("textbox", { name: "Message the project PM" });
     expect(screen.getByTestId("conversation-welcome")).toBeInTheDocument();
+    expect(screen.getAllByText(workItem.title)).toHaveLength(1);
+    expect(screen.queryByText(workItem.objective)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("conversation-summary-empty")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("conversation-total-usage")).not.toBeInTheDocument();
     await user.type(composer, "Draft the plan{enter}");
 
     await waitFor(() =>
@@ -2145,7 +2149,7 @@ describe("conversation workspace", () => {
     expect(new Headers(submit?.init?.headers).get("content-type")).toBe("application/json");
   });
 
-  it("renames the conversation from its title bar and updates every title", async () => {
+  it("renames the conversation from its title bar and updates the compact conversation list", async () => {
     const renamed = {
       ...workItem,
       title: "Release readiness",
@@ -2181,9 +2185,9 @@ describe("conversation workspace", () => {
     await user.type(title, "Release readiness");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    await waitFor(() =>
-      expect(screen.getAllByText("Release readiness").length).toBeGreaterThanOrEqual(2),
-    );
+    expect(await screen.findByRole("heading", { name: "Release readiness" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open conversations" }));
+    expect(screen.getAllByText("Release readiness")).toHaveLength(2);
     expect(patchedBody).toEqual({ title: "Release readiness" });
   });
 
@@ -2640,17 +2644,19 @@ describe("conversation workspace", () => {
     expect(
       screen.queryByRole("textbox", { name: "Message the project PM" }),
     ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open conversations" }));
     expect(
       screen.getByRole("button", {
         name: `Open Planning conversation for ${workItem.title} (archived)`,
       }),
     ).toHaveTextContent("Usage is still settling");
-    expect(
-      screen.getByRole("button", {
-        name: `Open Execution PM conversation for ${workItem.title} (active)`,
-      }),
-    ).toHaveTextContent("Usage is unavailable");
+    const executionConversationButton = screen.getByRole("button", {
+      name: `Open Execution PM conversation for ${workItem.title} (active)`,
+    });
+    expect(executionConversationButton).toHaveTextContent("active");
+    expect(executionConversationButton).not.toHaveTextContent("Usage is unavailable");
 
+    await user.click(screen.getByRole("button", { name: "Close conversations" }));
     await user.click(screen.getByRole("button", { name: "Open execution PM conversation" }));
     expect(await screen.findByRole("textbox", { name: "Message the execution PM" })).toBeEnabled();
     expect(selected).toHaveBeenCalledWith(execution.id);
