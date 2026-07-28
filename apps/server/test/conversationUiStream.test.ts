@@ -60,6 +60,16 @@ describe("AI SDK UI protocol conversation stream", () => {
           conversation: { id: "conversation-route" },
         }),
         listMessages: async () => [],
+        renameWorkItem: async (
+          _user: unknown,
+          projectId: string,
+          workItemId: string,
+          title: string,
+        ) => ({
+          id: workItemId,
+          project_id: projectId,
+          title,
+        }),
       },
       attempts: {
         active: async () => null,
@@ -147,6 +157,22 @@ describe("AI SDK UI protocol conversation stream", () => {
         triggering_message_id: "message-route",
         status: "cancelled",
         output_message_id: null,
+      },
+    });
+  });
+
+  it("renames the durable work-item title", async () => {
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/v2/projects/project-route/work-items/work-route",
+      payload: { title: "Renamed from the title bar" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      work_item: {
+        id: "work-route",
+        project_id: "project-route",
+        title: "Renamed from the title bar",
       },
     });
   });

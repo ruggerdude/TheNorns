@@ -42,6 +42,7 @@ const WorkItemBody = z
     objective: z.string().trim().min(1),
   })
   .strict();
+const WorkItemTitleBody = z.object({ title: z.string().trim().min(1).max(120) }).strict();
 const MessageBody = z
   .object({
     client_message_id: z.string().min(1),
@@ -222,6 +223,27 @@ export function registerConversationRoutes(
         pin,
       );
       return reply.code(201).send(created);
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.patch(`${workBase}/:workItemId`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId, workItemId } = request.params as {
+      projectId: string;
+      workItemId: string;
+    };
+    try {
+      const { title } = WorkItemTitleBody.parse(request.body);
+      const work_item = await options.conversations.renameWorkItem(
+        user,
+        projectId,
+        workItemId,
+        title,
+      );
+      return reply.send({ work_item });
     } catch (error) {
       routeError(reply, error);
     }

@@ -384,6 +384,35 @@
   white-space: nowrap;
 }
 
+.conversation-title-row,
+.conversation-title-editor {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.conversation-title-row h2,
+.conversation-title-editor .input {
+  min-width: 0;
+}
+
+.conversation-title-editor .input {
+  width: min(30rem, 58vw);
+  font-size: var(--text-lg);
+  font-weight: 700;
+}
+
+.conversation-rename-button {
+  flex: 0 0 auto;
+  opacity: 0.72;
+}
+
+.conversation-title-row:hover .conversation-rename-button,
+.conversation-rename-button:focus-visible {
+  opacity: 1;
+}
+
 .conversation-header p {
   display: -webkit-box;
   max-width: 70ch;
@@ -1626,6 +1655,41 @@
   margin: auto;
   gap: 1.5rem;
   padding: 2rem;
+}
+
+.conversation-new-composer {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: 0 0.8rem 2rem color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.conversation-new-composer .textarea {
+  min-height: 9rem;
+  resize: vertical;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.conversation-new-composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem;
+  border-top: 1px solid var(--line);
+}
+
+.conversation-new-composer-actions span {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.conversation-new-composer-actions .btn {
+  min-width: 6rem;
 }
 
 .mockup-request-composer {

@@ -136,6 +136,26 @@ export class ConversationService {
     });
   }
 
+  renameWorkItem(
+    actor: ConversationActor,
+    projectId: string,
+    workItemId: string,
+    candidateTitle: string,
+  ): Promise<V2WorkItemT> {
+    const title = V2CreateWorkItemInput.shape.title.parse(candidateTitle);
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(projectId, actor.id);
+      const updated = await repository.updateWorkItemTitle(projectId, workItemId, title);
+      if (!updated) {
+        throw new ConversationPersistenceError(
+          "work_item_not_found",
+          `unknown work item "${workItemId}" in project "${projectId}"`,
+        );
+      }
+      return updated;
+    });
+  }
+
   listWorkItems(actor: ConversationActor, projectId: string): Promise<WorkItemWithConversations[]> {
     return this.store.transaction(async (repository) => {
       await repository.assertProjectAccess(projectId, actor.id);

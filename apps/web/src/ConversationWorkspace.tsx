@@ -84,6 +84,7 @@ import {
   messageEndpoint,
   proposeExecutionConversationAction,
   proposeHumanWaitAnswer,
+  renamePlanningWorkItem,
   resolveConversation,
   retrieveConversationPlanningExcerpt,
   updateConversationPmSettings,
@@ -182,8 +183,16 @@ function conversationPath(projectId: string, workItemId: string, conversationId:
 }
 
 function titleForObjective(objective: string): string {
-  const firstLine = objective.split("\n", 1)[0]?.trim() ?? "";
-  return firstLine.length > 72 ? `${firstLine.slice(0, 69)}…` : firstLine;
+  const firstThought =
+    objective
+      .trim()
+      .replace(/^#+\s*/, "")
+      .split(/(?:\r?\n|[.!?]\s)/, 1)[0]
+      ?.replace(/^(?:please\s+)?(?:i|we)\s+(?:would like|want|need)\s+to\s+/i, "")
+      .replace(/^please\s+/i, "")
+      .trim() || "New conversation";
+  const titled = `${firstThought.charAt(0).toUpperCase()}${firstThought.slice(1)}`;
+  return titled.length > 72 ? `${titled.slice(0, 69).trimEnd()}…` : titled;
 }
 
 function conversationKindLabel(kind: V2WorkConversationT["kind"]): string {
@@ -279,6 +288,13 @@ function precedingUserMessage(
 const conversationFetch: typeof fetch = async (input, init) => {
   const response = await fetch(input, init);
   if (response.status === 401) throw new UnauthorizedError();
+  if (response.status === 415) {
+    throw new ApiError(
+      "The message request was rejected. Refresh the page and try sending it again.",
+      415,
+      "unsupported_media_type",
+    );
+  }
   return response;
 };
 
@@ -288,7 +304,10 @@ class NornsConversationTransport extends AssistantChatTransport<NornsUIMessage> 
       api: `${conversationBase}/messages`,
       credentials: "include",
       fetch: conversationFetch,
-      headers: () => authHeaders(true),
+      // DefaultChatTransport owns the JSON Content-Type header. Adding our
+      // lower-case variant makes browsers combine both values into an invalid
+      // media type ("application/json, application/json").
+      headers: () => authHeaders(false),
       prepareSendMessagesRequest: ({ messages, trigger, messageId }) => {
         if (trigger === "regenerate-message") {
           const triggeringMessage = precedingUserMessage(messages, messageId);
@@ -296,7 +315,7 @@ class NornsConversationTransport extends AssistantChatTransport<NornsUIMessage> 
           return {
             api: `${conversationBase}/retry`,
             credentials: "include",
-            headers: authHeaders(true),
+            headers: authHeaders(false),
             body: { triggering_message_id: triggeringMessage.id },
           };
         }
@@ -310,7 +329,7 @@ class NornsConversationTransport extends AssistantChatTransport<NornsUIMessage> 
         return {
           api: `${conversationBase}/messages`,
           credentials: "include",
-          headers: authHeaders(true),
+          headers: authHeaders(false),
           body,
         };
       },
@@ -1964,6 +1983,24 @@ function RetryTerminalResponseButton({
   );
 }
 
+function InitialConversationMessage({
+  text,
+  onStarted,
+}: {
+  text: string;
+  onStarted: () => void;
+}): null {
+  const chat = useAISDKChat<NornsUIMessage>();
+  const started = useRef(false);
+  useEffect(() => {
+    if (!chat || started.current) return;
+    started.current = true;
+    onStarted();
+    void chat.sendMessage({ text });
+  }, [chat, onStarted, text]);
+  return null;
+}
+
 function confirmationStorageKey(actionId: string): string {
   return `norns:conversation-action-confirmation:${actionId}`;
 }
@@ -2212,11 +2249,15 @@ function confirmationKeyFor(action: V2ConversationActionT, memory: Map<string, s
 
 function ConversationThread({
   detail,
+  initialMessage,
+  onInitialMessageStarted,
   onOpenConversation,
   onRefresh,
   onUnauthorized,
 }: {
   detail: ConversationDetail;
+  initialMessage?: string | null;
+  onInitialMessageStarted?: () => void;
   onOpenConversation: (conversationId: string) => void;
   onRefresh: () => void;
   onUnauthorized: () => void;
@@ -2981,6 +3022,12 @@ function ConversationThread({
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
+      {initialMessage ? (
+        <InitialConversationMessage
+          text={initialMessage}
+          onStarted={onInitialMessageStarted ?? (() => undefined)}
+        />
+      ) : null}
       <ConversationActionContext.Provider value={actionContext}>
         <section
           className="conversation-thread"
@@ -3259,52 +3306,52 @@ function NewWorkForm({
   onCreate,
 }: {
   busy: boolean;
-  onCreate: (title: string, objective: string) => Promise<void>;
+  onCreate: (message: string) => Promise<void>;
 }): React.ReactElement {
-  const [title, setTitle] = useState("");
-  const [objective, setObjective] = useState("");
+  const [message, setMessage] = useState("");
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    const cleanObjective = objective.trim();
-    if (!cleanObjective) return;
-    void onCreate(title.trim() || titleForObjective(cleanObjective), cleanObjective);
+    const cleanMessage = message.trim();
+    if (!cleanMessage) return;
+    void onCreate(cleanMessage);
   };
   return (
     <section className="conversation-new-work" aria-labelledby="conversation-new-title">
       <div>
-        <div className="eyebrow">New planning conversation</div>
-        <h2 id="conversation-new-title">What work should the PM help you plan?</h2>
+        <div className="eyebrow">New conversation</div>
+        <h2 id="conversation-new-title">What are we working on?</h2>
         <p className="muted">
-          This creates a durable work item and pins the project’s current PM provider and model for
-          the full conversation.
+          Send the first message. Norns will name the conversation automatically, and you can rename
+          it at any time.
         </p>
       </div>
-      <form className="form-stack" onSubmit={submit}>
-        <Field label="Title (optional)">
-          <Input
-            value={title}
-            disabled={busy}
-            placeholder="Short name for this work"
-            onChange={(event) => setTitle(event.target.value)}
-          />
-        </Field>
-        <Field label="Objective">
-          <TextArea
-            data-testid="conversation-objective"
-            value={objective}
-            disabled={busy}
-            placeholder="Describe the outcome, constraints, and anything the PM should know…"
-            onChange={(event) => setObjective(event.target.value)}
-          />
-        </Field>
-        <Button
-          variant="primary"
-          type="submit"
-          disabled={busy || !objective.trim()}
-          data-testid="conversation-create"
-        >
-          {busy ? "Creating…" : "Start planning conversation"}
-        </Button>
+      <form className="conversation-new-composer" onSubmit={submit}>
+        <TextArea
+          data-testid="conversation-first-message"
+          aria-label="Message the project PM"
+          rows={5}
+          value={message}
+          disabled={busy}
+          placeholder="Tell the PM what you want to build, change, or understand…"
+          onChange={(event) => setMessage(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+        />
+        <div className="conversation-new-composer-actions">
+          <span>Enter to send · Shift+Enter for a new line</span>
+          <Button
+            variant="primary"
+            type="submit"
+            disabled={busy || !message.trim()}
+            data-testid="conversation-create"
+          >
+            {busy ? "Starting…" : "Send"}
+          </Button>
+        </div>
       </form>
     </section>
   );
@@ -3340,7 +3387,14 @@ export function ConversationWorkspace({
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [creating, setCreating] = useState(false);
   const [showNew, setShowNew] = useState(initialNewConversation);
+  const [initialMessage, setInitialMessage] = useState<{
+    conversationId: string;
+    text: string;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [renameTitle, setRenameTitle] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
   const [threadVersion, setThreadVersion] = useState(0);
   const initialSelectionHandled = useRef<string | null>(null);
 
@@ -3382,6 +3436,8 @@ export function ConversationWorkspace({
     setSelected(null);
     setDetail(null);
     setShowNew(initialNewConversation);
+    setInitialMessage(null);
+    setRenaming(false);
     initialSelectionHandled.current = null;
     void loadGroups();
   }, [initialNewConversation, loadGroups]);
@@ -3476,6 +3532,8 @@ export function ConversationWorkspace({
 
   const chooseConversation = (workItemId: string, conversation: V2WorkConversationT) => {
     setShowNew(false);
+    setInitialMessage(null);
+    setRenaming(false);
     setDetail(null);
     setSelected({ workItemId, conversationId: conversation.id });
     callbacks.current.onConversationSelected?.(conversation.id);
@@ -3521,13 +3579,17 @@ export function ConversationWorkspace({
     [handleError, loadGroups, projectId],
   );
 
-  const createWork = async (title: string, objective: string) => {
+  const createWork = async (message: string) => {
     setCreating(true);
     setError(null);
     try {
-      const created = await createPlanningWorkItem(projectId, { title, objective });
+      const created = await createPlanningWorkItem(projectId, {
+        title: titleForObjective(message),
+        objective: message,
+      });
       await loadGroups();
       setShowNew(false);
+      setInitialMessage({ conversationId: created.conversation.id, text: message });
       setDetail({
         work_item: created.work_item,
         conversation: created.conversation,
@@ -3552,6 +3614,32 @@ export function ConversationWorkspace({
     }
   };
 
+  const renameWork = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!detail || !renameTitle.trim()) return;
+    setRenameBusy(true);
+    setError(null);
+    try {
+      const updated = await renamePlanningWorkItem(
+        projectId,
+        detail.work_item.id,
+        renameTitle.trim(),
+      );
+      setDetail((current) => (current ? { ...current, work_item: updated } : current));
+      setGroups(
+        (current) =>
+          current?.map((group) =>
+            group.work_item.id === updated.id ? { ...group, work_item: updated } : group,
+          ) ?? current,
+      );
+      setRenaming(false);
+    } catch (caught) {
+      handleError(caught);
+    } finally {
+      setRenameBusy(false);
+    }
+  };
+
   const refresh = useCallback(() => {
     void Promise.all([loadDetail(true), loadGroups()]);
   }, [loadDetail, loadGroups]);
@@ -3570,6 +3658,8 @@ export function ConversationWorkspace({
             onClick={() => {
               setSelected(null);
               setDetail(null);
+              setInitialMessage(null);
+              setRenaming(false);
               setShowNew(true);
               callbacks.current.onNewConversation?.();
             }}
@@ -3628,7 +3718,48 @@ export function ConversationWorkspace({
                 <div className="eyebrow">
                   {conversationKindLabel(detail.conversation.kind)} conversation
                 </div>
-                <h2>{detail.work_item.title}</h2>
+                {renaming ? (
+                  <form className="conversation-title-editor" onSubmit={renameWork}>
+                    <Input
+                      aria-label="Conversation title"
+                      value={renameTitle}
+                      maxLength={120}
+                      disabled={renameBusy}
+                      autoFocus
+                      onChange={(event) => setRenameTitle(event.target.value)}
+                    />
+                    <Button
+                      className="btn-small"
+                      variant="primary"
+                      type="submit"
+                      disabled={renameBusy || !renameTitle.trim()}
+                    >
+                      {renameBusy ? "Saving…" : "Save"}
+                    </Button>
+                    <Button
+                      className="btn-small"
+                      type="button"
+                      disabled={renameBusy}
+                      onClick={() => setRenaming(false)}
+                    >
+                      Cancel
+                    </Button>
+                  </form>
+                ) : (
+                  <div className="conversation-title-row">
+                    <h2>{detail.work_item.title}</h2>
+                    <Button
+                      className="btn-small conversation-rename-button"
+                      type="button"
+                      onClick={() => {
+                        setRenameTitle(detail.work_item.title);
+                        setRenaming(true);
+                      }}
+                    >
+                      Rename
+                    </Button>
+                  </div>
+                )}
                 <p>{detail.work_item.objective}</p>
               </div>
               <div className="conversation-header-actions">
@@ -3657,6 +3788,12 @@ export function ConversationWorkspace({
             <ConversationThread
               key={`${detail.conversation.id}:${threadVersion}`}
               detail={detail}
+              initialMessage={
+                initialMessage?.conversationId === detail.conversation.id
+                  ? initialMessage.text
+                  : null
+              }
+              onInitialMessageStarted={() => setInitialMessage(null)}
               onOpenConversation={(conversationId) => void openConversationById(conversationId)}
               onRefresh={refresh}
               onUnauthorized={handleUnauthorized}

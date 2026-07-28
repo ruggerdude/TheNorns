@@ -247,6 +247,37 @@ describe.sequential("conversation-first durable domain", () => {
     ).rejects.toMatchObject({ code: "approved_plan_required" });
   });
 
+  it("renames a work item durably for authorized members", async () => {
+    const before = await service
+      .listWorkItems(member, "conversation-project")
+      .then((items) => items.find(({ work_item }) => work_item.id === workItemId)?.work_item);
+    const renamed = await service.renameWorkItem(
+      member,
+      "conversation-project",
+      workItemId,
+      "A clearer conversation title",
+    );
+
+    expect(renamed).toMatchObject({
+      id: workItemId,
+      title: "A clearer conversation title",
+      aggregate_version: (before?.aggregate_version ?? 0) + 1,
+    });
+    await expect(
+      service.renameWorkItem(outsider, "conversation-project", workItemId, "Outsider title"),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    await expect(service.listWorkItems(owner, "conversation-project")).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          work_item: expect.objectContaining({
+            id: workItemId,
+            title: "A clearer conversation title",
+          }),
+        }),
+      ]),
+    );
+  });
+
   it("assigns stable row-locked order and makes user submission idempotent", async () => {
     const parts = [{ type: "text" as const, format: "markdown" as const, text: "Plan this." }];
     const requestFingerprint = canonicalSha256({ parts });

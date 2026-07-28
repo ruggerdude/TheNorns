@@ -1663,7 +1663,50 @@ describe("conversation workspace", () => {
       parts: [{ type: "text", format: "markdown", text: "Draft the plan" }],
     });
     expect(JSON.parse(String(submit?.init?.body)).client_message_id).toEqual(expect.any(String));
+    expect(new Headers(submit?.init?.headers).get("content-type")).toBe("application/json");
     expect(calls.some(({ url }) => url.includes("/actions"))).toBe(false);
+  });
+
+  it("shows a readable message instead of a raw Fastify 415 payload", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse();
+        if (url.endsWith(`/conversations/${conversationId}/messages`)) {
+          return Response.json(
+            {
+              statusCode: 415,
+              code: "FST_ERR_CTP_INVALID_MEDIA_TYPE",
+              error: "Unsupported Media Type",
+              message: "Unsupported Media Type",
+            },
+            { status: 415 },
+          );
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message the project PM" });
+    await user.type(composer, "Try this message{enter}");
+
+    expect(
+      await screen.findByText(
+        "The message request was rejected. Refresh the page and try sending it again.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/FST_ERR_CTP_INVALID_MEDIA_TYPE/)).not.toBeInTheDocument();
   });
 
   it("retries an uncertain confirmation with the identical caller-stable key", async () => {
@@ -2025,9 +2068,123 @@ describe("conversation workspace", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: "What work should the PM help you plan?" }),
+      await screen.findByRole("heading", { name: "What are we working on?" }),
     ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Title (optional)")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message the project PM" })).toBeInTheDocument();
     expect(screen.queryByText("Please inspect the API.")).not.toBeInTheDocument();
+  });
+
+  it("starts by sending the first message and assigns an automatic title", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const firstMessage =
+      "I want to build a release dashboard. It should show deployments and current health.";
+    const stream =
+      'data: {"type":"start","messageId":"message-first-reply"}\n\n' +
+      'data: {"type":"text-start","id":"text-first"}\n\n' +
+      'data: {"type":"text-delta","id":"text-first","delta":"Ready to plan."}\n\n' +
+      'data: {"type":"text-end","id":"text-first"}\n\n' +
+      'data: {"type":"finish","finishReason":"stop"}\n\n' +
+      "data: [DONE]\n\n";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        calls.push({ url, init });
+        if (url.endsWith("/work-items") && init?.method === "POST") {
+          return Response.json({ work_item: workItem, conversation }, { status: 201 });
+        }
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}/messages`)) {
+          return new Response(stream, {
+            status: 200,
+            headers: {
+              "content-type": "text/event-stream",
+              "x-vercel-ai-ui-message-stream": "v1",
+            },
+          });
+        }
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse([
+            message({
+              id: "message-first-user",
+              role: "user",
+              sequence: 1,
+              parts: [{ type: "text", format: "markdown", text: firstMessage }],
+            }),
+          ]);
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialNewConversation
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message the project PM" });
+    await user.type(composer, `${firstMessage}{enter}`);
+
+    expect(await screen.findByText("Ready to plan.")).toBeInTheDocument();
+    const create = calls.find(
+      ({ url, init }) => url.endsWith("/work-items") && init?.method === "POST",
+    );
+    expect(JSON.parse(String(create?.init?.body))).toEqual({
+      title: "Build a release dashboard",
+      objective: firstMessage,
+    });
+    const submit = calls.find(({ url }) => url.endsWith("/messages"));
+    expect(JSON.parse(String(submit?.init?.body))).toMatchObject({
+      parts: [{ type: "text", format: "markdown", text: firstMessage }],
+    });
+    expect(new Headers(submit?.init?.headers).get("content-type")).toBe("application/json");
+  });
+
+  it("renames the conversation from its title bar and updates every title", async () => {
+    const renamed = {
+      ...workItem,
+      title: "Release readiness",
+      aggregate_version: workItem.aggregate_version + 1,
+    };
+    let patchedBody: unknown = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse();
+        if (url.endsWith(`/work-items/${workItemId}`) && init?.method === "PATCH") {
+          patchedBody = JSON.parse(String(init.body));
+          return Response.json({ work_item: renamed });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Rename" }));
+    const title = screen.getByRole("textbox", { name: "Conversation title" });
+    await user.clear(title);
+    await user.type(title, "Release readiness");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(screen.getAllByText("Release readiness").length).toBeGreaterThanOrEqual(2),
+    );
+    expect(patchedBody).toEqual({ title: "Release readiness" });
   });
 
   it("offers a truthful status refresh instead of claiming an active stream can resume", async () => {

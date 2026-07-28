@@ -278,6 +278,11 @@ export interface ConversationRepository {
   insertWorkItem(input: InsertWorkItem): Promise<V2WorkItemT>;
   findWorkItem(projectId: string, workItemId: string): Promise<V2WorkItemT | null>;
   listWorkItems(projectId: string): Promise<V2WorkItemT[]>;
+  updateWorkItemTitle(
+    projectId: string,
+    workItemId: string,
+    title: string,
+  ): Promise<V2WorkItemT | null>;
   lockWorkItem(projectId: string, workItemId: string): Promise<V2WorkItemT | null>;
   insertConversation(input: InsertConversation): Promise<V2WorkConversationT>;
   findConversation(projectId: string, conversationId: string): Promise<V2WorkConversationT | null>;
@@ -396,6 +401,23 @@ class SqlConversationRepository implements ConversationRepository {
       [projectId],
     );
     return result.rows.map(workItem);
+  }
+
+  async updateWorkItemTitle(
+    projectId: string,
+    workItemId: string,
+    title: string,
+  ): Promise<V2WorkItemT | null> {
+    const result = await this.sql.query<WorkItemRow>(
+      `UPDATE work_items
+          SET title=$3,
+              aggregate_version=aggregate_version + 1,
+              updated_at=NOW()
+        WHERE project_id=$1 AND id=$2
+        RETURNING ${workItemColumns}`,
+      [projectId, workItemId, title],
+    );
+    return result.rows[0] ? workItem(result.rows[0]) : null;
   }
 
   async lockWorkItem(projectId: string, workItemId: string): Promise<V2WorkItemT | null> {

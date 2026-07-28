@@ -119,6 +119,21 @@ export function createPlanningWorkItem(
   });
 }
 
+export async function renamePlanningWorkItem(
+  projectId: string,
+  workItemId: string,
+  title: string,
+): Promise<V2WorkItemT> {
+  const result = await requestJson<{ work_item: V2WorkItemT }>(
+    `/api/v2/projects/${projectId}/work-items/${workItemId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    },
+  );
+  return result.work_item;
+}
+
 export function messageEndpoint(
   projectId: string,
   workItemId: string,
