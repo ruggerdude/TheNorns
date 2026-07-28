@@ -403,9 +403,7 @@ test("New project creates from a name and lands in the workspace", async ({ page
   expect(setupWidth).toBeLessThanOrEqual(1216);
 
   await expect(page.getByTestId("automatic-github-destination")).toContainText("octocat");
-  await page
-    .getByTestId("project-name")
-    .fill("Deployment workflow dashboard for release managers");
+  await page.getByTestId("project-name").fill("Deployment workflow dashboard for release managers");
   await expect(page.getByTestId("derived-project-summary")).toContainText(
     "Deployment workflow dashboard for release managers",
   );
