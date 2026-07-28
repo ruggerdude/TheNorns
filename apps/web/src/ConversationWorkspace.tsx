@@ -13,6 +13,7 @@ import {
   ComposerPrimitive,
   MessagePrimitive,
   ThreadPrimitive,
+  useComposerRuntime,
 } from "@assistant-ui/react";
 import { AssistantChatTransport, useAISDKChat, useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
@@ -2266,6 +2267,82 @@ function confirmationKeyFor(action: V2ConversationActionT, memory: Map<string, s
 
 const PLANNING_WORKFLOW_STEPS = ["Chat", "Plan", "QC", "Execute"] as const;
 
+function isPlanAdoptionIntent(value: string): boolean {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]+$/u, "")
+    .replace(/\s+/gu, " ");
+  return [
+    "use this",
+    "use that",
+    "use this as the plan",
+    "use that as the plan",
+    "make this the plan",
+    "turn this into the plan",
+    "create the plan from this",
+    "lock this in as the plan",
+    "proceed with this plan",
+  ].includes(normalized);
+}
+
+function ConversationComposer({
+  isExecution,
+  planIntentEnabled,
+  onUseAsPlan,
+}: {
+  isExecution: boolean;
+  planIntentEnabled: boolean;
+  onUseAsPlan: (message: string) => void;
+}): React.ReactElement {
+  const composer = useComposerRuntime();
+  const interceptPlanIntent = (event: FormEvent<HTMLFormElement>) => {
+    const state = composer.getState();
+    if (!planIntentEnabled || state.attachments.length > 0 || !isPlanAdoptionIntent(state.text)) {
+      return;
+    }
+    event.preventDefault();
+    const message = state.text.trim();
+    composer.setText("");
+    onUseAsPlan(message);
+  };
+
+  return (
+    <ComposerPrimitive.Root className="conversation-composer" onSubmit={interceptPlanIntent}>
+      <ComposerPrimitive.Attachments>{() => <ComposerAttachment />}</ComposerPrimitive.Attachments>
+      <ComposerPrimitive.Input
+        className="conversation-composer-input"
+        placeholder={
+          isExecution
+            ? "Message the execution PM…"
+            : "Message the PM, or say “Use this as the plan”…"
+        }
+        aria-label={isExecution ? "Message the execution PM" : "Message the project PM"}
+        submitMode="enter"
+        unstable_insertNewlineOnTouchEnter
+        rows={2}
+      />
+      <div className="conversation-composer-actions">
+        <ComposerPrimitive.AddAttachment
+          className="conversation-icon-button"
+          aria-label="Add image"
+        >
+          + Image
+        </ComposerPrimitive.AddAttachment>
+        <span className="conversation-keyboard-help">
+          Enter to send · Shift+Enter for a new line
+        </span>
+        <ComposerPrimitive.Cancel className="conversation-stop-button" aria-label="Stop response">
+          Stop
+        </ComposerPrimitive.Cancel>
+        <ComposerPrimitive.Send className="conversation-send-button" aria-label="Send message">
+          Send
+        </ComposerPrimitive.Send>
+      </div>
+    </ComposerPrimitive.Root>
+  );
+}
+
 function PlanningWorkflowBar({
   detail,
   proposalBusy,
@@ -2387,7 +2464,8 @@ function PlanningWorkflowBar({
     <section className="conversation-workflow" aria-label="Planning workflow">
       <ol aria-label="Chat to execution progress">
         {PLANNING_WORKFLOW_STEPS.map((step, index) => {
-          const state = index < currentStep ? "complete" : index === currentStep ? "current" : "next";
+          const state =
+            index < currentStep ? "complete" : index === currentStep ? "current" : "next";
           return (
             <li
               className={`is-${state}`}
@@ -2665,71 +2743,109 @@ function ConversationThread({
     return () => window.clearTimeout(timer);
   }, [awaitingBackgroundSettlement, onRefresh]);
 
-  const generatePlanProposal = useCallback(async () => {
-    if (proposalBusy) return;
-    const conversationId = detail.conversation.id;
-    const idempotencyKey = proposalKeyFor(conversationId, proposalKeys.current);
-    setProposalBusy(true);
-    setProposalError(null);
-    try {
-      window.sessionStorage.removeItem(proposalErrorStorageKey(conversationId));
-    } catch {
-      // Browser storage is optional; the current component still shows request state.
-    }
-    try {
-      await generateConversationPlanProposal(
-        detail.work_item.project_id,
-        detail.work_item.id,
-        conversationId,
-        idempotencyKey,
-      );
-      proposalKeys.current.delete(conversationId);
+  const generatePlanProposal = useCallback(
+    async (intentMessage?: string, saveWhenReady = false) => {
+      if (proposalBusy) return;
+      const conversationId = detail.conversation.id;
+      const idempotencyKey = proposalKeyFor(conversationId, proposalKeys.current);
+      setProposalBusy(true);
+      setProposalError(null);
       try {
-        window.sessionStorage.removeItem(proposalStorageKey(conversationId));
         window.sessionStorage.removeItem(proposalErrorStorageKey(conversationId));
       } catch {
-        // The durable proposal and action are already server-owned.
+        // Browser storage is optional; the current component still shows request state.
       }
-      onRefresh();
-    } catch (caught) {
-      if (caught instanceof UnauthorizedError) {
-        onUnauthorized();
-        return;
-      }
-      const prefix =
-        caught instanceof ApiError
-          ? ""
-          : "Proposal generation status is uncertain. Retry to check the same request safely. ";
-      const message = caught instanceof Error ? caught.message : String(caught);
-      const visibleError = `${prefix}${message}`;
-      setProposalError(visibleError);
-      if (caught instanceof ApiError && caught.code === "proposal_failed") {
+      try {
+        const generated = await generateConversationPlanProposal(
+          detail.work_item.project_id,
+          detail.work_item.id,
+          conversationId,
+          idempotencyKey,
+          intentMessage,
+        );
         proposalKeys.current.delete(conversationId);
         try {
           window.sessionStorage.removeItem(proposalStorageKey(conversationId));
+          window.sessionStorage.removeItem(proposalErrorStorageKey(conversationId));
         } catch {
-          // A new user attempt will receive a fresh in-memory key.
+          // The durable proposal and action are already server-owned.
         }
-      }
-      if (!(caught instanceof ApiError)) {
-        try {
-          window.sessionStorage.setItem(proposalErrorStorageKey(conversationId), visibleError);
-        } catch {
-          // The current component retains the visible uncertain status.
+        if (saveWhenReady) {
+          const confirmationKey = confirmationKeyFor(generated.action, confirmationKeys.current);
+          try {
+            const saved = await confirmConversationAction(
+              detail.work_item.project_id,
+              detail.work_item.id,
+              conversationId,
+              generated.action.id,
+              confirmationKey,
+            );
+            setActionOverrides((current) =>
+              new Map(current).set(generated.action.id, saved.action),
+            );
+            setEffectOverrides((current) =>
+              new Map(current).set(generated.action.id, saved.effect),
+            );
+            confirmationKeys.current.delete(generated.action.id);
+            try {
+              window.sessionStorage.removeItem(confirmationStorageKey(generated.action.id));
+            } catch {
+              // The plan is already durably saved.
+            }
+          } catch (caught) {
+            if (caught instanceof UnauthorizedError) {
+              onUnauthorized();
+              return;
+            }
+            setProposalError(
+              `The plan was created, but it could not be saved. Use Save plan to retry. ${
+                caught instanceof Error ? caught.message : String(caught)
+              }`,
+            );
+          }
         }
         onRefresh();
+      } catch (caught) {
+        if (caught instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
+        const prefix =
+          caught instanceof ApiError
+            ? ""
+            : "Proposal generation status is uncertain. Retry to check the same request safely. ";
+        const message = caught instanceof Error ? caught.message : String(caught);
+        const visibleError = `${prefix}${message}`;
+        setProposalError(visibleError);
+        if (caught instanceof ApiError && caught.code === "proposal_failed") {
+          proposalKeys.current.delete(conversationId);
+          try {
+            window.sessionStorage.removeItem(proposalStorageKey(conversationId));
+          } catch {
+            // A new user attempt will receive a fresh in-memory key.
+          }
+        }
+        if (!(caught instanceof ApiError)) {
+          try {
+            window.sessionStorage.setItem(proposalErrorStorageKey(conversationId), visibleError);
+          } catch {
+            // The current component retains the visible uncertain status.
+          }
+          onRefresh();
+        }
+      } finally {
+        setProposalBusy(false);
       }
-    } finally {
-      setProposalBusy(false);
-    }
-  }, [
-    detail.conversation.id,
-    detail.work_item.id,
-    detail.work_item.project_id,
-    onRefresh,
-    onUnauthorized,
-    proposalBusy,
-  ]);
+    },
+    [
+      detail.conversation.id,
+      detail.work_item.id,
+      detail.work_item.project_id,
+      onRefresh,
+      onUnauthorized,
+      proposalBusy,
+    ],
+  );
 
   const proposePlanChanges = useCallback(
     async (version: V2WorkPlanVersionT, direction: string): Promise<boolean> => {
@@ -3172,6 +3288,15 @@ function ConversationThread({
       message.parts.flatMap((part) => (part.type === "action" ? [part.action_id] : [])),
     ),
   );
+  const pendingSaveAction =
+    [...actionContext.actions.values()].find(
+      (action) => action.action_type === "save_plan_candidate" && action.status === "proposed",
+    ) ?? null;
+  const planIntentEnabled =
+    isPlanning &&
+    (pendingSaveAction !== null
+      ? busyActionId === null
+      : proposalBusy === false && detail.active_attempt === null && proposalBlockedReason === null);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -3374,46 +3499,17 @@ function ConversationThread({
                     </span>
                   </output>
                 ) : (
-                  <ComposerPrimitive.Root className="conversation-composer">
-                    <ComposerPrimitive.Attachments>
-                      {() => <ComposerAttachment />}
-                    </ComposerPrimitive.Attachments>
-                    <ComposerPrimitive.Input
-                      className="conversation-composer-input"
-                      placeholder={
-                        isExecution ? "Message the execution PM…" : "Message the project PM…"
+                  <ConversationComposer
+                    isExecution={isExecution}
+                    planIntentEnabled={planIntentEnabled}
+                    onUseAsPlan={(message) => {
+                      if (pendingSaveAction) {
+                        void confirmAction(pendingSaveAction);
+                        return;
                       }
-                      aria-label={
-                        isExecution ? "Message the execution PM" : "Message the project PM"
-                      }
-                      submitMode="enter"
-                      unstable_insertNewlineOnTouchEnter
-                      rows={2}
-                    />
-                    <div className="conversation-composer-actions">
-                      <ComposerPrimitive.AddAttachment
-                        className="conversation-icon-button"
-                        aria-label="Add image"
-                      >
-                        + Image
-                      </ComposerPrimitive.AddAttachment>
-                      <span className="conversation-keyboard-help">
-                        Enter to send · Shift+Enter for a new line
-                      </span>
-                      <ComposerPrimitive.Cancel
-                        className="conversation-stop-button"
-                        aria-label="Stop response"
-                      >
-                        Stop
-                      </ComposerPrimitive.Cancel>
-                      <ComposerPrimitive.Send
-                        className="conversation-send-button"
-                        aria-label="Send message"
-                      >
-                        Send
-                      </ComposerPrimitive.Send>
-                    </div>
-                  </ComposerPrimitive.Root>
+                      void generatePlanProposal(message, true);
+                    }}
+                  />
                 )}
               </ThreadPrimitive.ViewportFooter>
             </ThreadPrimitive.Viewport>

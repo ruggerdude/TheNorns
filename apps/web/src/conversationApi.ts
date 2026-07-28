@@ -206,13 +206,17 @@ export function generateConversationPlanProposal(
   workItemId: string,
   conversationId: string,
   idempotencyKey: string,
+  intentMessage?: string,
 ): Promise<{
   message: V2WorkMessageT;
   action: V2ConversationActionT;
 }> {
   return requestJson(`${messageEndpoint(projectId, workItemId, conversationId)}/plan-proposals`, {
     method: "POST",
-    body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    body: JSON.stringify({
+      idempotency_key: idempotencyKey,
+      ...(intentMessage ? { intent_message: intentMessage } : {}),
+    }),
   });
 }
 

@@ -204,6 +204,18 @@ export class ConversationPlanProposalService {
         "this idempotent plan proposal is still generating",
       );
     }
+    if (input.intent_message) {
+      await this.conversations.submitUserMessage(
+        { id: userId },
+        {
+          project_id: projectId,
+          work_item_id: workItemId,
+          conversation_id: conversationId,
+          client_message_id: `plan-intent:${input.idempotency_key}`,
+          parts: [{ type: "text", format: "plain", text: input.intent_message }],
+        },
+      );
+    }
     const assembled = await this.contexts.assemblePlanProposal(
       projectId,
       workItemId,

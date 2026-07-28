@@ -62,7 +62,10 @@ describe("conversation plan routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/v2/projects/project-1/work-items/work-1/conversations/conversation-1/plan-proposals",
-      payload: { idempotency_key: "proposal-key" },
+      payload: {
+        idempotency_key: "proposal-key",
+        intent_message: "Use this as the plan.",
+      },
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
@@ -77,7 +80,10 @@ describe("conversation plan routes", () => {
           "project-1",
           "work-1",
           "conversation-1",
-          { idempotency_key: "proposal-key" },
+          {
+            idempotency_key: "proposal-key",
+            intent_message: "Use this as the plan.",
+          },
         ],
       },
     ]);

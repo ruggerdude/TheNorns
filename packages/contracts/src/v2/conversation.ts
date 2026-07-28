@@ -2732,6 +2732,7 @@ export type V2CreateConversationPlanningExcerptInputT = z.infer<
 export const V2CreateConversationPlanProposalInput = z
   .object({
     idempotency_key: V2EntityId,
+    intent_message: z.string().trim().min(1).max(200).optional(),
   })
   .strict();
 export type V2CreateConversationPlanProposalInputT = z.infer<

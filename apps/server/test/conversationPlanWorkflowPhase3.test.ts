@@ -587,6 +587,53 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     );
   });
 
+  it("records a natural-language plan handoff once and makes it the proposal source", async () => {
+    const scope = await workspace("natural-plan-handoff");
+    const adapter = proposalAdapter as FakeAdapter;
+    adapter.enqueue(plan("Use the agreed conversation as the plan"));
+    const request = {
+      idempotency_key: "natural-plan-handoff",
+      intent_message: "Use this as the plan.",
+    };
+
+    const first = await proposals.propose(
+      owner.id,
+      projectId,
+      scope.workItemId,
+      scope.conversationId,
+      request,
+    );
+    const replay = await proposals.propose(
+      owner.id,
+      projectId,
+      scope.workItemId,
+      scope.conversationId,
+      request,
+    );
+
+    expect(replay).toEqual(first);
+    expect(adapter.requests).toHaveLength(1);
+    const messages = await conversations.listMessages(
+      owner,
+      projectId,
+      scope.workItemId,
+      scope.conversationId,
+    );
+    const intentMessages = messages.filter(
+      (message) =>
+        message.role === "user" &&
+        message.parts.some((part) => part.type === "text" && part.text === "Use this as the plan."),
+    );
+    expect(intentMessages).toHaveLength(1);
+    const attempt = await pg.query<{ source_message_id: string }>(
+      `SELECT source_message_id
+         FROM conversation_plan_proposal_attempts
+        WHERE conversation_id=$1 AND idempotency_key=$2`,
+      [scope.conversationId, request.idempotency_key],
+    );
+    expect(attempt.rows[0]?.source_message_id).toBe(intentMessages[0]?.id);
+  });
+
   it("settles adapter-construction failure once and replays the terminal failure without spend", async () => {
     const scope = await workspace("proposal-construction-failure");
     let factoryCalls = 0;
