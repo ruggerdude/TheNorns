@@ -125,7 +125,7 @@ export function Login({
       <section className="login-art">
         <Brand />
         <div className="login-copy">
-          <div className="eyebrow">AI program management</div>
+          <div className="eyebrow">Program management</div>
           <h1>
             Shape the work.
             <br />

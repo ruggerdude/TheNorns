@@ -1041,8 +1041,53 @@ decision and is deliberately untouched.
   widths, header pattern; new logo mark + favicon; fix New Project
   bottom-pinned layout bug; remove login/index.html "AI" copy.
 - [x] ✅ DES-P2a — Usage suite sweep (branch worktree-agent-ad9edeafdb865dffd @ 0fb936a).
-- [ ] 🔄 DES-P2b — Settings/Admin/Login sweep.
+- [x] ✅ DES-P2b — Settings/Admin/Login sweep (branch worktree-agent-a3f7fc0e0a3a130dc @ 4342f27).
 - [ ] 🔄 DES-P2c — Portfolio (Projects.tsx) sweep.
 - [ ] 🔄 DES-P2d — Project workspace sweep (App.tsx shell, PhaseTab,
   ConversationWorkspace, operations dashboard) incl. "AI pick"/staffing copy.
 - [ ] 📋 DES-P3 — Integration, full verification gate, browser walkthrough.
+
+## Design overhaul (Phase 2 — 2026-07-27)
+
+- [x] ✅ P2b — settings/admin/login sweep (opened and finished in this
+  worktree, one of four parallel Phase-2 agents against `docs/DESIGN-SYSTEM.md`).
+  Worktree had drifted off the `design-overhaul` branch (base was `main`@`c1aa1ac`,
+  missing Phase 1's token/PageHeader/Brand work); fast-forward merged
+  `design-overhaul` (`7605a35`) in first. `Account.tsx`: adopted `PageHeader`
+  for the "Workspace / Settings" intro, wrapped content in
+  `.page-container.page-container-narrow`, renamed "AI providers" →
+  "Model providers" (connection-icon glyph "AI" → "MP"), fixed the full-width
+  red Sign out button (was an unconstrained grid child of `.form-stack`;
+  wrapped in the existing `.session-row` flex class so it right-sizes and
+  reads as a separated destructive row). `Admin.tsx`: adopted `PageHeader`
+  for "Workspace controls / Administration", switched the page wrapper to
+  `.page-container`, applied the existing token-based `.card` class to the
+  Users / Add-a-user / Invite-by-email grid children for a consistent
+  evenly-guttered card grid (`.admin-layout` already had the grid+gutter;
+  audited existing typography — no sub-`--text-xs` violations found there).
+  `Login.tsx`: reassigned eyebrow copy "AI program management" →
+  "Program management" per PM redirect; hero layout/type size and the
+  split-panel structure left untouched. Three requests blocked by the hard
+  file-scope rule (no `styles.css` edits allowed) written up in
+  `P2-SHARED-REQUESTS.md`: `.login-card` padding/radius are hardcoded
+  (1.6rem/22px) instead of token values; `.meta` (micro-strip + Account's
+  local-agent-setup copy) renders at .69rem, under the `--text-xs` floor;
+  and a bigger finding — `.eyebrow` has three colliding un-namespaced
+  definitions left over from the pre-Phase-1 layers, so today's actual
+  rendered eyebrow (including through `PageHeader`) is a cascade hybrid of
+  all three, not the clean Phase 1 token version — likely affects every
+  other P2 page too. Verification: `pnpm exec biome check` on the 3 changed
+  files — 0 issues; `pnpm --filter @norns/web exec tsc -p tsconfig.json
+  --noEmit` — 0 errors (after building the pre-existing unbuilt
+  `@norns/contracts` workspace dependency, unrelated to this change);
+  `pnpm --filter @norns/web test` full suite — 58 files / 271 tests passed,
+  including `Account.test.tsx` (4), `Admin.test.tsx` (6),
+  `Account.connections.test.tsx` (6), `Login.test.tsx` (7), and
+  `App.auth-wiring.test.tsx` (8, exercises opening both panels); `pnpm run
+  build` — clean across all 5 workspace packages, web entry bundle 154.9 KiB
+  gzip within the 161 KiB budget. No test copy assertions needed updating
+  (existing tests use role/testid queries, not the exact strings that
+  changed). Not visually browser-verified: the session's shared preview
+  server was serving a different checkout (title mismatch confirmed it
+  wasn't this worktree's `index.html`), so relied on the full automated
+  verification bar instead.
