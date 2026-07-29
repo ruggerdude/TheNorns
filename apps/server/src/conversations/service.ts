@@ -1,4 +1,5 @@
 import {
+  PmModel,
   V2Actor,
   type V2ActorT,
   V2ConfirmConversationActionInput,
@@ -15,6 +16,7 @@ import {
   type V2WorkConversationT,
   type V2WorkItemT,
   type V2WorkMessageT,
+  isPmModelForProvider,
 } from "@norns/contracts";
 import { newId } from "../ids.js";
 import { canonicalSha256 } from "../persistence/migration/canonicalJson.js";
@@ -150,6 +152,67 @@ export class ConversationService {
         throw new ConversationPersistenceError(
           "work_item_not_found",
           `unknown work item "${workItemId}" in project "${projectId}"`,
+        );
+      }
+      return updated;
+    });
+  }
+
+  switchConversationModel(
+    actor: ConversationActor,
+    projectId: string,
+    workItemId: string,
+    conversationId: string,
+    candidateModel: string,
+  ): Promise<V2WorkConversationT> {
+    const model = PmModel.parse(candidateModel);
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(projectId, actor.id);
+      const conversation = await repository.lockConversation(projectId, workItemId, conversationId);
+      if (!conversation) {
+        throw new ConversationPersistenceError(
+          "conversation_not_found",
+          `unknown conversation "${conversationId}" in work item "${workItemId}"`,
+        );
+      }
+      if (conversation.status !== "active") {
+        throw new ConversationPersistenceError(
+          "conversation_inactive",
+          `conversation "${conversationId}" is ${conversation.status}`,
+        );
+      }
+      if (conversation.provider !== "anthropic" && conversation.provider !== "openai") {
+        throw new ConversationPersistenceError(
+          "model_ecosystem_mismatch",
+          `conversation provider "${conversation.provider}" does not support model switching`,
+        );
+      }
+      if (!isPmModelForProvider(conversation.provider, model)) {
+        throw new ConversationPersistenceError(
+          "model_ecosystem_mismatch",
+          `choose a ${conversation.provider} model for this conversation`,
+        );
+      }
+      if (conversation.model === model) return conversation;
+      if (
+        (await repository.hasActiveTurnAttempt(conversation.id)) ||
+        (await repository.hasActivePlanProposal(conversation.id))
+      ) {
+        throw new ConversationPersistenceError(
+          "turn_in_progress",
+          "wait for the current PM response or plan generation to finish before changing models",
+        );
+      }
+      const updated = await repository.updateConversationModel(
+        projectId,
+        workItemId,
+        conversationId,
+        model,
+      );
+      if (!updated) {
+        throw new ConversationPersistenceError(
+          "conversation_inactive",
+          `conversation "${conversationId}" is no longer active`,
         );
       }
       return updated;

@@ -1,5 +1,10 @@
 import type { ProviderName } from "@norns/adapters";
-import { V2CreateConversationPlanningExcerptInput, V2WorkMessagePart } from "@norns/contracts";
+import {
+  PmModel,
+  V2CreateConversationPlanningExcerptInput,
+  V2WorkMessagePart,
+  providerForPmModel,
+} from "@norns/contracts";
 import { createUIMessageStream, pipeUIMessageStreamToResponse } from "ai";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -40,9 +45,11 @@ const WorkItemBody = z
   .object({
     title: z.string().trim().min(1),
     objective: z.string().trim().min(1),
+    model: PmModel.optional(),
   })
   .strict();
 const WorkItemTitleBody = z.object({ title: z.string().trim().min(1).max(120) }).strict();
+const ConversationModelBody = z.object({ model: PmModel }).strict();
 const MessageBody = z
   .object({
     client_message_id: z.string().min(1),
@@ -216,10 +223,12 @@ export function registerConversationRoutes(
     const { projectId } = request.params as { projectId: string };
     try {
       const body = WorkItemBody.parse(request.body);
-      const pin = await options.pinForProject(projectId);
+      const pin = body.model
+        ? { provider: providerForPmModel(body.model), model: body.model }
+        : await options.pinForProject(projectId);
       const created = await options.conversations.createPlanningWorkspace(
         user,
-        { project_id: projectId, ...body },
+        { project_id: projectId, title: body.title, objective: body.objective },
         pin,
       );
       return reply.code(201).send(created);
@@ -244,6 +253,29 @@ export function registerConversationRoutes(
         title,
       );
       return reply.send({ work_item });
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.patch(`${conversationBase}/:conversationId/model`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId, workItemId, conversationId } = request.params as {
+      projectId: string;
+      workItemId: string;
+      conversationId: string;
+    };
+    try {
+      const { model } = ConversationModelBody.parse(request.body);
+      const conversation = await options.conversations.switchConversationModel(
+        user,
+        projectId,
+        workItemId,
+        conversationId,
+        model,
+      );
+      return reply.send({ conversation });
     } catch (error) {
       routeError(reply, error);
     }

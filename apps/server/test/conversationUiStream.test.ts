@@ -13,6 +13,7 @@ import {
 
 describe("AI SDK UI protocol conversation stream", () => {
   const app = Fastify();
+  let createdWorkspacePin: { provider: string; model: string } | null = null;
 
   beforeAll(async () => {
     app.get("/stream", async (request, reply) => {
@@ -55,6 +56,26 @@ describe("AI SDK UI protocol conversation stream", () => {
     registerConversationRoutes(app, {
       requireUser: async () => ({ id: "user-route" }),
       conversations: {
+        createPlanningWorkspace: async (
+          _user: unknown,
+          input: { project_id: string; title: string; objective: string },
+          pin: { provider: string; model: string },
+        ) => {
+          createdWorkspacePin = pin;
+          return {
+            work_item: {
+              id: "work-created",
+              project_id: input.project_id,
+              title: input.title,
+              objective: input.objective,
+            },
+            conversation: {
+              id: "conversation-created",
+              provider: pin.provider,
+              model: pin.model,
+            },
+          };
+        },
         getConversation: async () => ({
           work_item: { id: "work-route" },
           conversation: { id: "conversation-route" },
@@ -69,6 +90,27 @@ describe("AI SDK UI protocol conversation stream", () => {
           id: workItemId,
           project_id: projectId,
           title,
+        }),
+        switchConversationModel: async (
+          _user: unknown,
+          projectId: string,
+          workItemId: string,
+          conversationId: string,
+          model: string,
+        ) => ({
+          schema_version: 2,
+          id: conversationId,
+          project_id: projectId,
+          work_item_id: workItemId,
+          created_by_user_id: "user-route",
+          kind: "planning",
+          status: "active",
+          provider: "openai",
+          model,
+          next_message_sequence: 1,
+          created_at: "2026-07-28T00:00:00.000Z",
+          updated_at: "2026-07-28T00:00:00.000Z",
+          archived_at: null,
         }),
       },
       attempts: {
@@ -161,6 +203,30 @@ describe("AI SDK UI protocol conversation stream", () => {
     });
   });
 
+  it("lets a new conversation choose its initial provider ecosystem", async () => {
+    createdWorkspacePin = null;
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v2/projects/project-route/work-items",
+      payload: {
+        title: "Model-selected conversation",
+        objective: "Start with an OpenAI model.",
+        model: "gpt-5.6-terra",
+      },
+    });
+    expect(response.statusCode).toBe(201);
+    expect(createdWorkspacePin).toEqual({
+      provider: "openai",
+      model: "gpt-5.6-terra",
+    });
+    expect(response.json()).toMatchObject({
+      conversation: {
+        provider: "openai",
+        model: "gpt-5.6-terra",
+      },
+    });
+  });
+
   it("renames the durable work-item title", async () => {
     const response = await app.inject({
       method: "PATCH",
@@ -173,6 +239,22 @@ describe("AI SDK UI protocol conversation stream", () => {
         id: "work-route",
         project_id: "project-route",
         title: "Renamed from the title bar",
+      },
+    });
+  });
+
+  it("switches the active conversation model through the explicit endpoint", async () => {
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/v2/projects/project-route/work-items/work-route/conversations/conversation-route/model",
+      payload: { model: "gpt-5.6-terra" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      conversation: {
+        id: "conversation-route",
+        provider: "openai",
+        model: "gpt-5.6-terra",
       },
     });
   });

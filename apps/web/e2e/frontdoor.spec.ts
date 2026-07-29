@@ -710,11 +710,15 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   );
 
   await expect(page.getByText("I mapped the release workflow")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Release readiness" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Release readiness" })).toHaveCount(0);
   await expect(page.getByText("# Release readiness", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("Conversation", { exact: true })).toBeVisible();
+  await expect(page.getByText("Conversation", { exact: true })).toHaveCount(0);
   const planningComposer = page.getByRole("textbox", { name: "Message the project PM" });
   await expect(planningComposer).toBeVisible();
+  const conversationModel = page.getByRole("combobox", { name: "Conversation model" });
+  await expect(conversationModel).toHaveValue("claude-sonnet-5");
+  await expect(conversationModel.locator('option[value="gpt-5.6-sol"]')).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add file" })).toHaveText("+");
   await expect(planningComposer).toHaveAttribute(
     "placeholder",
     "Message the PM, or say “Use this as the plan”…",
@@ -736,7 +740,7 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   const planningWorkflow = page.getByRole("region", { name: "Planning workflow" });
   await expect(planningWorkflow).toBeVisible();
   await expect(planningWorkflow.locator('[aria-current="step"]')).toHaveText("Chat");
-  await expect(planningWorkflow.getByRole("button", { name: "Create plan" })).toBeVisible();
+  await expect(planningWorkflow.getByRole("button", { name: "Create plan" })).toHaveCount(0);
   await expect(page.locator(".conversation-sidebar")).toHaveCount(0);
   await expect(
     page.getByText("Plan the release dashboard and deployment health workflow.", { exact: true }),
@@ -747,6 +751,7 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   const conversationChromeBox = await page.locator(".conversation-thread-chrome").boundingBox();
   const conversationToolsBox = await page.locator(".conversation-thread-tools").boundingBox();
   const transcriptBox = await page.locator(".conversation-thread-viewport").boundingBox();
+  const composerShellBox = await page.locator(".conversation-composer").boundingBox();
   expect(conversationBox?.height ?? 0).toBeGreaterThan(1020);
   expect(conversationMainBox?.width ?? 0).toBeGreaterThan((conversationBox?.width ?? 0) - 3);
   expect(conversationChromeBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(76);
@@ -756,6 +761,7 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
     (conversationChromeBox?.y ?? 0) + (conversationChromeBox?.height ?? 0) + 1,
   );
   expect(transcriptBox?.height ?? 0).toBeGreaterThan(740);
+  expect(composerShellBox?.width ?? 0).toBeGreaterThan((transcriptBox?.width ?? 0) * 0.9);
 
   await page.getByRole("button", { name: "Open conversations" }).click();
   const conversationDrawer = page.getByRole("complementary", { name: "Project conversations" });
@@ -766,6 +772,8 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   const conversationPickerRow = conversationDrawer.locator(".conversation-list-item").first();
   const conversationPickerRowBox = await conversationPickerRow.boundingBox();
   expect(conversationPickerRowBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(48);
+  await conversationPickerRow.click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: "Rename" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(conversationDrawer).toHaveCount(0);
 

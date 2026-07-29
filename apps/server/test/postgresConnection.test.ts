@@ -117,6 +117,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             conversation_human_steering: "conversation_human_steering_v1",
             conversation_mockups_dashboard: "conversation_mockups_dashboard_v1",
             conversation_inference_reservations: "conversation_inference_reservations",
+            conversation_plan_review_mode: true,
           },
         ],
       }),
@@ -153,6 +154,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             conversation_human_steering: null,
             conversation_mockups_dashboard: null,
             conversation_inference_reservations: null,
+            conversation_plan_review_mode: false,
           },
         ],
       }),
@@ -170,7 +172,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "conversation domain tables, conversation_stream_lifecycle_v1, " +
         "conversation_plan_workflow_v1, conversation_execution_handoff_v1, " +
         "conversation_human_steering_v1, conversation_mockups_dashboard_v1, " +
-        "conversation_inference_reservations",
+        "conversation_inference_reservations, conversation_plan_reviews.review_mode",
     });
   });
 
@@ -202,6 +204,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             conversation_human_steering: null,
             conversation_mockups_dashboard: null,
             conversation_inference_reservations: null,
+            conversation_plan_review_mode: false,
           },
         ],
       }),
@@ -214,7 +217,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
           "database migrations are required before startup; missing: " +
           "conversation_stream_lifecycle_v1, conversation_plan_workflow_v1, " +
           "conversation_execution_handoff_v1, conversation_human_steering_v1, " +
-          "conversation_mockups_dashboard_v1, conversation_inference_reservations",
+          "conversation_mockups_dashboard_v1, conversation_inference_reservations, " +
+          "conversation_plan_reviews.review_mode",
       },
     );
   });

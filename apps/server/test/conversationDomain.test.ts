@@ -6,6 +6,7 @@ import { canonicalJson, canonicalSha256 } from "../src/persistence/migration/can
 import { assertCurrentRuntimeSchema } from "../src/persistence/postgresConnection.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import {
+  CONVERSATION_MODEL_SWITCHING_MIGRATION_NAME,
   CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME,
   GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME,
   PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
@@ -183,9 +184,15 @@ describe.sequential("conversation-first durable domain", () => {
     ).resolves.toBeUndefined();
     const replay = await runCurrentV2Migrations(asMigrationDatabase(pg));
     expect(replay.at(-1)).toMatchObject({
-      name: CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME,
+      name: CONVERSATION_MODEL_SWITCHING_MIGRATION_NAME,
       applied: false,
     });
+    expect(replay).toContainEqual(
+      expect.objectContaining({
+        name: CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME,
+        applied: false,
+      }),
+    );
   });
 
   it("authorizes project members without leaking conversations to outsiders", async () => {
@@ -206,6 +213,35 @@ describe.sequential("conversation-first durable domain", () => {
     });
     conversationId = conversation.id;
     expect(conversation.created_by_user_id).toBe(member.id);
+
+    const switched = await service.switchConversationModel(
+      member,
+      "conversation-project",
+      item.id,
+      conversation.id,
+      "gpt-5.6-terra",
+    );
+    expect(switched.model).toBe("gpt-5.6-terra");
+    expect(switched.provider).toBe("openai");
+    await expect(
+      service.switchConversationModel(
+        member,
+        "conversation-project",
+        item.id,
+        conversation.id,
+        "claude-sonnet-5",
+      ),
+    ).rejects.toMatchObject({
+      code: "model_ecosystem_mismatch",
+      httpStatus: 409,
+    });
+    await service.switchConversationModel(
+      member,
+      "conversation-project",
+      item.id,
+      conversation.id,
+      "gpt-5.6-sol",
+    );
 
     await expect(
       service.listMessages(outsider, "conversation-project", workItemId, conversationId),

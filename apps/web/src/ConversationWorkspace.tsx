@@ -19,6 +19,8 @@ import {
 import { AssistantChatTransport, useAISDKChat, useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
 import type {
+  PmModelT,
+  PmProviderT,
   V2ConfirmConversationActionResponseT,
   V2ConversationActionDeliveryEventT,
   V2ConversationActionT,
@@ -77,7 +79,6 @@ import {
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import {
   type ConversationDetail,
-  type ConversationUsageSummary,
   type SubmitConversationMessageBody,
   type WorkItemConversationGroup,
   confirmConversationAction,
@@ -85,6 +86,7 @@ import {
   generateConversationPlanChangeProposal,
   generateConversationPlanProposal,
   getConversation,
+  getProjectConversationPin,
   listWorkItemConversations,
   messageEndpoint,
   proposeExecutionConversationAction,
@@ -92,6 +94,7 @@ import {
   renamePlanningWorkItem,
   resolveConversation,
   retrieveConversationPlanningExcerpt,
+  switchConversationModel,
   updateConversationPmSettings,
 } from "./conversationApi";
 import { type ExecutionModelCapability, getExecutionModelCapabilities } from "./phaseTabApi";
@@ -210,6 +213,16 @@ function conversationKindLabel(kind: V2WorkConversationT["kind"]): string {
 function displayConversationTitle(title: string): string {
   return title.replace(/^#{1,6}\s+/, "").trim() || "Untitled conversation";
 }
+
+const conversationModelOptions = (
+  Object.entries(PM_MODEL_OPTIONS) as Array<[PmProviderT, (typeof PM_MODEL_OPTIONS)[PmProviderT]]>
+).flatMap(([provider, models]) =>
+  models.map((model) => ({
+    provider,
+    id: model.id,
+    label: model.label,
+  })),
+);
 
 function attachmentIdFromUrl(url: string): string | null {
   const match = /\/attachments\/([^/?#]+)(?:[?#]|$)/.exec(url);
@@ -1483,31 +1496,6 @@ function InterruptedStatus(): React.ReactElement {
   );
 }
 
-function usageSummary(usage: ConversationUsageSummary): string {
-  if (usage.usage_status === "pending") return "Usage is still settling";
-  if (usage.usage_status === "unavailable") return "Usage is unavailable";
-  const tokens = usage.input_tokens + usage.output_tokens;
-  const cost =
-    usage.cost_usd === null
-      ? "cost unavailable"
-      : `${usage.exact_cost ? "" : "estimated "}$${usage.cost_usd.toFixed(4)}`;
-  return `${tokens.toLocaleString()} tokens · ${cost} · ${usage.attempt_count.toLocaleString()} request${
-    usage.attempt_count === 1 ? "" : "s"
-  }`;
-}
-
-function hasRecordedUsage(
-  usage: ConversationUsageSummary | null | undefined,
-): usage is ConversationUsageSummary {
-  return Boolean(
-    usage &&
-      (usage.attempt_count > 0 ||
-        usage.input_tokens > 0 ||
-        usage.output_tokens > 0 ||
-        usage.cost_usd !== null),
-  );
-}
-
 function ConversationSummaryIndicator({
   summary,
 }: {
@@ -2482,13 +2470,21 @@ function ConversationComposer({
   isExecution,
   isPlanning,
   pmProvider,
+  pmModel,
+  modelBusy,
+  modelDisabled,
+  onModelChange,
   planIntentEnabled,
   planIntentBusy,
   onUseAsPlan,
 }: {
   isExecution: boolean;
   isPlanning: boolean;
-  pmProvider: "anthropic" | "openai";
+  pmProvider: PmProviderT;
+  pmModel: PmModelT;
+  modelBusy: boolean;
+  modelDisabled: boolean;
+  onModelChange: (model: PmModelT) => void;
   planIntentEnabled: boolean;
   planIntentBusy: boolean;
   onUseAsPlan: (message: string, handoff?: V2PlanHandoffPreferenceT) => void;
@@ -2526,10 +2522,27 @@ function ConversationComposer({
       <div className="conversation-composer-actions">
         <ComposerPrimitive.AddAttachment
           className="conversation-icon-button"
-          aria-label="Add image"
+          aria-label="Add file"
+          title="Attach an image"
         >
-          + Image
+          +
         </ComposerPrimitive.AddAttachment>
+        <div className="conversation-model-select">
+          <span className="sr-only">Conversation model</span>
+          <Select
+            aria-label="Conversation model"
+            value={pmModel}
+            disabled={modelBusy || modelDisabled}
+            title={`${pmProvider === "anthropic" ? "Anthropic" : "OpenAI"} ecosystem is locked for this conversation`}
+            onChange={(event) => onModelChange(event.target.value as PmModelT)}
+          >
+            {PM_MODEL_OPTIONS[pmProvider].map((model) => (
+              <option key={model.id} value={model.id}>
+                {pmProvider === "anthropic" ? "Anthropic" : "OpenAI"} · {model.label}
+              </option>
+            ))}
+          </Select>
+        </div>
         <span className="conversation-keyboard-help">
           Enter to send · Shift+Enter for a new line
         </span>
@@ -2574,14 +2587,10 @@ function ConversationComposer({
 function PlanningWorkflowBar({
   detail,
   proposalBusy,
-  proposalBlockedReason,
-  onCreateProposal,
   onOpenConversation,
 }: {
   detail: ConversationDetail;
   proposalBusy: boolean;
-  proposalBlockedReason: string | null;
-  onCreateProposal: () => void;
   onOpenConversation: (conversationId: string) => void;
 }): React.ReactElement {
   const context = useContext(ConversationActionContext);
@@ -2673,19 +2682,7 @@ function PlanningWorkflowBar({
   } else if (activeReview) {
     action = <Badge tone="info">QC {activeReview.status.replaceAll("_", " ")}</Badge>;
   } else {
-    const update = hasSavedPlan;
-    action = (
-      <Button
-        className="btn-small conversation-workflow-action"
-        variant="primary"
-        aria-label={update ? "Update plan" : "Create plan"}
-        disabled={busy || proposalBlockedReason !== null}
-        title={proposalBlockedReason ?? undefined}
-        onClick={onCreateProposal}
-      >
-        {proposalBusy ? "Creating…" : update ? "Update plan" : "Create plan"}
-      </Button>
-    );
+    action = null;
   }
 
   return (
@@ -2705,7 +2702,7 @@ function PlanningWorkflowBar({
           );
         })}
       </ol>
-      <div className="conversation-workflow-next">{action}</div>
+      {action ? <div className="conversation-workflow-next">{action}</div> : null}
     </section>
   );
 }
@@ -2716,6 +2713,7 @@ function ConversationThread({
   initialMessage,
   onInitialMessageStarted,
   onOpenConversation,
+  onConversationModelChanged,
   onRefresh,
   onUnauthorized,
 }: {
@@ -2724,10 +2722,13 @@ function ConversationThread({
   initialMessage?: string | null;
   onInitialMessageStarted?: () => void;
   onOpenConversation: (conversationId: string) => void;
+  onConversationModelChanged: (conversation: V2WorkConversationT) => void;
   onRefresh: () => void;
   onUnauthorized: () => void;
 }): React.ReactElement {
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [modelBusy, setModelBusy] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
   const [latestAttempt, setLatestAttempt] = useState<AttemptData | null>(null);
   const [latestUsage, setLatestUsage] = useState<UsageData | null>(null);
   const [proposalBusy, setProposalBusy] = useState(false);
@@ -2838,6 +2839,37 @@ function ConversationThread({
       refreshTimer.current = window.setTimeout(onRefresh, isAbort ? 0 : 120);
     },
   });
+
+  const changeConversationModel = useCallback(
+    async (model: PmModelT) => {
+      if (modelBusy || model === detail.conversation.model) return;
+      setModelBusy(true);
+      setModelError(null);
+      try {
+        const updated = await switchConversationModel(
+          detail.work_item.project_id,
+          detail.work_item.id,
+          detail.conversation.id,
+          model,
+        );
+        onConversationModelChanged(updated);
+      } catch (caught) {
+        if (caught instanceof UnauthorizedError) onUnauthorized();
+        else setModelError(caught instanceof Error ? caught.message : String(caught));
+      } finally {
+        setModelBusy(false);
+      }
+    },
+    [
+      detail.conversation.id,
+      detail.conversation.model,
+      detail.work_item.id,
+      detail.work_item.project_id,
+      modelBusy,
+      onConversationModelChanged,
+      onUnauthorized,
+    ],
+  );
 
   useEffect(
     () => () => {
@@ -3614,8 +3646,6 @@ function ConversationThread({
                 <PlanningWorkflowBar
                   detail={detail}
                   proposalBusy={proposalBusy || detail.active_attempt !== null}
-                  proposalBlockedReason={proposalBlockedReason}
-                  onCreateProposal={() => void generatePlanProposal()}
                   onOpenConversation={onOpenConversation}
                 />
                 {!isReadOnly ? (
@@ -3705,6 +3735,11 @@ function ConversationThread({
           {streamError ? (
             <div className="conversation-thread-alert">
               <Alert testId="conversation-stream-error">{streamError}</Alert>
+            </div>
+          ) : null}
+          {modelError ? (
+            <div className="conversation-thread-alert">
+              <Alert testId="conversation-model-error">{modelError}</Alert>
             </div>
           ) : null}
           {latestAttempt || latestUsage ? (
@@ -3799,6 +3834,15 @@ function ConversationThread({
                     isExecution={isExecution}
                     isPlanning={isPlanning}
                     pmProvider={detail.conversation.provider === "openai" ? "openai" : "anthropic"}
+                    pmModel={detail.conversation.model as PmModelT}
+                    modelBusy={modelBusy}
+                    modelDisabled={
+                      detail.active_attempt !== null ||
+                      proposalBusy ||
+                      busyActionId !== null ||
+                      isReadOnly
+                    }
+                    onModelChange={(model) => void changeConversationModel(model)}
                     planIntentEnabled={planIntentEnabled}
                     planIntentBusy={proposalBusy || busyActionId !== null}
                     onUseAsPlan={(message, handoff) => {
@@ -3821,17 +3865,25 @@ function ConversationThread({
 
 function NewWorkForm({
   busy,
+  defaultPin,
+  modelError,
   onCreate,
 }: {
   busy: boolean;
-  onCreate: (message: string) => Promise<void>;
+  defaultPin: { provider: PmProviderT; model: PmModelT } | null;
+  modelError: string | null;
+  onCreate: (message: string, model: PmModelT) => Promise<void>;
 }): React.ReactElement {
   const [message, setMessage] = useState("");
+  const [model, setModel] = useState<PmModelT | null>(defaultPin?.model ?? null);
+  useEffect(() => {
+    if (defaultPin) setModel((current) => current ?? defaultPin.model);
+  }, [defaultPin]);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const cleanMessage = message.trim();
-    if (!cleanMessage) return;
-    void onCreate(cleanMessage);
+    if (!cleanMessage || !model) return;
+    void onCreate(cleanMessage, model);
   };
   return (
     <section className="conversation-new-work" aria-labelledby="conversation-new-title">
@@ -3839,8 +3891,8 @@ function NewWorkForm({
         <div className="eyebrow">New conversation</div>
         <h2 id="conversation-new-title">What are we working on?</h2>
         <p className="muted">
-          Send the first message. Norns will name the conversation automatically, and you can rename
-          it at any time.
+          Send the first message. Norns will name the conversation automatically. Right-click it in
+          the conversation list to rename it.
         </p>
       </div>
       <form className="conversation-new-composer" onSubmit={submit}>
@@ -3860,17 +3912,40 @@ function NewWorkForm({
           }}
         />
         <div className="conversation-new-composer-actions">
+          <div className="conversation-model-select">
+            <span className="sr-only">Conversation model</span>
+            <Select
+              aria-label="Conversation model"
+              value={model ?? ""}
+              disabled={busy || defaultPin === null}
+              onChange={(event) => setModel(event.target.value as PmModelT)}
+            >
+              {defaultPin === null ? <option value="">Loading model…</option> : null}
+              {(["anthropic", "openai"] as const).map((provider) => (
+                <optgroup key={provider} label={provider === "anthropic" ? "Anthropic" : "OpenAI"}>
+                  {conversationModelOptions
+                    .filter((option) => option.provider === provider)
+                    .map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                </optgroup>
+              ))}
+            </Select>
+          </div>
           <span>Enter to send · Shift+Enter for a new line</span>
           <Button
             variant="primary"
             type="submit"
-            disabled={busy || !message.trim()}
+            disabled={busy || !message.trim() || model === null}
             data-testid="conversation-create"
           >
             {busy ? "Starting…" : "Send"}
           </Button>
         </div>
       </form>
+      {modelError ? <Alert>{modelError}</Alert> : null}
     </section>
   );
 }
@@ -3906,28 +3981,69 @@ export function ConversationWorkspace({
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [creating, setCreating] = useState(false);
   const [showNew, setShowNew] = useState(initialNewConversation);
+  const [projectPin, setProjectPin] = useState<{
+    provider: PmProviderT;
+    model: PmModelT;
+  } | null>(null);
+  const [projectPinError, setProjectPinError] = useState<string | null>(null);
   const [conversationListOpen, setConversationListOpen] = useState(false);
   const [initialMessage, setInitialMessage] = useState<{
     conversationId: string;
     text: string;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [renaming, setRenaming] = useState(false);
+  const [renamingWorkItemId, setRenamingWorkItemId] = useState<string | null>(null);
   const [renameTitle, setRenameTitle] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
+  const [conversationMenu, setConversationMenu] = useState<{
+    workItemId: string;
+    title: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const [threadVersion, setThreadVersion] = useState(0);
   const initialSelectionHandled = useRef<string | null>(null);
+  const handleUnauthorized = useCallback(() => callbacks.current.onUnauthorized(), []);
 
   useEffect(() => {
     if (!conversationListOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setConversationListOpen(false);
+      if (event.key === "Escape") {
+        setConversationMenu(null);
+        setConversationListOpen(false);
+      }
     };
+    const closeMenu = () => setConversationMenu(null);
     window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
+    window.addEventListener("click", closeMenu);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("click", closeMenu);
+    };
   }, [conversationListOpen]);
 
-  const handleUnauthorized = useCallback(() => callbacks.current.onUnauthorized(), []);
+  useEffect(() => {
+    if (!showNew || projectPin) return;
+    let current = true;
+    setProjectPinError(null);
+    void getProjectConversationPin(projectId)
+      .then((pin) => {
+        if (current) setProjectPin(pin);
+      })
+      .catch((caught) => {
+        if (!current) return;
+        if (caught instanceof UnauthorizedError) handleUnauthorized();
+        else
+          setProjectPinError(
+            caught instanceof Error
+              ? caught.message
+              : "The conversation model could not be loaded.",
+          );
+      });
+    return () => {
+      current = false;
+    };
+  }, [handleUnauthorized, projectId, projectPin, showNew]);
 
   const handleError = useCallback(
     (caught: unknown) => {
@@ -3968,9 +4084,12 @@ export function ConversationWorkspace({
     setSelected(null);
     setDetail(null);
     setShowNew(initialNewConversation);
+    setProjectPin(null);
+    setProjectPinError(null);
     setConversationListOpen(false);
     setInitialMessage(null);
-    setRenaming(false);
+    setRenamingWorkItemId(null);
+    setConversationMenu(null);
     initialSelectionHandled.current = null;
     void loadGroups();
   }, [initialNewConversation, loadGroups]);
@@ -4067,7 +4186,8 @@ export function ConversationWorkspace({
     setShowNew(false);
     setConversationListOpen(false);
     setInitialMessage(null);
-    setRenaming(false);
+    setRenamingWorkItemId(null);
+    setConversationMenu(null);
     setDetail(null);
     setSelected({ workItemId, conversationId: conversation.id });
     callbacks.current.onConversationSelected?.(conversation.id);
@@ -4113,13 +4233,14 @@ export function ConversationWorkspace({
     [handleError, loadGroups, projectId],
   );
 
-  const createWork = async (message: string) => {
+  const createWork = async (message: string, model: PmModelT) => {
     setCreating(true);
     setError(null);
     try {
       const created = await createPlanningWorkItem(projectId, {
         title: titleForObjective(message),
         objective: message,
+        model,
       });
       await loadGroups();
       setShowNew(false);
@@ -4149,25 +4270,23 @@ export function ConversationWorkspace({
     }
   };
 
-  const renameWork = async (event: FormEvent) => {
+  const renameWork = async (event: FormEvent, workItemId: string) => {
     event.preventDefault();
-    if (!detail || !renameTitle.trim()) return;
+    if (!renameTitle.trim()) return;
     setRenameBusy(true);
     setError(null);
     try {
-      const updated = await renamePlanningWorkItem(
-        projectId,
-        detail.work_item.id,
-        renameTitle.trim(),
+      const updated = await renamePlanningWorkItem(projectId, workItemId, renameTitle.trim());
+      setDetail((current) =>
+        current?.work_item.id === updated.id ? { ...current, work_item: updated } : current,
       );
-      setDetail((current) => (current ? { ...current, work_item: updated } : current));
       setGroups(
         (current) =>
           current?.map((group) =>
             group.work_item.id === updated.id ? { ...group, work_item: updated } : group,
           ) ?? current,
       );
-      setRenaming(false);
+      setRenamingWorkItemId(null);
     } catch (caught) {
       handleError(caught);
     } finally {
@@ -4192,83 +4311,19 @@ export function ConversationWorkspace({
         Conversations
       </Button>
       {!showNew && detail ? (
-        <>
-          <div className="conversation-header-title">
-            <span className="conversation-context-label">Conversation</span>
-            {renaming ? (
-              <form className="conversation-title-editor" onSubmit={renameWork}>
-                <Input
-                  aria-label="Conversation title"
-                  value={renameTitle}
-                  maxLength={120}
-                  disabled={renameBusy}
-                  autoFocus
-                  onChange={(event) => setRenameTitle(event.target.value)}
-                />
-                <Button
-                  className="btn-small"
-                  variant="primary"
-                  type="submit"
-                  disabled={renameBusy || !renameTitle.trim()}
-                >
-                  {renameBusy ? "Saving…" : "Save"}
-                </Button>
-                <Button
-                  className="btn-small"
-                  type="button"
-                  disabled={renameBusy}
-                  onClick={() => setRenaming(false)}
-                >
-                  Cancel
-                </Button>
-              </form>
-            ) : (
-              <div className="conversation-title-row">
-                <h2 title={detail.work_item.title}>
-                  {displayConversationTitle(detail.work_item.title)}
-                </h2>
-                <Button
-                  className="btn-small conversation-rename-button"
-                  type="button"
-                  onClick={() => {
-                    setRenameTitle(detail.work_item.title);
-                    setRenaming(true);
-                  }}
-                >
-                  Rename
-                </Button>
-              </div>
-            )}
-          </div>
-          <div className="conversation-header-actions">
-            {hasRecordedUsage(detail.usage) ? (
-              <output className="conversation-total-usage" data-testid="conversation-total-usage">
-                {usageSummary(detail.usage)}
-              </output>
-            ) : null}
-            <div
-              className="conversation-model-pin"
-              data-testid="conversation-model-pin"
-              title="PM pinned for this conversation"
-            >
-              <span aria-hidden="true">●</span>
-              <strong>
-                {detail.conversation.provider} · {detail.conversation.model}
-              </strong>
-            </div>
-            <Badge tone={detail.conversation.status === "active" ? "success" : "default"}>
-              {detail.conversation.status}
-            </Badge>
-            <Button
-              className="btn-small conversation-refresh-button"
-              disabled={loadingDetail}
-              onClick={refresh}
-              aria-label="Refresh conversation"
-            >
-              {loadingDetail ? "Refreshing…" : "Refresh"}
-            </Button>
-          </div>
-        </>
+        <div className="conversation-header-actions">
+          <Badge tone={detail.conversation.status === "active" ? "success" : "default"}>
+            {detail.conversation.status}
+          </Badge>
+          <Button
+            className="btn-small conversation-refresh-button"
+            disabled={loadingDetail}
+            onClick={refresh}
+            aria-label="Refresh conversation"
+          >
+            {loadingDetail ? "Refreshing…" : "Refresh"}
+          </Button>
+        </div>
       ) : null}
     </header>
   );
@@ -4299,7 +4354,8 @@ export function ConversationWorkspace({
                     setSelected(null);
                     setDetail(null);
                     setInitialMessage(null);
-                    setRenaming(false);
+                    setRenamingWorkItemId(null);
+                    setConversationMenu(null);
                     setShowNew(true);
                     setConversationListOpen(false);
                     callbacks.current.onNewConversation?.();
@@ -4325,34 +4381,99 @@ export function ConversationWorkspace({
             <div className="conversation-list">
               {groups?.map((group) => (
                 <div className="conversation-work-group" key={group.work_item.id}>
-                  {group.conversations.map((conversation) => {
-                    const active = selected?.conversationId === conversation.id && !showNew;
-                    return (
-                      <button
-                        type="button"
-                        className={`conversation-list-item${active ? " is-active" : ""}`}
-                        data-status={conversation.status}
-                        aria-current={active ? "page" : undefined}
-                        aria-label={`Open ${conversationKindLabel(conversation.kind)} conversation for ${group.work_item.title} (${conversation.status})`}
-                        key={conversation.id}
-                        onClick={() => chooseConversation(group.work_item.id, conversation)}
-                      >
-                        <strong title={group.work_item.title}>
-                          {displayConversationTitle(group.work_item.title)}
-                        </strong>
-                        <span
-                          className={`conversation-list-status is-${conversation.status}`}
-                          aria-hidden="true"
-                        />
-                        {group.conversations.length > 1 ? (
-                          <small>{conversationKindLabel(conversation.kind)}</small>
-                        ) : null}
-                      </button>
-                    );
-                  })}
+                  {renamingWorkItemId === group.work_item.id ? (
+                    <form
+                      className="conversation-list-rename"
+                      onSubmit={(event) => void renameWork(event, group.work_item.id)}
+                    >
+                      <Input
+                        aria-label="Conversation title"
+                        value={renameTitle}
+                        maxLength={120}
+                        disabled={renameBusy}
+                        autoFocus
+                        onChange={(event) => setRenameTitle(event.target.value)}
+                      />
+                      <div>
+                        <Button
+                          className="btn-small"
+                          variant="primary"
+                          type="submit"
+                          disabled={renameBusy || !renameTitle.trim()}
+                        >
+                          {renameBusy ? "Saving…" : "Save"}
+                        </Button>
+                        <Button
+                          className="btn-small"
+                          type="button"
+                          disabled={renameBusy}
+                          onClick={() => setRenamingWorkItemId(null)}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </form>
+                  ) : (
+                    group.conversations.map((conversation) => {
+                      const active = selected?.conversationId === conversation.id && !showNew;
+                      return (
+                        <button
+                          type="button"
+                          className={`conversation-list-item${active ? " is-active" : ""}`}
+                          data-status={conversation.status}
+                          aria-current={active ? "page" : undefined}
+                          aria-label={`Open ${conversationKindLabel(conversation.kind)} conversation for ${group.work_item.title} (${conversation.status})`}
+                          title="Right-click to rename"
+                          key={conversation.id}
+                          onClick={() => chooseConversation(group.work_item.id, conversation)}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setConversationMenu({
+                              workItemId: group.work_item.id,
+                              title: group.work_item.title,
+                              x: Math.min(event.clientX, window.innerWidth - 160),
+                              y: Math.min(event.clientY, window.innerHeight - 56),
+                            });
+                          }}
+                        >
+                          <strong title={group.work_item.title}>
+                            {displayConversationTitle(group.work_item.title)}
+                          </strong>
+                          <span
+                            className={`conversation-list-status is-${conversation.status}`}
+                            aria-hidden="true"
+                          />
+                          {group.conversations.length > 1 ? (
+                            <small>{conversationKindLabel(conversation.kind)}</small>
+                          ) : null}
+                        </button>
+                      );
+                    })
+                  )}
                 </div>
               ))}
             </div>
+            {conversationMenu ? (
+              <div
+                className="conversation-context-menu"
+                role="menu"
+                aria-label="Conversation actions"
+                style={{ left: conversationMenu.x, top: conversationMenu.y }}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setRenameTitle(conversationMenu.title);
+                    setRenamingWorkItemId(conversationMenu.workItemId);
+                    setConversationMenu(null);
+                  }}
+                >
+                  Rename
+                </button>
+              </div>
+            ) : null}
           </aside>
         </>
       ) : null}
@@ -4364,7 +4485,14 @@ export function ConversationWorkspace({
           </div>
         ) : null}
         {showNew ? conversationHeader : null}
-        {showNew ? <NewWorkForm busy={creating} onCreate={createWork} /> : null}
+        {showNew ? (
+          <NewWorkForm
+            busy={creating}
+            defaultPin={projectPin}
+            modelError={projectPinError}
+            onCreate={createWork}
+          />
+        ) : null}
         {!showNew && detail ? (
           <>
             <ConversationThread
@@ -4378,6 +4506,18 @@ export function ConversationWorkspace({
               }
               onInitialMessageStarted={() => setInitialMessage(null)}
               onOpenConversation={(conversationId) => void openConversationById(conversationId)}
+              onConversationModelChanged={(conversation) => {
+                setDetail((current) => (current ? { ...current, conversation } : current));
+                setGroups(
+                  (current) =>
+                    current?.map((group) => ({
+                      ...group,
+                      conversations: group.conversations.map((candidate) =>
+                        candidate.id === conversation.id ? conversation : candidate,
+                      ),
+                    })) ?? current,
+                );
+              }}
               onRefresh={refresh}
               onUnauthorized={handleUnauthorized}
             />

@@ -25,6 +25,7 @@ export type ConversationPersistenceErrorCode =
   | "conversation_not_found"
   | "conversation_inactive"
   | "turn_in_progress"
+  | "model_ecosystem_mismatch"
   | "historical_retry_forbidden"
   | "conversation_kind_forbidden"
   | "approved_plan_required"
@@ -292,6 +293,12 @@ export interface ConversationRepository {
     workItemId: string,
     conversationId: string,
   ): Promise<V2WorkConversationT | null>;
+  updateConversationModel(
+    projectId: string,
+    workItemId: string,
+    conversationId: string,
+    model: string,
+  ): Promise<V2WorkConversationT | null>;
   findUserMessage(
     conversationId: string,
     userId: string,
@@ -499,6 +506,26 @@ class SqlConversationRepository implements ConversationRepository {
         WHERE project_id=$1 AND work_item_id=$2 AND id=$3
         FOR UPDATE`,
       [projectId, workItemId, conversationId],
+    );
+    return result.rows[0] ? conversation(result.rows[0]) : null;
+  }
+
+  async updateConversationModel(
+    projectId: string,
+    workItemId: string,
+    conversationId: string,
+    model: string,
+  ): Promise<V2WorkConversationT | null> {
+    const result = await this.sql.query<ConversationRow>(
+      `UPDATE work_conversations
+          SET model=$4,
+              updated_at=NOW()
+        WHERE project_id=$1
+          AND work_item_id=$2
+          AND id=$3
+          AND status='active'
+       RETURNING ${conversationColumns}`,
+      [projectId, workItemId, conversationId, model],
     );
     return result.rows[0] ? conversation(result.rows[0]) : null;
   }

@@ -160,8 +160,8 @@ describe("conversation deep links", () => {
 
     render(<App />);
 
-    expect(await screen.findByTestId("conversation-model-pin")).toHaveTextContent(
-      "anthropic · claude-sonnet-5",
+    expect(await screen.findByRole("combobox", { name: "Conversation model" })).toHaveValue(
+      "claude-sonnet-5",
     );
     expect(window.location.pathname).toBe(deepPath);
     expect(screen.getByRole("button", { name: "Work" })).toHaveAttribute("aria-current", "page");

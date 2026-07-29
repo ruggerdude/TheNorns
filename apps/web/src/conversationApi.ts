@@ -1,4 +1,6 @@
 import type {
+  PmModelT,
+  PmProviderT,
   V2ConfirmConversationActionResponseT,
   V2ConversationActionDeliveryEventT,
   V2ConversationActionT,
@@ -109,7 +111,7 @@ export function resolveConversation(
 
 export function createPlanningWorkItem(
   projectId: string,
-  input: { title: string; objective: string },
+  input: { title: string; objective: string; model?: PmModelT },
 ): Promise<{
   work_item: V2WorkItemT;
   conversation: V2WorkConversationT;
@@ -118,6 +120,35 @@ export function createPlanningWorkItem(
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export async function getProjectConversationPin(
+  projectId: string,
+): Promise<{ provider: PmProviderT; model: PmModelT }> {
+  const project = await requestJson<{
+    pm_provider: PmProviderT;
+    pm_model: PmModelT | null;
+  }>(`/api/projects/${encodeURIComponent(projectId)}`);
+  if (!project.pm_model) {
+    throw new Error("This project does not have a conversation model configured.");
+  }
+  return { provider: project.pm_provider, model: project.pm_model };
+}
+
+export async function switchConversationModel(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  model: PmModelT,
+): Promise<V2WorkConversationT> {
+  const result = await requestJson<{ conversation: V2WorkConversationT }>(
+    `${messageEndpoint(projectId, workItemId, conversationId)}/model`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ model }),
+    },
+  );
+  return result.conversation;
 }
 
 export async function renamePlanningWorkItem(

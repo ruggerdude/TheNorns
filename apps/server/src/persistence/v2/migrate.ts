@@ -321,6 +321,12 @@ export const CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const CONVERSATION_MODEL_SWITCHING_MIGRATION_NAME = "0048_conversation_model_switching";
+export const CONVERSATION_MODEL_SWITCHING_MIGRATION_URL = new URL(
+  "../../../drizzle/0048_conversation_model_switching.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -539,6 +545,10 @@ export async function loadGitHubAuthorizationRemovalMigrationSql(): Promise<stri
 
 export async function loadConversationPlanHandoffChoicesMigrationSql(): Promise<string> {
   return readFile(CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_URL, "utf8");
+}
+
+export async function loadConversationModelSwitchingMigrationSql(): Promise<string> {
+  return readFile(CONVERSATION_MODEL_SWITCHING_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -840,6 +850,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME,
       sql: await loadConversationPlanHandoffChoicesMigrationSql(),
+    },
+    {
+      name: CONVERSATION_MODEL_SWITCHING_MIGRATION_NAME,
+      sql: await loadConversationModelSwitchingMigrationSql(),
     },
   ];
 }
