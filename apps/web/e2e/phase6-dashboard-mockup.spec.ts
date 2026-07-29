@@ -357,7 +357,7 @@ test("project operations and exact mockup approval work on desktop and mobile", 
   expect(desktopColumns.split(" ").length).toBeGreaterThanOrEqual(2);
 
   await page.goto(`/projects/${projectId}/work/${conversationId}`);
-  await expect(page.getByText("Create Mockup", { exact: true })).toBeVisible();
+  await expect(page.getByText("UI preview", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Mockup version 1" })).toBeVisible();
   await expect(page.getByAltText("Current mockup version 1 desktop viewport")).toBeVisible();
   await expect(page.getByAltText("Current mockup version 1 mobile viewport")).toBeVisible();

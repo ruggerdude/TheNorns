@@ -612,7 +612,7 @@ describe("conversation workspace", () => {
       screen.queryByText("# Conversation-first planning", { exact: true }),
     ).not.toBeInTheDocument();
     const combinedHeader = document.querySelector(".conversation-thread-chrome");
-    expect(combinedHeader).toContainElement(screen.getByText("Create Mockup", { exact: true }));
+    expect(combinedHeader).not.toContainElement(screen.queryByText("UI preview", { exact: true }));
     expect(combinedHeader).not.toContainElement(
       screen.getByRole("button", { name: "Use conversation as plan" }),
     );
@@ -1477,7 +1477,12 @@ describe("conversation workspace", () => {
         await user.type(input, intentText);
         await user.keyboard("{Enter}");
       } else {
+        expect(screen.queryByText("UI preview", { exact: true })).not.toBeInTheDocument();
         await user.click(screen.getByRole("button", { name: "Use conversation as plan" }));
+        const handoffDialog = await screen.findByRole("dialog", {
+          name: "How should this plan proceed?",
+        });
+        expect(handoffDialog.closest(".plan-handoff-backdrop")?.parentElement).toBe(document.body);
         if (skipsQc) {
           await user.click(await screen.findByRole("radio", { name: /Skip QC/ }));
           expect(screen.queryByRole("combobox", { name: "QC agent" })).not.toBeInTheDocument();
@@ -1493,6 +1498,7 @@ describe("conversation workspace", () => {
 
       expect(await screen.findByText(intentText)).toBeInTheDocument();
       expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
+      expect(await screen.findByText("UI preview", { exact: true })).toBeInTheDocument();
       if (trigger === "typed command") {
         expect(screen.getByRole("button", { name: "Send to QC" })).toBeInTheDocument();
       } else if (skipsQc) {

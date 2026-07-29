@@ -63,6 +63,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import remarkGfm from "remark-gfm";
 import { ArtifactImage } from "./ArtifactImage";
 import { ConversationActionCard } from "./ConversationActionCard";
@@ -2326,7 +2327,7 @@ function PlanHandoffDialog({
     executionModels?.find((model) => `${model.provider}:${model.id}` === executionModel) ?? null;
   const canSubmit = !busy && selectedExecution !== null;
 
-  return (
+  return createPortal(
     <div className="plan-handoff-backdrop" role="presentation" onMouseDown={onCancel}>
       <dialog
         open
@@ -2462,7 +2463,8 @@ function PlanHandoffDialog({
               : "Create plan & start"}
         </Button>
       </dialog>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -3648,7 +3650,7 @@ function ConversationThread({
                   proposalBusy={proposalBusy || detail.active_attempt !== null}
                   onOpenConversation={onOpenConversation}
                 />
-                {!isReadOnly ? (
+                {!isReadOnly && (!isPlanning || latestPlan !== undefined) ? (
                   <MockupRequestComposer
                     taskOptions={taskOptions}
                     planningPlanVersionId={isPlanning ? (latestPlan?.id ?? null) : null}

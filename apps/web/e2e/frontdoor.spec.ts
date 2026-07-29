@@ -724,8 +724,17 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
     "Message the PM, or say “Use this as the plan”…",
   );
   await expect(page.getByRole("button", { name: "Use conversation as plan" })).toHaveText("Plan");
+  await expect(page.getByText("UI preview", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Use conversation as plan" }).click();
   const planHandoff = page.getByRole("dialog", { name: "How should this plan proceed?" });
+  expect(
+    await planHandoff.evaluate(
+      (dialog) => dialog.closest(".plan-handoff-backdrop")?.parentElement === document.body,
+    ),
+  ).toBe(true);
+  const planHandoffBackdropBox = await page.locator(".plan-handoff-backdrop").boundingBox();
+  expect(planHandoffBackdropBox?.x).toBe(0);
+  expect(planHandoffBackdropBox?.width).toBe(1920);
   await expect(planHandoff).toContainText(
     "The PM uses the whole chat as context, then keeps only the latest agreed plan",
   );

@@ -163,14 +163,14 @@ describe("Phase 5 execution conversation controls", () => {
       />,
     );
 
-    await user.click(screen.getByText("Create Mockup"));
+    await user.click(screen.getByText("UI preview"));
     await user.type(
       screen.getByRole("textbox", { name: "Mockup brief" }),
       "Show checkout on desktop and mobile.",
     );
     await user.selectOptions(screen.getByRole("combobox", { name: "Mockup task" }), "task-7");
     await user.click(screen.getByRole("checkbox", { name: "Wireframe" }));
-    await user.click(screen.getByRole("button", { name: "Prepare mockup request" }));
+    await user.click(screen.getByRole("button", { name: "Prepare UI preview" }));
 
     expect(onPrepare).toHaveBeenCalledWith({
       brief: "Show checkout on desktop and mobile.",

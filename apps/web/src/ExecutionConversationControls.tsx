@@ -85,7 +85,9 @@ export function MockupRequestComposer({
       data-testid="mockup-request-composer"
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
-      <summary>Create Mockup</summary>
+      <summary title="Generate desktop and mobile screenshots for a plan module or task">
+        UI preview
+      </summary>
       {open ? (
         <form
           onSubmit={(event) => {
@@ -107,8 +109,8 @@ export function MockupRequestComposer({
           }}
         >
           <p>
-            Request deterministic desktop and mobile evidence. Preparing this request creates an
-            inert action card for separate confirmation.
+            Generate desktop and mobile screenshots for one plan module or task. This only prepares
+            the request; you confirm it before an agent runs.
           </p>
           <Field label="Mockup brief">
             <TextArea
@@ -188,7 +190,7 @@ export function MockupRequestComposer({
               busy || Boolean(disabledReason) || taskOptions.length === 0 || taskId.length === 0
             }
           >
-            {busy ? "Preparing mockup…" : "Prepare mockup request"}
+            {busy ? "Preparing preview…" : "Prepare UI preview"}
           </Button>
           {taskOptions.length === 0 ? (
             <p className="muted">
