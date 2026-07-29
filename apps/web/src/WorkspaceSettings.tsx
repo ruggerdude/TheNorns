@@ -38,6 +38,24 @@ async function rulesRequest(
   return body;
 }
 
+async function archiveProjectRequest(projectId: string): Promise<void> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (response.status === 401) throw new UnauthorizedError();
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as {
+      detail?: string;
+      message?: string;
+    };
+    throw new ApiError(
+      body.message ?? body.detail ?? `request failed: ${response.status}`,
+      response.status,
+    );
+  }
+}
+
 const intervalOptions: Array<{ value: UpdateIntervalSeconds; label: string }> = [
   { value: 60, label: "Every minute" },
   { value: 300, label: "Every 5 minutes" },
@@ -98,10 +116,14 @@ function PreferenceFields({
 
 export function WorkspaceSettings({
   projectId,
+  projectName,
+  onProjectArchived,
   onPreferencesChanged,
   onUnauthorized,
 }: {
   projectId: string;
+  projectName: string;
+  onProjectArchived: (projectId: string) => void;
   onPreferencesChanged: (preferences: UpdatePreferences) => void;
   onUnauthorized: () => void;
 }): React.ReactElement {
@@ -116,6 +138,7 @@ export function WorkspaceSettings({
   );
   const [preferencesSaved, setPreferencesSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [archivingProject, setArchivingProject] = useState(false);
 
   useEffect(() => {
     let current = true;
@@ -156,6 +179,25 @@ export function WorkspaceSettings({
     const resolved = inheritGlobal ? globalDraft : projectDraft;
     onPreferencesChanged(resolved);
     setPreferencesSaved(true);
+  };
+
+  const archiveProject = async () => {
+    const confirmed = window.confirm(
+      `Remove "${projectName}" from The Norns?\n\nThis archives the project but does not delete its GitHub repository or historical records. Projects with active work cannot be removed.`,
+    );
+    if (!confirmed) return;
+
+    setArchivingProject(true);
+    setError(null);
+    try {
+      await archiveProjectRequest(projectId);
+      onProjectArchived(projectId);
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) onUnauthorized();
+      else setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setArchivingProject(false);
+    }
   };
 
   return (
@@ -242,6 +284,32 @@ export function WorkspaceSettings({
             </div>
           </>
         )}
+      </section>
+
+      <section
+        className="card workspace-settings-card workspace-settings-danger"
+        aria-labelledby="remove-project-heading"
+      >
+        <div className="section-head">
+          <div>
+            <div className="eyebrow">Danger zone</div>
+            <h2 id="remove-project-heading">Remove project</h2>
+          </div>
+        </div>
+        <p className="muted">
+          Archive this project and remove it from Portfolio. Its GitHub repository and historical
+          records are preserved. Projects with active work cannot be removed.
+        </p>
+        <div className="settings-save-row">
+          <span className="muted">This action requires confirmation.</span>
+          <Button
+            variant="danger"
+            disabled={archivingProject}
+            onClick={() => void archiveProject()}
+          >
+            {archivingProject ? "Removing project…" : "Remove project"}
+          </Button>
+        </div>
       </section>
       {error ? <Alert>{error}</Alert> : null}
     </div>

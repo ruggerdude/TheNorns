@@ -423,7 +423,6 @@ export function AttentionDecisionForm({
 export function Projects({
   onOpenProject,
   openProjects,
-  onCloseProject,
   onUnauthorized,
   onSignOut,
   user,
@@ -433,7 +432,6 @@ export function Projects({
 }: {
   onOpenProject: (p: ProjectSummary) => void;
   openProjects: ProjectSummary[];
-  onCloseProject: (id: string) => void;
   onUnauthorized: () => void;
   onSignOut: () => void;
   user: CurrentUser | null;
@@ -487,7 +485,6 @@ export function Projects({
   const [localSourcesError, setLocalSourcesError] = useState<string | null>(null);
   const [localSelection, setLocalSelection] = useState<LocalRepositorySelection | null>(null);
   const [creating, setCreating] = useState(false);
-  const [removingProjectId, setRemovingProjectId] = useState<string | null>(null);
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
   const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
   const [resumePollIssue, setResumePollIssue] = useState<string | null>(null);
@@ -850,38 +847,6 @@ export function Projects({
       }
     },
     [onUnauthorized, refreshAttention],
-  );
-
-  const removeProject = useCallback(
-    async (project: ProjectSummary) => {
-      const confirmed = window.confirm(
-        `Remove "${project.name}" from the dashboard?\n\nThis archives the project but does not delete its GitHub repository or historical records. Projects with active work cannot be removed.`,
-      );
-      if (!confirmed) return;
-
-      setRemovingProjectId(project.id);
-      setError(null);
-      try {
-        await requestVerb(`/api/projects/${project.id}`, "DELETE");
-        setProjects(
-          (current) => current?.filter((candidate) => candidate.id !== project.id) ?? null,
-        );
-        setResumeById((current) => {
-          const next = { ...current };
-          Reflect.deleteProperty(next, project.id);
-          return next;
-        });
-        onCloseProject(project.id);
-        void refreshAttention();
-      } catch (error) {
-        error instanceof UnauthorizedError
-          ? onUnauthorized()
-          : setError(error instanceof Error ? error.message : String(error));
-      } finally {
-        setRemovingProjectId(null);
-      }
-    },
-    [onCloseProject, onUnauthorized, refreshAttention],
   );
 
   // Close the front door around a project that is ready to open. Creation is
@@ -2043,17 +2008,6 @@ export function Projects({
                         onClick={() => onOpenProject(project)}
                       >
                         Enter project →
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        className="btn-small pr-remove"
-                        aria-label="Remove project from dashboard"
-                        aria-describedby={`project-title-${project.id}`}
-                        disabled={removingProjectId === project.id}
-                        onClick={() => void removeProject(project)}
-                      >
-                        {removingProjectId === project.id ? "Removing…" : "Remove"}
                       </Button>
                     </div>
                   </div>

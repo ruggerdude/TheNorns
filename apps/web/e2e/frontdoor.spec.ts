@@ -441,6 +441,14 @@ async function prepare(
     if (/^\/api\/projects\/project-[^/]+$/.test(path) && request.method() === "GET") {
       return fulfill(route, projects[0]);
     }
+    if (/^\/api\/v2\/projects\/project-[^/]+\/rules$/.test(path) && request.method() === "GET") {
+      return fulfill(route, {
+        filename: "NORN.md",
+        content: "",
+        version: 0,
+        updated_at: null,
+      });
+    }
     if (path.includes("/planning-reviewer") && request.method() === "DELETE") {
       return route.fulfill({ status: 204, body: "" });
     }
@@ -846,6 +854,26 @@ test("Mobile Portfolio exposes the global navigation drawer", async ({ page }) =
   await expect(page.getByTestId("usage-panel")).toBeVisible();
   await expect(navigation).not.toBeInViewport();
   await expect(page.getByRole("button", { name: "Open navigation menu" })).toBeVisible();
+});
+
+test("Project removal lives only in project Settings", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await prepare(page, "github");
+  await page.goto("/");
+  await selectExistingGitHubRepository(page);
+  await page.getByRole("button", { name: /adopt project/i }).click();
+
+  await page.getByRole("button", { name: "Menu", exact: true }).click();
+  const workspaceNavigation = page.getByRole("navigation", { name: "Workspace sections" });
+  await workspaceNavigation.getByRole("button", { name: "Settings", exact: true }).click();
+  const dangerZone = page.getByRole("region", { name: "Remove project" });
+  await expect(dangerZone).toBeVisible();
+  await expect(dangerZone.getByRole("button", { name: "Remove project" })).toBeVisible();
+
+  await page.getByRole("button", { name: "← Portfolio", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "All projects" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Remove project" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Remove project from dashboard" })).toHaveCount(0);
 });
 
 test("Usage, Settings, and Admin use the regular application sidebar", async ({ page }) => {

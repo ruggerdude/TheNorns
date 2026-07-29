@@ -436,7 +436,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
       within(settings)
         .getAllByRole("heading", { level: 2 })
         .map((heading) => heading.textContent),
-    ).toEqual(["Timing and content", "NORN.md"]);
+    ).toEqual(["Timing and content", "NORN.md", "Remove project"]);
     await user.type(
       await screen.findByLabelText("Project rules"),
       "# Rules\n\n- Preserve API compatibility.",

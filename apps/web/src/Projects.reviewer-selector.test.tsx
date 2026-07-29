@@ -87,7 +87,6 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
       <Projects
         onOpenProject={onOpenProject}
         openProjects={[]}
-        onCloseProject={vi.fn()}
         onUnauthorized={vi.fn()}
         onSignOut={vi.fn()}
         user={null}

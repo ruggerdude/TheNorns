@@ -108,7 +108,6 @@ describe("Phase 5 attention-first portfolio", () => {
       <Projects
         onOpenProject={onOpenProject}
         openProjects={[]}
-        onCloseProject={vi.fn()}
         onUnauthorized={vi.fn()}
         onSignOut={vi.fn()}
         user={null}

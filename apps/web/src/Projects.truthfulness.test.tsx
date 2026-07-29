@@ -9,7 +9,6 @@ function renderProjects(): void {
     <Projects
       onOpenProject={vi.fn()}
       openProjects={[]}
-      onCloseProject={vi.fn()}
       onUnauthorized={vi.fn()}
       onSignOut={vi.fn()}
       user={null}

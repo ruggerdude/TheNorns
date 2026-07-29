@@ -88,7 +88,6 @@ describe("project manager model selection", () => {
       <Projects
         onOpenProject={onOpenProject}
         openProjects={[]}
-        onCloseProject={vi.fn()}
         onUnauthorized={vi.fn()}
         onSignOut={vi.fn()}
         user={null}

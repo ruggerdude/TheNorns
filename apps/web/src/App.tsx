@@ -782,6 +782,7 @@ function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
 function ProjectGraph({
   project,
   onBack,
+  onProjectArchived,
   onLogout,
   user,
   onOpenAccount,
@@ -795,6 +796,7 @@ function ProjectGraph({
 }: {
   project: ProjectSummary;
   onBack: () => void;
+  onProjectArchived: (projectId: string) => void;
   onLogout: (message: string) => void;
   user: CurrentUser | null;
   onOpenAccount: () => void;
@@ -2490,6 +2492,8 @@ function ProjectGraph({
           <div className="workspace-tab-panel" data-testid="workspace-tab-settings">
             <WorkspaceSettings
               projectId={project.id}
+              projectName={project.name}
+              onProjectArchived={onProjectArchived}
               onPreferencesChanged={setUpdatePreferences}
               onUnauthorized={() => onLogout("Session expired. Sign in again.")}
             />
@@ -3246,7 +3250,6 @@ export function App(): React.ReactElement {
     <Projects
       onOpenProject={openProject}
       openProjects={openProjects}
-      onCloseProject={closeProject}
       onUnauthorized={() => logout("Session expired. Sign in again.")}
       onSignOut={() => logout("Signed out.")}
       user={user}
@@ -3263,6 +3266,7 @@ export function App(): React.ReactElement {
         setRoutedProjectId(null);
         window.history.pushState(null, "", "/");
       }}
+      onProjectArchived={closeProject}
       onLogout={logout}
       user={user}
       onOpenAccount={openAccount}

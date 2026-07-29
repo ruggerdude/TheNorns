@@ -200,7 +200,6 @@ describe("O1: GitHub and local Git repository onboarding", () => {
       <Projects
         onOpenProject={onOpenProject}
         openProjects={[]}
-        onCloseProject={vi.fn()}
         onUnauthorized={vi.fn()}
         onSignOut={vi.fn()}
         user={null}
@@ -607,7 +606,6 @@ describe("O1: GitHub and local Git repository onboarding", () => {
       <Projects
         onOpenProject={onOpenProject}
         openProjects={[]}
-        onCloseProject={vi.fn()}
         onUnauthorized={vi.fn()}
         onSignOut={vi.fn()}
         user={null}

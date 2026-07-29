@@ -5778,6 +5778,15 @@ h4 {
   align-self: start;
 }
 
+.workspace-settings-danger {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--line));
+  background: color-mix(in srgb, var(--danger) 5%, var(--surface));
+}
+
+.workspace-settings-danger .eyebrow {
+  color: var(--danger);
+}
+
 .project-rules-editor {
   min-height: 360px;
   font-family: "DM Mono", monospace;
