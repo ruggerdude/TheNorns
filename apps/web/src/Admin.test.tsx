@@ -30,6 +30,7 @@ describe("Admin panel", () => {
 
   beforeEach(() => {
     mock = new MockFetch();
+    mock.get("/api/admin/projects/archived", { body: [] });
     mock.get("/api/v2/admin/rules", {
       body: { filename: "NORN.md", content: "", version: 0, updated_at: null },
     });
@@ -69,6 +70,51 @@ describe("Admin panel", () => {
 
     expect(await screen.findByText("v1")).toBeVisible();
     expect(editor).toHaveValue("# Global rules\n\n- Keep updates concise.");
+  });
+
+  test("unarchives a project and removes it from the archived list", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    let restored = false;
+    mock.get("/api/admin/users", { body: makeRoster() });
+    mock.get("/api/admin/projects/archived", () => ({
+      body: restored
+        ? []
+        : [
+            {
+              id: "project-archived",
+              name: "Archived project",
+              description: "Return this project to Portfolio",
+              status: "archived",
+              pm_provider: "openai",
+              pm_model: "gpt-5.6-sol",
+              reviewer_provider: "anthropic",
+              source_type: "github",
+              source_location: "github.com/example/archived",
+              plan_objective: null,
+              archived_at: "2026-07-28T12:00:00.000Z",
+            },
+          ],
+    }));
+    mock.post("/api/admin/projects/project-archived/restore", () => {
+      restored = true;
+      return { body: { ok: true } };
+    });
+    mock.install();
+
+    const user = userEvent.setup();
+    render(<Admin onClose={vi.fn()} onUnauthorized={vi.fn()} />);
+
+    const archivedList = await screen.findByTestId("archived-project-list");
+    expect(archivedList).toHaveTextContent("Archived project");
+    await user.click(screen.getByRole("button", { name: "Unarchive" }));
+
+    expect(await screen.findByText("No archived projects.")).toBeVisible();
+    expect(
+      mock.calls.find(
+        (call) =>
+          call.method === "POST" && call.url === "/api/admin/projects/project-archived/restore",
+      ),
+    ).toBeDefined();
   });
 
   test("adding a user posts the form and refreshes the roster", async () => {

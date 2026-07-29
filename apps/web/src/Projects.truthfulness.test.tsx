@@ -104,17 +104,12 @@ describe("portfolio truthfulness", () => {
 
     renderProjects();
 
-    expect(await screen.findByText("1 item need attention")).toBeVisible();
+    expect((await screen.findAllByText("Needs attention")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("Needs attention").length).toBeGreaterThan(0);
     expect(screen.queryByText("No urgent interventions")).not.toBeInTheDocument();
     expect(await screen.findByTestId("proj-row")).toHaveClass("s-red");
     expect(screen.getByText("Run failed", { selector: ".badge" })).toBeVisible();
-    expect(await screen.findByText("failed — review")).toBeVisible();
-    // DESIGN R2: the runner fact is a tile — bare state value + label. With
-    // no runner registered it truthfully reads "None", never a healthy state.
-    expect(screen.getByTestId("runner-freshness")).toHaveTextContent("None");
-    expect(screen.getByTestId("runner-freshness")).toHaveTextContent("Runner heartbeat");
-    expect(screen.getByTestId("runner-freshness")).not.toHaveTextContent("Online");
+    expect(screen.queryByTestId("pr-phase")).not.toBeInTheDocument();
   });
 
   it("shows a failed quick kickoff as restart-needed instead of Ready or Draft", async () => {
@@ -202,9 +197,8 @@ describe("portfolio truthfulness", () => {
 
     renderProjects();
 
-    expect(await screen.findByText("1 item need attention")).toBeVisible();
+    expect((await screen.findAllByText("Needs attention")).length).toBeGreaterThan(0);
     expect(screen.getByText("Coding needs a restart")).toBeVisible();
-    expect(screen.getByText("Needs you")).toBeVisible();
     expect(screen.getAllByText("Needs attention").length).toBeGreaterThan(0);
     expect(
       within(screen.getByLabelText("Portfolio attention summary")).getByText("Blockers")
@@ -268,7 +262,7 @@ describe("portfolio truthfulness", () => {
     renderProjects();
 
     expect(await screen.findByText("Status unavailable")).toBeVisible();
-    expect(screen.getByText("Portfolio status is unavailable")).toBeVisible();
+    expect(screen.getByText("Current status is unavailable")).toBeVisible();
     expect(screen.getByTestId("portfolio-refresh-status")).toHaveTextContent(
       "Refresh issue · showing last known data",
     );

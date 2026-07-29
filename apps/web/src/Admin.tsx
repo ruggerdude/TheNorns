@@ -18,6 +18,13 @@ interface GlobalRulesDto {
   updated_at: string | null;
 }
 
+interface ArchivedProjectSummary {
+  id: string;
+  name: string;
+  description: string;
+  archived_at: string;
+}
+
 async function adminRequest<T>(
   method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
@@ -81,6 +88,8 @@ export function Admin({
   const [globalRules, setGlobalRules] = useState<GlobalRulesDto | null>(null);
   const [globalRulesDraft, setGlobalRulesDraft] = useState("");
   const [globalRulesSaving, setGlobalRulesSaving] = useState(false);
+  const [archivedProjects, setArchivedProjects] = useState<ArchivedProjectSummary[] | null>(null);
+  const [restoringProjectId, setRestoringProjectId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [addEmail, setAddEmail] = useState("");
@@ -106,13 +115,15 @@ export function Admin({
   const refresh = useCallback(async () => {
     try {
       setError(null);
-      const [nextUsers, nextRules] = await Promise.all([
+      const [nextUsers, nextRules, nextArchivedProjects] = await Promise.all([
         adminRequest<UserSummary[]>("GET", "/api/admin/users"),
         adminRequest<GlobalRulesDto>("GET", "/api/v2/admin/rules"),
+        adminRequest<ArchivedProjectSummary[]>("GET", "/api/admin/projects/archived"),
       ]);
       setUsers(nextUsers);
       setGlobalRules(nextRules);
       setGlobalRulesDraft(nextRules.content);
+      setArchivedProjects(nextArchivedProjects);
     } catch (e) {
       fail(e);
     }
@@ -199,6 +210,29 @@ export function Admin({
     }
   }, [fail, globalRulesDraft]);
 
+  const restoreProject = useCallback(
+    async (project: ArchivedProjectSummary) => {
+      if (
+        !window.confirm(
+          `Unarchive "${project.name}"?\n\nIt will return to Portfolio and the active project menu.`,
+        )
+      ) {
+        return;
+      }
+      setRestoringProjectId(project.id);
+      setError(null);
+      try {
+        await adminRequest("POST", `/api/admin/projects/${encodeURIComponent(project.id)}/restore`);
+        await refresh();
+      } catch (e) {
+        fail(e);
+      } finally {
+        setRestoringProjectId(null);
+      }
+    },
+    [fail, refresh],
+  );
+
   return (
     <div className={embedded ? "embedded-page-view" : "full-page-view"} data-testid="admin-panel">
       {!embedded ? (
@@ -219,6 +253,42 @@ export function Admin({
           lede="Manage global agent rules, members, roles, and invitations."
         />
         {error ? <Alert testId="admin-error">{error}</Alert> : null}
+
+        <section
+          className="card admin-archived-projects"
+          aria-labelledby="archived-projects-heading"
+        >
+          <div className="section-head">
+            <div>
+              <div className="eyebrow">Project recovery</div>
+              <h2 id="archived-projects-heading">Archived projects</h2>
+            </div>
+            <Badge tone="info">{archivedProjects?.length ?? 0}</Badge>
+          </div>
+          {archivedProjects === null ? (
+            <p className="muted">Loading archived projects…</p>
+          ) : archivedProjects.length === 0 ? (
+            <p className="muted">No archived projects.</p>
+          ) : (
+            <ul className="admin-archived-list" data-testid="archived-project-list">
+              {archivedProjects.map((project) => (
+                <li key={project.id}>
+                  <div>
+                    <strong>{project.name}</strong>
+                    <small>Archived {new Date(project.archived_at).toLocaleDateString()}</small>
+                  </div>
+                  <Button
+                    className="btn-small"
+                    disabled={restoringProjectId === project.id}
+                    onClick={() => void restoreProject(project)}
+                  >
+                    {restoringProjectId === project.id ? "Unarchiving…" : "Unarchive"}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
 
         <section className="admin-global-rules" aria-labelledby="global-rules-heading">
           <div className="section-head">

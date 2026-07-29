@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceSettings } from "./WorkspaceSettings";
 import { MockFetch } from "./test/mockFetch";
 
-describe("WorkspaceSettings project removal", () => {
+describe("WorkspaceSettings project archiving", () => {
   const projectId = "project-settings";
   const onProjectArchived = vi.fn<(archivedProjectId: string) => void>();
   const onUnauthorized = vi.fn();
@@ -42,9 +42,9 @@ describe("WorkspaceSettings project removal", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     setup();
 
-    const removeButton = await screen.findByRole("button", { name: "Remove project" });
-    expect(removeButton.closest(".workspace-settings-danger")).not.toBeNull();
-    await userEvent.click(removeButton);
+    const archiveButton = await screen.findByRole("button", { name: "Archive project" });
+    expect(archiveButton.closest(".workspace-settings-danger")).not.toBeNull();
+    await userEvent.click(archiveButton);
 
     await waitFor(() => expect(onProjectArchived).toHaveBeenCalledWith(projectId));
     expect(
@@ -58,7 +58,7 @@ describe("WorkspaceSettings project removal", () => {
     vi.spyOn(window, "confirm").mockReturnValue(false);
     setup();
 
-    await userEvent.click(await screen.findByRole("button", { name: "Remove project" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Archive project" }));
 
     expect(mock.calls.some((call) => call.method === "DELETE")).toBe(false);
     expect(onProjectArchived).not.toHaveBeenCalled();
@@ -72,7 +72,7 @@ describe("WorkspaceSettings project removal", () => {
     });
     setup();
 
-    await userEvent.click(await screen.findByRole("button", { name: "Remove project" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Archive project" }));
 
     expect(await screen.findByText("Projects with active work cannot be removed.")).toBeVisible();
     expect(onProjectArchived).not.toHaveBeenCalled();

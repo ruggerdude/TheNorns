@@ -20,7 +20,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
   beforeAll(preloadConversationWorkspaceForTest);
   afterEach(() => mock.restore());
 
-  it("defaults to the Overview dashboard and history, but not the graph canvas", async () => {
+  it("defaults to the Overview dashboard without the removed history panel or graph canvas", async () => {
     setToken("present");
     mock = new MockFetch();
     mock.get("/api/projects", { body: [projectAlpha] });
@@ -86,8 +86,10 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     expect(screen.getByRole("button", { name: "Usage" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Members" })).toBeInTheDocument();
     expect(screen.getByTestId("overview-dashboard")).toBeInTheDocument();
-    expect(screen.getByTestId("work-history")).toBeInTheDocument();
-    expect(screen.getByText("Improve the notification delivery pipeline")).toBeInTheDocument();
+    expect(screen.queryByTestId("work-history")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Improve the notification delivery pipeline"),
+    ).not.toBeInTheDocument();
     // The graph canvas is NOT the dominant panel anymore — it isn't even
     // mounted until the Graph tab is selected.
     expect(screen.queryByTestId("graph-canvas")).not.toBeInTheDocument();
@@ -149,7 +151,9 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     expect(screen.queryByRole("navigation", { name: "Open projects" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: `Return to ${projectAlpha.name}` }));
+    const portfolioMenu = document.querySelector(".portfolio-switcher");
+    if (!(portfolioMenu instanceof HTMLElement)) throw new Error("Portfolio menu not found");
+    await user.click(within(portfolioMenu).getByRole("button", { name: projectAlpha.name }));
     const workspaceNav = await screen.findByRole("navigation", { name: "Workspace sections" });
     expect(workspaceNav).toBeVisible();
     expect(within(workspaceNav).getByRole("button", { name: "Overview" })).toHaveClass("on");
@@ -436,7 +440,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
       within(settings)
         .getAllByRole("heading", { level: 2 })
         .map((heading) => heading.textContent),
-    ).toEqual(["Timing and content", "NORN.md", "Remove project"]);
+    ).toEqual(["Timing and content", "NORN.md", "Archive project"]);
     await user.type(
       await screen.findByLabelText("Project rules"),
       "# Rules\n\n- Preserve API compatibility.",

@@ -14,6 +14,9 @@ import type { GraphNode, GraphSnapshot, WorkflowGraph } from "../graph/graph.js"
 import type { ProjectStore, ProjectSummary } from "./store.js";
 
 type Awaitable<T> = T | Promise<T>;
+export interface ArchivedProjectSummary extends ProjectSummary {
+  archived_at: string;
+}
 type CreateProjectInput = Parameters<ProjectStore["create"]>[0] & {
   /** Authenticated creator used by relational ownership enforcement. */
   ownerUserId?: string;
@@ -41,8 +44,10 @@ export interface ProjectRepository {
   readonly repositoryKind: "project_repository";
   create(input: CreateProjectInput): Awaitable<ProjectSummary>;
   list(): Awaitable<ProjectSummary[]>;
+  listArchived(): Awaitable<ArchivedProjectSummary[]>;
   summary(id: string): Awaitable<ProjectSummary>;
   archive(id: string, actorId: string): Awaitable<void>;
+  restore(id: string, actorId: string): Awaitable<void>;
   pmSelectionOf(id: string): Awaitable<ReturnType<ProjectStore["pmSelectionOf"]>>;
   graph(id: string): Awaitable<ProjectGraphView>;
   addEdge(id: string, from: string, to: string): Awaitable<ProjectGraphView>;
@@ -89,12 +94,20 @@ export class LegacyProjectRepository implements ProjectRepository {
     return this.store.list();
   }
 
+  listArchived(): ArchivedProjectSummary[] {
+    return this.store.listArchived();
+  }
+
   summary(id: string): ProjectSummary {
     return this.store.summary(id);
   }
 
   archive(id: string, _actorId: string): void {
     this.store.archive(id);
+  }
+
+  restore(id: string, _actorId: string): void {
+    this.store.restore(id);
   }
 
   pmSelectionOf(id: string): ReturnType<ProjectStore["pmSelectionOf"]> {

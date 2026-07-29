@@ -102,12 +102,20 @@ export class RoutedProjectRepository implements ProjectRepository {
     return this.repositoryFor(this.newProjectsRoute).list();
   }
 
+  listArchived(): ReturnType<ProjectRepository["listArchived"]> {
+    return this.repositoryFor(this.newProjectsRoute).listArchived();
+  }
+
   summary(id: string): ReturnType<ProjectRepository["summary"]> {
     return this.projectRead(id).summary(id);
   }
 
   archive(id: string, actorId: string): ReturnType<ProjectRepository["archive"]> {
     return this.projectWrite(id).archive(id, actorId);
+  }
+
+  restore(id: string, actorId: string): ReturnType<ProjectRepository["restore"]> {
+    return this.projectWrite(id).restore(id, actorId);
   }
 
   pmSelectionOf(id: string): ReturnType<ProjectRepository["pmSelectionOf"]> {

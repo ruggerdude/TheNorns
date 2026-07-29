@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import type { SettingsTab } from "./Account";
+import { PortfolioMenu } from "./PortfolioMenu";
+import type { ProjectSummary } from "./Projects";
 import type { CurrentUser } from "./auth";
 import { ThemeToggle } from "./theme";
 import { Button } from "./ui";
@@ -73,6 +75,7 @@ export function AuthenticatedHeaderActions({
   onOpenAdmin,
   onSignOut,
   activeView = null,
+  portfolioNavigation,
 }: {
   user: CurrentUser;
   onOpenUsage: () => void;
@@ -80,6 +83,13 @@ export function AuthenticatedHeaderActions({
   onOpenAdmin: () => void;
   onSignOut: () => void;
   activeView?: "usage" | "settings" | "admin" | null;
+  portfolioNavigation?: {
+    projects?: ProjectSummary[] | null;
+    activeProjectId?: string | null;
+    onOpenPortfolio: () => void;
+    onOpenProject: (project: ProjectSummary) => void;
+    onUnauthorized: () => void;
+  };
 }): React.ReactElement {
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const closeMobileNavigation = () => setMobileNavigationOpen(false);
@@ -162,6 +172,21 @@ export function AuthenticatedHeaderActions({
               ×
             </Button>
           </div>
+          {portfolioNavigation ? (
+            <PortfolioMenu
+              projects={portfolioNavigation.projects}
+              activeProjectId={portfolioNavigation.activeProjectId}
+              onOpenPortfolio={() => {
+                closeMobileNavigation();
+                portfolioNavigation.onOpenPortfolio();
+              }}
+              onOpenProject={(project) => {
+                closeMobileNavigation();
+                portfolioNavigation.onOpenProject(project);
+              }}
+              onUnauthorized={portfolioNavigation.onUnauthorized}
+            />
+          ) : null}
           <Button
             className={activeView === "usage" ? "is-active" : ""}
             variant="ghost"

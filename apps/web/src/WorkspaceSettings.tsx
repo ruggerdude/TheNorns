@@ -183,7 +183,7 @@ export function WorkspaceSettings({
 
   const archiveProject = async () => {
     const confirmed = window.confirm(
-      `Remove "${projectName}" from The Norns?\n\nThis archives the project but does not delete its GitHub repository or historical records. Projects with active work cannot be removed.`,
+      `Archive "${projectName}"?\n\nIt will leave Portfolio and the active project menu. Its GitHub repository and history are preserved, and an admin can unarchive it later. Projects with active work cannot be archived.`,
     );
     if (!confirmed) return;
 
@@ -293,12 +293,12 @@ export function WorkspaceSettings({
         <div className="section-head">
           <div>
             <div className="eyebrow">Danger zone</div>
-            <h2 id="remove-project-heading">Remove project</h2>
+            <h2 id="remove-project-heading">Archive project</h2>
           </div>
         </div>
         <p className="muted">
-          Archive this project and remove it from Portfolio. Its GitHub repository and historical
-          records are preserved. Projects with active work cannot be removed.
+          Remove this project from Portfolio while preserving its GitHub repository and historical
+          records. An admin can unarchive it later. Projects with active work cannot be archived.
         </p>
         <div className="settings-save-row">
           <span className="muted">This action requires confirmation.</span>
@@ -307,7 +307,7 @@ export function WorkspaceSettings({
             disabled={archivingProject}
             onClick={() => void archiveProject()}
           >
-            {archivingProject ? "Removing project…" : "Remove project"}
+            {archivingProject ? "Archiving project…" : "Archive project"}
           </Button>
         </div>
       </section>

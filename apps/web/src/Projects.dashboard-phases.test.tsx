@@ -1,9 +1,3 @@
-// FRONT DOOR P1 (dashboard): each project row lists one line per phase, with
-// a compact per-phase button at the row's right end. A blocked phase reads
-// "Answer →" (it needs a human decision); every other phase reads "Open →".
-// Both route into the project workspace pre-focused on that exact phase
-// (focus_phase_id), which is the human-approved addition to this phase's
-// brief — this suite is its required routing test.
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -64,11 +58,16 @@ function resumeBody() {
       agents_active: 2,
       decisions_waiting: 1,
     },
+    delivery: {
+      total_commits: 14,
+      last_commit_sha: "abc123def456",
+      last_commit_at: "2026-07-27T15:45:00.000Z",
+    },
     update_interval_seconds: 300,
   };
 }
 
-describe("dashboard per-phase lines", () => {
+describe("project cards on the Portfolio", () => {
   let mock: MockFetch;
   const onOpenProject = vi.fn<(project: ProjectSummary) => void>();
 
@@ -94,74 +93,28 @@ describe("dashboard per-phase lines", () => {
     );
   }
 
-  it("renders one line per phase with percent, ETA, and the blocked phase reading 'needs you'", async () => {
+  it("shows the compact project dashboard horizontally and omits the phase plan", async () => {
     setup();
-    const rows = await screen.findAllByTestId("pr-phase");
-    expect(rows).toHaveLength(2);
-
-    const schemaRow = rows.find((row) => within(row).queryByText(/schema & ingest/i));
-    expect(schemaRow).toBeDefined();
-    expect(within(schemaRow as HTMLElement).getByText("78%")).toBeInTheDocument();
-    expect(within(schemaRow as HTMLElement).getByText(/~/)).toBeInTheDocument();
-
-    const blockedRow = rows.find((row) => within(row).queryByText(/reconciliation/i));
-    expect(blockedRow).toBeDefined();
-    expect(blockedRow).toHaveClass("blocked");
-    expect(within(blockedRow as HTMLElement).getByText(/blocked — needs you/i)).toBeInTheDocument();
-
-    // Overall row color-codes red because a decision is waiting / a phase is
-    // blocked, per the P1 dashboard spec.
     const row = await screen.findByTestId("proj-row");
+    const dashboard = within(row).getByLabelText(`${project.name} dashboard`);
+    await waitFor(() => expect(within(dashboard).getByText("47%")).toBeVisible());
+    expect(within(dashboard).getByText("Overall complete")).toBeVisible();
+    expect(within(dashboard).getByText("Active agents")).toBeVisible();
+    expect(within(dashboard).getByText("Decisions")).toBeVisible();
+    expect(within(dashboard).getByText("Blended ETA")).toBeVisible();
+    expect(within(dashboard).getByText("Total commits")).toBeVisible();
+    expect(within(dashboard).getByText("14")).toBeVisible();
+    expect(within(dashboard).getByText("Last commit")).toBeVisible();
+    expect(within(dashboard).getByText("abc123de")).toBeVisible();
+    expect(screen.queryByTestId("pr-phase")).not.toBeInTheDocument();
+    expect(screen.queryByText("Schema & ingest")).not.toBeInTheDocument();
     expect(row).toHaveClass("s-red");
   });
 
-  it("routes 'Open →' on a normal phase to that exact phase", async () => {
+  it("opens the Overview workspace from anywhere on the project card", async () => {
     setup();
-    const rows = await screen.findAllByTestId("pr-phase");
-    const schemaRow = rows.find((row) =>
-      within(row).queryByText(/schema & ingest/i),
-    ) as HTMLElement;
-    const openButton = within(schemaRow).getByRole("button", { name: /open →/i });
-    expect(openButton).toHaveTextContent(/open →/i);
-
-    await userEvent.click(openButton);
-    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
-    expect(onOpenProject).toHaveBeenCalledWith(
-      expect.objectContaining({ id: project.id, focus_phase_id: "phase-schema" }),
-    );
-  });
-
-  it("routes 'Answer →' on the blocked phase to that exact phase, distinct from the normal phase's button", async () => {
-    setup();
-    const rows = await screen.findAllByTestId("pr-phase");
-    const blockedRow = rows.find((row) =>
-      within(row).queryByText(/reconciliation/i),
-    ) as HTMLElement;
-    const answerButton = within(blockedRow).getByRole("button", { name: /answer →/i });
-    expect(answerButton).toHaveTextContent(/answer →/i);
-
-    await userEvent.click(answerButton);
-    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
-    expect(onOpenProject).toHaveBeenCalledWith(
-      expect.objectContaining({ id: project.id, focus_phase_id: "phase-reconciliation" }),
-    );
-
-    // Never routed to the other (non-blocked) phase.
-    expect(onOpenProject).not.toHaveBeenCalledWith(
-      expect.objectContaining({ focus_phase_id: "phase-schema" }),
-    );
-  });
-
-  it("clicking a phase button does not also trigger the row's own 'open workspace' navigation", async () => {
-    setup();
-    const rows = await screen.findAllByTestId("pr-phase");
-    const schemaRow = rows.find((row) =>
-      within(row).queryByText(/schema & ingest/i),
-    ) as HTMLElement;
-    await userEvent.click(within(schemaRow).getByRole("button", { name: /open →/i }));
-    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
-    // Exactly one call — the phase button's click does not bubble into a
-    // second, row-level "open workspace" handler.
+    await userEvent.click(await screen.findByRole("link", { name: `Enter ${project.name}` }));
+    expect(onOpenProject).toHaveBeenCalledWith(project);
     expect(onOpenProject).toHaveBeenCalledTimes(1);
   });
 });

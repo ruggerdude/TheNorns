@@ -6,6 +6,7 @@ import type { GraphNode } from "../graph/graph.js";
 import { newId } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import type { ProjectGraphView, ProjectRepository } from "./repository.js";
+import type { ArchivedProjectSummary } from "./repository.js";
 import { safeLocalRepositoryDisplayName } from "./repositoryDisplayName.js";
 import {
   ProjectNotFoundError,
@@ -35,6 +36,7 @@ interface ProjectReadRow {
   remote_github_owner: string | null;
   remote_github_name: string | null;
   onboarding_scenario: string | null;
+  archived_at: string | Date | null;
 }
 
 interface ProjectGraphHeaderRow {
@@ -198,6 +200,7 @@ async function projectRows(
   sql: V2SqlExecutor,
   migrationRunId: string,
   projectId?: string,
+  lifecycle: "active" | "archived" = "active",
 ): Promise<ProjectReadRow[]> {
   const params: unknown[] = [migrationRunId];
   const projectPredicate =
@@ -220,7 +223,7 @@ async function projectRows(
             CASE WHEN binding.binding_type = 'local_runner' THEN binding.repository_display_name ELSE NULL END AS local_repository_display_name,
             remote.github_owner AS remote_github_owner,
             remote.github_name AS remote_github_name,
-            project.onboarding_scenario
+            project.onboarding_scenario, project.archived_at
      FROM projects project
      LEFT JOIN legacy_project_imports imported
        ON imported.project_id = project.id
@@ -271,7 +274,7 @@ async function projectRows(
        ON binding.id = project.primary_repository_binding_id
       AND binding.project_id = project.id
       AND binding.status = 'connected'
-     WHERE project.status <> 'archived' ${projectPredicate}
+     WHERE project.status ${lifecycle === "active" ? "<>" : "="} 'archived' ${projectPredicate}
      ORDER BY project.created_at DESC, imported.imported_at DESC NULLS LAST, project.id DESC`,
     params,
   );
@@ -423,6 +426,23 @@ export class RelationalProjectReadRepository implements ProjectRepository {
     });
   }
 
+  async listArchived(): Promise<ArchivedProjectSummary[]> {
+    return this.transactions.transaction(async (sql) => {
+      const rows = await projectRows(sql, this.migrationRunId, undefined, "archived");
+      const unique = new Map<string, ArchivedProjectSummary>();
+      for (const row of rows) {
+        if (unique.has(row.id) || row.archived_at === null) continue;
+        unique.set(row.id, {
+          ...summaryFromRow(row),
+          archived_at: iso(row.archived_at),
+        });
+      }
+      return [...unique.values()].sort((left, right) =>
+        right.archived_at.localeCompare(left.archived_at),
+      );
+    });
+  }
+
   async summary(id: string): Promise<ProjectSummary> {
     return this.transactions.transaction(async (sql) => {
       const row = (await projectRows(sql, this.migrationRunId, id))[0];
@@ -492,6 +512,43 @@ export class RelationalProjectReadRepository implements ProjectRepository {
           newId("correlation"),
           archivedAt,
           JSON.stringify({ reason: "removed_from_dashboard" }),
+        ],
+      );
+    });
+  }
+
+  async restore(id: string, actorId: string): Promise<void> {
+    await this.transactions.transaction(async (sql) => {
+      const restoredAt = new Date().toISOString();
+      const result = await sql.query<{ id: string }>(
+        `UPDATE projects
+            SET status = 'active', archived_at = NULL, updated_at = $2,
+                aggregate_version = aggregate_version + 1
+          WHERE id = $1 AND status = 'archived'
+          RETURNING id`,
+        [id, restoredAt],
+      );
+      if (result.rows.length !== 1) throw new ProjectNotFoundError(id);
+
+      const stream = await sql.query<{ next: number }>(
+        `SELECT COALESCE(max(stream_version),0)::int + 1 AS next
+           FROM domain_events
+          WHERE stream_type = 'project' AND stream_id = $1`,
+        [id],
+      );
+      await sql.query(
+        `INSERT INTO domain_events (
+           event_id, stream_type, stream_id, stream_version, event_type,
+           project_id, actor_type, actor_id, correlation_id, occurred_at, payload
+         ) VALUES ($1,'project',$2,$3,'project.restored',$2,'human',$4,$5,$6,$7::jsonb)`,
+        [
+          newId("event"),
+          id,
+          stream.rows[0]?.next ?? 1,
+          actorId,
+          newId("correlation"),
+          restoredAt,
+          JSON.stringify({ restored_from: "admin" }),
         ],
       );
     });

@@ -1,7 +1,7 @@
 import type { ProviderName } from "@norns/adapters";
 import type { PmModelT, V2PersistenceScopeTypeT, V2ShadowReadComparisonT } from "@norns/contracts";
 import { buildShadowReadComparison } from "../persistence/migration/shadowRead.js";
-import type { ProjectGraphView, ProjectRepository } from "./repository.js";
+import type { ArchivedProjectSummary, ProjectGraphView, ProjectRepository } from "./repository.js";
 import type { ProjectSummary } from "./store.js";
 
 type Awaitable<T> = T | Promise<T>;
@@ -77,6 +77,15 @@ export class ShadowProjectRepository implements ProjectRepository {
     );
   }
 
+  listArchived(): Promise<ArchivedProjectSummary[]> {
+    return this.read(
+      { type: "new_projects", key: "*" },
+      "listArchived",
+      () => this.options.legacy.listArchived(),
+      () => this.options.relational.listArchived(),
+    );
+  }
+
   summary(id: string): Promise<ProjectSummary> {
     return this.read(
       { type: "project", key: id },
@@ -88,6 +97,10 @@ export class ShadowProjectRepository implements ProjectRepository {
 
   archive(id: string, actorId: string): ReturnType<ProjectRepository["archive"]> {
     return this.options.legacy.archive(id, actorId);
+  }
+
+  restore(id: string, actorId: string): ReturnType<ProjectRepository["restore"]> {
+    return this.options.legacy.restore(id, actorId);
   }
 
   pmSelectionOf(id: string): Promise<{ provider: ProviderName; model: PmModelT | null }> {

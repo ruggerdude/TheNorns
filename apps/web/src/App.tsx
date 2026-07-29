@@ -23,6 +23,7 @@ import { Debates } from "./Debates";
 import { Gantt, type GanttPhase } from "./Gantt";
 import { KnowledgeStatusPanel } from "./KnowledgeStatusPanel";
 import { Login, type LoginMode } from "./Login";
+import { PortfolioMenu } from "./PortfolioMenu";
 import { ProjectMembers } from "./ProjectMembers";
 import {
   AttentionDecisionForm,
@@ -790,6 +791,7 @@ function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
 function ProjectGraph({
   project,
   onBack,
+  onOpenProject,
   onProjectArchived,
   onLogout,
   user,
@@ -804,6 +806,7 @@ function ProjectGraph({
 }: {
   project: ProjectSummary;
   onBack: () => void;
+  onOpenProject: (project: ProjectSummary) => void;
   onProjectArchived: (projectId: string) => void;
   onLogout: (message: string) => void;
   user: CurrentUser | null;
@@ -865,7 +868,6 @@ function ProjectGraph({
   const [mobileWorkspaceNavOpen, setMobileWorkspaceNavOpen] = useState(false);
   const previousInitialWorkRoute = useRef(initialWorkRoute);
   const suppressRouteExitReset = useRef(false);
-  const [planningHistory, setPlanningHistory] = useState<PhasePlanningRunDto[] | null>(null);
   const [lastWorkspaceUpdateAt, setLastWorkspaceUpdateAt] = useState<Date | null>(null);
   const [updatePreferences, setUpdatePreferences] = useState<UpdatePreferences>(() =>
     resolveUpdatePreferences(project.id),
@@ -990,22 +992,6 @@ function ProjectGraph({
   useEffect(() => {
     void loadResume();
   }, [loadResume]);
-
-  const loadPlanningHistory = useCallback(async () => {
-    try {
-      const response = await getJson<{ planning_runs: PhasePlanningRunDto[] }>(
-        `/api/v2/projects/${project.id}/planning-runs`,
-      );
-      setPlanningHistory(response.planning_runs);
-    } catch (err) {
-      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
-      else if (!(err instanceof ApiError && err.status === 404)) setPlanningHistory([]);
-    }
-  }, [project.id, onLogout]);
-
-  useEffect(() => {
-    void loadPlanningHistory();
-  }, [loadPlanningHistory]);
 
   const loadLatestRelationalPlanningRun = useCallback(async () => {
     try {
@@ -1767,10 +1753,13 @@ function ProjectGraph({
           switching stays in Portfolio instead of duplicating browser tabs. */}
       <header className="topbar">
         <div className="workspace-nav-start">
-          <Brand />
-          <Button className="btn-small" variant="ghost" onClick={onBack}>
-            ← Portfolio
-          </Button>
+          <Brand onHome={onBack} />
+          <PortfolioMenu
+            activeProjectId={project.id}
+            onOpenPortfolio={onBack}
+            onOpenProject={onOpenProject}
+            onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+          />
           <div className="workspace-rail-project" data-testid="workspace-project-context">
             <span>Project</span>
             <strong title={project.name}>{project.name}</strong>
@@ -1809,6 +1798,20 @@ function ProjectGraph({
             >
               ×
             </Button>
+          </div>
+          <div className="workspace-mobile-portfolio-switcher">
+            <PortfolioMenu
+              activeProjectId={project.id}
+              onOpenPortfolio={() => {
+                setMobileWorkspaceNavOpen(false);
+                onBack();
+              }}
+              onOpenProject={(nextProject) => {
+                setMobileWorkspaceNavOpen(false);
+                onOpenProject(nextProject);
+              }}
+              onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+            />
           </div>
           <button
             type="button"
@@ -1947,32 +1950,6 @@ function ProjectGraph({
         {workspaceTab === "overview" ? (
           <div className="workspace-tab-panel" data-testid="workspace-tab-overview">
             {error ? <Alert testId="error">{error}</Alert> : null}
-
-            <Suspense fallback={<Spinner label="Loading project operations…" />}>
-              <ProjectOperationsDashboard
-                projectId={project.id}
-                onUnauthorized={() => onLogout("Session expired. Sign in again.")}
-                onOpenLegacyPlanningRun={(planningRunId) => {
-                  setActivePlanningRunId(planningRunId);
-                }}
-              />
-            </Suspense>
-
-            {resume &&
-            resume.phases.length === 0 &&
-            !relationalPhaseFallback &&
-            !strategyReview &&
-            !activePlanningRunId ? (
-              <button
-                type="button"
-                className="card workspace-empty-pointer"
-                data-testid="overview-no-plan-pointer"
-                onClick={() => setWorkspaceTab("work")}
-              >
-                <strong>No work planned yet</strong>
-                <span>Start in Work →</span>
-              </button>
-            ) : null}
 
             {resume ? (
               <section className="card project-overview-dashboard" data-testid="overview-dashboard">
@@ -2263,6 +2240,32 @@ function ProjectGraph({
               </section>
             ) : null}
 
+            {resume &&
+            resume.phases.length === 0 &&
+            !relationalPhaseFallback &&
+            !strategyReview &&
+            !activePlanningRunId ? (
+              <button
+                type="button"
+                className="card workspace-empty-pointer"
+                data-testid="overview-no-plan-pointer"
+                onClick={() => setWorkspaceTab("work")}
+              >
+                <strong>No work planned yet</strong>
+                <span>Start in Work →</span>
+              </button>
+            ) : null}
+
+            <Suspense fallback={<Spinner label="Loading project operations…" />}>
+              <ProjectOperationsDashboard
+                projectId={project.id}
+                onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+                onOpenLegacyPlanningRun={(planningRunId) => {
+                  setActivePlanningRunId(planningRunId);
+                }}
+              />
+            </Suspense>
+
             <Suspense fallback={<Spinner label="Loading project conversations…" />}>
               <ConversationOverview
                 projectId={project.id}
@@ -2288,94 +2291,6 @@ function ProjectGraph({
               }
               onUnauthorized={handleWorkspaceUnauthorized}
             />
-
-            <section className="card work-history-card" data-testid="work-history">
-              <div className="section-head">
-                <div>
-                  <div className="eyebrow">Past conversations</div>
-                  <h2>Work history</h2>
-                </div>
-                <span className="muted">
-                  {planningHistory ? `${planningHistory.length} total` : "Loading…"}
-                </span>
-              </div>
-              {!planningHistory ? <Spinner label="Loading work history…" /> : null}
-              {planningHistory?.length === 0 ? (
-                <div className="history-empty">
-                  <strong>No previous work conversations</strong>
-                  <span>New work started here will remain available on this overview.</span>
-                </div>
-              ) : null}
-              <div className="work-history-list">
-                {planningHistory?.map((run) => {
-                  const latestMessage = run.transcript.at(-1);
-                  return (
-                    <article className="work-history-item" key={run.id}>
-                      <div className="work-history-main">
-                        <div className="work-history-meta">
-                          <Badge
-                            tone={
-                              run.status === "failed" || run.status === "rejected"
-                                ? "danger"
-                                : run.status === "approved"
-                                  ? "success"
-                                  : "info"
-                            }
-                          >
-                            {run.status.replaceAll("_", " ")}
-                          </Badge>
-                          <span>{run.mode === "quick" ? "Quick change" : "Planned work"}</span>
-                          {run.created_at ? (
-                            <time dateTime={run.created_at}>
-                              {new Date(run.created_at).toLocaleDateString()}
-                            </time>
-                          ) : null}
-                        </div>
-                        <h3>{run.objective?.trim() || "Untitled work conversation"}</h3>
-                        <p>
-                          {latestMessage?.summary ??
-                            (run.error
-                              ? run.error
-                              : `${run.transcript.length} planning message${
-                                  run.transcript.length === 1 ? "" : "s"
-                                } recorded`)}
-                        </p>
-                      </div>
-                      <Button
-                        className="btn-small"
-                        variant={
-                          [
-                            "queued",
-                            "drafting",
-                            "reviewing",
-                            "revising",
-                            "converged",
-                            "cap_reached",
-                          ].includes(run.status)
-                            ? "primary"
-                            : "default"
-                        }
-                        onClick={() => {
-                          setPhaseJourneyRunId(run.id);
-                          setWorkspaceTab("work");
-                        }}
-                      >
-                        {[
-                          "queued",
-                          "drafting",
-                          "reviewing",
-                          "revising",
-                          "converged",
-                          "cap_reached",
-                        ].includes(run.status)
-                          ? "Continue"
-                          : "Open"}
-                      </Button>
-                    </article>
-                  );
-                })}
-              </div>
-            </section>
           </div>
         ) : null}
 
@@ -2465,13 +2380,11 @@ function ProjectGraph({
                 onRunStarted={(runId) => {
                   setPhaseJourneyRunId(runId);
                   setPhaseComposerRequested(false);
-                  void loadPlanningHistory();
                 }}
                 onJourneyChanged={() => {
                   void loadResume();
                   void loadLatestRelationalPlanningRun();
                   void loadPhaseExecution();
-                  void loadPlanningHistory();
                 }}
                 onOpenRecoveryDetails={(phaseId) => {
                   setMonitoredPhaseId(phaseId);
@@ -2909,7 +2822,8 @@ function GlobalPageShell({
   page,
   user,
   activeProject,
-  onReturn,
+  onOpenPortfolio,
+  onOpenProject,
   onOpenUsage,
   onOpenAccount,
   onOpenAdmin,
@@ -2919,7 +2833,8 @@ function GlobalPageShell({
   page: GlobalPage;
   user: CurrentUser;
   activeProject: ProjectSummary | null;
-  onReturn: () => void;
+  onOpenPortfolio: () => void;
+  onOpenProject: (project: ProjectSummary) => void;
   onOpenUsage: () => void;
   onOpenAccount: (tab?: SettingsTab) => void;
   onOpenAdmin: () => void;
@@ -2930,15 +2845,13 @@ function GlobalPageShell({
     <div className="app-shell global-page-shell">
       <header className="topbar">
         <div className="topbar-main">
-          <Brand />
-          <Button
-            className="btn-small"
-            variant="ghost"
-            aria-label={activeProject ? `Return to ${activeProject.name}` : "Return to Portfolio"}
-            onClick={onReturn}
-          >
-            {activeProject ? "← Project" : "← Portfolio"}
-          </Button>
+          <Brand onHome={onOpenPortfolio} />
+          <PortfolioMenu
+            activeProjectId={activeProject?.id ?? null}
+            onOpenPortfolio={onOpenPortfolio}
+            onOpenProject={onOpenProject}
+            onUnauthorized={onSignOut}
+          />
         </div>
         <AuthenticatedHeaderActions
           user={user}
@@ -2947,6 +2860,12 @@ function GlobalPageShell({
           onOpenAccount={onOpenAccount}
           onOpenAdmin={onOpenAdmin}
           onSignOut={onSignOut}
+          portfolioNavigation={{
+            activeProjectId: activeProject?.id ?? null,
+            onOpenPortfolio,
+            onOpenProject,
+            onUnauthorized: onSignOut,
+          }}
         />
       </header>
       <div className="global-page-content">{children}</div>
@@ -3170,6 +3089,24 @@ export function App(): React.ReactElement {
     setShowUsage(false);
   }, []);
 
+  const openPortfolio = useCallback(() => {
+    setShowAccount(false);
+    setShowAdmin(false);
+    setShowUsage(false);
+    setActiveProject(null);
+    setWorkConversationRoute(null);
+    setRoutedProjectId(null);
+    window.history.pushState(null, "", "/");
+  }, []);
+
+  const openProjectFromGlobalNavigation = useCallback(
+    (project: ProjectSummary) => {
+      closeGlobalPage();
+      openProject(project);
+    },
+    [closeGlobalPage, openProject],
+  );
+
   const globalPage: GlobalPage | null = showAccount
     ? "settings"
     : showAdmin && user?.role === "admin"
@@ -3211,7 +3148,8 @@ export function App(): React.ReactElement {
         page={globalPage}
         user={user}
         activeProject={activeProject}
-        onReturn={closeGlobalPage}
+        onOpenPortfolio={openPortfolio}
+        onOpenProject={openProjectFromGlobalNavigation}
         onOpenUsage={openUsage}
         onOpenAccount={openAccount}
         onOpenAdmin={openAdmin}
@@ -3268,12 +3206,8 @@ export function App(): React.ReactElement {
   ) : (
     <ProjectGraph
       project={activeProject}
-      onBack={() => {
-        setActiveProject(null);
-        setWorkConversationRoute(null);
-        setRoutedProjectId(null);
-        window.history.pushState(null, "", "/");
-      }}
+      onBack={openPortfolio}
+      onOpenProject={openProject}
       onProjectArchived={closeProject}
       onLogout={logout}
       user={user}

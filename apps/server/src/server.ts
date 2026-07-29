@@ -3587,13 +3587,30 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       reply.send(listed.filter((project) => accessible.has(project.id)));
     });
 
+    app.get("/api/admin/projects/archived", async (req, reply) => {
+      if (!(await requireAdmin(req, reply))) return;
+      reply.send(await projects.listArchived());
+    });
+
+    app.post("/api/admin/projects/:id/restore", async (req, reply) => {
+      const admin = await requireAdmin(req, reply);
+      if (!admin) return;
+      const { id } = req.params as { id: string };
+      try {
+        await projects.restore(id, admin.id);
+        stores.audit(admin.email, "project.restored", id, now());
+        reply.send({ ok: true });
+      } catch (error) {
+        projectError(reply, error);
+      }
+    });
+
     app.delete("/api/projects/:id", async (req, reply) => {
       const user = await resolveUser(req);
       if (!user) return reply.code(401).send({ error: "unauthorized" });
       const { id } = req.params as { id: string };
       try {
         await projects.archive(id, user.id);
-        await attachmentService?.deleteForProject(id);
         stores.audit(user.email, "project.archived", id, now());
         reply.code(204).send();
       } catch (error) {

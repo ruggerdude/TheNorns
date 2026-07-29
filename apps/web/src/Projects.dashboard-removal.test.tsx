@@ -62,8 +62,8 @@ describe("project dashboard entry", () => {
     expect(
       screen.queryByText("Phase-by-phase progress, ownership, and next action."),
     ).not.toBeInTheDocument();
-    // DESIGN R2: the create action moved out of Quick access to the top of
-    // the page (not in the topbar, not inside any section).
+    // The create action sits at the top of the page rather than inside a
+    // duplicate quick-access panel.
     const createButton = screen.getByRole("button", { name: "+ New project" });
     expect(createButton.closest("section")).toBeNull();
     expect(createButton.closest("header")).toBeNull();
@@ -86,7 +86,8 @@ describe("project dashboard entry", () => {
     expect(screen.queryByRole("link", { name: "Enter Alpha" })).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "← Dashboard" }));
-    expect(await screen.findByRole("heading", { name: "Quick access" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "All projects" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Quick access" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Enter Alpha" })).toBeInTheDocument();
   });
 

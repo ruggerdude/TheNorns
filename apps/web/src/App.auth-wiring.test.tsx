@@ -228,6 +228,6 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     expect(screen.getByRole("button", { name: "Usage" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Return to Portfolio" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Go to Portfolio" })).toBeInTheDocument();
   });
 });

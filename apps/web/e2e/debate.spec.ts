@@ -194,7 +194,7 @@ test("creates, controls, directs, replays, and reruns a debate", async ({ page }
   });
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Debate E2E Project" }).click();
+  await page.getByRole("link", { name: "Enter Debate E2E Project" }).click();
   await page.getByRole("button", { name: "Debates" }).click();
   await page.getByRole("button", { name: "New debate" }).click();
 

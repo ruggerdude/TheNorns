@@ -141,6 +141,9 @@ async function prepare(
     if (path === "/api/admin/users") {
       return fulfill(route, []);
     }
+    if (path === "/api/admin/projects/archived") {
+      return fulfill(route, []);
+    }
     if (path === "/api/v2/admin/rules") {
       return fulfill(route, {
         filename: "NORN.md",
@@ -664,15 +667,14 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await expect(workspace).toBeVisible();
   const workspaceBox = await workspace.boundingBox();
   expect(workspaceBox).not.toBeNull();
-  expect(workspaceBox?.width ?? 0).toBeGreaterThanOrEqual(1280);
-  expect(workspaceBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(1360);
-  expect(workspaceBox?.x ?? 0).toBeGreaterThan(248);
+  expect(workspaceBox?.width).toBe(1660);
+  expect(workspaceBox?.x).toBe(260);
 
   const navigationRail = page.locator(".workspace-shell > .topbar");
   const railBox = await navigationRail.boundingBox();
   expect(railBox).not.toBeNull();
   expect(railBox?.x).toBe(0);
-  expect(railBox?.width).toBe(248);
+  expect(railBox?.width).toBe(260);
   expect(railBox?.height).toBe(1080);
   const projectContext = page.getByTestId("workspace-project-context");
   await expect(projectContext.getByText("Project", { exact: true })).toBeVisible();
@@ -688,7 +690,9 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
     (projectContextBox?.y ?? 0) + (projectContextBox?.height ?? 0) + 8,
   );
 
-  const portfolioButtonBox = await page.getByRole("button", { name: "← Portfolio" }).boundingBox();
+  const portfolioButtonBox = await page
+    .locator('.workspace-nav-start summary[aria-label="Portfolio and active projects"]')
+    .boundingBox();
   const usageButtonBox = await page
     .getByRole("button", { name: "Usage", exact: true })
     .boundingBox();
@@ -790,7 +794,7 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   const shortRailBox = await navigationRail.boundingBox();
   const userMenuBox = await page.locator(".user-chip").boundingBox();
   expect(shortRailBox?.height).toBe(720);
-  expect((userMenuBox?.y ?? 0) + (userMenuBox?.height ?? 0)).toBeLessThanOrEqual(704);
+  expect((userMenuBox?.y ?? 0) + (userMenuBox?.height ?? 0)).toBeLessThanOrEqual(710);
 
   await page.setViewportSize({ width: 820, height: 900 });
   const compactHeaderBox = await navigationRail.boundingBox();
@@ -873,7 +877,7 @@ test("Mobile Portfolio exposes the global navigation drawer", async ({ page }) =
   await expect(page.getByRole("button", { name: "Open navigation menu" })).toBeVisible();
 });
 
-test("Project removal lives only in project Settings", async ({ page }) => {
+test("Project archiving lives only in project Settings", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await prepare(page, "github");
   await page.goto("/");
@@ -883,14 +887,15 @@ test("Project removal lives only in project Settings", async ({ page }) => {
   await page.getByRole("button", { name: "Menu", exact: true }).click();
   const workspaceNavigation = page.getByRole("navigation", { name: "Workspace sections" });
   await workspaceNavigation.getByRole("button", { name: "Settings", exact: true }).click();
-  const dangerZone = page.getByRole("region", { name: "Remove project" });
+  const dangerZone = page.getByRole("region", { name: "Archive project" });
   await expect(dangerZone).toBeVisible();
-  await expect(dangerZone.getByRole("button", { name: "Remove project" })).toBeVisible();
+  await expect(dangerZone.getByRole("button", { name: "Archive project" })).toBeVisible();
 
-  await page.getByRole("button", { name: "← Portfolio", exact: true }).click();
+  await page.getByRole("button", { name: "Menu", exact: true }).click();
+  await workspaceNavigation.locator('summary[aria-label="Portfolio and active projects"]').click();
+  await workspaceNavigation.getByRole("button", { name: "Portfolio overview" }).click();
   await expect(page.getByRole("heading", { name: "All projects" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Remove project" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Remove project from dashboard" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Archive project" })).toHaveCount(0);
 });
 
 test("Usage, Settings, and Admin use the regular application sidebar", async ({ page }) => {
@@ -914,7 +919,7 @@ test("Usage, Settings, and Admin use the regular application sidebar", async ({ 
   const globalRailBox = await globalRail.boundingBox();
   expect(globalRailBox).not.toBeNull();
   expect(globalRailBox?.x).toBe(0);
-  expect(globalRailBox?.width).toBe(248);
+  expect(globalRailBox?.width).toBe(260);
   expect(globalRailBox?.height).toBe(1080);
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
@@ -933,7 +938,8 @@ test("Usage, Settings, and Admin use the regular application sidebar", async ({ 
   );
   await expect(globalRail).toBeVisible();
 
-  await page.getByRole("button", { name: "Return to front-door-app" }).click();
+  await page.locator('summary[aria-label="Portfolio and active projects"]').click();
+  await page.getByRole("button", { name: "front-door-app" }).click();
   await expect(page.getByRole("navigation", { name: "Workspace sections" })).toBeVisible();
 
   await page.setViewportSize({ width: 1280, height: 720 });

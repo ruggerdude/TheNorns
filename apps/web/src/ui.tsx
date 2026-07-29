@@ -152,7 +152,13 @@ export function BrandMark({ size = 26, className }: { size?: number; className?:
  * beside the uncial wordmark at 20px. `hero` (login-scale): the wordmark at
  * 40px stacked above a 300×34 braid with a long lead-in.
  */
-export function Brand({ variant = "topbar" }: { variant?: "topbar" | "hero" }) {
+export function Brand({
+  variant = "topbar",
+  onHome,
+}: {
+  variant?: "topbar" | "hero";
+  onHome?: () => void;
+}) {
   if (variant === "hero") {
     return (
       <div className="brand brand-hero">
@@ -161,11 +167,23 @@ export function Brand({ variant = "topbar" }: { variant?: "topbar" | "hero" }) {
       </div>
     );
   }
-  return (
-    <div className="brand">
+  const lockup = (
+    <>
       <BraidMark width={64} height={26} lead={14} period={34} strokeWidth={4.5} />
       <span className="brand-word">The Norns</span>
-    </div>
+    </>
+  );
+  return onHome ? (
+    <button
+      type="button"
+      className="brand brand-home"
+      aria-label="Go to Portfolio"
+      onClick={onHome}
+    >
+      {lockup}
+    </button>
+  ) : (
+    <div className="brand">{lockup}</div>
   );
 }
 /**

@@ -140,7 +140,7 @@ describe("projects API", () => {
     expect(res.statusCode).toBe(404);
   });
 
-  it("removes a project from the dashboard without deleting another project", async () => {
+  it("archives a project out of Portfolio and lets an admin restore it", async () => {
     const users = new UserStore();
     TOKEN = testAdminToken(users);
     server = await buildServer({
@@ -166,11 +166,31 @@ describe("projects API", () => {
     const list = (await inject(server, "GET", "/api/projects")).json() as Array<{ id: string }>;
     expect(list.map((project) => project.id)).toEqual([retainedId]);
     expect((await inject(server, "GET", `/api/projects/${removedId}`)).statusCode).toBe(404);
+
+    const archived = (await inject(server, "GET", "/api/admin/projects/archived")).json() as Array<{
+      id: string;
+      archived_at: string;
+    }>;
+    expect(archived).toEqual([
+      expect.objectContaining({
+        id: removedId,
+        archived_at: expect.any(String),
+      }),
+    ]);
+
+    expect(
+      (await inject(server, "POST", `/api/admin/projects/${removedId}/restore`)).statusCode,
+    ).toBe(200);
+    const restored = (await inject(server, "GET", "/api/projects")).json() as Array<{
+      id: string;
+    }>;
+    expect(restored.map((project) => project.id)).toEqual([retainedId, removedId]);
+    expect((await inject(server, "GET", `/api/projects/${removedId}`)).statusCode).toBe(200);
     expect(
       ((await inject(server, "GET", "/api/audit")).json() as Array<{ action: string }>).map(
         (entry) => entry.action,
       ),
-    ).toContain("project.archived");
+    ).toEqual(expect.arrayContaining(["project.archived", "project.restored"]));
   });
 });
 

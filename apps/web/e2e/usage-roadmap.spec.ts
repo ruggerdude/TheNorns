@@ -197,6 +197,9 @@ async function prepare(
         },
       ]);
     }
+    if (path === "/api/admin/projects/archived" && method === "GET") {
+      return json(route, []);
+    }
     if (path === "/api/v2/admin/rules" && method === "GET") {
       return json(route, globalRules);
     }
@@ -419,14 +422,21 @@ async function prepare(
 }
 
 async function openPortfolioUsage(page: Page): Promise<void> {
-  await expect(page.getByRole("heading", { name: "Quick access" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "All projects" })).toBeVisible();
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(page.getByTestId("usage-intelligence")).toBeVisible();
 }
 
 async function openProject(page: Page): Promise<void> {
-  await page.getByRole("link", { name: `Quick access: ${project.name}` }).click();
+  await page.getByRole("link", { name: `Enter ${project.name}` }).click();
   await expect(page.getByRole("heading", { name: project.name })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Workspace sections" })).toBeVisible();
+}
+
+async function returnToProjectFromGlobalSidebar(page: Page): Promise<void> {
+  const portfolioMenu = page.locator(".portfolio-switcher");
+  await portfolioMenu.locator('summary[aria-label="Portfolio and active projects"]').click();
+  await portfolioMenu.getByRole("button", { name: project.name }).click();
   await expect(page.getByRole("navigation", { name: "Workspace sections" })).toBeVisible();
 }
 
@@ -536,7 +546,7 @@ test("administrator completes portfolio analytics and project access journeys", 
     )
     .toBe(true);
 
-  await page.getByRole("button", { name: "Return to Portfolio" }).click();
+  await page.getByRole("button", { name: "Go to Portfolio" }).click();
   await openProject(page);
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
@@ -548,7 +558,7 @@ test("administrator completes portfolio analytics and project access journeys", 
       .getByRole("navigation", { name: "Usage scope" })
       .getByRole("button", { name: project.name }),
   ).toHaveAttribute("aria-current", "page");
-  await page.getByRole("button", { name: `Return to ${project.name}` }).click();
+  await returnToProjectFromGlobalSidebar(page);
 
   await page.getByRole("button", { name: "Members" }).click();
   await expect(page.getByRole("heading", { name: "Project members" })).toBeVisible();
@@ -589,7 +599,7 @@ test("standard member can inspect personal and project usage without admin contr
   await expect(page.getByRole("button", { name: "My usage" })).toBeVisible();
   await expect(page.getByRole("button", { name: "All usage" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Analytics" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Return to Portfolio" }).click();
+  await page.getByRole("button", { name: "Go to Portfolio" }).click();
 
   await openProject(page);
   await page.getByRole("button", { name: "Usage", exact: true }).click();
@@ -602,7 +612,7 @@ test("standard member can inspect personal and project usage without admin contr
   await expect(page.getByRole("button", { name: "My usage" })).toBeVisible();
   await expect(page.getByRole("button", { name: "All usage" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Analytics" })).toHaveCount(0);
-  await page.getByRole("button", { name: `Return to ${project.name}` }).click();
+  await returnToProjectFromGlobalSidebar(page);
 
   await page.getByRole("button", { name: "Members" }).click();
   await expect(page.getByRole("heading", { name: "Project members" })).toBeVisible();
@@ -643,7 +653,7 @@ test("administrator edits global NORN.md without losing the current workspace", 
     { content: "# Global rules\n\n- Report blockers every five minutes." },
   ]);
 
-  await page.getByRole("button", { name: `Return to ${project.name}` }).click();
+  await returnToProjectFromGlobalSidebar(page);
   await expect(workspaceNavigation).toBeVisible();
   await expect(workspaceNavigation.getByRole("button", { name: "Overview" })).toHaveAttribute(
     "aria-current",
@@ -657,7 +667,7 @@ test("an unauthorized usage response returns the user to session-expired sign in
   await prepare(page, "member", { expireFirstUsageRequest: true });
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "Quick access" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "All projects" })).toBeVisible();
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(page.getByText("Session expired. Sign in again.")).toBeVisible();
   await expect(page.getByText("Welcome back")).toBeVisible();

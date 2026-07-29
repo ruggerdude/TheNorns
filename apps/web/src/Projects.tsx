@@ -9,6 +9,7 @@ import {
 } from "@norns/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GitHubConnection, GitHubIntegrationStatus, SettingsTab } from "./Account";
+import { PortfolioMenu } from "./PortfolioMenu";
 import { AuthenticatedHeaderActions } from "./UserMenu";
 import { ApiError, type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
 import {
@@ -125,6 +126,9 @@ export interface DashboardResumeSummary {
   blended_eta_at: string | null;
   agents_active: number;
   decisions_waiting: number;
+  total_commits: number;
+  last_commit_sha: string | null;
+  last_commit_at: string | null;
   // O1: the resume payload's own plain-language summary (e.g. "Runs in
   // github.com/acme/app · Pushes to github.com/acme/app") — prefer this
   // over re-deriving the sentence client-side; it's only absent for
@@ -215,15 +219,6 @@ export interface PortfolioAttentionDto {
     attention_count: number;
     next_action: string;
   }>;
-}
-
-interface RunnerSnapshotDto {
-  runner_id: string;
-  generation: number;
-  connected: boolean;
-  workspace_picker_ready: boolean;
-  workspace_repository_inventory_ready: boolean;
-  last_seen_at: string;
 }
 
 export function isActionableAttention(item: Pick<AttentionItemDto, "kind" | "severity">): boolean {
@@ -422,7 +417,6 @@ export function AttentionDecisionForm({
 
 export function Projects({
   onOpenProject,
-  openProjects,
   onUnauthorized,
   onSignOut,
   user,
@@ -441,7 +435,6 @@ export function Projects({
 }): React.ReactElement {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
   const [dialog, setDialog] = useState(false);
   // DESIGN P1 bug fix: the New Project view is a full page swapped in-place,
   // so the document keeps whatever scroll offset the dashboard had (and the
@@ -488,7 +481,6 @@ export function Projects({
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
   const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
   const [resumePollIssue, setResumePollIssue] = useState<string | null>(null);
-  const [runners, setRunners] = useState<RunnerSnapshotDto[]>([]);
   const [roundsCount, setRoundsCount] = useState(3);
   // FRONT DOOR P2b: reviewer selector. "auto" means no explicit override
   // (the server's automatic opposite-provider default); any other value is
@@ -572,6 +564,11 @@ export function Projects({
               decisions_waiting: number;
             };
             attention: { open_decisions: number; active_runs: number; blocked_tasks: number };
+            delivery?: {
+              total_commits: number;
+              last_commit_sha: string | null;
+              last_commit_at: string | null;
+            };
             // O1: the resume payload's own plain-language onboarding summary.
             onboarding?: { summary_line?: string | null } | null;
           }>(`/api/v2/projects/${project.id}/resume`, undefined, signal);
@@ -592,6 +589,9 @@ export function Projects({
             agents_active: resume.progress?.agents_active ?? resume.attention.active_runs,
             decisions_waiting:
               resume.progress?.decisions_waiting ?? resume.attention.open_decisions,
+            total_commits: resume.delivery?.total_commits ?? 0,
+            last_commit_sha: resume.delivery?.last_commit_sha ?? null,
+            last_commit_at: resume.delivery?.last_commit_at ?? null,
             onboardingSummaryLine: resume.onboarding?.summary_line ?? null,
           };
           return [project.id, summary] as const;
@@ -752,17 +752,6 @@ export function Projects({
     },
   });
   const refreshAttention = attentionPolling.refresh;
-
-  const runnerPolling = useSingleFlightPolling({
-    intervalMs: 10_000,
-    maxBackoffMs: 120_000,
-    resourceKey: "runner-freshness",
-    load: (signal) => request<RunnerSnapshotDto[]>("/api/runners", undefined, signal),
-    onSuccess: setRunners,
-    onError: (pollError) => {
-      if (pollError instanceof UnauthorizedError) onUnauthorized();
-    },
-  });
 
   const dispositionAttention = useCallback(
     async (item: AttentionItemDto, disposition: "acknowledged" | "snoozed") => {
@@ -1175,29 +1164,10 @@ export function Projects({
     setIdempotencyKey(globalThis.crypto.randomUUID());
   }, []);
 
-  const visible = useMemo(
-    () =>
-      projects?.filter((p) =>
-        `${p.name} ${p.description} ${p.plan_objective ?? ""}`
-          .toLowerCase()
-          .includes(query.toLowerCase()),
-      ),
-    [projects, query],
-  );
-  const planned = projects?.filter((p) => p.status === "planned").length ?? 0;
-  const quickAccessProjects = useMemo(() => {
-    if (query.trim()) return (visible ?? []).slice(0, 4);
-    const ordered = new Map<string, ProjectSummary>();
-    for (const project of openProjects) ordered.set(project.id, project);
-    for (const project of projects ?? []) ordered.set(project.id, project);
-    return [...ordered.values()].slice(0, 4);
-  }, [openProjects, projects, query, visible]);
+  const visible = projects;
   const activeAgents =
     attention?.counts.active_runs ??
     Object.values(resumeById).reduce((sum, resume) => sum + resume.agents_active, 0);
-  const waitingDecisions =
-    attention?.counts.decisions ??
-    Object.values(resumeById).reduce((sum, resume) => sum + resume.decisions_waiting, 0);
   const actionableAttention = attention?.items.filter(isActionableAttention) ?? [];
   const blockedProjects =
     attention?.projects.filter((project) => project.health === "blocked").length ??
@@ -1217,26 +1187,6 @@ export function Projects({
       : activeAgents > 0
         ? "Work in progress"
         : "Ready";
-  const runnerLastSeen = runners.reduce<number | null>((latest, runner) => {
-    const seen = Date.parse(runner.last_seen_at);
-    return Number.isFinite(seen) && (latest === null || seen > latest) ? seen : latest;
-  }, null);
-  const runnerFresh = runners.some(
-    (runner) =>
-      runner.connected &&
-      Number.isFinite(Date.parse(runner.last_seen_at)) &&
-      Date.now() - Date.parse(runner.last_seen_at) <= 60_000,
-  );
-  // DESIGN R2: the runner fact renders as a small tile (value + label), so
-  // the value is the bare state word; the label supplies "Runner heartbeat".
-  const runnerTileValue =
-    runners.length === 0
-      ? "None"
-      : runnerFresh
-        ? "Online"
-        : runners.some((runner) => runner.connected)
-          ? "Stale"
-          : "Offline";
   const connectedGitHub =
     githubStatus?.connections.filter((connection) => connection.status === "connected") ?? [];
   const selectedConnection = connectedGitHub.find(
@@ -1298,8 +1248,21 @@ export function Projects({
     <div className={dialog ? "full-page-view project-setup-view" : "app-shell"}>
       <header className="topbar" hidden={dialog}>
         <div className="topbar-main">
-          <Brand />
-          <span className="topbar-location">Portfolio</span>
+          <Brand
+            onHome={() => {
+              window.history.pushState(null, "", "/");
+              window.scrollTo(0, 0);
+            }}
+          />
+          <PortfolioMenu
+            projects={projects}
+            onOpenPortfolio={() => {
+              window.history.pushState(null, "", "/");
+              window.scrollTo(0, 0);
+            }}
+            onOpenProject={onOpenProject}
+            onUnauthorized={onUnauthorized}
+          />
         </div>
         {user && onOpenUsage ? (
           <AuthenticatedHeaderActions
@@ -1308,6 +1271,15 @@ export function Projects({
             onOpenAccount={onOpenAccount}
             onOpenAdmin={onOpenAdmin}
             onSignOut={onSignOut}
+            portfolioNavigation={{
+              projects,
+              onOpenPortfolio: () => {
+                window.history.pushState(null, "", "/");
+                window.scrollTo(0, 0);
+              },
+              onOpenProject,
+              onUnauthorized,
+            }}
           />
         ) : null}
       </header>
@@ -1350,220 +1322,62 @@ export function Projects({
             + New project
           </Button>
         </div>
-        <div className="dashboard-focus-grid">
-          <section
-            className="focus-panel quick-access-panel"
-            aria-labelledby="quick-access-heading"
-          >
-            <div className="focus-panel-head">
-              <h2 id="quick-access-heading">Quick access</h2>
+        <section className="focus-panel portfolio-pulse-panel" aria-label="Portfolio summary">
+          <div className="portfolio-summary-head">
+            <div>
+              <div className="eyebrow">Portfolio summary</div>
+              <strong>
+                {!hasStatusData
+                  ? "Current status is unavailable"
+                  : activeAgents > 0
+                    ? "Work is moving"
+                    : "Ready for the next project"}
+              </strong>
             </div>
-            <Input
-              aria-label="Search projects"
-              placeholder="Find a project by name, brief, or objective…"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-            {projects === null ? (
-              <Spinner label="Loading projects…" />
-            ) : quickAccessProjects.length ? (
-              <div className="quick-project-list">
-                {quickAccessProjects.map((project) => {
-                  const resume = resumeById[project.id];
-                  const blocked = resume?.phases.some((phase) => phase.blocked) ?? false;
-                  const active = resume?.phases.some((phase) => phase.status === "active") ?? false;
-                  const needsAttention =
-                    blocked || actionableAttention.some((item) => item.project_id === project.id);
-                  const state = needsAttention
-                    ? "Needs you"
-                    : active
-                      ? "In progress"
-                      : project.status === "planned"
-                        ? "Plan ready"
-                        : "Draft";
-                  const stateClass = needsAttention
-                    ? "is-blocked"
-                    : active
-                      ? "is-active"
-                      : project.status === "planned"
-                        ? "is-ready"
-                        : "is-draft";
-                  return (
-                    <a
-                      className="quick-project"
-                      key={project.id}
-                      href={`#project-${encodeURIComponent(project.id)}`}
-                      aria-label={`Quick access: ${project.name}`}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        onOpenProject(project);
-                      }}
-                    >
-                      <span className="quick-project-mark">
-                        {project.name.slice(0, 2).toUpperCase()}
-                      </span>
-                      <span className="quick-project-copy">
-                        <strong>
-                          <span>{project.name.slice(0, 1)}</span>
-                          <span>{project.name.slice(1)}</span>
-                        </strong>
-                        <small>
-                          {isFillerDescription(project.description)
-                            ? "No project brief yet"
-                            : project.description}
-                        </small>
-                      </span>
-                      <span className={`quick-project-state ${stateClass}`}>
-                        {/* DESIGN R2: subtle gold accent on the ready dot. */}
-                        <i
-                          style={
-                            stateClass === "is-ready" ? { background: "var(--gold)" } : undefined
-                          }
-                        />
-                        {state}
-                      </span>
-                      <span className="quick-project-progress">
-                        <strong>{resume ? `${resume.overall_percent_complete}%` : "—"}</strong>
-                        <small>complete</small>
-                      </span>
-                      <span className="quick-project-enter" aria-hidden="true">
-                        →
-                      </span>
-                    </a>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="quick-access-empty">
-                <strong>{query ? "No matching projects" : "No projects yet"}</strong>
-                <span>{query ? "Try a broader search." : "Create a project to get started."}</span>
-              </div>
-            )}
-          </section>
-
-          {/* DESIGN R2: the "Portfolio status" heading is removed — the panel
-              keeps its content and leads with the state badge; the section
-              stays labelled for assistive tech only. */}
-          <section className="focus-panel portfolio-pulse-panel" aria-label="Portfolio status">
-            <div className="focus-panel-head" style={{ justifyContent: "flex-end" }}>
-              <Badge
-                tone={
-                  portfolioState === "Needs attention"
-                    ? "danger"
-                    : portfolioState === "Work in progress"
-                      ? "success"
-                      : portfolioState === "Status unavailable"
-                        ? "warn"
-                        : "info"
-                }
-              >
-                {portfolioState}
-              </Badge>
-            </div>
-            <div className="portfolio-pulse-hero">
-              <div className="pulse-orbit" aria-hidden="true">
-                <span />
-              </div>
-              <div>
-                <strong>
-                  {!hasStatusData
-                    ? "Portfolio status is unavailable"
-                    : waitingDecisions > 0
-                      ? `${waitingDecisions} decision${waitingDecisions === 1 ? "" : "s"} waiting`
-                      : actionableAttention.length > 0
-                        ? `${actionableAttention.length} item${actionableAttention.length === 1 ? "" : "s"} need attention`
-                        : activeAgents > 0
-                          ? `${activeAgents} active run${activeAgents === 1 ? "" : "s"}`
-                          : "No urgent interventions"}
-                </strong>
-                {/* DESIGN R2: the quiet state carries no helper subtext. */}
-                {!hasStatusData ? (
-                  <p>Progress could not be refreshed. No healthy state is being inferred.</p>
-                ) : waitingDecisions > 0 ? (
-                  <p>Your input will unblock the next stretch of work.</p>
-                ) : actionableAttention.length > 0 ? (
-                  <p>A failed, stalled, blocked, or approval-bound item needs review.</p>
-                ) : activeAgents > 0 ? (
-                  <p>Execution is moving and status will refresh automatically.</p>
-                ) : null}
-              </div>
-            </div>
-            {/* DESIGN R2: numbers and labels centered in each tile (inline
-                until the shared-CSS request lands). The Decisions count gets
-                the gold attention highlight when input is actually waiting. */}
-            <div className="project-stats" aria-label="Project overview">
-              <div style={{ textAlign: "center" }}>
-                <strong>{projects?.length ?? "—"}</strong>
-                <span>Total</span>
-              </div>
-              <div style={{ textAlign: "center" }}>
-                <strong>{activeAgents}</strong>
-                <span>Active runs</span>
-              </div>
-              <div style={{ textAlign: "center" }}>
-                <strong style={waitingDecisions > 0 ? { color: "var(--gold)" } : undefined}>
-                  {waitingDecisions}
-                </strong>
-                <span>Decisions</span>
-              </div>
-              <div style={{ textAlign: "center" }}>
-                <strong>{blockedProjects}</strong>
-                <span>Blocked</span>
-              </div>
-            </div>
-            {/* DESIGN R2: the former inline "0 planned · 0 drafts · …" text
-                row is now a second row of small tiles on the same stat-tile
-                pattern. */}
-            <div
-              className="project-stats pulse-foot-tiles"
-              aria-label="Portfolio inventory"
-              style={{ margin: "0 0 0.8rem" }}
+            <Badge
+              tone={
+                portfolioState === "Needs attention"
+                  ? "danger"
+                  : portfolioState === "Work in progress"
+                    ? "success"
+                    : portfolioState === "Status unavailable"
+                      ? "warn"
+                      : "info"
+              }
             >
-              <div style={{ textAlign: "center" }}>
-                <strong>{planned}</strong>
-                <span>Planned</span>
-              </div>
-              <div style={{ textAlign: "center" }}>
-                <strong>{(projects?.length ?? 0) - planned}</strong>
-                <span>Drafts</span>
-              </div>
-              <div style={{ textAlign: "center" }}>
-                <strong>{projects?.length ?? 0}</strong>
-                <span>Projects</span>
-              </div>
-              <div
-                style={{ textAlign: "center" }}
-                data-testid="runner-freshness"
-                title={
-                  runnerLastSeen === null
-                    ? "No heartbeat has been recorded"
-                    : `Last heartbeat ${new Date(runnerLastSeen).toLocaleString()}`
-                }
-              >
-                <strong>{runnerTileValue}</strong>
-                <span>Runner heartbeat</span>
-              </div>
+              {portfolioState}
+            </Badge>
+          </div>
+          <div className="portfolio-summary-stats">
+            <div>
+              <strong>{projects?.length ?? "—"}</strong>
+              <span>Total projects</span>
             </div>
-            {attentionPolling.error ||
-            resumePolling.error ||
-            resumePollIssue ||
-            runnerPolling.error ? (
-              <p className="muted" data-testid="portfolio-refresh-status" aria-live="polite">
-                Refresh issue · showing last known data
-                {attentionPolling.lastSuccessAt
-                  ? ` from ${attentionPolling.lastSuccessAt.toLocaleTimeString()}`
-                  : ""}
-                .
-              </p>
-            ) : (
-              <p className="muted" data-testid="portfolio-refresh-status" aria-live="polite">
-                {attentionPolling.lastSuccessAt
-                  ? `Last refreshed ${attentionPolling.lastSuccessAt.toLocaleTimeString()}`
-                  : "Refreshing status…"}
-              </p>
-            )}
-          </section>
-        </div>
+            <div>
+              <strong>{activeAgents}</strong>
+              <span>Active runs</span>
+            </div>
+            <div>
+              <strong>{blockedProjects}</strong>
+              <span>Blocked</span>
+            </div>
+          </div>
+          {attentionPolling.error || resumePolling.error || resumePollIssue ? (
+            <p className="muted" data-testid="portfolio-refresh-status" aria-live="polite">
+              Refresh issue · showing last known data
+              {attentionPolling.lastSuccessAt
+                ? ` from ${attentionPolling.lastSuccessAt.toLocaleTimeString()}`
+                : ""}
+              .
+            </p>
+          ) : (
+            <p className="muted" data-testid="portfolio-refresh-status" aria-live="polite">
+              {attentionPolling.lastSuccessAt
+                ? `Last refreshed ${attentionPolling.lastSuccessAt.toLocaleTimeString()}`
+                : "Refreshing status…"}
+            </p>
+          )}
+        </section>
         {attention ? (
           <section className="attention-center" aria-labelledby="attention-heading">
             <div className="section-head">
@@ -1729,7 +1543,15 @@ export function Projects({
               ))}
             </div>
           </section>
-        ) : null}
+        ) : (
+          <section className="attention-center" aria-labelledby="attention-heading">
+            <div className="section-head">
+              <h2 id="attention-heading">Status</h2>
+              <span className="muted">Unavailable</span>
+            </div>
+            <Alert>Portfolio status is unavailable. Refresh to try again.</Alert>
+          </section>
+        )}
         <div className="project-toolbar">
           <h2>All projects</h2>
           <span className="project-count">{visible?.length ?? 0} shown</span>
@@ -1740,10 +1562,8 @@ export function Projects({
           <div className="empty">
             <div>
               <div className="empty-icon">◇</div>
-              <strong>{query ? "No matching projects" : "No projects yet"}</strong>
-              <p>
-                {query ? "Try a different search." : "Create your first project to begin planning."}
-              </p>
+              <strong>No projects yet</strong>
+              <p>Create your first project to begin planning.</p>
             </div>
           </div>
         ) : (
@@ -1801,22 +1621,26 @@ export function Projects({
                     <div className="pr-head">
                       <span className="monogram">{project.name.slice(0, 2).toUpperCase()}</span>
                       <div className="pr-titles">
-                        {/* DESIGN R2: project name is the card's dominant
-                            text (≥ --text-lg / 700); filler descriptions are
-                            suppressed. */}
-                        <button
-                          type="button"
-                          className="pr-title-btn"
-                          id={`project-title-${project.id}`}
-                          style={{ fontSize: "var(--text-lg)", fontWeight: 700 }}
-                          onClick={() => onOpenProject(project)}
-                        >
+                        <h3 className="pr-title" id={`project-title-${project.id}`}>
                           {project.name}
-                        </button>
+                        </h3>
                         {!isFillerDescription(project.description) ? (
                           <div className="desc">{project.description}</div>
                         ) : null}
                       </div>
+                      <Badge
+                        tone={
+                          status === "red"
+                            ? "danger"
+                            : status === "green"
+                              ? "success"
+                              : status === "blue"
+                                ? "info"
+                                : "default"
+                        }
+                      >
+                        {statusLabel}
+                      </Badge>
                     </div>
                     <div className="pr-staffing">
                       <span className="role-lbl">Coordinator</span>
@@ -1846,170 +1670,57 @@ export function Projects({
                         <strong>{project.source_location}</strong>
                       </div>
                     ) : null}
-                    {resume?.phases.length ? (
-                      <div className="pr-phases">
-                        {resume.phases.map((phase, index) => {
-                          const phaseNeedsAttention =
-                            phase.blocked ||
-                            projectAttention.some(
-                              (item) => item.phase_id === phase.id && isActionableAttention(item),
-                            );
-                          return (
-                            <div
-                              className={`pr-phase${phaseNeedsAttention ? " blocked" : ""}${
-                                phase.status === "completed" ? " done" : ""
-                              }${phase.status === "queued" || phase.status === "proposed" ? " queued" : ""}`}
-                              key={phase.id}
-                              data-testid="pr-phase"
-                            >
-                              <span className="pp-num">P{index + 1}</span>
-                              <span className="pp-name">{phase.objective_summary}</span>
-                              {phaseNeedsAttention ? (
-                                <span className="pp-blocked">
-                                  {phase.blocked ? "blocked — needs you" : "failed — review"}
-                                </span>
-                              ) : (
-                                <span className="pp-bar">
-                                  <span className="track thin">
-                                    <i style={{ width: `${phase.percent_complete}%` }} />
-                                  </span>
-                                  <span className="pp-pct">{phase.percent_complete}%</span>
-                                </span>
-                              )}
-                              {!phaseNeedsAttention ? (
-                                <span className="pp-eta">
-                                  <span className="lbl">ETA</span>
-                                  {formatEta(phase.eta_at)}
-                                </span>
-                              ) : null}
-                              <button
-                                type="button"
-                                className="pp-open"
-                                data-testid="pp-open"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  onOpenProject({ ...project, focus_phase_id: phase.id });
-                                }}
-                              >
-                                <span className="bubble">💬</span>{" "}
-                                {phase.blocked
-                                  ? "Answer →"
-                                  : phaseNeedsAttention
-                                    ? "Review →"
-                                    : "Open →"}
-                              </button>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <div className="pr-phases">
-                        <div className="pr-phase queued no-plan">
-                          <span className="pp-num">—</span>
-                          <span className="pp-name muted">
-                            No plan drafted yet — phases appear once the coordinator drafts one.
-                          </span>
-                        </div>
-                      </div>
-                    )}
                   </div>
-                  {/* DESIGN R2: side panel restructured into clear sub-areas —
-                      status badge row, a progress tile, a small tile grid for
-                      ETA / agents / decisions, then the actions row. Tile
-                      styling is inline until the shared-CSS request lands. */}
-                  <div className="pr-side">
-                    <div className="pr-side-status">
-                      <Badge
-                        tone={
-                          status === "red"
-                            ? "danger"
-                            : status === "green"
-                              ? "success"
-                              : status === "blue"
-                                ? "info"
-                                : "default"
-                        }
-                      >
-                        {statusLabel}
-                      </Badge>
-                    </div>
-                    <div
-                      className="pr-agg"
-                      style={{
-                        flexDirection: "column",
-                        alignItems: "center",
-                        gap: "0.15rem",
-                        padding: "0.75rem 0.6rem",
-                        border: "1px solid var(--line)",
-                        borderRadius: "var(--radius-sm)",
-                        background: "color-mix(in srgb, var(--bg) 52%, transparent)",
-                        textAlign: "center",
-                      }}
-                    >
-                      <span className="big tnum">
-                        {resume ? `${resume.overall_percent_complete}%` : "—"}
-                      </span>
-                      <span className="lbl">overall complete</span>
-                    </div>
-                    <div
-                      className="pr-facts"
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-                        gap: "0.45rem",
-                      }}
-                    >
-                      {[
-                        {
-                          key: "eta",
-                          label: "Blended ETA",
-                          value: formatEtaDate(resume?.blended_eta_at),
-                          warn: false,
-                        },
-                        {
-                          key: "agents",
-                          label: "Agents active",
-                          value: String(resume?.agents_active ?? 0),
-                          warn: false,
-                        },
-                        {
-                          key: "decisions",
-                          label: "Decisions",
-                          value: resume?.decisions_waiting
-                            ? `${resume.decisions_waiting} waiting`
-                            : "None",
-                          warn: (resume?.decisions_waiting ?? 0) > 0,
-                        },
-                      ].map((fact) => (
-                        <div
-                          className="pr-fact"
-                          key={fact.key}
-                          style={{
-                            flexDirection: "column",
-                            justifyContent: "center",
-                            gap: "0.2rem",
-                            padding: "0.5rem 0.35rem",
-                            border: "1px solid var(--line)",
-                            borderRadius: "var(--radius-sm)",
-                            background: "color-mix(in srgb, var(--bg) 52%, transparent)",
-                            textAlign: "center",
-                          }}
-                        >
-                          <span className={`v${fact.warn ? " warn" : ""}`}>{fact.value}</span>
-                          <span className="k">{fact.label}</span>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="pr-actions">
-                      <Button
-                        type="button"
-                        variant="primary"
-                        className="btn-small"
-                        onClick={() => onOpenProject(project)}
-                      >
-                        Enter project →
-                      </Button>
-                    </div>
+                  <div
+                    className="pr-side project-card-dashboard"
+                    aria-label={`${project.name} dashboard`}
+                  >
+                    {[
+                      {
+                        key: "complete",
+                        label: "Overall complete",
+                        value: resume ? `${resume.overall_percent_complete}%` : "—",
+                        warn: false,
+                      },
+                      {
+                        key: "agents",
+                        label: "Active agents",
+                        value: String(resume?.agents_active ?? 0),
+                        warn: false,
+                      },
+                      {
+                        key: "decisions",
+                        label: "Decisions",
+                        value: resume?.decisions_waiting
+                          ? `${resume.decisions_waiting} waiting`
+                          : "None",
+                        warn: (resume?.decisions_waiting ?? 0) > 0,
+                      },
+                      {
+                        key: "eta",
+                        label: "Blended ETA",
+                        value: formatEtaDate(resume?.blended_eta_at),
+                        warn: false,
+                      },
+                      {
+                        key: "commits",
+                        label: "Total commits",
+                        value: String(resume?.total_commits ?? 0),
+                        warn: false,
+                      },
+                      {
+                        key: "last-commit",
+                        label: "Last commit",
+                        value: resume?.last_commit_sha?.slice(0, 8) ?? "—",
+                        warn: false,
+                        title: resume?.last_commit_sha ?? undefined,
+                      },
+                    ].map((fact) => (
+                      <div className="project-card-stat" key={fact.key} title={fact.title}>
+                        <strong className={fact.warn ? "warn" : ""}>{fact.value}</strong>
+                        <span>{fact.label}</span>
+                      </div>
+                    ))}
                   </div>
                 </article>
               );
@@ -2025,7 +1736,7 @@ export function Projects({
               viewport like every other screen's top strip. */}
           <header className="full-page-header">
             <div className="full-page-header-title">
-              <Brand />
+              <Brand onHome={closeWizard} />
               <span>New project</span>
             </div>
             <Button variant="ghost" className="btn-small" onClick={closeWizard}>

@@ -66,6 +66,15 @@ export const V2ProjectProgress = z
   .strict();
 export type V2ProjectProgressT = z.infer<typeof V2ProjectProgress>;
 
+export const V2ProjectDeliverySummary = z
+  .object({
+    total_commits: z.number().int().nonnegative(),
+    last_commit_sha: z.string().min(7).nullable(),
+    last_commit_at: z.string().datetime().nullable(),
+  })
+  .strict();
+export type V2ProjectDeliverySummaryT = z.infer<typeof V2ProjectDeliverySummary>;
+
 // ---------------------------------------------------------------------------
 // ONBOARDING O2 (read model): every project is GitHub-backed and executes in
 // a GitHub Actions job. A project holds two attachments -- a WORKSPACE (where
@@ -140,6 +149,7 @@ export type V2ProjectOnboardingViewT = z.infer<typeof V2ProjectOnboardingView>;
 export type V2ProjectResumeWithTrackingT = Omit<V2ProjectResumeT, "phases"> & {
   phases: Array<V2ProjectResumeT["phases"][number] & V2PhaseProgressT>;
   progress: V2ProjectProgressT;
+  delivery: V2ProjectDeliverySummaryT;
   update_interval_seconds: number;
   onboarding: V2ProjectOnboardingViewT;
 };
@@ -513,6 +523,24 @@ export class ProjectResumeService {
          WHERE rn <= $2`,
         [projectId, PROGRESS_WINDOW_SIZE],
       );
+      const deliveryResult = await tx.query<{
+        total_commits: number | string;
+        last_commit_sha: string | null;
+        last_commit_at: Date | string | null;
+      }>(
+        `WITH project_commits AS (
+           SELECT COALESCE(published_commit_sha, commit_sha) AS commit_sha,
+                  COALESCE(published_at, finished_at, updated_at, created_at) AS committed_at
+           FROM agent_runs
+           WHERE project_id = $1
+             AND COALESCE(published_commit_sha, commit_sha) IS NOT NULL
+         )
+         SELECT count(DISTINCT commit_sha)::int AS total_commits,
+                (array_agg(commit_sha ORDER BY committed_at DESC))[1] AS last_commit_sha,
+                max(committed_at) AS last_commit_at
+         FROM project_commits`,
+        [projectId],
+      );
       // ONBOARDING O2: both attachments, resolved by role across both tiers.
       const attachments = await tx.query<AttachmentRow>(ONBOARDING_ATTACHMENTS_QUERY, [projectId]);
       const resolved = resolveAttachments(attachments.rows);
@@ -633,6 +661,14 @@ export class ProjectResumeService {
         agents_active: metrics.active_runs,
         decisions_waiting: metrics.open_decisions,
       });
+      const deliveryRow = deliveryResult.rows[0];
+      const delivery = V2ProjectDeliverySummary.parse({
+        total_commits: Number(deliveryRow?.total_commits ?? 0),
+        last_commit_sha: deliveryRow?.last_commit_sha ?? null,
+        last_commit_at: deliveryRow?.last_commit_at
+          ? new Date(deliveryRow.last_commit_at).toISOString()
+          : null,
+      });
 
       const onboarding = V2ProjectOnboardingView.parse({
         scenario: project.onboarding_scenario,
@@ -650,6 +686,7 @@ export class ProjectResumeService {
         ...baseResume,
         phases: phasesWithProgress,
         progress,
+        delivery,
         update_interval_seconds: project.update_interval_seconds,
         onboarding,
       };

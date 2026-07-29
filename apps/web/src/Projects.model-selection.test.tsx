@@ -100,7 +100,7 @@ describe("project manager model selection", () => {
   afterEach(() => mock.restore());
 
   async function openCreateDialog() {
-    await screen.findByText(projectAlpha.name);
+    await screen.findByRole("heading", { name: projectAlpha.name });
     await userEvent.click(screen.getByRole("button", { name: /new project/i }));
     return screen.findByTestId("pm-model");
   }
@@ -161,7 +161,7 @@ describe("project manager model selection", () => {
   });
 
   it("shows the selected PM model on project cards", async () => {
-    await screen.findByText(projectAlpha.name);
+    await screen.findByRole("heading", { name: projectAlpha.name });
     expect(screen.getByText("Claude Sonnet 5")).toBeInTheDocument();
   });
 });

@@ -223,6 +223,15 @@ export class ProjectStore {
       .map((record) => this.summarize(record));
   }
 
+  listArchived(): Array<ProjectSummary & { archived_at: string }> {
+    return [...this.projects.values()]
+      .filter(
+        (record): record is ProjectRecord & { archivedAt: string } => record.archivedAt !== null,
+      )
+      .sort((left, right) => right.archivedAt.localeCompare(left.archivedAt))
+      .map((record) => ({ ...this.summarize(record), archived_at: record.archivedAt }));
+  }
+
   summary(id: string): ProjectSummary {
     return this.summarize(this.record(id));
   }
@@ -232,6 +241,13 @@ export class ProjectStore {
     const record = this.projects.get(id);
     if (!record || record.archivedAt !== null) throw new ProjectNotFoundError(id);
     record.archivedAt = new Date().toISOString();
+  }
+
+  /** Return an archived project to active product surfaces without changing its history. */
+  restore(id: string): void {
+    const record = this.projects.get(id);
+    if (!record || record.archivedAt === null) throw new ProjectNotFoundError(id);
+    record.archivedAt = null;
   }
 
   /** The live GraphSession for a project — throws if it hasn't been planned yet. */

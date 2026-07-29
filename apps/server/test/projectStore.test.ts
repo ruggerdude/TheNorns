@@ -119,7 +119,7 @@ describe("ProjectStore", () => {
     expect(() => store.summary("proj-does-not-exist")).toThrow(ProjectNotFoundError);
   });
 
-  it("archives a project out of active reads and preserves that removal in snapshots", () => {
+  it("archives a project out of active reads, lists it for admins, and restores it", () => {
     const store = new ProjectStore();
     const retained = store.create({
       name: "Retained",
@@ -135,12 +135,21 @@ describe("ProjectStore", () => {
     store.archive(removed.id);
 
     expect(store.list().map((project) => project.id)).toEqual([retained.id]);
+    expect(store.listArchived()).toEqual([
+      expect.objectContaining({
+        id: removed.id,
+        archived_at: expect.any(String),
+      }),
+    ]);
     expect(() => store.summary(removed.id)).toThrow(ProjectNotFoundError);
 
     const restored = new ProjectStore();
     restored.restoreFrom(store.snapshot());
     expect(restored.list().map((project) => project.id)).toEqual([retained.id]);
     expect(() => restored.summary(removed.id)).toThrow(ProjectNotFoundError);
+    restored.restore(removed.id);
+    expect(restored.listArchived()).toEqual([]);
+    expect(restored.summary(removed.id)).toMatchObject({ id: removed.id, status: "draft" });
   });
 
   it("loadPlan turns a draft project into a planned one with a real graph", () => {
