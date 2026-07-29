@@ -650,6 +650,34 @@ describe("conversation workspace", () => {
     );
   });
 
+  it("discards the obsolete pre-migration review_mode error from the browser session", async () => {
+    const storageKey = `norns:conversation-plan-proposal-error:${conversationId}`;
+    window.sessionStorage.setItem(storageKey, 'column "review_mode" does not exist');
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse([]);
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onConversationSelected={() => undefined}
+        onUnsupported={() => undefined}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByRole("textbox", { name: "Message the project PM" })).toBeVisible();
+    expect(screen.queryByTestId("conversation-plan-proposal-error")).not.toBeInTheDocument();
+    expect(window.sessionStorage.getItem(storageKey)).toBeNull();
+  });
+
   it("switches models inside the pinned provider ecosystem", async () => {
     let switchBody: unknown = null;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

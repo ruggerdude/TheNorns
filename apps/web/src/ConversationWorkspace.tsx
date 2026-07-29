@@ -2205,7 +2205,13 @@ function planChangeProposalKeyFor(planVersionId: string, memory: Map<string, str
 
 function storedProposalError(conversationId: string): string | null {
   try {
-    return window.sessionStorage.getItem(proposalErrorStorageKey(conversationId));
+    const storageKey = proposalErrorStorageKey(conversationId);
+    const stored = window.sessionStorage.getItem(storageKey);
+    if (stored?.includes('column "review_mode" does not exist')) {
+      window.sessionStorage.removeItem(storageKey);
+      return null;
+    }
+    return stored;
   } catch {
     return null;
   }
