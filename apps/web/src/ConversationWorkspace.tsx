@@ -82,6 +82,7 @@ import {
   type ConversationDetail,
   type SubmitConversationMessageBody,
   type WorkItemConversationGroup,
+  cancelConversationPlanReview,
   confirmConversationAction,
   createPlanningWorkItem,
   generateConversationPlanChangeProposal,
@@ -422,6 +423,9 @@ type ConversationActionContextValue = {
   planChangeErrors: Map<string, string>;
   planChangeLockedIds: Set<string>;
   proposePlanChanges: (version: V2WorkPlanVersionT, direction: string) => Promise<boolean>;
+  reviewBusyId: string | null;
+  reviewErrors: Map<string, string>;
+  cancelReview: (review: V2ConversationPlanReviewT, reason: string) => Promise<void>;
   prepareExecutionAction: (
     actionType: V2CreateExecutionActionProposalInputT["action_type"],
     parameters: Record<string, unknown>,
@@ -1443,14 +1447,198 @@ function PlanChangeControl({
   );
 }
 
+function StaffingReviewControl({
+  reviews,
+  version,
+}: {
+  reviews: V2ConversationPlanReviewT[];
+  version: V2WorkPlanVersionT;
+}): React.ReactElement | null {
+  const context = useContext(ConversationActionContext);
+  const [models, setModels] = useState<ExecutionModelCapability[] | null>(null);
+  const [selection, setSelection] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      version.plan.staffing.map((staffing) => [
+        staffing.module_id,
+        `${staffing.provider}:${staffing.model}`,
+      ]),
+    ),
+  );
+  const activeReview = reviews.find(
+    (review) => review.status === "queued" || review.status === "running",
+  );
+
+  useEffect(() => {
+    let current = true;
+    void getExecutionModelCapabilities()
+      .then((response) => {
+        if (current) setModels(response.models.filter((model) => model.available));
+      })
+      .catch(() => {
+        if (current) setModels([]);
+      });
+    return () => {
+      current = false;
+    };
+  }, []);
+
+  if (!context || !["candidate", "in_qc"].includes(version.status)) return null;
+  const changed = version.plan.staffing.some(
+    (staffing) => selection[staffing.module_id] !== `${staffing.provider}:${staffing.model}`,
+  );
+
+  return (
+    <details className="conversation-staffing-review">
+      <summary>Review or change implementation agents</summary>
+      <div>
+        <p>
+          Every plan task already has one pinned role, provider, and model. Changes create a new
+          immutable plan version so the final approval always shows the exact team that will run.
+        </p>
+        <div className="conversation-staffing-grid">
+          {version.plan.staffing.map((staffing) => {
+            const module = version.plan.plan.modules.find(
+              (candidate) => candidate.id === staffing.module_id,
+            );
+            const currentValue = `${staffing.provider}:${staffing.model}`;
+            const options = [...(models ?? [])];
+            if (!options.some((model) => `${model.provider}:${model.id}` === currentValue)) {
+              options.unshift({
+                provider: staffing.provider,
+                id: staffing.model,
+                label: staffing.model,
+                available: true,
+                unavailable_reason: null,
+              });
+            }
+            const selectId = `staffing-agent-${version.id}-${staffing.module_id}`;
+            return (
+              <label key={staffing.module_id} htmlFor={selectId}>
+                <span>
+                  <strong>{module?.title ?? staffing.module_id}</strong>
+                  <small>{staffing.agent_role}</small>
+                </span>
+                <Select
+                  id={selectId}
+                  aria-label={`Agent for ${module?.title ?? staffing.module_id}`}
+                  value={selection[staffing.module_id] ?? currentValue}
+                  disabled={
+                    models === null ||
+                    activeReview !== undefined ||
+                    context.planChangeBusyId === version.id
+                  }
+                  onChange={(event) =>
+                    setSelection((current) => ({
+                      ...current,
+                      [staffing.module_id]: event.target.value,
+                    }))
+                  }
+                >
+                  {options.map((model) => (
+                    <option
+                      key={`${staffing.module_id}:${model.provider}:${model.id}`}
+                      value={`${model.provider}:${model.id}`}
+                    >
+                      {model.label} · {model.provider}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+            );
+          })}
+        </div>
+        <div className="conversation-staffing-actions">
+          <span>
+            {activeReview
+              ? "Stop or finish QC before changing the team."
+              : changed
+                ? "Agent changes are ready to prepare."
+                : "The displayed team is the team encoded in this plan."}
+          </span>
+          <Button
+            disabled={
+              !changed || activeReview !== undefined || context.planChangeBusyId === version.id
+            }
+            onClick={() => {
+              const assignments = version.plan.staffing.map((staffing) => {
+                const [provider, ...modelParts] = (
+                  selection[staffing.module_id] ?? `${staffing.provider}:${staffing.model}`
+                ).split(":");
+                return `- ${staffing.module_id}: role "${staffing.agent_role}", provider "${provider}", model "${modelParts.join(":")}"`;
+              });
+              void context.proposePlanChanges(
+                version,
+                [
+                  "Update only the staffing assignments in the Work Plan Contract to exactly the following:",
+                  ...assignments,
+                  "Preserve every task, dependency, acceptance check, verification requirement, risk, open decision, and budget unless a staffing change strictly requires a corresponding clarification.",
+                ].join("\n"),
+              );
+            }}
+          >
+            {context.planChangeBusyId === version.id
+              ? "Preparing team change…"
+              : "Prepare team change"}
+          </Button>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 function PlanPreview({ data }: DataMessagePartProps<PlanData>): React.ReactElement {
+  const context = useContext(ConversationActionContext);
   if (!data.version) return <ReferenceCard data={data} />;
   return (
     <>
       <ConversationPlanCard version={data.version} />
-      {data.reviews.map((review: V2ConversationPlanReviewT) => (
-        <ConversationQcCard key={review.id} planVersion={data.version} review={review} />
-      ))}
+      {data.reviews.map((review: V2ConversationPlanReviewT) => {
+        const targetPlanId = review.revised_plan_version_id ?? review.plan_version_id;
+        const proposed = context
+          ? [...context.actions.values()].filter((action) => action.status === "proposed")
+          : [];
+        const approve =
+          proposed.find(
+            (action) =>
+              action.action_type === "approve_plan" &&
+              action.payload.parameters.plan_review_id === review.id &&
+              action.payload.parameters.plan_version_id === targetPlanId,
+          ) ?? null;
+        const repeat =
+          proposed.find(
+            (action) =>
+              action.action_type === "send_plan_to_qc" &&
+              action.payload.parameters.plan_version_id === targetPlanId,
+          ) ?? null;
+        const reject =
+          proposed.find(
+            (action) =>
+              action.action_type === "reject_plan" &&
+              action.payload.parameters.plan_version_id === targetPlanId,
+          ) ?? null;
+        return (
+          <ConversationQcCard
+            key={review.id}
+            planVersion={data.version}
+            review={review}
+            actions={{ approve, repeat, reject }}
+            busy={
+              context?.reviewBusyId === review.id ||
+              (context?.busyActionId !== null && context?.busyActionId !== undefined)
+            }
+            error={
+              context?.reviewErrors.get(review.id) ??
+              (approve ? context?.errors.get(approve.id) : null) ??
+              (repeat ? context?.errors.get(repeat.id) : null) ??
+              (reject ? context?.errors.get(reject.id) : null) ??
+              null
+            }
+            onCancel={context?.cancelReview}
+            onConfirmAction={context?.confirm}
+          />
+        );
+      })}
+      <StaffingReviewControl version={data.version} reviews={data.reviews} />
       <PlanChangeControl version={data.version} reviews={data.reviews} />
     </>
   );
@@ -2747,8 +2935,11 @@ function ConversationThread({
   const [planChangeBusyId, setPlanChangeBusyId] = useState<string | null>(null);
   const [planChangeErrors, setPlanChangeErrors] = useState(() => new Map<string, string>());
   const [planChangeLockedIds, setPlanChangeLockedIds] = useState(() => new Set<string>());
+  const [reviewBusyId, setReviewBusyId] = useState<string | null>(null);
+  const [reviewErrors, setReviewErrors] = useState(() => new Map<string, string>());
   const [executionProposalBusy, setExecutionProposalBusy] = useState(false);
   const [executionProposalError, setExecutionProposalError] = useState<string | null>(null);
+  const [stopTaskId, setStopTaskId] = useState("");
   const [lockedExecutionRequest, setLockedExecutionRequest] =
     useState<V2CreateExecutionActionProposalInputT | null>(() =>
       storedExactRequest(
@@ -3256,6 +3447,49 @@ function ConversationThread({
     ],
   );
 
+  const cancelReview = useCallback(
+    async (review: V2ConversationPlanReviewT, reason: string): Promise<void> => {
+      if (reviewBusyId !== null) return;
+      setReviewBusyId(review.id);
+      setReviewErrors((current) => {
+        const next = new Map(current);
+        next.delete(review.id);
+        return next;
+      });
+      try {
+        await cancelConversationPlanReview(
+          detail.work_item.project_id,
+          detail.work_item.id,
+          detail.conversation.id,
+          review.id,
+          reason,
+        );
+        onRefresh();
+      } catch (caught) {
+        if (caught instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
+        setReviewErrors((current) =>
+          new Map(current).set(
+            review.id,
+            caught instanceof Error ? caught.message : String(caught),
+          ),
+        );
+      } finally {
+        setReviewBusyId(null);
+      }
+    },
+    [
+      detail.conversation.id,
+      detail.work_item.id,
+      detail.work_item.project_id,
+      onRefresh,
+      onUnauthorized,
+      reviewBusyId,
+    ],
+  );
+
   const submitExecutionAction = useCallback(
     async (request: V2CreateExecutionActionProposalInputT): Promise<boolean> => {
       if (executionProposalBusy) return false;
@@ -3549,6 +3783,9 @@ function ConversationThread({
       planChangeErrors,
       planChangeLockedIds,
       proposePlanChanges,
+      reviewBusyId,
+      reviewErrors,
+      cancelReview,
       prepareExecutionAction: proposeExecutionAction,
       executionProposalBusy,
       executionProposalError,
@@ -3571,6 +3808,9 @@ function ConversationThread({
     planChangeBusyId,
     planChangeErrors,
     planChangeLockedIds,
+    reviewBusyId,
+    reviewErrors,
+    cancelReview,
     prepareHumanWaitAnswer,
     proposePlanChanges,
     proposeExecutionAction,
@@ -3674,6 +3914,45 @@ function ConversationThread({
           </div>
           {isExecution && !isReadOnly ? (
             <section className="execution-conversation-controls" aria-label="Execution controls">
+              <div className="execution-stop-agents">
+                <div>
+                  <strong>Running agents</strong>
+                  <span>
+                    Stop one live task immediately, or pause all work and block new dispatches.
+                  </span>
+                </div>
+                <Select
+                  aria-label="Agent task to stop"
+                  value={stopTaskId}
+                  disabled={executionProposalBusy || lockedExecutionRequest !== null}
+                  onChange={(event) => setStopTaskId(event.target.value)}
+                >
+                  <option value="">All work · pause dispatch</option>
+                  {taskOptions.map((option) => (
+                    <option key={`stop:${option.id}`} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+                <Button
+                  variant="danger"
+                  disabled={executionProposalBusy || lockedExecutionRequest !== null}
+                  onClick={() =>
+                    void proposeExecutionAction("pause_work", {
+                      reason: stopTaskId
+                        ? `Task ${stopTaskId} stopped by the human operator.`
+                        : "All new agent dispatches paused by the human operator.",
+                      ...(stopTaskId ? { task_id: stopTaskId } : {}),
+                    })
+                  }
+                >
+                  {executionProposalBusy
+                    ? "Preparing stop…"
+                    : stopTaskId
+                      ? "Stop selected agent"
+                      : "Pause all agent work"}
+                </Button>
+              </div>
               <details>
                 <summary>Decisions, direction, pause, and artifacts</summary>
                 <ExecutionActionComposer

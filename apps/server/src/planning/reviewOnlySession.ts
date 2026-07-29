@@ -26,6 +26,7 @@ export interface ReviewOnlyRound {
   reviewed_plan: V2WorkPlanContractT;
   findings: ReviewFindingT[];
   responses: FindingResponseT[] | null;
+  revised_plan_content_hash?: string | null;
 }
 
 export interface ReviewOnlyPlanningResult {
@@ -47,6 +48,8 @@ export interface ReviewOnlyPlanningOptions {
   frozenContext: unknown;
   telemetryGroupId: string;
   maxRounds: number;
+  signal?: AbortSignal;
+  onProgress?: (rounds: readonly ReviewOnlyRound[]) => void | Promise<void>;
 }
 
 function reviewOnlySystem(base: string, frozenContext: unknown): string {
@@ -116,6 +119,7 @@ export async function runReviewOnlyPlanning(
         telemetryRequestId: `${options.telemetryGroupId}:review:${round}`,
         telemetryRetryGroupId: `${options.telemetryGroupId}:review:${round}`,
         telemetryRetryAttempt: 0,
+        ...(options.signal ? { signal: options.signal } : {}),
       },
       ReviewFindings,
       "review_findings",
@@ -127,8 +131,10 @@ export async function runReviewOnlyPlanning(
       reviewed_plan: reviewedPlan,
       findings,
       responses: null,
+      revised_plan_content_hash: null,
     };
     rounds.push(record);
+    await options.onProgress?.(rounds);
     if (mustFixCount(findings) === 0) {
       return {
         status: "converged",
@@ -149,6 +155,7 @@ export async function runReviewOnlyPlanning(
         telemetryRequestId: `${options.telemetryGroupId}:revision:${round}`,
         telemetryRetryGroupId: `${options.telemetryGroupId}:revision:${round}`,
         telemetryRetryAttempt: 0,
+        ...(options.signal ? { signal: options.signal } : {}),
       },
       ReviewOnlyRevision,
       "plan_revision",
@@ -181,6 +188,8 @@ export async function runReviewOnlyPlanning(
     }
     record.responses = [...revision.value.responses];
     plan = V2WorkPlanContract.parse(revision.value.plan);
+    record.revised_plan_content_hash = canonicalSha256(plan);
+    await options.onProgress?.(rounds);
     if (round === options.maxRounds) {
       return {
         status: "cap_reached",

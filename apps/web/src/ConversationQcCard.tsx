@@ -1,9 +1,11 @@
 import type {
+  V2ConversationActionT,
   V2ConversationPlanReviewFindingT,
   V2ConversationPlanReviewT,
   V2WorkPlanVersionT,
 } from "@norns/contracts";
-import { Badge } from "./ui";
+import { useState } from "react";
+import { Badge, Button, TextArea } from "./ui";
 
 const SEVERITIES = [
   { value: "must_fix", label: "Must fix", tone: "danger" },
@@ -15,7 +17,7 @@ function statusTone(
   status: V2ConversationPlanReviewT["status"],
 ): "default" | "success" | "warn" | "danger" | "info" {
   if (status === "converged") return "success";
-  if (status === "failed") return "danger";
+  if (status === "failed" || status === "cancelled") return "danger";
   if (status === "cap_reached") return "warn";
   return "info";
 }
@@ -56,13 +58,33 @@ function Finding({
 export function ConversationQcCard({
   planVersion,
   review,
+  actions = {},
+  busy = false,
+  error = null,
+  onCancel,
+  onConfirmAction,
 }: {
   planVersion: V2WorkPlanVersionT | null;
   review: V2ConversationPlanReviewT;
+  actions?: {
+    approve?: V2ConversationActionT | null;
+    repeat?: V2ConversationActionT | null;
+    reject?: V2ConversationActionT | null;
+  };
+  busy?: boolean;
+  error?: string | null;
+  onCancel?: (review: V2ConversationPlanReviewT, reason: string) => Promise<void>;
+  onConfirmAction?: (action: V2ConversationActionT) => Promise<void>;
 }): React.ReactElement {
+  const [stopping, setStopping] = useState(false);
+  const [reason, setReason] = useState("Stopped by human review.");
   const titleId = `conversation-qc-${review.id}`;
-  const terminal = ["converged", "cap_reached", "failed"].includes(review.status);
+  const terminal = ["converged", "cap_reached", "failed", "cancelled"].includes(review.status);
   const waived = review.review_mode === "waived";
+  const percent = Math.min(
+    100,
+    Math.round((review.rounds_completed / Math.max(1, review.max_rounds)) * 100),
+  );
 
   return (
     <article
@@ -85,6 +107,12 @@ export function ConversationQcCard({
       </header>
 
       <dl className="conversation-qc-summary">
+        <div>
+          <dt>Progress</dt>
+          <dd>
+            {review.rounds_completed} / {review.max_rounds} rounds
+          </dd>
+        </div>
         <div>
           <dt>Exact reviewed hash</dt>
           <dd>
@@ -116,16 +144,102 @@ export function ConversationQcCard({
       </dl>
 
       {!terminal ? (
-        <output className="conversation-qc-progress" aria-live="polite">
-          QC is {review.status}. Findings and PM dispositions will appear here after the review
-          settles.
-        </output>
+        <>
+          <output className="conversation-qc-progress" aria-live="polite">
+            <span>
+              QC is {review.status}. Findings and PM dispositions will appear here after the review
+              settles.
+            </span>
+            <span>{percent}%</span>
+          </output>
+          <div className="conversation-qc-progress-track" aria-hidden="true">
+            <span style={{ width: `${percent}%` }} />
+          </div>
+        </>
       ) : null}
       {review.status === "failed" ? (
         <output className="conversation-qc-failure" role="alert">
           QC failed · {review.failure_code}. The unchanged plan remains a candidate and can be sent
           to QC again.
         </output>
+      ) : null}
+      {review.status === "cancelled" ? (
+        <output className="conversation-qc-failure">
+          QC stopped by a human · {review.cancellation_reason}
+        </output>
+      ) : null}
+
+      {review.round_exchanges.length > 0 ? (
+        <section className="conversation-qc-transcript" aria-labelledby={`${titleId}-transcript`}>
+          <div>
+            <h4 id={`${titleId}-transcript`}>Agent review transcript</h4>
+            <Badge tone="info">{review.round_exchanges.length} rounds</Badge>
+          </div>
+          <ol>
+            {review.round_exchanges.map((exchange) => (
+              <li key={exchange.round}>
+                <div className="conversation-qc-round-heading">
+                  <strong>Round {exchange.round}</strong>
+                  <code title={exchange.reviewed_plan_content_hash}>
+                    Plan {exchange.reviewed_plan_content_hash.slice(0, 10)}
+                  </code>
+                </div>
+                <article className="conversation-qc-agent-message is-reviewer">
+                  <header>
+                    <Badge tone="warn">QC reviewer</Badge>
+                    <strong>
+                      {exchange.reviewer.provider} · {exchange.reviewer.model}
+                    </strong>
+                  </header>
+                  {exchange.reviewer.findings.length === 0 ? (
+                    <p>No changes requested.</p>
+                  ) : (
+                    <ol>
+                      {exchange.reviewer.findings.map((finding, index) => (
+                        <li key={`${exchange.round}:finding:${index}`}>
+                          <strong>{finding.severity.replaceAll("_", " ")}</strong>
+                          <span>{finding.finding}</span>
+                          <small>{finding.recommendation}</small>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </article>
+                {exchange.pm ? (
+                  <article className="conversation-qc-agent-message is-pm">
+                    <header>
+                      <Badge tone="info">Planning agent</Badge>
+                      <strong>
+                        {exchange.pm.provider} · {exchange.pm.model}
+                      </strong>
+                    </header>
+                    {exchange.pm.dispositions.length > 0 ? (
+                      <ol>
+                        {exchange.pm.dispositions.map((disposition) => (
+                          <li key={`${exchange.round}:response:${disposition.finding_index}`}>
+                            <strong>{disposition.disposition}</strong>
+                            <span>{disposition.rationale}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    ) : (
+                      <p>No dispositions were required.</p>
+                    )}
+                    <code title={exchange.pm.revised_plan_content_hash}>
+                      Revised plan {exchange.pm.revised_plan_content_hash.slice(0, 10)}
+                    </code>
+                  </article>
+                ) : exchange.reviewer.findings.some(
+                    (finding) => finding.severity === "must_fix",
+                  ) ? (
+                  <p className="conversation-qc-awaiting-agent">
+                    Waiting for the planning agent to respond.
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        </section>
       ) : null}
 
       {SEVERITIES.map((severity) => {
@@ -163,6 +277,92 @@ export function ConversationQcCard({
         <p className="conversation-qc-revision">
           PM revision saved as plan reference <code>{review.revised_plan_version_id}</code>.
         </p>
+      ) : null}
+
+      {!terminal && onCancel ? (
+        <section className="conversation-qc-controls">
+          {stopping ? (
+            <>
+              <label htmlFor={`${titleId}-stop-reason`}>Why are you stopping QC?</label>
+              <TextArea
+                id={`${titleId}-stop-reason`}
+                value={reason}
+                maxLength={500}
+                disabled={busy}
+                onChange={(event) => setReason(event.target.value)}
+              />
+              <div>
+                <Button disabled={busy} onClick={() => setStopping(false)}>
+                  Keep QC running
+                </Button>
+                <Button
+                  variant="danger"
+                  disabled={busy || !reason.trim()}
+                  onClick={() => void onCancel(review, reason.trim())}
+                >
+                  {busy ? "Stopping…" : "Confirm stop QC"}
+                </Button>
+              </div>
+            </>
+          ) : (
+            <Button variant="danger" disabled={busy} onClick={() => setStopping(true)}>
+              Stop QC
+            </Button>
+          )}
+        </section>
+      ) : null}
+      {!terminal && error ? (
+        <output className="conversation-action-error" role="alert">
+          {error}
+        </output>
+      ) : null}
+
+      {terminal && onConfirmAction ? (
+        <section className="conversation-qc-decision" aria-label="Human plan decision">
+          <div>
+            <h4>What happens next?</h4>
+            <p>Review the transcript and final staffing before choosing.</p>
+          </div>
+          <div>
+            {actions.approve && ["converged", "cap_reached"].includes(review.status) ? (
+              <Button
+                variant="primary"
+                disabled={busy}
+                onClick={() => {
+                  if (actions.approve) void onConfirmAction(actions.approve);
+                }}
+              >
+                Approve plan & start
+              </Button>
+            ) : null}
+            {actions.repeat ? (
+              <Button
+                disabled={busy}
+                onClick={() => {
+                  if (actions.repeat) void onConfirmAction(actions.repeat);
+                }}
+              >
+                Run more QC rounds
+              </Button>
+            ) : null}
+            {actions.reject ? (
+              <Button
+                variant="danger"
+                disabled={busy}
+                onClick={() => {
+                  if (actions.reject) void onConfirmAction(actions.reject);
+                }}
+              >
+                Stop this plan
+              </Button>
+            ) : null}
+          </div>
+          {error ? (
+            <output className="conversation-action-error" role="alert">
+              {error}
+            </output>
+          ) : null}
+        </section>
       ) : null}
     </article>
   );

@@ -33,6 +33,12 @@ const ConfirmBody = z
   })
   .strict();
 
+const CancelReviewBody = z
+  .object({
+    reason: z.string().trim().min(1).max(500),
+  })
+  .strict();
+
 function routeError(reply: FastifyReply, error: unknown): void {
   if (error instanceof z.ZodError) {
     reply.code(400).send({ error: "bad_request", issues: error.issues });
@@ -171,6 +177,29 @@ export function registerConversationPlanRoutes(
         idempotency_key: body.idempotency_key,
       });
       return reply.send(response);
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.post(`${base}/plan-reviews/:reviewId/cancel`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId, workItemId, conversationId, reviewId } = request.params as {
+      projectId: string;
+      workItemId: string;
+      conversationId: string;
+      reviewId: string;
+    };
+    try {
+      const body = CancelReviewBody.parse(request.body);
+      const review = await options.workflow.cancelReview(
+        user.id,
+        { projectId, workItemId, conversationId },
+        reviewId,
+        body.reason,
+      );
+      return reply.send({ review });
     } catch (error) {
       routeError(reply, error);
     }

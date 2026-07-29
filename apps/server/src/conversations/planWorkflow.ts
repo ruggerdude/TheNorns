@@ -26,7 +26,7 @@ import {
 import { newId } from "../ids.js";
 import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
-import type { ReviewOnlyPlanningResult } from "../planning/reviewOnlySession.js";
+import type { ReviewOnlyPlanningResult, ReviewOnlyRound } from "../planning/reviewOnlySession.js";
 import type {
   ApprovedPlanExecutionKickoff,
   ApprovedStaffingEntryDto,
@@ -43,6 +43,7 @@ export type ConversationPlanWorkflowErrorCode =
   | "project_not_found"
   | "work_item_not_found"
   | "conversation_not_found"
+  | "review_not_found"
   | "conversation_inactive"
   | "action_not_found"
   | "action_already_confirmed"
@@ -82,6 +83,7 @@ export interface ConversationPlanWorkflowOptions {
     pm: { provider: ProviderName; model: string },
   ): Promise<ConversationPlanReviewModels>;
   runReviewNow(runId: string): Promise<unknown>;
+  cancelReviewNow?(runId: string): boolean;
   executionKickoff?: ApprovedPlanExecutionKickoff;
   approvalTransitionCheckpoint?: (
     checkpoint:
@@ -174,6 +176,9 @@ interface ReviewRow {
   review_mode: "qc" | "waived";
   usage_request_group_id: string;
   status: V2ConversationPlanReviewT["status"];
+  rounds_completed: number | string;
+  max_rounds: number | string;
+  round_exchanges: unknown;
   seed_plan: unknown;
   plan_content_hash: string;
   result_plan_content_hash: string;
@@ -188,6 +193,8 @@ interface ReviewRow {
   started_at: Date | string | null;
   completed_at: Date | string | null;
   failure_code: string | null;
+  cancelled_by_user_id: string | null;
+  cancellation_reason: string | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -238,7 +245,11 @@ const reviewColumns = `schema_version, id, project_id, work_item_id, conversatio
   usage_request_group_id,
   plan_content_hash, result_plan_content_hash, context_receipt, context_manifest,
   context_hash, findings, dispositions, revised_plan, revised_plan_content_hash,
-  revised_plan_version_id, started_at, completed_at, failure_code, created_at, updated_at`;
+  revised_plan_version_id,
+  (SELECT round FROM planning_runs WHERE id=planning_run_id) AS rounds_completed,
+  (SELECT max_rounds FROM planning_runs WHERE id=planning_run_id) AS max_rounds,
+  round_exchanges, started_at, completed_at, failure_code,
+  cancelled_by_user_id, cancellation_reason, created_at, updated_at`;
 const effectColumns = `schema_version, id, project_id, work_item_id, conversation_id,
   action_id, effect_kind, plan_version_id, plan_review_id, planning_run_id,
   execution_status, execution_started, execution_detail,
@@ -320,6 +331,9 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
     review_mode: row.review_mode,
     usage_request_group_id: row.usage_request_group_id,
     status: row.status,
+    rounds_completed: Number(row.rounds_completed),
+    max_rounds: Number(row.max_rounds),
+    round_exchanges: json(row.round_exchanges),
     plan_content_hash: row.plan_content_hash,
     result_plan_content_hash: row.result_plan_content_hash,
     context_manifest: { entries: manifest.entries, context_hash: row.context_hash },
@@ -329,6 +343,8 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
     started_at: nullableIso(row.started_at),
     completed_at: nullableIso(row.completed_at),
     failure_code: row.failure_code,
+    cancelled_by_user_id: row.cancelled_by_user_id,
+    cancellation_reason: row.cancellation_reason,
     created_at: iso(row.created_at),
     updated_at: iso(row.updated_at),
   });
@@ -553,6 +569,173 @@ export class ConversationPlanWorkflowService {
     });
   }
 
+  async recordReviewOnlyProgress(input: {
+    reviewId: string;
+    planningRunId: string;
+    rounds: readonly ReviewOnlyRound[];
+  }): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      const review = (
+        await tx.query<ReviewRow>(
+          `SELECT ${reviewColumns} FROM conversation_plan_reviews
+            WHERE id=$1 AND planning_run_id=$2 FOR UPDATE`,
+          [input.reviewId, input.planningRunId],
+        )
+      ).rows[0];
+      if (!review || review.status !== "running") return;
+      const exchanges = this.reviewRoundExchanges(review, input.rounds);
+      const latest = input.rounds.at(-1);
+      const round = latest?.round ?? 0;
+      const transcript = exchanges.flatMap((exchange) => [
+        {
+          round: exchange.round,
+          role: "reviewer",
+          provider: exchange.reviewer.provider,
+          model: exchange.reviewer.model,
+          summary: `${exchange.reviewer.findings.length} finding(s) recorded.`,
+          finding_counts: {
+            must_fix: exchange.reviewer.findings.filter(
+              (finding) => finding.severity === "must_fix",
+            ).length,
+            should_fix: exchange.reviewer.findings.filter(
+              (finding) => finding.severity === "should_fix",
+            ).length,
+            suggestion: exchange.reviewer.findings.filter(
+              (finding) => finding.severity === "suggestion",
+            ).length,
+          },
+        },
+        ...(exchange.pm
+          ? [
+              {
+                round: exchange.round,
+                role: "pm",
+                provider: exchange.pm.provider,
+                model: exchange.pm.model,
+                summary: `${exchange.pm.dispositions.length} disposition(s) recorded and the plan revised.`,
+                finding_counts: null,
+              },
+            ]
+          : []),
+      ]);
+      const now = this.now().toISOString();
+      await tx.query(
+        `UPDATE planning_runs
+            SET status=$2, round=$3, transcript=$4::jsonb, updated_at=$5
+          WHERE id=$1 AND mode='review_only'
+            AND status IN ('reviewing','revising')`,
+        [
+          input.planningRunId,
+          latest?.responses ? "reviewing" : "revising",
+          round,
+          JSON.stringify(transcript),
+          now,
+        ],
+      );
+      await tx.query(
+        `UPDATE conversation_plan_reviews
+            SET round_exchanges=$2::jsonb, updated_at=$3
+          WHERE id=$1 AND status='running'`,
+        [input.reviewId, JSON.stringify(exchanges), now],
+      );
+    });
+  }
+
+  async cancelReview(
+    userId: string,
+    scope: { projectId: string; workItemId: string; conversationId: string },
+    reviewId: string,
+    reason: string,
+  ): Promise<V2ConversationPlanReviewT> {
+    const cancelled = await this.transactions.transaction(async (tx) => {
+      await this.assertAccess(tx, scope.projectId, userId);
+      await this.assertConversation(
+        tx,
+        scope.projectId,
+        scope.workItemId,
+        scope.conversationId,
+        false,
+      );
+      const review = (
+        await tx.query<ReviewRow>(
+          `SELECT ${reviewColumns} FROM conversation_plan_reviews
+            WHERE id=$1 AND project_id=$2 AND work_item_id=$3 AND conversation_id=$4
+            FOR UPDATE`,
+          [reviewId, scope.projectId, scope.workItemId, scope.conversationId],
+        )
+      ).rows[0];
+      if (!review) {
+        throw new ConversationPlanWorkflowError(
+          "review_not_found",
+          `plan review "${reviewId}" was not found`,
+          404,
+        );
+      }
+      if (review.status === "cancelled") return { review, changed: false };
+      if (!["queued", "running"].includes(review.status)) {
+        throw new ConversationPlanWorkflowError(
+          "invalid_plan_state",
+          `QC cannot be stopped after it is ${review.status}`,
+        );
+      }
+      const now = this.now().toISOString();
+      await tx.query(
+        `UPDATE planning_runs
+            SET status='cancelled', error=NULL, lease_token=NULL, leased_until=NULL, updated_at=$2
+          WHERE id=$1 AND mode='review_only'
+            AND status IN ('queued','drafting','reviewing','revising')`,
+        [review.planning_run_id, now],
+      );
+      await tx.query(
+        `UPDATE conversation_plan_reviews
+            SET status='cancelled', completed_at=$2, cancelled_by_user_id=$3,
+                cancellation_reason=$4, updated_at=$2
+          WHERE id=$1 AND status IN ('queued','running')`,
+        [review.id, now, userId, reason],
+      );
+      const action = await this.actionById(tx, review.action_id, true);
+      if (["sent", "agent_acknowledged"].includes(action.status)) {
+        await tx.query(
+          `UPDATE conversation_actions
+              SET status='failed', failure_code='qc_cancelled_by_human', updated_at=$2
+            WHERE id=$1`,
+          [action.id, now],
+        );
+      }
+      await tx.query(
+        `UPDATE work_plan_versions SET status='candidate', updated_at=$2
+          WHERE id=$1 AND status='in_qc'`,
+        [review.plan_version_id, now],
+      );
+      await tx.query(
+        `UPDATE work_items
+            SET status='planning', aggregate_version=aggregate_version+1, updated_at=$3
+          WHERE project_id=$1 AND id=$2 AND status='in_qc'`,
+        [review.project_id, review.work_item_id, now],
+      );
+      const plan = await this.planById(tx, review.plan_version_id, false);
+      await this.appendVisibleMessage(
+        tx,
+        review,
+        userId,
+        `QC was stopped by the human operator: ${reason}`,
+        plan.id,
+        review.action_id,
+        this.candidateFollowUps(plan),
+      );
+      const updated = (
+        await tx.query<ReviewRow>(
+          `SELECT ${reviewColumns} FROM conversation_plan_reviews WHERE id=$1`,
+          [review.id],
+        )
+      ).rows[0];
+      if (!updated) throw new Error("cancelled review could not be reloaded");
+      return { review: updated, changed: true };
+    });
+    if (cancelled.changed) this.options.cancelReviewNow?.(cancelled.review.planning_run_id);
+    return toReview(cancelled.review);
+  }
+
   async completeReviewOnly(input: {
     reviewId: string;
     planningRunId: string;
@@ -568,7 +751,7 @@ export class ConversationPlanWorkflowService {
         )
       ).rows[0];
       if (!review) throw new Error("review-only completion scope mismatch");
-      if (["converged", "cap_reached"].includes(review.status)) return;
+      if (["converged", "cap_reached", "cancelled"].includes(review.status)) return;
       if (review.status !== "running") {
         throw new Error(`review-only completion requires running, got ${review.status}`);
       }
@@ -639,7 +822,8 @@ export class ConversationPlanWorkflowService {
                 revised_plan=$6::jsonb,
                 revised_plan_content_hash=$7,
                 revised_plan_version_id=$8,
-                completed_at=$9, updated_at=$9
+                round_exchanges=$9::jsonb,
+                completed_at=$10, updated_at=$10
           WHERE id=$1 AND status='running'`,
         [
           review.id,
@@ -650,6 +834,9 @@ export class ConversationPlanWorkflowService {
           revisedPlan ? JSON.stringify(finalPlan) : null,
           revisedPlan?.content_hash ?? null,
           revisedPlan?.id ?? null,
+          JSON.stringify(
+            this.reviewRoundExchanges(review, input.result.review_rounds, input.result.final_plan),
+          ),
           now,
         ],
       );
@@ -673,7 +860,7 @@ export class ConversationPlanWorkflowService {
           : `QC ${input.result.status === "converged" ? "converged" : "reached its round cap"} on Plan v${seedVersion.version}. Findings and PM dispositions are available for approval review.`,
         revisedPlan?.id ?? seedVersion.id,
         review.action_id,
-        this.reviewFollowUps(revisedPlan ?? seedVersion, review.id),
+        this.reviewFollowUps(revisedPlan ?? seedVersion, review),
       );
     });
   }
@@ -687,7 +874,8 @@ export class ConversationPlanWorkflowService {
           [planningRunId],
         )
       ).rows[0];
-      if (!review || ["converged", "cap_reached", "failed"].includes(review.status)) return;
+      if (!review || ["converged", "cap_reached", "failed", "cancelled"].includes(review.status))
+        return;
       const code = errorCode(error);
       const now = this.now().toISOString();
       await tx.query(
@@ -2216,6 +2404,35 @@ export class ConversationPlanWorkflowService {
     return { findings, dispositions };
   }
 
+  private reviewRoundExchanges(
+    review: ReviewRow,
+    rounds: readonly ReviewOnlyRound[],
+    finalPlan?: V2WorkPlanContractT,
+  ) {
+    return rounds.map((round, index) => ({
+      round: round.round,
+      reviewed_plan_content_hash: canonicalSha256(round.reviewed_plan),
+      reviewer: {
+        provider: review.reviewer_provider,
+        model: review.reviewer_model,
+        findings: round.findings,
+      },
+      pm:
+        round.responses === null
+          ? null
+          : {
+              provider: review.pm_provider,
+              model: review.pm_model,
+              dispositions: round.responses,
+              revised_plan_content_hash:
+                round.revised_plan_content_hash ??
+                canonicalSha256(
+                  rounds[index + 1]?.reviewed_plan ?? finalPlan ?? round.reviewed_plan,
+                ),
+            },
+    }));
+  }
+
   private staffingProposal(plan: V2WorkPlanContractT) {
     return {
       summary: "Staffing pinned by the approved conversational Plan Contract.",
@@ -2768,7 +2985,22 @@ export class ConversationPlanWorkflowService {
     ];
   }
 
-  private reviewFollowUps(plan: V2WorkPlanVersionT, reviewId: string): FollowUpActionProposal[] {
+  private reviewFollowUps(
+    plan: V2WorkPlanVersionT,
+    review: ReviewRow | string,
+  ): FollowUpActionProposal[] {
+    const reviewId = typeof review === "string" ? review : review.id;
+    const repeatReview =
+      typeof review === "string" || review.review_mode === "waived"
+        ? undefined
+        : {
+            mode: "qc" as const,
+            reviewer: {
+              provider: review.reviewer_provider,
+              model: review.reviewer_model,
+            },
+            rounds: Number(review.max_rounds),
+          };
     return [
       {
         action_type: "approve_plan",
@@ -2778,8 +3010,16 @@ export class ConversationPlanWorkflowService {
           plan_review_id: reviewId,
         },
       },
+      {
+        action_type: "send_plan_to_qc",
+        parameters: {
+          plan_version_id: plan.id,
+          content_hash: plan.content_hash,
+          ...(repeatReview ? { review: repeatReview } : {}),
+        },
+      },
       ...this.candidateFollowUps(plan).filter(
-        (proposal) => proposal.action_type !== "send_plan_to_qc",
+        (proposal) => !["send_plan_to_qc"].includes(proposal.action_type),
       ),
     ];
   }

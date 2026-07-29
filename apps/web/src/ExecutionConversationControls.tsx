@@ -22,7 +22,7 @@ const ACTION_OPTIONS: Array<{ value: ProposalActionType; label: string }> = [
   { value: "redirect_agent", label: "Task direction" },
   { value: "propose_plan_change", label: "Plan change proposal" },
   { value: "approve_plan_change", label: "Plan-change approval" },
-  { value: "pause_work", label: "Pause work" },
+  { value: "pause_work", label: "Stop active agents (pause)" },
   { value: "resume_work", label: "Resume work" },
 ];
 

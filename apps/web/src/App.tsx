@@ -359,7 +359,15 @@ function effectivePhaseStatus(execution: PhaseExecutionDto): string {
  *  mirrored client-side. */
 interface PlanningRunPollDto {
   id: string;
-  status: "queued" | "drafting" | "reviewing" | "revising" | "converged" | "cap_reached" | "failed";
+  status:
+    | "queued"
+    | "drafting"
+    | "reviewing"
+    | "revising"
+    | "converged"
+    | "cap_reached"
+    | "failed"
+    | "cancelled";
   round: number;
   max_rounds: number;
   transcript: Array<{

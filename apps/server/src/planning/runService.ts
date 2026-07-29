@@ -17,6 +17,7 @@ export type PlanningRunStatus =
   | "converged"
   | "cap_reached"
   | "failed"
+  | "cancelled"
   // PHASE TAB P1: terminal human-decision states. converged/cap_reached
   // continue to double as the awaiting-decision states (no separate
   // `awaiting_decision` status was added — a run in either state with no

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PlanContract, PlanModule, validatePlan } from "../plan.js";
+import { FindingResponse, ReviewFinding } from "../review.js";
 import {
   V2Actor,
   V2EntityId,
@@ -1938,6 +1939,7 @@ export const V2ConversationPlanReviewStatus = z.enum([
   "converged",
   "cap_reached",
   "failed",
+  "cancelled",
 ]);
 export type V2ConversationPlanReviewStatusT = z.infer<typeof V2ConversationPlanReviewStatus>;
 
@@ -1980,6 +1982,30 @@ export type V2ConversationPlanReviewDispositionT = z.infer<
   typeof V2ConversationPlanReviewDisposition
 >;
 
+export const V2ConversationPlanReviewRound = z
+  .object({
+    round: z.number().int().positive(),
+    reviewed_plan_content_hash: V2Sha256Hex,
+    reviewer: z
+      .object({
+        provider: z.enum(["anthropic", "openai"]),
+        model: V2NonEmptyString,
+        findings: z.array(ReviewFinding),
+      })
+      .strict(),
+    pm: z
+      .object({
+        provider: z.enum(["anthropic", "openai"]),
+        model: V2NonEmptyString,
+        dispositions: z.array(FindingResponse),
+        revised_plan_content_hash: V2Sha256Hex,
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+export type V2ConversationPlanReviewRoundT = z.infer<typeof V2ConversationPlanReviewRound>;
+
 export const V2ConversationPlanReview = z
   .object({
     schema_version: schemaVersion,
@@ -1999,6 +2025,9 @@ export const V2ConversationPlanReview = z
     review_mode: z.enum(["qc", "waived"]).optional(),
     usage_request_group_id: V2EntityId,
     status: V2ConversationPlanReviewStatus,
+    rounds_completed: nonNegativeInteger,
+    max_rounds: z.number().int().min(1).max(5),
+    round_exchanges: z.array(V2ConversationPlanReviewRound),
     plan_content_hash: V2Sha256Hex,
     result_plan_content_hash: V2Sha256Hex,
     context_manifest: V2ConversationPlanReviewContextManifest,
@@ -2008,12 +2037,14 @@ export const V2ConversationPlanReview = z
     started_at: nullableDate,
     completed_at: nullableDate,
     failure_code: V2NonEmptyString.nullable(),
+    cancelled_by_user_id: V2EntityId.nullable(),
+    cancellation_reason: V2NonEmptyString.nullable(),
     created_at: V2IsoDateTime,
     updated_at: V2IsoDateTime,
   })
   .strict()
   .superRefine((review, ctx) => {
-    const terminal = ["converged", "cap_reached", "failed"].includes(review.status);
+    const terminal = ["converged", "cap_reached", "failed", "cancelled"].includes(review.status);
     if (terminal !== (review.completed_at !== null)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -2025,6 +2056,7 @@ export const V2ConversationPlanReview = z
       (review.status === "queued" && review.started_at === null && review.completed_at === null) ||
       (review.status === "running" && review.started_at !== null && review.completed_at === null) ||
       (review.status === "failed" && review.completed_at !== null) ||
+      (review.status === "cancelled" && review.completed_at !== null) ||
       (["converged", "cap_reached"].includes(review.status) &&
         review.started_at !== null &&
         review.completed_at !== null);
@@ -2041,6 +2073,59 @@ export const V2ConversationPlanReview = z
         path: ["failure_code"],
         message: "only failed plan reviews carry a failure code",
       });
+    }
+    const cancelled = review.status === "cancelled";
+    if (
+      cancelled !== (review.cancelled_by_user_id !== null && review.cancellation_reason !== null)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["cancelled_by_user_id"],
+        message: "cancelled reviews require an attributable human and reason",
+      });
+    }
+    if (review.rounds_completed > review.max_rounds) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["rounds_completed"],
+        message: "completed rounds cannot exceed the configured QC round cap",
+      });
+    }
+    if (review.round_exchanges.length > review.rounds_completed + 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["round_exchanges"],
+        message: "QC transcript cannot run ahead of durable round progress",
+      });
+    }
+    for (const [index, exchange] of review.round_exchanges.entries()) {
+      if (exchange.round !== index + 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["round_exchanges", index, "round"],
+          message: "QC transcript rounds must be contiguous and ordered",
+        });
+      }
+      if (
+        exchange.reviewer.provider !== review.reviewer_provider ||
+        exchange.reviewer.model !== review.reviewer_model
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["round_exchanges", index, "reviewer"],
+          message: "QC transcript reviewer must match the pinned reviewer",
+        });
+      }
+      if (
+        exchange.pm !== null &&
+        (exchange.pm.provider !== review.pm_provider || exchange.pm.model !== review.pm_model)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["round_exchanges", index, "pm"],
+          message: "QC transcript PM must match the pinned planning agent",
+        });
+      }
     }
     if (review.pm_provider === review.reviewer_provider) {
       ctx.addIssue({
@@ -2126,7 +2211,7 @@ export const V2ConversationPlanReview = z
       });
     }
     if (
-      ["queued", "running", "failed"].includes(review.status) &&
+      ["queued", "running", "failed", "cancelled"].includes(review.status) &&
       (hasRevision || review.result_plan_content_hash !== review.plan_content_hash)
     ) {
       ctx.addIssue({
@@ -2136,7 +2221,7 @@ export const V2ConversationPlanReview = z
       });
     }
     if (
-      ["queued", "running", "failed"].includes(review.status) &&
+      ["queued", "running", "failed", "cancelled"].includes(review.status) &&
       (review.findings.length > 0 || review.dispositions.length > 0)
     ) {
       ctx.addIssue({

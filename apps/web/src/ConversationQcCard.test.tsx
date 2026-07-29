@@ -1,6 +1,6 @@
 import type { V2ConversationPlanReviewT } from "@norns/contracts";
-import { render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import { ConversationQcCard } from "./ConversationQcCard";
 
 const now = "2026-07-27T12:00:00.000Z";
@@ -23,6 +23,9 @@ function review(overrides: Partial<V2ConversationPlanReviewT> = {}): V2Conversat
     reviewer_provider: "openai",
     reviewer_model: "gpt-5.6",
     status: "converged",
+    rounds_completed: 1,
+    max_rounds: 3,
+    round_exchanges: [],
     plan_content_hash: "a".repeat(64),
     result_plan_content_hash: "a".repeat(64),
     context_manifest: {
@@ -65,6 +68,8 @@ function review(overrides: Partial<V2ConversationPlanReviewT> = {}): V2Conversat
     started_at: now,
     completed_at: now,
     failure_code: null,
+    cancelled_by_user_id: null,
+    cancellation_reason: null,
     created_at: now,
     updated_at: now,
     ...overrides,
@@ -103,6 +108,76 @@ describe("conversation QC card", () => {
 
     expect(screen.getByRole("alert")).toHaveTextContent(
       "The unchanged plan remains a candidate and can be sent to QC again.",
+    );
+  });
+
+  it("shows each agent's round separately and lets the human stop active QC", async () => {
+    const onCancel = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ConversationQcCard
+        planVersion={null}
+        review={review({
+          status: "running",
+          rounds_completed: 1,
+          findings: [],
+          dispositions: [],
+          revised_plan_version_id: null,
+          result_plan_content_hash: "a".repeat(64),
+          completed_at: null,
+          round_exchanges: [
+            {
+              round: 1,
+              reviewed_plan_content_hash: "a".repeat(64),
+              reviewer: {
+                provider: "openai",
+                model: "gpt-5.6-sol",
+                findings: [
+                  {
+                    severity: "must_fix",
+                    module_id: "core-api",
+                    finding: "The stop path is not attributable.",
+                    recommendation: "Record the human actor and reason.",
+                  },
+                ],
+              },
+              pm: {
+                provider: "anthropic",
+                model: "claude-sonnet-5",
+                dispositions: [
+                  {
+                    finding_index: 0,
+                    disposition: "accept",
+                    rationale: "Cancellation attribution was added to the review receipt.",
+                  },
+                ],
+                revised_plan_content_hash: "d".repeat(64),
+              },
+            },
+          ],
+        })}
+        onCancel={onCancel}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Agent review transcript" })).toBeInTheDocument();
+    expect(screen.getByText("QC reviewer")).toBeInTheDocument();
+    expect(screen.getByText("Planning agent")).toBeInTheDocument();
+    expect(screen.getByText("The stop path is not attributable.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Cancellation attribution was added to the review receipt."),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop QC" }));
+    fireEvent.change(screen.getByLabelText("Why are you stopping QC?"), {
+      target: { value: "The plan needs a different architecture." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm stop QC" }));
+
+    await waitFor(() =>
+      expect(onCancel).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "review-1" }),
+        "The plan needs a different architecture.",
+      ),
     );
   });
 });

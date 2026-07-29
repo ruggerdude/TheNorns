@@ -327,6 +327,12 @@ export const CONVERSATION_MODEL_SWITCHING_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const QC_CONTROL_TRANSCRIPT_MIGRATION_NAME = "0049_qc_control_and_transcript";
+export const QC_CONTROL_TRANSCRIPT_MIGRATION_URL = new URL(
+  "../../../drizzle/0049_qc_control_and_transcript.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -549,6 +555,10 @@ export async function loadConversationPlanHandoffChoicesMigrationSql(): Promise<
 
 export async function loadConversationModelSwitchingMigrationSql(): Promise<string> {
   return readFile(CONVERSATION_MODEL_SWITCHING_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcControlTranscriptMigrationSql(): Promise<string> {
+  return readFile(QC_CONTROL_TRANSCRIPT_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -854,6 +864,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: CONVERSATION_MODEL_SWITCHING_MIGRATION_NAME,
       sql: await loadConversationModelSwitchingMigrationSql(),
+    },
+    {
+      name: QC_CONTROL_TRANSCRIPT_MIGRATION_NAME,
+      sql: await loadQcControlTranscriptMigrationSql(),
     },
   ];
 }

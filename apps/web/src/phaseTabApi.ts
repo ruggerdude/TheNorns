@@ -107,7 +107,8 @@ export type PhasePlanningRunStatus =
   | "cap_reached"
   | "approved"
   | "rejected"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 /** Statuses where the coordinator/reviewer loop is still producing output. */
 export const PHASE_RUN_ACTIVE_STATUSES: ReadonlySet<PhasePlanningRunStatus> = new Set([

@@ -18,7 +18,11 @@ import { type CodexReasoningEffortT, PlanContract, type PlanContractT } from "@n
 import type { ReviewFindingT, UsageEventT } from "@norns/contracts";
 import type { V2WorkPlanContractT } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
-import { type ReviewOnlyPlanningResult, runReviewOnlyPlanning } from "./reviewOnlySession.js";
+import {
+  type ReviewOnlyPlanningResult,
+  type ReviewOnlyRound,
+  runReviewOnlyPlanning,
+} from "./reviewOnlySession.js";
 import type {
   ApprovedPlanExecutionKickoff,
   PlanningRunDecisionDto,
@@ -108,6 +112,11 @@ export interface PlanningRunWorkerOptions {
     frozenContext: unknown;
   }>;
   markReviewOnlyStarted?: (reviewId: string) => Promise<void>;
+  recordReviewOnlyProgress?: (input: {
+    reviewId: string;
+    planningRunId: string;
+    rounds: readonly ReviewOnlyRound[];
+  }) => Promise<void>;
   completeReviewOnly?: (input: {
     reviewId: string;
     planningRunId: string;
@@ -269,6 +278,7 @@ export class PlanningRunWorker {
   private readonly now: () => Date;
   private readonly leaseMs: number;
   private readonly kickoffRetryMs: number;
+  private readonly activeReviewControllers = new Map<string, AbortController>();
 
   constructor(
     private readonly transactions: V2TransactionRunner,
@@ -278,6 +288,12 @@ export class PlanningRunWorker {
     this.now = options.now ?? (() => new Date());
     this.leaseMs = options.leaseMs ?? 10 * 60_000;
     this.kickoffRetryMs = options.kickoffRetryMs ?? 30_000;
+  }
+
+  cancelReview(runId: string): boolean {
+    const controller = this.activeReviewControllers.get(runId);
+    controller?.abort();
+    return controller !== undefined;
   }
 
   /** Call once at startup, before any tick(). See the module-level note on
@@ -610,6 +626,8 @@ export class PlanningRunWorker {
     reviewer: LlmAdapter | null,
     models: ResolvedPlanningModels,
   ): Promise<void> {
+    const controller = new AbortController();
+    this.activeReviewControllers.set(claim.id, controller);
     try {
       if (
         !reviewer ||
@@ -631,6 +649,17 @@ export class PlanningRunWorker {
         frozenContext: seed.frozenContext,
         telemetryGroupId: seed.usageRequestGroupId,
         maxRounds: claim.max_rounds,
+        signal: controller.signal,
+        ...(this.options.recordReviewOnlyProgress
+          ? {
+              onProgress: (rounds: readonly ReviewOnlyRound[]) =>
+                this.options.recordReviewOnlyProgress?.({
+                  reviewId: seed.reviewId,
+                  planningRunId: claim.id,
+                  rounds,
+                }),
+            }
+          : {}),
       });
       this.options.recordUsage?.(result.usage);
       const totalCostUsd = result.usage.reduce(
@@ -645,6 +674,8 @@ export class PlanningRunWorker {
       });
     } catch (error) {
       await this.options.failReviewOnly?.(claim.id, error);
+    } finally {
+      this.activeReviewControllers.delete(claim.id);
     }
     void models;
   }

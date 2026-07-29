@@ -5033,12 +5033,17 @@ export const conversationPlanReviews = pgTable(
     contextHash: text("context_hash").notNull(),
     findings: jsonb("findings").notNull().default([]),
     dispositions: jsonb("dispositions").notNull().default([]),
+    roundExchanges: jsonb("round_exchanges").notNull().default([]),
     revisedPlan: jsonb("revised_plan"),
     revisedPlanContentHash: text("revised_plan_content_hash"),
     revisedPlanVersionId: text("revised_plan_version_id"),
     startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
     completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
     failureCode: text("failure_code"),
+    cancelledByUserId: text("cancelled_by_user_id").references(() => phase2Users.id, {
+      onDelete: "restrict",
+    }),
+    cancellationReason: text("cancellation_reason"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -5113,7 +5118,7 @@ export const conversationPlanReviews = pgTable(
     check("conversation_plan_reviews_attempt_check", sql`${table.attemptNumber} > 0`),
     check(
       "conversation_plan_reviews_status_check",
-      sql`${table.status} IN ('queued','running','converged','cap_reached','failed')`,
+      sql`${table.status} IN ('queued','running','converged','cap_reached','failed','cancelled')`,
     ),
     check(
       "conversation_plan_reviews_provider_policy_check",
@@ -5130,6 +5135,7 @@ export const conversationPlanReviews = pgTable(
         AND jsonb_typeof(${table.contextManifest}) = 'object'
         AND jsonb_typeof(${table.findings}) = 'array'
         AND jsonb_typeof(${table.dispositions}) = 'array'
+        AND jsonb_typeof(${table.roundExchanges}) = 'array'
         AND ${table.planContentHash} ~ '^[a-f0-9]{64}$'
         AND ${table.resultPlanContentHash} ~ '^[a-f0-9]{64}$'
         AND ${table.contextHash} ~ '^[a-f0-9]{64}$'`,

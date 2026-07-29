@@ -108,6 +108,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
   let approvalFailureAt: string | null;
   let failKickoffClaim: boolean;
   let failKickoffSettlement: boolean;
+  let cancelledReviewRuns: string[];
 
   const newId = (prefix: string): string => `${prefix}-phase3-${++idSequence}`;
 
@@ -162,6 +163,10 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       runReviewNow: async (runId) => {
         dispatches.push(runId);
       },
+      cancelReviewNow: (runId) => {
+        cancelledReviewRuns.push(runId);
+        return true;
+      },
       executionKickoff: {
         kickoff: async (input) => {
           kickoffInputs.push(input);
@@ -205,6 +210,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     approvalFailureAt = null;
     failKickoffClaim = false;
     failKickoffSettlement = false;
+    cancelledReviewRuns = [];
     proposalAdapter = new FakeAdapter("anthropic", "claude-sonnet-5");
   });
 
@@ -2551,5 +2557,131 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       failure_code: "orphaned",
     });
     expect(orphan.rows[0]?.settled_at).not.toBeNull();
+  });
+
+  it("stops active QC with human attribution while preserving its partial agent transcript", async () => {
+    const scope = await workspace("human-stopped-qc");
+    const candidate = plan("Keep human control over active QC");
+    const saved = await proposeAndSave(scope, candidate, "human-stopped-qc");
+    const qcAction = await proposedAction(scope, "send_plan_to_qc");
+    const qc = await workflow.confirm(
+      owner.id,
+      confirmation(scope, qcAction.id, "start-human-stopped-qc"),
+    );
+    if (qc.effect.kind !== "qc_started") throw new Error("expected QC effect");
+
+    const seed = await workflow.loadReviewOnlySeed(qc.effect.planning_run_id);
+    await workflow.markReviewOnlyStarted(seed.reviewId);
+    await pg.query("UPDATE planning_runs SET status='reviewing' WHERE id=$1 AND status='queued'", [
+      qc.effect.planning_run_id,
+    ]);
+    await workflow.recordReviewOnlyProgress({
+      reviewId: seed.reviewId,
+      planningRunId: qc.effect.planning_run_id,
+      rounds: [
+        {
+          round: 1,
+          reviewed_plan: candidate,
+          findings: [
+            {
+              severity: "must_fix",
+              module_id: "conversation-api",
+              finding: "The operator needs a durable stop control.",
+              recommendation: "Cancel the active run and record who stopped it.",
+            },
+          ],
+          responses: null,
+        },
+      ],
+    });
+
+    const stopped = await workflow.cancelReview(
+      owner.id,
+      {
+        projectId,
+        workItemId: scope.workItemId,
+        conversationId: scope.conversationId,
+      },
+      seed.reviewId,
+      "The human wants to revise staffing before continuing.",
+    );
+    expect(stopped).toMatchObject({
+      status: "cancelled",
+      rounds_completed: 1,
+      max_rounds: 3,
+      cancelled_by_user_id: owner.id,
+      cancellation_reason: "The human wants to revise staffing before continuing.",
+      round_exchanges: [
+        {
+          round: 1,
+          reviewer: {
+            provider: "openai",
+            model: "gpt-5.6-sol",
+            findings: [
+              {
+                finding: "The operator needs a durable stop control.",
+              },
+            ],
+          },
+          pm: null,
+        },
+      ],
+    });
+    expect(cancelledReviewRuns).toEqual([qc.effect.planning_run_id]);
+
+    const detail = await workflow.detail(
+      owner.id,
+      projectId,
+      scope.workItemId,
+      scope.conversationId,
+    );
+    expect(detail.plan_versions.find((version) => version.id === saved.id)?.status).toBe(
+      "candidate",
+    );
+    expect(detail.actions.find((action) => action.id === qcAction.id)).toMatchObject({
+      status: "failed",
+      failure_code: "qc_cancelled_by_human",
+    });
+    expect(
+      detail.actions
+        .filter((action) => action.status === "proposed")
+        .map((action) => action.action_type)
+        .sort(),
+    ).toEqual(["reject_plan", "send_plan_to_qc"]);
+
+    const lifecycle = await pg.query<{
+      work_status: string;
+      run_status: string;
+      review_status: string;
+      cancelled_by_user_id: string;
+    }>(
+      `SELECT item.status AS work_status, run.status AS run_status,
+              review.status AS review_status, review.cancelled_by_user_id
+         FROM work_items item
+         JOIN conversation_plan_reviews review ON review.work_item_id=item.id
+         JOIN planning_runs run ON run.id=review.planning_run_id
+        WHERE item.id=$1 AND review.id=$2`,
+      [scope.workItemId, seed.reviewId],
+    );
+    expect(lifecycle.rows[0]).toEqual({
+      work_status: "planning",
+      run_status: "cancelled",
+      review_status: "cancelled",
+      cancelled_by_user_id: owner.id,
+    });
+
+    expect(
+      await workflow.cancelReview(
+        owner.id,
+        {
+          projectId,
+          workItemId: scope.workItemId,
+          conversationId: scope.conversationId,
+        },
+        seed.reviewId,
+        "An idempotent repeat stop.",
+      ),
+    ).toEqual(stopped);
+    expect(cancelledReviewRuns).toEqual([qc.effect.planning_run_id]);
   });
 });

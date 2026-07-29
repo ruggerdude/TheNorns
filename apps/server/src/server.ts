@@ -5663,6 +5663,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       let executeReviewNow: (runId: string) => Promise<unknown> = async () => {
         throw new Error("planning worker is not initialized");
       };
+      let cancelReviewNow: (runId: string) => boolean = () => false;
       if (
         conversationService &&
         conversationContextAssembler &&
@@ -5679,6 +5680,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             return { pm: resolved.pm, reviewer: resolved.reviewer };
           },
           runReviewNow: (runId) => executeReviewNow(runId),
+          cancelReviewNow: (runId) => cancelReviewNow(runId),
           ...(options.planningRuns.executionKickoff
             ? { executionKickoff: options.planningRuns.executionKickoff }
             : {}),
@@ -5705,6 +5707,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               loadReviewOnlySeed: (runId: string) => reviewWorkflow.loadReviewOnlySeed(runId),
               markReviewOnlyStarted: (reviewId: string) =>
                 reviewWorkflow.markReviewOnlyStarted(reviewId),
+              recordReviewOnlyProgress: (input) => reviewWorkflow.recordReviewOnlyProgress(input),
               completeReviewOnly: (input: {
                 reviewId: string;
                 planningRunId: string;
@@ -5757,6 +5760,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         },
       });
       executeReviewNow = (runId) => planningWorker.runNow(runId);
+      cancelReviewNow = (runId) => planningWorker.cancelReview(runId);
 
       if (
         conversationPlanWorkflow &&

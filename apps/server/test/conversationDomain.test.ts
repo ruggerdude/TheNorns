@@ -10,6 +10,7 @@ import {
   CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME,
   GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME,
   PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
+  QC_CONTROL_TRANSCRIPT_MIGRATION_NAME,
   type V2MigrationDatabase,
   runCurrentV2Migrations,
 } from "../src/persistence/v2/migrate.js";
@@ -184,9 +185,15 @@ describe.sequential("conversation-first durable domain", () => {
     ).resolves.toBeUndefined();
     const replay = await runCurrentV2Migrations(asMigrationDatabase(pg));
     expect(replay.at(-1)).toMatchObject({
-      name: CONVERSATION_MODEL_SWITCHING_MIGRATION_NAME,
+      name: QC_CONTROL_TRANSCRIPT_MIGRATION_NAME,
       applied: false,
     });
+    expect(replay).toContainEqual(
+      expect.objectContaining({
+        name: CONVERSATION_MODEL_SWITCHING_MIGRATION_NAME,
+        applied: false,
+      }),
+    );
     expect(replay).toContainEqual(
       expect.objectContaining({
         name: CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME,

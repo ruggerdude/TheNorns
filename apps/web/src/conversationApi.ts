@@ -190,6 +190,24 @@ export function confirmConversationAction(
   );
 }
 
+export function cancelConversationPlanReview(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  reviewId: string,
+  reason: string,
+): Promise<{ review: V2ConversationPlanReviewT }> {
+  return requestJson(
+    `${messageEndpoint(projectId, workItemId, conversationId)}/plan-reviews/${encodeURIComponent(
+      reviewId,
+    )}/cancel`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    },
+  );
+}
+
 export function proposeExecutionConversationAction(
   projectId: string,
   workItemId: string,
