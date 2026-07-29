@@ -25,6 +25,20 @@ describe("phase 1A — remote control", () => {
   it("connects, heartbeats, and reports runner status", async () => {
     stack = await startStack();
     expect(stack.server.connectedRunners()).toEqual(["runner-1"]);
+    const connectionCount = stack.stores
+      .auditEntries()
+      .filter(
+        (entry) => entry.actor === "runner:runner-1" && entry.action === "runner.connected",
+      ).length;
+    stack.daemon.connect();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(
+      stack.stores
+        .auditEntries()
+        .filter(
+          (entry) => entry.actor === "runner:runner-1" && entry.action === "runner.connected",
+        ),
+    ).toHaveLength(connectionCount);
     await waitFor(
       () => (stack as Stack).stores.runner("runner-1")?.last_seen_at != null,
       "heartbeat marks last_seen",

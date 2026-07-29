@@ -6836,6 +6836,24 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     const challenge = nonce();
     let authedRunnerId: string | null = null;
     let runnerEventDelivery = Promise.resolve();
+    let runnerEventIngressOpen = true;
+
+    const rejectRunnerEvents = (
+      runnerId: string,
+      detail: string,
+      options: { fencedGeneration?: number } = {},
+    ): void => {
+      if (!runnerEventIngressOpen) return;
+      runnerEventIngressOpen = false;
+      stores.auditRateLimited(`runner:${runnerId}`, "runner.event_rejected", detail, now());
+      if (options.fencedGeneration !== undefined) {
+        sendFrame(socket, {
+          type: "fenced",
+          current_generation: options.fencedGeneration,
+        });
+      }
+      socket.close(1008, "runner event rejected");
+    };
 
     sendFrame(socket, { type: "challenge", nonce: challenge });
 
@@ -7051,8 +7069,33 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       if (frame.type === "event") {
         const event: EventEnvelopeT = frame.event;
         const authenticatedRunnerId = authedRunnerId;
+        if (!runnerEventIngressOpen) return;
+
+        // Fence synchronously before adding work to the promise chain. An old
+        // daemon used to replay tens of thousands of stale events at once;
+        // discovering the stale socket asynchronously queued every frame and
+        // audited every rejection before close could take effect.
+        const currentRunner = stores.runner(authenticatedRunnerId);
+        const reconciled = reconciledRunners.get(authenticatedRunnerId);
+        if (
+          runnerSockets.get(authenticatedRunnerId) !== socket ||
+          reconciled?.socket !== socket ||
+          event.runner_id !== authenticatedRunnerId ||
+          !currentRunner ||
+          reconciled.generation !== currentRunner.generation ||
+          event.generation !== reconciled.generation
+        ) {
+          rejectRunnerEvents(
+            authenticatedRunnerId,
+            "event did not match the current reconciled runner generation",
+            { fencedGeneration: currentRunner?.generation ?? event.generation + 1 },
+          );
+          return;
+        }
+
         runnerEventDelivery = runnerEventDelivery
           .then(async () => {
+            if (!runnerEventIngressOpen) return;
             const currentRunner = stores.runner(authenticatedRunnerId);
             const reconciled = reconciledRunners.get(authenticatedRunnerId);
             if (
@@ -7063,17 +7106,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               reconciled.generation !== currentRunner.generation ||
               event.generation !== reconciled.generation
             ) {
-              stores.audit(
-                `runner:${authenticatedRunnerId}`,
-                "runner.event_rejected",
+              rejectRunnerEvents(
+                authenticatedRunnerId,
                 "event did not match the current reconciled runner generation",
-                now(),
+                { fencedGeneration: currentRunner?.generation ?? event.generation + 1 },
               );
-              sendFrame(socket, {
-                type: "fenced",
-                current_generation: currentRunner?.generation ?? event.generation + 1,
-              });
-              socket.close(1008, "runner event rejected");
               return;
             }
             const actionAckHandled =
@@ -7087,13 +7124,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             });
           })
           .catch((error) => {
-            stores.audit(
-              `runner:${authenticatedRunnerId}`,
-              "runner.event_rejected",
+            rejectRunnerEvents(
+              authenticatedRunnerId,
               error instanceof Error ? error.message : String(error),
-              now(),
             );
-            socket.close(1008, "runner event rejected");
           });
         return;
       }

@@ -153,6 +153,63 @@ describe("Tier-2 postgres persistence", () => {
     expect(callsAfterMutation).toBe(1);
   });
 
+  it("compacts a pathological runner-rejection audit during restore", () => {
+    const empty = JSON.parse(new RelayStores().snapshot()) as {
+      audit: Array<{ at: string; actor: string; action: string; detail: string }>;
+    };
+    empty.audit = Array.from({ length: 10_001 }, (_, index) => ({
+      at: `2026-07-14T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+      actor: "runner:runner-1",
+      action: "runner.event_rejected",
+      detail: "event did not match the current reconciled runner generation",
+    }));
+    empty.audit.push({
+      at: "2026-07-14T00:01:00.000Z",
+      actor: "operator",
+      action: "project.created",
+      detail: "project-1",
+    });
+
+    const restored = RelayStores.restore(JSON.stringify(empty));
+    const audit = restored.auditEntries();
+
+    expect(audit.filter((entry) => entry.action === "runner.event_rejected")).toHaveLength(1);
+    expect(audit).toContainEqual(
+      expect.objectContaining({ action: "project.created", detail: "project-1" }),
+    );
+    expect(audit.at(-1)).toMatchObject({
+      actor: "system",
+      action: "audit.compacted",
+    });
+    expect(restored.snapshot().length).toBeLessThan(5_000);
+  });
+
+  it("rate-limits repeated audit failures without hiding a later recurrence", () => {
+    const store = new RelayStores();
+    const first = new Date("2026-07-14T00:00:00.000Z");
+
+    expect(
+      store.auditRateLimited("runner:r", "runner.event_rejected", "stale generation", first),
+    ).toBe(true);
+    expect(
+      store.auditRateLimited(
+        "runner:r",
+        "runner.event_rejected",
+        "stale generation",
+        new Date("2026-07-14T00:00:30.000Z"),
+      ),
+    ).toBe(false);
+    expect(
+      store.auditRateLimited(
+        "runner:r",
+        "runner.event_rejected",
+        "stale generation",
+        new Date("2026-07-14T00:01:00.000Z"),
+      ),
+    ).toBe(true);
+    expect(store.auditEntries()).toHaveLength(2);
+  });
+
   it("serializes concurrent flushes and can pause, drain, and resume", async () => {
     const persistence = new PgPersistence(client);
     await persistence.init();
@@ -348,6 +405,6 @@ describe("Tier-2 postgres persistence", () => {
       "relay",
     ]);
     expect(rows.rows[0]?.n).toBe(1);
-    expect(await persistence.load("relay")).toBe(JSON.stringify({ v: 2 }));
+    expect(JSON.parse((await persistence.load("relay")) ?? "null")).toEqual({ v: 2 });
   });
 });

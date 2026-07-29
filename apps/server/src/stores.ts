@@ -58,6 +58,48 @@ interface StoreState {
 
 export type IngestOutcome = "accepted" | "duplicate" | "out_of_order";
 
+const RUNNER_EVENT_REJECTED_ACTION = "runner.event_rejected";
+const RUNNER_EVENT_REJECTION_AUDIT_WINDOW_MS = 60_000;
+const RELAY_AUDIT_COMPACTION_THRESHOLD = 10_000;
+
+function compactPathologicalRunnerRejections(state: StoreState): boolean {
+  if (state.audit.length < RELAY_AUDIT_COMPACTION_THRESHOLD) return false;
+
+  const rejectionBuckets = new Set<string>();
+  const compacted: AuditEntry[] = [];
+  let removed = 0;
+  for (const entry of state.audit) {
+    if (entry.action !== RUNNER_EVENT_REJECTED_ACTION) {
+      compacted.push(entry);
+      continue;
+    }
+    const occurredAt = Date.parse(entry.at);
+    if (!Number.isFinite(occurredAt)) {
+      compacted.push(entry);
+      continue;
+    }
+    const bucket = Math.floor(occurredAt / RUNNER_EVENT_REJECTION_AUDIT_WINDOW_MS);
+    const key = `${entry.actor}\u0000${entry.detail}\u0000${bucket}`;
+    if (rejectionBuckets.has(key)) {
+      removed += 1;
+      continue;
+    }
+    rejectionBuckets.add(key);
+    compacted.push(entry);
+  }
+  if (removed === 0) return false;
+
+  const lastAt = state.audit.at(-1)?.at ?? new Date(0).toISOString();
+  compacted.push({
+    at: lastAt,
+    actor: "system",
+    action: "audit.compacted",
+    detail: `Collapsed ${removed} repeated ${RUNNER_EVENT_REJECTED_ACTION} records into one sample per minute.`,
+  });
+  state.audit = compacted;
+  return true;
+}
+
 export class RelayStores {
   private state: StoreState;
   /**
@@ -66,6 +108,7 @@ export class RelayStores {
    * on every tick creates avoidable CPU and garbage-collection stalls.
    */
   private serializedSnapshot: string | null = null;
+  private readonly rateLimitedAuditAt = new Map<string, number>();
 
   constructor(initial?: StoreState) {
     this.state = initial ?? {
@@ -86,8 +129,10 @@ export class RelayStores {
   }
 
   static restore(json: string): RelayStores {
-    const stores = new RelayStores(JSON.parse(json) as StoreState);
-    stores.serializedSnapshot = json;
+    const state = JSON.parse(json) as StoreState;
+    const compacted = compactPathologicalRunnerRejections(state);
+    const stores = new RelayStores(state);
+    stores.serializedSnapshot = compacted ? null : json;
     return stores;
   }
 
@@ -100,6 +145,26 @@ export class RelayStores {
   audit(actor: string, action: string, detail: string, now: Date): void {
     this.state.audit.push({ at: now.toISOString(), actor, action, detail });
     this.changed();
+  }
+
+  /**
+   * Security failures remain visible without allowing one broken peer to turn
+   * an append-only audit stream into an application-wide denial of service.
+   */
+  auditRateLimited(
+    actor: string,
+    action: string,
+    detail: string,
+    now: Date,
+    windowMs = RUNNER_EVENT_REJECTION_AUDIT_WINDOW_MS,
+  ): boolean {
+    const key = `${actor}\u0000${action}\u0000${detail}`;
+    const occurredAt = now.getTime();
+    const prior = this.rateLimitedAuditAt.get(key);
+    if (prior !== undefined && occurredAt - prior < windowMs) return false;
+    this.rateLimitedAuditAt.set(key, occurredAt);
+    this.audit(actor, action, detail, now);
+    return true;
   }
 
   auditEntries(): readonly AuditEntry[] {

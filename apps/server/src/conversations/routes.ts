@@ -307,25 +307,22 @@ export function registerConversationRoutes(
     };
     try {
       const found = await options.conversations.getConversation(user, projectId, conversationId);
-      const planDetail = (await options.planDetail?.(
-        user.id,
-        projectId,
-        found.work_item.id,
-        conversationId,
-      )) ?? {
-        plan_versions: [],
-        actions: [],
-        plan_reviews: [],
-        action_effects: [],
-      };
-      const [messages, active_attempt, retryable_attempt] = await Promise.all([
-        options.conversations.listMessages(user, projectId, found.work_item.id, conversationId),
-        options.attempts.active(projectId, conversationId),
-        options.attempts.latestRetryableAttempt(projectId, found.work_item.id, conversationId),
-      ]);
-      const executionDetail: ExecutionConversationDetail | null = options.execution
-        ? await options.execution.detail(user.id, projectId, found.work_item.id, conversationId)
-        : null;
+      const [planDetail, messages, active_attempt, retryable_attempt, executionDetail] =
+        await Promise.all([
+          options.planDetail?.(user.id, projectId, found.work_item.id, conversationId) ??
+            Promise.resolve({
+              plan_versions: [],
+              actions: [],
+              plan_reviews: [],
+              action_effects: [],
+            }),
+          options.conversations.listMessages(user, projectId, found.work_item.id, conversationId),
+          options.attempts.active(projectId, conversationId),
+          options.attempts.latestRetryableAttempt(projectId, found.work_item.id, conversationId),
+          options.execution
+            ? options.execution.detail(user.id, projectId, found.work_item.id, conversationId)
+            : Promise.resolve(null),
+        ]);
       return reply.send({
         ...found,
         messages,
@@ -364,25 +361,22 @@ export function registerConversationRoutes(
           "conversation scope mismatch",
         );
       }
-      const planDetail = (await options.planDetail?.(
-        user.id,
-        projectId,
-        workItemId,
-        conversationId,
-      )) ?? {
-        plan_versions: [],
-        actions: [],
-        plan_reviews: [],
-        action_effects: [],
-      };
-      const [messages, active_attempt, retryable_attempt] = await Promise.all([
-        options.conversations.listMessages(user, projectId, workItemId, conversationId),
-        options.attempts.active(projectId, conversationId),
-        options.attempts.latestRetryableAttempt(projectId, workItemId, conversationId),
-      ]);
-      const executionDetail: ExecutionConversationDetail | null = options.execution
-        ? await options.execution.detail(user.id, projectId, workItemId, conversationId)
-        : null;
+      const [planDetail, messages, active_attempt, retryable_attempt, executionDetail] =
+        await Promise.all([
+          options.planDetail?.(user.id, projectId, workItemId, conversationId) ??
+            Promise.resolve({
+              plan_versions: [],
+              actions: [],
+              plan_reviews: [],
+              action_effects: [],
+            }),
+          options.conversations.listMessages(user, projectId, workItemId, conversationId),
+          options.attempts.active(projectId, conversationId),
+          options.attempts.latestRetryableAttempt(projectId, workItemId, conversationId),
+          options.execution
+            ? options.execution.detail(user.id, projectId, workItemId, conversationId)
+            : Promise.resolve(null),
+        ]);
       return reply.send({
         ...found,
         messages,

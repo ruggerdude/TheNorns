@@ -141,6 +141,26 @@ describe.sequential("runner event ingress fencing", () => {
     await rejected;
   });
 
+  it("records one rejection when a stale socket floods events before close", async () => {
+    const identity = pair("runner-flood");
+    const socket = await connect("runner-flood", identity.privateKey, identity.generation, false);
+    const rejected = expectRejected(socket, "runner-flood");
+    const stale = heartbeat("runner-flood", identity.generation);
+    for (let index = 0; index < 1_000; index += 1) {
+      socket.send(JSON.stringify(stale));
+    }
+    await rejected;
+
+    expect(
+      stores
+        .auditEntries()
+        .filter(
+          (entry) =>
+            entry.actor === "runner:runner-flood" && entry.action === "runner.event_rejected",
+        ),
+    ).toHaveLength(1);
+  });
+
   it("rejects a revoked key that learns the new generation but skips reconciliation", async () => {
     const identity = pair("runner-revoked");
     const currentGeneration = server.stores.revokeRunnerSessions("runner-revoked");

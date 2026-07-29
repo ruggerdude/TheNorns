@@ -3897,6 +3897,7 @@ export function ConversationWorkspace({
     onUnsupported,
   };
   const [groups, setGroups] = useState<WorkItemConversationGroup[] | null>(null);
+  const [groupsLoadFailed, setGroupsLoadFailed] = useState(false);
   const [selected, setSelected] = useState<{
     workItemId: string;
     conversationId: string;
@@ -3943,6 +3944,7 @@ export function ConversationWorkspace({
     try {
       const next = await listWorkItemConversations(projectId);
       setGroups(next);
+      setGroupsLoadFailed(false);
       setError(null);
       return next;
     } catch (caught) {
@@ -3955,12 +3957,14 @@ export function ConversationWorkspace({
       }
       handleError(caught);
       setGroups([]);
+      setGroupsLoadFailed(true);
       return null;
     }
   }, [handleError, projectId]);
 
   useEffect(() => {
     setGroups(null);
+    setGroupsLoadFailed(false);
     setSelected(null);
     setDetail(null);
     setShowNew(initialNewConversation);
@@ -4012,7 +4016,7 @@ export function ConversationWorkspace({
       return;
     }
 
-    if (selected || showNew) return;
+    if (selected || showNew || groupsLoadFailed) return;
     const latest = groups.flatMap((group) =>
       group.conversations.map((conversation) => ({
         workItemId: group.work_item.id,
@@ -4028,7 +4032,7 @@ export function ConversationWorkspace({
     } else {
       setShowNew(true);
     }
-  }, [groups, handleError, initialConversationId, projectId, selected, showNew]);
+  }, [groups, groupsLoadFailed, handleError, initialConversationId, projectId, selected, showNew]);
 
   const loadDetail = useCallback(
     async (forceRemount = false) => {
@@ -4256,7 +4260,7 @@ export function ConversationWorkspace({
               {detail.conversation.status}
             </Badge>
             <Button
-              className="btn-small"
+              className="btn-small conversation-refresh-button"
               disabled={loadingDetail}
               onClick={refresh}
               aria-label="Refresh conversation"
@@ -4379,9 +4383,24 @@ export function ConversationWorkspace({
             />
           </>
         ) : null}
-        {!showNew && !detail && loadingDetail ? (
+        {!showNew && !detail && (groups === null || loadingDetail) ? (
           <div className="conversation-main-loading">
-            <Spinner label="Loading conversation…" />
+            <Spinner label={groups === null ? "Loading conversations…" : "Loading conversation…"} />
+          </div>
+        ) : null}
+        {!showNew && !detail && groupsLoadFailed ? (
+          <div className="conversation-main-loading conversation-load-retry">
+            <p>Conversations could not be loaded.</p>
+            <Button
+              onClick={() => {
+                setGroups(null);
+                setGroupsLoadFailed(false);
+                setError(null);
+                void loadGroups();
+              }}
+            >
+              Try again
+            </Button>
           </div>
         ) : null}
       </main>

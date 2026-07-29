@@ -776,6 +776,53 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(820);
 });
 
+test("Mobile workspace opens navigation as a drawer and keeps chat usable", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await prepare(page, "github", { conversationWorkspace: true });
+  await page.goto("/");
+  await selectExistingGitHubRepository(page);
+  await page.getByRole("button", { name: /adopt project/i }).click();
+
+  const menu = page.getByRole("button", { name: "Menu" });
+  await expect(menu).toBeVisible();
+  await menu.click();
+  const navigation = page.getByRole("navigation", { name: "Workspace sections" });
+  await expect(navigation).toBeInViewport();
+  await navigation.getByRole("button", { name: "Work", exact: true }).click();
+  await expect(menu).toHaveAttribute("aria-expanded", "false");
+
+  await expect(page.getByText("I mapped the release workflow")).toBeVisible();
+  const composer = page.getByRole("textbox", { name: "Message the project PM" });
+  await expect(composer).toBeVisible();
+  const workspaceHeader = page.locator(".workspace-page-work > .workspace-header");
+  await expect(workspaceHeader).toBeHidden();
+
+  const topbarBox = await page.locator(".workspace-shell > .topbar").boundingBox();
+  const conversationBox = await page.locator(".conversation-workspace").boundingBox();
+  const composerBox = await composer.boundingBox();
+  expect(topbarBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(58);
+  expect(conversationBox?.height ?? 0).toBeGreaterThan(775);
+  expect((composerBox?.y ?? 0) + (composerBox?.height ?? 0)).toBeLessThanOrEqual(844);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+
+  await page.getByRole("button", { name: "Open conversations" }).click();
+  const conversationDrawer = page.getByRole("complementary", {
+    name: "Project conversations",
+  });
+  await expect(conversationDrawer).toBeVisible();
+  const drawerBox = await conversationDrawer.boundingBox();
+  expect(drawerBox?.width ?? 0).toBeGreaterThan(260);
+  expect(drawerBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(382);
+  await page.getByRole("button", { name: "Close conversations" }).click();
+
+  await page.getByRole("button", { name: "Use conversation as plan" }).click();
+  const planDialog = page.getByRole("dialog", { name: "How should this plan proceed?" });
+  await expect(planDialog).toBeVisible();
+  const dialogBox = await planDialog.boundingBox();
+  expect(dialogBox?.width ?? 0).toBeGreaterThanOrEqual(385);
+  expect((dialogBox?.y ?? 0) + (dialogBox?.height ?? 0)).toBeLessThanOrEqual(844);
+});
+
 test("Usage, Settings, and Admin use the regular application sidebar", async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await prepare(page, "github");

@@ -852,6 +852,7 @@ function ProjectGraph({
       ? "work"
       : "overview",
   );
+  const [mobileWorkspaceNavOpen, setMobileWorkspaceNavOpen] = useState(false);
   const previousInitialWorkRoute = useRef(initialWorkRoute);
   const suppressRouteExitReset = useRef(false);
   const [planningHistory, setPlanningHistory] = useState<PhasePlanningRunDto[] | null>(null);
@@ -1012,6 +1013,7 @@ function ProjectGraph({
   const selectWorkspaceTab = useCallback(
     (nextTab: WorkspaceTab) => {
       setWorkspaceTab(nextTab);
+      setMobileWorkspaceNavOpen(false);
       if (nextTab !== "work") {
         suppressRouteExitReset.current = true;
         onConversationRouteCleared?.();
@@ -1020,6 +1022,15 @@ function ProjectGraph({
     },
     [draftOnly, graph, loadLatestRelationalPlanningRun, onConversationRouteCleared],
   );
+
+  useEffect(() => {
+    if (!mobileWorkspaceNavOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileWorkspaceNavOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [mobileWorkspaceNavOpen]);
 
   useEffect(() => {
     if (initialWorkRoute || initialConversationId) {
@@ -1755,9 +1766,40 @@ function ProjectGraph({
             <strong title={project.name}>{project.name}</strong>
           </div>
         </div>
+        <Button
+          className="btn-small workspace-mobile-menu"
+          aria-controls="workspace-navigation"
+          aria-expanded={mobileWorkspaceNavOpen}
+          onClick={() => setMobileWorkspaceNavOpen((open) => !open)}
+        >
+          Menu
+        </Button>
+        {mobileWorkspaceNavOpen ? (
+          <button
+            type="button"
+            className="workspace-mobile-backdrop"
+            aria-label="Close navigation"
+            onClick={() => setMobileWorkspaceNavOpen(false)}
+          />
+        ) : null}
         {/* Keep project identity and its sections in one rail flow. This avoids
             the title and navigation drifting into each other as copy changes. */}
-        <nav className="workspace-tabs" aria-label="Workspace sections">
+        <nav
+          className={`workspace-tabs${mobileWorkspaceNavOpen ? " is-mobile-open" : ""}`}
+          id="workspace-navigation"
+          aria-label="Workspace sections"
+        >
+          <div className="workspace-mobile-nav-head">
+            <strong>{project.name}</strong>
+            <Button
+              className="btn-small"
+              variant="ghost"
+              aria-label="Close workspace navigation"
+              onClick={() => setMobileWorkspaceNavOpen(false)}
+            >
+              ×
+            </Button>
+          </div>
           <button
             type="button"
             className={workspaceTab === "overview" ? "on" : ""}

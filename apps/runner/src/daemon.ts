@@ -22,6 +22,8 @@ import { Redactor } from "./redact.js";
 import { RunnerStateFile } from "./state.js";
 import type { WorkspaceRegistry } from "./workspaceRegistry.js";
 
+const RUNNER_EVENT_SEND_WINDOW = 32;
+
 export interface DaemonOptions {
   serverUrl: string; // http://host:port
   runnerId: string;
@@ -62,6 +64,7 @@ export class RunnerDaemon {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private fenced = false;
+  private highestEventSeqSent = 0;
   private readonly executor: FixtureExecutor;
   private serverAckSeq = 0;
   private knowledgeTransportEnabled = false;
@@ -232,6 +235,7 @@ export class RunnerDaemon {
 
   connect(): void {
     if (this.stopped || this.fenced) return;
+    if (this.socket !== null) return;
     const state = this.requireState();
     const wsUrl = `${this.opts.serverUrl.replace(/^http/, "ws")}/ws/runner`;
     const socket = new WebSocket(wsUrl);
@@ -289,10 +293,11 @@ export class RunnerDaemon {
           this.knowledgeTransportEnabled =
             frame.body.capabilities?.includes("knowledge_transport") ?? false;
           state.pruneAcked(frame.body.ack_event_seq);
-          // replay everything the server has not acked, in order
-          for (const event of state.unackedSince(frame.body.ack_event_seq)) {
-            socket.send(JSON.stringify({ type: "event", event }));
-          }
+          this.highestEventSeqSent = frame.body.ack_event_seq;
+          // Keep reconnect replay bounded. A small acknowledgement window
+          // preserves normal throughput without allowing an old daemon to
+          // enqueue its entire durable history against the relay at once.
+          this.sendBufferedEvents();
           // A crash may have landed after the terminal execution state was
           // persisted but before its acknowledgement was buffered. The relay
           // excludes recently executed commands from resend_commands, so the
@@ -317,8 +322,10 @@ export class RunnerDaemon {
           break;
         }
         case "event_ack": {
-          this.serverAckSeq = frame.ack_event_seq;
-          state.pruneAcked(frame.ack_event_seq);
+          this.serverAckSeq = Math.max(this.serverAckSeq, frame.ack_event_seq);
+          state.pruneAcked(this.serverAckSeq);
+          this.highestEventSeqSent = Math.max(this.highestEventSeqSent, this.serverAckSeq);
+          this.sendBufferedEvents();
           break;
         }
         case "fenced": {
@@ -392,8 +399,11 @@ export class RunnerDaemon {
       // longer arrive; it would burn the job's whole timeout doing nothing.
       this.inference.abortAll();
       this.stopHeartbeat();
-      if (this.socket === socket) this.socket = null;
-      this.scheduleReconnect();
+      if (this.socket === socket) {
+        this.socket = null;
+        this.highestEventSeqSent = this.serverAckSeq;
+        this.scheduleReconnect();
+      }
     });
     socket.on("error", () => {
       // close handler drives reconnection
@@ -429,6 +439,22 @@ export class RunnerDaemon {
       this.reconnectTimer = null;
       this.connect();
     }, this.opts.reconnectDelayMs);
+  }
+
+  private sendBufferedEvents(): void {
+    if (!this.connected || this.fenced) return;
+    const state = this.requireState();
+    const inFlight = Math.max(0, this.highestEventSeqSent - this.serverAckSeq);
+    const available = Math.max(0, RUNNER_EVENT_SEND_WINDOW - inFlight);
+    if (available === 0) return;
+    const events = state
+      .unackedSince(this.serverAckSeq)
+      .filter((event) => event.event_seq > this.highestEventSeqSent)
+      .slice(0, available);
+    for (const event of events) {
+      this.socket?.send(JSON.stringify({ type: "event", event }));
+      this.highestEventSeqSent = event.event_seq;
+    }
   }
 
   private startHeartbeat(): void {
@@ -717,9 +743,7 @@ export class RunnerDaemon {
     });
     // Reconciliation sends an existing buffered event before redelivering
     // commands. Only a newly synthesized event needs sending here.
-    if (ensured.created && ensured.event && this.connected) {
-      this.socket?.send(JSON.stringify({ type: "event", event: ensured.event }));
-    }
+    if (ensured.created && ensured.event) this.sendBufferedEvents();
     this.reportRunSettled(commandId, ackState);
   }
 
@@ -758,8 +782,6 @@ export class RunnerDaemon {
       payload: safePayload,
     };
     state.bufferEvent(event);
-    if (this.connected) {
-      this.socket?.send(JSON.stringify({ type: "event", event }));
-    }
+    this.sendBufferedEvents();
   }
 }

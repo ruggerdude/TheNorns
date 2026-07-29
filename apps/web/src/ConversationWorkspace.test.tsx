@@ -505,6 +505,47 @@ afterEach(() => {
 });
 
 describe("conversation workspace", () => {
+  it("shows conversation loading immediately and recovers from a failed list request", async () => {
+    let listAttempts = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.endsWith("/work-items")) {
+        listAttempts += 1;
+        return listAttempts === 1
+          ? Response.json({ error: "temporarily unavailable" }, { status: 503 })
+          : listResponse();
+      }
+      if (url.endsWith(`/conversations/${conversationId}`)) {
+        return detailResponse([
+          message({
+            id: "message-recovered",
+            role: "assistant",
+            sequence: 1,
+            parts: [{ type: "text", format: "markdown", text: "Conversation recovered." }],
+          }),
+        ]);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        onConversationSelected={() => undefined}
+        onUnsupported={() => undefined}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Loading conversations…")).toBeInTheDocument();
+    expect(await screen.findByText("Conversations could not be loaded.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByText("Conversation recovered.")).toBeInTheDocument();
+    expect(listAttempts).toBe(2);
+  });
+
   it("restores durable visible history, structured parts, and the pinned PM", async () => {
     const history = [
       message({

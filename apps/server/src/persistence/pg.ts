@@ -40,13 +40,15 @@ export class PgPersistence {
 
   /** Load a state key's snapshot, or null if it has never been persisted. */
   async load(key: string): Promise<string | null> {
-    const result = await this.client.query("SELECT snapshot FROM norns_state WHERE key = $1", [
-      key,
-    ]);
+    const result = await this.client.query(
+      "SELECT snapshot::text AS snapshot_json FROM norns_state WHERE key = $1",
+      [key],
+    );
     const row = result.rows[0];
     if (!row) return null;
-    // node-postgres returns jsonb as an object; pglite likewise. Re-serialize.
-    return JSON.stringify(row.snapshot);
+    // Asking Postgres for text avoids parsing a potentially large JSONB value
+    // into an object only to stringify and parse it again during restore.
+    return String(row.snapshot_json);
   }
 }
 
@@ -62,6 +64,7 @@ export class SnapshotFlusher {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastWritten: string | null = null;
   private flushTail: Promise<void> = Promise.resolve();
+  private periodicFlushRunning = false;
 
   constructor(
     private readonly persistence: PgPersistence,
@@ -73,7 +76,13 @@ export class SnapshotFlusher {
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.flush();
+      if (this.periodicFlushRunning) return;
+      this.periodicFlushRunning = true;
+      void this.flush()
+        .catch(() => undefined)
+        .finally(() => {
+          this.periodicFlushRunning = false;
+        });
     }, this.intervalMs);
   }
 
