@@ -117,14 +117,15 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     const headerActions = adminButton.closest(".header-actions");
     expect(headerActions).not.toBeNull();
     const headerButtons = within(headerActions as HTMLElement).getAllByRole("button");
-    // DESIGN P1: the theme toggle moved from a floating control into the
-    // topbar actions, between Admin and the user menu.
-    expect(headerButtons).toHaveLength(5);
-    expect(headerButtons[0]).toHaveAccessibleName("Usage");
-    expect(headerButtons[1]).toHaveAccessibleName("Settings");
-    expect(headerButtons[2]).toHaveAccessibleName("Admin");
-    expect(headerButtons[3]).toHaveAccessibleName(/switch to (light|dark) mode/i);
-    expect(headerButtons[4]).toHaveAccessibleName("admin@x.com");
+    // Desktop exposes the destinations inline; the same action group also
+    // owns the mobile drawer trigger.
+    expect(headerButtons).toHaveLength(6);
+    expect(headerButtons[0]).toHaveAccessibleName("Open navigation menu");
+    expect(headerButtons[1]).toHaveAccessibleName("Usage");
+    expect(headerButtons[2]).toHaveAccessibleName("Settings");
+    expect(headerButtons[3]).toHaveAccessibleName("Admin");
+    expect(headerButtons[4]).toHaveAccessibleName(/switch to (light|dark) mode/i);
+    expect(headerButtons[5]).toHaveAccessibleName("admin@x.com");
     await user.click(adminButton);
     expect(await screen.findByTestId("admin-panel")).toBeInTheDocument();
     expect(screen.getByTestId("admin-panel")).toHaveClass("embedded-page-view");

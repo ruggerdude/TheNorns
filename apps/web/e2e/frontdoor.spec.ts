@@ -783,7 +783,7 @@ test("Mobile workspace opens navigation as a drawer and keeps chat usable", asyn
   await selectExistingGitHubRepository(page);
   await page.getByRole("button", { name: /adopt project/i }).click();
 
-  const menu = page.getByRole("button", { name: "Menu" });
+  const menu = page.getByRole("button", { name: "Menu", exact: true });
   await expect(menu).toBeVisible();
   await menu.click();
   const navigation = page.getByRole("navigation", { name: "Workspace sections" });
@@ -821,6 +821,31 @@ test("Mobile workspace opens navigation as a drawer and keeps chat usable", asyn
   const dialogBox = await planDialog.boundingBox();
   expect(dialogBox?.width ?? 0).toBeGreaterThanOrEqual(385);
   expect((dialogBox?.y ?? 0) + (dialogBox?.height ?? 0)).toBeLessThanOrEqual(844);
+});
+
+test("Mobile Portfolio exposes the global navigation drawer", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await prepare(page, "github");
+  await page.goto("/");
+
+  const menu = page.getByRole("button", { name: "Open navigation menu" });
+  await expect(menu).toBeVisible();
+  await menu.click();
+
+  const navigation = page.getByRole("navigation", { name: "Main navigation" });
+  await expect(navigation).toBeInViewport();
+  await expect
+    .poll(async () => Math.round((await navigation.boundingBox())?.x ?? -999))
+    .toBeGreaterThanOrEqual(0);
+  await expect(navigation.getByRole("button", { name: "Usage", exact: true })).toBeVisible();
+  await expect(navigation.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
+  await expect(navigation.getByRole("button", { name: "Admin", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+
+  await navigation.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect(page.getByTestId("usage-panel")).toBeVisible();
+  await expect(navigation).not.toBeInViewport();
+  await expect(page.getByRole("button", { name: "Open navigation menu" })).toBeVisible();
 });
 
 test("Usage, Settings, and Admin use the regular application sidebar", async ({ page }) => {

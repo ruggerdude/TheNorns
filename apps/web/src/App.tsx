@@ -1848,6 +1848,53 @@ function ProjectGraph({
           >
             Settings
           </button>
+          {user && mobileWorkspaceNavOpen ? (
+            <div className="workspace-mobile-global-actions">
+              <span>Account</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileWorkspaceNavOpen(false);
+                  onOpenUsage();
+                }}
+              >
+                Usage
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileWorkspaceNavOpen(false);
+                  onOpenAccount();
+                }}
+              >
+                Account settings
+              </button>
+              {user.role === "admin" ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileWorkspaceNavOpen(false);
+                    onOpenAdmin();
+                  }}
+                >
+                  Admin
+                </button>
+              ) : null}
+              <div className="workspace-mobile-theme">
+                <span>Appearance</span>
+                <ThemeToggle />
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileWorkspaceNavOpen(false);
+                  onLogout("Signed out.");
+                }}
+              >
+                Sign out
+              </button>
+            </div>
+          ) : null}
         </nav>
         {user ? (
           <AuthenticatedHeaderActions

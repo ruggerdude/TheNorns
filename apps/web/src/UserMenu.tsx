@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { SettingsTab } from "./Account";
 import type { CurrentUser } from "./auth";
 import { ThemeToggle } from "./theme";
@@ -81,8 +81,31 @@ export function AuthenticatedHeaderActions({
   onSignOut: () => void;
   activeView?: "usage" | "settings" | "admin" | null;
 }): React.ReactElement {
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
+  const closeMobileNavigation = () => setMobileNavigationOpen(false);
+
+  useEffect(() => {
+    if (!mobileNavigationOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNavigationOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [mobileNavigationOpen]);
+
   return (
     <div className="header-actions">
+      <Button
+        className="btn-small global-mobile-menu"
+        variant="ghost"
+        aria-label="Open navigation menu"
+        aria-controls="global-mobile-navigation"
+        aria-expanded={mobileNavigationOpen}
+        onClick={() => setMobileNavigationOpen((open) => !open)}
+      >
+        <span aria-hidden="true">☰</span>
+        Menu
+      </Button>
       <Button
         className={`btn-small${activeView === "usage" ? " is-active" : ""}`}
         variant="ghost"
@@ -111,6 +134,102 @@ export function AuthenticatedHeaderActions({
       ) : null}
       <ThemeToggle />
       <HeaderUserMenu user={user} onOpenAccount={onOpenAccount} onSignOut={onSignOut} />
+      {mobileNavigationOpen ? (
+        <button
+          type="button"
+          className="global-mobile-backdrop"
+          aria-label="Close navigation menu"
+          onClick={closeMobileNavigation}
+        />
+      ) : null}
+      {mobileNavigationOpen ? (
+        <nav
+          id="global-mobile-navigation"
+          className="global-mobile-navigation is-open"
+          aria-label="Main navigation"
+        >
+          <div className="global-mobile-navigation-head">
+            <div>
+              <span>Navigation</span>
+              <strong>The Norns</strong>
+            </div>
+            <Button
+              className="btn-small"
+              variant="ghost"
+              aria-label="Close navigation menu"
+              onClick={closeMobileNavigation}
+            >
+              ×
+            </Button>
+          </div>
+          <Button
+            className={activeView === "usage" ? "is-active" : ""}
+            variant="ghost"
+            aria-current={activeView === "usage" ? "page" : undefined}
+            onClick={() => {
+              closeMobileNavigation();
+              onOpenUsage();
+            }}
+          >
+            Usage
+          </Button>
+          <Button
+            className={activeView === "settings" ? "is-active" : ""}
+            variant="ghost"
+            aria-current={activeView === "settings" ? "page" : undefined}
+            onClick={() => {
+              closeMobileNavigation();
+              onOpenAccount();
+            }}
+          >
+            Settings
+          </Button>
+          {user.role === "admin" ? (
+            <Button
+              className={activeView === "admin" ? "is-active" : ""}
+              variant="ghost"
+              aria-current={activeView === "admin" ? "page" : undefined}
+              onClick={() => {
+                closeMobileNavigation();
+                onOpenAdmin();
+              }}
+            >
+              Admin
+            </Button>
+          ) : null}
+          <div className="global-mobile-navigation-account">
+            <span className="user-avatar" aria-hidden="true">
+              {(user.name ?? user.email).slice(0, 1).toUpperCase()}
+            </span>
+            <span>
+              <strong>{user.name ?? user.email}</strong>
+              {user.name ? <small>{user.email}</small> : null}
+            </span>
+          </div>
+          <div className="global-mobile-navigation-theme">
+            <span>Appearance</span>
+            <ThemeToggle />
+          </div>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              closeMobileNavigation();
+              onOpenAccount("profile");
+            }}
+          >
+            Profile
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              closeMobileNavigation();
+              onSignOut();
+            }}
+          >
+            Sign out
+          </Button>
+        </nav>
+      ) : null}
     </div>
   );
 }
