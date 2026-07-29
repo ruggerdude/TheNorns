@@ -118,6 +118,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
             conversation_mockups_dashboard: "conversation_mockups_dashboard_v1",
             conversation_inference_reservations: "conversation_inference_reservations",
             conversation_plan_review_mode: true,
+            conversation_organization: "conversation_organization_v1",
+            conversation_message_branches: "conversation_message_branches_v1",
           },
         ],
       }),
@@ -155,6 +157,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
             conversation_mockups_dashboard: null,
             conversation_inference_reservations: null,
             conversation_plan_review_mode: false,
+            conversation_organization: null,
+            conversation_message_branches: null,
           },
         ],
       }),
@@ -172,7 +176,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "conversation domain tables, conversation_stream_lifecycle_v1, " +
         "conversation_plan_workflow_v1, conversation_execution_handoff_v1, " +
         "conversation_human_steering_v1, conversation_mockups_dashboard_v1, " +
-        "conversation_inference_reservations, conversation_plan_reviews.review_mode",
+        "conversation_inference_reservations, conversation_plan_reviews.review_mode, " +
+        "conversation_organization_v1, conversation_message_branches_v1",
     });
   });
 
@@ -205,6 +210,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
             conversation_mockups_dashboard: null,
             conversation_inference_reservations: null,
             conversation_plan_review_mode: false,
+            conversation_organization: null,
+            conversation_message_branches: null,
           },
         ],
       }),
@@ -218,7 +225,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
           "conversation_stream_lifecycle_v1, conversation_plan_workflow_v1, " +
           "conversation_execution_handoff_v1, conversation_human_steering_v1, " +
           "conversation_mockups_dashboard_v1, conversation_inference_reservations, " +
-          "conversation_plan_reviews.review_mode",
+          "conversation_plan_reviews.review_mode, conversation_organization_v1, " +
+          "conversation_message_branches_v1",
       },
     );
   });

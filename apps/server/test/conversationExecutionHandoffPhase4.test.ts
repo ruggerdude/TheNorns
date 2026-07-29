@@ -1265,7 +1265,10 @@ describe.sequential("conversation-first Phase 4 legacy compatibility", () => {
       created.work_item.id,
       created.conversation.id,
     );
-    expect(upgradedDetail.action_effects.at(-1)?.effect).toMatchObject({
+    const legacyApprovalEffect = upgradedDetail.action_effects.find(
+      (candidate) => candidate.action_id === approval.id,
+    );
+    expect(legacyApprovalEffect?.effect).toMatchObject({
       kind: "plan_approved",
       transition_status: "legacy_unavailable",
       execution_conversation_id: null,

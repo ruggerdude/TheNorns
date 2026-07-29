@@ -1,7 +1,12 @@
 import type { ProviderName } from "@norns/adapters";
 import {
   PmModel,
+  V2CreateConversationFolderInput,
+  V2CreateConversationMessageBranchInput,
   V2CreateConversationPlanningExcerptInput,
+  V2ReorderConversationFoldersInput,
+  V2UpdateConversationFolderInput,
+  V2UpdateWorkItemOrganizationInput,
   V2WorkMessagePart,
   providerForPmModel,
 } from "@norns/contracts";
@@ -49,6 +54,12 @@ const WorkItemBody = z
   })
   .strict();
 const WorkItemTitleBody = z.object({ title: z.string().trim().min(1).max(120) }).strict();
+const ConversationNavigationQuery = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(100).default(30),
+    cursor: z.string().trim().min(1).optional(),
+  })
+  .strict();
 const ConversationModelBody = z.object({ model: PmModel }).strict();
 const MessageBody = z
   .object({
@@ -188,6 +199,94 @@ export function registerConversationRoutes(
 ): void {
   const workBase = "/api/v2/projects/:projectId/work-items";
   const conversationBase = `${workBase}/:workItemId/conversations`;
+  const folderBase = "/api/v2/projects/:projectId/conversation-folders";
+
+  app.get("/api/v2/projects/:projectId/conversation-navigation", async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId } = request.params as { projectId: string };
+    try {
+      const query = ConversationNavigationQuery.parse(request.query);
+      return reply.send(
+        await options.conversations.conversationNavigation(
+          user,
+          projectId,
+          query.limit,
+          query.cursor,
+        ),
+      );
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.post(folderBase, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId } = request.params as { projectId: string };
+    try {
+      const folder = await options.conversations.createConversationFolder(
+        user,
+        projectId,
+        V2CreateConversationFolderInput.parse(request.body),
+      );
+      return reply.code(201).send({ folder });
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.patch(`${folderBase}/:folderId`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId, folderId } = request.params as {
+      projectId: string;
+      folderId: string;
+    };
+    try {
+      const folder = await options.conversations.updateConversationFolder(
+        user,
+        projectId,
+        folderId,
+        V2UpdateConversationFolderInput.parse(request.body),
+      );
+      return reply.send({ folder });
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.put(`${folderBase}/order`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId } = request.params as { projectId: string };
+    try {
+      const folders = await options.conversations.reorderConversationFolders(
+        user,
+        projectId,
+        V2ReorderConversationFoldersInput.parse(request.body),
+      );
+      return reply.send({ folders });
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.delete(`${folderBase}/:folderId`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId, folderId } = request.params as {
+      projectId: string;
+      folderId: string;
+    };
+    try {
+      return reply.send(
+        await options.conversations.deleteConversationFolder(user, projectId, folderId),
+      );
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
 
   app.get(workBase, async (request, reply) => {
     const user = await options.requireUser(request, reply);
@@ -253,6 +352,26 @@ export function registerConversationRoutes(
         title,
       );
       return reply.send({ work_item });
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.patch(`${workBase}/:workItemId/organization`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId, workItemId } = request.params as {
+      projectId: string;
+      workItemId: string;
+    };
+    try {
+      const organization = await options.conversations.updateWorkItemOrganization(
+        user,
+        projectId,
+        workItemId,
+        V2UpdateWorkItemOrganizationInput.parse(request.body),
+      );
+      return reply.send({ organization });
     } catch (error) {
       routeError(reply, error);
     }
@@ -325,6 +444,28 @@ export function registerConversationRoutes(
         pin,
       );
       return reply.code(201).send({ conversation });
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.post(`${conversationBase}/:conversationId/branches`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId, workItemId, conversationId } = request.params as {
+      projectId: string;
+      workItemId: string;
+      conversationId: string;
+    };
+    try {
+      const created = await options.conversations.createConversationMessageBranch(
+        user,
+        projectId,
+        workItemId,
+        conversationId,
+        V2CreateConversationMessageBranchInput.parse(request.body),
+      );
+      return reply.code(201).send(created);
     } catch (error) {
       routeError(reply, error);
     }

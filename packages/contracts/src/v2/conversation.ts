@@ -109,6 +109,84 @@ export const V2WorkConversation = z
   });
 export type V2WorkConversationT = z.infer<typeof V2WorkConversation>;
 
+export const V2ConversationFolder = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    user_id: V2EntityId,
+    name: z.string().trim().min(1).max(80),
+    sort_order: nonNegativeInteger,
+    created_at: V2IsoDateTime,
+    updated_at: V2IsoDateTime,
+  })
+  .strict();
+export type V2ConversationFolderT = z.infer<typeof V2ConversationFolder>;
+
+export const V2WorkItemOrganization = z
+  .object({
+    schema_version: schemaVersion,
+    project_id: V2EntityId,
+    user_id: V2EntityId,
+    work_item_id: V2EntityId,
+    folder_id: V2EntityId.nullable(),
+    pinned_at: nullableDate,
+    created_at: V2IsoDateTime,
+    updated_at: V2IsoDateTime,
+  })
+  .strict();
+export type V2WorkItemOrganizationT = z.infer<typeof V2WorkItemOrganization>;
+
+export const V2ConversationNavigationConversation = z
+  .object({
+    id: V2EntityId,
+    kind: V2WorkConversationKind,
+    status: V2WorkConversationStatus,
+    provider: V2NonEmptyString,
+    model: V2NonEmptyString,
+  })
+  .strict();
+
+export const V2ConversationNavigationItem = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    title: V2NonEmptyString,
+    status: V2WorkItemStatus,
+    folder_id: V2EntityId.nullable(),
+    pinned_at: nullableDate,
+    latest_activity_at: V2IsoDateTime,
+    conversation_count: nonNegativeInteger,
+    latest_conversation: V2ConversationNavigationConversation.nullable(),
+  })
+  .strict();
+export type V2ConversationNavigationItemT = z.infer<typeof V2ConversationNavigationItem>;
+
+export const V2ConversationNavigationPage = z
+  .object({
+    folders: z.array(V2ConversationFolder),
+    items: z.array(V2ConversationNavigationItem),
+    next_cursor: V2NonEmptyString.nullable(),
+  })
+  .strict();
+export type V2ConversationNavigationPageT = z.infer<typeof V2ConversationNavigationPage>;
+
+export const V2ConversationMessageBranch = z
+  .object({
+    schema_version: schemaVersion,
+    id: V2EntityId,
+    project_id: V2EntityId,
+    work_item_id: V2EntityId,
+    child_conversation_id: V2EntityId,
+    parent_conversation_id: V2EntityId,
+    source_message_id: V2EntityId,
+    created_by_user_id: V2EntityId,
+    created_at: V2IsoDateTime,
+  })
+  .strict();
+export type V2ConversationMessageBranchT = z.infer<typeof V2ConversationMessageBranch>;
+
 export const V2MessageTextPart = z
   .object({
     type: z.literal("text"),
@@ -2663,6 +2741,47 @@ export const V2CreateWorkConversationInput = z
   })
   .strict();
 export type V2CreateWorkConversationInputT = z.infer<typeof V2CreateWorkConversationInput>;
+
+export const V2CreateConversationFolderInput = z
+  .object({
+    name: z.string().trim().min(1).max(80),
+  })
+  .strict();
+export type V2CreateConversationFolderInputT = z.infer<typeof V2CreateConversationFolderInput>;
+
+export const V2UpdateConversationFolderInput = V2CreateConversationFolderInput;
+export type V2UpdateConversationFolderInputT = z.infer<typeof V2UpdateConversationFolderInput>;
+
+export const V2ReorderConversationFoldersInput = z
+  .object({
+    folder_ids: z
+      .array(V2EntityId)
+      .max(500)
+      .refine((ids) => new Set(ids).size === ids.length, "folder_ids must be distinct"),
+  })
+  .strict();
+export type V2ReorderConversationFoldersInputT = z.infer<typeof V2ReorderConversationFoldersInput>;
+
+export const V2UpdateWorkItemOrganizationInput = z
+  .object({
+    folder_id: V2EntityId.nullable().optional(),
+    pinned: z.boolean().optional(),
+  })
+  .strict()
+  .refine(
+    (input) => input.folder_id !== undefined || input.pinned !== undefined,
+    "at least one organization field is required",
+  );
+export type V2UpdateWorkItemOrganizationInputT = z.infer<typeof V2UpdateWorkItemOrganizationInput>;
+
+export const V2CreateConversationMessageBranchInput = z
+  .object({
+    source_message_id: V2EntityId,
+  })
+  .strict();
+export type V2CreateConversationMessageBranchInputT = z.infer<
+  typeof V2CreateConversationMessageBranchInput
+>;
 
 export const V2SubmitWorkMessageInput = z
   .object({

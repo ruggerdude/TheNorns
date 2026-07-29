@@ -33,6 +33,7 @@ import {
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import { AiInvocationTelemetry } from "../src/usage-intelligence/telemetry.js";
+import { textPdf } from "./fileAttachmentFixtures.js";
 
 const asMigrationDatabase = (database: PGlite): V2MigrationDatabase =>
   database as unknown as V2MigrationDatabase;
@@ -949,6 +950,159 @@ describe.sequential("persistent planning conversation streaming", () => {
         created_by_user_id: owner.id,
       },
     ]);
+  });
+
+  it("injects durable file extraction exactly once while preserving image-only provider parts", async () => {
+    const extractedPhrase = "The launch constraint is a reversible staged rollout.";
+    const uploaded = await attachments.create("stream-project", {
+      mime: "application/pdf",
+      content: textPdf(extractedPhrase),
+      filename: "launch-constraints.pdf",
+      purpose: "conversation",
+      createdBy: owner.id,
+    });
+    expect(uploaded).toMatchObject({
+      mime: "application/pdf",
+      original_filename: "launch-constraints.pdf",
+      extraction_truncated: false,
+    });
+    expect(uploaded.extracted_text_sha256).toMatch(/^[0-9a-f]{64}$/u);
+
+    const trigger = await conversations.submitUserMessage(owner, {
+      project_id: "stream-project",
+      work_item_id: workItemId,
+      conversation_id: conversationId,
+      client_message_id: "stream-client-file-integration",
+      parts: [
+        { type: "text", format: "plain", text: "Use the attached launch constraints." },
+        {
+          type: "attachment",
+          attachment_id: uploaded.id,
+          name: "launch-constraints.pdf",
+          media_type: "application/pdf",
+        },
+      ],
+    });
+    const captured = new FakeAdapter("openai", "mock-openai");
+    captured.enqueue("The durable file context is available.");
+    currentAdapter = captured as ConversationLlmAdapter;
+    const prepared = await turnService.prepare({
+      actor: owner,
+      projectId: "stream-project",
+      workItemId,
+      conversationId,
+      triggeringMessageId: trigger.id,
+    });
+    await prepared.run({
+      started: () => undefined,
+      text: () => undefined,
+      finished: () => undefined,
+    });
+
+    expect(captured.requests).toHaveLength(1);
+    expect(captured.requests[0]?.images).toEqual([]);
+    const currentMessage = captured.requests[0]?.messages?.at(-1);
+    expect(currentMessage?.role).toBe("user");
+    expect(typeof currentMessage?.content).toBe("string");
+    const currentContent =
+      typeof currentMessage?.content === "string" ? currentMessage.content : "";
+    expect(currentContent).toContain(
+      [
+        "Use the attached launch constraints.",
+        `[Attachment: launch-constraints.pdf (application/pdf), id=${uploaded.id}]`,
+      ].join("\n\n"),
+    );
+    expect(currentContent).toContain("### File: launch-constraints.pdf");
+    expect(currentContent).toContain(extractedPhrase);
+    const system = captured.requests[0]?.system ?? "";
+    expect(system).not.toContain(extractedPhrase);
+    expect(`${system}\n${currentContent}`.split(extractedPhrase)).toHaveLength(2);
+    const renderedBlock = currentContent.slice(
+      currentContent.indexOf("### File: launch-constraints.pdf"),
+    );
+    const artifactEntry = prepared.attempt.context_manifest.entries.find(
+      (candidate) => candidate.kind === "artifact" && candidate.ref === uploaded.id,
+    );
+    expect(artifactEntry).toMatchObject({
+      content_hash: canonicalSha256(renderedBlock),
+      estimated_tokens: Math.ceil(renderedBlock.length / 4),
+    });
+    expect(artifactEntry?.estimated_tokens).toBeGreaterThan(0);
+  });
+
+  it("deterministically caps multi-file conversation context without omitting file labels", async () => {
+    const uploads = await Promise.all(
+      ["alpha", "beta", "gamma"].map((name, index) =>
+        attachments.create("stream-project", {
+          mime: "text/plain",
+          content: Buffer.from(`${name}:${String(index).repeat(60_000)}`, "utf8"),
+          filename: `${name}.txt`,
+          purpose: "conversation",
+          createdBy: owner.id,
+        }),
+      ),
+    );
+    const trigger = await conversations.submitUserMessage(owner, {
+      project_id: "stream-project",
+      work_item_id: workItemId,
+      conversation_id: conversationId,
+      client_message_id: "stream-client-multi-file-cap",
+      parts: [
+        { type: "text", format: "plain", text: "Compare every attached file." },
+        ...uploads.map((upload) => ({
+          type: "attachment" as const,
+          attachment_id: upload.id,
+          name: upload.original_filename,
+          media_type: upload.mime,
+        })),
+      ],
+    });
+    const captured = new FakeAdapter("openai", "mock-openai");
+    captured.enqueue("All attachment labels remained available.");
+    currentAdapter = captured as ConversationLlmAdapter;
+    const prepared = await turnService.prepare({
+      actor: owner,
+      projectId: "stream-project",
+      workItemId,
+      conversationId,
+      triggeringMessageId: trigger.id,
+    });
+    await prepared.run({
+      started: () => undefined,
+      text: () => undefined,
+      finished: () => undefined,
+    });
+
+    const currentMessage = captured.requests[0]?.messages?.at(-1);
+    expect(typeof currentMessage?.content).toBe("string");
+    const currentContent =
+      typeof currentMessage?.content === "string" ? currentMessage.content : "";
+    for (const upload of uploads) {
+      expect(currentContent).toContain(`### File: ${upload.original_filename}`);
+    }
+    expect(
+      currentContent.match(/\[File context truncated to the conversation limit\]/gu)?.length,
+    ).toBe(3);
+    const entries = prepared.attempt.context_manifest.entries.filter(
+      (candidate) =>
+        candidate.kind === "artifact" && uploads.some((upload) => upload.id === candidate.ref),
+    );
+    expect(entries).toHaveLength(3);
+    expect(entries.every((candidate) => candidate.estimated_tokens <= 12_500)).toBe(true);
+    expect(
+      entries.reduce((total, candidate) => total + candidate.estimated_tokens, 0),
+    ).toBeLessThan(30_000);
+    for (const [index, upload] of uploads.entries()) {
+      const start = currentContent.indexOf(`### File: ${upload.original_filename}`);
+      const nextUpload = uploads[index + 1];
+      const end = nextUpload
+        ? currentContent.indexOf(`\n### File: ${nextUpload.original_filename}`, start)
+        : currentContent.length;
+      const rendered = currentContent.slice(start, end);
+      const entry = entries.find((candidate) => candidate.ref === upload.id);
+      expect(entry?.content_hash).toBe(canonicalSha256(rendered));
+      expect(entry?.estimated_tokens).toBe(Math.ceil(rendered.length / 4));
+    }
   });
 
   it("settles exact provider usage on failure and cancellation while retaining ambiguous spend", async () => {

@@ -70,6 +70,7 @@ export class SqlConversationInferenceBudget implements ConversationInferenceBudg
     scope: ConversationInferenceScope,
     quote: ConversationInferenceQuote,
   ): Promise<ConversationInferenceReservation | null> {
+    const reservedAt = this.now();
     const reserved = await this.transactions.transaction(async (sql) => {
       const replay = (
         await sql.query<ReservationRow>(
@@ -109,7 +110,7 @@ export class SqlConversationInferenceBudget implements ConversationInferenceBudg
         if (limitUsd === null && limitTokens === null) {
           throw new Error(`usage budget policy "${policy.id}" is incomplete`);
         }
-        const bounds = usageBudgetPeriodBounds(policy.period, this.now());
+        const bounds = usageBudgetPeriodBounds(policy.period, reservedAt);
         // READ COMMITTED takes a new snapshot per statement. Read the fallback
         // first: if canonical telemetry commits between these reads, spend is
         // temporarily counted twice (safe refusal) instead of missed by both.
@@ -133,8 +134,8 @@ export class SqlConversationInferenceBudget implements ConversationInferenceBudg
           `INSERT INTO conversation_inference_reservations (
              reservation_key,usage_request_id,project_id,work_item_id,conversation_id,
              initiated_by_user_id,provider,model,max_input_tokens,max_output_tokens,
-             max_charge_usd,status
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'active')
+             max_charge_usd,status,created_at,updated_at
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'active',$12,$12)
            RETURNING *`,
           [
             scope.reservationKey,
@@ -148,6 +149,7 @@ export class SqlConversationInferenceBudget implements ConversationInferenceBudg
             quote.maxInputTokens,
             quote.maxOutputTokens,
             quote.maxChargeUsd,
+            reservedAt.toISOString(),
           ],
         )
       ).rows[0];

@@ -1,20 +1,32 @@
 // FRONT DOOR P4 (D3): the attachments domain service. Owns validation, the
 // content-addressed store (dedupe by sha256 within a project), the aggregate
 // quotas that can't live in a CHECK constraint, soft-deletion, and the
-// provider-neutral image parts handed to the planning loop. HTTP concerns
+// provider-neutral image parts and bounded file text handed to conversations.
+// HTTP concerns
 // (auth, status codes) stay in server.ts; this module is pure domain logic
 // over a V2 transaction runner so it is unit-testable against PGlite.
 import { createHash } from "node:crypto";
 import type { ImagePart } from "@norns/adapters";
 import { newId } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
-import { type AttachmentImageMime, isAllowedImageMime, sniffImage } from "./imageMeta.js";
+import {
+  ALLOWED_FILE_MIMES,
+  AttachmentFileError,
+  type AttachmentMime,
+  isAllowedAttachmentMime,
+  isImageAttachmentMime,
+  maxBytesForMime,
+  prepareAttachment,
+} from "./fileMeta.js";
+import { ALLOWED_IMAGE_MIMES, type AttachmentImageMime } from "./imageMeta.js";
 
-/** Caps from the freeze (D3). Aggregate caps are enforced transactionally; the
- *  per-image byte cap is also mirrored as a CHECK in the migration. */
+/** Aggregate caps are enforced transactionally; per-MIME byte caps are also
+ * mirrored as CHECK constraints by the attachment migrations. */
 export const ATTACHMENT_CAPS = {
   /** <= 3 MB per image. */
   maxBytesPerImage: 3 * 1024 * 1024,
+  /** <= 10 MB for the largest supported file type (PDF). */
+  maxBytesPerAttachment: 10 * 1024 * 1024,
   /** <= 8 live attachments per (project, purpose). */
   maxPerObjective: 8,
   /** <= 40 MB of live attachment bytes per project. */
@@ -29,6 +41,7 @@ export type AttachmentValidationCode =
   | "unsupported_media_type"
   | "payload_too_large"
   | "invalid_image"
+  | "invalid_file"
   | "objective_limit"
   | "project_quota"
   | "attachment_in_use";
@@ -59,18 +72,22 @@ export interface AttachmentDto {
   id: string;
   project_id: string;
   sha256: string;
-  mime: AttachmentImageMime;
+  mime: AttachmentMime;
   bytes: number;
   width: number | null;
   height: number | null;
+  original_filename: string;
+  extracted_text_sha256: string | null;
+  extraction_truncated: boolean;
   purpose: string;
   created_by: string | null;
   created_at: string;
 }
 
-/** The raw bytes for the GET-serves-image route. */
+/** The raw bytes and safe metadata for the authenticated download route. */
 export interface AttachmentContent {
-  mime: AttachmentImageMime;
+  mime: AttachmentMime;
+  filename: string;
   bytes: Buffer;
 }
 
@@ -81,6 +98,7 @@ export interface CreateAttachmentInput {
   /** Backward-compatible JSON transport for older clients. */
   base64?: string;
   purpose?: string;
+  filename?: string;
   createdBy?: string | null;
 }
 
@@ -135,10 +153,14 @@ interface AttachmentRow {
   id: string;
   project_id: string;
   sha256: string;
-  mime: AttachmentImageMime;
+  mime: AttachmentMime;
   bytes: number | string;
   width: number | null;
   height: number | null;
+  original_filename: string;
+  extracted_text: string | null;
+  extracted_text_sha256: string | null;
+  extraction_truncated: boolean;
   purpose: string;
   created_by: string | null;
   created_at: string | Date;
@@ -157,6 +179,9 @@ function rowToDto(row: AttachmentRow): AttachmentDto {
     bytes: typeof row.bytes === "number" ? row.bytes : Number(row.bytes),
     width: row.width,
     height: row.height,
+    original_filename: row.original_filename,
+    extracted_text_sha256: row.extracted_text_sha256,
+    extraction_truncated: row.extraction_truncated,
     purpose: row.purpose,
     created_by: row.created_by,
     created_at: iso(row.created_at),
@@ -181,15 +206,19 @@ export class AttachmentService {
   }
 
   /**
-   * Validate, dedupe, and store one image. Returns the metadata (never the
-   * bytes). A repeat upload of identical content to the same project returns
-   * the existing live row and is not re-charged against the quotas.
+   * Validate, dedupe, and store one image or model-readable file. Returns
+   * metadata only. A repeat upload of identical content to the same project
+   * returns the existing immutable live row and is not re-charged.
    */
   async create(projectId: string, input: CreateAttachmentInput): Promise<AttachmentDto> {
-    if (!isAllowedImageMime(input.mime)) {
+    const mime = normalizeMime(input.mime);
+    if (!isAllowedAttachmentMime(mime)) {
       throw new AttachmentValidationError(
         "unsupported_media_type",
-        `unsupported media type "${input.mime}"; allowed: image/png, image/jpeg, image/webp, image/gif`,
+        `unsupported media type "${input.mime}"; allowed: ${[
+          ...ALLOWED_IMAGE_MIMES,
+          ...ALLOWED_FILE_MIMES,
+        ].join(", ")}`,
       );
     }
     const bytes = input.content
@@ -198,21 +227,29 @@ export class AttachmentService {
         ? decodeBase64(input.base64)
         : Buffer.alloc(0);
     if (bytes.length === 0) {
-      throw new AttachmentValidationError("invalid_image", "empty attachment payload");
+      throw new AttachmentValidationError(
+        isImageAttachmentMime(mime) ? "invalid_image" : "invalid_file",
+        "empty attachment payload",
+      );
     }
-    if (bytes.length > ATTACHMENT_CAPS.maxBytesPerImage) {
+    const maxBytes = maxBytesForMime(mime, ATTACHMENT_CAPS.maxBytesPerImage);
+    if (bytes.length > maxBytes) {
       throw new AttachmentValidationError(
         "payload_too_large",
-        `attachment is ${bytes.length} bytes; the per-image cap is ${ATTACHMENT_CAPS.maxBytesPerImage}`,
+        `attachment is ${bytes.length} bytes; the ${mime} cap is ${maxBytes}`,
       );
     }
-    const detected = sniffImage(bytes);
-    if (!detected || detected.mime !== input.mime) {
+    let prepared: Awaited<ReturnType<typeof prepareAttachment>>;
+    try {
+      prepared = await prepareAttachment(mime, bytes);
+    } catch (error) {
+      if (!(error instanceof AttachmentFileError)) throw error;
       throw new AttachmentValidationError(
-        "invalid_image",
-        `payload is not a valid ${input.mime} image`,
+        isImageAttachmentMime(mime) ? "invalid_image" : "invalid_file",
+        error.message,
       );
     }
+    const filename = normalizeFilename(input.filename, mime);
     const purpose = normalizePurpose(input.purpose);
     const sha256 = createHash("sha256").update(bytes).digest("hex");
 
@@ -221,7 +258,9 @@ export class AttachmentService {
 
       // Dedupe within the project: identical content already stored → return it.
       const existing = await tx.query<AttachmentRow>(
-        `SELECT id, project_id, sha256, mime, bytes, width, height, purpose, created_by, created_at
+        `SELECT id, project_id, sha256, mime, bytes, width, height,
+                original_filename, extracted_text, extracted_text_sha256,
+                extraction_truncated, purpose, created_by, created_at
            FROM attachments
           WHERE project_id = $1 AND sha256 = $2 AND deleted_at IS NULL
           LIMIT 1`,
@@ -263,17 +302,25 @@ export class AttachmentService {
       const createdAt = this.now().toISOString();
       const inserted = await tx.query<AttachmentRow>(
         `INSERT INTO attachments
-           (id, project_id, sha256, mime, bytes, width, height, purpose, created_by, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-         RETURNING id, project_id, sha256, mime, bytes, width, height, purpose, created_by, created_at`,
+           (id, project_id, sha256, mime, bytes, width, height, original_filename,
+            extracted_text, extracted_text_sha256, extraction_truncated,
+            purpose, created_by, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         RETURNING id, project_id, sha256, mime, bytes, width, height,
+                   original_filename, extracted_text, extracted_text_sha256,
+                   extraction_truncated, purpose, created_by, created_at`,
         [
           id,
           projectId,
           sha256,
-          detected.mime,
+          prepared.mime,
           bytes.length,
-          detected.width,
-          detected.height,
+          prepared.width,
+          prepared.height,
+          filename,
+          prepared.extractedText,
+          prepared.extractedTextSha256,
+          prepared.extractionTruncated,
           purpose,
           input.createdBy ?? null,
           createdAt,
@@ -290,7 +337,9 @@ export class AttachmentService {
     return this.transactions.transaction(async (tx) => {
       await this.assertProjectExists(tx, projectId);
       const result = await tx.query<AttachmentRow>(
-        `SELECT id, project_id, sha256, mime, bytes, width, height, purpose, created_by, created_at
+        `SELECT id, project_id, sha256, mime, bytes, width, height,
+                original_filename, extracted_text, extracted_text_sha256,
+                extraction_truncated, purpose, created_by, created_at
            FROM attachments
           WHERE project_id = $1 AND deleted_at IS NULL
             AND ($2::text IS NULL OR purpose = $2)
@@ -301,11 +350,15 @@ export class AttachmentService {
     });
   }
 
-  /** The raw bytes + content-type for the image-serving GET route. */
+  /** The raw bytes + content metadata for the authenticated download route. */
   async content(projectId: string, attachmentId: string): Promise<AttachmentContent> {
     return this.transactions.transaction(async (tx) => {
-      const result = await tx.query<{ mime: AttachmentImageMime; sha256: string }>(
-        `SELECT mime, sha256
+      const result = await tx.query<{
+        mime: AttachmentMime;
+        sha256: string;
+        original_filename: string;
+      }>(
+        `SELECT mime, sha256, original_filename
            FROM attachments
           WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL`,
         [attachmentId, projectId],
@@ -324,7 +377,7 @@ export class AttachmentService {
           `content unavailable for attachment "${attachmentId}"`,
         );
       }
-      return { mime: row.mime, bytes };
+      return { mime: row.mime, filename: row.original_filename, bytes };
     });
   }
 
@@ -423,36 +476,69 @@ export class AttachmentService {
    * per-round image limit for cost control.
    */
   async imagePartsFor(projectId: string, attachmentIds: readonly string[]): Promise<ImagePart[]> {
-    if (attachmentIds.length === 0) return [];
+    return (await this.resolveForConversationTurn(projectId, attachmentIds)).images;
+  }
+
+  /**
+   * Resolve every attachment on a triggering message. Images become provider
+   * image parts; model-readable files are already present once in the
+   * assembler's immutable derived-text context and therefore add no binary
+   * provider part here.
+   */
+  async resolveForConversationTurn(
+    projectId: string,
+    attachmentIds: readonly string[],
+  ): Promise<{ images: ImagePart[]; unavailableAttachmentIds: string[] }> {
+    const uniqueIds = [...new Set(attachmentIds)];
+    if (uniqueIds.length === 0) return { images: [], unavailableAttachmentIds: [] };
     return this.transactions.transaction(async (tx) => {
       // Positional placeholders ($2, $3, …) for portability across the PGlite
       // test runtime and production node-postgres.
-      const placeholders = attachmentIds.map((_, i) => `$${i + 2}`).join(", ");
+      const placeholders = uniqueIds.map((_, i) => `$${i + 2}`).join(", ");
       const result = await tx.query<{
         id: string;
-        mime: AttachmentImageMime;
+        mime: AttachmentMime;
         sha256: string;
+        extracted_text: string | null;
+        extracted_text_sha256: string | null;
       }>(
-        `SELECT a.id AS id, a.mime AS mime, a.sha256 AS sha256
+        `SELECT a.id AS id, a.mime AS mime, a.sha256 AS sha256,
+                a.extracted_text, a.extracted_text_sha256
            FROM attachments a
           WHERE a.project_id = $1 AND a.deleted_at IS NULL AND a.id IN (${placeholders})`,
-        [projectId, ...attachmentIds],
+        [projectId, ...uniqueIds],
       );
       const byId = new Map(result.rows.map((row) => [row.id, row]));
       const parts: ImagePart[] = [];
-      for (const id of attachmentIds) {
-        if (parts.length >= ATTACHMENT_CAPS.maxImagesPerPlanningRound) break;
+      const unavailableAttachmentIds: string[] = [];
+      for (const id of uniqueIds) {
         const row = byId.get(id);
-        if (!row) continue;
+        if (!row) {
+          unavailableAttachmentIds.push(id);
+          continue;
+        }
+        if (!isImageAttachmentMime(row.mime)) {
+          if (row.extracted_text === null || row.extracted_text_sha256 === null) {
+            unavailableAttachmentIds.push(id);
+          }
+          continue;
+        }
+        if (parts.length >= ATTACHMENT_CAPS.maxImagesPerPlanningRound) {
+          unavailableAttachmentIds.push(id);
+          continue;
+        }
         const bytes = await this.blobStore.get(tx, row.sha256);
-        if (!bytes) continue;
+        if (!bytes) {
+          unavailableAttachmentIds.push(id);
+          continue;
+        }
         parts.push({
           type: "image",
           mime: row.mime,
           base64: bytes.toString("base64"),
         });
       }
-      return parts;
+      return { images: parts, unavailableAttachmentIds };
     });
   }
 
@@ -475,4 +561,43 @@ function decodeBase64(base64: string): Buffer {
 function normalizePurpose(purpose: string | undefined): string {
   const trimmed = (purpose ?? DEFAULT_ATTACHMENT_PURPOSE).trim();
   return trimmed.length > 0 ? trimmed : DEFAULT_ATTACHMENT_PURPOSE;
+}
+
+function normalizeMime(mime: string): string {
+  return mime.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+}
+
+function normalizeFilename(filename: string | undefined, mime: AttachmentMime): string {
+  const extension: Record<AttachmentMime, string> = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "text/plain": "txt",
+    "text/markdown": "md",
+    "application/json": "json",
+    "text/csv": "csv",
+    "application/pdf": "pdf",
+  };
+  const normalized = Array.from((filename ?? "").normalize("NFC"), (character) =>
+    isUnsafeFilenameCharacter(character) ? "_" : character,
+  )
+    .join("")
+    .trim();
+  const fallback = `attachment.${extension[mime]}`;
+  return Array.from(normalized || fallback)
+    .slice(0, 255)
+    .join("");
+}
+
+function isUnsafeFilenameCharacter(character: string): boolean {
+  const codePoint = character.codePointAt(0) ?? 0;
+  return (
+    codePoint <= 0x1f ||
+    (codePoint >= 0x7f && codePoint <= 0x9f) ||
+    (codePoint >= 0x202a && codePoint <= 0x202e) ||
+    (codePoint >= 0x2066 && codePoint <= 0x2069) ||
+    character === "/" ||
+    character === "\\"
+  );
 }

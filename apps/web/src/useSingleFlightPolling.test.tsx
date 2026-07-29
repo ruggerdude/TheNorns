@@ -79,15 +79,15 @@ describe("useSingleFlightPolling", () => {
       .mockResolvedValue("recovered");
     render(<Probe load={load} onValue={vi.fn()} />);
 
-    expect(await screen.findByTestId("error")).toHaveTextContent("first failure");
+    await waitFor(() => expect(screen.getByTestId("error")).toHaveTextContent("first failure"));
     await act(() => vi.advanceTimersByTimeAsync(1_001));
     await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
-    expect(screen.getByTestId("error")).toHaveTextContent("second failure");
+    await waitFor(() => expect(screen.getByTestId("error")).toHaveTextContent("second failure"));
 
     await act(() => vi.advanceTimersByTimeAsync(1_000));
     expect(load).toHaveBeenCalledTimes(2);
     await act(() => vi.advanceTimersByTimeAsync(1_001));
     await waitFor(() => expect(load).toHaveBeenCalledTimes(3));
-    expect(screen.getByTestId("error")).toHaveTextContent("");
+    await waitFor(() => expect(screen.getByTestId("error")).toBeEmptyDOMElement());
   });
 });

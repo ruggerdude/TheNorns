@@ -333,6 +333,24 @@ export const QC_CONTROL_TRANSCRIPT_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const CONVERSATION_ORGANIZATION_MIGRATION_NAME = "0050_conversation_organization";
+export const CONVERSATION_ORGANIZATION_MIGRATION_URL = new URL(
+  "../../../drizzle/0050_conversation_organization.sql",
+  import.meta.url,
+);
+
+export const CONVERSATION_FILE_ATTACHMENTS_MIGRATION_NAME = "0051_conversation_file_attachments";
+export const CONVERSATION_FILE_ATTACHMENTS_MIGRATION_URL = new URL(
+  "../../../drizzle/0051_conversation_file_attachments.sql",
+  import.meta.url,
+);
+
+export const CONVERSATION_MESSAGE_BRANCHES_MIGRATION_NAME = "0052_conversation_message_branches";
+export const CONVERSATION_MESSAGE_BRANCHES_MIGRATION_URL = new URL(
+  "../../../drizzle/0052_conversation_message_branches.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -559,6 +577,18 @@ export async function loadConversationModelSwitchingMigrationSql(): Promise<stri
 
 export async function loadQcControlTranscriptMigrationSql(): Promise<string> {
   return readFile(QC_CONTROL_TRANSCRIPT_MIGRATION_URL, "utf8");
+}
+
+export async function loadConversationOrganizationMigrationSql(): Promise<string> {
+  return readFile(CONVERSATION_ORGANIZATION_MIGRATION_URL, "utf8");
+}
+
+export async function loadConversationFileAttachmentsMigrationSql(): Promise<string> {
+  return readFile(CONVERSATION_FILE_ATTACHMENTS_MIGRATION_URL, "utf8");
+}
+
+export async function loadConversationMessageBranchesMigrationSql(): Promise<string> {
+  return readFile(CONVERSATION_MESSAGE_BRANCHES_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -868,6 +898,18 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: QC_CONTROL_TRANSCRIPT_MIGRATION_NAME,
       sql: await loadQcControlTranscriptMigrationSql(),
+    },
+    {
+      name: CONVERSATION_ORGANIZATION_MIGRATION_NAME,
+      sql: await loadConversationOrganizationMigrationSql(),
+    },
+    {
+      name: CONVERSATION_FILE_ATTACHMENTS_MIGRATION_NAME,
+      sql: await loadConversationFileAttachmentsMigrationSql(),
+    },
+    {
+      name: CONVERSATION_MESSAGE_BRANCHES_MIGRATION_NAME,
+      sql: await loadConversationMessageBranchesMigrationSql(),
     },
   ];
 }

@@ -6,6 +6,7 @@ allowBuilds:
   esbuild: true
 overrides:
   "@assistant-ui/tap": 0.9.5
+  "@hono/node-server": 2.0.12
   assistant-cloud: 0.1.36
 minimumReleaseAgeExclude:
   - '@assistant-ui/core@0.2.22'

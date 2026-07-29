@@ -108,6 +108,8 @@ interface RuntimeSchemaPosture {
   conversation_mockups_dashboard: string | null;
   conversation_inference_reservations: string | null;
   conversation_plan_review_mode: boolean;
+  conversation_organization: string | null;
+  conversation_message_branches: string | null;
 }
 
 /**
@@ -208,7 +210,11 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                WHERE table_schema='public'
                  AND table_name='conversation_plan_reviews'
                  AND column_name='review_mode'
-            ) AS conversation_plan_review_mode`,
+            ) AS conversation_plan_review_mode,
+            to_regclass('public.conversation_organization_v1')::text
+              AS conversation_organization,
+            to_regclass('public.conversation_message_branches_v1')::text
+              AS conversation_message_branches`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -240,6 +246,8 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
       ? ["conversation_inference_reservations"]
       : []),
     ...(!posture?.conversation_plan_review_mode ? ["conversation_plan_reviews.review_mode"] : []),
+    ...(!posture?.conversation_organization ? ["conversation_organization_v1"] : []),
+    ...(!posture?.conversation_message_branches ? ["conversation_message_branches_v1"] : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

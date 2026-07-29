@@ -60,10 +60,12 @@ import {
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
+  ALLOWED_IMAGE_MIMES,
   ATTACHMENT_CAPS,
   AttachmentLookupError,
   AttachmentService,
   AttachmentValidationError,
+  isImageAttachmentMime,
 } from "./attachments/index.js";
 import { bearerToken, verifyRunnerSignature } from "./auth.js";
 import {
@@ -128,6 +130,30 @@ import {
  * of not going lower is that this poll touches several tables per active phase.
  */
 const PHASE_QUEUE_DRAIN_INTERVAL_MS = 5_000;
+
+function attachmentContentDisposition(filename: string, inline: boolean): string {
+  const safeFilename = Array.from(filename, (character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f ||
+      (codePoint >= 0x7f && codePoint <= 0x9f) ||
+      (codePoint >= 0x202a && codePoint <= 0x202e) ||
+      (codePoint >= 0x2066 && codePoint <= 0x2069) ||
+      character === "/" ||
+      character === "\\"
+      ? "_"
+      : character;
+  }).join("");
+  const fallback =
+    safeFilename
+      .replace(/[^\x20-\x7e]/gu, "_")
+      .replace(/["\\]/gu, "_")
+      .trim() || "attachment";
+  const encoded = encodeURIComponent(safeFilename).replace(
+    /['()*]/gu,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `${inline ? "inline" : "attachment"}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
 import { DebateConflictError, type DebateService } from "./debates/service.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 // EXECUTION E1: task-context assembly + the runner-facing context fetch route.
@@ -572,8 +598,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   });
   await app.register(websocket);
   app.addContentTypeParser(
-    ["image/png", "image/jpeg", "image/webp", "image/gif"],
-    { parseAs: "buffer", bodyLimit: 10 * 1024 * 1024 },
+    [...ALLOWED_IMAGE_MIMES, "text/markdown", "text/csv", "application/pdf"],
+    { parseAs: "buffer", bodyLimit: ATTACHMENT_CAPS.maxBytesPerAttachment },
     (_request, body, done) => done(null, body),
   );
 
@@ -6384,8 +6410,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       });
     }
 
-    // ---- FRONT DOOR P4 (D3): image attachments ------------------------------
-    // Content-addressed image storage for project objectives. Raw image bytes
+    // ---- FRONT DOOR P4 (D3): model-readable attachments ---------------------
+    // Content-addressed storage for project objectives. Raw file bytes
     // are the preferred upload transport; legacy base64 JSON remains accepted.
     // Metadata JSON out; the GET serves the raw bytes. Session auth + project
     // authorization mirror the neighboring v2 project routes (the service 404s
@@ -6405,7 +6431,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               ? 415
               : error.code === "payload_too_large"
                 ? 413
-                : error.code === "invalid_image"
+                : error.code === "invalid_image" || error.code === "invalid_file"
                   ? 400
                   : 409; // objective_limit | project_quota | attachment_in_use
           reply.code(status).send({ error: error.code, message: error.message });
@@ -6419,33 +6445,58 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           mime: z.string().trim().min(1).max(100),
           base64: z.string().min(1),
           purpose: z.string().trim().min(1).max(200).optional(),
+          filename: z.string().trim().min(1).max(255).optional(),
         })
         .strict();
 
-      // A 3 MB image is ~4 MB base64; raise this route's body limit above the
-      // 1 MB Fastify default (with headroom for the JSON envelope). The real
-      // per-image byte cap is still enforced on the decoded bytes.
+      // A 10 MB PDF is ~13.4 MB base64; leave bounded envelope headroom. The
+      // decoded per-MIME limits remain enforced by AttachmentService.
       app.post(
         "/api/v2/projects/:id/attachments",
-        { bodyLimit: 8 * 1024 * 1024 },
+        { bodyLimit: 16 * 1024 * 1024 },
         async (req, reply) => {
           const user = await resolveUser(req);
           if (!user) return reply.code(401).send({ error: "unauthorized" });
           const { id } = req.params as { id: string };
           try {
-            const binary = Buffer.isBuffer(req.body) ? req.body : null;
+            const requestedMime =
+              String(req.headers["content-type"] ?? "")
+                .split(";", 1)[0]
+                ?.trim()
+                .toLowerCase() ?? "";
+            const binary = Buffer.isBuffer(req.body)
+              ? req.body
+              : typeof req.body === "string"
+                ? Buffer.from(req.body, "utf8")
+                : null;
             const body = binary ? null : CreateAttachmentBody.safeParse(req.body);
-            if (!binary && !body?.success) {
+            const resemblesEnvelope =
+              typeof req.body === "object" &&
+              req.body !== null &&
+              ("mime" in req.body || "base64" in req.body);
+            const rawJson =
+              !binary &&
+              !body?.success &&
+              requestedMime === "application/json" &&
+              !resemblesEnvelope
+                ? Buffer.from(JSON.stringify(req.body), "utf8")
+                : null;
+            const rawContent = binary ?? rawJson;
+            if (!rawContent && !body?.success) {
               return reply.code(400).send({ error: "bad_request" });
             }
             const headerPurpose = req.headers["x-attachment-purpose"];
             const purpose =
               typeof headerPurpose === "string" ? headerPurpose.trim().slice(0, 200) : undefined;
-            const attachment = binary
+            const headerFilename = req.headers["x-attachment-filename"];
+            const filename =
+              typeof headerFilename === "string" ? headerFilename.trim().slice(0, 255) : undefined;
+            const attachment = rawContent
               ? await attachmentService.create(id, {
-                  mime: String(req.headers["content-type"] ?? "").split(";")[0] ?? "",
-                  content: binary,
+                  mime: requestedMime,
+                  content: rawContent,
                   ...(purpose ? { purpose } : {}),
+                  ...(filename ? { filename } : {}),
                   createdBy: user.id,
                 })
               : body?.success
@@ -6453,6 +6504,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                     mime: body.data.mime,
                     base64: body.data.base64,
                     ...(body.data.purpose !== undefined ? { purpose: body.data.purpose } : {}),
+                    ...(body.data.filename !== undefined ? { filename: body.data.filename } : {}),
                     createdBy: user.id,
                   })
                 : undefined;
@@ -6479,11 +6531,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         if (!(await requireSession(req, reply))) return;
         const { id, attachmentId } = req.params as { id: string; attachmentId: string };
         try {
-          const { mime, bytes } = await attachmentService.content(id, attachmentId);
+          const { mime, filename, bytes } = await attachmentService.content(id, attachmentId);
           reply
             .header("Content-Type", mime)
             .header("Cache-Control", "private, max-age=300, immutable")
-            .header("Content-Disposition", "inline")
+            .header(
+              "Content-Disposition",
+              attachmentContentDisposition(filename, isImageAttachmentMime(mime)),
+            )
             .header("X-Content-Type-Options", "nosniff")
             .header("ETag", `"${attachmentId}"`)
             .send(bytes);

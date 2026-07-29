@@ -7,6 +7,7 @@ import { assertCurrentRuntimeSchema } from "../src/persistence/postgresConnectio
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import {
   CONVERSATION_MODEL_SWITCHING_MIGRATION_NAME,
+  CONVERSATION_ORGANIZATION_MIGRATION_NAME,
   CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME,
   GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME,
   PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
@@ -184,10 +185,18 @@ describe.sequential("conversation-first durable domain", () => {
       assertCurrentRuntimeSchema(pg as unknown as Parameters<typeof assertCurrentRuntimeSchema>[0]),
     ).resolves.toBeUndefined();
     const replay = await runCurrentV2Migrations(asMigrationDatabase(pg));
-    expect(replay.at(-1)).toMatchObject({
-      name: QC_CONTROL_TRANSCRIPT_MIGRATION_NAME,
-      applied: false,
-    });
+    expect(replay).toContainEqual(
+      expect.objectContaining({
+        name: CONVERSATION_ORGANIZATION_MIGRATION_NAME,
+        applied: false,
+      }),
+    );
+    expect(replay).toContainEqual(
+      expect.objectContaining({
+        name: QC_CONTROL_TRANSCRIPT_MIGRATION_NAME,
+        applied: false,
+      }),
+    );
     expect(replay).toContainEqual(
       expect.objectContaining({
         name: CONVERSATION_MODEL_SWITCHING_MIGRATION_NAME,

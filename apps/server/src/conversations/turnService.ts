@@ -240,18 +240,21 @@ export class ConversationTurnService {
       input.conversationId,
       input.triggeringMessageId,
     );
-    const images = await this.attachments.imagePartsFor(input.projectId, assembled.attachment_ids);
-    if (images.length !== assembled.attachment_ids.length) {
+    const resolvedAttachments = await this.attachments.resolveForConversationTurn(
+      input.projectId,
+      assembled.attachment_ids,
+    );
+    if (resolvedAttachments.unavailableAttachmentIds.length > 0) {
       throw new ConversationTurnError(
         "attachment_unavailable",
-        "one or more referenced images are unavailable",
+        "one or more referenced attachments are unavailable",
         422,
       );
     }
     const messages = withCurrentImages(
       assembled.messages,
       assembled.triggering_message_index,
-      images,
+      resolvedAttachments.images,
     );
     const provider = providerName(scope.conversation.provider);
 

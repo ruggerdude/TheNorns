@@ -1,6 +1,7 @@
 import type {
   V2ConversationActionDeliveryEventT,
   V2ConversationActionT,
+  V2ConversationMessageBranchT,
   V2ConversationMockupVersionT,
   V2ConversationPlanActionEffectT,
   V2ConversationPlanReviewT,
@@ -466,6 +467,7 @@ function detailResponse(
     deliveryEvents?: V2ConversationActionDeliveryEventT[];
     pmUpdates?: V2ConversationPmUpdateT[];
     pmUpdateSettings?: V2ConversationPmUpdateSettingsT | null;
+    branchLineage?: V2ConversationMessageBranchT | null;
   } = {},
 ): Response {
   return Response.json({
@@ -495,6 +497,7 @@ function detailResponse(
     action_delivery_events: resources.deliveryEvents ?? [],
     pm_updates: resources.pmUpdates ?? [],
     pm_update_settings: resources.pmUpdateSettings ?? null,
+    branch_lineage: resources.branchLineage ?? null,
   });
 }
 
@@ -543,7 +546,7 @@ describe("conversation workspace", () => {
       />,
     );
 
-    expect(screen.getByText("Loading conversations…")).toBeInTheDocument();
+    expect(screen.getAllByText("Loading conversations…")).toHaveLength(2);
     expect(await screen.findByText("Conversations could not be loaded.")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
 
@@ -587,6 +590,10 @@ describe("conversation workspace", () => {
       throw new Error(`Unexpected request: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const clipboardWrite = vi
+      .spyOn(window.navigator.clipboard, "writeText")
+      .mockResolvedValue(undefined);
 
     const view = render(
       <ConversationWorkspace
@@ -610,9 +617,12 @@ describe("conversation workspace", () => {
     expect(screen.getByRole("combobox", { name: "Conversation model" })).toHaveValue(
       "claude-sonnet-5",
     );
+    expect(document.querySelector(".conversation-header")).toContainElement(
+      screen.getByRole("combobox", { name: "Conversation model" }),
+    );
     expect(
-      screen.queryByRole("heading", { name: "Conversation-first planning" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("heading", { name: "Conversation-first planning" }),
+    ).toBeInTheDocument();
     expect(
       screen.queryByText("# Conversation-first planning", { exact: true }),
     ).not.toBeInTheDocument();
@@ -625,6 +635,13 @@ describe("conversation workspace", () => {
       "Plan",
     );
     expect(screen.getByRole("button", { name: "Add file" })).toHaveTextContent("+");
+    expect(screen.getByRole("button", { name: "Send message" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop response" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "More chat actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Copy last response" }));
+    expect(clipboardWrite).toHaveBeenCalledWith(
+      "I found **one risk**.\n\n```ts\nconst durable = true;\n```",
+    );
     expect(screen.queryByTestId("conversation-welcome")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry response" })).not.toBeInTheDocument();
 
@@ -653,6 +670,641 @@ describe("conversation workspace", () => {
     expect(screen.getByRole("combobox", { name: "Conversation model" })).toHaveValue(
       "claude-sonnet-5",
     );
+  });
+
+  it("presents attributable human, PM, worker, runner, coordinator, and system actors", async () => {
+    const actors = [
+      message({
+        id: "actor-human",
+        role: "user",
+        sequence: 1,
+        actor: { actor_type: "human", actor_id: "user-1" },
+        parts: [{ type: "text", format: "markdown", text: "Human direction" }],
+      }),
+      message({
+        id: "actor-pm",
+        role: "assistant",
+        sequence: 2,
+        actor: { actor_type: "agent", actor_id: "pm:conversation-1" },
+        parts: [{ type: "text", format: "markdown", text: "PM response" }],
+      }),
+      message({
+        id: "actor-worker",
+        role: "assistant",
+        sequence: 3,
+        actor: { actor_type: "agent", actor_id: "worker:api" },
+        parts: [{ type: "text", format: "markdown", text: "Worker response" }],
+      }),
+      message({
+        id: "actor-runner",
+        role: "assistant",
+        sequence: 4,
+        actor: { actor_type: "runner", actor_id: "runner:task-1" },
+        parts: [{ type: "text", format: "markdown", text: "Runner response" }],
+      }),
+      message({
+        id: "actor-coordinator",
+        role: "assistant",
+        sequence: 5,
+        actor: { actor_type: "coordinator", actor_id: "qc:review-1" },
+        parts: [{ type: "text", format: "markdown", text: "Coordinator response" }],
+      }),
+      message({
+        id: "actor-system",
+        role: "system",
+        sequence: 6,
+        actor: { actor_type: "system", actor_id: null },
+        parts: [{ type: "text", format: "plain", text: "System event" }],
+      }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse(actors);
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(
+      (await screen.findByText("Human direction")).closest(".conversation-message"),
+    ).toHaveClass("actor-human");
+    expect(screen.getByTitle("pm:conversation-1").closest(".conversation-message")).toHaveClass(
+      "actor-pm",
+    );
+    expect(screen.getByTitle("worker:api")).toHaveTextContent("Agent");
+    expect(screen.getByTitle("worker:api").closest(".conversation-message")).toHaveClass(
+      "actor-agent",
+    );
+    expect(screen.getByTitle("runner:task-1")).toHaveTextContent("Runner");
+    expect(screen.getByTitle("qc:review-1")).toHaveTextContent("Coordinator");
+    expect(screen.getByText("System event").closest(".conversation-message")).toHaveClass(
+      "actor-system",
+    );
+    expect(screen.getByRole("button", { name: "Copy message" })).toBeInTheDocument();
+  });
+
+  it("pastes an image, preserves its filename and MIME, previews it, and removes it", async () => {
+    const NativeURL = URL;
+    class ObjectURL extends NativeURL {
+      static createObjectURL(): string {
+        return "blob:conversation-image-preview";
+      }
+
+      static revokeObjectURL(): void {}
+    }
+    vi.stubGlobal("URL", ObjectURL);
+    const uploads: Array<{ headers: Headers; body: BodyInit | null | undefined }> = [];
+    let removed = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse();
+        if (url.endsWith("/attachments") && init?.method === "POST") {
+          uploads.push({ headers: new Headers(init.headers), body: init.body });
+          return Response.json({ id: "attachment-image" }, { status: 201 });
+        }
+        if (url.endsWith("/attachments/attachment-image") && init?.method === "DELETE") {
+          removed = true;
+          return new Response(null, { status: 204 });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message the project PM" });
+    const image = new File(["png"], "launch-map.png", { type: "image/png" });
+    fireEvent.paste(composer, { clipboardData: { files: [image] } });
+
+    expect(await screen.findByText("launch-map.png")).toBeInTheDocument();
+    expect(document.querySelector(".conversation-composer-attachment img")).toHaveAttribute(
+      "src",
+      "blob:conversation-image-preview",
+    );
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]?.headers.get("content-type")).toBe("image/png");
+    expect(uploads[0]?.headers.get("x-attachment-filename")).toBe("launch-map.png");
+    expect(uploads[0]?.body).toBe(image);
+
+    await userEvent.click(screen.getByRole("button", { name: "Remove attachment" }));
+    await waitFor(() => expect(removed).toBe(true));
+    expect(screen.queryByText("launch-map.png")).not.toBeInTheDocument();
+  });
+
+  it("adds a PDF from the plus picker and a Markdown file by drag and drop", async () => {
+    const uploaded: Array<{ name: string | null; mime: string | null }> = [];
+    let submittedBody: unknown = null;
+    const stream =
+      'data: {"type":"start","messageId":"message-file-response"}\n\n' +
+      'data: {"type":"finish","finishReason":"stop"}\n\n' +
+      "data: [DONE]\n\n";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse();
+        if (url.endsWith("/attachments") && init?.method === "POST") {
+          const headers = new Headers(init.headers);
+          uploaded.push({
+            name: headers.get("x-attachment-filename"),
+            mime: headers.get("content-type"),
+          });
+          return Response.json({ id: `attachment-${uploaded.length}` }, { status: 201 });
+        }
+        if (url.endsWith(`/conversations/${conversationId}/messages`) && init?.method === "POST") {
+          submittedBody = JSON.parse(String(init.body));
+          return new Response(stream, {
+            status: 200,
+            headers: {
+              "content-type": "text/event-stream",
+              "x-vercel-ai-ui-message-stream": "v1",
+            },
+          });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    const addFile = await screen.findByRole("button", { name: "Add file" });
+    expect(addFile).toHaveAttribute("title", "Add images or files");
+    await user.click(addFile);
+    const picker = document.querySelector<HTMLInputElement>('input[type="file"]');
+    if (!picker) throw new Error("Expected the file picker input.");
+    expect(picker.accept).toContain(".pdf");
+    expect(picker.accept).toContain(".md");
+    const pdf = new File(["pdf"], "release-notes.pdf", { type: "application/pdf" });
+    Object.defineProperty(picker, "files", { configurable: true, value: [pdf] });
+    fireEvent.change(picker);
+    expect(await screen.findByText("release-notes.pdf")).toBeInTheDocument();
+
+    const markdown = new File(["# Launch"], "launch.md", {
+      type: "application/octet-stream",
+    });
+    fireEvent.drop(screen.getByRole("form", { name: "Message composer and file dropzone" }), {
+      dataTransfer: { files: [markdown] },
+    });
+    expect(await screen.findByText("launch.md")).toBeInTheDocument();
+    expect(uploaded).toEqual([
+      { name: "release-notes.pdf", mime: "application/pdf" },
+      { name: "launch.md", mime: "text/markdown" },
+    ]);
+    await user.type(
+      screen.getByRole("textbox", { name: "Message the project PM" }),
+      "Review these files{enter}",
+    );
+    await waitFor(() => expect(submittedBody).not.toBeNull());
+    expect(submittedBody).toMatchObject({
+      parts: [
+        { type: "text", format: "markdown", text: "Review these files" },
+        {
+          type: "attachment",
+          attachment_id: "attachment-1",
+          name: "release-notes.pdf",
+          media_type: "application/pdf",
+        },
+        {
+          type: "attachment",
+          attachment_id: "attachment-2",
+          name: "launch.md",
+          media_type: "text/markdown",
+        },
+      ],
+    });
+  });
+
+  it("renders durable images as thumbnails and documents as accessible download chips", async () => {
+    const history = [
+      message({
+        id: "message-durable-files",
+        role: "user",
+        sequence: 1,
+        parts: [
+          {
+            type: "attachment",
+            attachment_id: "attachment-image-durable",
+            name: "architecture.png",
+            media_type: "image/png",
+          },
+          {
+            type: "attachment",
+            attachment_id: "attachment-pdf-durable",
+            name: "brief.pdf",
+            media_type: "application/pdf",
+          },
+        ],
+      }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse(history);
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByAltText("architecture.png")).toHaveAttribute(
+      "src",
+      `/api/v2/projects/${projectId}/attachments/attachment-image-durable`,
+    );
+    const pdf = screen.getByRole("link", { name: "Open brief.pdf" });
+    expect(pdf).toHaveAttribute(
+      "href",
+      `/api/v2/projects/${projectId}/attachments/attachment-pdf-durable`,
+    );
+    expect(pdf).toHaveAttribute("download", "brief.pdf");
+    expect(pdf).toHaveTextContent("PDF");
+  });
+
+  it("fails closed with a readable error for an unsupported pasted file", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.endsWith("/work-items")) return listResponse();
+      if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse();
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message the project PM" });
+    fireEvent.paste(composer, {
+      clipboardData: {
+        files: [new File(["binary"], "installer.exe", { type: "application/x-msdownload" })],
+      },
+    });
+
+    expect(
+      await screen.findByText(
+        "That file type is not supported. Add an image, PDF, plain text, Markdown, JSON, or CSV file.",
+      ),
+    ).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => urlOf(input).endsWith("/attachments"))).toBe(
+      false,
+    );
+  });
+
+  it("edits a human planning message through a durable child branch and leaves the parent unchanged", async () => {
+    const originalText = "Use a Friday launch window.";
+    const editedText = "Use a Tuesday launch window.";
+    const source = message({
+      id: "message-edit-source",
+      role: "user",
+      sequence: 1,
+      parts: [{ type: "text", format: "markdown", text: originalText }],
+    });
+    const child = {
+      ...conversation,
+      id: "conversation-edit-child",
+      next_message_sequence: 1,
+    };
+    const branchLineage: V2ConversationMessageBranchT = {
+      schema_version: 2,
+      id: "branch-edit-1",
+      project_id: projectId,
+      work_item_id: workItemId,
+      child_conversation_id: child.id,
+      parent_conversation_id: conversationId,
+      source_message_id: source.id,
+      created_by_user_id: "user-1",
+      created_at: now,
+    };
+    const selectedConversations: string[] = [];
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    let branched = false;
+    let submitted = false;
+    const stream =
+      'data: {"type":"start","messageId":"message-edited-response"}\n\n' +
+      'data: {"type":"text-start","id":"text-edited"}\n\n' +
+      'data: {"type":"text-delta","id":"text-edited","delta":"Tuesday is recorded."}\n\n' +
+      'data: {"type":"text-end","id":"text-edited"}\n\n' +
+      'data: {"type":"finish","finishReason":"stop"}\n\n' +
+      "data: [DONE]\n\n";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        calls.push({ url, init });
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [
+              {
+                work_item: workItem,
+                conversations: branched ? [conversation, child] : [conversation],
+              },
+            ],
+          });
+        }
+        if (
+          url.endsWith(`/conversations/${conversationId}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return detailResponse([source]);
+        }
+        if (url.endsWith(`/conversations/${conversationId}/branches`) && init?.method === "POST") {
+          branched = true;
+          return Response.json(
+            { conversation: child, branch_lineage: branchLineage },
+            { status: 201 },
+          );
+        }
+        if (
+          url.endsWith(`/conversations/${child.id}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          const childHistory = submitted
+            ? [
+                message({
+                  id: "message-edited-user",
+                  role: "user",
+                  sequence: 1,
+                  conversation_id: child.id,
+                  parts: [{ type: "text", format: "markdown", text: editedText }],
+                }),
+              ]
+            : [];
+          return detailResponse(childHistory, null, null, {
+            conversation: child,
+            branchLineage,
+          });
+        }
+        if (url.endsWith(`/conversations/${child.id}/messages`) && init?.method === "POST") {
+          submitted = true;
+          return new Response(stream, {
+            status: 200,
+            headers: {
+              "content-type": "text/event-stream",
+              "x-vercel-ai-ui-message-stream": "v1",
+            },
+          });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onConversationSelected={(id) => selectedConversations.push(id)}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText(originalText)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Edit message" }));
+    const editor = screen.getByRole("textbox", { name: "Edited message" });
+    expect(editor).toHaveValue(originalText);
+    expect(screen.getByRole("form", { name: "Edit message" })).toHaveTextContent(
+      "The original conversation stays unchanged.",
+    );
+    await user.clear(editor);
+    await user.type(editor, editedText);
+    await user.click(screen.getByRole("button", { name: "Create edited branch" }));
+
+    await waitFor(() =>
+      expect(
+        calls.find(
+          ({ url, init }) =>
+            url.endsWith(`/conversations/${conversationId}/branches`) && init?.method === "POST",
+        ),
+      ).toBeDefined(),
+    );
+    const branchCall = calls.find(({ url }) => url.endsWith("/branches"));
+    expect(JSON.parse(String(branchCall?.init?.body))).toEqual({
+      source_message_id: source.id,
+    });
+    expect(await screen.findByLabelText("Edited conversation branch")).toHaveTextContent(
+      "original conversation is unchanged",
+    );
+    expect(await screen.findByText("Tuesday is recorded.")).toBeInTheDocument();
+    const editedSubmit = calls.find(
+      ({ url, init }) => url.endsWith(`/${child.id}/messages`) && init?.method === "POST",
+    );
+    expect(JSON.parse(String(editedSubmit?.init?.body))).toMatchObject({
+      parts: [{ type: "text", format: "markdown", text: editedText }],
+    });
+    expect(
+      calls.some(
+        ({ url, init }) => url.endsWith(`/${conversationId}/messages`) && init?.method === "POST",
+      ),
+    ).toBe(false);
+    expect(selectedConversations).toContain(child.id);
+
+    await user.click(screen.getByRole("button", { name: "Open original" }));
+    expect(await screen.findByText(originalText)).toBeInTheDocument();
+    expect(screen.queryByText(editedText)).not.toBeInTheDocument();
+  });
+
+  it("keeps the original conversation selected and shows branch creation failures inline", async () => {
+    const source = message({
+      id: "message-edit-failure",
+      role: "user",
+      sequence: 1,
+      parts: [{ type: "text", format: "markdown", text: "Original direction" }],
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse([source]);
+        if (url.endsWith(`/conversations/${conversationId}/branches`) && init?.method === "POST") {
+          return Response.json(
+            { message: "Stop the active response before editing this message." },
+            { status: 409 },
+          );
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Edit message" }));
+    const editor = screen.getByRole("textbox", { name: "Edited message" });
+    await user.clear(editor);
+    await user.type(editor, "Replacement direction");
+    await user.click(screen.getByRole("button", { name: "Create edited branch" }));
+
+    expect(
+      await screen.findByText("Stop the active response before editing this message."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Original direction")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Edited conversation branch")).not.toBeInTheDocument();
+  });
+
+  it("hides Edit for non-human, attachment-bearing, attachment-only, and workflow messages", async () => {
+    const history = [
+      message({
+        id: "eligible-edit",
+        role: "user",
+        sequence: 1,
+        parts: [{ type: "text", format: "markdown", text: "Eligible direction" }],
+      }),
+      message({
+        id: "non-human-user",
+        role: "user",
+        sequence: 2,
+        actor: { actor_type: "agent", actor_id: "worker:api" },
+        parts: [{ type: "text", format: "markdown", text: "Agent-authored direction" }],
+      }),
+      message({
+        id: "attachment-only",
+        role: "user",
+        sequence: 3,
+        parts: [
+          {
+            type: "attachment",
+            attachment_id: "attachment-only-1",
+            name: "context.pdf",
+            media_type: "application/pdf",
+          },
+        ],
+      }),
+      message({
+        id: "text-and-attachment",
+        role: "user",
+        sequence: 4,
+        parts: [
+          { type: "text", format: "markdown", text: "Use this context" },
+          {
+            type: "attachment",
+            attachment_id: "attachment-with-text-1",
+            name: "context.md",
+            media_type: "text/markdown",
+          },
+        ],
+      }),
+      message({
+        id: "workflow-bearing",
+        role: "user",
+        sequence: 5,
+        parts: [
+          { type: "text", format: "markdown", text: "Workflow direction" },
+          { type: "action", action_id: "action-workflow" },
+        ],
+      }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse(history);
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("Eligible direction")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Edit message" })).toHaveLength(1);
+  });
+
+  it.each([
+    ["execution conversations", executionConversation(), null],
+    [
+      "read-only conversations",
+      { ...conversation, status: "archived" as const, archived_at: now },
+      null,
+    ],
+    ["active responses", conversation, { status: "streaming" }],
+  ])("hides Edit in %s", async (_label, selectedConversation, activeAttempt) => {
+    const source = message({
+      id: `message-no-edit-${selectedConversation.id}`,
+      role: "user",
+      sequence: 1,
+      conversation_id: selectedConversation.id,
+      parts: [{ type: "text", format: "markdown", text: "Do not edit here" }],
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [{ work_item: workItem, conversations: [selectedConversation] }],
+          });
+        }
+        if (url.endsWith(`/conversations/${selectedConversation.id}`)) {
+          return detailResponse(source ? [source] : [], activeAttempt, null, {
+            conversation: selectedConversation,
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={selectedConversation.id}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("Do not edit here")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit message" })).not.toBeInTheDocument();
   });
 
   it("discards the obsolete pre-migration review_mode error from the browser session", async () => {
@@ -2129,7 +2781,9 @@ describe("conversation workspace", () => {
 
     const composer = await screen.findByRole("textbox", { name: "Message the project PM" });
     expect(screen.getByTestId("conversation-welcome")).toBeInTheDocument();
-    expect(screen.queryByText("Conversation-first planning")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Conversation-first planning" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText(workItem.objective)).not.toBeInTheDocument();
     expect(screen.queryByTestId("conversation-summary-empty")).not.toBeInTheDocument();
     expect(screen.queryByTestId("conversation-total-usage")).not.toBeInTheDocument();
@@ -2667,20 +3321,342 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Open conversations" }));
-    const conversationRow = screen.getByRole("button", {
-      name: "Open Planning conversation for # Conversation-first planning (active)",
-    });
-    fireEvent.contextMenu(conversationRow, { clientX: 80, clientY: 100 });
+    await user.click(
+      await screen.findByRole("button", { name: "Actions for Conversation-first planning" }),
+    );
     await user.click(screen.getByRole("menuitem", { name: "Rename" }));
     const title = screen.getByRole("textbox", { name: "Conversation title" });
     await user.clear(title);
     await user.type(title, "Release readiness");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(await screen.findByText("Release readiness")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Release readiness" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Release readiness" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open chat Release readiness" })).toBeInTheDocument();
     expect(patchedBody).toEqual({ title: "Release readiness" });
+  });
+
+  it("keeps chat-family navigation persistent, searchable, and collapsible", async () => {
+    const execution = executionConversation();
+    const secondWorkItem = {
+      ...workItem,
+      id: "work-item-2",
+      title: "Second release train",
+      objective: "Coordinate the second release train.",
+    };
+    const secondConversation = {
+      ...conversation,
+      id: "conversation-2",
+      work_item_id: secondWorkItem.id,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [
+              { work_item: workItem, conversations: [conversation, execution] },
+              { work_item: secondWorkItem, conversations: [secondConversation] },
+            ],
+          });
+        }
+        if (url.includes("/conversation-navigation?")) {
+          return Response.json({
+            folders: [],
+            items: [
+              {
+                schema_version: 2,
+                id: workItem.id,
+                project_id: projectId,
+                title: workItem.title,
+                status: workItem.status,
+                folder_id: null,
+                pinned_at: null,
+                latest_activity_at: now,
+                conversation_count: 2,
+                latest_conversation: {
+                  id: execution.id,
+                  kind: execution.kind,
+                  status: execution.status,
+                  provider: execution.provider,
+                  model: execution.model,
+                },
+              },
+              {
+                schema_version: 2,
+                id: secondWorkItem.id,
+                project_id: projectId,
+                title: secondWorkItem.title,
+                status: secondWorkItem.status,
+                folder_id: null,
+                pinned_at: null,
+                latest_activity_at: now,
+                conversation_count: 1,
+                latest_conversation: {
+                  id: secondConversation.id,
+                  kind: secondConversation.kind,
+                  status: secondConversation.status,
+                  provider: secondConversation.provider,
+                  model: secondConversation.model,
+                },
+              },
+            ],
+            next_cursor: null,
+          });
+        }
+        if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse();
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    const sidebar = await screen.findByRole("complementary", {
+      name: "Project conversations",
+    });
+    expect(sidebar).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Pinned" })).toHaveAttribute(
+      "data-organization-state",
+      "available",
+    );
+    expect(screen.getByLabelText("Threads in Conversation-first planning")).toContainElement(
+      screen.getByRole("button", {
+        name: `Open Execution PM conversation for ${workItem.title} (active)`,
+      }),
+    );
+
+    await user.type(screen.getByRole("searchbox", { name: "Search chats" }), "second");
+    expect(
+      screen.queryByRole("button", { name: "Open chat Conversation-first planning" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open chat Second release train" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Collapse conversations" }));
+    expect(sidebar).toHaveClass("is-collapsed");
+    const expandSidebar = sidebar.querySelector<HTMLButtonElement>(
+      '[aria-label="Expand conversations"]',
+    );
+    if (!expandSidebar) throw new Error("Expected the collapsed sidebar to expose its toggle.");
+    await user.click(expandSidebar);
+    expect(sidebar).not.toHaveClass("is-collapsed");
+  });
+
+  it("pins chats and creates, renames, moves into, and deletes personal folders", async () => {
+    const folder = {
+      schema_version: 2 as const,
+      id: "folder-release",
+      project_id: projectId,
+      user_id: "user-1",
+      name: "Release",
+      sort_order: 0,
+      created_at: now,
+      updated_at: now,
+    };
+    let currentFolder = folder;
+    let folderId: string | null = null;
+    let pinnedAt: string | null = null;
+    const organizationBodies: unknown[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = urlOf(input);
+      if (url.endsWith("/work-items")) return listResponse();
+      if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse();
+      if (url.includes("/conversation-navigation?")) {
+        return Response.json({
+          folders: [],
+          items: [
+            {
+              schema_version: 2,
+              id: workItem.id,
+              project_id: projectId,
+              title: workItem.title,
+              status: workItem.status,
+              folder_id: folderId,
+              pinned_at: pinnedAt,
+              latest_activity_at: now,
+              conversation_count: 1,
+              latest_conversation: {
+                id: conversation.id,
+                kind: conversation.kind,
+                status: conversation.status,
+                provider: conversation.provider,
+                model: conversation.model,
+              },
+            },
+          ],
+          next_cursor: null,
+        });
+      }
+      if (url.endsWith("/conversation-folders") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { name: string };
+        currentFolder = { ...folder, name: body.name };
+        return Response.json({ folder: currentFolder });
+      }
+      if (url.endsWith(`/conversation-folders/${folder.id}`) && init?.method === "PATCH") {
+        const body = JSON.parse(String(init.body)) as { name: string };
+        currentFolder = { ...currentFolder, name: body.name };
+        return Response.json({ folder: currentFolder });
+      }
+      if (url.endsWith(`/conversation-folders/${folder.id}`) && init?.method === "DELETE") {
+        folderId = null;
+        return Response.json({ deleted_folder_id: folder.id, unfiled_work_item_count: 1 });
+      }
+      if (url.endsWith(`/work-items/${workItemId}/organization`) && init?.method === "PATCH") {
+        const body = JSON.parse(String(init.body)) as {
+          folder_id?: string | null;
+          pinned?: boolean;
+        };
+        organizationBodies.push(body);
+        if (body.folder_id !== undefined) folderId = body.folder_id;
+        if (body.pinned !== undefined) pinnedAt = body.pinned ? now : null;
+        return Response.json({
+          organization: {
+            schema_version: 2,
+            project_id: projectId,
+            user_id: "user-1",
+            work_item_id: workItemId,
+            folder_id: folderId,
+            pinned_at: pinnedAt,
+            created_at: now,
+            updated_at: now,
+          },
+        });
+      }
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Create folder" }));
+    await user.type(screen.getByRole("textbox", { name: "Folder name" }), "Release");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    expect(await screen.findByText("Release")).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Actions for Conversation-first planning" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: "Pin" }));
+    await waitFor(() => expect(organizationBodies).toContainEqual({ pinned: true }));
+    expect(screen.getByRole("region", { name: "Pinned" })).toContainElement(
+      screen.getByRole("button", { name: "Open chat Conversation-first planning" }),
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Actions for Conversation-first planning" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: "Release" }));
+    await waitFor(() => expect(organizationBodies).toContainEqual({ folder_id: "folder-release" }));
+    await user.click(
+      screen.getByRole("button", { name: "Actions for Conversation-first planning" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: "Unpin" }));
+    await waitFor(() => expect(organizationBodies).toContainEqual({ pinned: false }));
+    expect(screen.getByText("Release").closest(".conversation-folder")).toContainElement(
+      screen.getByRole("button", { name: "Open chat Conversation-first planning" }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Rename folder Release" }));
+    const renamedFolder = screen.getByRole("textbox", { name: "New folder name" });
+    await user.clear(renamedFolder);
+    await user.type(renamedFolder, "Launch");
+    await user.click(screen.getByRole("button", { name: "Rename" }));
+    expect(await screen.findByText("Launch")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Delete folder Launch" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Its chats move to Recent.");
+    await user.click(screen.getByRole("button", { name: "Confirm delete" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining(`/conversation-folders/${folder.id}`),
+        expect.objectContaining({ method: "DELETE" }),
+      ),
+    );
+    expect(screen.queryByText("Launch")).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Recent" })).toContainElement(
+      screen.getByRole("button", { name: "Open chat Conversation-first planning" }),
+    );
+  });
+
+  it("opens execution agent activity from the header and keeps stop controls proposal-based", async () => {
+    const execution = executionConversation();
+    const approvedVersion = planVersion({ status: "approved" });
+    const baseHandoff = handoffFor(approvedVersion, execution.id);
+    const handoff = {
+      ...baseHandoff,
+      package: {
+        ...baseHandoff.package,
+        task_ids: ["task-api"],
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [
+              {
+                work_item: { ...workItem, status: "executing" },
+                conversations: [execution],
+              },
+            ],
+          });
+        }
+        if (url.endsWith(`/conversations/${execution.id}`)) {
+          return detailResponse([], null, null, {
+            workItem: { ...workItem, status: "executing" },
+            conversation: execution,
+            planVersions: [approvedVersion],
+            handoff,
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={execution.id}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    const agents = await screen.findByRole("button", { name: "Agents 1" });
+    expect(screen.queryByRole("complementary", { name: "Agent activity" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Agent task to stop" })).not.toBeInTheDocument();
+    await user.click(agents);
+
+    const drawer = screen.getByRole("complementary", { name: "Agent activity" });
+    expect(drawer).toHaveTextContent("1 planned agent task");
+    expect(drawer).toHaveTextContent("task-api");
+    expect(screen.getByRole("combobox", { name: "Agent task to stop" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Prepare pause action" })).toBeInTheDocument();
+    expect(drawer).toHaveTextContent("must still be confirmed");
+
+    const closeAgentActivity = screen
+      .getAllByRole("button", { name: "Close agent activity" })
+      .at(0);
+    if (!closeAgentActivity) throw new Error("Expected the agent drawer close control.");
+    await user.click(closeAgentActivity);
+    expect(screen.queryByRole("complementary", { name: "Agent activity" })).not.toBeInTheDocument();
   });
 
   it("offers a truthful status refresh instead of claiming an active stream can resume", async () => {
@@ -3135,7 +4111,6 @@ describe("conversation workspace", () => {
     expect(
       screen.queryByRole("textbox", { name: "Message the project PM" }),
     ).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Open conversations" }));
     const archivedConversationButton = screen.getByRole("button", {
       name: `Open Planning conversation for ${workItem.title} (archived)`,
     });
@@ -3147,7 +4122,6 @@ describe("conversation workspace", () => {
     expect(executionConversationButton).toHaveAttribute("data-status", "active");
     expect(executionConversationButton).not.toHaveTextContent(/tokens|requests|usage|\$/i);
 
-    await user.click(screen.getByRole("button", { name: "Close conversations" }));
     await user.click(screen.getByRole("button", { name: "Open execution PM conversation" }));
     expect(await screen.findByRole("textbox", { name: "Message the execution PM" })).toBeEnabled();
     expect(selected).toHaveBeenCalledWith(execution.id);

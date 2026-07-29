@@ -4,7 +4,10 @@ import type {
   V2ConfirmConversationActionResponseT,
   V2ConversationActionDeliveryEventT,
   V2ConversationActionT,
+  V2ConversationFolderT,
   V2ConversationHandoffT,
+  V2ConversationMessageBranchT,
+  V2ConversationNavigationPageT,
   V2ConversationPlanActionEffectT,
   V2ConversationPlanReviewT,
   V2ConversationPlanningExcerptReceiptT,
@@ -20,6 +23,7 @@ import type {
   V2HumanWaitT,
   V2PlanHandoffPreferenceT,
   V2WorkConversationT,
+  V2WorkItemOrganizationT,
   V2WorkItemT,
   V2WorkMessagePartT,
   V2WorkMessageT,
@@ -57,6 +61,7 @@ export interface ConversationDetail {
   action_delivery_events?: V2ConversationActionDeliveryEventT[];
   pm_updates?: V2ConversationPmUpdateT[];
   pm_update_settings?: V2ConversationPmUpdateSettingsT | null;
+  branch_lineage?: V2ConversationMessageBranchT | null;
 }
 
 async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -92,6 +97,64 @@ export async function listWorkItemConversations(
   return result.work_items;
 }
 
+export function listConversationNavigation(
+  projectId: string,
+  options: { cursor?: string; limit?: number } = {},
+): Promise<V2ConversationNavigationPageT> {
+  const query = new URLSearchParams({
+    limit: String(options.limit ?? 100),
+    ...(options.cursor ? { cursor: options.cursor } : {}),
+  });
+  return requestJson(
+    `/api/v2/projects/${encodeURIComponent(projectId)}/conversation-navigation?${query}`,
+  );
+}
+
+export async function createConversationFolder(
+  projectId: string,
+  name: string,
+): Promise<V2ConversationFolderT> {
+  const result = await requestJson<{ folder: V2ConversationFolderT }>(
+    `/api/v2/projects/${encodeURIComponent(projectId)}/conversation-folders`,
+    { method: "POST", body: JSON.stringify({ name }) },
+  );
+  return result.folder;
+}
+
+export async function updateConversationFolder(
+  projectId: string,
+  folderId: string,
+  name: string,
+): Promise<V2ConversationFolderT> {
+  const result = await requestJson<{ folder: V2ConversationFolderT }>(
+    `/api/v2/projects/${encodeURIComponent(projectId)}/conversation-folders/${encodeURIComponent(folderId)}`,
+    { method: "PATCH", body: JSON.stringify({ name }) },
+  );
+  return result.folder;
+}
+
+export function deleteConversationFolder(
+  projectId: string,
+  folderId: string,
+): Promise<{ deleted_folder_id: string; unfiled_work_item_count: number }> {
+  return requestJson(
+    `/api/v2/projects/${encodeURIComponent(projectId)}/conversation-folders/${encodeURIComponent(folderId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function updateWorkItemOrganization(
+  projectId: string,
+  workItemId: string,
+  input: { folder_id?: string | null; pinned?: boolean },
+): Promise<V2WorkItemOrganizationT> {
+  const result = await requestJson<{ organization: V2WorkItemOrganizationT }>(
+    `/api/v2/projects/${encodeURIComponent(projectId)}/work-items/${encodeURIComponent(workItemId)}/organization`,
+    { method: "PATCH", body: JSON.stringify(input) },
+  );
+  return result.organization;
+}
+
 export function getConversation(
   projectId: string,
   workItemId: string,
@@ -107,6 +170,24 @@ export function resolveConversation(
   conversationId: string,
 ): Promise<ConversationDetail> {
   return requestJson(`/api/v2/projects/${projectId}/conversations/${conversationId}`);
+}
+
+export function createConversationMessageBranch(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  sourceMessageId: string,
+): Promise<{
+  conversation: V2WorkConversationT;
+  branch_lineage: V2ConversationMessageBranchT;
+}> {
+  return requestJson(
+    `/api/v2/projects/${encodeURIComponent(projectId)}/work-items/${encodeURIComponent(workItemId)}/conversations/${encodeURIComponent(conversationId)}/branches`,
+    {
+      method: "POST",
+      body: JSON.stringify({ source_message_id: sourceMessageId }),
+    },
+  );
 }
 
 export function createPlanningWorkItem(

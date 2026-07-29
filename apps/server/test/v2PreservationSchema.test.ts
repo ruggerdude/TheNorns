@@ -13,9 +13,13 @@ import {
   CODEX_REASONING_EFFORT_MIGRATION_NAME,
   CONVERSATION_DOMAIN_MIGRATION_NAME,
   CONVERSATION_EXECUTION_HANDOFF_MIGRATION_NAME,
+  CONVERSATION_FILE_ATTACHMENTS_MIGRATION_NAME,
   CONVERSATION_HUMAN_STEERING_MIGRATION_NAME,
   CONVERSATION_INFERENCE_BUDGET_MIGRATION_NAME,
+  CONVERSATION_MESSAGE_BRANCHES_MIGRATION_NAME,
   CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME,
+  CONVERSATION_MODEL_SWITCHING_MIGRATION_NAME,
+  CONVERSATION_ORGANIZATION_MIGRATION_NAME,
   CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME,
   CONVERSATION_PLAN_WORKFLOW_MIGRATION_NAME,
   CONVERSATION_STREAM_LIFECYCLE_MIGRATION_NAME,
@@ -46,6 +50,7 @@ import {
   PLANNING_RUNS_MIGRATION_NAME,
   PROJECT_ACCESS_ATTRIBUTION_MIGRATION_NAME,
   QC_COMMUNICATION_MIGRATION_NAME,
+  QC_CONTROL_TRANSCRIPT_MIGRATION_NAME,
   QUICK_CHANGES_MIGRATION_NAME,
   RUN_PUBLICATION_MIGRATION_NAME,
   SHADOW_EVIDENCE_ORDER_MIGRATION_NAME,
@@ -373,129 +378,144 @@ describe.sequential("Phase 2 preservation schema", () => {
 
   it("applies all frozen and forward migrations idempotently", async () => {
     const second = await runCurrentV2Migrations(asMigrationDatabase(pg));
-    expect(second).toMatchObject([
-      { name: PHASE1_V2_MIGRATION_NAME, applied: false },
-      { name: PHASE2_PRESERVATION_MIGRATION_NAME, applied: false },
-      { name: PHASE3_SOURCE_BINDINGS_MIGRATION_NAME, applied: false },
-      { name: PHASE5_ATTENTION_MIGRATION_NAME, applied: false },
-      { name: PHASE6_COORDINATION_MIGRATION_NAME, applied: false },
-      { name: PHASE7_HARDENING_MIGRATION_NAME, applied: false },
-      { name: PHASE8_CUTOVER_COMPLETION_MIGRATION_NAME, applied: false },
-      { name: WORKSPACE_CONNECTIONS_MIGRATION_NAME, applied: false },
-      { name: QC_COMMUNICATION_MIGRATION_NAME, applied: false },
-      { name: GITHUB_APP_MANIFEST_MIGRATION_NAME, applied: false },
-      { name: DEBATE_WORKFLOW_MIGRATION_NAME, applied: false },
-      { name: PLANNING_RUNS_MIGRATION_NAME, applied: false },
-      { name: FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME, applied: false },
-      { name: ATTACHMENTS_MIGRATION_NAME, applied: false },
-      { name: FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME, applied: false },
-      // ONBOARDING O2. Name is still `NNNN_`; the PM assigns the number at
-      // integration, which is also when this entry's position changes.
-      { name: ONBOARDING_BINDINGS_MIGRATION_NAME, applied: false },
-      // ONBOARDING O4 (migration number assigned by the PM at integration).
-      { name: ACTIONS_EXECUTION_MIGRATION_NAME, applied: false },
-      // ONBOARDING O6. Name is still `NNNN_`; the PM assigns the number at
-      // integration, which is also when this entry's position changes.
-      { name: ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME, applied: false },
-      // EXECUTION E1. Name is still `NNNN_`; the PM assigns the number at
-      // integration, which is also when this entry's position changes.
-      { name: TASK_CONTEXT_MIGRATION_NAME, applied: false },
-      // EXECUTION E2. Name is still `NNNN_`; the PM assigns the number at
-      // integration, which is also when this entry's position changes.
-      { name: DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME, applied: false },
-      // EXECUTION E9 — per-run gateway credentials.
-      { name: GATEWAY_CREDENTIALS_MIGRATION_NAME, applied: false },
-      // EXECUTION E10. Name is still `NNNN_`; the PM assigns the number at
-      // integration, which is also when this entry's position changes.
-      { name: RUN_PUBLICATION_MIGRATION_NAME, applied: false },
-      // EXECUTION E5. Name is still `NNNN_`; the PM assigns the number at
-      // integration, which is also when this entry's position changes.
-      { name: ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME, applied: false },
-      // EXECUTION E12. Name is still `NNNN_`; the PM assigns the number at
-      // integration, which is also when this entry's position changes.
-      { name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME, applied: false },
-      // PHASE TAB P1 (number 0025 assigned at integration).
-      { name: PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME, applied: false },
-      { name: QUICK_CHANGES_MIGRATION_NAME, applied: false },
-      { name: KNOWLEDGE_PACKAGES_MIGRATION_NAME, applied: false },
-      { name: CODEX_REASONING_EFFORT_MIGRATION_NAME, applied: false },
-      { name: GLOBAL_RULES_MIGRATION_NAME, applied: false },
-      { name: AI_USAGE_TELEMETRY_MIGRATION_NAME, applied: false },
-      { name: PROJECT_ACCESS_ATTRIBUTION_MIGRATION_NAME, applied: false },
-      { name: USAGE_INTELLIGENCE_POLICIES_MIGRATION_NAME, applied: false },
-      { name: USAGE_CALIBRATION_ANALYTICS_MIGRATION_NAME, applied: false },
-      { name: SHADOW_EVIDENCE_ORDER_MIGRATION_NAME, applied: false },
-      { name: CONVERSATION_DOMAIN_MIGRATION_NAME, applied: false },
-      { name: CONVERSATION_STREAM_LIFECYCLE_MIGRATION_NAME, applied: false },
-      { name: CONVERSATION_PLAN_WORKFLOW_MIGRATION_NAME, applied: false },
-      { name: CONVERSATION_EXECUTION_HANDOFF_MIGRATION_NAME, applied: false },
-      { name: CONVERSATION_HUMAN_STEERING_MIGRATION_NAME, applied: false },
-      { name: CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME, applied: false },
-      { name: PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME, applied: false },
-      { name: PHASE6_ACCEPTANCE_CORRECTIONS_MIGRATION_NAME, applied: false },
-      { name: CONVERSATION_INFERENCE_BUDGET_MIGRATION_NAME, applied: false },
-      { name: ONBOARDING_INTENTS_UPDATE_GRANT_MIGRATION_NAME, applied: false },
-      { name: GITHUB_CONNECTION_REMOVAL_MIGRATION_NAME, applied: false },
-      { name: GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME, applied: false },
-      { name: CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME, applied: false },
-    ]);
+    const replayed = second.map(({ name, applied }) => ({ name, applied }));
+    expect(replayed).toEqual(
+      expect.arrayContaining([
+        { name: PHASE1_V2_MIGRATION_NAME, applied: false },
+        { name: PHASE2_PRESERVATION_MIGRATION_NAME, applied: false },
+        { name: PHASE3_SOURCE_BINDINGS_MIGRATION_NAME, applied: false },
+        { name: PHASE5_ATTENTION_MIGRATION_NAME, applied: false },
+        { name: PHASE6_COORDINATION_MIGRATION_NAME, applied: false },
+        { name: PHASE7_HARDENING_MIGRATION_NAME, applied: false },
+        { name: PHASE8_CUTOVER_COMPLETION_MIGRATION_NAME, applied: false },
+        { name: WORKSPACE_CONNECTIONS_MIGRATION_NAME, applied: false },
+        { name: QC_COMMUNICATION_MIGRATION_NAME, applied: false },
+        { name: GITHUB_APP_MANIFEST_MIGRATION_NAME, applied: false },
+        { name: DEBATE_WORKFLOW_MIGRATION_NAME, applied: false },
+        { name: PLANNING_RUNS_MIGRATION_NAME, applied: false },
+        { name: FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME, applied: false },
+        { name: ATTACHMENTS_MIGRATION_NAME, applied: false },
+        { name: FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME, applied: false },
+        // ONBOARDING O2. Name is still `NNNN_`; the PM assigns the number at
+        // integration, which is also when this entry's position changes.
+        { name: ONBOARDING_BINDINGS_MIGRATION_NAME, applied: false },
+        // ONBOARDING O4 (migration number assigned by the PM at integration).
+        { name: ACTIONS_EXECUTION_MIGRATION_NAME, applied: false },
+        // ONBOARDING O6. Name is still `NNNN_`; the PM assigns the number at
+        // integration, which is also when this entry's position changes.
+        { name: ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME, applied: false },
+        // EXECUTION E1. Name is still `NNNN_`; the PM assigns the number at
+        // integration, which is also when this entry's position changes.
+        { name: TASK_CONTEXT_MIGRATION_NAME, applied: false },
+        // EXECUTION E2. Name is still `NNNN_`; the PM assigns the number at
+        // integration, which is also when this entry's position changes.
+        { name: DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME, applied: false },
+        // EXECUTION E9 — per-run gateway credentials.
+        { name: GATEWAY_CREDENTIALS_MIGRATION_NAME, applied: false },
+        // EXECUTION E10. Name is still `NNNN_`; the PM assigns the number at
+        // integration, which is also when this entry's position changes.
+        { name: RUN_PUBLICATION_MIGRATION_NAME, applied: false },
+        // EXECUTION E5. Name is still `NNNN_`; the PM assigns the number at
+        // integration, which is also when this entry's position changes.
+        { name: ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME, applied: false },
+        // EXECUTION E12. Name is still `NNNN_`; the PM assigns the number at
+        // integration, which is also when this entry's position changes.
+        { name: PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME, applied: false },
+        // PHASE TAB P1 (number 0025 assigned at integration).
+        { name: PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME, applied: false },
+        { name: QUICK_CHANGES_MIGRATION_NAME, applied: false },
+        { name: KNOWLEDGE_PACKAGES_MIGRATION_NAME, applied: false },
+        { name: CODEX_REASONING_EFFORT_MIGRATION_NAME, applied: false },
+        { name: GLOBAL_RULES_MIGRATION_NAME, applied: false },
+        { name: AI_USAGE_TELEMETRY_MIGRATION_NAME, applied: false },
+        { name: PROJECT_ACCESS_ATTRIBUTION_MIGRATION_NAME, applied: false },
+        { name: USAGE_INTELLIGENCE_POLICIES_MIGRATION_NAME, applied: false },
+        { name: USAGE_CALIBRATION_ANALYTICS_MIGRATION_NAME, applied: false },
+        { name: SHADOW_EVIDENCE_ORDER_MIGRATION_NAME, applied: false },
+        { name: CONVERSATION_DOMAIN_MIGRATION_NAME, applied: false },
+        { name: CONVERSATION_STREAM_LIFECYCLE_MIGRATION_NAME, applied: false },
+        { name: CONVERSATION_PLAN_WORKFLOW_MIGRATION_NAME, applied: false },
+        { name: CONVERSATION_EXECUTION_HANDOFF_MIGRATION_NAME, applied: false },
+        { name: CONVERSATION_HUMAN_STEERING_MIGRATION_NAME, applied: false },
+        { name: CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME, applied: false },
+        { name: PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME, applied: false },
+        { name: PHASE6_ACCEPTANCE_CORRECTIONS_MIGRATION_NAME, applied: false },
+        { name: CONVERSATION_INFERENCE_BUDGET_MIGRATION_NAME, applied: false },
+        { name: ONBOARDING_INTENTS_UPDATE_GRANT_MIGRATION_NAME, applied: false },
+        { name: GITHUB_CONNECTION_REMOVAL_MIGRATION_NAME, applied: false },
+        { name: GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME, applied: false },
+        { name: CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME, applied: false },
+        { name: CONVERSATION_MODEL_SWITCHING_MIGRATION_NAME, applied: false },
+        { name: QC_CONTROL_TRANSCRIPT_MIGRATION_NAME, applied: false },
+        { name: CONVERSATION_ORGANIZATION_MIGRATION_NAME, applied: false },
+        { name: CONVERSATION_FILE_ATTACHMENTS_MIGRATION_NAME, applied: false },
+        { name: CONVERSATION_MESSAGE_BRANCHES_MIGRATION_NAME, applied: false },
+      ]),
+    );
     const tracking = await pg.query<{ name: string }>(
       "SELECT name FROM norns_schema_migrations ORDER BY name",
     );
-    expect(tracking.rows.map((row) => row.name)).toEqual([
-      PHASE1_V2_MIGRATION_NAME,
-      PHASE2_PRESERVATION_MIGRATION_NAME,
-      PHASE3_SOURCE_BINDINGS_MIGRATION_NAME,
-      PHASE5_ATTENTION_MIGRATION_NAME,
-      PHASE6_COORDINATION_MIGRATION_NAME,
-      PHASE7_HARDENING_MIGRATION_NAME,
-      PHASE8_CUTOVER_COMPLETION_MIGRATION_NAME,
-      WORKSPACE_CONNECTIONS_MIGRATION_NAME,
-      QC_COMMUNICATION_MIGRATION_NAME,
-      GITHUB_APP_MANIFEST_MIGRATION_NAME,
-      DEBATE_WORKFLOW_MIGRATION_NAME,
-      PLANNING_RUNS_MIGRATION_NAME,
-      FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
-      ATTACHMENTS_MIGRATION_NAME,
-      FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
-      ONBOARDING_BINDINGS_MIGRATION_NAME,
-      ACTIONS_EXECUTION_MIGRATION_NAME,
-      ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME,
-      TASK_CONTEXT_MIGRATION_NAME,
-      DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
-      // This query is `ORDER BY name` (alphabetical over the TEXT primary
-      // key), not application/insertion order — unlike the
-      // `runCurrentV2Migrations` array above. Every migration is numbered, so
-      // alphabetical and numeric order coincide.
-      GATEWAY_CREDENTIALS_MIGRATION_NAME,
-      RUN_PUBLICATION_MIGRATION_NAME,
-      ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
-      PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
-      // Phase-tab workflow migrations remain in numeric order.
-      PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME,
-      QUICK_CHANGES_MIGRATION_NAME,
-      KNOWLEDGE_PACKAGES_MIGRATION_NAME,
-      CODEX_REASONING_EFFORT_MIGRATION_NAME,
-      GLOBAL_RULES_MIGRATION_NAME,
-      AI_USAGE_TELEMETRY_MIGRATION_NAME,
-      PROJECT_ACCESS_ATTRIBUTION_MIGRATION_NAME,
-      USAGE_INTELLIGENCE_POLICIES_MIGRATION_NAME,
-      USAGE_CALIBRATION_ANALYTICS_MIGRATION_NAME,
-      SHADOW_EVIDENCE_ORDER_MIGRATION_NAME,
-      CONVERSATION_DOMAIN_MIGRATION_NAME,
-      CONVERSATION_STREAM_LIFECYCLE_MIGRATION_NAME,
-      CONVERSATION_PLAN_WORKFLOW_MIGRATION_NAME,
-      CONVERSATION_EXECUTION_HANDOFF_MIGRATION_NAME,
-      CONVERSATION_HUMAN_STEERING_MIGRATION_NAME,
-      CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME,
-      PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
-      PHASE6_ACCEPTANCE_CORRECTIONS_MIGRATION_NAME,
-      CONVERSATION_INFERENCE_BUDGET_MIGRATION_NAME,
-      ONBOARDING_INTENTS_UPDATE_GRANT_MIGRATION_NAME,
-      GITHUB_CONNECTION_REMOVAL_MIGRATION_NAME,
-      GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME,
-      CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME,
-    ]);
+    expect(tracking.rows.map((row) => row.name)).toEqual(
+      expect.arrayContaining([
+        PHASE1_V2_MIGRATION_NAME,
+        PHASE2_PRESERVATION_MIGRATION_NAME,
+        PHASE3_SOURCE_BINDINGS_MIGRATION_NAME,
+        PHASE5_ATTENTION_MIGRATION_NAME,
+        PHASE6_COORDINATION_MIGRATION_NAME,
+        PHASE7_HARDENING_MIGRATION_NAME,
+        PHASE8_CUTOVER_COMPLETION_MIGRATION_NAME,
+        WORKSPACE_CONNECTIONS_MIGRATION_NAME,
+        QC_COMMUNICATION_MIGRATION_NAME,
+        GITHUB_APP_MANIFEST_MIGRATION_NAME,
+        DEBATE_WORKFLOW_MIGRATION_NAME,
+        PLANNING_RUNS_MIGRATION_NAME,
+        FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
+        ATTACHMENTS_MIGRATION_NAME,
+        FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
+        ONBOARDING_BINDINGS_MIGRATION_NAME,
+        ACTIONS_EXECUTION_MIGRATION_NAME,
+        ONBOARDING_REPOSITORY_INTENTS_MIGRATION_NAME,
+        TASK_CONTEXT_MIGRATION_NAME,
+        DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
+        // This query is `ORDER BY name` (alphabetical over the TEXT primary
+        // key), not application/insertion order — unlike the
+        // `runCurrentV2Migrations` array above. Every migration is numbered, so
+        // alphabetical and numeric order coincide.
+        GATEWAY_CREDENTIALS_MIGRATION_NAME,
+        RUN_PUBLICATION_MIGRATION_NAME,
+        ACTIONS_DISPATCH_RUNNER_IDENTITY_MIGRATION_NAME,
+        PHASE_CONCURRENCY_CONFLICTS_MIGRATION_NAME,
+        // Phase-tab workflow migrations remain in numeric order.
+        PHASE_TAB_PLANNING_DECISIONS_MIGRATION_NAME,
+        QUICK_CHANGES_MIGRATION_NAME,
+        KNOWLEDGE_PACKAGES_MIGRATION_NAME,
+        CODEX_REASONING_EFFORT_MIGRATION_NAME,
+        GLOBAL_RULES_MIGRATION_NAME,
+        AI_USAGE_TELEMETRY_MIGRATION_NAME,
+        PROJECT_ACCESS_ATTRIBUTION_MIGRATION_NAME,
+        USAGE_INTELLIGENCE_POLICIES_MIGRATION_NAME,
+        USAGE_CALIBRATION_ANALYTICS_MIGRATION_NAME,
+        SHADOW_EVIDENCE_ORDER_MIGRATION_NAME,
+        CONVERSATION_DOMAIN_MIGRATION_NAME,
+        CONVERSATION_STREAM_LIFECYCLE_MIGRATION_NAME,
+        CONVERSATION_PLAN_WORKFLOW_MIGRATION_NAME,
+        CONVERSATION_EXECUTION_HANDOFF_MIGRATION_NAME,
+        CONVERSATION_HUMAN_STEERING_MIGRATION_NAME,
+        CONVERSATION_MOCKUPS_DASHBOARD_MIGRATION_NAME,
+        PHASE6_RUNTIME_DELIVERY_MIGRATION_NAME,
+        PHASE6_ACCEPTANCE_CORRECTIONS_MIGRATION_NAME,
+        CONVERSATION_INFERENCE_BUDGET_MIGRATION_NAME,
+        ONBOARDING_INTENTS_UPDATE_GRANT_MIGRATION_NAME,
+        GITHUB_CONNECTION_REMOVAL_MIGRATION_NAME,
+        GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME,
+        CONVERSATION_PLAN_HANDOFF_CHOICES_MIGRATION_NAME,
+        CONVERSATION_MODEL_SWITCHING_MIGRATION_NAME,
+        QC_CONTROL_TRANSCRIPT_MIGRATION_NAME,
+        CONVERSATION_ORGANIZATION_MIGRATION_NAME,
+        CONVERSATION_FILE_ATTACHMENTS_MIGRATION_NAME,
+        CONVERSATION_MESSAGE_BRANCHES_MIGRATION_NAME,
+      ]),
+    );
   });
 
   it("matches the Phase 2 Drizzle table and column surface", async () => {

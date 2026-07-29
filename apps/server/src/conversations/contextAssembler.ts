@@ -23,6 +23,8 @@ const RETAIN_RECENT_MESSAGES_AFTER_COMPACTION = 40;
 const MAX_VISIBLE_DIGEST_ENTRIES = 24;
 const MAX_VISIBLE_DIGEST_CHARACTERS = 280;
 const VISIBLE_DIGEST_PREFIX = "Visible conversation message #";
+const MAX_FILE_CONTEXT_CHARACTERS = 50_000;
+const MAX_TOTAL_FILE_CONTEXT_CHARACTERS = 120_000;
 
 interface ContextMaterial {
   kind: V2ConversationContextManifestT["entries"][number]["kind"];
@@ -52,6 +54,10 @@ interface AttachmentRow {
   id: string;
   sha256: string;
   mime: string;
+  original_filename: string;
+  extracted_text: string | null;
+  extracted_text_sha256: string | null;
+  extraction_truncated: boolean;
 }
 
 export interface ConversationContextAssembly {
@@ -271,6 +277,10 @@ export class ConversationContextAssembler {
       let triggeringMessageIndex = -1;
       const attachmentIds: string[] = [];
       const currentAttachmentIds: string[] = [];
+      const messageAttachmentIds: Array<{
+        messageIndex: number;
+        attachmentIds: string[];
+      }> = [];
       const artifactIds: string[] = [];
       const excerptReceiptIds: string[] = [];
       for (const row of recent) {
@@ -278,19 +288,26 @@ export class ConversationContextAssembler {
         const content = visibleText(parsedParts);
         if (!content) continue;
         materials.push({ kind: "message", ref: row.id, content });
+        let messageIndex = -1;
         if (row.role !== "system") {
           messages.push({ role: row.role, content });
+          messageIndex = messages.length - 1;
           if (row.id === triggeringMessageId) triggeringMessageIndex = messages.length - 1;
         }
+        const rowAttachmentIds: string[] = [];
         for (const part of parsedParts) {
           if (part.type === "attachment") {
             attachmentIds.push(part.attachment_id);
+            rowAttachmentIds.push(part.attachment_id);
             if (row.id === triggeringMessageId) currentAttachmentIds.push(part.attachment_id);
           }
           if (part.type === "artifact") artifactIds.push(part.artifact_id);
           if (part.type === "planning_excerpt") {
             excerptReceiptIds.push(part.excerpt_receipt_id);
           }
+        }
+        if (messageIndex >= 0 && rowAttachmentIds.length > 0) {
+          messageAttachmentIds.push({ messageIndex, attachmentIds: rowAttachmentIds });
         }
       }
       if (executionPm && excerptReceiptIds.length > 0) {
@@ -304,7 +321,7 @@ export class ConversationContextAssembler {
           systemSections,
         );
       }
-      await this.addReferencedArtifacts(
+      const fileContexts = await this.addReferencedArtifacts(
         tx,
         projectId,
         [...new Set(attachmentIds)],
@@ -312,6 +329,23 @@ export class ConversationContextAssembler {
         materials,
         systemSections,
       );
+      for (const referenced of messageAttachmentIds) {
+        const fileBlocks = referenced.attachmentIds.flatMap((attachmentId) => {
+          const content = fileContexts.get(attachmentId);
+          return content ? [content] : [];
+        });
+        if (fileBlocks.length === 0) continue;
+        const message = messages[referenced.messageIndex];
+        if (!message) continue;
+        const fileContent = fileBlocks.join("\n");
+        messages[referenced.messageIndex] = {
+          ...message,
+          content:
+            typeof message.content === "string"
+              ? `${message.content}\n\n${fileContent}`
+              : [...message.content, { type: "text", text: fileContent }],
+        };
+      }
 
       const manifest = V2ConversationContextManifest.parse({
         entries: materials.map(entry),
@@ -850,25 +884,66 @@ export class ConversationContextAssembler {
     artifactIds: string[],
     materials: ContextMaterial[],
     sections: string[],
-  ): Promise<void> {
+  ): Promise<Map<string, string>> {
     const rendered: string[] = [];
+    const fileContexts = new Map<string, string>();
     if (attachmentIds.length > 0) {
       const attachments = await tx.query<AttachmentRow>(
-        `SELECT id, sha256, mime FROM attachments
+        `SELECT id, sha256, mime, original_filename, extracted_text,
+                extracted_text_sha256, extraction_truncated
+           FROM attachments
           WHERE project_id=$1 AND deleted_at IS NULL AND id=ANY($2::text[])
           ORDER BY id`,
         [projectId, attachmentIds],
       );
-      for (const attachment of attachments.rows) {
-        const content = `image attachment ${attachment.id} (${attachment.mime})`;
-        materials.push({
-          kind: "artifact",
-          ref: attachment.id,
-          content,
-          contentHash: attachment.sha256,
-          estimatedTokens: 0,
-        });
-        rendered.push(`- ${content}`);
+      const attachmentsById = new Map(
+        attachments.rows.map((attachment) => [attachment.id, attachment]),
+      );
+      const orderedAttachments = attachmentIds.flatMap((attachmentId) => {
+        const attachment = attachmentsById.get(attachmentId);
+        return attachment ? [attachment] : [];
+      });
+      const fileAttachments = orderedAttachments.filter(
+        (attachment) =>
+          attachment.extracted_text !== null && attachment.extracted_text_sha256 !== null,
+      );
+      let remainingFileCharacters = MAX_TOTAL_FILE_CONTEXT_CHARACTERS;
+      let seenFiles = 0;
+      for (const attachment of orderedAttachments) {
+        if (!attachment) continue;
+        if (attachment.extracted_text !== null && attachment.extracted_text_sha256 !== null) {
+          const remainingFiles = fileAttachments.slice(seenFiles + 1);
+          const reservedForRemaining = remainingFiles.reduce(
+            (total, candidate) => total + minimumFileBlock(candidate).length,
+            0,
+          );
+          const availableForFile = Math.min(
+            MAX_FILE_CONTEXT_CHARACTERS,
+            Math.max(
+              minimumFileBlock(attachment).length,
+              remainingFileCharacters - reservedForRemaining,
+            ),
+          );
+          const content = boundedFileBlock(attachment, availableForFile);
+          materials.push({
+            kind: "artifact",
+            ref: attachment.id,
+            content,
+          });
+          fileContexts.set(attachment.id, content);
+          remainingFileCharacters -= content.length;
+          seenFiles += 1;
+        } else {
+          const content = `image attachment ${attachment.id} (${attachment.mime})`;
+          materials.push({
+            kind: "artifact",
+            ref: attachment.id,
+            content,
+            contentHash: attachment.sha256,
+            estimatedTokens: 0,
+          });
+          rendered.push(`- ${content}`);
+        }
       }
     }
     if (artifactIds.length > 0) {
@@ -896,5 +971,31 @@ export class ConversationContextAssembler {
     if (rendered.length > 0) {
       sections.push(section("Referenced artifacts", rendered.join("\n")));
     }
+    return fileContexts;
   }
+}
+
+function fileBlockHeader(attachment: AttachmentRow): string {
+  return [
+    `### File: ${attachment.original_filename}`,
+    `Media type: ${attachment.mime}; attachment id: ${attachment.id}`,
+    ...(attachment.extraction_truncated
+      ? ["The stored extraction was truncated to the safe ingestion limit."]
+      : []),
+  ].join("\n");
+}
+
+function minimumFileBlock(attachment: AttachmentRow): string {
+  return `${fileBlockHeader(attachment)}\n\n[File content omitted because the conversation attachment budget was exhausted]`;
+}
+
+function boundedFileBlock(attachment: AttachmentRow, characterBudget: number): string {
+  if (attachment.extracted_text === null) return minimumFileBlock(attachment);
+  const header = fileBlockHeader(attachment);
+  const complete = `${header}\n\n${attachment.extracted_text}`;
+  if (complete.length <= characterBudget) return complete;
+  const marker = "\n\n[File context truncated to the conversation limit]";
+  const prefixLength = Math.max(0, characterBudget - header.length - 2 - marker.length);
+  if (prefixLength === 0) return minimumFileBlock(attachment);
+  return `${header}\n\n${attachment.extracted_text.slice(0, prefixLength)}${marker}`;
 }

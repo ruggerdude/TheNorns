@@ -5,22 +5,92 @@ import {
   V2ConfirmConversationActionInput,
   type V2ConfirmConversationActionInputT,
   type V2ConversationActionT,
+  type V2ConversationFolderT,
+  type V2ConversationMessageBranchT,
+  V2ConversationNavigationPage,
+  type V2ConversationNavigationPageT,
+  V2CreateConversationFolderInput,
+  type V2CreateConversationFolderInputT,
+  V2CreateConversationMessageBranchInput,
+  type V2CreateConversationMessageBranchInputT,
   V2CreateWorkConversationInput,
   type V2CreateWorkConversationInputT,
   V2CreateWorkItemInput,
   type V2CreateWorkItemInputT,
   V2ProposeConversationActionInput,
   type V2ProposeConversationActionInputT,
+  V2ReorderConversationFoldersInput,
+  type V2ReorderConversationFoldersInputT,
   V2SubmitWorkMessageInput,
   type V2SubmitWorkMessageInputT,
+  V2UpdateConversationFolderInput,
+  type V2UpdateConversationFolderInputT,
+  V2UpdateWorkItemOrganizationInput,
+  type V2UpdateWorkItemOrganizationInputT,
   type V2WorkConversationT,
+  type V2WorkItemOrganizationT,
   type V2WorkItemT,
   type V2WorkMessageT,
   isPmModelForProvider,
 } from "@norns/contracts";
+import { z } from "zod";
 import { newId } from "../ids.js";
 import { canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import { ConversationPersistenceError, type ConversationRepositoryStore } from "./repository.js";
+
+const ConversationNavigationCursorPayload = z
+  .object({
+    version: z.literal(1),
+    pinned: z.boolean(),
+    latest_activity_at: z.string().datetime(),
+    work_item_id: z.string().trim().min(1),
+    project_id: z.string().trim().min(1),
+    user_id: z.string().trim().min(1),
+  })
+  .strict();
+
+function decodeNavigationCursor(cursor: string | undefined, projectId: string, userId: string) {
+  if (cursor === undefined) return null;
+  try {
+    const parsed = ConversationNavigationCursorPayload.parse(
+      JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")),
+    );
+    if (parsed.project_id !== projectId || parsed.user_id !== userId) {
+      throw new Error("cursor scope mismatch");
+    }
+    return {
+      pinned: parsed.pinned,
+      latestActivityAt: parsed.latest_activity_at,
+      workItemId: parsed.work_item_id,
+    };
+  } catch {
+    throw new ConversationPersistenceError(
+      "invalid_navigation_cursor",
+      "conversation navigation cursor is invalid or expired",
+    );
+  }
+}
+
+function encodeNavigationCursor(
+  item: {
+    pinned_at: string | null;
+    latest_activity_at: string;
+    id: string;
+  },
+  projectId: string,
+  userId: string,
+): string {
+  return Buffer.from(
+    JSON.stringify({
+      version: 1,
+      pinned: item.pinned_at !== null,
+      latest_activity_at: item.latest_activity_at,
+      work_item_id: item.id,
+      project_id: projectId,
+      user_id: userId,
+    }),
+  ).toString("base64url");
+}
 
 export interface ConversationActor {
   id: string;
@@ -47,6 +117,16 @@ export interface WorkItemWithConversations {
   conversations: V2WorkConversationT[];
 }
 
+export type WorkConversationWithBranchLineage = V2WorkConversationT & {
+  branch_lineage: V2ConversationMessageBranchT | null;
+};
+
+const branchSafePartTypes = new Set<V2WorkMessageT["parts"][number]["type"]>([
+  "text",
+  "code",
+  "attachment",
+]);
+
 export class ConversationService {
   private readonly makeId: (prefix: string) => string;
 
@@ -55,6 +135,183 @@ export class ConversationService {
     options: ConversationServiceOptions = {},
   ) {
     this.makeId = options.newId ?? newId;
+  }
+
+  createConversationFolder(
+    actor: ConversationActor,
+    projectId: string,
+    candidate: V2CreateConversationFolderInputT,
+  ): Promise<V2ConversationFolderT> {
+    const input = V2CreateConversationFolderInput.parse(candidate);
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(projectId, actor.id);
+      const folder = await repository.insertConversationFolder(
+        this.makeId("folder"),
+        projectId,
+        actor.id,
+        input.name,
+      );
+      if (!folder) {
+        throw new ConversationPersistenceError(
+          "conversation_folder_name_conflict",
+          `a conversation folder named "${input.name}" already exists`,
+        );
+      }
+      return folder;
+    });
+  }
+
+  updateConversationFolder(
+    actor: ConversationActor,
+    projectId: string,
+    folderId: string,
+    candidate: V2UpdateConversationFolderInputT,
+  ): Promise<V2ConversationFolderT> {
+    const input = V2UpdateConversationFolderInput.parse(candidate);
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(projectId, actor.id);
+      const existing = await repository.findConversationFolder(projectId, actor.id, folderId);
+      if (!existing) {
+        throw new ConversationPersistenceError(
+          "conversation_folder_not_found",
+          `unknown conversation folder "${folderId}"`,
+        );
+      }
+      const updated = await repository.updateConversationFolder(
+        projectId,
+        actor.id,
+        folderId,
+        input.name,
+      );
+      if (!updated) {
+        throw new ConversationPersistenceError(
+          "conversation_folder_name_conflict",
+          `a conversation folder named "${input.name}" already exists`,
+        );
+      }
+      return updated;
+    });
+  }
+
+  reorderConversationFolders(
+    actor: ConversationActor,
+    projectId: string,
+    candidate: V2ReorderConversationFoldersInputT,
+  ): Promise<V2ConversationFolderT[]> {
+    const input = V2ReorderConversationFoldersInput.parse(candidate);
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(projectId, actor.id);
+      const existing = await repository.listConversationFolders(projectId, actor.id);
+      const existingIds = new Set(existing.map((folder) => folder.id));
+      if (
+        existingIds.size !== input.folder_ids.length ||
+        input.folder_ids.some((id) => !existingIds.has(id))
+      ) {
+        throw new ConversationPersistenceError(
+          "conversation_folder_order_invalid",
+          "folder_ids must contain every conversation folder exactly once",
+        );
+      }
+      return repository.reorderConversationFolders(projectId, actor.id, input.folder_ids);
+    });
+  }
+
+  deleteConversationFolder(
+    actor: ConversationActor,
+    projectId: string,
+    folderId: string,
+  ): Promise<{ deleted_folder_id: string; unfiled_work_item_count: number }> {
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(projectId, actor.id);
+      const folder = await repository.findConversationFolder(projectId, actor.id, folderId);
+      if (!folder) {
+        throw new ConversationPersistenceError(
+          "conversation_folder_not_found",
+          `unknown conversation folder "${folderId}"`,
+        );
+      }
+      const result = await repository.unfileAndDeleteConversationFolder(
+        projectId,
+        actor.id,
+        folderId,
+      );
+      if (!result.deleted) {
+        throw new ConversationPersistenceError(
+          "conversation_folder_not_found",
+          `conversation folder "${folderId}" is no longer available`,
+        );
+      }
+      return {
+        deleted_folder_id: folderId,
+        unfiled_work_item_count: result.unfiledWorkItemCount,
+      };
+    });
+  }
+
+  updateWorkItemOrganization(
+    actor: ConversationActor,
+    projectId: string,
+    workItemId: string,
+    candidate: V2UpdateWorkItemOrganizationInputT,
+  ): Promise<V2WorkItemOrganizationT> {
+    const input = V2UpdateWorkItemOrganizationInput.parse(candidate);
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(projectId, actor.id);
+      const workItem = await repository.findWorkItem(projectId, workItemId);
+      if (!workItem) {
+        throw new ConversationPersistenceError(
+          "work_item_not_found",
+          `unknown work item "${workItemId}" in project "${projectId}"`,
+        );
+      }
+      if (input.folder_id) {
+        const folder = await repository.findConversationFolder(
+          projectId,
+          actor.id,
+          input.folder_id,
+        );
+        if (!folder) {
+          throw new ConversationPersistenceError(
+            "conversation_folder_not_found",
+            `unknown conversation folder "${input.folder_id}"`,
+          );
+        }
+      }
+      return repository.upsertWorkItemOrganization(
+        projectId,
+        actor.id,
+        workItemId,
+        input.folder_id,
+        input.pinned,
+      );
+    });
+  }
+
+  async conversationNavigation(
+    actor: ConversationActor,
+    projectId: string,
+    limit: number,
+    cursor?: string,
+  ): Promise<V2ConversationNavigationPageT> {
+    const decodedCursor = decodeNavigationCursor(cursor, projectId, actor.id);
+    const pageSize = z.number().int().min(1).max(100).parse(limit);
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(projectId, actor.id);
+      const folders = await repository.listConversationFolders(projectId, actor.id);
+      const navigation = await repository.listConversationNavigation(
+        projectId,
+        actor.id,
+        pageSize,
+        decodedCursor,
+      );
+      const last = navigation.items.at(-1);
+      return V2ConversationNavigationPage.parse({
+        folders,
+        items: navigation.items,
+        next_cursor:
+          navigation.hasMore && last ? encodeNavigationCursor(last, projectId, actor.id) : null,
+      });
+    });
   }
 
   createWorkItem(
@@ -243,7 +500,7 @@ export class ConversationService {
     actor: ConversationActor,
     projectId: string,
     workItemId: string,
-  ): Promise<V2WorkConversationT[]> {
+  ): Promise<WorkConversationWithBranchLineage[]> {
     return this.store.transaction(async (repository) => {
       await repository.assertProjectAccess(projectId, actor.id);
       const workItem = await repository.findWorkItem(projectId, workItemId);
@@ -253,7 +510,13 @@ export class ConversationService {
           `unknown work item "${workItemId}" in project "${projectId}"`,
         );
       }
-      return repository.listConversations(projectId, workItemId);
+      const conversations = await repository.listConversations(projectId, workItemId);
+      const lineages = await repository.listConversationMessageBranches(projectId, workItemId);
+      const byChild = new Map(lineages.map((lineage) => [lineage.child_conversation_id, lineage]));
+      return conversations.map((conversation) => ({
+        ...conversation,
+        branch_lineage: byChild.get(conversation.id) ?? null,
+      }));
     });
   }
 
@@ -261,7 +524,11 @@ export class ConversationService {
     actor: ConversationActor,
     projectId: string,
     conversationId: string,
-  ): Promise<{ work_item: V2WorkItemT; conversation: V2WorkConversationT }> {
+  ): Promise<{
+    work_item: V2WorkItemT;
+    conversation: V2WorkConversationT;
+    branch_lineage: V2ConversationMessageBranchT | null;
+  }> {
     return this.store.transaction(async (repository) => {
       await repository.assertProjectAccess(projectId, actor.id);
       const conversation = await repository.findConversation(projectId, conversationId);
@@ -278,7 +545,113 @@ export class ConversationService {
           `conversation "${conversationId}" has no work item in project "${projectId}"`,
         );
       }
-      return { work_item, conversation };
+      const branch_lineage = await repository.findConversationMessageBranch(
+        projectId,
+        work_item.id,
+        conversation.id,
+      );
+      return { work_item, conversation, branch_lineage };
+    });
+  }
+
+  createConversationMessageBranch(
+    actor: ConversationActor,
+    projectId: string,
+    workItemId: string,
+    conversationId: string,
+    candidate: V2CreateConversationMessageBranchInputT,
+  ): Promise<{
+    conversation: V2WorkConversationT;
+    branch_lineage: V2ConversationMessageBranchT;
+  }> {
+    const input = V2CreateConversationMessageBranchInput.parse(candidate);
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(projectId, actor.id);
+      const parent = await repository.lockConversation(projectId, workItemId, conversationId);
+      if (!parent) {
+        throw new ConversationPersistenceError(
+          "conversation_not_found",
+          `unknown conversation "${conversationId}" in the requested scope`,
+        );
+      }
+      if (parent.kind !== "planning") {
+        throw new ConversationPersistenceError(
+          "conversation_kind_forbidden",
+          "only planning conversations can be branched from an edited message",
+        );
+      }
+      if (parent.status !== "active") {
+        throw new ConversationPersistenceError(
+          "conversation_inactive",
+          `conversation "${conversationId}" is ${parent.status}`,
+        );
+      }
+      if (
+        (await repository.hasActiveTurnAttempt(conversationId)) ||
+        (await repository.hasActivePlanProposal(conversationId))
+      ) {
+        throw new ConversationPersistenceError(
+          "turn_in_progress",
+          "wait for or stop active conversation work before creating a message branch",
+        );
+      }
+
+      const source = await repository.findMessage(
+        projectId,
+        workItemId,
+        conversationId,
+        input.source_message_id,
+      );
+      if (!source) {
+        throw new ConversationPersistenceError(
+          "message_not_found",
+          `unknown source message "${input.source_message_id}" in this conversation`,
+        );
+      }
+      if (
+        source.role !== "user" ||
+        source.actor.actor_type !== "human" ||
+        source.visibility_status !== "complete"
+      ) {
+        throw new ConversationPersistenceError(
+          "conversation_branch_unsafe",
+          "a message branch must start from a complete human user message",
+        );
+      }
+
+      const prefix = (await repository.listMessages(projectId, workItemId, conversationId)).filter(
+        (message) => message.sequence < source.sequence,
+      );
+      const unsafe = prefix.find(
+        (message) =>
+          message.visibility_status === "streaming" ||
+          message.parts.some((part) => !branchSafePartTypes.has(part.type)),
+      );
+      if (unsafe) {
+        throw new ConversationPersistenceError(
+          "conversation_branch_unsafe",
+          `message "${unsafe.id}" contains workflow state that cannot be copied safely`,
+        );
+      }
+
+      const created = await repository.insertConversationMessageBranch({
+        id: this.makeId("branch"),
+        childConversationId: this.makeId("conversation"),
+        actorUserId: actor.id,
+        projectId,
+        workItemId,
+        parentConversation: parent,
+        sourceMessageId: source.id,
+        prefix: prefix.map((message) => ({
+          source: message,
+          id: this.makeId("message"),
+          clientMessageId: message.role === "user" ? this.makeId("branch-client") : null,
+        })),
+      });
+      return {
+        conversation: created.conversation,
+        branch_lineage: created.branchLineage,
+      };
     });
   }
 

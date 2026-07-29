@@ -13,8 +13,11 @@ import {
   ComposerPrimitive,
   MessagePrimitive,
   ThreadPrimitive,
+  useAttachment,
   useComposer,
   useComposerRuntime,
+  useMessage,
+  useThread,
 } from "@assistant-ui/react";
 import { AssistantChatTransport, useAISDKChat, useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
@@ -24,8 +27,11 @@ import type {
   V2ConfirmConversationActionResponseT,
   V2ConversationActionDeliveryEventT,
   V2ConversationActionT,
+  V2ConversationFolderT,
   V2ConversationHandoffT,
   V2ConversationMockupVersionT,
+  V2ConversationNavigationItemT,
+  V2ConversationNavigationPageT,
   V2ConversationPlanActionEffectValueT,
   V2ConversationPlanReviewT,
   V2ConversationPlanningExcerptReceiptT,
@@ -84,11 +90,15 @@ import {
   type WorkItemConversationGroup,
   cancelConversationPlanReview,
   confirmConversationAction,
+  createConversationFolder,
+  createConversationMessageBranch,
   createPlanningWorkItem,
+  deleteConversationFolder,
   generateConversationPlanChangeProposal,
   generateConversationPlanProposal,
   getConversation,
   getProjectConversationPin,
+  listConversationNavigation,
   listWorkItemConversations,
   messageEndpoint,
   proposeExecutionConversationAction,
@@ -97,7 +107,9 @@ import {
   resolveConversation,
   retrieveConversationPlanningExcerpt,
   switchConversationModel,
+  updateConversationFolder,
   updateConversationPmSettings,
+  updateWorkItemOrganization,
 } from "./conversationApi";
 import { type ExecutionModelCapability, getExecutionModelCapabilities } from "./phaseTabApi";
 import { Alert, Badge, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
@@ -172,12 +184,22 @@ type NornsDataParts = {
   "message-status": MessageStatusData;
 };
 
-type NornsMessageMetadata = {
+type NornsMessageCustomMetadata = {
   sequence?: number;
   visibility_status?: V2WorkMessageT["visibility_status"];
+  actor?: V2WorkMessageT["actor"];
+};
+
+type NornsMessageMetadata = {
+  custom?: NornsMessageCustomMetadata;
 };
 
 type NornsUIMessage = UIMessage<NornsMessageMetadata, NornsDataParts>;
+
+type SidebarConversationFamily = {
+  group: WorkItemConversationGroup;
+  organization: V2ConversationNavigationItemT | null;
+};
 
 interface ConversationWorkspaceProps {
   projectId: string;
@@ -216,6 +238,54 @@ function displayConversationTitle(title: string): string {
   return title.replace(/^#{1,6}\s+/, "").trim() || "Untitled conversation";
 }
 
+type ActorPresentation = {
+  className: "human" | "pm" | "agent" | "reviewer" | "system";
+  label: string;
+  actorId: string | null;
+};
+
+function actorPresentation(
+  actor: V2WorkMessageT["actor"] | undefined,
+  fallback: "user" | "assistant" | "system",
+): ActorPresentation {
+  if (!actor) {
+    if (fallback === "user") return { className: "human", label: "You", actorId: null };
+    if (fallback === "system") return { className: "system", label: "System", actorId: null };
+    return { className: "pm", label: "PM", actorId: null };
+  }
+  const actorId = actor.actor_id;
+  const normalizedId = actorId?.toLocaleLowerCase() ?? "";
+  if (actor.actor_type === "human") return { className: "human", label: "You", actorId };
+  if (actor.actor_type === "system") return { className: "system", label: "System", actorId };
+  if (
+    actor.actor_type === "coordinator" ||
+    normalizedId.includes("review") ||
+    normalizedId.includes("qc")
+  ) {
+    return {
+      className: "reviewer",
+      label: actor.actor_type === "coordinator" ? "Coordinator" : "Reviewer",
+      actorId,
+    };
+  }
+  if (normalizedId.includes("pm")) return { className: "pm", label: "PM", actorId };
+  if (actor.actor_type === "agent" || actor.actor_type === "runner") {
+    return {
+      className: "agent",
+      label: actor.actor_type === "runner" ? "Runner" : "Agent",
+      actorId,
+    };
+  }
+  return { className: "pm", label: "PM", actorId };
+}
+
+function useCurrentActorPresentation(fallback: "user" | "assistant" | "system"): ActorPresentation {
+  const actor = useMessage(
+    (message) => (message.metadata.custom as NornsMessageCustomMetadata | undefined)?.actor,
+  );
+  return actorPresentation(actor, fallback);
+}
+
 const conversationModelOptions = (
   Object.entries(PM_MODEL_OPTIONS) as Array<[PmProviderT, (typeof PM_MODEL_OPTIONS)[PmProviderT]]>
 ).flatMap(([provider, models]) =>
@@ -231,6 +301,54 @@ function attachmentIdFromUrl(url: string): string | null {
   return match?.[1] ? decodeURIComponent(match[1]) : null;
 }
 
+const CONVERSATION_ATTACHMENT_ACCEPT = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "text/plain",
+  "text/markdown",
+  "application/json",
+  "text/csv",
+  "application/pdf",
+  ".txt",
+  ".md",
+  ".markdown",
+  ".json",
+  ".csv",
+  ".pdf",
+].join(",");
+
+const ATTACHMENT_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+  txt: "text/plain",
+  md: "text/markdown",
+  markdown: "text/markdown",
+  json: "application/json",
+  csv: "text/csv",
+  pdf: "application/pdf",
+};
+
+function resolvedAttachmentMime(file: File): string | null {
+  const declared = file.type.trim().toLocaleLowerCase();
+  if (declared && declared !== "application/octet-stream") return declared;
+  const extension = file.name.split(".").pop()?.toLocaleLowerCase();
+  return extension ? (ATTACHMENT_MIME_BY_EXTENSION[extension] ?? null) : null;
+}
+
+function attachmentTypeLabel(mimeType: string): string {
+  if (mimeType.startsWith("image/")) return "Image";
+  if (mimeType === "application/pdf") return "PDF";
+  if (mimeType === "application/json") return "JSON";
+  if (mimeType === "text/markdown") return "Markdown";
+  if (mimeType === "text/csv") return "CSV";
+  return "Text file";
+}
+
 function toSubmissionParts(message: NornsUIMessage): V2WorkMessagePartT[] {
   return message.parts.flatMap((part): V2WorkMessagePartT[] => {
     if (part.type === "text" && part.text.trim()) {
@@ -243,7 +361,9 @@ function toSubmissionParts(message: NornsUIMessage): V2WorkMessagePartT[] {
         {
           type: "attachment",
           attachment_id: attachmentId,
-          name: part.filename?.trim() || "Image attachment",
+          name:
+            part.filename?.trim() ||
+            (part.mediaType.startsWith("image/") ? "Image attachment" : "File attachment"),
           media_type: part.mediaType,
         },
       ];
@@ -437,6 +557,17 @@ type ConversationActionContextValue = {
 
 const ConversationActionContext = createContext<ConversationActionContextValue | null>(null);
 
+type EditableConversationMessage = {
+  text: string;
+};
+
+type ConversationEditContextValue = {
+  messages: Map<string, EditableConversationMessage>;
+  editMessage: (sourceMessageId: string, text: string) => Promise<void>;
+};
+
+const ConversationEditContext = createContext<ConversationEditContextValue | null>(null);
+
 function messagePartToUi(
   projectId: string,
   part: V2WorkMessagePartT,
@@ -582,8 +713,11 @@ function toUiMessage(
     id: message.id,
     role,
     metadata: {
-      sequence: message.sequence,
-      visibility_status: message.visibility_status,
+      custom: {
+        sequence: message.sequence,
+        visibility_status: message.visibility_status,
+        actor: message.actor,
+      },
     },
     parts,
   };
@@ -594,15 +728,22 @@ function createConversationAttachmentAdapter(
   onUnauthorized: () => void,
 ): AttachmentAdapter {
   return {
-    accept: "image/png,image/jpeg,image/webp,image/gif",
+    accept: CONVERSATION_ATTACHMENT_ACCEPT,
     async add({ file }): Promise<PendingAttachment> {
+      const contentType = resolvedAttachmentMime(file);
+      if (!contentType) {
+        throw new Error(
+          "That file type is not supported. Add an image, PDF, plain text, Markdown, JSON, or CSV file.",
+        );
+      }
       const response = await fetch(`/api/v2/projects/${projectId}/attachments`, {
         method: "POST",
         credentials: "include",
         headers: {
           ...authHeaders(),
-          "content-type": file.type,
+          "content-type": contentType,
           "x-attachment-purpose": "conversation",
+          "x-attachment-filename": file.name,
         },
         body: file,
       });
@@ -612,30 +753,40 @@ function createConversationAttachmentAdapter(
       }
       const payload = (await response.json().catch(() => ({}))) as {
         id?: string;
+        error?: string;
         message?: string;
       };
       if (!response.ok || !payload.id) {
-        throw new Error(payload.message ?? `Upload failed (${response.status}).`);
+        throw new Error(
+          payload.message ??
+            payload.error ??
+            `The file could not be uploaded (${response.status}).`,
+        );
       }
       return {
         id: payload.id,
-        type: "image",
+        type: contentType.startsWith("image/") ? "image" : "file",
         name: file.name,
-        contentType: file.type,
+        contentType,
         file,
         status: { type: "requires-action", reason: "composer-send" },
       };
     },
     async send(attachment) {
+      const url = `/api/v2/projects/${projectId}/attachments/${encodeURIComponent(attachment.id)}`;
       return {
         ...attachment,
         status: { type: "complete" },
-        content: [
-          {
-            type: "image",
-            image: `/api/v2/projects/${projectId}/attachments/${encodeURIComponent(attachment.id)}`,
-          },
-        ],
+        content: attachment.contentType?.startsWith("image/")
+          ? [{ type: "image", image: url, filename: attachment.name }]
+          : [
+              {
+                type: "file",
+                data: url,
+                filename: attachment.name,
+                mimeType: attachment.contentType ?? "text/plain",
+              },
+            ],
       };
     },
     async remove(attachment) {
@@ -649,7 +800,7 @@ function createConversationAttachmentAdapter(
       );
       if (response.status === 401) onUnauthorized();
       if (!response.ok && response.status !== 404) {
-        throw new Error(`Could not remove the image (${response.status}).`);
+        throw new Error(`Could not remove the file (${response.status}).`);
       }
     },
   };
@@ -666,24 +817,46 @@ function MarkdownText(): React.ReactElement {
   );
 }
 
-function FilePreview({ filename, mimeType, data }: FileMessagePartProps): React.ReactElement {
+function AttachmentPreview({
+  filename,
+  mimeType,
+  data,
+}: {
+  filename?: string;
+  mimeType: string;
+  data: string;
+}): React.ReactElement {
   const image = mimeType.startsWith("image/");
+  const label = filename ?? "Attachment";
   return (
     <a
-      className="conversation-attachment-card"
+      className={`conversation-attachment-card${image ? " is-image" : " is-file"}`}
       href={data}
       target="_blank"
       rel="noreferrer"
-      aria-label={`Open ${filename ?? "attachment"}`}
+      download={filename}
+      aria-label={`Open ${label}`}
     >
       {image ? (
         <img src={data} alt={filename ?? "Attached image"} />
       ) : (
-        <span aria-hidden="true">▧</span>
+        <>
+          <span className="conversation-attachment-icon" aria-hidden="true">
+            ▧
+          </span>
+          <span className="conversation-attachment-copy">
+            <strong>{label}</strong>
+            <small>{attachmentTypeLabel(mimeType)}</small>
+          </span>
+        </>
       )}
-      <span>{filename ?? "Attachment"}</span>
+      {image ? <span>{label}</span> : null}
     </a>
   );
+}
+
+function FilePreview({ filename, mimeType, data }: FileMessagePartProps): React.ReactElement {
+  return <AttachmentPreview filename={filename} mimeType={mimeType} data={data} />;
 }
 
 function ArtifactPreview({ data }: DataMessagePartProps<ArtifactData>): React.ReactElement {
@@ -2047,19 +2220,76 @@ function PlanningExcerptControl({
 }
 
 function ComposerAttachment(): React.ReactElement {
+  const attachment = useAttachment();
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const isImage = attachment.contentType?.startsWith("image/") ?? false;
+  useEffect(() => {
+    if (
+      !isImage ||
+      !attachment.file ||
+      typeof URL.createObjectURL !== "function" ||
+      typeof URL.revokeObjectURL !== "function"
+    ) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(attachment.file);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [attachment.file, isImage]);
+
   return (
-    <AttachmentPrimitive.Root className="conversation-composer-attachment">
-      <AttachmentPrimitive.unstable_Thumb />
-      <AttachmentPrimitive.Name />
+    <AttachmentPrimitive.Root
+      className={`conversation-composer-attachment${isImage ? " is-image" : " is-file"}`}
+    >
+      {previewUrl ? (
+        <img src={previewUrl} alt="" />
+      ) : (
+        <AttachmentPrimitive.unstable_Thumb aria-hidden="true" />
+      )}
+      <span className="conversation-composer-attachment-name">
+        <AttachmentPrimitive.Name />
+        <small>
+          {attachment.contentType ? attachmentTypeLabel(attachment.contentType) : "Pending file"}
+        </small>
+      </span>
       <AttachmentPrimitive.Remove aria-label="Remove attachment">×</AttachmentPrimitive.Remove>
     </AttachmentPrimitive.Root>
   );
 }
 
 function UserMessage(): React.ReactElement {
+  const presentation = useCurrentActorPresentation("user");
+  const editContext = useContext(ConversationEditContext);
+  const messageId = useMessage((message) => message.id);
+  const responseRunning = useThread((thread) => thread.isRunning);
+  const editable = editContext?.messages.get(messageId);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editedText, setEditedText] = useState(editable?.text ?? "");
+  const [editBusy, setEditBusy] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const submitEdit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!editable || !editContext || responseRunning || editBusy) return;
+    const replacement = editedText.trim();
+    if (!replacement || replacement === editable.text.trim()) return;
+    setEditBusy(true);
+    setEditError(null);
+    try {
+      await editContext.editMessage(messageId, replacement);
+    } catch (caught) {
+      setEditError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setEditBusy(false);
+    }
+  };
   return (
-    <MessagePrimitive.Root className="conversation-message is-user">
-      <div className="conversation-message-label">You</div>
+    <MessagePrimitive.Root
+      className={`conversation-message is-user actor-${presentation.className}`}
+    >
+      <div className="conversation-message-label" title={presentation.actorId ?? undefined}>
+        {presentation.label}
+      </div>
       <div className="conversation-bubble">
         <MessagePrimitive.Parts
           components={{
@@ -2083,15 +2313,113 @@ function UserMessage(): React.ReactElement {
             },
           }}
         />
+        <MessagePrimitive.Attachments>
+          {({ attachment }) => {
+            const content = attachment.content[0];
+            if (content?.type === "image") {
+              return (
+                <AttachmentPreview
+                  filename={attachment.name}
+                  mimeType={attachment.contentType ?? "image/png"}
+                  data={content.image}
+                />
+              );
+            }
+            if (content?.type === "file") {
+              return (
+                <AttachmentPreview
+                  filename={attachment.name}
+                  mimeType={content.mimeType}
+                  data={content.data}
+                />
+              );
+            }
+            return null;
+          }}
+        </MessagePrimitive.Attachments>
       </div>
+      <ActionBarPrimitive.Root className="conversation-message-actions">
+        <ActionBarPrimitive.Copy aria-label="Copy message">Copy</ActionBarPrimitive.Copy>
+        {editable ? (
+          <button
+            type="button"
+            aria-label="Edit message"
+            disabled={responseRunning || editBusy}
+            title={
+              responseRunning
+                ? "Stop the active response before editing an earlier message."
+                : "Edit this message in a new conversation branch."
+            }
+            onClick={() => {
+              setEditedText(editable.text);
+              setEditError(null);
+              setEditorOpen(true);
+            }}
+          >
+            Edit
+          </button>
+        ) : null}
+      </ActionBarPrimitive.Root>
+      {editorOpen && editable ? (
+        <form
+          className="conversation-message-editor"
+          aria-label="Edit message"
+          onSubmit={(event) => void submitEdit(event)}
+        >
+          <strong>Edit in a new branch</strong>
+          <p>The original conversation stays unchanged.</p>
+          <TextArea
+            aria-label="Edited message"
+            value={editedText}
+            rows={4}
+            autoFocus
+            disabled={editBusy || responseRunning}
+            onChange={(event) => setEditedText(event.target.value)}
+          />
+          {editError ? (
+            <output className="conversation-action-error" role="alert">
+              {editError}
+            </output>
+          ) : null}
+          <div>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={
+                editBusy ||
+                responseRunning ||
+                !editedText.trim() ||
+                editedText.trim() === editable.text.trim()
+              }
+            >
+              {editBusy ? "Creating branch…" : "Create edited branch"}
+            </Button>
+            <Button
+              type="button"
+              disabled={editBusy}
+              onClick={() => {
+                setEditorOpen(false);
+                setEditError(null);
+              }}
+            >
+              Cancel
+            </Button>
+          </div>
+        </form>
+      ) : null}
     </MessagePrimitive.Root>
   );
 }
 
 function AssistantMessage(): React.ReactElement {
+  const presentation = useCurrentActorPresentation("assistant");
   return (
-    <MessagePrimitive.Root className="conversation-message is-assistant">
-      <div className="conversation-message-label">PM</div>
+    <MessagePrimitive.Root
+      className={`conversation-message is-assistant actor-${presentation.className}`}
+    >
+      <div className="conversation-message-label" title={presentation.actorId ?? undefined}>
+        {presentation.label}
+      </div>
       <div className="conversation-bubble" aria-live="polite">
         <MessagePrimitive.Parts
           components={{
@@ -2124,8 +2452,14 @@ function AssistantMessage(): React.ReactElement {
 }
 
 function SystemMessage(): React.ReactElement {
+  const presentation = useCurrentActorPresentation("system");
   return (
-    <MessagePrimitive.Root className="conversation-message is-system">
+    <MessagePrimitive.Root
+      className={`conversation-message is-system actor-${presentation.className}`}
+    >
+      <div className="conversation-message-label" title={presentation.actorId ?? undefined}>
+        {presentation.label}
+      </div>
       <div className="conversation-bubble">
         <MessagePrimitive.Parts
           components={{
@@ -2666,10 +3000,6 @@ function ConversationComposer({
   isExecution,
   isPlanning,
   pmProvider,
-  pmModel,
-  modelBusy,
-  modelDisabled,
-  onModelChange,
   planIntentEnabled,
   planIntentBusy,
   onUseAsPlan,
@@ -2677,18 +3007,32 @@ function ConversationComposer({
   isExecution: boolean;
   isPlanning: boolean;
   pmProvider: PmProviderT;
-  pmModel: PmModelT;
-  modelBusy: boolean;
-  modelDisabled: boolean;
-  onModelChange: (model: PmModelT) => void;
   planIntentEnabled: boolean;
   planIntentBusy: boolean;
   onUseAsPlan: (message: string, handoff?: V2PlanHandoffPreferenceT) => void;
 }): React.ReactElement {
   const composer = useComposerRuntime();
   const [handoffOpen, setHandoffOpen] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const responseRunning = useThread((thread) => thread.isRunning);
   const hasDraft = useComposer((state) => state.text.trim().length > 0);
   const hasAttachments = useComposer((state) => state.attachments.length > 0);
+  useEffect(() => {
+    const stopListeningForErrors = composer.unstable_on("attachmentAddError", ({ message }) => {
+      setAttachmentError(
+        message.includes("is not accepted")
+          ? "That file type is not supported. Add an image, PDF, plain text, Markdown, JSON, or CSV file."
+          : message,
+      );
+    });
+    const stopListeningForAdds = composer.unstable_on("attachmentAdd", () =>
+      setAttachmentError(null),
+    );
+    return () => {
+      stopListeningForErrors();
+      stopListeningForAdds();
+    };
+  }, [composer]);
   const interceptPlanIntent = (event: FormEvent<HTMLFormElement>) => {
     const state = composer.getState();
     if (!planIntentEnabled || state.attachments.length > 0 || !isPlanAdoptionIntent(state.text)) {
@@ -2701,82 +3045,95 @@ function ConversationComposer({
   };
 
   return (
-    <ComposerPrimitive.Root className="conversation-composer" onSubmit={interceptPlanIntent}>
-      <ComposerPrimitive.Attachments>{() => <ComposerAttachment />}</ComposerPrimitive.Attachments>
-      <ComposerPrimitive.Input
-        className="conversation-composer-input"
-        placeholder={
-          isExecution
-            ? "Message the execution PM…"
-            : "Message the PM, or say “Use this as the plan”…"
-        }
-        aria-label={isExecution ? "Message the execution PM" : "Message the project PM"}
-        submitMode="enter"
-        unstable_insertNewlineOnTouchEnter
-        rows={2}
-      />
-      <div className="conversation-composer-actions">
-        <ComposerPrimitive.AddAttachment
-          className="conversation-icon-button"
-          aria-label="Add file"
-          title="Attach an image"
-        >
-          +
-        </ComposerPrimitive.AddAttachment>
-        <div className="conversation-model-select">
-          <span className="sr-only">Conversation model</span>
-          <Select
-            aria-label="Conversation model"
-            value={pmModel}
-            disabled={modelBusy || modelDisabled}
-            title={`${pmProvider === "anthropic" ? "Anthropic" : "OpenAI"} ecosystem is locked for this conversation`}
-            onChange={(event) => onModelChange(event.target.value as PmModelT)}
-          >
-            {PM_MODEL_OPTIONS[pmProvider].map((model) => (
-              <option key={model.id} value={model.id}>
-                {pmProvider === "anthropic" ? "Anthropic" : "OpenAI"} · {model.label}
-              </option>
-            ))}
-          </Select>
-        </div>
-        <span className="conversation-keyboard-help">
-          Enter to send · Shift+Enter for a new line
-        </span>
-        <ComposerPrimitive.Cancel className="conversation-stop-button" aria-label="Stop response">
-          Stop
-        </ComposerPrimitive.Cancel>
-        {isPlanning ? (
-          <button
-            type="button"
-            className="conversation-plan-button"
-            aria-label="Use conversation as plan"
-            disabled={!planIntentEnabled || hasDraft || hasAttachments}
-            title={
-              hasDraft || hasAttachments
-                ? "Send or clear the current draft before creating the plan."
-                : "Create and save a plan from this conversation."
-            }
-            onClick={() => setHandoffOpen(true)}
-          >
-            {planIntentBusy ? "Planning…" : "Plan"}
-          </button>
+    <ComposerPrimitive.AttachmentDropzone asChild>
+      <ComposerPrimitive.Root
+        className="conversation-composer"
+        aria-label="Message composer and file dropzone"
+        onSubmit={interceptPlanIntent}
+      >
+        <ComposerPrimitive.Attachments>
+          {() => <ComposerAttachment />}
+        </ComposerPrimitive.Attachments>
+        {attachmentError ? (
+          <output className="conversation-attachment-error" role="alert">
+            {attachmentError}
+          </output>
         ) : null}
-        <ComposerPrimitive.Send className="conversation-send-button" aria-label="Send message">
-          Send
-        </ComposerPrimitive.Send>
-      </div>
-      {handoffOpen ? (
-        <PlanHandoffDialog
-          busy={planIntentBusy}
-          pmProvider={pmProvider}
-          onCancel={() => setHandoffOpen(false)}
-          onSubmit={(handoff) => {
-            setHandoffOpen(false);
-            onUseAsPlan("Use this as the plan.", handoff);
+        <ComposerPrimitive.Input
+          className="conversation-composer-input"
+          placeholder={
+            isExecution
+              ? "Message the execution PM…"
+              : "Message the PM, or say “Use this as the plan”…"
+          }
+          aria-label={isExecution ? "Message the execution PM" : "Message the project PM"}
+          addAttachmentOnPaste={false}
+          onPaste={(event) => {
+            const files = Array.from(event.clipboardData.files);
+            if (files.length === 0) return;
+            event.preventDefault();
+            void Promise.all(files.map((file) => composer.addAttachment(file))).catch(() => {
+              // attachmentAddError exposes the readable error beside the composer.
+            });
           }}
+          submitMode="enter"
+          unstable_insertNewlineOnTouchEnter
+          rows={2}
         />
-      ) : null}
-    </ComposerPrimitive.Root>
+        <div className="conversation-composer-actions">
+          <ComposerPrimitive.AddAttachment
+            className="conversation-icon-button"
+            aria-label="Add file"
+            title="Add images or files"
+          >
+            +
+          </ComposerPrimitive.AddAttachment>
+          <span className="conversation-keyboard-help">
+            Enter to send · Shift+Enter for a new line
+          </span>
+          {responseRunning ? (
+            <ComposerPrimitive.Cancel
+              className="conversation-stop-button"
+              aria-label="Stop response"
+            >
+              Stop
+            </ComposerPrimitive.Cancel>
+          ) : null}
+          {isPlanning ? (
+            <button
+              type="button"
+              className="conversation-plan-button"
+              aria-label="Use conversation as plan"
+              disabled={!planIntentEnabled || hasDraft || hasAttachments}
+              title={
+                hasDraft || hasAttachments
+                  ? "Send or clear the current draft before creating the plan."
+                  : "Create and save a plan from this conversation."
+              }
+              onClick={() => setHandoffOpen(true)}
+            >
+              {planIntentBusy ? "Planning…" : "Plan"}
+            </button>
+          ) : null}
+          {!responseRunning ? (
+            <ComposerPrimitive.Send className="conversation-send-button" aria-label="Send message">
+              Send
+            </ComposerPrimitive.Send>
+          ) : null}
+        </div>
+        {handoffOpen ? (
+          <PlanHandoffDialog
+            busy={planIntentBusy}
+            pmProvider={pmProvider}
+            onCancel={() => setHandoffOpen(false)}
+            onSubmit={(handoff) => {
+              setHandoffOpen(false);
+              onUseAsPlan("Use this as the plan.", handoff);
+            }}
+          />
+        ) : null}
+      </ComposerPrimitive.Root>
+    </ComposerPrimitive.AttachmentDropzone>
   );
 }
 
@@ -2908,15 +3265,17 @@ function ConversationThread({
   detail,
   initialMessage,
   onInitialMessageStarted,
+  onEditMessage,
   onOpenConversation,
   onConversationModelChanged,
   onRefresh,
   onUnauthorized,
 }: {
-  header: ReactNode;
+  header: (modelControl: ReactNode) => ReactNode;
   detail: ConversationDetail;
   initialMessage?: string | null;
   onInitialMessageStarted?: () => void;
+  onEditMessage: (sourceMessageId: string, text: string) => Promise<void>;
   onOpenConversation: (conversationId: string) => void;
   onConversationModelChanged: (conversation: V2WorkConversationT) => void;
   onRefresh: () => void;
@@ -2940,6 +3299,7 @@ function ConversationThread({
   const [executionProposalBusy, setExecutionProposalBusy] = useState(false);
   const [executionProposalError, setExecutionProposalError] = useState<string | null>(null);
   const [stopTaskId, setStopTaskId] = useState("");
+  const [agentsOpen, setAgentsOpen] = useState(false);
   const [lockedExecutionRequest, setLockedExecutionRequest] =
     useState<V2CreateExecutionActionProposalInputT | null>(() =>
       storedExactRequest(
@@ -3873,6 +4233,40 @@ function ConversationThread({
     proposalBusy === false &&
     detail.active_attempt === null &&
     proposalBlockedReason === null;
+  const editableMessages = useMemo(() => {
+    if (
+      !isPlanning ||
+      isReadOnly ||
+      detail.active_attempt !== null ||
+      proposalBusy ||
+      busyActionId !== null
+    ) {
+      return new Map<string, EditableConversationMessage>();
+    }
+    return new Map(
+      detail.messages.flatMap((message): Array<[string, EditableConversationMessage]> => {
+        const text = message.parts
+          .flatMap((part) => (part.type === "text" ? [part.text] : []))
+          .join("\n\n")
+          .trim();
+        const safeParts = message.parts.every((part) => part.type === "text");
+        if (
+          message.role !== "user" ||
+          message.actor.actor_type !== "human" ||
+          message.visibility_status !== "complete" ||
+          !safeParts ||
+          !text
+        ) {
+          return [];
+        }
+        return [[message.id, { text }]];
+      }),
+    );
+  }, [busyActionId, detail.active_attempt, detail.messages, isPlanning, isReadOnly, proposalBusy]);
+  const editContext = useMemo<ConversationEditContextValue>(
+    () => ({ messages: editableMessages, editMessage: onEditMessage }),
+    [editableMessages, onEditMessage],
+  );
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -3883,268 +4277,376 @@ function ConversationThread({
         />
       ) : null}
       <ConversationActionContext.Provider value={actionContext}>
-        <section
-          className="conversation-thread"
-          aria-label={`${conversationKindLabel(detail.conversation.kind)} conversation`}
-        >
-          <div className="conversation-thread-chrome">
-            {header}
-            {isPlanning || isExecution ? (
-              <div className="conversation-thread-tools" aria-label="Conversation tools">
-                <PlanningWorkflowBar
-                  detail={detail}
-                  proposalBusy={proposalBusy || detail.active_attempt !== null}
-                  onOpenConversation={onOpenConversation}
+        <ConversationEditContext.Provider value={editContext}>
+          <section
+            className="conversation-thread"
+            aria-label={`${conversationKindLabel(detail.conversation.kind)} conversation`}
+          >
+            <div className="conversation-thread-chrome">
+              {header(
+                <>
+                  <div className="conversation-header-model">
+                    <span className="sr-only">Conversation model</span>
+                    <Select
+                      aria-label="Conversation model"
+                      value={detail.conversation.model}
+                      disabled={
+                        modelBusy ||
+                        detail.active_attempt !== null ||
+                        proposalBusy ||
+                        busyActionId !== null ||
+                        isReadOnly
+                      }
+                      title={`${detail.conversation.provider === "anthropic" ? "Anthropic" : "OpenAI"} ecosystem is locked for this conversation`}
+                      onChange={(event) =>
+                        void changeConversationModel(event.target.value as PmModelT)
+                      }
+                    >
+                      {PM_MODEL_OPTIONS[
+                        detail.conversation.provider === "openai" ? "openai" : "anthropic"
+                      ].map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {detail.conversation.provider === "anthropic" ? "Anthropic" : "OpenAI"} ·{" "}
+                          {model.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                  {isExecution ? (
+                    <Button
+                      className="btn-small conversation-agents-button"
+                      aria-label={`Agents ${taskOptions.length}`}
+                      aria-expanded={agentsOpen}
+                      onClick={() => setAgentsOpen((open) => !open)}
+                    >
+                      Agents {taskOptions.length}
+                    </Button>
+                  ) : null}
+                </>,
+              )}
+              {isPlanning || isExecution ? (
+                <div className="conversation-thread-tools" aria-label="Conversation tools">
+                  <PlanningWorkflowBar
+                    detail={detail}
+                    proposalBusy={proposalBusy || detail.active_attempt !== null}
+                    onOpenConversation={onOpenConversation}
+                  />
+                  {!isReadOnly && (!isPlanning || latestPlan !== undefined) ? (
+                    <MockupRequestComposer
+                      taskOptions={taskOptions}
+                      planningPlanVersionId={isPlanning ? (latestPlan?.id ?? null) : null}
+                      artifactOptions={artifactOptions}
+                      busy={executionProposalBusy}
+                      error={executionProposalError}
+                      disabledReason={
+                        lockedExecutionRequest ? "Retry the locked exact request first." : null
+                      }
+                      onPrepare={(parameters) =>
+                        proposeExecutionAction("create_mockup", parameters)
+                      }
+                    />
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+            {detail.branch_lineage ? (
+              <aside
+                className="conversation-branch-lineage"
+                aria-label="Edited conversation branch"
+              >
+                <span aria-hidden="true">⑂</span>
+                <div>
+                  <strong>Edited branch</strong>
+                  <small>
+                    Created from message <code>{detail.branch_lineage.source_message_id}</code>. The
+                    original conversation is unchanged.
+                  </small>
+                </div>
+                <Button
+                  className="btn-small"
+                  variant="ghost"
+                  onClick={() => {
+                    const parentConversationId = detail.branch_lineage?.parent_conversation_id;
+                    if (parentConversationId) onOpenConversation(parentConversationId);
+                  }}
+                >
+                  Open original
+                </Button>
+              </aside>
+            ) : null}
+            {agentsOpen && isExecution ? (
+              <>
+                <button
+                  type="button"
+                  className="conversation-agents-backdrop"
+                  aria-label="Close agent activity"
+                  onClick={() => setAgentsOpen(false)}
                 />
-                {!isReadOnly && (!isPlanning || latestPlan !== undefined) ? (
-                  <MockupRequestComposer
-                    taskOptions={taskOptions}
-                    planningPlanVersionId={isPlanning ? (latestPlan?.id ?? null) : null}
-                    artifactOptions={artifactOptions}
+                <aside className="conversation-agents-drawer" aria-label="Agent activity">
+                  <header>
+                    <div>
+                      <span className="eyebrow">Execution</span>
+                      <h2>Agent activity</h2>
+                    </div>
+                    <Button
+                      className="btn-small"
+                      variant="ghost"
+                      aria-label="Close agent activity"
+                      onClick={() => setAgentsOpen(false)}
+                    >
+                      ×
+                    </Button>
+                  </header>
+                  <p>
+                    {taskOptions.length} planned{" "}
+                    {taskOptions.length === 1 ? "agent task" : "agent tasks"}. Stop and pause
+                    requests create a proposal that must still be confirmed.
+                  </p>
+                  {taskOptions.length > 0 ? (
+                    <ol className="conversation-agent-list">
+                      {taskOptions.map((option) => (
+                        <li key={`agent:${option.id}`}>
+                          <span className="conversation-agent-indicator" aria-hidden="true" />
+                          <div>
+                            <strong>{option.label}</strong>
+                            <small>Plan task · status available after dispatch</small>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : (
+                    <p className="conversation-list-empty">
+                      No execution agents are configured yet.
+                    </p>
+                  )}
+                  {!isReadOnly ? (
+                    <div className="execution-stop-agents">
+                      <Select
+                        aria-label="Agent task to stop"
+                        value={stopTaskId}
+                        disabled={executionProposalBusy || lockedExecutionRequest !== null}
+                        onChange={(event) => setStopTaskId(event.target.value)}
+                      >
+                        <option value="">All work · pause dispatch</option>
+                        {taskOptions.map((option) => (
+                          <option key={`stop:${option.id}`} value={option.id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </Select>
+                      <Button
+                        variant="danger"
+                        disabled={executionProposalBusy || lockedExecutionRequest !== null}
+                        onClick={() =>
+                          void proposeExecutionAction("pause_work", {
+                            reason: stopTaskId
+                              ? `Task ${stopTaskId} stopped by the human operator.`
+                              : "All new agent dispatches paused by the human operator.",
+                            ...(stopTaskId ? { task_id: stopTaskId } : {}),
+                          })
+                        }
+                      >
+                        {executionProposalBusy
+                          ? "Preparing…"
+                          : stopTaskId
+                            ? "Prepare stop action"
+                            : "Prepare pause action"}
+                      </Button>
+                    </div>
+                  ) : null}
+                </aside>
+              </>
+            ) : null}
+            {isExecution && !isReadOnly ? (
+              <section className="execution-conversation-controls" aria-label="Execution controls">
+                <details>
+                  <summary>Decisions, direction, pause, and artifacts</summary>
+                  <ExecutionActionComposer
+                    actions={[...actionContext.actions.values()]}
+                    planVersions={detail.plan_versions}
                     busy={executionProposalBusy}
                     error={executionProposalError}
-                    disabledReason={
-                      lockedExecutionRequest ? "Retry the locked exact request first." : null
+                    disabledReason={null}
+                    lockedRequest={lockedExecutionRequest}
+                    onPrepare={proposeExecutionAction}
+                    onRetryLocked={() =>
+                      lockedExecutionRequest
+                        ? submitExecutionAction(lockedExecutionRequest)
+                        : Promise.resolve(false)
                     }
-                    onPrepare={(parameters) => proposeExecutionAction("create_mockup", parameters)}
                   />
+                </details>
+                <ExecutionActionHistory
+                  actions={[...actionContext.actions.values()].filter(
+                    (action) => !referencedActionIds.has(action.id),
+                  )}
+                  deliveryEvents={detail.action_delivery_events ?? []}
+                  effects={actionContext.effects}
+                  busyActionId={busyActionId}
+                  errors={actionErrors}
+                  onConfirm={confirmAction}
+                />
+                {(pmSettingsOverride ?? detail.pm_update_settings) ? (
+                  <PmUpdateControls
+                    settings={
+                      (pmSettingsOverride ??
+                        detail.pm_update_settings) as V2ConversationPmUpdateSettingsT
+                    }
+                    updates={detail.pm_updates ?? []}
+                    busy={pmSettingsBusy}
+                    error={pmSettingsError}
+                    onSave={savePmSettings}
+                  />
+                ) : null}
+              </section>
+            ) : null}
+            {proposalError ? (
+              <div className="conversation-thread-alert">
+                <Alert testId="conversation-plan-proposal-error">{proposalError}</Alert>
+              </div>
+            ) : null}
+            {detail.active_attempt ? (
+              <output className="conversation-active-run">
+                <span>A PM response is {detail.active_attempt.status.replaceAll("_", " ")}.</span>
+                <Button className="btn-small" onClick={onRefresh}>
+                  Refresh status
+                </Button>
+              </output>
+            ) : null}
+            {!detail.active_attempt && detail.retryable_attempt ? (
+              <output className="conversation-active-run conversation-retryable-run">
+                <span>
+                  The last PM response{" "}
+                  {detail.retryable_attempt.status === "failed"
+                    ? "failed before it completed"
+                    : "was interrupted"}
+                  .
+                </span>
+                <RetryTerminalResponseButton
+                  onError={(message) => setStreamError(message || null)}
+                />
+              </output>
+            ) : null}
+            {streamError ? (
+              <div className="conversation-thread-alert">
+                <Alert testId="conversation-stream-error">{streamError}</Alert>
+              </div>
+            ) : null}
+            {modelError ? (
+              <div className="conversation-thread-alert">
+                <Alert testId="conversation-model-error">{modelError}</Alert>
+              </div>
+            ) : null}
+            {latestAttempt || latestUsage ? (
+              <div className="conversation-live-telemetry" aria-live="polite">
+                {latestAttempt ? (
+                  <output className="conversation-turn-meta">
+                    PM request: {latestAttempt.status.replaceAll("_", " ")}
+                  </output>
+                ) : null}
+                {latestUsage ? (
+                  <output className="conversation-turn-meta" data-testid="conversation-usage">
+                    {latestUsage.input_tokens.toLocaleString()} in ·{" "}
+                    {latestUsage.output_tokens.toLocaleString()} out · $
+                    {latestUsage.cost_usd.toFixed(4)}
+                  </output>
                 ) : null}
               </div>
             ) : null}
-          </div>
-          {isExecution && !isReadOnly ? (
-            <section className="execution-conversation-controls" aria-label="Execution controls">
-              <div className="execution-stop-agents">
-                <div>
-                  <strong>Running agents</strong>
-                  <span>
-                    Stop one live task immediately, or pause all work and block new dispatches.
-                  </span>
-                </div>
-                <Select
-                  aria-label="Agent task to stop"
-                  value={stopTaskId}
-                  disabled={executionProposalBusy || lockedExecutionRequest !== null}
-                  onChange={(event) => setStopTaskId(event.target.value)}
-                >
-                  <option value="">All work · pause dispatch</option>
-                  {taskOptions.map((option) => (
-                    <option key={`stop:${option.id}`} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </Select>
-                <Button
-                  variant="danger"
-                  disabled={executionProposalBusy || lockedExecutionRequest !== null}
-                  onClick={() =>
-                    void proposeExecutionAction("pause_work", {
-                      reason: stopTaskId
-                        ? `Task ${stopTaskId} stopped by the human operator.`
-                        : "All new agent dispatches paused by the human operator.",
-                      ...(stopTaskId ? { task_id: stopTaskId } : {}),
-                    })
-                  }
-                >
-                  {executionProposalBusy
-                    ? "Preparing stop…"
-                    : stopTaskId
-                      ? "Stop selected agent"
-                      : "Pause all agent work"}
-                </Button>
-              </div>
-              <details>
-                <summary>Decisions, direction, pause, and artifacts</summary>
-                <ExecutionActionComposer
-                  actions={[...actionContext.actions.values()]}
-                  planVersions={detail.plan_versions}
-                  busy={executionProposalBusy}
-                  error={executionProposalError}
-                  disabledReason={null}
-                  lockedRequest={lockedExecutionRequest}
-                  onPrepare={proposeExecutionAction}
-                  onRetryLocked={() =>
-                    lockedExecutionRequest
-                      ? submitExecutionAction(lockedExecutionRequest)
-                      : Promise.resolve(false)
-                  }
-                />
-              </details>
-              <ExecutionActionHistory
-                actions={[...actionContext.actions.values()].filter(
-                  (action) => !referencedActionIds.has(action.id),
-                )}
-                deliveryEvents={detail.action_delivery_events ?? []}
-                effects={actionContext.effects}
-                busyActionId={busyActionId}
-                errors={actionErrors}
-                onConfirm={confirmAction}
-              />
-              {(pmSettingsOverride ?? detail.pm_update_settings) ? (
-                <PmUpdateControls
-                  settings={
-                    (pmSettingsOverride ??
-                      detail.pm_update_settings) as V2ConversationPmUpdateSettingsT
-                  }
-                  updates={detail.pm_updates ?? []}
-                  busy={pmSettingsBusy}
-                  error={pmSettingsError}
-                  onSave={savePmSettings}
-                />
-              ) : null}
-            </section>
-          ) : null}
-          {proposalError ? (
-            <div className="conversation-thread-alert">
-              <Alert testId="conversation-plan-proposal-error">{proposalError}</Alert>
-            </div>
-          ) : null}
-          {detail.active_attempt ? (
-            <output className="conversation-active-run">
-              <span>A PM response is {detail.active_attempt.status.replaceAll("_", " ")}.</span>
-              <Button className="btn-small" onClick={onRefresh}>
-                Refresh status
-              </Button>
-            </output>
-          ) : null}
-          {!detail.active_attempt && detail.retryable_attempt ? (
-            <output className="conversation-active-run conversation-retryable-run">
-              <span>
-                The last PM response{" "}
-                {detail.retryable_attempt.status === "failed"
-                  ? "failed before it completed"
-                  : "was interrupted"}
-                .
-              </span>
-              <RetryTerminalResponseButton onError={(message) => setStreamError(message || null)} />
-            </output>
-          ) : null}
-          {streamError ? (
-            <div className="conversation-thread-alert">
-              <Alert testId="conversation-stream-error">{streamError}</Alert>
-            </div>
-          ) : null}
-          {modelError ? (
-            <div className="conversation-thread-alert">
-              <Alert testId="conversation-model-error">{modelError}</Alert>
-            </div>
-          ) : null}
-          {latestAttempt || latestUsage ? (
-            <div className="conversation-live-telemetry" aria-live="polite">
-              {latestAttempt ? (
-                <output className="conversation-turn-meta">
-                  PM request: {latestAttempt.status.replaceAll("_", " ")}
-                </output>
-              ) : null}
-              {latestUsage ? (
-                <output className="conversation-turn-meta" data-testid="conversation-usage">
-                  {latestUsage.input_tokens.toLocaleString()} in ·{" "}
-                  {latestUsage.output_tokens.toLocaleString()} out · $
-                  {latestUsage.cost_usd.toFixed(4)}
-                </output>
-              ) : null}
-            </div>
-          ) : null}
-          {detail.handoff || detail.latest_summary ? (
-            <section
-              className="conversation-context-receipt"
-              aria-label="Conversation context and usage"
-            >
-              {detail.handoff ? (
-                <HandoffCard
-                  handoff={detail.handoff}
-                  currentConversationId={detail.conversation.id}
-                  onOpenConversation={onOpenConversation}
-                />
-              ) : null}
-              <div className="conversation-context-indicators">
-                {detail.latest_summary ? (
-                  <ConversationSummaryIndicator summary={detail.latest_summary} />
-                ) : null}
-              </div>
-              <PlanningExcerptControl
-                key={`${detail.conversation.id}:${detail.handoff?.id ?? "no-handoff"}`}
-                detail={detail}
-                onOpenConversation={onOpenConversation}
-                onRefresh={onRefresh}
-                onUnauthorized={onUnauthorized}
-              />
-            </section>
-          ) : null}
-          <ThreadPrimitive.Root className="conversation-thread-root">
-            <ThreadPrimitive.Viewport
-              className="conversation-thread-viewport"
-              turnAnchor="top"
-              scrollToBottomOnThreadSwitch
-            >
-              <AuiIf condition={(state) => state.thread.messages.length === 0}>
-                <div className="conversation-welcome" data-testid="conversation-welcome">
-                  <p>
-                    {isExecution
-                      ? "Continue delivery with your PM. Planning context is available from the approved handoff."
-                      : "Ask your PM about the work, constraints, risks, or next steps."}
-                  </p>
-                </div>
-              </AuiIf>
-              <ThreadPrimitive.Messages>
-                {({ message }) =>
-                  message.role === "user" ? (
-                    <UserMessage />
-                  ) : message.role === "system" ? (
-                    <SystemMessage />
-                  ) : (
-                    <AssistantMessage />
-                  )
-                }
-              </ThreadPrimitive.Messages>
-              <ThreadPrimitive.ViewportFooter className="conversation-composer-footer">
-                <ThreadPrimitive.ScrollToBottom
-                  className="conversation-scroll-button"
-                  aria-label="Scroll to latest message"
-                >
-                  ↓ Latest
-                </ThreadPrimitive.ScrollToBottom>
-                {isReadOnly ? (
-                  <output className="conversation-read-only">
-                    <strong>
-                      This {conversationKindLabel(detail.conversation.kind).toLowerCase()}{" "}
-                      conversation is {detail.conversation.status.replaceAll("_", " ")}.
-                    </strong>
-                    <span>
-                      {isPlanning
-                        ? "Its visible history remains readable. Continue work in the linked execution PM conversation."
-                        : "Its visible history remains readable, but it no longer accepts messages."}
-                    </span>
-                  </output>
-                ) : (
-                  <ConversationComposer
-                    isExecution={isExecution}
-                    isPlanning={isPlanning}
-                    pmProvider={detail.conversation.provider === "openai" ? "openai" : "anthropic"}
-                    pmModel={detail.conversation.model as PmModelT}
-                    modelBusy={modelBusy}
-                    modelDisabled={
-                      detail.active_attempt !== null ||
-                      proposalBusy ||
-                      busyActionId !== null ||
-                      isReadOnly
-                    }
-                    onModelChange={(model) => void changeConversationModel(model)}
-                    planIntentEnabled={planIntentEnabled}
-                    planIntentBusy={proposalBusy || busyActionId !== null}
-                    onUseAsPlan={(message, handoff) => {
-                      if (pendingSaveAction) {
-                        void confirmAction(pendingSaveAction);
-                        return;
-                      }
-                      void generatePlanProposal(message, true, handoff);
-                    }}
+            {detail.handoff || detail.latest_summary ? (
+              <section
+                className="conversation-context-receipt"
+                aria-label="Conversation context and usage"
+              >
+                {detail.handoff ? (
+                  <HandoffCard
+                    handoff={detail.handoff}
+                    currentConversationId={detail.conversation.id}
+                    onOpenConversation={onOpenConversation}
                   />
-                )}
-              </ThreadPrimitive.ViewportFooter>
-            </ThreadPrimitive.Viewport>
-          </ThreadPrimitive.Root>
-        </section>
+                ) : null}
+                <div className="conversation-context-indicators">
+                  {detail.latest_summary ? (
+                    <ConversationSummaryIndicator summary={detail.latest_summary} />
+                  ) : null}
+                </div>
+                <PlanningExcerptControl
+                  key={`${detail.conversation.id}:${detail.handoff?.id ?? "no-handoff"}`}
+                  detail={detail}
+                  onOpenConversation={onOpenConversation}
+                  onRefresh={onRefresh}
+                  onUnauthorized={onUnauthorized}
+                />
+              </section>
+            ) : null}
+            <ThreadPrimitive.Root className="conversation-thread-root">
+              <ThreadPrimitive.Viewport
+                className="conversation-thread-viewport"
+                turnAnchor="top"
+                scrollToBottomOnThreadSwitch
+              >
+                <AuiIf condition={(state) => state.thread.messages.length === 0}>
+                  <div className="conversation-welcome" data-testid="conversation-welcome">
+                    <p>
+                      {isExecution
+                        ? "Continue delivery with your PM. Planning context is available from the approved handoff."
+                        : "Ask your PM about the work, constraints, risks, or next steps."}
+                    </p>
+                  </div>
+                </AuiIf>
+                <ThreadPrimitive.Messages>
+                  {({ message }) =>
+                    message.role === "user" ? (
+                      <UserMessage />
+                    ) : message.role === "system" ? (
+                      <SystemMessage />
+                    ) : (
+                      <AssistantMessage />
+                    )
+                  }
+                </ThreadPrimitive.Messages>
+                <ThreadPrimitive.ViewportFooter className="conversation-composer-footer">
+                  <ThreadPrimitive.ScrollToBottom
+                    className="conversation-scroll-button"
+                    aria-label="Scroll to latest message"
+                  >
+                    ↓ Latest
+                  </ThreadPrimitive.ScrollToBottom>
+                  {isReadOnly ? (
+                    <output className="conversation-read-only">
+                      <strong>
+                        This {conversationKindLabel(detail.conversation.kind).toLowerCase()}{" "}
+                        conversation is {detail.conversation.status.replaceAll("_", " ")}.
+                      </strong>
+                      <span>
+                        {isPlanning
+                          ? "Its visible history remains readable. Continue work in the linked execution PM conversation."
+                          : "Its visible history remains readable, but it no longer accepts messages."}
+                      </span>
+                    </output>
+                  ) : (
+                    <ConversationComposer
+                      isExecution={isExecution}
+                      isPlanning={isPlanning}
+                      pmProvider={
+                        detail.conversation.provider === "openai" ? "openai" : "anthropic"
+                      }
+                      planIntentEnabled={planIntentEnabled}
+                      planIntentBusy={proposalBusy || busyActionId !== null}
+                      onUseAsPlan={(message, handoff) => {
+                        if (pendingSaveAction) {
+                          void confirmAction(pendingSaveAction);
+                          return;
+                        }
+                        void generatePlanProposal(message, true, handoff);
+                      }}
+                    />
+                  )}
+                </ThreadPrimitive.ViewportFooter>
+              </ThreadPrimitive.Viewport>
+            </ThreadPrimitive.Root>
+          </section>
+        </ConversationEditContext.Provider>
       </ConversationActionContext.Provider>
     </AssistantRuntimeProvider>
   );
@@ -4274,6 +4776,21 @@ export function ConversationWorkspace({
   } | null>(null);
   const [projectPinError, setProjectPinError] = useState<string | null>(null);
   const [conversationListOpen, setConversationListOpen] = useState(false);
+  const [conversationSidebarCollapsed, setConversationSidebarCollapsed] = useState(false);
+  const [conversationSearch, setConversationSearch] = useState("");
+  const [navigation, setNavigation] = useState<V2ConversationNavigationPageT | null>(null);
+  const [organizationAvailable, setOrganizationAvailable] = useState<boolean | null>(null);
+  const [organizationError, setOrganizationError] = useState<string | null>(null);
+  const [organizationBusyWorkItemId, setOrganizationBusyWorkItemId] = useState<string | null>(null);
+  const [folderEditor, setFolderEditor] = useState<{
+    mode: "create" | "rename";
+    folderId: string | null;
+    name: string;
+  } | null>(null);
+  const [folderBusy, setFolderBusy] = useState(false);
+  const [deleteFolderId, setDeleteFolderId] = useState<string | null>(null);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const [lastResponseCopied, setLastResponseCopied] = useState(false);
   const [initialMessage, setInitialMessage] = useState<{
     conversationId: string;
     text: string;
@@ -4293,21 +4810,25 @@ export function ConversationWorkspace({
   const handleUnauthorized = useCallback(() => callbacks.current.onUnauthorized(), []);
 
   useEffect(() => {
-    if (!conversationListOpen) return;
+    if (!conversationListOpen && !conversationMenu && !headerMenuOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setConversationMenu(null);
+        setHeaderMenuOpen(false);
         setConversationListOpen(false);
       }
     };
-    const closeMenu = () => setConversationMenu(null);
+    const closeMenu = () => {
+      setConversationMenu(null);
+      setHeaderMenuOpen(false);
+    };
     window.addEventListener("keydown", closeOnEscape);
     window.addEventListener("click", closeMenu);
     return () => {
       window.removeEventListener("keydown", closeOnEscape);
       window.removeEventListener("click", closeMenu);
     };
-  }, [conversationListOpen]);
+  }, [conversationListOpen, conversationMenu, headerMenuOpen]);
 
   useEffect(() => {
     if (!showNew || projectPin) return;
@@ -4343,6 +4864,50 @@ export function ConversationWorkspace({
     [handleUnauthorized],
   );
 
+  const loadNavigation = useCallback(async () => {
+    try {
+      const firstPage = await listConversationNavigation(projectId);
+      const items = [...firstPage.items];
+      let cursor = firstPage.next_cursor;
+      let pageCount = 1;
+      while (cursor && pageCount < 5) {
+        const page = await listConversationNavigation(projectId, { cursor });
+        items.push(...page.items);
+        cursor = page.next_cursor;
+        pageCount += 1;
+      }
+      setNavigation({ ...firstPage, items, next_cursor: cursor });
+      setOrganizationAvailable(true);
+      setOrganizationError(
+        cursor
+          ? "Only the first 500 organized chats are shown. Refine your search to find older work."
+          : null,
+      );
+      return;
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) {
+        handleUnauthorized();
+        return;
+      }
+      if (
+        (caught instanceof ApiError && (caught.status === 404 || caught.status === 501)) ||
+        (caught instanceof Error && caught.message.includes("no route registered"))
+      ) {
+        setNavigation(null);
+        setOrganizationAvailable(false);
+        setOrganizationError(null);
+        return;
+      }
+      setNavigation(null);
+      setOrganizationAvailable(false);
+      setOrganizationError(
+        caught instanceof Error
+          ? `Folders and pins are temporarily unavailable. ${caught.message}`
+          : "Folders and pins are temporarily unavailable.",
+      );
+    }
+  }, [handleUnauthorized, projectId]);
+
   const loadGroups = useCallback(async () => {
     try {
       const next = await listWorkItemConversations(projectId);
@@ -4374,12 +4939,21 @@ export function ConversationWorkspace({
     setProjectPin(null);
     setProjectPinError(null);
     setConversationListOpen(false);
+    setConversationSearch("");
+    setNavigation(null);
+    setOrganizationAvailable(null);
+    setOrganizationError(null);
+    setOrganizationBusyWorkItemId(null);
+    setFolderEditor(null);
+    setDeleteFolderId(null);
+    setHeaderMenuOpen(false);
+    setLastResponseCopied(false);
     setInitialMessage(null);
     setRenamingWorkItemId(null);
     setConversationMenu(null);
     initialSelectionHandled.current = null;
-    void loadGroups();
-  }, [initialNewConversation, loadGroups]);
+    void Promise.all([loadGroups(), loadNavigation()]);
+  }, [initialNewConversation, loadGroups, loadNavigation]);
 
   useEffect(() => {
     if (!groups) return;
@@ -4393,16 +4967,18 @@ export function ConversationWorkspace({
         )
         .find(({ conversation }) => conversation.id === initialConversationId);
       if (match) {
-        if (
-          selected?.workItemId !== match.workItemId ||
-          selected.conversationId !== match.conversation.id
-        ) {
-          setSelected({
-            workItemId: match.workItemId,
-            conversationId: match.conversation.id,
-          });
+        if (initialSelectionHandled.current !== initialConversationId) {
+          if (
+            selected?.workItemId !== match.workItemId ||
+            selected.conversationId !== match.conversation.id
+          ) {
+            setSelected({
+              workItemId: match.workItemId,
+              conversationId: match.conversation.id,
+            });
+          }
+          initialSelectionHandled.current = initialConversationId;
         }
-        initialSelectionHandled.current = initialConversationId;
         return;
       }
       if (initialSelectionHandled.current !== initialConversationId) {
@@ -4520,6 +5096,75 @@ export function ConversationWorkspace({
     [handleError, loadGroups, projectId],
   );
 
+  const editConversationMessage = useCallback(
+    async (sourceMessageId: string, text: string) => {
+      if (!detail) throw new Error("The conversation is no longer available to edit.");
+      const parent = detail;
+      try {
+        const created = await createConversationMessageBranch(
+          projectId,
+          parent.work_item.id,
+          parent.conversation.id,
+          sourceMessageId,
+        );
+        setGroups(
+          (current) =>
+            current?.map((group) =>
+              group.work_item.id === parent.work_item.id
+                ? {
+                    ...group,
+                    conversations: group.conversations.some(
+                      (candidate) => candidate.id === created.conversation.id,
+                    )
+                      ? group.conversations
+                      : [...group.conversations, created.conversation],
+                  }
+                : group,
+            ) ?? current,
+        );
+        setNavigation((current) =>
+          current
+            ? {
+                ...current,
+                items: current.items.map((item) =>
+                  item.id === parent.work_item.id
+                    ? {
+                        ...item,
+                        conversation_count: item.conversation_count + 1,
+                        latest_activity_at: created.conversation.updated_at,
+                        latest_conversation: {
+                          id: created.conversation.id,
+                          kind: created.conversation.kind,
+                          status: created.conversation.status,
+                          provider: created.conversation.provider,
+                          model: created.conversation.model,
+                        },
+                      }
+                    : item,
+                ),
+              }
+            : current,
+        );
+        setShowNew(false);
+        setConversationListOpen(false);
+        setConversationMenu(null);
+        setDetail(null);
+        setSelected({
+          workItemId: parent.work_item.id,
+          conversationId: created.conversation.id,
+        });
+        setInitialMessage({ conversationId: created.conversation.id, text });
+        setThreadVersion((version) => version + 1);
+        callbacks.current.onConversationSelected?.(created.conversation.id);
+        setError(null);
+      } catch (caught) {
+        if (caught instanceof UnauthorizedError) handleUnauthorized();
+        throw caught;
+      }
+    },
+    [detail, handleUnauthorized, projectId],
+  );
+
   const createWork = async (message: string, model: PmModelT) => {
     setCreating(true);
     setError(null);
@@ -4529,7 +5174,7 @@ export function ConversationWorkspace({
         objective: message,
         model,
       });
-      await loadGroups();
+      await Promise.all([loadGroups(), loadNavigation()]);
       setShowNew(false);
       setConversationListOpen(false);
       setInitialMessage({ conversationId: created.conversation.id, text: message });
@@ -4573,6 +5218,16 @@ export function ConversationWorkspace({
             group.work_item.id === updated.id ? { ...group, work_item: updated } : group,
           ) ?? current,
       );
+      setNavigation((current) =>
+        current
+          ? {
+              ...current,
+              items: current.items.map((item) =>
+                item.id === updated.id ? { ...item, title: updated.title } : item,
+              ),
+            }
+          : current,
+      );
       setRenamingWorkItemId(null);
     } catch (caught) {
       handleError(caught);
@@ -4582,23 +5237,386 @@ export function ConversationWorkspace({
   };
 
   const refresh = useCallback(() => {
-    void Promise.all([loadDetail(true), loadGroups()]);
-  }, [loadDetail, loadGroups]);
+    void Promise.all([loadDetail(true), loadGroups(), loadNavigation()]);
+  }, [loadDetail, loadGroups, loadNavigation]);
 
-  const conversationHeader = (
+  const sidebarFamilies = useMemo<SidebarConversationFamily[]>(() => {
+    if (!groups) return [];
+    const groupsById = new Map(groups.map((group) => [group.work_item.id, group]));
+    const organized =
+      navigation?.items.flatMap((item) => {
+        const group = groupsById.get(item.id);
+        if (!group) return [];
+        groupsById.delete(item.id);
+        return [{ group, organization: item }];
+      }) ?? [];
+    return [
+      ...organized,
+      ...groups
+        .filter((group) => groupsById.has(group.work_item.id))
+        .map((group) => ({ group, organization: null })),
+    ];
+  }, [groups, navigation]);
+
+  const visibleFamilies = useMemo(() => {
+    const query = conversationSearch.trim().toLocaleLowerCase();
+    if (!query) return sidebarFamilies;
+    return sidebarFamilies.filter(
+      ({ group, organization }) =>
+        displayConversationTitle(organization?.title ?? group.work_item.title)
+          .toLocaleLowerCase()
+          .includes(query) ||
+        group.conversations.some((conversation) =>
+          `${conversationKindLabel(conversation.kind)} ${conversation.status}`
+            .toLocaleLowerCase()
+            .includes(query),
+        ),
+    );
+  }, [conversationSearch, sidebarFamilies]);
+
+  const searching = conversationSearch.trim().length > 0;
+  const pinnedFamilies = searching
+    ? []
+    : visibleFamilies.filter(({ organization }) => organization?.pinned_at != null);
+  const folderFamilies = (folderId: string) =>
+    searching
+      ? []
+      : visibleFamilies.filter(
+          ({ organization }) =>
+            organization?.folder_id === folderId && organization.pinned_at === null,
+        );
+  const recentFamilies = searching
+    ? visibleFamilies
+    : visibleFamilies.filter(
+        ({ organization }) =>
+          organization === null ||
+          (organization.folder_id === null && organization.pinned_at === null),
+      );
+
+  const changeOrganization = async (
+    workItemId: string,
+    input: { folder_id?: string | null; pinned?: boolean },
+  ) => {
+    if (!navigation || organizationBusyWorkItemId) return;
+    const previous = navigation;
+    setOrganizationBusyWorkItemId(workItemId);
+    setOrganizationError(null);
+    const now = new Date().toISOString();
+    setNavigation((current) =>
+      current
+        ? {
+            ...current,
+            items: current.items.map((item) =>
+              item.id === workItemId
+                ? {
+                    ...item,
+                    ...(input.folder_id !== undefined ? { folder_id: input.folder_id } : {}),
+                    ...(input.pinned !== undefined ? { pinned_at: input.pinned ? now : null } : {}),
+                  }
+                : item,
+            ),
+          }
+        : current,
+    );
+    try {
+      const organization = await updateWorkItemOrganization(projectId, workItemId, input);
+      setNavigation((current) =>
+        current
+          ? {
+              ...current,
+              items: current.items.map((item) =>
+                item.id === workItemId
+                  ? {
+                      ...item,
+                      folder_id: organization.folder_id,
+                      pinned_at: organization.pinned_at,
+                    }
+                  : item,
+              ),
+            }
+          : current,
+      );
+      setConversationMenu(null);
+    } catch (caught) {
+      setNavigation(previous);
+      setOrganizationError(caught instanceof Error ? caught.message : String(caught));
+      void loadNavigation();
+    } finally {
+      setOrganizationBusyWorkItemId(null);
+    }
+  };
+
+  const saveFolder = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!folderEditor?.name.trim() || folderBusy) return;
+    setFolderBusy(true);
+    setOrganizationError(null);
+    const previous = navigation;
+    try {
+      if (folderEditor.mode === "create") {
+        const folder = await createConversationFolder(projectId, folderEditor.name.trim());
+        setNavigation((current) =>
+          current ? { ...current, folders: [...current.folders, folder] } : current,
+        );
+      } else if (folderEditor.folderId) {
+        const folder = await updateConversationFolder(
+          projectId,
+          folderEditor.folderId,
+          folderEditor.name.trim(),
+        );
+        setNavigation((current) =>
+          current
+            ? {
+                ...current,
+                folders: current.folders.map((candidate) =>
+                  candidate.id === folder.id ? folder : candidate,
+                ),
+              }
+            : current,
+        );
+      }
+      setFolderEditor(null);
+    } catch (caught) {
+      setNavigation(previous);
+      setOrganizationError(caught instanceof Error ? caught.message : String(caught));
+      void loadNavigation();
+    } finally {
+      setFolderBusy(false);
+    }
+  };
+
+  const confirmDeleteFolder = async (folder: V2ConversationFolderT) => {
+    if (!navigation || folderBusy) return;
+    const previous = navigation;
+    setFolderBusy(true);
+    setOrganizationError(null);
+    setNavigation((current) =>
+      current
+        ? {
+            ...current,
+            folders: current.folders.filter((candidate) => candidate.id !== folder.id),
+            items: current.items.map((item) =>
+              item.folder_id === folder.id ? { ...item, folder_id: null } : item,
+            ),
+          }
+        : current,
+    );
+    try {
+      await deleteConversationFolder(projectId, folder.id);
+      setDeleteFolderId(null);
+    } catch (caught) {
+      setNavigation(previous);
+      setOrganizationError(caught instanceof Error ? caught.message : String(caught));
+      void loadNavigation();
+    } finally {
+      setFolderBusy(false);
+    }
+  };
+
+  const lastResponseText = useMemo(() => {
+    const lastResponse = [...(detail?.messages ?? [])]
+      .reverse()
+      .find((message) => message.role === "assistant");
+    if (!lastResponse) return null;
+    const text = lastResponse.parts
+      .flatMap((part) => {
+        if (part.type === "text") return [part.text];
+        if (part.type === "code") return [`\`\`\`${part.language ?? ""}\n${part.code}\n\`\`\``];
+        return [];
+      })
+      .join("\n\n")
+      .trim();
+    return text || null;
+  }, [detail?.messages]);
+
+  const copyLastResponse = async () => {
+    if (!lastResponseText) return;
+    await navigator.clipboard.writeText(lastResponseText);
+    setLastResponseCopied(true);
+    window.setTimeout(() => setLastResponseCopied(false), 1500);
+  };
+
+  const renderConversationFamily = ({
+    group,
+    organization,
+  }: SidebarConversationFamily): ReactNode => {
+    const selectedInGroup =
+      !showNew && selected?.workItemId === group.work_item.id
+        ? group.conversations.find((conversation) => conversation.id === selected.conversationId)
+        : null;
+    const primaryConversation =
+      selectedInGroup ??
+      group.conversations.find((conversation) => conversation.status === "active") ??
+      group.conversations[0];
+    const familyActive = selectedInGroup !== null;
+    const displayTitle = displayConversationTitle(organization?.title ?? group.work_item.title);
+    return (
+      <div
+        className="conversation-work-group"
+        data-folder-id={organization?.folder_id ?? undefined}
+        key={group.work_item.id}
+      >
+        {renamingWorkItemId === group.work_item.id ? (
+          <form
+            className="conversation-list-rename"
+            onSubmit={(event) => void renameWork(event, group.work_item.id)}
+          >
+            <Input
+              aria-label="Conversation title"
+              value={renameTitle}
+              maxLength={120}
+              disabled={renameBusy}
+              autoFocus
+              onChange={(event) => setRenameTitle(event.target.value)}
+            />
+            <div>
+              <Button
+                className="btn-small"
+                variant="primary"
+                type="submit"
+                disabled={renameBusy || !renameTitle.trim()}
+              >
+                {renameBusy ? "Saving…" : "Save"}
+              </Button>
+              <Button
+                className="btn-small"
+                type="button"
+                disabled={renameBusy}
+                onClick={() => setRenamingWorkItemId(null)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </form>
+        ) : (
+          <>
+            <div className="conversation-family-row">
+              <button
+                type="button"
+                className={`conversation-family-button${familyActive ? " is-active" : ""}`}
+                data-status={primaryConversation?.status}
+                aria-current={familyActive ? "page" : undefined}
+                aria-label={`Open chat ${displayTitle}`}
+                onClick={() => {
+                  if (primaryConversation) {
+                    chooseConversation(group.work_item.id, primaryConversation);
+                  }
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setConversationMenu({
+                    workItemId: group.work_item.id,
+                    title: group.work_item.title,
+                    x: Math.min(event.clientX, window.innerWidth - 208),
+                    y: Math.min(event.clientY, window.innerHeight - 240),
+                  });
+                }}
+              >
+                <strong title={group.work_item.title}>{displayTitle}</strong>
+                <span
+                  className={`conversation-list-status is-${primaryConversation?.status ?? "archived"}`}
+                  aria-hidden="true"
+                />
+                <small>
+                  {primaryConversation
+                    ? `${conversationKindLabel(primaryConversation.kind)} · ${primaryConversation.status.replaceAll("_", " ")}`
+                    : "No active threads"}
+                </small>
+              </button>
+              <button
+                type="button"
+                className="conversation-family-menu"
+                aria-label={`Actions for ${displayTitle}`}
+                disabled={organizationBusyWorkItemId === group.work_item.id}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  const bounds = event.currentTarget.getBoundingClientRect();
+                  setConversationMenu({
+                    workItemId: group.work_item.id,
+                    title: group.work_item.title,
+                    x: Math.min(bounds.right - 184, window.innerWidth - 208),
+                    y: Math.min(bounds.bottom + 4, window.innerHeight - 240),
+                  });
+                }}
+              >
+                <span aria-hidden="true">•••</span>
+              </button>
+            </div>
+            {group.conversations.length > 1 ? (
+              <div className="conversation-thread-list" aria-label={`Threads in ${displayTitle}`}>
+                {group.conversations.map((conversation) => {
+                  const active = selected?.conversationId === conversation.id && !showNew;
+                  return (
+                    <button
+                      type="button"
+                      className={`conversation-list-item${active ? " is-active" : ""}`}
+                      data-status={conversation.status}
+                      aria-current={active ? "page" : undefined}
+                      aria-label={`Open ${conversationKindLabel(conversation.kind)} conversation for ${group.work_item.title} (${conversation.status})`}
+                      key={conversation.id}
+                      onClick={() => chooseConversation(group.work_item.id, conversation)}
+                    >
+                      <strong>{conversationKindLabel(conversation.kind)}</strong>
+                      <span
+                        className={`conversation-list-status is-${conversation.status}`}
+                        aria-hidden="true"
+                      />
+                      <small>{conversation.status.replaceAll("_", " ")}</small>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+          </>
+        )}
+      </div>
+    );
+  };
+  const menuOrganization = conversationMenu
+    ? (navigation?.items.find((item) => item.id === conversationMenu.workItemId) ?? null)
+    : null;
+
+  const startNewWork = () => {
+    setSelected(null);
+    setDetail(null);
+    setInitialMessage(null);
+    setRenamingWorkItemId(null);
+    setConversationMenu(null);
+    setShowNew(true);
+    setConversationListOpen(false);
+    callbacks.current.onNewConversation?.();
+  };
+
+  const conversationHeader = (modelControl?: ReactNode) => (
     <header className="conversation-header">
       <Button
         className="btn-small conversation-sidebar-toggle"
-        aria-expanded={conversationListOpen}
+        aria-expanded={!conversationSidebarCollapsed || conversationListOpen}
         aria-controls="project-conversations"
-        aria-label="Open conversations"
-        disabled={conversationListOpen}
-        onClick={() => setConversationListOpen(true)}
+        aria-label="Expand conversations"
+        onClick={() => {
+          setConversationSidebarCollapsed(false);
+          setConversationListOpen(true);
+        }}
       >
-        Conversations
+        <span aria-hidden="true">☰</span>
       </Button>
+      <div className="conversation-header-identity">
+        <span>
+          {showNew ? "New chat" : detail ? conversationKindLabel(detail.conversation.kind) : "Chat"}
+        </span>
+        <h2>
+          {showNew
+            ? "Start new work"
+            : detail
+              ? displayConversationTitle(detail.work_item.title)
+              : "Conversation"}
+        </h2>
+      </div>
       {!showNew && detail ? (
         <div className="conversation-header-actions">
+          {modelControl}
           <Badge tone={detail.conversation.status === "active" ? "success" : "default"}>
             {detail.conversation.status}
           </Badge>
@@ -4610,160 +5628,360 @@ export function ConversationWorkspace({
           >
             {loadingDetail ? "Refreshing…" : "Refresh"}
           </Button>
+          <div className="conversation-header-menu">
+            <Button
+              className="btn-small"
+              variant="ghost"
+              aria-label="More chat actions"
+              aria-expanded={headerMenuOpen}
+              onClick={(event) => {
+                event.stopPropagation();
+                setHeaderMenuOpen((open) => !open);
+              }}
+            >
+              <span aria-hidden="true">•••</span>
+            </Button>
+            {headerMenuOpen ? (
+              <div className="conversation-header-menu-popover" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!lastResponseText}
+                  onClick={() => void copyLastResponse()}
+                >
+                  {lastResponseCopied ? "Copied" : "Copy last response"}
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
       ) : null}
     </header>
   );
 
   return (
-    <div className="conversation-workspace" data-testid="conversation-workspace">
+    <div
+      className={`conversation-workspace${conversationSidebarCollapsed ? " is-sidebar-collapsed" : ""}`}
+      data-testid="conversation-workspace"
+    >
       {conversationListOpen ? (
-        <>
-          <button
-            type="button"
-            className="conversation-sidebar-backdrop"
-            aria-hidden="true"
-            tabIndex={-1}
-            onClick={() => setConversationListOpen(false)}
-          />
-          <aside
-            className="conversation-sidebar"
-            id="project-conversations"
-            aria-label="Project conversations"
+        <button
+          type="button"
+          className="conversation-sidebar-backdrop"
+          aria-hidden="true"
+          tabIndex={-1}
+          onClick={() => setConversationListOpen(false)}
+        />
+      ) : null}
+      <aside
+        className={`conversation-sidebar${conversationSidebarCollapsed ? " is-collapsed" : ""}${conversationListOpen ? " is-mobile-open" : ""}`}
+        id="project-conversations"
+        aria-label="Project conversations"
+      >
+        <div className="conversation-sidebar-head">
+          <div className="conversation-sidebar-title">
+            <span className="conversation-sidebar-mark" aria-hidden="true">
+              N
+            </span>
+            <h2>Chats</h2>
+          </div>
+          <div>
+            <Button
+              className="btn-small conversation-sidebar-collapse"
+              variant="ghost"
+              aria-label={
+                conversationSidebarCollapsed ? "Expand conversations" : "Collapse conversations"
+              }
+              onClick={() => setConversationSidebarCollapsed((collapsed) => !collapsed)}
+            >
+              <span aria-hidden="true">{conversationSidebarCollapsed ? "›" : "‹"}</span>
+            </Button>
+            <Button
+              className="btn-small conversation-sidebar-close"
+              variant="ghost"
+              aria-label="Close conversations"
+              onClick={() => setConversationListOpen(false)}
+            >
+              <span aria-hidden="true">×</span>
+            </Button>
+          </div>
+        </div>
+        <div className="conversation-sidebar-content">
+          <Button
+            className="conversation-sidebar-new"
+            aria-label="Start new work"
+            onClick={startNewWork}
           >
-            <div className="conversation-sidebar-head">
-              <h2>Conversations</h2>
-              <div>
-                <Button
-                  className="btn-small conversation-sidebar-new"
-                  aria-label="Start new work"
-                  onClick={() => {
-                    setSelected(null);
-                    setDetail(null);
-                    setInitialMessage(null);
-                    setRenamingWorkItemId(null);
-                    setConversationMenu(null);
-                    setShowNew(true);
-                    setConversationListOpen(false);
-                    callbacks.current.onNewConversation?.();
-                  }}
-                >
-                  + New
-                </Button>
-                <Button
-                  className="btn-small conversation-sidebar-close"
-                  variant="ghost"
-                  aria-label="Close conversations"
-                  autoFocus
-                  onClick={() => setConversationListOpen(false)}
-                >
-                  <span aria-hidden="true">×</span>
-                </Button>
-              </div>
-            </div>
+            <span aria-hidden="true">＋</span>
+            New chat
+          </Button>
+          <div className="conversation-search">
+            <Input
+              type="search"
+              aria-label="Search chats"
+              placeholder="Search chats"
+              value={conversationSearch}
+              onChange={(event) => setConversationSearch(event.target.value)}
+            />
+          </div>
+          {organizationError ? (
+            <Alert testId="conversation-organization-error">{organizationError}</Alert>
+          ) : null}
+          {!searching ? (
+            <>
+              <section
+                className="conversation-sidebar-section"
+                aria-labelledby="conversation-pinned"
+                data-organization-state={
+                  organizationAvailable === null
+                    ? "loading"
+                    : organizationAvailable
+                      ? "available"
+                      : "legacy"
+                }
+              >
+                <h3 id="conversation-pinned">Pinned</h3>
+                {organizationAvailable === null ? (
+                  <Spinner label="Loading pins…" />
+                ) : pinnedFamilies.length > 0 ? (
+                  <div className="conversation-list">
+                    {pinnedFamilies.map(renderConversationFamily)}
+                  </div>
+                ) : (
+                  <p className="conversation-list-empty">
+                    {organizationAvailable
+                      ? "No pinned chats yet."
+                      : "Pins are unavailable on this deployment."}
+                  </p>
+                )}
+              </section>
+              <section
+                className="conversation-sidebar-section conversation-folder-section"
+                aria-labelledby="conversation-folders"
+                data-organization-state={
+                  organizationAvailable === null
+                    ? "loading"
+                    : organizationAvailable
+                      ? "available"
+                      : "legacy"
+                }
+              >
+                <div className="conversation-folder-heading">
+                  <h3 id="conversation-folders">Folders</h3>
+                  {organizationAvailable ? (
+                    <button
+                      type="button"
+                      aria-label="Create folder"
+                      onClick={() => setFolderEditor({ mode: "create", folderId: null, name: "" })}
+                    >
+                      ＋
+                    </button>
+                  ) : null}
+                </div>
+                {folderEditor ? (
+                  <form className="conversation-folder-editor" onSubmit={saveFolder}>
+                    <Input
+                      aria-label={
+                        folderEditor.mode === "create" ? "Folder name" : "New folder name"
+                      }
+                      value={folderEditor.name}
+                      maxLength={80}
+                      autoFocus
+                      disabled={folderBusy}
+                      onChange={(event) =>
+                        setFolderEditor((current) =>
+                          current ? { ...current, name: event.target.value } : current,
+                        )
+                      }
+                    />
+                    <div>
+                      <Button
+                        className="btn-small"
+                        variant="primary"
+                        type="submit"
+                        disabled={folderBusy || !folderEditor.name.trim()}
+                      >
+                        {folderBusy
+                          ? "Saving…"
+                          : folderEditor.mode === "create"
+                            ? "Create"
+                            : "Rename"}
+                      </Button>
+                      <Button
+                        className="btn-small"
+                        type="button"
+                        disabled={folderBusy}
+                        onClick={() => setFolderEditor(null)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </form>
+                ) : null}
+                {organizationAvailable === false ? (
+                  <p className="conversation-list-empty">
+                    Folders are unavailable on this deployment.
+                  </p>
+                ) : null}
+                {organizationAvailable && navigation?.folders.length === 0 && !folderEditor ? (
+                  <p className="conversation-list-empty">No folders yet.</p>
+                ) : null}
+                {navigation?.folders.map((folder) => {
+                  const families = folderFamilies(folder.id);
+                  return (
+                    <div className="conversation-folder" key={folder.id}>
+                      <div className="conversation-folder-row">
+                        <strong>{folder.name}</strong>
+                        <span>{families.length}</span>
+                        <button
+                          type="button"
+                          aria-label={`Rename folder ${folder.name}`}
+                          disabled={folderBusy}
+                          onClick={() =>
+                            setFolderEditor({
+                              mode: "rename",
+                              folderId: folder.id,
+                              name: folder.name,
+                            })
+                          }
+                        >
+                          Rename
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Delete folder ${folder.name}`}
+                          disabled={folderBusy}
+                          onClick={() => setDeleteFolderId(folder.id)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                      {deleteFolderId === folder.id ? (
+                        <div className="conversation-folder-delete" role="alert">
+                          <span>Delete {folder.name}? Its chats move to Recent.</span>
+                          <div>
+                            <Button
+                              className="btn-small"
+                              variant="danger"
+                              disabled={folderBusy}
+                              onClick={() => void confirmDeleteFolder(folder)}
+                            >
+                              {folderBusy ? "Deleting…" : "Confirm delete"}
+                            </Button>
+                            <Button
+                              className="btn-small"
+                              disabled={folderBusy}
+                              onClick={() => setDeleteFolderId(null)}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      ) : null}
+                      {families.length > 0 ? (
+                        <div className="conversation-list">
+                          {families.map(renderConversationFamily)}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </section>
+            </>
+          ) : null}
+          <section
+            className="conversation-sidebar-section conversation-recent"
+            aria-labelledby="conversation-recent"
+          >
+            <h3 id="conversation-recent">{searching ? "Results" : "Recent"}</h3>
             {groups === null ? <Spinner label="Loading conversations…" /> : null}
             {groups?.length === 0 ? (
               <p className="conversation-list-empty">No conversations yet.</p>
             ) : null}
-            <div className="conversation-list">
-              {groups?.map((group) => (
-                <div className="conversation-work-group" key={group.work_item.id}>
-                  {renamingWorkItemId === group.work_item.id ? (
-                    <form
-                      className="conversation-list-rename"
-                      onSubmit={(event) => void renameWork(event, group.work_item.id)}
-                    >
-                      <Input
-                        aria-label="Conversation title"
-                        value={renameTitle}
-                        maxLength={120}
-                        disabled={renameBusy}
-                        autoFocus
-                        onChange={(event) => setRenameTitle(event.target.value)}
-                      />
-                      <div>
-                        <Button
-                          className="btn-small"
-                          variant="primary"
-                          type="submit"
-                          disabled={renameBusy || !renameTitle.trim()}
-                        >
-                          {renameBusy ? "Saving…" : "Save"}
-                        </Button>
-                        <Button
-                          className="btn-small"
-                          type="button"
-                          disabled={renameBusy}
-                          onClick={() => setRenamingWorkItemId(null)}
-                        >
-                          Cancel
-                        </Button>
-                      </div>
-                    </form>
-                  ) : (
-                    group.conversations.map((conversation) => {
-                      const active = selected?.conversationId === conversation.id && !showNew;
-                      return (
-                        <button
-                          type="button"
-                          className={`conversation-list-item${active ? " is-active" : ""}`}
-                          data-status={conversation.status}
-                          aria-current={active ? "page" : undefined}
-                          aria-label={`Open ${conversationKindLabel(conversation.kind)} conversation for ${group.work_item.title} (${conversation.status})`}
-                          title="Right-click to rename"
-                          key={conversation.id}
-                          onClick={() => chooseConversation(group.work_item.id, conversation)}
-                          onContextMenu={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            setConversationMenu({
-                              workItemId: group.work_item.id,
-                              title: group.work_item.title,
-                              x: Math.min(event.clientX, window.innerWidth - 160),
-                              y: Math.min(event.clientY, window.innerHeight - 56),
-                            });
-                          }}
-                        >
-                          <strong title={group.work_item.title}>
-                            {displayConversationTitle(group.work_item.title)}
-                          </strong>
-                          <span
-                            className={`conversation-list-status is-${conversation.status}`}
-                            aria-hidden="true"
-                          />
-                          {group.conversations.length > 1 ? (
-                            <small>{conversationKindLabel(conversation.kind)}</small>
-                          ) : null}
-                        </button>
-                      );
-                    })
-                  )}
-                </div>
-              ))}
-            </div>
-            {conversationMenu ? (
-              <div
-                className="conversation-context-menu"
-                role="menu"
-                aria-label="Conversation actions"
-                style={{ left: conversationMenu.x, top: conversationMenu.y }}
-              >
+            {groups?.length && visibleFamilies.length === 0 ? (
+              <p className="conversation-list-empty">No chats match your search.</p>
+            ) : null}
+            <div className="conversation-list">{recentFamilies.map(renderConversationFamily)}</div>
+          </section>
+        </div>
+        {conversationSidebarCollapsed ? (
+          <Button
+            className="conversation-sidebar-collapsed-new"
+            variant="ghost"
+            aria-label="Start new work"
+            onClick={startNewWork}
+          >
+            <span aria-hidden="true">＋</span>
+          </Button>
+        ) : null}
+        {conversationMenu ? (
+          <div
+            className="conversation-context-menu"
+            role="menu"
+            aria-label="Conversation actions"
+            style={{ left: conversationMenu.x, top: conversationMenu.y }}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setRenameTitle(conversationMenu.title);
+                setRenamingWorkItemId(conversationMenu.workItemId);
+                setConversationMenu(null);
+              }}
+            >
+              Rename
+            </button>
+            {organizationAvailable && menuOrganization ? (
+              <>
                 <button
                   type="button"
                   role="menuitem"
-                  onClick={() => {
-                    setRenameTitle(conversationMenu.title);
-                    setRenamingWorkItemId(conversationMenu.workItemId);
-                    setConversationMenu(null);
-                  }}
+                  disabled={organizationBusyWorkItemId === conversationMenu.workItemId}
+                  onClick={() =>
+                    void changeOrganization(conversationMenu.workItemId, {
+                      pinned: menuOrganization.pinned_at === null,
+                    })
+                  }
                 >
-                  Rename
+                  {menuOrganization.pinned_at ? "Unpin" : "Pin"}
                 </button>
-              </div>
+                <div className="conversation-context-menu-label">Move to folder</div>
+                {menuOrganization.folder_id ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={organizationBusyWorkItemId === conversationMenu.workItemId}
+                    onClick={() =>
+                      void changeOrganization(conversationMenu.workItemId, { folder_id: null })
+                    }
+                  >
+                    Remove from folder
+                  </button>
+                ) : null}
+                {navigation?.folders.map((folder) => (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={
+                      organizationBusyWorkItemId === conversationMenu.workItemId ||
+                      menuOrganization.folder_id === folder.id
+                    }
+                    key={`move:${conversationMenu.workItemId}:${folder.id}`}
+                    onClick={() =>
+                      void changeOrganization(conversationMenu.workItemId, {
+                        folder_id: folder.id,
+                      })
+                    }
+                  >
+                    {folder.name}
+                  </button>
+                ))}
+              </>
             ) : null}
-          </aside>
-        </>
-      ) : null}
+          </div>
+        ) : null}
+      </aside>
 
       <main className="conversation-main">
         {error ? (
@@ -4771,7 +5989,7 @@ export function ConversationWorkspace({
             <Alert testId="conversation-error">{error}</Alert>
           </div>
         ) : null}
-        {showNew ? conversationHeader : null}
+        {showNew ? conversationHeader() : null}
         {showNew ? (
           <NewWorkForm
             busy={creating}
@@ -4792,6 +6010,7 @@ export function ConversationWorkspace({
                   : null
               }
               onInitialMessageStarted={() => setInitialMessage(null)}
+              onEditMessage={editConversationMessage}
               onOpenConversation={(conversationId) => void openConversationById(conversationId)}
               onConversationModelChanged={(conversation) => {
                 setDetail((current) => (current ? { ...current, conversation } : current));

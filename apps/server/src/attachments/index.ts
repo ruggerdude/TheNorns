@@ -1,4 +1,4 @@
-// FRONT DOOR P4 (D3): image attachments module — public surface.
+// FRONT DOOR P4 (D3): model-readable attachments module — public surface.
 export {
   ATTACHMENT_CAPS,
   DEFAULT_ATTACHMENT_PURPOSE,
@@ -14,6 +14,15 @@ export {
   type AttachmentBlobStore,
   PostgresAttachmentBlobStore,
 } from "./service.js";
+export {
+  ALLOWED_FILE_MIMES,
+  FILE_EXTRACTION_CAPS,
+  type AttachmentFileMime,
+  type AttachmentMime,
+  isAllowedAttachmentMime,
+  isAllowedFileMime,
+  isImageAttachmentMime,
+} from "./fileMeta.js";
 export {
   ALLOWED_IMAGE_MIMES,
   type AttachmentImageMime,

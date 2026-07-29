@@ -1,4 +1,4 @@
-// FRONT DOOR P4 (D3): HTTP surface for image attachments — auth, mime and
+// FRONT DOOR P4 (D3): HTTP surface for model-readable attachments — auth, mime and
 // size caps, dedupe, per-objective and per-project quotas, delete, and the
 // bytes-serving GET. Mirrors the planningRunRoutes.test.ts harness (buildServer
 // over a PGlite transaction runner).
@@ -10,6 +10,7 @@ import { ProjectStore } from "../src/projects/store.js";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
 import { UserStore } from "../src/users/store.js";
+import { textPdf } from "./fileAttachmentFixtures.js";
 import { testAdminToken } from "./helpers.js";
 
 // ---- tiny valid image builders (header-only; the sniffer reads headers) -----
@@ -236,6 +237,114 @@ describe.sequential("attachment HTTP API (FRONT DOOR P4)", () => {
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
     expect(res.headers.etag).toBe(`"${id}"`);
     expect(res.rawPayload.equals(Buffer.from(gifBase64(6, 5), "base64"))).toBe(true);
+  });
+
+  it("uploads model-readable text, JSON, CSV, and PDF with durable extraction metadata", async () => {
+    const files = [
+      {
+        mime: "text/plain",
+        filename: "../../notes\r\n.txt",
+        bytes: Buffer.from("Plain attachment context.", "utf8"),
+      },
+      {
+        mime: "text/markdown",
+        filename: "design.md",
+        bytes: Buffer.from("# Design\n\nKeep the reading column bounded.", "utf8"),
+      },
+      {
+        mime: "application/json",
+        filename: "settings.json",
+        bytes: Buffer.from('{"theme":"dark","density":"compact"}', "utf8"),
+      },
+      {
+        mime: "text/csv",
+        filename: "roles.csv",
+        bytes: Buffer.from("actor,color\nworker,blue\nreviewer,gold\n", "utf8"),
+      },
+      {
+        mime: "application/pdf",
+        filename: 'réport "Q3".pdf',
+        bytes: textPdf("PDF attachment context."),
+      },
+    ] as const;
+
+    for (const file of files) {
+      const uploaded = await post(base(), {
+        mime: file.mime,
+        filename: file.filename,
+        base64: file.bytes.toString("base64"),
+      });
+      expect(uploaded.statusCode).toBe(201);
+      const dto = uploaded.json() as {
+        id: string;
+        original_filename: string;
+        extracted_text_sha256: string;
+        extraction_truncated: boolean;
+      };
+      expect(dto.extracted_text_sha256).toMatch(/^[0-9a-f]{64}$/u);
+      expect(dto.extraction_truncated).toBe(false);
+      expect(dto.original_filename).not.toMatch(/[\r\n/\\]/u);
+
+      const downloaded = await inject("GET", `${base()}/${dto.id}`);
+      expect(downloaded.statusCode).toBe(200);
+      expect(downloaded.headers["content-type"]).toContain(file.mime);
+      expect(downloaded.headers["content-disposition"]).toContain("attachment;");
+      expect(downloaded.headers["content-disposition"]).toContain("filename*=UTF-8''");
+      expect(downloaded.headers["content-disposition"]).not.toMatch(/[\r\n]/u);
+      expect(downloaded.rawPayload.equals(file.bytes)).toBe(true);
+    }
+  });
+
+  it("rejects malformed UTF-8, JSON, and PDF files before persistence", async () => {
+    const invalid = [
+      { mime: "text/plain", bytes: Buffer.from([0xc3, 0x28]) },
+      { mime: "application/json", bytes: Buffer.from('{"missing":', "utf8") },
+      { mime: "application/pdf", bytes: Buffer.from("%PDF-not-a-document", "ascii") },
+    ] as const;
+    for (const file of invalid) {
+      const response = await post(base(), {
+        mime: file.mime,
+        filename: "invalid",
+        base64: file.bytes.toString("base64"),
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ error: "invalid_file" });
+    }
+    await expect(
+      pg.query<{ count: number }>("SELECT count(*)::int AS count FROM attachments"),
+    ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+  });
+
+  it("caps durable extracted context without discarding the original file", async () => {
+    const source = Buffer.from("x".repeat(200_500), "utf8");
+    const uploaded = await post(base(), {
+      mime: "text/plain",
+      filename: "large.txt",
+      base64: source.toString("base64"),
+    });
+    expect(uploaded.statusCode).toBe(201);
+    const dto = uploaded.json() as {
+      id: string;
+      extraction_truncated: boolean;
+      extracted_text_sha256: string;
+    };
+    expect(dto.extraction_truncated).toBe(true);
+    const derived = await pg.query<{
+      extracted_characters: number;
+      extracted_text_sha256: string;
+    }>(
+      `SELECT length(extracted_text)::int AS extracted_characters, extracted_text_sha256
+         FROM attachments WHERE id=$1`,
+      [dto.id],
+    );
+    expect(derived.rows).toEqual([
+      {
+        extracted_characters: 200_000,
+        extracted_text_sha256: dto.extracted_text_sha256,
+      },
+    ]);
+    const downloaded = await inject("GET", `${base()}/${dto.id}`);
+    expect(downloaded.rawPayload.equals(source)).toBe(true);
   });
 
   it("soft-deletes and then 404s the image and a repeat delete", async () => {
