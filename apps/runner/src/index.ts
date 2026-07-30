@@ -1,5 +1,24 @@
 export { RunnerDaemon, type DaemonOptions } from "./daemon.js";
 export {
+  AGENT_HOST_CSRF_HEADER,
+  AGENT_HOST_LOCK_FILENAME,
+  AGENT_HOST_PORT_FILENAME,
+  AGENT_HOST_SESSION_COOKIE,
+  AgentHost,
+  AgentHostAlreadyRunningError,
+  FileAgentHostPortDiscovery,
+  FileAgentHostSingleInstanceLock,
+  type AgentDaemonLifecycle,
+  type AgentDaemonState,
+  type AgentEnrollmentState,
+  type AgentHostLoopbackAddress,
+  type AgentHostOptions,
+  type AgentHostPortDiscovery,
+  type AgentHostPortRecord,
+  type AgentHostSingleInstanceLock,
+  type AgentHostStartResult,
+} from "./agentHost.js";
+export {
   LOCAL_AGENT_CONFIG_FILENAME,
   LOCAL_AGENT_PAIRING_PROTOCOL,
   type LocalAgentConfig,
@@ -17,6 +36,11 @@ export {
   type LiveRunSession,
 } from "./liveRuns.js";
 export { RunnerStateFile } from "./state.js";
+export {
+  PENDING_DEVICE_CREDENTIAL_FILENAME,
+  PendingDeviceCredentialStore,
+  type PendingDeviceCredentialSummary,
+} from "./pendingDeviceCredential.js";
 export { WorkspaceRegistry } from "./workspaceRegistry.js";
 export {
   DEFAULT_VERIFICATION_POLICY_REF,

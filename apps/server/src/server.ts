@@ -155,6 +155,10 @@ function attachmentContentDisposition(filename: string, inline: boolean): string
   return `${inline ? "inline" : "attachment"}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 import { DebateConflictError, type DebateService } from "./debates/service.js";
+import {
+  type DeviceEnrollmentRouteService,
+  registerDeviceEnrollmentRoutes,
+} from "./devices/routes.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 // EXECUTION E1: task-context assembly + the runner-facing context fetch route.
 import {
@@ -394,6 +398,13 @@ export interface ServerOptions {
    * snapshot-backed behavior while route handlers use one async seam.
    */
   identity?: IdentityService;
+  /**
+   * Phase 1 enrollment slice. Production startup supplies it only after the
+   * explicit device-enrollment feature flag and HMAC configuration validate.
+   */
+  deviceEnrollment?: {
+    service: DeviceEnrollmentRouteService;
+  };
   /**
    * Deploy-level secret (Railway env var). Its ONLY job is gating the
    * one-time POST /api/auth/bootstrap that creates the first admin account
@@ -1429,6 +1440,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   };
   const requireSession = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> =>
     (await requireSessionUser(req, reply)) !== null;
+
+  if (options.deviceEnrollment) {
+    await registerDeviceEnrollmentRoutes(app, {
+      service: options.deviceEnrollment.service,
+      requireUser: requireSessionUser,
+      now,
+    });
+  }
 
   /** Like requireSession, but also enforces the admin role. Returns the
    *  resolved admin user (so the caller can attribute audit entries), or

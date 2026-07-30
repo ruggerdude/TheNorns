@@ -34,6 +34,13 @@ import { PhaseLaunchService } from "./coordinator/phaseLaunchService.js";
 import { buildDashboard } from "./dashboard.js";
 import { DebateService } from "./debates/service.js";
 import { DebateWorker } from "./debates/worker.js";
+import {
+  DeviceEnrollmentCodeHasher,
+  DeviceEnrollmentRuntimeConfigurationError,
+  DeviceEnrollmentService,
+  PostgresDeviceEnrollmentRepository,
+  parseDeviceEnrollmentRuntimeConfiguration,
+} from "./devices/index.js";
 import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
 import { RelationalTaskContextAssembler, TaskContextStore } from "./execution/index.js";
@@ -201,12 +208,24 @@ let knowledgeOptions: { service: KnowledgeSystemService } | undefined;
 // working only by the accident that production wires all three from this same
 // runner, and one config change away from silently disabling runner inference.
 let runnerInferenceOptions: { transactions: V2TransactionRunner } | undefined;
+let deviceEnrollmentOptions: { service: DeviceEnrollmentService } | undefined;
 
 const publicOrigin =
   process.env.NORNS_PUBLIC_ORIGIN ??
   (process.env.RAILWAY_PUBLIC_DOMAIN
     ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
     : "http://127.0.0.1:5173");
+
+let deviceEnrollmentRuntime: ReturnType<typeof parseDeviceEnrollmentRuntimeConfiguration>;
+try {
+  deviceEnrollmentRuntime = parseDeviceEnrollmentRuntimeConfiguration(process.env);
+} catch (error) {
+  if (error instanceof DeviceEnrollmentRuntimeConfigurationError) {
+    console.error(`device enrollment startup refused [${error.code}]: ${error.message}`);
+    process.exit(1);
+  }
+  throw error;
+}
 
 if (databaseUrl) {
   try {
@@ -230,6 +249,17 @@ if (databaseUrl) {
       mode: "runtime",
       role: "norns_app",
     });
+    if (deviceEnrollmentRuntime.enabled) {
+      deviceEnrollmentOptions = {
+        service: new DeviceEnrollmentService(
+          new PostgresDeviceEnrollmentRepository(runtimeTransactions),
+          {
+            codeHasher: new DeviceEnrollmentCodeHasher(deviceEnrollmentRuntime.code_hmac_key),
+            verificationUri: new URL("/device-authorization", publicOrigin).toString(),
+          },
+        ),
+      };
+    }
     const canonicalTelemetry = new AiInvocationTelemetry(
       new SqlAiUsageTelemetryRepository(runtimeTransactions),
     );
@@ -659,6 +689,13 @@ if (databaseUrl) {
   }
 }
 
+if (deviceEnrollmentRuntime.enabled && !deviceEnrollmentOptions) {
+  console.error(
+    "device enrollment startup refused [device_enrollment_database_required]: DATABASE_URL is required",
+  );
+  process.exit(1);
+}
+
 // demo engine over the same plan, driven partway for a live-looking dashboard
 const budget = new BudgetLedger(2000);
 for (const mod of demoSession.plan.modules) budget.approve(mod.id, 150);
@@ -775,6 +812,7 @@ const server = await buildServer({
   stores,
   users,
   ...(identityRuntime.mode === "relational" ? { identity: identityRuntime.identity } : {}),
+  ...(deviceEnrollmentOptions !== undefined ? { deviceEnrollment: deviceEnrollmentOptions } : {}),
   projects: projectRuntime.repository,
   ...(relationalComposition !== undefined ? { relationalComposition } : {}),
   ...(phase3Services !== undefined ? { phase3: phase3Services } : {}),

@@ -12,6 +12,7 @@ import { mkdirSync } from "node:fs";
 //     handling commands until Ctrl-C.
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { type AgentDaemonLifecycle, AgentHost } from "./agentHost.js";
 import {
   parseLocalAgentPairingUri,
   readLocalAgentConfig,
@@ -235,6 +236,7 @@ const USAGE = `norns-runner — TheNorns Local Runner
 Usage:
   norns-runner pair <code> --server <url> [--id <runnerId>] [--data <dir>]
   norns-runner pair-url <norns-agent://pair?...> [--data <dir>]
+  norns-runner agent-host [--data <dir>]
   norns-runner agent-start [--data <dir>]
   norns-runner start --server <url> [--id <runnerId>] [--data <dir>]
   norns-runner start --ephemeral --id <runnerId> --job <dispatchJobId>
@@ -246,6 +248,11 @@ Flags:
   --server  Relay URL (e.g. https://your-app.up.railway.app). Or set NORNS_SERVER.
   --id      Runner id (default: runner-1)
   --data    State directory (default: ~/.norns/<runnerId>)
+
+Device AgentHost preview:
+  agent-host starts only the foreground, loopback Control Center. Enable it
+  explicitly with NORNS_ENABLE_DEVICE_AGENT_HOST=true. Cloud device dispatch
+  remains disabled until the device enrollment cutover is complete.
 
 Ephemeral (GitHub Actions) mode:
   --ephemeral  Enroll for one dispatched job, run it, then exit. Reads the
@@ -268,6 +275,53 @@ async function main(): Promise<void> {
 
   if (!command || command === "help" || args.flags.help) {
     process.stdout.write(USAGE);
+    return;
+  }
+  if (command === "agent-host") {
+    if (process.env.NORNS_ENABLE_DEVICE_AGENT_HOST !== "true") {
+      throw new Error(
+        "AgentHost is disabled; set NORNS_ENABLE_DEVICE_AGENT_HOST=true to run the local preview",
+      );
+    }
+
+    const disabledDaemon: AgentDaemonLifecycle = {
+      async start() {
+        throw new Error("cloud device dispatch is disabled until device enrollment is complete");
+      },
+      async stop() {},
+    };
+    const agentHost = new AgentHost({ dataDir, daemon: disabledDaemon });
+    const started = await agentHost.start();
+    let stopping = false;
+    const stopAgentHost = (): void => {
+      if (stopping) return;
+      stopping = true;
+      void agentHost
+        .stop()
+        .then(() => {
+          process.stdout.write("\nNorns Local Agent Control Center stopped\n");
+          process.exit(0);
+        })
+        .catch((error: unknown) => {
+          process.stderr.write(
+            `error: failed to stop AgentHost: ${
+              error instanceof Error ? error.message : String(error)
+            }\n`,
+          );
+          process.exit(1);
+        });
+    };
+    process.once("SIGINT", stopAgentHost);
+    process.once("SIGTERM", stopAgentHost);
+    process.stdout.write(
+      [
+        `Norns Local Agent Control Center: ${started.bootstrap_url}`,
+        "Cloud device dispatch is disabled in this preview.",
+        "Press Ctrl-C to stop.",
+        "",
+      ].join("\n"),
+    );
+    await new Promise<never>(() => {});
     return;
   }
   if (command === "workspace") {

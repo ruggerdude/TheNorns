@@ -79,6 +79,11 @@ const GraphCanvas = lazy(() =>
 );
 const Account = lazy(() => import("./Account").then(({ Account }) => ({ default: Account })));
 const Admin = lazy(() => import("./Admin").then(({ Admin }) => ({ default: Admin })));
+const DeviceAuthorizationApproval = lazy(() =>
+  import("./DeviceAuthorizationApproval").then(({ DeviceAuthorizationApproval }) => ({
+    default: DeviceAuthorizationApproval,
+  })),
+);
 const UsageHub = lazy(() => import("./UsageHub").then(({ UsageHub }) => ({ default: UsageHub })));
 const PhaseTab = lazy(() => import("./PhaseTab").then(({ PhaseTab }) => ({ default: PhaseTab })));
 const ConversationOverview = lazy(() =>
@@ -2816,7 +2821,7 @@ function ProjectGraph({
   );
 }
 
-type GlobalPage = "usage" | "settings" | "admin";
+type GlobalPage = "usage" | "settings" | "admin" | "device-authorization";
 
 function GlobalPageShell({
   page,
@@ -2855,7 +2860,7 @@ function GlobalPageShell({
         </div>
         <AuthenticatedHeaderActions
           user={user}
-          activeView={page}
+          activeView={page === "device-authorization" ? null : page}
           onOpenUsage={onOpenUsage}
           onOpenAccount={onOpenAccount}
           onOpenAdmin={onOpenAdmin}
@@ -3114,6 +3119,8 @@ export function App(): React.ReactElement {
       : showUsage
         ? "usage"
         : null;
+  const deviceAuthorizationRoute =
+    typeof window !== "undefined" && window.location.pathname === "/device-authorization";
 
   if (!token) {
     const mode: LoginMode = recoveryToken
@@ -3139,6 +3146,29 @@ export function App(): React.ReactElement {
           error={authError}
         />
       </>
+    );
+  }
+
+  if (deviceAuthorizationRoute && user) {
+    return (
+      <GlobalPageShell
+        page="device-authorization"
+        user={user}
+        activeProject={activeProject}
+        onOpenPortfolio={openPortfolio}
+        onOpenProject={openProjectFromGlobalNavigation}
+        onOpenUsage={openUsage}
+        onOpenAccount={openAccount}
+        onOpenAdmin={openAdmin}
+        onSignOut={() => logout("Signed out.")}
+      >
+        <Suspense fallback={<Spinner label="Loading device authorization…" />}>
+          <DeviceAuthorizationApproval
+            user={user}
+            onUnauthorized={() => logout("Session expired. Sign in again.")}
+          />
+        </Suspense>
+      </GlobalPageShell>
     );
   }
 

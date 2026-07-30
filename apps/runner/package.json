@@ -13,7 +13,7 @@
     "build": "tsc -p tsconfig.build.json",
     "pack:tarball": "node scripts/pack-tarball.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "echo '@norns/runner: covered by @norns/server integration tests'"
+    "test": "pnpm run build && node --test test/*.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.207",

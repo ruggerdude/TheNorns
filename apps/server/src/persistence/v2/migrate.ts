@@ -351,6 +351,12 @@ export const CONVERSATION_MESSAGE_BRANCHES_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const DEVICE_IDENTITY_CORE_MIGRATION_NAME = "0053_device_identity_core";
+export const DEVICE_IDENTITY_CORE_MIGRATION_URL = new URL(
+  "../../../drizzle/0053_device_identity_core.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -589,6 +595,10 @@ export async function loadConversationFileAttachmentsMigrationSql(): Promise<str
 
 export async function loadConversationMessageBranchesMigrationSql(): Promise<string> {
   return readFile(CONVERSATION_MESSAGE_BRANCHES_MIGRATION_URL, "utf8");
+}
+
+export async function loadDeviceIdentityCoreMigrationSql(): Promise<string> {
+  return readFile(DEVICE_IDENTITY_CORE_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -910,6 +920,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: CONVERSATION_MESSAGE_BRANCHES_MIGRATION_NAME,
       sql: await loadConversationMessageBranchesMigrationSql(),
+    },
+    {
+      name: DEVICE_IDENTITY_CORE_MIGRATION_NAME,
+      sql: await loadDeviceIdentityCoreMigrationSql(),
     },
   ];
 }
