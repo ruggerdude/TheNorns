@@ -357,6 +357,24 @@ export const DEVICE_IDENTITY_CORE_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME = "0054_device_http_request_replays";
+export const DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_URL = new URL(
+  "../../../drizzle/0054_device_http_request_replays.sql",
+  import.meta.url,
+);
+
+export const DEVICE_CANCELLATION_TRACKING_MIGRATION_NAME = "0055_device_cancellation_tracking";
+export const DEVICE_CANCELLATION_TRACKING_MIGRATION_URL = new URL(
+  "../../../drizzle/0055_device_cancellation_tracking.sql",
+  import.meta.url,
+);
+
+export const GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME = "0056_gateway_device_authorization";
+export const GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_URL = new URL(
+  "../../../drizzle/0056_gateway_device_authorization.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -599,6 +617,18 @@ export async function loadConversationMessageBranchesMigrationSql(): Promise<str
 
 export async function loadDeviceIdentityCoreMigrationSql(): Promise<string> {
   return readFile(DEVICE_IDENTITY_CORE_MIGRATION_URL, "utf8");
+}
+
+export async function loadDeviceHttpRequestReplaysMigrationSql(): Promise<string> {
+  return readFile(DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_URL, "utf8");
+}
+
+export async function loadDeviceCancellationTrackingMigrationSql(): Promise<string> {
+  return readFile(DEVICE_CANCELLATION_TRACKING_MIGRATION_URL, "utf8");
+}
+
+export async function loadGatewayDeviceAuthorizationMigrationSql(): Promise<string> {
+  return readFile(GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -924,6 +954,18 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: DEVICE_IDENTITY_CORE_MIGRATION_NAME,
       sql: await loadDeviceIdentityCoreMigrationSql(),
+    },
+    {
+      name: DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME,
+      sql: await loadDeviceHttpRequestReplaysMigrationSql(),
+    },
+    {
+      name: DEVICE_CANCELLATION_TRACKING_MIGRATION_NAME,
+      sql: await loadDeviceCancellationTrackingMigrationSql(),
+    },
+    {
+      name: GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
+      sql: await loadGatewayDeviceAuthorizationMigrationSql(),
     },
   ];
 }

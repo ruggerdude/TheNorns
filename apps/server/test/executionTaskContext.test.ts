@@ -5,17 +5,28 @@
 // from @norns/runner rather than re-implementing hash verification here. Mocks
 // of the runner side have hidden three dead paths in this codebase already; if
 // the ref shape drifts from what the runner accepts, this test fails.
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
-import { HashVerifiedContextLoader } from "@norns/runner";
+import {
+  DEVICE_HTTP_DEVICE_ID_HEADER,
+  DEVICE_HTTP_GENERATION_HEADER,
+  DEVICE_HTTP_REQUEST_ID_HEADER,
+  DEVICE_HTTP_TIMESTAMP_HEADER,
+  HashVerifiedContextLoader,
+  LEGACY_RUNNER_HTTP_AUTHORIZATION_SCHEME,
+  RunnerSignedContextFetcher,
+  devicePrivateKeySigner,
+  privateKeySigner,
+} from "@norns/runner";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DispatchContextScopeRepository } from "../src/coordinator/dispatchContextScope.js";
+import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
+import { PostgresDeviceActionAuthorization } from "../src/devices/actionAuthorization.js";
 import {
+  DeviceHttpRequestAuthenticator,
   MAX_TOTAL_CONTEXT_BYTES,
-  RUNNER_CONTEXT_RUNNER_ID_HEADER,
-  RUNNER_CONTEXT_TIMESTAMP_HEADER,
+  PostgresDeviceHttpCredentialRepository,
   RelationalTaskContextAssembler,
-  RunnerSignedContextFetcher,
   TASK_CONTEXT_ROUTE_PREFIX,
   TaskContextAssemblyError,
   TaskContextStore,
@@ -553,25 +564,71 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
     let server: NornsServer;
     let origin: string;
     let privateKeyPem: string;
+    let publicKeyPem: string;
+    let publicKeyDer: Buffer;
     let dispatchScope: DispatchContextScopeRepository;
+    let stores: RelayStores;
 
     beforeEach(async () => {
-      const stores = new RelayStores();
+      stores = new RelayStores();
       const keys = generateKeyPairSync("ed25519");
       privateKeyPem = keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-      stores.registerRunner(
-        RUNNER,
-        keys.publicKey.export({ type: "spki", format: "pem" }).toString(),
-      );
+      publicKeyPem = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
+      publicKeyDer = keys.publicKey.export({ type: "spki", format: "der" });
+      stores.registerRunner(RUNNER, publicKeyPem);
       const users = new UserStore();
       server = await buildServer({
         stores,
         users,
         projects: new ProjectStore(),
         execution: { transactions, baseUrl: "http://127.0.0.1" },
+        runnerHttpAuthentication: new DeviceHttpRequestAuthenticator({
+          repository: new PostgresDeviceHttpCredentialRepository(transactions),
+          legacyCompatibility: {
+            enabled: true,
+            lookupRunner: (runnerId) => {
+              const runner = stores.runner(runnerId);
+              return runner
+                ? {
+                    public_key_pem: runner.public_key_pem,
+                    generation: runner.generation,
+                  }
+                : null;
+            },
+          },
+        }),
+        deviceActionAuthorization: {
+          service: new PostgresDeviceActionAuthorization(),
+          transactions,
+        },
       });
       origin = await listen(server);
       dispatchScope = new DispatchContextScopeRepository(transactions);
+      await pg.exec(`
+        INSERT INTO repository_bindings (
+          id,project_id,binding_type,status,runner_id,workspace_id,repository_id,
+          repository_display_name,granted_permissions,default_branch,observed_head,
+          verification_policy_ref,repository_health,created_by_actor_type,created_by_actor_id
+        ) VALUES (
+          'context-legacy-binding','${PROJECT}','local_runner','connected','${RUNNER}',
+          'legacy-workspace','legacy-repository','Legacy repository','{}'::jsonb,
+          'main','abc123','verification/strict','healthy','human','${USER}'
+        );
+        INSERT INTO agent_runs (
+          id,project_id,phase_id,task_id,assignment_id,attempt,state,runner_id,
+          repository_binding_id,expected_revision,lifecycle_version,finished_at
+        ) VALUES (
+          'run:test','${PROJECT}','${PHASE}','${TASK}','${ASSIGNMENT}',99,'failed',
+          '${RUNNER}','context-legacy-binding','abc123',1,now()
+        );
+        INSERT INTO commands (
+          command_id,dispatch_job_id,project_id,phase_id,task_id,run_id,runner_id,
+          runner_generation,kind,envelope,status,correlation_id
+        ) VALUES (
+          'command:test','dispatch-job:test','${PROJECT}','${PHASE}','${TASK}',
+          'run:test','${RUNNER}',1,'launch_run','{}'::jsonb,'queued','context-test'
+        );
+      `);
     });
 
     afterEach(async () => {
@@ -580,6 +637,117 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
 
     function rebase(storageRef: string): string {
       return `${origin}${new URL(storageRef).pathname}`;
+    }
+
+    function signedFetcher(
+      runnerId = RUNNER,
+      generation = stores.runner(runnerId)?.generation ?? 1,
+      now: () => Date = () => new Date(),
+      httpFetch: typeof fetch = fetch,
+    ): RunnerSignedContextFetcher {
+      return new RunnerSignedContextFetcher(
+        privateKeySigner(runnerId, privateKeyPem, generation),
+        now,
+        httpFetch,
+      );
+    }
+
+    async function deviceScopedFetcher(
+      refs: ReadonlyArray<{ artifact_id: string; content_hash: string; byte_size: number }>,
+    ): Promise<RunnerSignedContextFetcher> {
+      await pg.query("UPDATE projects SET owner_user_id=$2 WHERE id=$1", [PROJECT, USER]);
+      await pg.query(
+        `INSERT INTO devices (
+           id,owner_user_id,display_name,os_family,architecture,lifecycle,current_generation
+         ) VALUES ($1,$2,'Context device','linux','x86_64','active',0)`,
+        [RUNNER, USER],
+      );
+      await pg.query(
+        `INSERT INTO device_credentials (
+           id,device_id,generation,public_key_spki_der,public_key_fingerprint,state
+         ) VALUES ('context-device-credential',$1,1,$2,$3,'active')`,
+        [RUNNER, publicKeyDer, createHash("sha256").update(publicKeyDer).digest("hex")],
+      );
+      await pg.query(
+        `INSERT INTO device_repository_registrations (
+           id,device_id,workspace_id,repository_id,repository_display_name,
+           state,approved_by_user_id,approved_at
+         ) VALUES (
+           'context-registration',$1,'context-workspace','context-repository',
+           'Context repository','active',$2,now()
+         )`,
+        [RUNNER, USER],
+      );
+      await pg.query(
+        `INSERT INTO project_device_repository_grants (
+           id,project_id,repository_registration_id,state,granted_by_user_id
+         ) VALUES (
+           'context-grant',$1,'context-registration','active',$2
+         )`,
+        [PROJECT, USER],
+      );
+      await pg.query(
+        `INSERT INTO repository_bindings (
+           id,project_id,binding_type,status,runner_id,workspace_id,repository_id,
+           repository_display_name,granted_permissions,default_branch,observed_head,
+           verification_policy_ref,repository_health,created_by_actor_type,
+           created_by_actor_id,project_device_repository_grant_id
+         ) VALUES (
+           'context-binding',$1,'local_runner','connected',$2,'context-workspace',
+           'context-repository','Context repository','{}'::jsonb,'main','abc123',
+           'verification/strict','healthy','human',$3,'context-grant'
+         )`,
+        [PROJECT, RUNNER, USER],
+      );
+      await pg.query(
+        "UPDATE projects SET primary_repository_binding_id='context-binding' WHERE id=$1",
+        [PROJECT],
+      );
+      const scheduled = await new Phase4Coordinator(transactions).schedule({
+        project_id: PROJECT,
+        phase_id: PHASE,
+        task_id: TASK,
+        assignment_id: ASSIGNMENT,
+        runner_id: RUNNER,
+        runner_generation: 1,
+        authorized_by: { actor_type: "human", actor_id: USER },
+        authorized_by_session_id: "context-session",
+        correlation_id: "context-correlation",
+        causation_id: null,
+        context_refs: refs.map((ref) => ({
+          ...ref,
+          storage_ref: `https://norns.example/context/${ref.artifact_id}`,
+        })),
+        target_branch: "norns/context",
+        worktree_policy_ref: "worktree/default",
+        sandbox_policy_ref: "sandbox/default",
+        max_input_tokens: 10_000,
+        max_output_tokens: 8_000,
+        max_duration_seconds: 900,
+        issued_at: new Date(Date.now() - 60_000).toISOString(),
+        expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+      });
+      await pg.query("UPDATE agent_runs SET initiated_by_user_id=$2 WHERE id=$1", [
+        scheduled.run_id,
+        USER,
+      ]);
+      await dispatchScope.recordScope(
+        {
+          runnerId: RUNNER,
+          runnerGeneration: 1,
+          dispatchJobId: scheduled.dispatch_job_id,
+          runId: scheduled.run_id,
+        },
+        refs.map((ref) => ({ ...ref, storage_ref: "unused://scope-only" })),
+      );
+      return new RunnerSignedContextFetcher(
+        devicePrivateKeySigner({
+          deviceId: RUNNER,
+          credentialId: "context-device-credential",
+          generation: 1,
+          privateKeyPem,
+        }),
+      );
     }
 
     // EXECUTION E2: the fetch route now ALSO requires a
@@ -593,7 +761,12 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
       refs: ReadonlyArray<{ artifact_id: string; content_hash: string; byte_size: number }>,
     ): Promise<void> {
       await dispatchScope.recordScope(
-        { runnerId: RUNNER, dispatchJobId: "dispatch-job:test", runId: "run:test" },
+        {
+          runnerId: RUNNER,
+          runnerGeneration: stores.runner(RUNNER)?.generation ?? 1,
+          dispatchJobId: "dispatch-job:test",
+          runId: "run:test",
+        },
         refs.map((ref) => ({ ...ref, storage_ref: "unused://scope-only" })),
       );
     }
@@ -606,9 +779,7 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
       const refs = (await server.taskContext?.assembleForTask(TASK)) ?? [];
       expect(refs.length).toBeGreaterThan(0);
       await authorize(refs);
-      const loader = new HashVerifiedContextLoader(
-        new RunnerSignedContextFetcher(RUNNER, privateKeyPem),
-      );
+      const loader = new HashVerifiedContextLoader(signedFetcher());
       const prompt = await loader.load(
         refs.map((ref) => ({ ...ref, storage_ref: rebase(ref.storage_ref) })),
       );
@@ -617,12 +788,23 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
       expect(prompt).toContain("pnpm run build");
     });
 
+    it("rejects a legacy HTTP subject for context scoped to a grant-backed device run", async () => {
+      const refs = (await server.taskContext?.assembleForTask(TASK)) ?? [];
+      const first = refs[0];
+      if (!first) throw new Error("no refs");
+      const deviceFetcher = await deviceScopedFetcher(refs);
+      await expect(
+        deviceFetcher.fetch({ ...first, storage_ref: rebase(first.storage_ref) }),
+      ).resolves.toBeInstanceOf(Uint8Array);
+      await expect(
+        signedFetcher().fetch({ ...first, storage_ref: rebase(first.storage_ref) }),
+      ).rejects.toThrow(/403/);
+    });
+
     it("makes the loader reject a tampered content_hash", async () => {
       const refs = (await server.taskContext?.assembleForTask(TASK)) ?? [];
       await authorize(refs);
-      const loader = new HashVerifiedContextLoader(
-        new RunnerSignedContextFetcher(RUNNER, privateKeyPem),
-      );
+      const loader = new HashVerifiedContextLoader(signedFetcher());
       const first = refs[0];
       if (!first) throw new Error("no refs");
       await expect(
@@ -640,9 +822,11 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
 
     it("rejects a signature from an unknown runner", async () => {
       const refs = (await server.taskContext?.assembleForTask(TASK)) ?? [];
-      const fetcher = new RunnerSignedContextFetcher("runner-nobody", privateKeyPem);
+      const first = refs[0];
+      if (!first) throw new Error("no refs");
+      const fetcher = signedFetcher("runner-nobody");
       await expect(
-        fetcher.fetch({ storage_ref: rebase(refs[0]?.storage_ref ?? "") }),
+        fetcher.fetch({ ...first, storage_ref: rebase(first.storage_ref) }),
       ).rejects.toThrow(/401/);
     });
 
@@ -652,9 +836,9 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
       if (!first || !second) throw new Error("need two refs");
       // Sign for `first`, then present the credential against `second`.
       let captured: { url: string; headers: Record<string, string> } | null = null;
-      const capturing = new RunnerSignedContextFetcher(
+      const capturing = signedFetcher(
         RUNNER,
-        privateKeyPem,
+        1,
         () => new Date(),
         async (input, init) => {
           captured = {
@@ -664,7 +848,7 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
           return new Response(new Uint8Array(), { status: 200 });
         },
       );
-      await capturing.fetch({ storage_ref: rebase(first.storage_ref) });
+      await capturing.fetch({ ...first, storage_ref: rebase(first.storage_ref) });
       if (!captured) throw new Error("no captured request");
       const replay = await fetch(rebase(second.storage_ref), {
         headers: (captured as { headers: Record<string, string> }).headers,
@@ -674,13 +858,11 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
 
     it("rejects a stale timestamp", async () => {
       const refs = (await server.taskContext?.assembleForTask(TASK)) ?? [];
-      const stale = new RunnerSignedContextFetcher(
-        RUNNER,
-        privateKeyPem,
-        () => new Date(Date.now() - 10 * 60_000),
-      );
+      const first = refs[0];
+      if (!first) throw new Error("no refs");
+      const stale = signedFetcher(RUNNER, 1, () => new Date(Date.now() - 10 * 60_000));
       await expect(
-        stale.fetch({ storage_ref: rebase(refs[0]?.storage_ref ?? "") }),
+        stale.fetch({ ...first, storage_ref: rebase(first.storage_ref) }),
       ).rejects.toThrow(/401/);
     });
 
@@ -691,9 +873,14 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
       await authorize([
         { artifact_id: "taskctx_missing", content_hash: "a".repeat(64), byte_size: 1 },
       ]);
-      const fetcher = new RunnerSignedContextFetcher(RUNNER, privateKeyPem);
+      const fetcher = signedFetcher();
       await expect(
-        fetcher.fetch({ storage_ref: `${origin}${TASK_CONTEXT_ROUTE_PREFIX}/taskctx_missing` }),
+        fetcher.fetch({
+          artifact_id: "taskctx_missing",
+          content_hash: "a".repeat(64),
+          byte_size: 1,
+          storage_ref: `${origin}${TASK_CONTEXT_ROUTE_PREFIX}/taskctx_missing`,
+        }),
       ).rejects.toThrow(/404/);
     });
 
@@ -703,28 +890,46 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
       if (!first) throw new Error("no refs");
       // Deliberately no `authorize(...)` call: a valid signature from a real,
       // paired runner is not enough on its own (E2's fix for the E1 gap).
-      const fetcher = new RunnerSignedContextFetcher(RUNNER, privateKeyPem);
-      await expect(fetcher.fetch({ storage_ref: rebase(first.storage_ref) })).rejects.toThrow(
-        /403/,
-      );
+      const fetcher = signedFetcher();
+      await expect(
+        fetcher.fetch({ ...first, storage_ref: rebase(first.storage_ref) }),
+      ).rejects.toThrow(/403/);
     });
 
-    it("sends the runner id and timestamp headers it signs over", async () => {
+    it("rejects context scoped to an earlier generation after re-pairing", async () => {
+      const refs = (await server.taskContext?.assembleForTask(TASK)) ?? [];
+      const first = refs[0];
+      if (!first) throw new Error("no refs");
+      await authorize([first]);
+      const replacement = stores.registerRunner(RUNNER, publicKeyPem);
+      expect(replacement.generation).toBe(2);
+      await expect(
+        signedFetcher(RUNNER, 2).fetch({ ...first, storage_ref: rebase(first.storage_ref) }),
+      ).rejects.toThrow(/403/);
+    });
+
+    it("sends the identity, generation, timestamp, and one-time request headers it signs over", async () => {
       const refs = (await server.taskContext?.assembleForTask(TASK)) ?? [];
       let headers: Record<string, string> = {};
-      const capturing = new RunnerSignedContextFetcher(
+      const capturing = signedFetcher(
         RUNNER,
-        privateKeyPem,
+        1,
         () => new Date(),
         async (_input, init) => {
           headers = (init?.headers ?? {}) as Record<string, string>;
           return new Response(new Uint8Array([1]), { status: 200 });
         },
       );
-      await capturing.fetch({ storage_ref: rebase(refs[0]?.storage_ref ?? "") });
-      expect(headers[RUNNER_CONTEXT_RUNNER_ID_HEADER]).toBe(RUNNER);
-      expect(headers[RUNNER_CONTEXT_TIMESTAMP_HEADER]).toMatch(/^\d{4}-/);
-      expect(headers.authorization).toMatch(/^Norns-Runner /);
+      const first = refs[0];
+      if (!first) throw new Error("no refs");
+      await capturing.fetch({ ...first, storage_ref: rebase(first.storage_ref) });
+      expect(headers[DEVICE_HTTP_DEVICE_ID_HEADER]).toBe(RUNNER);
+      expect(headers[DEVICE_HTTP_GENERATION_HEADER]).toBe("1");
+      expect(headers[DEVICE_HTTP_TIMESTAMP_HEADER]).toMatch(/^\d{4}-/);
+      expect(headers[DEVICE_HTTP_REQUEST_ID_HEADER]).toMatch(/^[0-9a-f-]{36}$/);
+      expect(headers.authorization).toMatch(
+        new RegExp(`^${LEGACY_RUNNER_HTTP_AUTHORIZATION_SCHEME} `),
+      );
     });
   });
 });

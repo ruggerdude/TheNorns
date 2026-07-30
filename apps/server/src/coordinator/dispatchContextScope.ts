@@ -1,7 +1,7 @@
 // EXECUTION E2: authorization for EXECUTION E1's runner-facing context fetch
 // route (`GET ${TASK_CONTEXT_ROUTE_PREFIX}/:documentId` in server.ts).
 //
-// E1's route authenticates a request with `authenticateRunnerContextRequest`:
+// The context route authenticates a request with `DeviceHttpRequestAuthenticator`:
 // a valid Ed25519 signature from ANY paired runner satisfies it, for ANY
 // project's document, because runner identity carries no project or job
 // scope. This module is the missing authorization layer. The moment a task
@@ -12,10 +12,11 @@
 // here naming the requesting runner for the requested document -- proof of
 // identity, plus proof of entitlement.
 import type { V2ContentAddressedReferenceT } from "@norns/contracts";
-import type { V2TransactionRunner } from "../persistence/v2/database.js";
+import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 
 export interface DispatchContextScopeInput {
   runnerId: string;
+  runnerGeneration: number;
   dispatchJobId: string;
   runId: string;
 }
@@ -40,13 +41,20 @@ export class DispatchContextScopeRepository {
       for (const ref of contextRefs) {
         await tx.query(
           `INSERT INTO dispatch_context_documents
-             (runner_id, context_document_id, dispatch_job_id, run_id)
-           VALUES ($1,$2,$3,$4)
+             (runner_id, runner_generation, context_document_id, dispatch_job_id, run_id)
+           VALUES ($1,$2,$3,$4,$5)
            ON CONFLICT (runner_id, context_document_id) DO UPDATE SET
+             runner_generation = EXCLUDED.runner_generation,
              dispatch_job_id = EXCLUDED.dispatch_job_id,
              run_id = EXCLUDED.run_id,
              created_at = now()`,
-          [input.runnerId, ref.artifact_id, input.dispatchJobId, input.runId],
+          [
+            input.runnerId,
+            input.runnerGeneration,
+            ref.artifact_id,
+            input.dispatchJobId,
+            input.runId,
+          ],
         );
       }
     });
@@ -58,15 +66,30 @@ export class DispatchContextScopeRepository {
    * the fetch route was missing: a valid signature alone proves identity, not
    * entitlement to this specific document.
    */
-  async isAuthorized(runnerId: string, documentId: string): Promise<boolean> {
-    return this.transactions.transaction(async (tx) => {
-      const result = await tx.query<{ found: number }>(
-        `SELECT 1 AS found FROM dispatch_context_documents
-          WHERE runner_id = $1 AND context_document_id = $2
-          LIMIT 1`,
-        [runnerId, documentId],
-      );
-      return result.rows.length > 0;
-    });
+  async isAuthorized(
+    runnerId: string,
+    runnerGeneration: number,
+    documentId: string,
+  ): Promise<boolean> {
+    return this.transactions.transaction(async (tx) =>
+      Boolean(await this.authorizedRunIdInTransaction(tx, runnerId, runnerGeneration, documentId)),
+    );
+  }
+
+  async authorizedRunIdInTransaction(
+    tx: V2SqlExecutor,
+    runnerId: string,
+    runnerGeneration: number,
+    documentId: string,
+  ): Promise<string | null> {
+    const result = await tx.query<{ run_id: string }>(
+      `SELECT run_id FROM dispatch_context_documents
+        WHERE runner_id=$1
+          AND context_document_id=$2
+          AND runner_generation=$3
+        FOR UPDATE`,
+      [runnerId, documentId, runnerGeneration],
+    );
+    return result.rows[0]?.run_id ?? null;
   }
 }

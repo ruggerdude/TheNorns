@@ -10,6 +10,7 @@ import {
   V2_HUMAN_WAIT_INSTRUCTION_HASH,
   v2CommandIdForDispatchJob,
 } from "@norns/contracts";
+import type { PostgresDeviceActionAuthorization } from "../devices/actionAuthorization.js";
 import {
   CLAUDE_CODE_SONNET_5_MAX_OUTPUT_TOKENS,
   GATEWAY_REQUEST_BODY_LIMIT_BYTES,
@@ -43,6 +44,7 @@ export const DEFAULT_QUICK_CHANGE_MAX_CHARGE_USD = 2;
 
 export interface Phase4CoordinatorOptions {
   quickChangeMaxChargeUsd?: number;
+  deviceAuthorization?: PostgresDeviceActionAuthorization;
 }
 
 export class Phase4CoordinatorConflictError extends Error {
@@ -143,6 +145,7 @@ interface SchedulingRow {
   task_state: string;
   task_aggregate_version: number;
   task_title: string;
+  initiated_by_user_id: string | null;
   verification_policy_ref: string;
   phase_status: string;
   approved_budget_usd: string | number;
@@ -199,6 +202,7 @@ function runIdentity(taskId: string, attempt: number): string {
 
 export class Phase4Coordinator {
   private readonly quickChangeMaxChargeUsd: number;
+  private readonly deviceAuthorization: PostgresDeviceActionAuthorization | undefined;
 
   constructor(
     private readonly transactions: V2TransactionRunner,
@@ -206,6 +210,7 @@ export class Phase4Coordinator {
   ) {
     this.quickChangeMaxChargeUsd =
       options.quickChangeMaxChargeUsd ?? DEFAULT_QUICK_CHANGE_MAX_CHARGE_USD;
+    this.deviceAuthorization = options.deviceAuthorization;
     if (!Number.isFinite(this.quickChangeMaxChargeUsd) || this.quickChangeMaxChargeUsd < 0) {
       throw new Error("quickChangeMaxChargeUsd must be finite and nonnegative");
     }
@@ -221,7 +226,7 @@ export class Phase4Coordinator {
     return this.transactions.transaction(async (sql) => {
       const rows = await sql.query<SchedulingRow>(
         `SELECT t.state AS task_state, t.aggregate_version AS task_aggregate_version,
-                t.title AS task_title, t.verification_policy_ref,
+                t.title AS task_title,t.initiated_by_user_id,t.verification_policy_ref,
                 p.status AS phase_status, p.approved_budget_usd,
                 a.status AS assignment_status, a.budget_limit_usd, a.agent_profile_id,
                 profile.provider, profile.runtime, profile.model, profile.reasoning_effort,
@@ -399,6 +404,32 @@ export class Phase4Coordinator {
       if (!input.authorized_by.actor_id) {
         throw new Phase4CoordinatorConflictError("dispatch authorization must be attributable");
       }
+      if (!row.repository_binding_id) {
+        throw new Phase4CoordinatorConflictError(
+          "device dispatch requires an immutable repository binding",
+        );
+      }
+      if (this.deviceAuthorization) {
+        try {
+          if (!row.initiated_by_user_id) {
+            throw new Error("device dispatch requires an attributable original actor");
+          }
+          const identity = await this.deviceAuthorization.resolveDispatchTargetIdentity(sql, {
+            runner_id: input.runner_id,
+            generation: input.runner_generation,
+          });
+          await this.deviceAuthorization.assertDispatchBinding(sql, {
+            ...identity,
+            actor_user_id: row.initiated_by_user_id,
+            project_id: input.project_id,
+            repository_binding_id: row.repository_binding_id,
+          });
+        } catch {
+          throw new Phase4CoordinatorConflictError(
+            "device repository binding is not currently authorized for dispatch",
+          );
+        }
+      }
       if (!row.expected_revision) {
         throw new Phase4CoordinatorConflictError("repository binding has no verified revision");
       }
@@ -553,8 +584,9 @@ export class Phase4Coordinator {
         `INSERT INTO agent_runs (
            id, project_id, phase_id, task_id, assignment_id, attempt, state,
            is_designated, runner_id, repository_binding_id, expected_revision,
-           verification_status, lifecycle_version, aggregate_version
-         ) VALUES ($1,$2,$3,$4,$5,$6,'created',$10,$7,$8,$9,'pending',0,1)`,
+           verification_status, lifecycle_version, aggregate_version,
+           initiated_by_user_id
+         ) VALUES ($1,$2,$3,$4,$5,$6,'created',$10,$7,$8,$9,'pending',0,1,$11)`,
         [
           runId,
           input.project_id,
@@ -566,6 +598,7 @@ export class Phase4Coordinator {
           row.repository_binding_id,
           row.expected_revision,
           !isReplacement,
+          row.initiated_by_user_id,
         ],
       );
       if (taskPackageDispatch) {

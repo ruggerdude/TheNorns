@@ -5,6 +5,7 @@ import {
   resolveV2BudgetReservation,
   v2CommandIdForDispatchJob,
 } from "@norns/contracts";
+import type { PostgresDeviceActionAuthorization } from "../devices/actionAuthorization.js";
 import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
@@ -113,6 +114,7 @@ export class HumanWaitContinuationWorker {
   private readonly owner: string;
   private readonly leaseMs: number;
   private readonly afterProvision: (provisioned: ProvisionedHumanWaitContinuation) => Promise<void>;
+  private readonly deviceAuthorization: PostgresDeviceActionAuthorization | undefined;
 
   constructor(
     private readonly transactions: V2TransactionRunner,
@@ -123,11 +125,13 @@ export class HumanWaitContinuationWorker {
       owner?: string;
       leaseMs?: number;
       afterProvision?: (provisioned: ProvisionedHumanWaitContinuation) => Promise<void>;
+      deviceAuthorization?: PostgresDeviceActionAuthorization;
     } = {},
   ) {
     this.owner = options.owner ?? `human-wait-continuation:${process.pid}`;
     this.leaseMs = options.leaseMs ?? 30_000;
     this.afterProvision = options.afterProvision ?? (async () => undefined);
+    this.deviceAuthorization = options.deviceAuthorization;
   }
 
   async tick(): Promise<ProvisionedHumanWaitContinuation | null> {
@@ -529,6 +533,18 @@ export class HumanWaitContinuationWorker {
         throw new HumanWaitContinuationConflictError(
           "continuation command identity or context order is not exact",
         );
+      }
+      if (this.deviceAuthorization) {
+        const identity = await this.deviceAuthorization.resolveDispatchTargetIdentity(tx, {
+          runner_id: target.runner_id,
+          generation: target.runner_generation,
+        });
+        await this.deviceAuthorization.assertDispatchBinding(tx, {
+          ...identity,
+          actor_user_id: row.answered_by_user_id,
+          project_id: row.project_id,
+          repository_binding_id: row.repository_binding_id,
+        });
       }
       await tx.query(
         `INSERT INTO commands (

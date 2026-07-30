@@ -60,7 +60,11 @@ export async function startStack(runnerId = "runner-1"): Promise<Stack> {
   const stores = new RelayStores();
   const users = new UserStore();
   const token = testAdminToken(users);
-  const server = await buildServer({ stores, users });
+  const server = await buildServer({
+    stores,
+    users,
+    legacyGlobalRunnerCompatibility: { enabled: true },
+  });
   const url = await listen(server);
 
   const api = (path: string, init?: RequestInit) =>

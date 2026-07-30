@@ -5,14 +5,14 @@ import { createPublicKey, verify as edVerify } from "node:crypto";
 
 export function verifyRunnerSignature(
   publicKeyPem: string,
-  nonceValue: string,
+  canonicalTranscript: string,
   signatureB64: string,
 ): boolean {
   try {
     const key = createPublicKey(publicKeyPem);
     return edVerify(
       null,
-      Buffer.from(nonceValue, "utf8"),
+      Buffer.from(canonicalTranscript, "utf8"),
       key,
       Buffer.from(signatureB64, "base64"),
     );

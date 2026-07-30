@@ -45,7 +45,7 @@ import {
 } from "@norns/contracts";
 import { BudgetExceededError, type BudgetLedger } from "../engine/budget.js";
 import { newId } from "../ids.js";
-import type { V2TransactionRunner } from "../persistence/v2/database.js";
+import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 
 // ---------------------------------------------------------------------------
 // Ports
@@ -84,6 +84,10 @@ export interface ProxiedRunFacts {
 export interface ProxiedRunLookup {
   /** Returns null for an unknown run. Must not throw for an unknown run. */
   lookup(runId: string): Promise<ProxiedRunFacts | null>;
+}
+
+export interface TransactionalProxiedRunLookup extends ProxiedRunLookup {
+  lookupInTransaction(sql: V2SqlExecutor, runId: string): Promise<ProxiedRunFacts | null>;
 }
 
 /** An accepted budget hold. Exactly one of settle/release must follow. */
@@ -404,27 +408,30 @@ export class InferenceProxy {
  * two different notions of "this runner owns this run" is how an authorization
  * bypass gets built by accident.
  */
-export class SqlProxiedRunLookup implements ProxiedRunLookup {
+export class SqlProxiedRunLookup implements TransactionalProxiedRunLookup {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
   /** Run states that may still spend. Terminal states may not, ever. */
   private static readonly SPENDABLE = new Set(["created", "dispatched", "running", "verifying"]);
 
   lookup(runId: string): Promise<ProxiedRunFacts | null> {
-    return this.transactions.transaction(async (sql) => {
-      const result = await sql.query<{
-        id: string;
-        project_id: string;
-        phase_id: string;
-        task_id: string;
-        initiated_by_user_id: string | null;
-        state: string;
-        runner_id: string | null;
-        superseded_at: string | null;
-        runner_generation: number;
-        revoked_through_generation: number | null;
-      }>(
-        `SELECT run.id, run.project_id, run.phase_id, run.task_id,
+    return this.transactions.transaction((sql) => this.lookupInTransaction(sql, runId));
+  }
+
+  async lookupInTransaction(sql: V2SqlExecutor, runId: string): Promise<ProxiedRunFacts | null> {
+    const result = await sql.query<{
+      id: string;
+      project_id: string;
+      phase_id: string;
+      task_id: string;
+      initiated_by_user_id: string | null;
+      state: string;
+      runner_id: string | null;
+      superseded_at: string | null;
+      runner_generation: number;
+      revoked_through_generation: number | null;
+    }>(
+      `SELECT run.id, run.project_id, run.phase_id, run.task_id,
                 run.initiated_by_user_id, run.state,
                 run.runner_id, run.superseded_at,
                 command.runner_generation,
@@ -435,27 +442,26 @@ export class SqlProxiedRunLookup implements ProxiedRunLookup {
          WHERE run.id = $1
          ORDER BY command.created_at DESC, command.command_id DESC
          LIMIT 1`,
-        [runId],
-      );
-      const row = result.rows[0];
-      if (!row || !row.runner_id) return null;
-      const generation = Number(row.runner_generation);
-      const revokedThrough =
-        row.revoked_through_generation === null ? null : Number(row.revoked_through_generation);
-      return {
-        run_id: row.id,
-        project_id: row.project_id,
-        phase_id: row.phase_id,
-        task_id: row.task_id,
-        initiated_by_user_id: row.initiated_by_user_id,
-        runner_id: row.runner_id,
-        runner_generation: generation,
-        active:
-          SqlProxiedRunLookup.SPENDABLE.has(row.state) &&
-          row.superseded_at === null &&
-          (revokedThrough === null || generation > revokedThrough),
-      };
-    });
+      [runId],
+    );
+    const row = result.rows[0];
+    if (!row || !row.runner_id) return null;
+    const generation = Number(row.runner_generation);
+    const revokedThrough =
+      row.revoked_through_generation === null ? null : Number(row.revoked_through_generation);
+    return {
+      run_id: row.id,
+      project_id: row.project_id,
+      phase_id: row.phase_id,
+      task_id: row.task_id,
+      initiated_by_user_id: row.initiated_by_user_id,
+      runner_id: row.runner_id,
+      runner_generation: generation,
+      active:
+        SqlProxiedRunLookup.SPENDABLE.has(row.state) &&
+        row.superseded_at === null &&
+        (revokedThrough === null || generation > revokedThrough),
+    };
   }
 }
 

@@ -4,16 +4,11 @@ import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
+  DEVICE_VISUAL_EVIDENCE_UPLOAD_HTTP_SIGNATURE_PURPOSE,
   V2ImplementationCaptureProfile,
   type V2ImplementationCaptureProfileT,
 } from "@norns/contracts";
-import {
-  RUNNER_AUTHORIZATION_SCHEME,
-  RUNNER_ID_HEADER,
-  RUNNER_TIMESTAMP_HEADER,
-  type RunnerContextIdentity,
-  runnerContextFetchPayload,
-} from "./contextAuth.js";
+import { type RunnerContextIdentity, signRunnerHttpRequest } from "./contextAuth.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -304,41 +299,40 @@ export class RunnerVisualEvidenceUploader {
     if (scope.project_id.trim().length === 0)
       throw new Error("visual evidence project is required");
     const path = `/api/runner/v2/projects/${encodeURIComponent(scope.project_id)}/visual-evidence`;
-    const issuedAt = this.now().toISOString();
-    const signature = this.identity.sign(
-      runnerContextFetchPayload({
-        method: "POST",
-        path,
-        runnerId: this.identity.runnerId,
-        issuedAt,
-      }),
-    );
-    const response = await this.httpFetch(new URL(path, this.origin), {
+    const body = JSON.stringify({
+      work_item_id: scope.work_item_id,
+      conversation_id: scope.conversation_id,
+      phase_id: scope.phase_id,
+      task_id: scope.task_id,
+      run_id: scope.run_id,
+      approved_mockup_version_id: evidence.approved_mockup_version_id,
+      repository_binding_id: scope.repository_binding_id,
+      verification_result_id: scope.verification_result_id,
+      deployment_record_id: scope.deployment_record_id,
+      deployment_observation_id: scope.deployment_observation_id,
+      commit_sha: evidence.commit_sha,
+      capture_profile: evidence.capture_profile,
+      verified_at: scope.verified_at,
+      desktop_png_base64: evidence.screenshots[0].bytes.toString("base64"),
+      mobile_png_base64: evidence.screenshots[1].bytes.toString("base64"),
+    });
+    const url = new URL(path, this.origin);
+    const signed = signRunnerHttpRequest({
+      identity: this.identity,
+      purpose: DEVICE_VISUAL_EVIDENCE_UPLOAD_HTTP_SIGNATURE_PURPOSE,
+      method: "POST",
+      url,
+      body,
+      timestamp: this.now().toISOString(),
+    });
+    const response = await this.httpFetch(url, {
       method: "POST",
       redirect: "error",
       headers: {
         "content-type": "application/json",
-        authorization: `${RUNNER_AUTHORIZATION_SCHEME} ${signature}`,
-        [RUNNER_ID_HEADER]: this.identity.runnerId,
-        [RUNNER_TIMESTAMP_HEADER]: issuedAt,
+        ...signed.headers,
       },
-      body: JSON.stringify({
-        work_item_id: scope.work_item_id,
-        conversation_id: scope.conversation_id,
-        phase_id: scope.phase_id,
-        task_id: scope.task_id,
-        run_id: scope.run_id,
-        approved_mockup_version_id: evidence.approved_mockup_version_id,
-        repository_binding_id: scope.repository_binding_id,
-        verification_result_id: scope.verification_result_id,
-        deployment_record_id: scope.deployment_record_id,
-        deployment_observation_id: scope.deployment_observation_id,
-        commit_sha: evidence.commit_sha,
-        capture_profile: evidence.capture_profile,
-        verified_at: scope.verified_at,
-        desktop_png_base64: evidence.screenshots[0].bytes.toString("base64"),
-        mobile_png_base64: evidence.screenshots[1].bytes.toString("base64"),
-      }),
+      body,
     });
     if (!response.ok) {
       throw new Error(`visual evidence upload failed with ${response.status}`);

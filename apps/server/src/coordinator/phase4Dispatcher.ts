@@ -3,6 +3,10 @@ import {
   type V2DispatchCommandT,
   resolveV2BudgetReservation,
 } from "@norns/contracts";
+import {
+  DeviceActionAuthorizationError,
+  type PostgresDeviceActionAuthorization,
+} from "../devices/actionAuthorization.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   transitionV2AgentRunLifecycle,
@@ -26,7 +30,70 @@ export interface Phase4TerminalActionsDispatch {
 }
 
 export class Phase4DispatchRepository {
-  constructor(private readonly transactions: V2TransactionRunner) {}
+  constructor(
+    private readonly transactions: V2TransactionRunner,
+    private readonly deviceAuthorization?: PostgresDeviceActionAuthorization,
+  ) {}
+
+  private async authorizeCommand(sql: V2SqlExecutor, command: V2DispatchCommandT): Promise<void> {
+    if (!this.deviceAuthorization) return;
+    const identity = await this.deviceAuthorization.resolveDispatchTargetIdentity(sql, {
+      runner_id: command.runner_id,
+      generation: command.runner_generation,
+    });
+    await this.deviceAuthorization.assertRun(sql, {
+      ...identity,
+      run_id: command.run_id,
+      project_id: command.project_id,
+      repository_binding_id: command.repository_binding_id,
+    });
+  }
+
+  private async cancelStaleCommand(
+    sql: V2SqlExecutor,
+    jobId: string,
+    commandId: string,
+  ): Promise<void> {
+    await sql.query(
+      `UPDATE dispatch_jobs
+          SET status='cancelled',completed_at=COALESCE(completed_at,now()),
+              lease_owner=NULL,lease_expires_at=NULL,updated_at=now()
+        WHERE id=$1
+          AND status IN ('queued','leased','awaiting_enrollment','delivered')`,
+      [jobId],
+    );
+    await sql.query(
+      `UPDATE commands
+          SET status='cancelled',updated_at=now()
+        WHERE command_id=$1
+          AND status NOT IN ('succeeded','failed','rejected','expired','cancelled')`,
+      [commandId],
+    );
+    await sql.query(
+      `UPDATE human_wait_continuations
+          SET status='failed',
+              last_error='device authorization changed before continuation dispatch',
+              lease_owner=NULL,lease_expires_at=NULL,updated_at=now()
+        WHERE resume_command_id=$1
+          AND status IN ('provisioned','dispatched')`,
+      [commandId],
+    );
+  }
+
+  private async authorizeOrCancel(
+    sql: V2SqlExecutor,
+    jobId: string,
+    command: V2DispatchCommandT,
+  ): Promise<boolean> {
+    try {
+      await this.authorizeCommand(sql, command);
+      return true;
+    } catch (error) {
+      if (!(error instanceof DeviceActionAuthorizationError)) throw error;
+      await this.cancelStaleCommand(sql, jobId, command.command_id);
+      return false;
+    }
+  }
 
   claim(owner: string, leaseMs: number): Promise<Phase4ClaimedDispatch | null> {
     return this.transactions.transaction(async (sql) => {
@@ -57,11 +124,13 @@ export class Phase4DispatchRepository {
       );
       const row = result.rows[0];
       if (!row) return null;
+      const command = V2DispatchCommand.parse(row.envelope);
+      if (!(await this.authorizeOrCancel(sql, row.id, command))) return null;
       return {
         job_id: row.id,
         attempts: row.attempts,
         run_id: row.run_id,
-        command: V2DispatchCommand.parse(row.envelope),
+        command,
       };
     });
   }
@@ -125,8 +194,8 @@ export class Phase4DispatchRepository {
 
   pendingForRunner(runnerId: string, runnerGeneration: number): Promise<V2DispatchCommandT[]> {
     return this.transactions.transaction(async (sql) => {
-      const awaiting = await sql.query<{ id: string }>(
-        `SELECT job.id
+      const awaiting = await sql.query<{ id: string; envelope: unknown }>(
+        `SELECT job.id,command.envelope
            FROM dispatch_jobs job
            JOIN commands command ON command.command_id=job.command_id
            JOIN github_actions_runs actions ON actions.dispatch_job_id=job.id
@@ -143,6 +212,8 @@ export class Phase4DispatchRepository {
       );
       const occurredAt = new Date().toISOString();
       for (const job of awaiting.rows) {
+        const command = V2DispatchCommand.parse(job.envelope);
+        if (!(await this.authorizeOrCancel(sql, job.id, command))) continue;
         await this.markDeliveredInTransaction(
           sql,
           job.id,
@@ -151,8 +222,8 @@ export class Phase4DispatchRepository {
           true,
         );
       }
-      const result = await sql.query<{ envelope: unknown }>(
-        `SELECT command.envelope
+      const result = await sql.query<{ id: string; envelope: unknown }>(
+        `SELECT job.id,command.envelope
          FROM dispatch_jobs job
          JOIN commands command ON command.command_id=job.command_id
          WHERE job.runner_id=$1 AND job.status='delivered'
@@ -161,7 +232,35 @@ export class Phase4DispatchRepository {
          ORDER BY job.delivered_at, job.id`,
         [runnerId, runnerGeneration],
       );
-      return result.rows.map((row) => V2DispatchCommand.parse(row.envelope));
+      const pending: V2DispatchCommandT[] = [];
+      for (const row of result.rows) {
+        const command = V2DispatchCommand.parse(row.envelope);
+        if (await this.authorizeOrCancel(sql, row.id, command)) pending.push(command);
+      }
+      return pending;
+    });
+  }
+
+  /**
+   * Re-authorizes a claimed command while holding the same device row lock
+   * revocation uses, sends it, and records delivery before releasing that lock.
+   * This closes the claim-to-send race and makes reconnect redelivery obey the
+   * same current grant/binding/credential decision as initial dispatch.
+   */
+  deliverClaimed(
+    jobId: string,
+    owner: string,
+    command: V2DispatchCommandT,
+    deliver: () => Promise<void>,
+    occurredAt: string,
+  ): Promise<"delivered" | "cancelled_stale"> {
+    return this.transactions.transaction(async (sql) => {
+      if (!(await this.authorizeOrCancel(sql, jobId, command))) {
+        return "cancelled_stale";
+      }
+      await deliver();
+      await this.markDeliveredInTransaction(sql, jobId, owner, occurredAt, false);
+      return "delivered";
     });
   }
 
@@ -356,6 +455,11 @@ export class Phase4DispatchRepository {
         [jobId, owner, error.slice(0, 2_000), retryDelayMs],
       );
       if ((result.affectedRows ?? result.rows.length) !== 1) {
+        const current = await sql.query<{ status: string }>(
+          "SELECT status FROM dispatch_jobs WHERE id=$1",
+          [jobId],
+        );
+        if (current.rows[0]?.status === "cancelled") return;
         throw new Error(`dispatch job ${jobId} retry lost its lease`);
       }
     });
@@ -378,7 +482,14 @@ export class Phase4DispatchRepository {
         [jobId, owner, error.slice(0, 2_000), occurredAt],
       );
       const job = result.rows[0];
-      if (!job) throw new Error(`dispatch job ${jobId} dead-letter lost its lease`);
+      if (!job) {
+        const current = await sql.query<{ status: string }>(
+          "SELECT status FROM dispatch_jobs WHERE id=$1",
+          [jobId],
+        );
+        if (current.rows[0]?.status === "cancelled") return;
+        throw new Error(`dispatch job ${jobId} dead-letter lost its lease`);
+      }
       await sql.query("UPDATE commands SET status='failed', updated_at=now() WHERE command_id=$1", [
         job.command_id,
       ]);
@@ -641,13 +752,14 @@ export class Phase4Dispatcher {
     const claimed = await this.repository.claim(this.owner, this.options.lease_ms ?? 30_000);
     if (!claimed) return false;
     try {
-      await this.deliver(claimed.command);
-      await this.repository.markDelivered(
+      const outcome = await this.repository.deliverClaimed(
         claimed.job_id,
         this.owner,
+        claimed.command,
+        () => this.deliver(claimed.command),
         (this.options.now ?? (() => new Date()))().toISOString(),
       );
-      return true;
+      return outcome === "delivered";
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       if (claimed.attempts >= (this.options.max_attempts ?? 5)) {

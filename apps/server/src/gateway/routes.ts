@@ -1,3 +1,4 @@
+import { DEVICE_GATEWAY_CREDENTIAL_MINT_HTTP_SIGNATURE_PURPOSE } from "@norns/contracts";
 // EXECUTION E9 — the HTTP surface. Two base URLs and one mint route.
 //
 // WHAT AN SDK SEES.
@@ -28,12 +29,21 @@
 // agent, which is what "chunk-for-chunk" has to mean.
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
-  RUNNER_CONTEXT_RUNNER_ID_HEADER,
-  authenticateRunnerContextRequest,
+  DeviceActionAuthorizationError,
+  type PostgresDeviceActionAuthorization,
+} from "../devices/actionAuthorization.js";
+import {
+  DEVICE_HTTP_DEVICE_ID_HEADER,
+  type DeviceHttpAuthRequest,
+  type DeviceHttpAuthResult,
+  captureRunnerHttpBodySha256,
+  capturedRunnerHttpBodySha256,
 } from "../execution/index.js";
+import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   type ProxiedRunFacts,
   type ProxiedRunLookup,
+  type TransactionalProxiedRunLookup,
   authorizeProxiedRunAccess,
 } from "../runners/inferenceProxy.js";
 import type { GatewayCredentialService } from "./credentials.js";
@@ -73,10 +83,16 @@ export interface GatewayRouteDependencies {
   gateway: ProviderGateway;
   credentials: GatewayCredentialService;
   runs: ProxiedRunLookup;
-  /** Ed25519 public key registered at pairing, or null for an unknown runner. */
-  runnerPublicKey: (runnerId: string) => string | null;
+  runnerHttpAuthentication: {
+    authenticate(request: DeviceHttpAuthRequest): Promise<DeviceHttpAuthResult>;
+  };
+  deviceActionAuthorization?:
+    | {
+        service: PostgresDeviceActionAuthorization;
+        transactions: V2TransactionRunner;
+      }
+    | undefined;
   audit?: ((actor: string, action: string, detail: string) => void) | undefined;
-  now?: (() => Date) | undefined;
   /** The origin the runtimes should be pointed at. */
   publicOrigin: string;
 }
@@ -91,83 +107,200 @@ export async function registerGatewayRoutes(
   app: FastifyInstance,
   deps: GatewayRouteDependencies,
 ): Promise<void> {
-  const now = deps.now ?? (() => new Date());
-
   // -- the mint route -------------------------------------------------------
   //
-  // AUTH: the runner's EXISTING relay identity — the Ed25519 keypair
-  // registered at pairing, exactly as E1's context-fetch route uses. No second
-  // credential system is introduced to protect the credential system.
+  // AUTH: an active device credential, or the explicitly gated legacy runner
+  // compatibility identity during cutover. Both sign the same full request
+  // transcript and consume a persistent one-time request id.
   //
   // The runner names a run; the server resolves that run from its own records
   // and refuses unless the authenticated runner is the one it was dispatched
   // to, at the generation it was dispatched at. A compromised job asking for a
   // credential to somebody else's run gets the same 401 as an unknown run.
-  app.post(GATEWAY_CREDENTIAL_ROUTE, async (req, reply) => {
-    const auth = authenticateRunnerContextRequest(
-      {
+  app.post(
+    GATEWAY_CREDENTIAL_ROUTE,
+    { preParsing: captureRunnerHttpBodySha256 },
+    async (req, reply) => {
+      const auth = await deps.runnerHttpAuthentication.authenticate({
+        purpose: DEVICE_GATEWAY_CREDENTIAL_MINT_HTTP_SIGNATURE_PURPOSE,
         method: req.method,
-        path: new URL(req.url, "http://placeholder.invalid").pathname,
+        path_and_query: req.url,
+        routed_path: GATEWAY_CREDENTIAL_ROUTE,
+        body_sha256: capturedRunnerHttpBodySha256(req),
         headers: req.headers as Record<string, string | string[] | undefined>,
-      },
-      deps.runnerPublicKey,
-      now().getTime(),
-    );
-    if (!auth.ok) {
-      deps.audit?.(
-        `runner:${req.headers[RUNNER_CONTEXT_RUNNER_ID_HEADER] ?? "unknown"}`,
-        "gateway.credential_auth_failed",
-        auth.reason,
-      );
-      return reply.code(401).send({ error: "unauthorized" });
-    }
-    const body = (req.body ?? {}) as { run_id?: unknown };
-    const runId = typeof body.run_id === "string" ? body.run_id : "";
-    if (runId.length === 0) return reply.code(400).send({ error: "run_id is required" });
-
-    let run: ProxiedRunFacts | null;
-    try {
-      run = await deps.runs.lookup(runId);
-    } catch {
-      return reply.code(503).send({ error: "run_lookup_failed" });
-    }
-    // The credential is fenced to whatever generation the run is CURRENTLY
-    // dispatched at, so re-dispatching a run invalidates every token minted
-    // for the previous attempt without anyone deleting a row.
-    const access = authorizeProxiedRunAccess(
-      run,
-      runId,
-      auth.runner_id,
-      run?.runner_generation ?? -1,
-    );
-    if (!run || access !== "ok") {
-      deps.audit?.(
-        `runner:${auth.runner_id}`,
-        "gateway.credential_refused",
-        `run=${runId} ${access}`,
-      );
-      // 401 for "not yours" and 403 for "not spendable" — the second reveals
-      // nothing the caller has not already proved it owns.
-      return reply.code(access === "run_not_active" ? 403 : 401).send({ error: access });
-    }
-
-    const minted = await deps.credentials.mint(run);
-    deps.audit?.(
-      `runner:${auth.runner_id}`,
-      "gateway.credential_minted",
-      `run=${run.run_id} expires=${minted.expires_at}`,
-    );
-    return reply
-      .header("cache-control", "no-store")
-      .code(201)
-      .send({
-        // The plaintext token exists here and nowhere else, ever.
-        token: minted.token,
-        expires_at: minted.expires_at,
-        anthropic_base_url: anthropicGatewayBaseUrl(deps.publicOrigin),
-        openai_base_url: openAiGatewayBaseUrl(deps.publicOrigin),
       });
-  });
+      if (!auth.ok) {
+        deps.audit?.(
+          `runner:${req.headers[DEVICE_HTTP_DEVICE_ID_HEADER] ?? "unknown"}`,
+          "gateway.credential_auth_failed",
+          auth.reason,
+        );
+        return reply.code(401).send({ error: "unauthorized" });
+      }
+      const subjectId = auth.identity.authorization_subject_id;
+      const body = (req.body ?? {}) as { run_id?: unknown };
+      const runId = typeof body.run_id === "string" ? body.run_id : "";
+      if (runId.length === 0) return reply.code(400).send({ error: "run_id is required" });
+
+      if (auth.identity.kind === "device") {
+        const deviceIdentity = auth.identity;
+        const authorization = deps.deviceActionAuthorization;
+        const lookup = deps.runs as Partial<TransactionalProxiedRunLookup>;
+        if (!authorization || typeof lookup.lookupInTransaction !== "function") {
+          return reply.code(503).send({ error: "device_authorization_unavailable" });
+        }
+        try {
+          const decision = await authorization.transactions.transaction(async (sql) => {
+            await authorization.service.assertRun(sql, {
+              subject: "device",
+              runner_id: deviceIdentity.device_id,
+              generation: deviceIdentity.generation,
+              credential_id: deviceIdentity.credential_id,
+              run_id: runId,
+            });
+            const run = await lookup.lookupInTransaction?.(sql, runId);
+            const access = authorizeProxiedRunAccess(
+              run ?? null,
+              runId,
+              deviceIdentity.device_id,
+              deviceIdentity.generation,
+            );
+            if (!run || access !== "ok") return { access } as const;
+            const minted = await deps.credentials.mint(
+              run,
+              { subject: "device", credential_id: deviceIdentity.credential_id },
+              sql,
+            );
+            return { access: "ok", minted } as const;
+          });
+          if (decision.access !== "ok" || !("minted" in decision)) {
+            return reply
+              .code(decision.access === "run_not_active" ? 403 : 401)
+              .send({ error: decision.access });
+          }
+          deps.audit?.(
+            `device:${deviceIdentity.device_id}`,
+            "gateway.credential_minted",
+            `run=${runId} expires=${decision.minted.expires_at}`,
+          );
+          return reply
+            .header("cache-control", "no-store")
+            .code(201)
+            .send({
+              token: decision.minted.token,
+              expires_at: decision.minted.expires_at,
+              anthropic_base_url: anthropicGatewayBaseUrl(deps.publicOrigin),
+              openai_base_url: openAiGatewayBaseUrl(deps.publicOrigin),
+            });
+        } catch (error) {
+          if (error instanceof DeviceActionAuthorizationError) {
+            deps.audit?.(
+              `device:${deviceIdentity.device_id}`,
+              "gateway.credential_refused",
+              `run=${runId} ${error.code}`,
+            );
+            return reply.code(401).send({ error: "unauthorized" });
+          }
+          return reply.code(503).send({ error: "run_lookup_failed" });
+        }
+      }
+
+      if (auth.identity.kind !== "legacy_runner") {
+        return reply.code(401).send({ error: "unauthorized" });
+      }
+      const legacyIdentity = auth.identity;
+      let legacyDecision:
+        | { access: ReturnType<typeof authorizeProxiedRunAccess> }
+        | {
+            access: "ok";
+            run: ProxiedRunFacts;
+            minted: Awaited<ReturnType<GatewayCredentialService["mint"]>>;
+          };
+      try {
+        const authorization = deps.deviceActionAuthorization;
+        const lookup = deps.runs as Partial<TransactionalProxiedRunLookup>;
+        if (authorization) {
+          if (typeof lookup.lookupInTransaction !== "function") {
+            return reply.code(503).send({ error: "device_authorization_unavailable" });
+          }
+          legacyDecision = await authorization.transactions.transaction(async (sql) => {
+            await authorization.service.assertRun(sql, {
+              subject: "legacy_runner",
+              runner_id: legacyIdentity.runner_id,
+              generation: legacyIdentity.generation,
+              run_id: runId,
+            });
+            const run = (await lookup.lookupInTransaction?.(sql, runId)) ?? null;
+            const access = authorizeProxiedRunAccess(
+              run,
+              runId,
+              legacyIdentity.runner_id,
+              legacyIdentity.generation,
+            );
+            if (!run || access !== "ok") return { access };
+            return {
+              access: "ok",
+              run,
+              minted: await deps.credentials.mint(run, { subject: "legacy_runner" }, sql),
+            };
+          });
+        } else {
+          const run = await deps.runs.lookup(runId);
+          const access = authorizeProxiedRunAccess(
+            run,
+            runId,
+            legacyIdentity.runner_id,
+            legacyIdentity.generation,
+          );
+          legacyDecision =
+            !run || access !== "ok"
+              ? { access }
+              : {
+                  access: "ok",
+                  run,
+                  minted: await deps.credentials.mint(run, { subject: "legacy_runner" }),
+                };
+        }
+      } catch (error) {
+        if (error instanceof DeviceActionAuthorizationError) {
+          deps.audit?.(
+            `runner:${subjectId}`,
+            "gateway.credential_refused",
+            `run=${runId} ${error.code}`,
+          );
+          return reply.code(401).send({ error: "unauthorized" });
+        }
+        return reply.code(503).send({ error: "run_lookup_failed" });
+      }
+      if (legacyDecision.access !== "ok" || !("minted" in legacyDecision)) {
+        deps.audit?.(
+          `runner:${subjectId}`,
+          "gateway.credential_refused",
+          `run=${runId} ${legacyDecision.access}`,
+        );
+        return reply
+          .code(legacyDecision.access === "run_not_active" ? 403 : 401)
+          .send({ error: legacyDecision.access });
+      }
+
+      const { minted } = legacyDecision;
+      deps.audit?.(
+        `runner:${subjectId}`,
+        "gateway.credential_minted",
+        `run=${legacyDecision.run.run_id} expires=${minted.expires_at}`,
+      );
+      return reply
+        .header("cache-control", "no-store")
+        .code(201)
+        .send({
+          // The plaintext token exists here and nowhere else, ever.
+          token: minted.token,
+          expires_at: minted.expires_at,
+          anthropic_base_url: anthropicGatewayBaseUrl(deps.publicOrigin),
+          openai_base_url: openAiGatewayBaseUrl(deps.publicOrigin),
+        });
+    },
+  );
 
   // -- the two provider surfaces -------------------------------------------
   await app.register(async (scope) => {

@@ -20,19 +20,31 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DEVICE_CONTEXT_RETRIEVAL_HTTP_SIGNATURE_PURPOSE,
+  legacyRunnerHttpCredentialId,
+  serializeSignedDeviceHttpTranscript,
+} from "@norns/contracts";
+import {
+  DEVICE_HTTP_CREDENTIAL_ID_HEADER,
+  DEVICE_HTTP_DEVICE_ID_HEADER,
+  DEVICE_HTTP_GENERATION_HEADER,
+  DEVICE_HTTP_REQUEST_ID_HEADER,
+  DEVICE_HTTP_TIMESTAMP_HEADER,
   HashVerifiedContextLoader,
-  RUNNER_AUTHORIZATION_SCHEME,
-  RUNNER_ID_HEADER,
-  RUNNER_TIMESTAMP_HEADER,
+  LEGACY_RUNNER_HTTP_AUTHORIZATION_SCHEME,
   RunnerDaemon,
   RunnerSignedContextFetcher,
   RunnerStateFile,
   SignedUrlContentFetcher,
   privateKeySigner,
-  runnerContextFetchPayload,
+  signRunnerHttpRequest,
 } from "@norns/runner";
 import { afterEach, describe, expect, it } from "vitest";
-import { verifyRunnerSignature } from "../src/auth.js";
+import {
+  DeviceHttpRequestAuthenticator,
+  EMPTY_HTTP_BODY_SHA256,
+  type LegacyRunnerHttpReplayInput,
+} from "../src/execution/index.js";
 
 const SKEW_MS = 5 * 60 * 1000;
 const DOCUMENT = "You are implementing TRK-014. The failing test is in apps/server/test.";
@@ -50,40 +62,57 @@ function newKeypair(): { publicPem: string; privatePem: string } {
  * the runner client implements, using the server's real verifier. If the two
  * halves ever disagree about the canonical payload, this fails.
  */
-function startContextServer(registry: ReadonlyMap<string, string>): Promise<{
+interface RegisteredRunner {
+  publicKeyPem: string;
+  generation: number;
+}
+
+function startContextServer(registry: ReadonlyMap<string, RegisteredRunner>): Promise<{
   server: Server;
   origin: string;
   attempts: { runnerId: string | undefined; status: number }[];
 }> {
   const attempts: { runnerId: string | undefined; status: number }[] = [];
-  const server = createServer((req, res) => {
-    const runnerId = req.headers[RUNNER_ID_HEADER] as string | undefined;
-    const timestamp = req.headers[RUNNER_TIMESTAMP_HEADER] as string | undefined;
-    const authorization = req.headers.authorization;
+  const consumedRequestIds = new Set<string>();
+  const authenticator = new DeviceHttpRequestAuthenticator({
+    repository: {
+      activeCredential: async () => null,
+      consumeRequestId: async () => "inactive",
+      consumeLegacyRequestId: async (input: LegacyRunnerHttpReplayInput) => {
+        if (consumedRequestIds.has(input.request_id)) return "replayed";
+        consumedRequestIds.add(input.request_id);
+        return "consumed";
+      },
+    },
+    legacyCompatibility: {
+      enabled: true,
+      lookupRunner: (runnerId) => {
+        const runner = registry.get(runnerId);
+        return runner
+          ? {
+              public_key_pem: runner.publicKeyPem,
+              generation: runner.generation,
+            }
+          : null;
+      },
+    },
+  });
+  const server = createServer(async (req, res) => {
+    const runnerId = req.headers[DEVICE_HTTP_DEVICE_ID_HEADER] as string | undefined;
     const finish = (status: number, body: string) => {
       attempts.push({ runnerId, status });
       res.writeHead(status, { "content-type": "text/plain" });
       res.end(body);
     };
-    if (!runnerId || !timestamp || !authorization?.startsWith(`${RUNNER_AUTHORIZATION_SCHEME} `)) {
-      return finish(401, "unauthorized");
-    }
-    const publicKeyPem = registry.get(runnerId);
-    if (!publicKeyPem) return finish(401, "unauthorized");
-    const issued = Date.parse(timestamp);
-    if (!Number.isFinite(issued) || Math.abs(Date.now() - issued) > SKEW_MS) {
-      return finish(401, "unauthorized");
-    }
-    const payload = runnerContextFetchPayload({
+    const auth = await authenticator.authenticate({
+      purpose: DEVICE_CONTEXT_RETRIEVAL_HTTP_SIGNATURE_PURPOSE,
       method: req.method ?? "GET",
-      path: new URL(req.url ?? "/", "http://127.0.0.1").pathname,
-      runnerId,
-      issuedAt: timestamp,
+      path_and_query: req.url ?? "/",
+      routed_path: (req.url ?? "/").split("?", 1)[0] ?? "/",
+      body_sha256: EMPTY_HTTP_BODY_SHA256,
+      headers: req.headers as Record<string, string | string[] | undefined>,
     });
-    const signature = authorization.slice(`${RUNNER_AUTHORIZATION_SCHEME} `.length);
-    if (!verifyRunnerSignature(publicKeyPem, payload, signature)) {
-      return finish(401, "unauthorized");
-    }
+    if (!auth.ok) return finish(401, "unauthorized");
     return finish(200, DOCUMENT);
   });
   return new Promise((resolve) => {
@@ -111,7 +140,7 @@ afterEach(() => {
 });
 
 async function harness() {
-  const registry = new Map<string, string>();
+  const registry = new Map<string, RegisteredRunner>();
   const { server, origin, attempts } = await startContextServer(registry);
   cleanup.push(() => server.close());
   return { registry, origin, attempts };
@@ -131,13 +160,15 @@ describe("the runner fetches its context document with a signed request", () => 
       private_key_pem: privatePem,
       generation: 7,
     });
-    registry.set("actions:project-1", publicPem);
+    registry.set("actions:project-1", { publicKeyPem: publicPem, generation: 7 });
     const daemon = new RunnerDaemon({ serverUrl: origin, runnerId: "actions:project-1", dataDir });
     daemon.loadState();
 
     const loader = new HashVerifiedContextLoader(
       new RunnerSignedContextFetcher({
+        mode: "legacy_runner",
         runnerId: "actions:project-1",
+        generation: 7,
         sign: (payload) => daemon.sign(payload),
       }),
     );
@@ -160,10 +191,10 @@ describe("the runner fetches its context document with a signed request", () => 
     const { registry, origin } = await harness();
     const legitimate = newKeypair();
     const attacker = newKeypair();
-    registry.set("runner-a", legitimate.publicPem);
+    registry.set("runner-a", { publicKeyPem: legitimate.publicPem, generation: 1 });
 
     const loader = new HashVerifiedContextLoader(
-      new RunnerSignedContextFetcher(privateKeySigner("runner-a", attacker.privatePem)),
+      new RunnerSignedContextFetcher(privateKeySigner("runner-a", attacker.privatePem, 1)),
     );
     await expect(loader.load([reference(origin)])).rejects.toThrow(/failed with 401/);
   });
@@ -172,7 +203,7 @@ describe("the runner fetches its context document with a signed request", () => 
     const { origin } = await harness();
     const { privatePem } = newKeypair();
     const loader = new HashVerifiedContextLoader(
-      new RunnerSignedContextFetcher(privateKeySigner("runner-unknown", privatePem)),
+      new RunnerSignedContextFetcher(privateKeySigner("runner-unknown", privatePem, 1)),
     );
     await expect(loader.load([reference(origin)])).rejects.toThrow(/failed with 401/);
   });
@@ -180,10 +211,10 @@ describe("the runner fetches its context document with a signed request", () => 
   it("bounds replay: a signature minted outside the skew window is refused", async () => {
     const { registry, origin } = await harness();
     const { publicPem, privatePem } = newKeypair();
-    registry.set("runner-a", publicPem);
+    registry.set("runner-a", { publicKeyPem: publicPem, generation: 1 });
     const stale = new Date(Date.now() - SKEW_MS - 60_000);
     const loader = new HashVerifiedContextLoader(
-      new RunnerSignedContextFetcher(privateKeySigner("runner-a", privatePem), () => stale),
+      new RunnerSignedContextFetcher(privateKeySigner("runner-a", privatePem, 1), () => stale),
     );
     await expect(loader.load([reference(origin)])).rejects.toThrow(/failed with 401/);
   });
@@ -191,26 +222,21 @@ describe("the runner fetches its context document with a signed request", () => 
   it("binds the signature to the path, so it cannot be reused for another document", async () => {
     const { registry, origin } = await harness();
     const { publicPem, privatePem } = newKeypair();
-    registry.set("runner-a", publicPem);
-    const identity = privateKeySigner("runner-a", privatePem);
+    registry.set("runner-a", { publicKeyPem: publicPem, generation: 1 });
+    const identity = privateKeySigner("runner-a", privatePem, 1);
     const issuedAt = new Date().toISOString();
 
     // A signature legitimately minted for document A...
-    const signature = identity.sign(
-      runnerContextFetchPayload({
-        method: "GET",
-        path: "/api/v2/runs/run-1/context/artifact:A",
-        runnerId: "runner-a",
-        issuedAt,
-      }),
-    );
+    const signed = signRunnerHttpRequest({
+      identity,
+      purpose: DEVICE_CONTEXT_RETRIEVAL_HTTP_SIGNATURE_PURPOSE,
+      method: "GET",
+      url: new URL(`${origin}/api/v2/runs/run-1/context/artifact:A`),
+      timestamp: issuedAt,
+    });
     // ...presented for document B.
     const response = await fetch(`${origin}/api/v2/runs/run-1/context/artifact:B`, {
-      headers: {
-        authorization: `${RUNNER_AUTHORIZATION_SCHEME} ${signature}`,
-        [RUNNER_ID_HEADER]: "runner-a",
-        [RUNNER_TIMESTAMP_HEADER]: issuedAt,
-      },
+      headers: signed.headers,
     });
     expect(response.status).toBe(401);
   });
@@ -218,17 +244,20 @@ describe("the runner fetches its context document with a signed request", () => 
   it("is domain-separated: a bare relay-style signature is not a context credential", async () => {
     const { registry, origin } = await harness();
     const { publicPem, privatePem } = newKeypair();
-    registry.set("runner-a", publicPem);
+    registry.set("runner-a", { publicKeyPem: publicPem, generation: 1 });
     const issuedAt = new Date().toISOString();
     // The relay handshake signs a bare nonce with no domain prefix. If the
     // context route accepted that shape, a captured relay challenge response
     // could be replayed here.
-    const relayStyle = privateKeySigner("runner-a", privatePem).sign(issuedAt);
+    const relayStyle = privateKeySigner("runner-a", privatePem, 1).sign(issuedAt);
     const response = await fetch(`${origin}/api/v2/runs/run-1/context/artifact:A`, {
       headers: {
-        authorization: `${RUNNER_AUTHORIZATION_SCHEME} ${relayStyle}`,
-        [RUNNER_ID_HEADER]: "runner-a",
-        [RUNNER_TIMESTAMP_HEADER]: issuedAt,
+        authorization: `${LEGACY_RUNNER_HTTP_AUTHORIZATION_SCHEME} ${relayStyle}`,
+        [DEVICE_HTTP_DEVICE_ID_HEADER]: "runner-a",
+        [DEVICE_HTTP_CREDENTIAL_ID_HEADER]: legacyRunnerHttpCredentialId("runner-a", 1),
+        [DEVICE_HTTP_GENERATION_HEADER]: "1",
+        [DEVICE_HTTP_TIMESTAMP_HEADER]: issuedAt,
+        [DEVICE_HTTP_REQUEST_ID_HEADER]: "11111111-1111-4111-8111-111111111111",
       },
     });
     expect(response.status).toBe(401);
@@ -236,22 +265,21 @@ describe("the runner fetches its context document with a signed request", () => 
 });
 
 describe("the canonical payload", () => {
-  it("is domain-separated and field-delimited", () => {
+  it("is domain-separated and binds the full request", () => {
     expect(
-      runnerContextFetchPayload({
-        method: "get",
-        path: "/api/v2/runs/run-1/context/a",
-        runnerId: "runner-a",
-        issuedAt: "2026-07-21T00:00:00.000Z",
+      serializeSignedDeviceHttpTranscript({
+        purpose: DEVICE_CONTEXT_RETRIEVAL_HTTP_SIGNATURE_PURPOSE,
+        device_id: "runner-a",
+        credential_id: legacyRunnerHttpCredentialId("runner-a", 1),
+        generation: 1,
+        http_method: "GET",
+        canonical_path_and_query: "/api/v2/runs/run-1/context/a?part=1",
+        body_sha256: EMPTY_HTTP_BODY_SHA256,
+        timestamp: "2026-07-21T00:00:00.000Z",
+        request_id: "11111111-1111-4111-8111-111111111111",
       }),
-      // EXECUTION E9 — NEWLINE, not "|". This assertion previously pinned the
-      // runner's own spelling, which the server has never accepted: its
-      // verifier joins with "\n" and reads `x-norns-runner-timestamp`, so
-      // every real context fetch 401'd. The two halves now share one canonical
-      // form, asserted directly against the server's function in
-      // gatewayCredentialAuth.test.ts.
     ).toBe(
-      "norns:runner-context-fetch:v1\nGET\n/api/v2/runs/run-1/context/a\nrunner-a\n2026-07-21T00:00:00.000Z",
+      '{"purpose":"norns.runner-http.context-retrieval.v1","device_id":"runner-a","credential_id":"legacy-runner:runner-a:generation:1","generation":1,"http_method":"GET","canonical_path_and_query":"/api/v2/runs/run-1/context/a?part=1","body_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","timestamp":"2026-07-21T00:00:00.000Z","request_id":"11111111-1111-4111-8111-111111111111"}',
     );
   });
 });

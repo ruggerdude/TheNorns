@@ -32,24 +32,35 @@ describe.sequential("EXECUTION E2 — DispatchContextScopeRepository", () => {
   });
 
   it("is unauthorized for a document that was never scoped to any runner", async () => {
-    expect(await repo.isAuthorized("runner-1", "doc-1")).toBe(false);
+    expect(await repo.isAuthorized("runner-1", 1, "doc-1")).toBe(false);
   });
 
   it("authorizes exactly the runner recorded for exactly the document scoped to it", async () => {
     await repo.recordScope(
-      { runnerId: "runner-1", dispatchJobId: "dispatch-job:run-1", runId: "run-1" },
+      {
+        runnerId: "runner-1",
+        runnerGeneration: 1,
+        dispatchJobId: "dispatch-job:run-1",
+        runId: "run-1",
+      },
       [ref("doc-1"), ref("doc-2")],
     );
-    expect(await repo.isAuthorized("runner-1", "doc-1")).toBe(true);
-    expect(await repo.isAuthorized("runner-1", "doc-2")).toBe(true);
+    expect(await repo.isAuthorized("runner-1", 1, "doc-1")).toBe(true);
+    expect(await repo.isAuthorized("runner-1", 1, "doc-2")).toBe(true);
+    expect(await repo.isAuthorized("runner-1", 2, "doc-1")).toBe(false);
     // Neither a different document nor a different runner is authorized.
-    expect(await repo.isAuthorized("runner-1", "doc-3")).toBe(false);
-    expect(await repo.isAuthorized("runner-2", "doc-1")).toBe(false);
+    expect(await repo.isAuthorized("runner-1", 1, "doc-3")).toBe(false);
+    expect(await repo.isAuthorized("runner-2", 1, "doc-1")).toBe(false);
   });
 
   it("is a no-op for an empty ref list (never writes a row)", async () => {
     await repo.recordScope(
-      { runnerId: "runner-1", dispatchJobId: "dispatch-job:run-1", runId: "run-1" },
+      {
+        runnerId: "runner-1",
+        runnerGeneration: 1,
+        dispatchJobId: "dispatch-job:run-1",
+        runId: "run-1",
+      },
       [],
     );
     const rows = await pg.query<{ count: string }>(
@@ -64,14 +75,25 @@ describe.sequential("EXECUTION E2 — DispatchContextScopeRepository", () => {
     // same runner is legitimately re-dispatched the same document under a
     // new dispatch job — the row is refreshed in place, not duplicated.
     await repo.recordScope(
-      { runnerId: "runner-1", dispatchJobId: "dispatch-job:run-1", runId: "run-1" },
+      {
+        runnerId: "runner-1",
+        runnerGeneration: 1,
+        dispatchJobId: "dispatch-job:run-1",
+        runId: "run-1",
+      },
       [ref("shared-doc")],
     );
     await repo.recordScope(
-      { runnerId: "runner-1", dispatchJobId: "dispatch-job:run-2", runId: "run-2" },
+      {
+        runnerId: "runner-1",
+        runnerGeneration: 2,
+        dispatchJobId: "dispatch-job:run-2",
+        runId: "run-2",
+      },
       [ref("shared-doc")],
     );
-    expect(await repo.isAuthorized("runner-1", "shared-doc")).toBe(true);
+    expect(await repo.isAuthorized("runner-1", 1, "shared-doc")).toBe(false);
+    expect(await repo.isAuthorized("runner-1", 2, "shared-doc")).toBe(true);
     const rows = await pg.query<{ count: string; dispatch_job_id: string; run_id: string }>(
       "SELECT count(*) AS count FROM dispatch_context_documents WHERE runner_id = 'runner-1' AND context_document_id = 'shared-doc'",
     );
@@ -84,15 +106,25 @@ describe.sequential("EXECUTION E2 — DispatchContextScopeRepository", () => {
 
   it("scopes the same document independently per runner (one runner's dispatch never authorizes another)", async () => {
     await repo.recordScope(
-      { runnerId: "runner-1", dispatchJobId: "dispatch-job:run-1", runId: "run-1" },
+      {
+        runnerId: "runner-1",
+        runnerGeneration: 1,
+        dispatchJobId: "dispatch-job:run-1",
+        runId: "run-1",
+      },
       [ref("shared-doc")],
     );
-    expect(await repo.isAuthorized("runner-2", "shared-doc")).toBe(false);
+    expect(await repo.isAuthorized("runner-2", 1, "shared-doc")).toBe(false);
     await repo.recordScope(
-      { runnerId: "runner-2", dispatchJobId: "dispatch-job:run-3", runId: "run-3" },
+      {
+        runnerId: "runner-2",
+        runnerGeneration: 3,
+        dispatchJobId: "dispatch-job:run-3",
+        runId: "run-3",
+      },
       [ref("shared-doc")],
     );
-    expect(await repo.isAuthorized("runner-1", "shared-doc")).toBe(true);
-    expect(await repo.isAuthorized("runner-2", "shared-doc")).toBe(true);
+    expect(await repo.isAuthorized("runner-1", 1, "shared-doc")).toBe(true);
+    expect(await repo.isAuthorized("runner-2", 3, "shared-doc")).toBe(true);
   });
 });

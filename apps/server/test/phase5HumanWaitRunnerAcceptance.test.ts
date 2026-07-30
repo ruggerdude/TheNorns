@@ -19,6 +19,7 @@ import {
   CommandPolicyVerifier,
   GitWorktreeManager,
   HashVerifiedContextLoader,
+  LiveRunRegistry,
   RunnerDaemon,
   type RunnerPublisher,
   RunnerStateFile,
@@ -182,6 +183,7 @@ function executor(
   harness: RunnerHarness,
   codingRuntime: CodingRuntime,
   publisher?: RunnerPublisher,
+  liveRuns?: LiveRunRegistry,
 ): V2RunnerExecutor {
   return new V2RunnerExecutor(
     { id: "runner-1", generation: 3, scratch_root: harness.root },
@@ -192,6 +194,7 @@ function executor(
     new CommandPolicyVerifier(new Map([["verification", []]])),
     undefined,
     publisher,
+    liveRuns,
   );
 }
 
@@ -251,6 +254,32 @@ describe("Phase 5 runner human-wait acceptance", () => {
     const publication = publications[0];
     if (!publication) throw new Error("missing checkpoint publication");
     await expect(stat(publication.worktree)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("re-checks a generation fence before publishing a human-wait checkpoint", async () => {
+    const harness = await runnerHarness(cleanup, "fenced-human-wait");
+    const publications: Array<{ worktree: string; commit: string }> = [];
+    const events: EventPayloadT[] = [];
+    const liveRuns = new LiveRunRegistry();
+    const result = await executor(
+      harness,
+      runtime(async (request) => writeEnvelope(request.humanWaitPath ?? "")),
+      pushedPublisher(publications),
+      liveRuns,
+    ).execute(command(harness.base, "fenced-human-wait"), (event) => {
+      events.push(event);
+      if (event.kind === "runtime_result" && event.outcome === "waiting_for_human") {
+        liveRuns.cancelAll("device revoked before human-wait publication");
+      }
+    });
+
+    expect(result).toMatchObject({ outcome: "cancelled", publication: null });
+    expect(publications).toHaveLength(0);
+    expect(events.some((event) => event.kind === "run_published")).toBe(false);
+    expect(events.some((event) => event.kind === "human_wait_requested")).toBe(false);
+    await expect(
+      stat(resolve(harness.worktreeRoot, "run-fenced-human-wait")),
+    ).resolves.toBeTruthy();
   });
 
   it("rejects a typed wait from a legacy command that did not authorize the ask channel", async () => {

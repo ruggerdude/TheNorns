@@ -449,7 +449,9 @@ async function main(): Promise<void> {
           throw new Error("visual evidence manifest names a different approved mockup");
         }
         await new RunnerVisualEvidenceUploader(server, {
+          mode: "legacy_runner",
           runnerId,
+          generation: daemon.generation,
           sign: (payload) => daemon.sign(payload),
         }).upload(evidence, {
           project_id: command.project_id,
@@ -495,7 +497,12 @@ async function main(): Promise<void> {
       dataDir,
       workspaces,
       // The key stays inside the daemon; only a signing capability is handed out.
-      { runnerId, sign: (payload) => daemon.sign(payload) },
+      {
+        mode: "legacy_runner",
+        runnerId,
+        generation: daemon.generation,
+        sign: (payload) => daemon.sign(payload),
+      },
       daemon.inference,
       // EXECUTION E9 — the relay origin the agentic runtimes mint against.
       // `server` is already required to reach this point.

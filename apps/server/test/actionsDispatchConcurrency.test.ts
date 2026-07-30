@@ -39,10 +39,12 @@ import { Phase7OperationsService } from "../src/operations/phase7Operations.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import { SqlProxiedRunLookup, authorizeProxiedRunAccess } from "../src/runners/inferenceProxy.js";
+import { PostgresLegacyRunnerAuthorization } from "../src/runners/legacyAuthorization.js";
 import { type NornsServer, buildServer } from "../src/server.js";
 import { RelayStores } from "../src/stores.js";
-import { UserStore } from "../src/users/store.js";
-import { listen, testAdminToken, waitFor } from "./helpers.js";
+import { detectPasswordHashScheme } from "../src/users/passwords.js";
+import { type UserRecord, UserStore } from "../src/users/store.js";
+import { listen, waitFor } from "./helpers.js";
 
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -86,12 +88,36 @@ interface Stack {
   actionsRepository: ActionsExecutionRepository;
   phase4Coordinator: Phase4Coordinator;
   adminToken: string;
+  users: UserStore;
   dispatched: { inputs: Record<string, string> }[];
   /** The most recently PUT enrollment secret, unsealed with the test's own
    *  keypair — i.e. the plaintext token a real ephemeral runner would read
    *  from `NORNS_RUNNER_ENROLLMENT_TOKEN`. */
   latestEnrollmentToken: () => Promise<string>;
   stop: () => Promise<void>;
+}
+
+async function seedRelationalUser(pg: PGlite, user: UserRecord): Promise<void> {
+  if (!user.passwordHash) throw new Error(`test user ${user.id} requires a password`);
+  const passwordScheme = detectPasswordHashScheme(user.passwordHash);
+  if (!passwordScheme) throw new Error(`test user ${user.id} has an unsupported password`);
+  await pg.query(
+    `INSERT INTO users (
+       id,username,display_name,email,name,password_hash,password_hash_scheme,
+       role,status,source,source_record_id,created_at,updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active','legacy_snapshot',$1,$9,$9)`,
+    [
+      user.id,
+      user.email,
+      user.name ?? user.email,
+      user.email,
+      user.name,
+      user.passwordHash,
+      passwordScheme,
+      user.role,
+      user.createdAt,
+    ],
+  );
 }
 
 /** Seeds a project with an approved phase, a connected GitHub execution
@@ -293,11 +319,27 @@ async function buildStack(taskCount: number, cap: number): Promise<Stack> {
     stores.restoreDurableRunnerIdentity(runnerId, pem, generation),
   );
   const users = new UserStore();
-  const adminToken = testAdminToken(users);
+  const admin = users.createActive({
+    email: "test-admin@example.com",
+    password: "test-password-1",
+    role: "admin",
+  });
+  const adminToken = users.login("test-admin@example.com", "test-password-1").token;
+  const adminRecord = users.snapshot().users.find((user) => user.id === admin.id);
+  if (!adminRecord) throw new Error("missing test administrator");
+  await seedRelationalUser(pg, adminRecord);
+  await pg.query("UPDATE projects SET owner_user_id=$1 WHERE id='project-1'", [admin.id]);
+  await pg.query(
+    `INSERT INTO project_members (
+       project_id,user_id,status,added_by_user_id,added_at
+     ) VALUES ('project-1',$1,'active',$1,now())`,
+    [admin.id],
+  );
 
   const server = await buildServer({
     stores,
     users,
+    legacyRunnerAuthorization: new PostgresLegacyRunnerAuthorization(transactions),
     phase4,
     actionsExecution: {
       coordinator: actionsCoordinator,
@@ -318,6 +360,7 @@ async function buildStack(taskCount: number, cap: number): Promise<Stack> {
     actionsRepository,
     phase4Coordinator,
     adminToken,
+    users,
     dispatched,
     latestEnrollmentToken: async () => {
       if (!latestSealedSecret) throw new Error("no enrollment secret has been provisioned yet");
@@ -524,6 +567,37 @@ describe("EXECUTION E5 — per-dispatch runner identity, end to end", () => {
     const jobB = await stack.actionsCoordinator.schedule(scheduleInputFor(2));
     const daemonB = await enrollAndConnect(stack, jobB.actions.runner_id, jobB.dispatch_job_id);
     daemons.push(daemonB);
+
+    const unrelatedAdmin = stack.users.createActive({
+      email: "unrelated-admin@example.com",
+      password: "unrelated-password-1",
+      role: "admin",
+    });
+    const unrelatedRecord = stack.users
+      .snapshot()
+      .users.find((user) => user.id === unrelatedAdmin.id);
+    if (!unrelatedRecord) throw new Error("missing unrelated administrator");
+    await seedRelationalUser(stack.pg, unrelatedRecord);
+    const unrelatedToken = stack.users.login(
+      "unrelated-admin@example.com",
+      "unrelated-password-1",
+    ).token;
+    const denied = await fetch(
+      `${stack.url}/api/admin/runners/${encodeURIComponent(jobA.actions.runner_id)}/revoke`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${unrelatedToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          revoked_through_generation: jobA.actions.runner_generation,
+          reason: "administrator without project access",
+        }),
+      },
+    );
+    expect(denied.status).toBe(403);
+    expect(stack.server.connectedRunners()).toContain(jobA.actions.runner_id);
 
     const revoke = await fetch(
       `${stack.url}/api/admin/runners/${encodeURIComponent(jobA.actions.runner_id)}/revoke`,

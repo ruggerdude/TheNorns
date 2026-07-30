@@ -2,9 +2,13 @@ import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  DEVICE_CANCELLATION_TRACKING_MIGRATION_NAME,
+  DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME,
   DEVICE_IDENTITY_CORE_MIGRATION_NAME,
+  GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
   currentV2MigrationSources,
   loadDeviceIdentityCoreMigrationSql,
+  loadGatewayDeviceAuthorizationMigrationSql,
 } from "../src/persistence/v2/migrate.js";
 
 describe.sequential("device identity core migration", () => {
@@ -31,12 +35,15 @@ describe.sequential("device identity core migration", () => {
     await database.close();
   });
 
-  it("is registered last in the ordered migration manifest", async () => {
+  it("is registered before the additive Phase 2 device migrations", async () => {
     const sources = await currentV2MigrationSources();
-    expect(sources.at(-1)).toMatchObject({
-      name: DEVICE_IDENTITY_CORE_MIGRATION_NAME,
-    });
-    expect(sources.at(-1)?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
+    expect(sources.slice(-4).map((source) => source.name)).toEqual([
+      DEVICE_IDENTITY_CORE_MIGRATION_NAME,
+      DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME,
+      DEVICE_CANCELLATION_TRACKING_MIGRATION_NAME,
+      GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
+    ]);
+    expect(sources.at(-4)?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
   });
 
   it("creates the five core tables, privacy-safe columns, and runtime grants", async () => {
@@ -331,5 +338,73 @@ describe.sequential("device identity core migration", () => {
           'binding-cross-project', 'project-2', 'local_runner', 'grant-1'
         )`),
     ).rejects.toThrow();
+  });
+
+  it("keeps historical gateway credentials legacy and enforces exact device credentials", async () => {
+    const gatewayDatabase = new PGlite();
+    try {
+      await gatewayDatabase.exec(`
+        CREATE TABLE device_credentials (
+          id TEXT PRIMARY KEY,
+          device_id TEXT NOT NULL,
+          generation BIGINT NOT NULL,
+          UNIQUE (device_id,id,generation)
+        );
+        CREATE TABLE gateway_credentials (
+          id TEXT PRIMARY KEY,
+          token_hash TEXT NOT NULL UNIQUE,
+          run_id TEXT NOT NULL,
+          runner_id TEXT NOT NULL,
+          runner_generation INTEGER NOT NULL,
+          issued_at TIMESTAMPTZ NOT NULL,
+          expires_at TIMESTAMPTZ NOT NULL,
+          revoked_at TIMESTAMPTZ
+        );
+        INSERT INTO gateway_credentials (
+          id,token_hash,run_id,runner_id,runner_generation,issued_at,expires_at
+        ) VALUES (
+          'legacy-gateway',repeat('a',64),'run-1','runner-1',1,now(),now()+interval '1 hour'
+        );
+      `);
+      await gatewayDatabase.exec(await loadGatewayDeviceAuthorizationMigrationSql());
+      const legacy = await gatewayDatabase.query<{
+        authentication_subject: string;
+        device_credential_id: string | null;
+      }>(
+        `SELECT authentication_subject,device_credential_id
+           FROM gateway_credentials
+          WHERE id='legacy-gateway'`,
+      );
+      expect(legacy.rows[0]).toEqual({
+        authentication_subject: "legacy_runner",
+        device_credential_id: null,
+      });
+
+      await expect(
+        gatewayDatabase.query(
+          `INSERT INTO gateway_credentials (
+             id,token_hash,run_id,runner_id,runner_generation,
+             authentication_subject,device_credential_id,issued_at,expires_at
+           ) VALUES (
+             'forged-device',repeat('b',64),'run-2','device-1',2,
+             'device','missing-credential',now(),now()+interval '1 hour'
+           )`,
+        ),
+      ).rejects.toThrow();
+
+      await gatewayDatabase.exec(`
+        INSERT INTO device_credentials (id,device_id,generation)
+        VALUES ('credential-2','device-1',2);
+        INSERT INTO gateway_credentials (
+          id,token_hash,run_id,runner_id,runner_generation,
+          authentication_subject,device_credential_id,issued_at,expires_at
+        ) VALUES (
+          'device-gateway',repeat('c',64),'run-2','device-1',2,
+          'device','credential-2',now(),now()+interval '1 hour'
+        );
+      `);
+    } finally {
+      await gatewayDatabase.close();
+    }
   });
 });

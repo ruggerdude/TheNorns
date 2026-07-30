@@ -25,6 +25,7 @@ import {
   Phase4EventProcessor,
   Phase4RunnerEventRejectedError,
 } from "../src/coordinator/phase4EventProcessor.js";
+import { PostgresDeviceActionAuthorization } from "../src/devices/actionAuthorization.js";
 import {
   RelationalTaskContextAssembler,
   TaskContextAssemblyError,
@@ -226,6 +227,39 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
       expires_at: "2099-07-27T12:15:00.000Z",
       ...(limits.supersedes_run_id ? { supersedes_run_id: limits.supersedes_run_id } : {}),
     });
+  }
+
+  async function poisonLocalBindingWithMismatchedDeviceGrant(): Promise<void> {
+    await pg.exec(`
+      INSERT INTO devices (
+        id,owner_user_id,display_name,os_family,architecture,lifecycle,current_generation
+      ) VALUES (
+        'device-phase5-actual','${ownerId}','Actual Phase 5 device',
+        'linux','x64','active',0
+      );
+      INSERT INTO device_credentials (
+        id,device_id,generation,public_key_spki_der,public_key_fingerprint,state
+      ) VALUES (
+        'credential-phase5-actual','device-phase5-actual',1,'\\x01',
+        repeat('e',64),'active'
+      );
+      INSERT INTO device_repository_registrations (
+        id,device_id,workspace_id,repository_id,repository_display_name,
+        state,approved_by_user_id,approved_at
+      ) VALUES (
+        'registration-phase5-actual','device-phase5-actual','workspace-phase5',
+        'repository-phase5','Phase 5 Waits','active','${ownerId}',now()
+      );
+      INSERT INTO project_device_repository_grants (
+        id,project_id,repository_registration_id,state,granted_by_user_id
+      ) VALUES (
+        'grant-phase5-actual','${projectId}','registration-phase5-actual',
+        'active','${ownerId}'
+      );
+      UPDATE repository_bindings
+         SET project_device_repository_grant_id='grant-phase5-actual'
+       WHERE id='binding-phase5';
+    `);
   }
 
   async function deliver(scheduled: Scheduled): Promise<void> {
@@ -1093,6 +1127,53 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
       statuses: ["confirmed", "recorded", "sent", "agent_acknowledged", "applied"],
       commands: 2,
       jobs: 2,
+    });
+  });
+
+  it("fails a provisioned continuation instead of dispatching through a poisoned grant binding", async () => {
+    const { waitId } = await openWait();
+    await answerWait(waitId, "poisoned-local-continuation");
+    const worker = new HumanWaitContinuationWorker(
+      transactions,
+      async () => ({
+        kind: "local",
+        runner_id: "runner-phase5",
+        runner_generation: 8,
+      }),
+      { owner: "phase5-poisoned-continuation-worker" },
+    );
+    const provisioned = await worker.tick();
+    if (!provisioned) throw new Error("missing provisioned continuation");
+
+    await poisonLocalBindingWithMismatchedDeviceGrant();
+    const dispatch = new Phase4DispatchRepository(
+      transactions,
+      new PostgresDeviceActionAuthorization(),
+    );
+    await expect(dispatch.claim("phase5-poisoned-dispatcher", 30_000)).resolves.toBeNull();
+    const state = await pg.query<{
+      job_status: string;
+      command_status: string;
+      continuation_status: string;
+      last_error: string | null;
+    }>(
+      `SELECT
+         job.status AS job_status,
+         command.status AS command_status,
+         continuation.status AS continuation_status,
+         continuation.last_error
+       FROM dispatch_jobs job
+       JOIN commands command ON command.command_id=job.command_id
+       JOIN human_wait_continuations continuation
+         ON continuation.resume_command_id=command.command_id
+       WHERE job.id=$1`,
+      [provisioned.command.dispatch_job_id],
+    );
+    expect(state.rows[0]).toEqual({
+      job_status: "cancelled",
+      command_status: "cancelled",
+      continuation_status: "failed",
+      last_error: "device authorization changed before continuation dispatch",
     });
   });
 
@@ -2094,6 +2175,76 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
       intent_status: "applied",
       events: ["confirmed", "recorded", "sent", "agent_acknowledged", "applied"],
       actions: 1,
+    });
+  });
+
+  it("rejects a conversation action acknowledgement after its run binding becomes poisoned", async () => {
+    const { proposal } = await openRunningDirection("poisoned-action-ack");
+    const delivery = new ConversationActionDeliveryWorker(
+      transactions,
+      {
+        resolveTarget: async () => ({
+          runner_id: "runner-phase5",
+          generation: 7,
+        }),
+        enqueue: () => undefined,
+        notify: () => true,
+      },
+      {
+        workerId: "poisoned-action-ack-delivery",
+        deviceAuthorization: new PostgresDeviceActionAuthorization(),
+      },
+    );
+    await expect(delivery.tick()).resolves.toMatchObject({
+      action_id: proposal.action.id,
+      status: "sent",
+    });
+    await poisonLocalBindingWithMismatchedDeviceGrant();
+    await expect(
+      delivery.applyCommandAck(
+        {
+          protocol: 1,
+          event_seq: 20,
+          runner_id: "runner-phase5",
+          generation: 7,
+          correlation_id: proposal.action.id,
+          causation_id: `conversation-action-command:${proposal.action.id}`,
+          occurred_at: "2026-07-27T13:01:00.000Z",
+          payload: {
+            kind: "command_ack",
+            command_id: `conversation-action-command:${proposal.action.id}`,
+            state: "succeeded",
+            detail: "forged through a poisoned binding",
+          },
+        },
+        {
+          subject: "legacy_runner",
+          runner_id: "runner-phase5",
+          generation: 7,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "device_run_unauthorized" });
+    const state = await pg.query<{
+      action_status: string;
+      intent_status: string;
+      runner_events: number;
+    }>(
+      `SELECT
+         action.status AS action_status,
+         intent.status AS intent_status,
+         (SELECT count(*)::int FROM runner_events
+           WHERE runner_id='runner-phase5'
+             AND runner_generation=7
+             AND causation_id=$2) AS runner_events
+       FROM conversation_actions action
+       JOIN conversation_action_delivery_intents intent ON intent.action_id=action.id
+       WHERE action.id=$1`,
+      [proposal.action.id, `conversation-action-command:${proposal.action.id}`],
+    );
+    expect(state.rows[0]).toEqual({
+      action_status: "sent",
+      intent_status: "sent",
+      runner_events: 0,
     });
   });
 

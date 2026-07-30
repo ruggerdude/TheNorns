@@ -342,6 +342,11 @@ export interface RunnerVerifier {
      * be read at expected_commit before any runner-local policy is considered.
      */
     repository_manifest?: true;
+    /**
+     * Checked between verification commands and passed to the active command.
+     * The executor checks it again before issuing publication authority.
+     */
+    signal?: AbortSignal;
   }): Promise<RunnerVerificationResult>;
 }
 
@@ -389,6 +394,7 @@ export class CommandPolicyVerifier implements RunnerVerifier {
     base_revision: string;
     commands?: readonly VerificationCommand[];
     repository_manifest?: true;
+    signal?: AbortSignal;
   }): Promise<RunnerVerificationResult> {
     const refuse = (reason: string): RunnerVerificationResult => ({
       passed: false,
@@ -484,7 +490,25 @@ export class CommandPolicyVerifier implements RunnerVerifier {
 
     const results: VerificationCommandResult[] = [];
     for (const entry of commands) {
-      results.push(await this.runCommand(entry, input.worktree_path));
+      if (input.signal?.aborted) {
+        return {
+          passed: false,
+          output: this.render(source, results),
+          command_results: results,
+          reason: "verification was cancelled before all commands completed",
+          hygiene_only: false,
+        };
+      }
+      results.push(await this.runCommand(entry, input.worktree_path, input.signal));
+      if (input.signal?.aborted) {
+        return {
+          passed: false,
+          output: this.render(source, results),
+          command_results: results,
+          reason: "verification was cancelled before all commands completed",
+          hygiene_only: false,
+        };
+      }
     }
 
     const headAfter = await this.head(input.worktree_path);
@@ -518,6 +542,7 @@ export class CommandPolicyVerifier implements RunnerVerifier {
   private async runCommand(
     entry: VerificationCommand,
     worktreePath: string,
+    signal?: AbortSignal,
   ): Promise<VerificationCommandResult> {
     const [file, ...args] = entry.command;
     try {
@@ -525,6 +550,7 @@ export class CommandPolicyVerifier implements RunnerVerifier {
         cwd: worktreePath,
         maxBuffer: 10 * 1024 * 1024,
         timeout: VERIFICATION_COMMAND_TIMEOUT_MS,
+        signal,
         // No shell, ever. `entry.command` is an argv vector and stays one.
         shell: false,
       });
@@ -729,7 +755,13 @@ export class V2RunnerExecutor {
     // told the run "is not live yet"; the signal is checked at each stage
     // boundary below so the abort is honoured wherever it lands.
     const controller = new AbortController();
+    // Project cancellation may preserve already-committed work by publishing
+    // it. Device/generation fencing is a separate, stronger signal that aborts
+    // publication itself and can be delivered after project cancellation.
+    const publicationFence = new AbortController();
     let cancelReason: string | null = null;
+    let cancellationPublication: "allow_committed" | "fenced" = "allow_committed";
+    const publicationIsFenced = (): boolean => cancellationPublication === "fenced";
     /**
      * EXECUTION E11 — the resumable session this run leaves behind.
      *
@@ -740,6 +772,7 @@ export class V2RunnerExecutor {
     let sessionId: string | null = null;
     let session: RuntimeSession | null = null;
     let settled: V2RunnerExecutionResult["outcome"] = "failed";
+    let preserveWorktree = false;
     let knowledgeHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
     let knowledgeTerminalEmitted = false;
     let knowledgeCommit = command.expected_revision;
@@ -847,9 +880,13 @@ export class V2RunnerExecutor {
       runId: command.run_id,
       runtimeName: runtime.name,
       capabilities: runtime.capabilities,
-      cancel: (reason) => {
-        // Idempotent: the relay delivers at least once and a human may click
-        // twice. The FIRST reason is the one kept — it is the one a human saw.
+      cancel: (reason, options) => {
+        // Publication authority is monotonic: a device/generation fence always
+        // dominates an earlier project stop, including after the signal fired.
+        if (options.publication === "fenced") {
+          cancellationPublication = "fenced";
+          publicationFence.abort();
+        }
         if (controller.signal.aborted) return;
         cancelReason = reason;
         controller.abort();
@@ -874,6 +911,129 @@ export class V2RunnerExecutor {
         usage: { input_tokens: 0, output_tokens: 0, usage_source: "unavailable" },
         empty: true,
         publication: null,
+        session_id: sessionId,
+        reason,
+      });
+    };
+    /**
+     * Cancellation after worktree preparation preserves all local evidence.
+     * Project cancellation may publish work that was already committed;
+     * generation/device fencing is monotonic and never may.
+     */
+    const cancelledWithWorktree = async (
+      usage: RuntimeRunResult["usage"],
+    ): Promise<V2RunnerExecutionResult> => {
+      const currentWorktree = worktree;
+      if (!currentWorktree) return cancelledBefore("preparing the worktree");
+      preserveWorktree = true;
+      const commit = await currentWorktree.head();
+      const produced = commit !== currentWorktree.base_revision;
+      knowledgeCommit = produced ? commit : command.expected_revision;
+      const stopped = cancelReason ?? "the run was cancelled";
+      const sensitive = [
+        ...registeredSensitivePaths,
+        repositoryPath,
+        currentWorktree.path,
+        scratch,
+        this.runner.scratch_root,
+      ];
+      const dirty = await this.uncommittedPaths(currentWorktree.path);
+      knowledgeFiles = boundedKnowledgeList(dirty);
+      if (dirty.length > 0) {
+        emit({
+          kind: "run_log",
+          run_id: command.run_id,
+          chunk: `${stopped}: ${dirty.length} uncommitted path(s) in the worktree were NOT published, because the agent never committed them`,
+        });
+      }
+
+      let publication: PublicationResult | null = null;
+      let reason = `${stopped}; no commit had been made, so there was nothing to publish`;
+      if (produced && !publicationIsFenced()) {
+        try {
+          if (!this.publisher) {
+            throw new PublicationError(
+              "this runner has no publisher configured, so the cancelled run's commits cannot be made durable",
+              "construct V2RunnerExecutor with a RunnerPublisher",
+            );
+          }
+          // Last local authority check before publication. A later device fence
+          // can still escalate an already-fired project cancellation because
+          // cancellationPublication is monotonic.
+          if (publicationIsFenced()) {
+            reason = `${stopped}; committed work remains in the managed worktree, but publication is fenced`;
+          } else {
+            publication = await this.publisher.publish({
+              worktree_path: currentWorktree.path,
+              branch: command.target_branch,
+              commit,
+              run_id: command.run_id,
+              task_id: command.task_id,
+              verification_passed: false,
+              verification_summary:
+                "the run was cancelled before verification, so this work is UNVERIFIED",
+              signal: publicationFence.signal,
+            });
+            if (publicationIsFenced()) {
+              publication = null;
+              reason = `${stopped}; committed work remains in the managed worktree, but publication is fenced`;
+            } else {
+              reason = `${stopped}; the work committed before cancellation was published to ${publication.branch}`;
+              knowledgeArtifacts = boundedKnowledgeList([
+                `branch:${publication.branch}`,
+                `commit:${publication.commit}`,
+                ...(publication.pull_request_url ? [publication.pull_request_url] : []),
+              ]);
+              emit({
+                kind: "run_log",
+                run_id: command.run_id,
+                chunk: redactExactLocalPaths(
+                  [
+                    `published ${publication.outcome} after cancellation: branch ${publication.branch} at ${publication.commit}`,
+                    publication.remote ? `remote: ${publication.remote}` : null,
+                    publication.pull_request_url
+                      ? `pull request: ${publication.pull_request_url}`
+                      : publication.pull_request_note,
+                  ]
+                    .filter(Boolean)
+                    .join("\n"),
+                  sensitive,
+                ),
+              });
+              emit(this.publishedEvent(command.run_id, publication));
+            }
+          }
+        } catch (error) {
+          reason = publicationIsFenced()
+            ? `${stopped}; committed work remains in the managed worktree, but publication is fenced`
+            : `${stopped}, but the work committed before cancellation could NOT be published: ${
+                error instanceof PublicationError ? error.reason : "publication failed"
+              }`;
+          emit({ kind: "run_log", run_id: command.run_id, chunk: reason });
+        }
+      } else if (produced) {
+        reason = `${stopped}; committed work remains in the managed worktree, but publication is fenced`;
+        emit({ kind: "run_log", run_id: command.run_id, chunk: reason });
+      }
+      emitKnowledgeHandoff(
+        "blocked",
+        reason,
+        ["Run cancelled before verification."],
+        [
+          ...(dirty.length > 0
+            ? [`${dirty.length} uncommitted path(s) could not be published.`]
+            : []),
+        ],
+      );
+      emit({ kind: "run_log", run_id: command.run_id, chunk: reason });
+      emit({ kind: "run_status", run_id: command.run_id, status: "cancelled" });
+      return finish({
+        outcome: "cancelled",
+        commit_sha: produced ? commit : null,
+        verification_passed: false,
+        usage,
+        empty: !produced,
+        publication,
         session_id: sessionId,
         reason,
       });
@@ -1023,6 +1183,19 @@ export class V2RunnerExecutor {
           humanWait: hashHumanWaitEnvelope(humanWaitEnvelope),
         };
       }
+      // Cancellation may arrive after the runtime has resolved but before the
+      // executor has inspected its result. Normalize that race into the same
+      // cancellation path instead of allowing a stale "completed" result to
+      // proceed to verification or publication.
+      if (controller.signal.aborted && runtimeResult.outcome !== "cancelled") {
+        runtimeResult = {
+          outcome: "cancelled",
+          detail: cancelReason ?? "the run was cancelled after the runtime returned",
+          usage: runtimeResult.usage,
+          ...(runtimeResult.sessionId ? { sessionId: runtimeResult.sessionId } : {}),
+          stopReason: "cancelled",
+        };
+      }
       if (runtimeResult.sessionId) {
         sessionId = runtimeResult.sessionId;
         // Emitted as a run log because that is the only durable channel a
@@ -1062,6 +1235,9 @@ export class V2RunnerExecutor {
         remaining: "moderate",
         risk: runtimeResult.outcome === "completed" ? "green" : "red",
       });
+      if (controller.signal.aborted && runtimeResult.outcome !== "cancelled") {
+        return await cancelledWithWorktree(runtimeResult.usage);
+      }
       if (runtimeResult.outcome === "waiting_for_human") {
         if (!command.human_wait_channel) {
           const reason = "the source command did not authorize a versioned human-wait channel";
@@ -1104,6 +1280,9 @@ export class V2RunnerExecutor {
           });
         }
         const dirty = await this.allUncommittedPaths(worktree.path);
+        if (controller.signal.aborted) {
+          return await cancelledWithWorktree(runtimeResult.usage);
+        }
         if (dirty.length > 0) {
           const reason = `human input was requested with ${dirty.length} uncommitted path(s); the runner refused to release an ephemeral worktree that could not be resumed exactly`;
           emitFailure("publication", "human_wait_checkpoint_unpublished", reason);
@@ -1119,6 +1298,9 @@ export class V2RunnerExecutor {
           });
         }
         const commit = await worktree.head();
+        if (controller.signal.aborted) {
+          return await cancelledWithWorktree(runtimeResult.usage);
+        }
         let publication: PublicationResult;
         try {
           if (!this.publisher) {
@@ -1126,6 +1308,9 @@ export class V2RunnerExecutor {
               "this runner has no publisher configured for a resumable human checkpoint",
               "construct V2RunnerExecutor with a RunnerPublisher",
             );
+          }
+          if (controller.signal.aborted) {
+            return await cancelledWithWorktree(runtimeResult.usage);
           }
           publication = await this.publisher.publish({
             worktree_path: worktree.path,
@@ -1135,7 +1320,11 @@ export class V2RunnerExecutor {
             task_id: command.task_id,
             verification_passed: false,
             verification_summary: "waiting for a human decision; checkpoint is not yet verified",
+            signal: publicationFence.signal,
           });
+          if (controller.signal.aborted && publicationIsFenced()) {
+            return await cancelledWithWorktree(runtimeResult.usage);
+          }
           if (publication.outcome === "local_only" || publication.remote === null) {
             throw new PublicationError(
               "a human wait requires a remotely pushed checkpoint",
@@ -1143,6 +1332,9 @@ export class V2RunnerExecutor {
             );
           }
         } catch (error) {
+          if (controller.signal.aborted) {
+            return await cancelledWithWorktree(runtimeResult.usage);
+          }
           const reason =
             error instanceof PublicationError
               ? error.reason
@@ -1217,107 +1409,7 @@ export class V2RunnerExecutor {
       // and a green badge on a half-finished change would assert something
       // nobody checked. The publication is marked unverified and says why.
       if (runtimeResult.outcome === "cancelled") {
-        const commit = await worktree.head();
-        const produced = commit !== worktree.base_revision;
-        knowledgeCommit = produced ? commit : command.expected_revision;
-        const stopped = cancelReason ?? "the run was cancelled";
-        const sensitive = [
-          ...registeredSensitivePaths,
-          repositoryPath,
-          worktree.path,
-          scratch,
-          this.runner.scratch_root,
-        ];
-        // Work the agent had not committed cannot be published without
-        // fabricating a commit it never made. Say so rather than lose it
-        // quietly — a human can still recover it from a laptop worktree.
-        const dirty = await this.uncommittedPaths(worktree.path);
-        knowledgeFiles = boundedKnowledgeList(dirty);
-        if (dirty.length > 0) {
-          emit({
-            kind: "run_log",
-            run_id: command.run_id,
-            chunk: `${stopped}: ${dirty.length} uncommitted path(s) in the worktree were NOT published, because the agent never committed them`,
-          });
-        }
-        let publication: PublicationResult | null = null;
-        let reason = `${stopped}; no commit had been made, so there was nothing to publish`;
-        if (produced) {
-          try {
-            if (!this.publisher) {
-              throw new PublicationError(
-                "this runner has no publisher configured, so the cancelled run's commits cannot be made durable",
-                "construct V2RunnerExecutor with a RunnerPublisher",
-              );
-            }
-            publication = await this.publisher.publish({
-              worktree_path: worktree.path,
-              branch: command.target_branch,
-              commit,
-              run_id: command.run_id,
-              task_id: command.task_id,
-              verification_passed: false,
-              verification_summary:
-                "the run was cancelled before verification, so this work is UNVERIFIED",
-            });
-            reason = `${stopped}; the work committed before cancellation was published to ${publication.branch}`;
-            knowledgeArtifacts = boundedKnowledgeList([
-              `branch:${publication.branch}`,
-              `commit:${publication.commit}`,
-              ...(publication.pull_request_url ? [publication.pull_request_url] : []),
-            ]);
-            emit({
-              kind: "run_log",
-              run_id: command.run_id,
-              chunk: redactExactLocalPaths(
-                [
-                  `published ${publication.outcome} after cancellation: branch ${publication.branch} at ${publication.commit}`,
-                  publication.remote ? `remote: ${publication.remote}` : null,
-                  publication.pull_request_url
-                    ? `pull request: ${publication.pull_request_url}`
-                    : publication.pull_request_note,
-                ]
-                  .filter(Boolean)
-                  .join("\n"),
-                sensitive,
-              ),
-            });
-            // A cancelled run that published is still a run with work to
-            // review; the link matters at least as much here as on success.
-            emit(this.publishedEvent(command.run_id, publication));
-          } catch (error) {
-            // The run stays CANCELLED. A human asked for it to stop and it
-            // stopped; relabelling that as `failed` would misattribute their
-            // decision to the system. The lost work is stated instead of
-            // being hidden behind a state change.
-            reason = `${stopped}, but the work committed before cancellation could NOT be published: ${
-              error instanceof PublicationError ? error.reason : "publication failed"
-            }`;
-            emit({ kind: "run_log", run_id: command.run_id, chunk: reason });
-          }
-        }
-        emitKnowledgeHandoff(
-          "blocked",
-          reason,
-          ["Run cancelled before verification."],
-          [
-            ...(dirty.length > 0
-              ? [`${dirty.length} uncommitted path(s) could not be published.`]
-              : []),
-          ],
-        );
-        emit({ kind: "run_log", run_id: command.run_id, chunk: reason });
-        emit({ kind: "run_status", run_id: command.run_id, status: "cancelled" });
-        return finish({
-          outcome: "cancelled",
-          commit_sha: produced ? commit : null,
-          verification_passed: false,
-          usage: runtimeResult.usage,
-          empty: !produced,
-          publication,
-          session_id: sessionId,
-          reason,
-        });
+        return await cancelledWithWorktree(runtimeResult.usage);
       }
       stage = "worktree_inspection";
       const commit = await worktree.head();
@@ -1325,6 +1417,9 @@ export class V2RunnerExecutor {
       knowledgeFiles = boundedKnowledgeList(
         await this.changedPaths(worktree.path, worktree.base_revision, commit),
       );
+      if (controller.signal.aborted) {
+        return await cancelledWithWorktree(runtimeResult.usage);
+      }
 
       // EXECUTION E4 — an empty run, reported as empty.
       //
@@ -1381,6 +1476,9 @@ export class V2RunnerExecutor {
           return file ? { name: entry.name, command: [file, ...args] as const } : null;
         })
         .filter((entry): entry is VerificationCommand => entry !== null);
+      if (controller.signal.aborted) {
+        return await cancelledWithWorktree(runtimeResult.usage);
+      }
       stage = "verification";
       const verification = await this.verifier.verify({
         worktree_path: worktree.path,
@@ -1401,7 +1499,11 @@ export class V2RunnerExecutor {
         ...(command.repository_verification_manifest !== undefined
           ? { repository_manifest: true as const }
           : {}),
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) {
+        return await cancelledWithWorktree(runtimeResult.usage);
+      }
       // The failing output is the single most useful thing a human can be
       // handed, and the event contract carries only a digest of it. Stream the
       // real text as run logs so the failure is diagnosable from the UI.
@@ -1449,6 +1551,12 @@ export class V2RunnerExecutor {
             `${result.passed ? "pass" : "fail"}: ${result.name} (${result.command.join(" ")})`,
         ),
       );
+      // `emit` is synchronous and may process a just-delivered generation
+      // fence. Check again after the verification event and immediately before
+      // any publication operation.
+      if (controller.signal.aborted) {
+        return await cancelledWithWorktree(runtimeResult.usage);
+      }
 
       // EXECUTION E4 — publish BEFORE the `finally` removes the worktree.
       //
@@ -1466,6 +1574,9 @@ export class V2RunnerExecutor {
             "construct V2RunnerExecutor with a RunnerPublisher",
           );
         }
+        if (controller.signal.aborted) {
+          return await cancelledWithWorktree(runtimeResult.usage);
+        }
         publication = await this.publisher.publish({
           worktree_path: worktree.path,
           branch: command.target_branch,
@@ -1474,7 +1585,11 @@ export class V2RunnerExecutor {
           task_id: command.task_id,
           verification_passed: verification.passed,
           verification_summary: verification.reason ?? verification.output.slice(0, 4_000),
+          signal: publicationFence.signal,
         });
+        if (controller.signal.aborted && publicationIsFenced()) {
+          return await cancelledWithWorktree(runtimeResult.usage);
+        }
         emit({
           kind: "run_log",
           run_id: command.run_id,
@@ -1505,6 +1620,9 @@ export class V2RunnerExecutor {
         ]);
         emit(this.publishedEvent(command.run_id, publication));
       } catch (error) {
+        if (controller.signal.aborted) {
+          return await cancelledWithWorktree(runtimeResult.usage);
+        }
         // A push that did not happen is a FAILED run with a reason, never a
         // success and never a silent loss. Saying "succeeded" here would be
         // claiming durability for commits that are about to be deleted.
@@ -1597,7 +1715,15 @@ export class V2RunnerExecutor {
       // EXECUTION E11 — an abort mid-stage typically surfaces as a thrown
       // error (a killed child process, a rejected fetch). Reporting that as
       // `failed` would tell a human their cancellation broke the run.
-      if (controller.signal.aborted) return cancelledBefore("the run was in progress");
+      if (controller.signal.aborted) {
+        return worktree
+          ? await cancelledWithWorktree({
+              input_tokens: 0,
+              output_tokens: 0,
+              usage_source: "unavailable",
+            })
+          : cancelledBefore("the run was in progress");
+      }
       const code = FAILURE_CODE_BY_STAGE[stage];
       const rawDetail = error instanceof Error ? error.message : String(error);
       const detail = rawDetail.trim() || "runner execution failed without diagnostic detail";
@@ -1624,11 +1750,16 @@ export class V2RunnerExecutor {
       });
     } finally {
       stopKnowledgeHeartbeats();
-      // Deregister BEFORE the worktree is destroyed: from this moment a control
-      // aimed at this run is answered with "already ended (<outcome>)" rather
-      // than being applied to something that no longer exists.
+      // Deregister before cleanup or recovery handoff: from this moment a
+      // control aimed at this run is answered with "already ended (<outcome>)"
+      // rather than being applied to a process that no longer exists.
       release?.(settled);
-      await worktree?.cleanup().catch(() => undefined);
+      // Cancellation preserves the managed worktree for local diagnosis and
+      // recovery. In particular, generation fencing must stop the process tree
+      // without destroying evidence or publishing through a revoked device.
+      if (!controller.signal.aborted && !preserveWorktree) {
+        await worktree?.cleanup().catch(() => undefined);
+      }
       if (scratch) await rm(scratch, { recursive: true, force: true });
     }
   }

@@ -288,6 +288,9 @@ describe("EXECUTION E11 — cancel reaches a live coding run", () => {
       const remoteSha = await git(h.remote, "rev-parse", "refs/heads/norns/task-task-1");
       expect(remoteSha).toBe(result.commit_sha);
       expect(await git(h.remote, "show", `${remoteSha}:agent.txt`)).toBe("half the work");
+      // Cancellation preserves the managed worktree for local recovery even
+      // after committed work was made durable remotely.
+      expect(await exists(resolve(h.worktreeRoot, "run-1", "agent.txt"))).toBe(true);
       // 5. And nobody is told the unverified work passed anything.
       expect(result.verification_passed).toBe(false);
       const statuses = events
@@ -297,6 +300,202 @@ describe("EXECUTION E11 — cancel reaches a live coding run", () => {
       expect(statuses).not.toContain("failed");
     },
   );
+
+  it(
+    "generation fencing kills the process, preserves its worktree, and does not publish",
+    { timeout: 60_000 },
+    async () => {
+      const h = await harness(cleanup);
+      const survived = resolve(h.root, "FENCED_PROCESS_SURVIVED");
+      const liveRuns = new LiveRunRegistry();
+      const events: EventPayloadT[] = [];
+      const { executor, scriptBytes } = executorFor(
+        h,
+        [
+          "node -e \"require('fs').writeFileSync('fenced.txt','recover me\\n')\"",
+          "git add -A",
+          'git commit -q -m "local work before fence"',
+          "echo FENCED_WORK_COMMITTED",
+          "sleep 3",
+          `node -e "require('fs').writeFileSync(${JSON.stringify(survived)},'x')"`,
+          "sleep 60",
+        ].join("\n"),
+        liveRuns,
+        githubApi().fetchImpl,
+      );
+
+      const running = executor.execute(dispatchCommand(scriptBytes, h.base), (event) =>
+        events.push(event),
+      );
+      await awaitMarker(events, "FENCED_WORK_COMMITTED", "the local commit before fencing");
+      liveRuns.cancelAll("runner generation fenced");
+      const result = await running;
+
+      expect(result).toMatchObject({
+        outcome: "cancelled",
+        publication: null,
+        verification_passed: false,
+      });
+      expect(result.reason).toContain("publication is fenced");
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 4_000));
+      expect(await exists(survived)).toBe(false);
+      expect(await exists(resolve(h.worktreeRoot, "run-1", "fenced.txt"))).toBe(true);
+      await expect(git(h.remote, "rev-parse", "refs/heads/norns/task-task-1")).rejects.toBeTruthy();
+      expect(events.some((event) => event.kind === "run_published")).toBe(false);
+    },
+  );
+
+  it(
+    "escalates an earlier project cancellation to a publication fence",
+    { timeout: 60_000 },
+    async () => {
+      const h = await harness(cleanup);
+      const liveRuns = new LiveRunRegistry();
+      const events: EventPayloadT[] = [];
+      const { executor, scriptBytes } = executorFor(
+        h,
+        [
+          "node -e \"require('fs').writeFileSync('escalated.txt','recover locally\\n')\"",
+          "git add -A",
+          'git commit -q -m "work before cancellation escalation"',
+          "echo ESCALATION_READY",
+          "sleep 60",
+        ].join("\n"),
+        liveRuns,
+        githubApi().fetchImpl,
+      );
+
+      const running = executor.execute(dispatchCommand(scriptBytes, h.base), (event) =>
+        events.push(event),
+      );
+      await awaitMarker(events, "ESCALATION_READY", "the committed work before cancellation");
+
+      // The project stop fires AbortSignal first. The generation fence arrives
+      // while process shutdown is still settling and must still dominate.
+      const projectStop = liveRuns.control("run-1", "cancel");
+      liveRuns.cancelAll("runner generation fenced");
+      await projectStop;
+      const result = await running;
+
+      expect(result).toMatchObject({ outcome: "cancelled", publication: null });
+      expect(result.reason).toContain("publication is fenced");
+      expect(await exists(resolve(h.worktreeRoot, "run-1", "escalated.txt"))).toBe(true);
+      await expect(git(h.remote, "rev-parse", "refs/heads/norns/task-task-1")).rejects.toBeTruthy();
+      expect(events.some((event) => event.kind === "run_published")).toBe(false);
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "kills a real Unix grandchild process in the managed process group and waits for shell close",
+    { timeout: 60_000 },
+    async () => {
+      const h = await harness(cleanup);
+      const survived = resolve(h.root, "GRANDCHILD_SURVIVED");
+      const liveRuns = new LiveRunRegistry();
+      const events: EventPayloadT[] = [];
+      const { executor, scriptBytes } = executorFor(
+        h,
+        [
+          `node -e 'setTimeout(() => require("fs").writeFileSync(process.argv[1], "x"), 3000)' ${JSON.stringify(survived)} &`,
+          "echo GRANDCHILD_STARTED",
+          "wait",
+        ].join("\n"),
+        liveRuns,
+        githubApi().fetchImpl,
+      );
+
+      const running = executor.execute(dispatchCommand(scriptBytes, h.base), (event) =>
+        events.push(event),
+      );
+      await awaitMarker(events, "GRANDCHILD_STARTED", "the background grandchild");
+      liveRuns.cancelAll("runner generation fenced");
+      const result = await running;
+
+      expect(result.outcome).toBe("cancelled");
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 4_000));
+      expect(await exists(survived)).toBe(false);
+      expect(await exists(resolve(h.worktreeRoot, "run-1"))).toBe(true);
+    },
+  );
+
+  it(
+    "interrupts verification and fences publication when revocation arrives during the check",
+    { timeout: 60_000 },
+    async () => {
+      const h = await harness(cleanup);
+      const verificationStarted = resolve(h.root, "VERIFICATION_STARTED");
+      const verificationSurvived = resolve(h.root, "VERIFICATION_SURVIVED");
+      const liveRuns = new LiveRunRegistry();
+      const events: EventPayloadT[] = [];
+      const { executor, scriptBytes } = executorFor(
+        h,
+        [
+          "node -e \"require('fs').writeFileSync('verified.txt','local recovery\\n')\"",
+          "git add -A",
+          'git commit -q -m "work before verification fence"',
+        ].join("\n"),
+        liveRuns,
+        githubApi().fetchImpl,
+      );
+      const running = executor.execute(
+        dispatchCommand(scriptBytes, h.base, {
+          verification_commands: [
+            {
+              name: "long verification",
+              command: [
+                "node",
+                "-e",
+                [
+                  `require('fs').writeFileSync(${JSON.stringify(verificationStarted)}, 'x')`,
+                  `setTimeout(() => require('fs').writeFileSync(${JSON.stringify(verificationSurvived)}, 'x'), 3000)`,
+                  "setTimeout(() => {}, 60000)",
+                ].join(";"),
+              ],
+            },
+          ],
+        }),
+        (event) => events.push(event),
+      );
+      await waitFor(() => exists(verificationStarted), "verification command to start");
+      liveRuns.cancelAll("device revoked during verification");
+      const result = await running;
+
+      expect(result).toMatchObject({ outcome: "cancelled", publication: null });
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 4_000));
+      expect(await exists(verificationSurvived)).toBe(false);
+      expect(await exists(resolve(h.worktreeRoot, "run-1", "verified.txt"))).toBe(true);
+      await expect(git(h.remote, "rev-parse", "refs/heads/norns/task-task-1")).rejects.toBeTruthy();
+      expect(events.some((event) => event.kind === "run_published")).toBe(false);
+    },
+  );
+
+  it("re-checks a fence after verification and immediately before publication", async () => {
+    const h = await harness(cleanup);
+    const liveRuns = new LiveRunRegistry();
+    const events: EventPayloadT[] = [];
+    const { executor, scriptBytes } = executorFor(
+      h,
+      [
+        "node -e \"require('fs').writeFileSync('prepublication.txt','recover locally\\n')\"",
+        "git add -A",
+        'git commit -q -m "work before prepublication fence"',
+      ].join("\n"),
+      liveRuns,
+      githubApi().fetchImpl,
+    );
+
+    const result = await executor.execute(dispatchCommand(scriptBytes, h.base), (event) => {
+      events.push(event);
+      if (event.kind === "verification_result") {
+        liveRuns.cancelAll("device revoked before publication");
+      }
+    });
+
+    expect(result).toMatchObject({ outcome: "cancelled", publication: null });
+    expect(await exists(resolve(h.worktreeRoot, "run-1", "prepublication.txt"))).toBe(true);
+    await expect(git(h.remote, "rev-parse", "refs/heads/norns/task-task-1")).rejects.toBeTruthy();
+    expect(events.some((event) => event.kind === "run_published")).toBe(false);
+  });
 
   it(
     "a cancelled run that had committed nothing says there was nothing to publish",

@@ -8,9 +8,11 @@ import {
   type CommandStateT,
   type EventEnvelopeT,
   type EventPayloadT,
+  LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
   PROTOCOL_VERSION,
   TERMINAL_COMMAND_STATES,
   type V2DispatchCommandT,
+  canonicalLegacyRunnerWssAuthenticationTranscript,
   isCommandExpired,
   parseServerFrame,
 } from "@norns/contracts";
@@ -246,16 +248,25 @@ export class RunnerDaemon {
       if (!frame) return;
       switch (frame.type) {
         case "challenge": {
+          const transcript = canonicalLegacyRunnerWssAuthenticationTranscript({
+            purpose: LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
+            runner_id: this.opts.runnerId,
+            generation: state.state.generation,
+            protocol_version: PROTOCOL_VERSION,
+            challenge: frame.nonce,
+          });
           const signature = edSign(
             null,
-            Buffer.from(frame.nonce, "utf8"),
+            Buffer.from(transcript, "utf8"),
             state.state.private_key_pem,
           ).toString("base64");
           socket.send(
             JSON.stringify({
               type: "auth",
               runner_id: this.opts.runnerId,
-              nonce_signature: signature,
+              generation: state.state.generation,
+              protocol_version: PROTOCOL_VERSION,
+              transcript_signature: signature,
             }),
           );
           break;

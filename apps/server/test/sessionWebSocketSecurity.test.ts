@@ -208,6 +208,7 @@ describe.sequential("browser session WebSocket security", () => {
       stores: relayStores,
       users: new UserStore(),
       identity,
+      legacyGlobalRunnerCompatibility: { enabled: true },
     });
     const url = await listen(relationalServer);
     // POLISH P1: the pairing HTTP front door is gone; mint the runner identity

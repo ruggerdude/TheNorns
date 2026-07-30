@@ -89,17 +89,22 @@ export class TaskContextStore {
 
   /** The raw bytes for the runner-facing GET route. Null when unknown. */
   async content(documentId: string): Promise<TaskContextDocumentContent | null> {
-    return this.transactions.transaction(async (tx) => {
-      const result = await tx.query<{ media_type: string; content: Buffer | Uint8Array }>(
-        `SELECT d.media_type AS media_type, b.content AS content
-           FROM task_context_documents d
-           JOIN task_context_blobs b ON b.sha256 = d.sha256
-          WHERE d.id = $1`,
-        [documentId],
-      );
-      const row = result.rows[0];
-      if (!row) return null;
-      return { media_type: row.media_type, bytes: Buffer.from(row.content) };
-    });
+    return this.transactions.transaction((tx) => this.contentInTransaction(tx, documentId));
+  }
+
+  async contentInTransaction(
+    tx: V2SqlExecutor,
+    documentId: string,
+  ): Promise<TaskContextDocumentContent | null> {
+    const result = await tx.query<{ media_type: string; content: Buffer | Uint8Array }>(
+      `SELECT d.media_type AS media_type, b.content AS content
+         FROM task_context_documents d
+         JOIN task_context_blobs b ON b.sha256 = d.sha256
+        WHERE d.id = $1`,
+      [documentId],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return { media_type: row.media_type, bytes: Buffer.from(row.content) };
   }
 }

@@ -1,4 +1,9 @@
 import { type KeyObject, generateKeyPairSync, sign } from "node:crypto";
+import {
+  LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
+  PROTOCOL_VERSION,
+  canonicalLegacyRunnerWssAuthenticationTranscript,
+} from "@norns/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type NornsServer, buildServer } from "../src/server.js";
@@ -17,7 +22,11 @@ describe.sequential("runner event ingress fencing", () => {
     const users = new UserStore();
     token = testAdminToken(users);
     stores = new RelayStores();
-    server = await buildServer({ stores, users });
+    server = await buildServer({
+      stores,
+      users,
+      legacyGlobalRunnerCompatibility: { enabled: true },
+    });
     url = await listen(server);
   });
 
@@ -60,11 +69,22 @@ describe.sequential("runner event ingress fencing", () => {
     socket.on("message", (data) => {
       const frame = JSON.parse(data.toString()) as { type: string; nonce?: string };
       if (frame.type === "challenge" && frame.nonce) {
+        const transcript = canonicalLegacyRunnerWssAuthenticationTranscript({
+          purpose: LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
+          runner_id: runnerId,
+          generation,
+          protocol_version: PROTOCOL_VERSION,
+          challenge: frame.nonce,
+        });
         socket.send(
           JSON.stringify({
             type: "auth",
             runner_id: runnerId,
-            nonce_signature: sign(null, Buffer.from(frame.nonce), privateKey).toString("base64"),
+            generation,
+            protocol_version: PROTOCOL_VERSION,
+            transcript_signature: sign(null, Buffer.from(transcript), privateKey).toString(
+              "base64",
+            ),
           }),
         );
       } else if (frame.type === "auth_ok") {

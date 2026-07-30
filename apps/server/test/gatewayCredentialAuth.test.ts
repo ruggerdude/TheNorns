@@ -2,45 +2,43 @@
 //
 // WHY THIS FILE EXISTS AT ALL, AND WHAT IT CAUGHT.
 //
-// E1 built a runner-signed HTTP auth scheme and E3 built the runner's client
-// for it. They did not agree, in two independent ways:
-//
-//   server (`execution/runnerContextAuth.ts`)  reads `x-norns-runner-timestamp`
-//                                             and signs a `\n`-joined payload
-//   runner (`runner/src/contextAuth.ts`)       sent `x-norns-timestamp`
-//                                             and signed a `|`-joined payload
-//
-// So every real task-context fetch answered 401 and every dispatched run
-// started with an empty prompt — the exact failure E3 believed it had fixed.
-// The only test of that path drives a hand-rolled fake server that implements
-// the RUNNER's spelling on both sides, so both halves agreed with a third
-// thing and neither agreed with production. That is the fourth time a mock has
-// concealed a dead path in this repo.
-//
-// This file cannot make that mistake: it runs the REAL `buildServer`, the REAL
-// Ed25519 keypair from a REAL paired `RunnerDaemon`, and the REAL
-// `ModelGatewayClient` shipped in `@norns/runner`. Nothing in the middle is
-// written for the test.
-import { generateKeyPairSync } from "node:crypto";
+// The end-to-end tests run the real `buildServer`, the real Ed25519 keypair
+// from a paired `RunnerDaemon`, and the real `ModelGatewayClient` shipped in
+// `@norns/runner`. This prevents a test-only signer or verifier from drifting
+// away from the shared nine-field transcript.
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import {
+  DEVICE_GATEWAY_CREDENTIAL_MINT_HTTP_SIGNATURE_PURPOSE,
+  serializeSignedDeviceHttpTranscript,
+} from "@norns/contracts";
+import {
   GatewayCredentialError,
   ModelGatewayClient,
   RunnerDaemon,
   RunnerStateFile,
+  RunnerVisualEvidenceUploader,
+  devicePrivateKeySigner,
   privateKeySigner,
-  runnerContextFetchPayload,
+  signRunnerHttpRequest,
 } from "@norns/runner";
 import { afterEach, describe, expect, it } from "vitest";
 import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
-import { runnerContextSigningPayload } from "../src/execution/index.js";
+import { PostgresDeviceActionAuthorization } from "../src/devices/actionAuthorization.js";
+import { DeviceRevocationService } from "../src/devices/revocation.js";
+import {
+  DeviceHttpRequestAuthenticator,
+  PostgresDeviceHttpCredentialRepository,
+} from "../src/execution/index.js";
 import {
   GATEWAY_CREDENTIAL_ROUTE,
   GatewayCredentialService,
-  InMemoryGatewayCredentialStore,
+  type GatewaySurface,
+  ProviderGateway,
+  SqlGatewayCredentialStore,
   anthropicGatewayBaseUrl,
   openAiGatewayBaseUrl,
 } from "../src/gateway/index.js";
@@ -53,27 +51,46 @@ import { UserStore } from "../src/users/store.js";
 import { listen, testAdminToken, waitFor } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
-// The regression test proper — one assertion, no HTTP, no way to skip it
+// The regression test proper — one serializer, shared by every HTTP surface.
 // ---------------------------------------------------------------------------
 
-describe("EXECUTION E9 — runner and server agree on the signed payload", () => {
-  it("produces byte-identical canonical strings on both sides", () => {
-    const input = {
+describe("EXECUTION E9 — gateway uses the shared signed transcript", () => {
+  it("binds all nine fields through the contracts serializer", () => {
+    let captured = "";
+    const body = JSON.stringify({ run_id: "run-1" });
+    const timestamp = "2026-07-21T09:00:00.000Z";
+    const requestId = "11111111-1111-4111-8111-111111111111";
+    signRunnerHttpRequest({
+      identity: {
+        mode: "device",
+        deviceId: "device-1",
+        credentialId: "credential-1",
+        generation: 7,
+        sign: (payload) => {
+          captured = payload;
+          return "signed";
+        },
+      },
+      purpose: DEVICE_GATEWAY_CREDENTIAL_MINT_HTTP_SIGNATURE_PURPOSE,
       method: "POST",
-      path: GATEWAY_CREDENTIAL_ROUTE,
-      runnerId: "runner-1",
-      timestamp: "2026-07-21T09:00:00.000Z",
-    };
-    // The server's function and the runner's function name their timestamp
-    // field differently, which is itself how the drift went unnoticed.
-    expect(
-      runnerContextFetchPayload({
-        method: input.method,
-        path: input.path,
-        runnerId: input.runnerId,
-        issuedAt: input.timestamp,
+      url: new URL(`https://norns.example${GATEWAY_CREDENTIAL_ROUTE}?mode=task`),
+      body,
+      timestamp,
+      requestId,
+    });
+    expect(captured).toBe(
+      serializeSignedDeviceHttpTranscript({
+        purpose: DEVICE_GATEWAY_CREDENTIAL_MINT_HTTP_SIGNATURE_PURPOSE,
+        device_id: "device-1",
+        credential_id: "credential-1",
+        generation: 7,
+        http_method: "POST",
+        canonical_path_and_query: `${GATEWAY_CREDENTIAL_ROUTE}?mode=task`,
+        body_sha256: createHash("sha256").update(body).digest("hex"),
+        timestamp,
+        request_id: requestId,
       }),
-    ).toBe(runnerContextSigningPayload(input));
+    );
   });
 });
 
@@ -88,6 +105,7 @@ interface Stack {
   runId: string;
   credentials: GatewayCredentialService;
   transactions: PGliteTransactionRunner;
+  privateKeyPem: string;
   stop(): Promise<void>;
 }
 
@@ -103,10 +121,19 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
   `);
   await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
   await pg.exec(`
+    INSERT INTO users (
+      id,username,display_name,email,name,password_hash,
+      password_hash_scheme,role,status,source
+    ) VALUES (
+      'admin-1','admin@example.com','Admin','admin@example.com','Admin',
+      'hash','scrypt-v1','admin','active','native'
+    );
     INSERT INTO projects (
       id, name, description, status, assignment_policy_ref,
-      verification_policy_ref, budget_policy_ref
-    ) VALUES ('project-1','Project One','','active','assignment','verification','budget');
+      verification_policy_ref, budget_policy_ref,owner_user_id
+    ) VALUES (
+      'project-1','Project One','','active','assignment','verification','budget','admin-1'
+    );
     INSERT INTO repository_bindings (
       id, project_id, binding_type, status, runner_id, workspace_id,
       repository_id, repository_display_name, granted_permissions,
@@ -151,20 +178,81 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
       'Best','["capability"]'::jsonb,50,'allocation');
   `);
   const transactions = new PGliteTransactionRunner(pg);
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyDer = publicKey.export({ type: "spki", format: "der" });
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  await pg.query(
+    `INSERT INTO devices (
+       id,owner_user_id,display_name,os_family,architecture,lifecycle,current_generation
+     ) VALUES ($1,'admin-1','Gateway device','linux','x86_64','active',0)`,
+    [runnerId],
+  );
+  await pg.query(
+    `INSERT INTO device_credentials (
+       id,device_id,generation,public_key_spki_der,public_key_fingerprint,state
+     ) VALUES (
+       'gateway-device-credential',$1,1,$2,$3,'active'
+     )`,
+    [runnerId, publicKeyDer, createHash("sha256").update(publicKeyDer).digest("hex")],
+  );
+  await pg.query(
+    `INSERT INTO device_repository_registrations (
+       id,device_id,workspace_id,repository_id,repository_display_name,
+       state,approved_by_user_id,approved_at
+     ) VALUES (
+       'gateway-registration',$1,'workspace-1','repository-1','Project One',
+       'active','admin-1',now()
+     )`,
+    [runnerId],
+  );
+  await pg.query(
+    `INSERT INTO project_device_repository_grants (
+       id,project_id,repository_registration_id,state,granted_by_user_id
+     ) VALUES (
+       'gateway-grant','project-1','gateway-registration','active','admin-1'
+     )`,
+  );
+  await pg.query(
+    `UPDATE repository_bindings
+        SET project_device_repository_grant_id='gateway-grant'
+      WHERE id='binding-1'`,
+  );
 
   const stores = new RelayStores();
   const users = new UserStore();
   const token = testAdminToken(users);
-  const credentials = new GatewayCredentialService(new InMemoryGatewayCredentialStore());
+  const credentials = new GatewayCredentialService(new SqlGatewayCredentialStore(transactions));
   const runs = new SqlProxiedRunLookup(transactions);
+  const runnerHttpAuthentication = new DeviceHttpRequestAuthenticator({
+    repository: new PostgresDeviceHttpCredentialRepository(transactions),
+    legacyCompatibility: {
+      enabled: true,
+      lookupRunner: (requestedRunnerId) => {
+        const runner = stores.runner(requestedRunnerId);
+        return runner
+          ? {
+              public_key_pem: runner.public_key_pem,
+              generation: runner.generation,
+            }
+          : null;
+      },
+    },
+  });
+  const deviceActionAuthorization = {
+    service: new PostgresDeviceActionAuthorization(),
+    transactions,
+  };
   const server = await buildServer({
     stores,
     users,
     // The gateway is composed by buildServer's own E9 section from these; only
     // the credential store is swapped so the test can inspect it.
     planningRuns: { transactions },
+    execution: { transactions, baseUrl: "http://127.0.0.1" },
     gatewayCredentials: credentials,
     gatewayRuns: runs,
+    runnerHttpAuthentication,
+    deviceActionAuthorization,
     publicOrigin: "https://norns.example",
   });
   const origin = await listen(server);
@@ -173,14 +261,13 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
   // server records, exactly what Actions enrollment produces. (POLISH P1
   // removed the pairing HTTP front door, so the key is registered directly.)
   const dataDir = mkdtempSync(join(tmpdir(), "norns-e9-"));
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const registered = stores.registerRunner(
     runnerId,
     publicKey.export({ type: "spki", format: "pem" }).toString(),
   );
   new RunnerStateFile(dataDir, {
     runner_id: runnerId,
-    private_key_pem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    private_key_pem: privateKeyPem,
     generation: registered.generation,
   });
   const daemon = new RunnerDaemon({
@@ -224,6 +311,11 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
     issued_at: new Date(Date.now() - 60_000).toISOString(),
     expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
   });
+  await transactions.transaction(async (sql) => {
+    await sql.query("UPDATE agent_runs SET initiated_by_user_id='admin-1' WHERE id=$1", [
+      scheduled.run_id,
+    ]);
+  });
 
   return {
     server,
@@ -232,6 +324,7 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
     runId: scheduled.run_id,
     credentials,
     transactions,
+    privateKeyPem,
     stop: async () => {
       daemon.stop();
       await server.app.close();
@@ -247,38 +340,253 @@ describe.sequential("EXECUTION E9 gateway credential mint route", () => {
     await stack?.stop();
   });
 
-  it("mints a credential for the run the runner was actually dispatched", async () => {
+  it("rejects a legacy HTTP subject for a grant-backed device run", async () => {
     stack = await startStack();
     const client = new ModelGatewayClient(stack.origin, {
+      mode: "legacy_runner",
       runnerId: "runner-1",
+      generation: stack.daemon.generation,
       // The key never leaves the daemon; only a signing capability is handed
       // out, exactly as the CLI does it.
       sign: (payload) => stack.daemon.sign(payload),
     });
 
-    const credential = await client.mint(stack.runId);
+    await expect(client.mint(stack.runId)).rejects.toMatchObject({ status: 401 });
+  });
 
-    expect(credential.token.startsWith("nrngw_")).toBe(true);
-    expect(Date.parse(credential.expires_at)).toBeGreaterThan(Date.now());
-    // The base URLs handed back are the exact strings the two SDKs need.
-    expect(credential.anthropic_base_url).toBe(anthropicGatewayBaseUrl("https://norns.example"));
-    expect(credential.openai_base_url).toBe(openAiGatewayBaseUrl("https://norns.example"));
-    expect(credential.openai_base_url.endsWith("/v1")).toBe(true);
+  it("rejects a pre-existing legacy gateway token for a grant-backed device run", async () => {
+    stack = await startStack();
+    const run = await new SqlProxiedRunLookup(stack.transactions).lookup(stack.runId);
+    if (!run) throw new Error("scheduled run missing");
+    const legacy = await stack.credentials.mint(run, { subject: "legacy_runner" });
+    const response = await fetch(`${anthropicGatewayBaseUrl(stack.origin)}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${legacy.token}`,
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-5",
+        max_tokens: 8,
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+    expect(response.status).toBe(401);
+    expect(response.headers.get("x-norns-gateway-refusal")).toBe("unauthorized");
+  });
 
-    // It resolves server-side to the run, task, project and generation.
-    const resolved = await stack.credentials.resolve(credential.token);
-    expect(resolved.ok).toBe(true);
-    if (resolved.ok) {
-      expect(resolved.credential.run_id).toBe(stack.runId);
-      expect(resolved.credential.runner_id).toBe("runner-1");
-      expect(resolved.credential.runner_generation).toBe(stack.daemon.generation);
+  it("rejects a legacy visual-evidence upload for a grant-backed device run", async () => {
+    stack = await startStack();
+    const uploader = new RunnerVisualEvidenceUploader(stack.origin, {
+      mode: "legacy_runner",
+      runnerId: "runner-1",
+      generation: stack.daemon.generation,
+      sign: (payload) => stack.daemon.sign(payload),
+    });
+    const desktop = Buffer.from("desktop");
+    const mobile = Buffer.from("mobile");
+    await expect(
+      uploader.upload(
+        {
+          schema_version: 2,
+          approved_mockup_version_id: "mockup-approved",
+          commit_sha: "a".repeat(40),
+          capture_profile: {
+            renderer: "playwright",
+            browser_name: "chromium",
+            browser_version: "123.0.0",
+            font_revision: "b".repeat(64),
+            pixel_ratio: 1,
+            network: "application_only",
+            locale: "en-US",
+            timezone: "UTC",
+            fixed_clock: "2026-07-30T12:00:00.000Z",
+          },
+          screenshots: [
+            {
+              viewport: "desktop",
+              path: ".norns/visual-evidence/desktop-1440x1024.png",
+              content_hash: createHash("sha256").update(desktop).digest("hex"),
+              width: 1440,
+              height: 1024,
+              bytes: desktop,
+            },
+            {
+              viewport: "mobile",
+              path: ".norns/visual-evidence/mobile-390x844.png",
+              content_hash: createHash("sha256").update(mobile).digest("hex"),
+              width: 390,
+              height: 844,
+              bytes: mobile,
+            },
+          ],
+        },
+        {
+          project_id: "project-1",
+          work_item_id: "work-item-1",
+          conversation_id: "conversation-1",
+          phase_id: "phase-1",
+          task_id: "task-1",
+          run_id: stack.runId,
+          repository_binding_id: "binding-1",
+          verification_result_id: "verification-1",
+          deployment_record_id: "deployment-1",
+          deployment_observation_id: "observation-1",
+          verified_at: "2026-07-30T12:00:00.000Z",
+        },
+      ),
+    ).rejects.toThrow(/403/);
+  });
+
+  it("mints a device credential only through the current repository grant chain", async () => {
+    stack = await startStack();
+    const client = new ModelGatewayClient(
+      stack.origin,
+      devicePrivateKeySigner({
+        deviceId: "runner-1",
+        credentialId: "gateway-device-credential",
+        generation: 1,
+        privateKeyPem: stack.privateKeyPem,
+      }),
+    );
+    const minted = await client.mint(stack.runId);
+    const resolved = await stack.credentials.resolve(minted.token);
+    expect(resolved).toMatchObject({
+      ok: true,
+      credential: {
+        authentication_subject: "device",
+        device_credential_id: "gateway-device-credential",
+      },
+    });
+  });
+
+  it("rejects mint and provider use immediately after the device grant is revoked", async () => {
+    stack = await startStack();
+    const client = new ModelGatewayClient(
+      stack.origin,
+      devicePrivateKeySigner({
+        deviceId: "runner-1",
+        credentialId: "gateway-device-credential",
+        generation: 1,
+        privateKeyPem: stack.privateKeyPem,
+      }),
+    );
+    const minted = await client.mint(stack.runId);
+    await stack.transactions.transaction(async (sql) => {
+      await sql.query(
+        `UPDATE project_device_repository_grants
+            SET state='revoked',revoked_by_user_id='admin-1',
+                revoked_at=now(),updated_at=now()
+          WHERE id='gateway-grant'`,
+      );
+    });
+
+    await expect(client.mint(stack.runId)).rejects.toMatchObject({ status: 401 });
+    const use = await fetch(`${anthropicGatewayBaseUrl(stack.origin)}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${minted.token}`,
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-5",
+        max_tokens: 8,
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+    expect(use.status).toBe(401);
+    expect(use.headers.get("x-norns-gateway-refusal")).toBe("unauthorized");
+  });
+
+  it("commits device revocation while an authorized provider request is waiting for headers", async () => {
+    stack = await startStack();
+    const runs = new SqlProxiedRunLookup(stack.transactions);
+    const run = await runs.lookup(stack.runId);
+    if (!run) throw new Error("scheduled run missing");
+    const minted = await stack.credentials.mint(run, {
+      subject: "device",
+      credential_id: "gateway-device-credential",
+    });
+
+    let releaseProvider!: (response: Response) => void;
+    const providerHeaders = new Promise<Response>((resolve) => {
+      releaseProvider = resolve;
+    });
+    let markProviderStarted!: () => void;
+    const providerStarted = new Promise<void>((resolve) => {
+      markProviderStarted = resolve;
+    });
+    const anthropicSurface: GatewaySurface = {
+      provider: "anthropic",
+      origin: "https://provider.invalid",
+      paths: new Set(["/v1/models"]),
+      meteredPaths: new Set(),
+      authHeaders: (key) => ({ "x-api-key": key }),
+    };
+    const openAiSurface: GatewaySurface = {
+      provider: "openai",
+      origin: "https://provider.invalid",
+      paths: new Set(["/v1/models"]),
+      meteredPaths: new Set(),
+      authHeaders: (key) => ({ authorization: `Bearer ${key}` }),
+    };
+    const gateway = new ProviderGateway({
+      runs,
+      credentials: stack.credentials,
+      deviceActionAuthorization: {
+        service: new PostgresDeviceActionAuthorization(),
+        transactions: stack.transactions,
+      },
+      apiKey: () => "provider-key",
+      fetchImpl: (async () => {
+        markProviderStarted();
+        return providerHeaders;
+      }) as typeof fetch,
+      surfaces: { anthropic: anthropicSurface, openai: openAiSurface },
+    });
+
+    const forwarding = gateway.forward({
+      provider: "anthropic",
+      path: "/v1/models",
+      query: "",
+      method: "GET",
+      headers: { authorization: `Bearer ${minted.token}` },
+      body: new Uint8Array(),
+    });
+    await providerStarted;
+
+    // The response headers are still withheld. This would deadlock (or make
+    // PGlite reject a nested transaction) if `forward` kept assertRun's row
+    // locks until the external fetch returned.
+    const revocation = await new DeviceRevocationService(stack.transactions).revoke({
+      device_id: "runner-1",
+      revoked_by_user_id: "admin-1",
+      reason: "Regression: revoke during withheld provider headers",
+      revoked_at: new Date().toISOString(),
+    });
+    expect(revocation.record.affected_run_ids).toEqual([stack.runId]);
+
+    releaseProvider(
+      new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const result = await forwarding;
+    expect(result.kind).toBe("forwarded");
+    if (result.kind === "forwarded") {
+      for await (const _chunk of result.body) {
+        // Consume the body so the forwarding request reaches its terminal path.
+      }
     }
   });
 
   it("refuses to mint for a run the caller was not dispatched", async () => {
     stack = await startStack();
     const client = new ModelGatewayClient(stack.origin, {
+      mode: "legacy_runner",
       runnerId: "runner-1",
+      generation: stack.daemon.generation,
       sign: (payload) => stack.daemon.sign(payload),
     });
     await expect(client.mint("run-belonging-to-nobody")).rejects.toBeInstanceOf(
@@ -295,7 +603,11 @@ describe.sequential("EXECUTION E9 gateway credential mint route", () => {
     const { privateKey } = generateKeyPairSync("ed25519");
     const impostor = new ModelGatewayClient(
       stack.origin,
-      privateKeySigner("runner-1", privateKey.export({ type: "pkcs8", format: "pem" }).toString()),
+      privateKeySigner(
+        "runner-1",
+        privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+        1,
+      ),
     );
     await expect(impostor.mint(stack.runId)).rejects.toMatchObject({ status: 401 });
   });
@@ -305,10 +617,53 @@ describe.sequential("EXECUTION E9 gateway credential mint route", () => {
     const longAgo = new Date(Date.now() - 60 * 60_000);
     const client = new ModelGatewayClient(
       stack.origin,
-      { runnerId: "runner-1", sign: (payload) => stack.daemon.sign(payload) },
+      {
+        mode: "legacy_runner",
+        runnerId: "runner-1",
+        generation: stack.daemon.generation,
+        sign: (payload) => stack.daemon.sign(payload),
+      },
       () => longAgo,
     );
     await expect(client.mint(stack.runId)).rejects.toMatchObject({ status: 401 });
+  });
+
+  it("refuses the current key when it claims a stale or future generation", async () => {
+    stack = await startStack();
+    const client = new ModelGatewayClient(stack.origin, {
+      mode: "legacy_runner",
+      runnerId: "runner-1",
+      generation: stack.daemon.generation + 1,
+      sign: (payload) => stack.daemon.sign(payload),
+    });
+    await expect(client.mint(stack.runId)).rejects.toMatchObject({ status: 401 });
+  });
+
+  it("refuses a valid signature when the transmitted body changes", async () => {
+    stack = await startStack();
+    const body = JSON.stringify({ run_id: stack.runId });
+    const signed = signRunnerHttpRequest({
+      identity: {
+        mode: "legacy_runner",
+        runnerId: "runner-1",
+        generation: stack.daemon.generation,
+        sign: (payload) => stack.daemon.sign(payload),
+      },
+      purpose: DEVICE_GATEWAY_CREDENTIAL_MINT_HTTP_SIGNATURE_PURPOSE,
+      method: "POST",
+      url: new URL(`${stack.origin}${GATEWAY_CREDENTIAL_ROUTE}`),
+      body,
+      timestamp: new Date().toISOString(),
+    });
+    const response = await fetch(`${stack.origin}${GATEWAY_CREDENTIAL_ROUTE}`, {
+      method: "POST",
+      headers: {
+        ...signed.headers,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ run_id: "different-run" }),
+    });
+    expect(response.status).toBe(401);
   });
 
   it("refuses an unauthenticated mint attempt outright", async () => {
@@ -323,10 +678,15 @@ describe.sequential("EXECUTION E9 gateway credential mint route", () => {
 
   it("stops working once the run is no longer spendable", async () => {
     stack = await startStack();
-    const client = new ModelGatewayClient(stack.origin, {
-      runnerId: "runner-1",
-      sign: (payload) => stack.daemon.sign(payload),
-    });
+    const client = new ModelGatewayClient(
+      stack.origin,
+      devicePrivateKeySigner({
+        deviceId: "runner-1",
+        credentialId: "gateway-device-credential",
+        generation: 1,
+        privateKeyPem: stack.privateKeyPem,
+      }),
+    );
     await client.mint(stack.runId);
 
     // Terminal state: the coordinator's own vocabulary, not a test-only flag.
@@ -372,12 +732,18 @@ describe.sequential("EXECUTION E9 boot wiring", () => {
     await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
     const transactions = new PGliteTransactionRunner(pg);
 
-    // Exactly what main.ts passes: `planningRuns: { transactions }` plus a
-    // publicOrigin. No gateway, no credential service, no run lookup.
+    const stores = new RelayStores();
+    const runnerHttpAuthentication = new DeviceHttpRequestAuthenticator({
+      repository: new PostgresDeviceHttpCredentialRepository(transactions),
+      legacyCompatibility: { enabled: false },
+    });
+    // Exactly the production composition inputs: relational transactions,
+    // runner HTTP authentication, and the public origin.
     const server = await buildServer({
-      stores: new RelayStores(),
+      stores,
       users: new UserStore(),
       planningRuns: { transactions },
+      runnerHttpAuthentication,
       publicOrigin: "https://norns.example",
     });
     const origin = await listen(server);
@@ -414,6 +780,8 @@ describe.sequential("EXECUTION E9 boot wiring", () => {
       });
       expect(columns).toContain("token_hash");
       expect(columns).toContain("runner_generation");
+      expect(columns).toContain("authentication_subject");
+      expect(columns).toContain("device_credential_id");
       expect(columns).not.toContain("token");
     } finally {
       await server.app.close();

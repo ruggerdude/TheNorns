@@ -8,6 +8,7 @@ import { Phase4EventProcessor } from "../src/coordinator/phase4EventProcessor.js
 import { Phase4RecoveryActionService } from "../src/coordinator/phase4RecoveryActions.js";
 import { Phase4RecoveryMonitor } from "../src/coordinator/phase4RecoveryMonitor.js";
 import { PhaseLaunchService } from "../src/coordinator/phaseLaunchService.js";
+import { PostgresDeviceActionAuthorization } from "../src/devices/actionAuthorization.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 
@@ -123,6 +124,35 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     });
   }
 
+  async function poisonPrimaryBindingWithMismatchedDeviceGrant(): Promise<void> {
+    await pg.exec(`
+      INSERT INTO devices (
+        id,owner_user_id,display_name,os_family,architecture,lifecycle,current_generation
+      ) VALUES ('device-actual','admin-1','Actual device','linux','x64','active',0);
+      INSERT INTO device_credentials (
+        id,device_id,generation,public_key_spki_der,public_key_fingerprint,state
+      ) VALUES (
+        'credential-actual','device-actual',1,'\\x01',
+        repeat('d',64),'active'
+      );
+      INSERT INTO device_repository_registrations (
+        id,device_id,workspace_id,repository_id,repository_display_name,
+        state,approved_by_user_id,approved_at
+      ) VALUES (
+        'registration-actual','device-actual','workspace-1','repository-1',
+        'Project One','active','admin-1',now()
+      );
+      INSERT INTO project_device_repository_grants (
+        id,project_id,repository_registration_id,state,granted_by_user_id
+      ) VALUES (
+        'grant-actual','project-1','registration-actual','active','admin-1'
+      );
+      UPDATE repository_bindings
+         SET project_device_repository_grant_id='grant-actual'
+       WHERE id='binding-1';
+    `);
+  }
+
   it("atomically assigns, reserves budget, and creates stable durable outbox records", async () => {
     const result = await schedule();
 
@@ -236,6 +266,181 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     );
     expect(state.rows[0]).toEqual({ job: "delivered", command: "dispatched", run: "dispatched" });
     await expect(repository.pendingForRunner("runner-1", 3)).resolves.toEqual([scheduled.command]);
+  });
+
+  it("cancels a claimed command when a grant-backed binding reveals identity confusion", async () => {
+    const scheduled = await schedule();
+    const transactions = new PGliteTransactionRunner(pg);
+    const unsecured = new Phase4DispatchRepository(transactions);
+    const claimed = await unsecured.claim("dispatcher-a", 30_000);
+    expect(claimed?.command.command_id).toBe(scheduled.command_id);
+
+    await poisonPrimaryBindingWithMismatchedDeviceGrant();
+    let delivered = false;
+    const secured = new Phase4DispatchRepository(
+      transactions,
+      new PostgresDeviceActionAuthorization(),
+    );
+    await expect(
+      secured.deliverClaimed(
+        scheduled.dispatch_job_id,
+        "dispatcher-a",
+        scheduled.command,
+        async () => {
+          delivered = true;
+        },
+        "2026-07-16T20:01:00.000Z",
+      ),
+    ).resolves.toBe("cancelled_stale");
+    expect(delivered).toBe(false);
+    const state = await pg.query<{ job: string; command: string }>(
+      `SELECT job.status AS job,command.status AS command
+         FROM dispatch_jobs job
+         JOIN commands command ON command.command_id=job.command_id
+        WHERE job.id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    expect(state.rows[0]).toEqual({ job: "cancelled", command: "cancelled" });
+  });
+
+  it("never reconnect-redelivers a delivered command after its binding becomes identity-confused", async () => {
+    const scheduled = await schedule();
+    const transactions = new PGliteTransactionRunner(pg);
+    const unsecured = new Phase4DispatchRepository(transactions);
+    await unsecured.claim("dispatcher-a", 30_000);
+    await unsecured.markDelivered(
+      scheduled.dispatch_job_id,
+      "dispatcher-a",
+      "2026-07-16T20:01:00.000Z",
+    );
+
+    await poisonPrimaryBindingWithMismatchedDeviceGrant();
+    const secured = new Phase4DispatchRepository(
+      transactions,
+      new PostgresDeviceActionAuthorization(),
+    );
+    await expect(secured.pendingForRunner("runner-1", 3)).resolves.toEqual([]);
+    const state = await pg.query<{ job: string; command: string }>(
+      `SELECT job.status AS job,command.status AS command
+         FROM dispatch_jobs job
+         JOIN commands command ON command.command_id=job.command_id
+        WHERE job.id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    expect(state.rows[0]).toEqual({ job: "cancelled", command: "cancelled" });
+  });
+
+  it("does not requeue a lease that revocation cancelled after delivery failed", async () => {
+    const scheduled = await schedule();
+    const repository = new Phase4DispatchRepository(new PGliteTransactionRunner(pg));
+    await expect(repository.claim("dispatcher-a", 30_000)).resolves.toMatchObject({
+      job_id: scheduled.dispatch_job_id,
+    });
+    await pg.query(
+      `UPDATE dispatch_jobs
+          SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL,updated_at=now()
+        WHERE id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    await pg.query("UPDATE commands SET status='cancelled',updated_at=now() WHERE command_id=$1", [
+      scheduled.command_id,
+    ]);
+
+    await expect(
+      repository.retry(
+        scheduled.dispatch_job_id,
+        "dispatcher-a",
+        "socket closed during send",
+        1_000,
+      ),
+    ).resolves.toBeUndefined();
+    const state = await pg.query<{ job: string; command: string }>(
+      `SELECT job.status AS job,command.status AS command
+         FROM dispatch_jobs job
+         JOIN commands command ON command.command_id=job.command_id
+        WHERE job.id=$1`,
+      [scheduled.dispatch_job_id],
+    );
+    expect(state.rows[0]).toEqual({ job: "cancelled", command: "cancelled" });
+  });
+
+  it("rejects run events and command acknowledgements for a poisoned grant-backed binding", async () => {
+    const scheduled = await schedule();
+    await poisonPrimaryBindingWithMismatchedDeviceGrant();
+    const processor = new Phase4EventProcessor(
+      new PGliteTransactionRunner(pg),
+      undefined,
+      new PostgresDeviceActionAuthorization(),
+    );
+    const identity = {
+      subject: "legacy_runner" as const,
+      runner_id: "runner-1",
+      generation: 3,
+    };
+    await expect(
+      processor.apply(
+        {
+          protocol: 1,
+          event_seq: 1,
+          runner_id: "runner-1",
+          generation: 3,
+          correlation_id: "correlation-1",
+          causation_id: scheduled.command_id,
+          occurred_at: "2026-07-16T20:01:00.000Z",
+          payload: {
+            kind: "run_status",
+            run_id: scheduled.run_id,
+            status: "started",
+          },
+        },
+        identity,
+      ),
+    ).rejects.toThrow(/not currently authorized for the event run/i);
+    await expect(
+      processor.apply(
+        {
+          protocol: 1,
+          event_seq: 2,
+          runner_id: "runner-1",
+          generation: 3,
+          correlation_id: "correlation-1",
+          causation_id: scheduled.command_id,
+          occurred_at: "2026-07-16T20:02:00.000Z",
+          payload: {
+            kind: "command_ack",
+            command_id: scheduled.command_id,
+            state: "accepted",
+            detail: "accepted after binding changed",
+          },
+        },
+        identity,
+      ),
+    ).rejects.toThrow(/not currently authorized for the acknowledged command/i);
+    await expect(
+      processor.apply({
+        protocol: 1,
+        event_seq: 3,
+        runner_id: "runner-1",
+        generation: 3,
+        correlation_id: "correlation-1",
+        causation_id: scheduled.command_id,
+        occurred_at: "2026-07-16T20:03:00.000Z",
+        payload: {
+          kind: "command_ack",
+          command_id: scheduled.command_id,
+          state: "accepted",
+          detail: "missing authenticated identity",
+        },
+      }),
+    ).rejects.toThrow(/authenticated transport identity is required/i);
+    const state = await pg.query<{ events: number; command: string; run: string }>(
+      `SELECT
+         (SELECT count(*)::int FROM runner_events WHERE runner_id='runner-1') AS events,
+         (SELECT status FROM commands WHERE command_id=$1) AS command,
+         (SELECT state FROM agent_runs WHERE id=$2) AS run`,
+      [scheduled.command_id, scheduled.run_id],
+    );
+    expect(state.rows[0]).toEqual({ events: 0, command: "queued", run: "created" });
   });
 
   it("durably applies runner events once and closes reviewed integrated work", async () => {

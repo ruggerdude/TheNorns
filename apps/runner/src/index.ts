@@ -41,6 +41,12 @@ export {
   PendingDeviceCredentialStore,
   type PendingDeviceCredentialSummary,
 } from "./pendingDeviceCredential.js";
+export {
+  createDeviceCancellationEvidenceFrame,
+  createDeviceWssAuthenticationFrame,
+  type DeviceWssIdentity,
+  type DeviceWssProofInput,
+} from "./deviceWssAuth.js";
 export { WorkspaceRegistry } from "./workspaceRegistry.js";
 export {
   DEFAULT_VERIFICATION_POLICY_REF,
@@ -81,14 +87,20 @@ export {
   type InferenceTransport,
 } from "./inferenceClient.js";
 export {
-  RUNNER_AUTHORIZATION_SCHEME,
-  RUNNER_CONTEXT_FETCH_DOMAIN,
-  RUNNER_ID_HEADER,
-  RUNNER_TIMESTAMP_HEADER,
+  DEVICE_HTTP_AUTHORIZATION_SCHEME,
+  DEVICE_HTTP_CREDENTIAL_ID_HEADER,
+  DEVICE_HTTP_DEVICE_ID_HEADER,
+  DEVICE_HTTP_GENERATION_HEADER,
+  DEVICE_HTTP_REQUEST_ID_HEADER,
+  DEVICE_HTTP_TIMESTAMP_HEADER,
+  LEGACY_RUNNER_HTTP_AUTHORIZATION_SCHEME,
   RunnerSignedContextFetcher,
+  type DeviceRunnerHttpIdentity,
+  type LegacyRunnerHttpIdentity,
   type RunnerContextIdentity,
+  devicePrivateKeySigner,
   privateKeySigner,
-  runnerContextFetchPayload,
+  signRunnerHttpRequest,
 } from "./contextAuth.js";
 export {
   CLAUDE_CODE_AUTONOMOUS_TOOLS,

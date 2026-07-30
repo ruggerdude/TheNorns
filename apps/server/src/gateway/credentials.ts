@@ -27,7 +27,7 @@
 // to remember to delete it.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { newId } from "../ids.js";
-import type { V2TransactionRunner } from "../persistence/v2/database.js";
+import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import type { ProxiedRunFacts } from "../runners/inferenceProxy.js";
 
 /**
@@ -52,6 +52,8 @@ export interface GatewayCredentialRecord {
   runner_id: string;
   /** The dispatch generation the token was minted at. The fence. */
   runner_generation: number;
+  authentication_subject: "device" | "legacy_runner";
+  device_credential_id: string | null;
   issued_at: string;
   expires_at: string;
   revoked_at: string | null;
@@ -65,8 +67,11 @@ export interface MintedGatewayCredential {
 
 /** Durable storage. A port so the decision logic is testable without a DB. */
 export interface GatewayCredentialStore {
-  insert(record: GatewayCredentialRecord & { token_hash: string }): Promise<void>;
-  findByHash(tokenHash: string): Promise<GatewayCredentialRecord | null>;
+  insert(
+    record: GatewayCredentialRecord & { token_hash: string },
+    sql?: V2SqlExecutor,
+  ): Promise<void>;
+  findByHash(tokenHash: string, sql?: V2SqlExecutor): Promise<GatewayCredentialRecord | null>;
   /** Revokes every live credential for a run. Idempotent. */
   revokeRun(runId: string, atIso: string): Promise<void>;
   /** Housekeeping: drop rows no request could ever accept again. */
@@ -117,23 +122,35 @@ export class GatewayCredentialService {
    * being the mint AND the guard is how a mint ends up trusted with something
    * it never checked.
    */
-  async mint(run: ProxiedRunFacts): Promise<MintedGatewayCredential> {
+  async mint(
+    run: ProxiedRunFacts,
+    authentication: { subject: "device"; credential_id: string } | { subject: "legacy_runner" } = {
+      subject: "legacy_runner",
+    },
+    sql?: V2SqlExecutor,
+  ): Promise<MintedGatewayCredential> {
     // 32 bytes of CSPRNG. base64url so it survives a shell, a YAML file, an
     // HTTP header, and a TOML config without escaping.
     const secret = randomBytes(32).toString("base64url");
     const token = `${GATEWAY_TOKEN_PREFIX}${secret}`;
     const issued = this.now();
     const expires = new Date(issued.getTime() + this.ttlMs);
-    await this.store.insert({
-      id: newId("gwcred"),
-      token_hash: hashGatewayToken(token),
-      run_id: run.run_id,
-      runner_id: run.runner_id,
-      runner_generation: run.runner_generation,
-      issued_at: issued.toISOString(),
-      expires_at: expires.toISOString(),
-      revoked_at: null,
-    });
+    await this.store.insert(
+      {
+        id: newId("gwcred"),
+        token_hash: hashGatewayToken(token),
+        run_id: run.run_id,
+        runner_id: run.runner_id,
+        runner_generation: run.runner_generation,
+        authentication_subject: authentication.subject,
+        device_credential_id:
+          authentication.subject === "device" ? authentication.credential_id : null,
+        issued_at: issued.toISOString(),
+        expires_at: expires.toISOString(),
+        revoked_at: null,
+      },
+      sql,
+    );
     return { token, expires_at: expires.toISOString() };
   }
 
@@ -143,12 +160,15 @@ export class GatewayCredentialService {
    * Every failure is a distinct reason for the SERVER's audit trail only. What
    * goes back on the wire is one indistinguishable 401 — see `routes.ts`.
    */
-  async resolve(token: string | null | undefined): Promise<GatewayCredentialResolution> {
+  async resolve(
+    token: string | null | undefined,
+    sql?: V2SqlExecutor,
+  ): Promise<GatewayCredentialResolution> {
     if (typeof token !== "string" || !token.startsWith(GATEWAY_TOKEN_PREFIX)) {
       return { ok: false, reason: "malformed" };
     }
     const presented = hashGatewayToken(token);
-    const credential = await this.store.findByHash(presented);
+    const credential = await this.store.findByHash(presented, sql);
     // findByHash matched on the hash already; re-comparing in constant time
     // costs nothing and removes any dependence on how the store compared.
     if (!credential) return { ok: false, reason: "unknown" };
@@ -184,40 +204,54 @@ export class GatewayCredentialService {
 export class SqlGatewayCredentialStore implements GatewayCredentialStore {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
-  async insert(record: GatewayCredentialRecord & { token_hash: string }): Promise<void> {
-    await this.transactions.transaction(async (sql) => {
-      await sql.query(
+  async insert(
+    record: GatewayCredentialRecord & { token_hash: string },
+    sql?: V2SqlExecutor,
+  ): Promise<void> {
+    const insert = async (executor: V2SqlExecutor): Promise<void> => {
+      await executor.query(
         `INSERT INTO gateway_credentials (
            id, token_hash, run_id, runner_id, runner_generation,
+           authentication_subject,device_credential_id,
            issued_at, expires_at, revoked_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         [
           record.id,
           record.token_hash,
           record.run_id,
           record.runner_id,
           record.runner_generation,
+          record.authentication_subject,
+          record.device_credential_id,
           record.issued_at,
           record.expires_at,
           record.revoked_at,
         ],
       );
-    });
+    };
+    if (sql) return insert(sql);
+    await this.transactions.transaction(insert);
   }
 
-  async findByHash(tokenHash: string): Promise<GatewayCredentialRecord | null> {
-    return this.transactions.transaction(async (sql) => {
-      const result = await sql.query<{
+  async findByHash(
+    tokenHash: string,
+    sql?: V2SqlExecutor,
+  ): Promise<GatewayCredentialRecord | null> {
+    const find = async (executor: V2SqlExecutor): Promise<GatewayCredentialRecord | null> => {
+      const result = await executor.query<{
         id: string;
         token_hash: string;
         run_id: string;
         runner_id: string;
         runner_generation: number | string;
+        authentication_subject: "device" | "legacy_runner";
+        device_credential_id: string | null;
         issued_at: string | Date;
         expires_at: string | Date;
         revoked_at: string | Date | null;
       }>(
         `SELECT id, token_hash, run_id, runner_id, runner_generation,
+                authentication_subject,device_credential_id,
                 issued_at, expires_at, revoked_at
          FROM gateway_credentials WHERE token_hash = $1 LIMIT 1`,
         [tokenHash],
@@ -229,11 +263,15 @@ export class SqlGatewayCredentialStore implements GatewayCredentialStore {
         run_id: row.run_id,
         runner_id: row.runner_id,
         runner_generation: Number(row.runner_generation),
+        authentication_subject: row.authentication_subject,
+        device_credential_id: row.device_credential_id,
         issued_at: iso(row.issued_at),
         expires_at: iso(row.expires_at),
         revoked_at: row.revoked_at === null ? null : iso(row.revoked_at),
       };
-    });
+    };
+    if (sql) return find(sql);
+    return this.transactions.transaction(find);
   }
 
   async revokeRun(runId: string, atIso: string): Promise<void> {
@@ -265,11 +303,17 @@ function iso(value: string | Date): string {
 export class InMemoryGatewayCredentialStore implements GatewayCredentialStore {
   private readonly rows = new Map<string, GatewayCredentialRecord & { token_hash: string }>();
 
-  async insert(record: GatewayCredentialRecord & { token_hash: string }): Promise<void> {
+  async insert(
+    record: GatewayCredentialRecord & { token_hash: string },
+    _sql?: V2SqlExecutor,
+  ): Promise<void> {
     this.rows.set(record.token_hash, { ...record });
   }
 
-  async findByHash(tokenHash: string): Promise<GatewayCredentialRecord | null> {
+  async findByHash(
+    tokenHash: string,
+    _sql?: V2SqlExecutor,
+  ): Promise<GatewayCredentialRecord | null> {
     const row = this.rows.get(tokenHash);
     return row ? { ...row } : null;
   }

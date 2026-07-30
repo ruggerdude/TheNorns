@@ -1,12 +1,146 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEVICE_CANCELLATION_EVIDENCE_WSS_SIGNATURE_PURPOSE,
+  LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
   RunnerFrame,
   RunnerWorkspaceRequest,
   RunnerWorkspaceResponse,
   ServerFrame,
+  canonicalDeviceCancellationEvidenceWssTranscript,
+  canonicalLegacyRunnerWssAuthenticationTranscript,
 } from "../src/wire.js";
 
 describe("runner workspace wire", () => {
+  it("separates device transcript authentication from legacy nonce authentication", () => {
+    expect(
+      canonicalLegacyRunnerWssAuthenticationTranscript({
+        purpose: LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
+        runner_id: "legacy-runner",
+        generation: 2,
+        protocol_version: 1,
+        challenge: "legacy-nonce",
+      }),
+    ).toBe(
+      '{"purpose":"norns.legacy-runner-wss-auth.v1","runner_id":"legacy-runner","generation":2,"protocol_version":1,"challenge":"legacy-nonce"}',
+    );
+    expect(
+      ServerFrame.safeParse({
+        type: "challenge",
+        nonce: "legacy-nonce",
+        device_auth: {
+          challenge: "device-challenge",
+          supported_protocol_versions: ["1"],
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      RunnerFrame.safeParse({
+        type: "auth",
+        runner_id: "legacy-runner",
+        generation: 2,
+        protocol_version: 1,
+        transcript_signature: "base64-signature",
+      }).success,
+    ).toBe(true);
+    expect(
+      RunnerFrame.safeParse({
+        type: "auth",
+        runner_id: "legacy-runner",
+        nonce_signature: "bare-nonce-signature",
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerFrame.safeParse({
+        type: "device_auth",
+        device_id: "device-1",
+        credential_id: "credential-1",
+        generation: 1,
+        protocol_version: "1",
+        transcript_signature: "base64-signature",
+      }).success,
+    ).toBe(true);
+    expect(
+      RunnerFrame.safeParse({
+        type: "device_auth",
+        runner_id: "legacy-runner",
+        nonce_signature: "base64-signature",
+      }).success,
+    ).toBe(false);
+    expect(
+      ServerFrame.safeParse({
+        type: "device_auth_ok",
+        device_id: "device-1",
+        generation: 1,
+        protocol_version: "1",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("binds cancellation evidence to an exact domain-separated state transition", () => {
+    const acknowledged = {
+      type: "device_cancellation_evidence" as const,
+      device_id: "device-1",
+      credential_id: "credential-1",
+      generation: 4,
+      run_id: "run-1",
+      evidence_state: "runner_acknowledged" as const,
+      acknowledged_at: "2026-07-30T12:00:00.000Z",
+      process_exited_at: null,
+      process_tree_reaped: false,
+      transcript_signature: "base64-signature",
+    };
+    expect(RunnerFrame.safeParse(acknowledged).success).toBe(true);
+    expect(
+      RunnerFrame.safeParse({
+        ...acknowledged,
+        process_exited_at: "2026-07-30T12:00:01.000Z",
+        process_tree_reaped: true,
+      }).success,
+    ).toBe(false);
+
+    const exited = {
+      ...acknowledged,
+      evidence_state: "process_exited" as const,
+      process_exited_at: "2026-07-30T12:00:01.000Z",
+      process_tree_reaped: true,
+    };
+    expect(RunnerFrame.safeParse(exited).success).toBe(true);
+    expect(
+      canonicalDeviceCancellationEvidenceWssTranscript({
+        purpose: DEVICE_CANCELLATION_EVIDENCE_WSS_SIGNATURE_PURPOSE,
+        device_id: exited.device_id,
+        credential_id: exited.credential_id,
+        generation: exited.generation,
+        run_id: exited.run_id,
+        evidence_state: exited.evidence_state,
+        acknowledged_at: exited.acknowledged_at,
+        process_exited_at: exited.process_exited_at,
+        process_tree_reaped: exited.process_tree_reaped,
+      }),
+    ).toBe(
+      '{"purpose":"norns.device-cancellation-evidence-wss.v1","device_id":"device-1","credential_id":"credential-1","generation":4,"run_id":"run-1","evidence_state":"process_exited","acknowledged_at":"2026-07-30T12:00:00.000Z","process_exited_at":"2026-07-30T12:00:01.000Z","process_tree_reaped":true}',
+    );
+    expect(
+      ServerFrame.safeParse({
+        type: "device_cancellation_request",
+        device_id: "device-1",
+        credential_id: "credential-1",
+        generation: 4,
+        run_id: "run-1",
+        cause: "project_stop",
+        requested_at: "2026-07-30T12:00:00.000Z",
+        publication_fenced: true,
+      }).success,
+    ).toBe(true);
+    expect(
+      ServerFrame.safeParse({
+        type: "device_cancellation_evidence_ack",
+        run_id: "run-1",
+        evidence_state: "process_exited",
+      }).success,
+    ).toBe(true);
+  });
+
   it("accepts opaque browse handles and the matching response payload", () => {
     expect(
       RunnerWorkspaceRequest.safeParse({

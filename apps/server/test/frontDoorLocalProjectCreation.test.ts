@@ -44,6 +44,9 @@ describe.sequential("Front Door secure local-folder creation", () => {
     server = await buildServer({
       stores: new RelayStores(),
       users,
+      // This fixture exercises the deprecated global helper onboarding path.
+      // Production omits this explicit cutover-only compatibility option.
+      legacyGlobalRunnerCompatibility: { enabled: true },
       projects: new RelationalProjectReadRepository(transactions, "secure-local-test"),
       phase3: {
         sourceBindings: new SourceBindingService(transactions),

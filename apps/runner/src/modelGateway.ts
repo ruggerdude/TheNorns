@@ -19,13 +19,8 @@
 // It is not a workflow input, not a repository secret, and not written to the
 // worktree — which is what makes this different from the "just use repo
 // secrets" option the human rejected.
-import type { RunnerContextIdentity } from "./contextAuth.js";
-import {
-  RUNNER_AUTHORIZATION_SCHEME,
-  RUNNER_ID_HEADER,
-  RUNNER_TIMESTAMP_HEADER,
-  runnerContextFetchPayload,
-} from "./contextAuth.js";
+import { DEVICE_GATEWAY_CREDENTIAL_MINT_HTTP_SIGNATURE_PURPOSE } from "@norns/contracts";
+import { type RunnerContextIdentity, signRunnerHttpRequest } from "./contextAuth.js";
 
 /** Must match the server's `GATEWAY_CREDENTIAL_ROUTE`. */
 export const GATEWAY_CREDENTIAL_PATH = "/api/execution/gateway/credentials";
@@ -52,11 +47,9 @@ export class GatewayCredentialError extends Error {
 /**
  * Mints per-run gateway credentials over the runner's existing identity.
  *
- * Signing reuses `runnerContextFetchPayload` — the SAME canonical form and the
- * SAME domain separator as the context fetch. That is deliberate: one signing
- * scheme to keep correct is better than two, and the server verifies both with
- * one function. (It is also why the mismatch documented in contextAuth.ts had
- * to be fixed before this could work at all.)
+ * Strict device authentication uses a purpose-separated transcript, so a
+ * credential-mint signature cannot authorize context retrieval or uploads.
+ * Pre-device identities use the explicitly tagged legacy compatibility shape.
  */
 export class ModelGatewayClient {
   constructor(
@@ -73,15 +66,15 @@ export class ModelGatewayClient {
       // A credential must never be requested — or delivered — in the clear.
       throw new GatewayCredentialError(0, "gateway credentials require an HTTPS relay");
     }
-    const issuedAt = this.now().toISOString();
-    const signature = this.identity.sign(
-      runnerContextFetchPayload({
-        method: "POST",
-        path: url.pathname,
-        runnerId: this.identity.runnerId,
-        issuedAt,
-      }),
-    );
+    const body = JSON.stringify({ run_id: runId });
+    const signed = signRunnerHttpRequest({
+      identity: this.identity,
+      purpose: DEVICE_GATEWAY_CREDENTIAL_MINT_HTTP_SIGNATURE_PURPOSE,
+      method: "POST",
+      url,
+      body,
+      timestamp: this.now().toISOString(),
+    });
     const response = await this.httpFetch(url, {
       method: "POST",
       // A signature is bound to one path, so following a redirect would forward
@@ -89,11 +82,9 @@ export class ModelGatewayClient {
       redirect: "error",
       headers: {
         "content-type": "application/json",
-        authorization: `${RUNNER_AUTHORIZATION_SCHEME} ${signature}`,
-        [RUNNER_ID_HEADER]: this.identity.runnerId,
-        [RUNNER_TIMESTAMP_HEADER]: issuedAt,
+        ...signed.headers,
       },
-      body: JSON.stringify({ run_id: runId }),
+      body,
     });
     if (!response.ok) {
       // The status is the useful part and is safe to surface; the body may
@@ -103,12 +94,12 @@ export class ModelGatewayClient {
         `gateway credential request failed with ${response.status}`,
       );
     }
-    const body = (await response.json()) as Partial<GatewayCredential>;
+    const responseBody = (await response.json()) as Partial<GatewayCredential>;
     if (
-      typeof body.token !== "string" ||
-      typeof body.expires_at !== "string" ||
-      typeof body.anthropic_base_url !== "string" ||
-      typeof body.openai_base_url !== "string"
+      typeof responseBody.token !== "string" ||
+      typeof responseBody.expires_at !== "string" ||
+      typeof responseBody.anthropic_base_url !== "string" ||
+      typeof responseBody.openai_base_url !== "string"
     ) {
       throw new GatewayCredentialError(
         response.status,
@@ -116,10 +107,10 @@ export class ModelGatewayClient {
       );
     }
     return {
-      token: body.token,
-      expires_at: body.expires_at,
-      anthropic_base_url: body.anthropic_base_url,
-      openai_base_url: body.openai_base_url,
+      token: responseBody.token,
+      expires_at: responseBody.expires_at,
+      anthropic_base_url: responseBody.anthropic_base_url,
+      openai_base_url: responseBody.openai_base_url,
     };
   }
 }

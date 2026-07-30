@@ -499,7 +499,12 @@ export class PhaseLaunchService {
         }
 
         await this.dispatchScope.recordScope(
-          { runnerId, dispatchJobId: result.dispatch_job_id, runId: result.run_id },
+          {
+            runnerId,
+            runnerGeneration: result.command.runner_generation,
+            dispatchJobId: result.dispatch_job_id,
+            runId: result.run_id,
+          },
           contextRefs,
         );
 

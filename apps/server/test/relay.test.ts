@@ -165,6 +165,9 @@ describe("phase 1A — remote control", () => {
     const restored = await buildServer({
       stores: RelayStores.restore(snapshot),
       users: stack.users, // same UserStore instance -> stack.token is still a live session
+      // Preserve the test stack's explicit compatibility setting across the
+      // simulated restart. Production remains fail-closed when this is absent.
+      legacyGlobalRunnerCompatibility: { enabled: true },
     });
     const url = await listen(restored);
     const restoredToken = stack.token;

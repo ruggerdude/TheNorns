@@ -110,6 +110,17 @@ interface RuntimeSchemaPosture {
   conversation_plan_review_mode: boolean;
   conversation_organization: string | null;
   conversation_message_branches: string | null;
+  devices: string | null;
+  device_credentials: string | null;
+  device_authorization_requests: string | null;
+  device_repository_registrations: string | null;
+  project_device_repository_grants: string | null;
+  device_http_request_replays: string | null;
+  dispatch_context_runner_generation: boolean;
+  device_run_cancellations: string | null;
+  device_revocations: string | null;
+  gateway_authentication_subject: boolean;
+  gateway_device_credential_id: boolean;
 }
 
 /**
@@ -214,7 +225,41 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
             to_regclass('public.conversation_organization_v1')::text
               AS conversation_organization,
             to_regclass('public.conversation_message_branches_v1')::text
-              AS conversation_message_branches`,
+              AS conversation_message_branches,
+            to_regclass('public.devices')::text AS devices,
+            to_regclass('public.device_credentials')::text AS device_credentials,
+            to_regclass('public.device_authorization_requests')::text
+              AS device_authorization_requests,
+            to_regclass('public.device_repository_registrations')::text
+              AS device_repository_registrations,
+            to_regclass('public.project_device_repository_grants')::text
+              AS project_device_repository_grants,
+            to_regclass('public.device_http_request_replays')::text
+              AS device_http_request_replays,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='dispatch_context_documents'
+                 AND column_name='runner_generation'
+            ) AS dispatch_context_runner_generation,
+            to_regclass('public.device_run_cancellations')::text
+              AS device_run_cancellations,
+            to_regclass('public.device_revocations')::text AS device_revocations,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='gateway_credentials'
+                 AND column_name='authentication_subject'
+            ) AS gateway_authentication_subject,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='gateway_credentials'
+                 AND column_name='device_credential_id'
+            ) AS gateway_device_credential_id`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -248,6 +293,21 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.conversation_plan_review_mode ? ["conversation_plan_reviews.review_mode"] : []),
     ...(!posture?.conversation_organization ? ["conversation_organization_v1"] : []),
     ...(!posture?.conversation_message_branches ? ["conversation_message_branches_v1"] : []),
+    ...(!posture?.devices ? ["devices"] : []),
+    ...(!posture?.device_credentials ? ["device_credentials"] : []),
+    ...(!posture?.device_authorization_requests ? ["device_authorization_requests"] : []),
+    ...(!posture?.device_repository_registrations ? ["device_repository_registrations"] : []),
+    ...(!posture?.project_device_repository_grants ? ["project_device_repository_grants"] : []),
+    ...(!posture?.device_http_request_replays ? ["device_http_request_replays"] : []),
+    ...(!posture?.dispatch_context_runner_generation
+      ? ["dispatch_context_documents.runner_generation"]
+      : []),
+    ...(!posture?.device_run_cancellations ? ["device_run_cancellations"] : []),
+    ...(!posture?.device_revocations ? ["device_revocations"] : []),
+    ...(!posture?.gateway_authentication_subject
+      ? ["gateway_credentials.authentication_subject"]
+      : []),
+    ...(!posture?.gateway_device_credential_id ? ["gateway_credentials.device_credential_id"] : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

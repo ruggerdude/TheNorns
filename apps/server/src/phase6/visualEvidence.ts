@@ -27,6 +27,7 @@ const VisualEvidenceMetadata = z
     capture_profile: V2ImplementationCaptureProfile,
     verified_at: z.string().datetime(),
     runner_id: z.string().trim().min(1),
+    runner_generation: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -95,11 +96,23 @@ export class Phase6VisualEvidenceService {
     evidence: V2ImplementationVisualEvidenceT;
     replayed: boolean;
   }> {
+    return this.transactions.transaction((tx) =>
+      this.recordWithReplayInTransaction(tx, inputValue),
+    );
+  }
+
+  recordWithReplayInTransaction(
+    tx: V2SqlExecutor,
+    inputValue: RecordImplementationVisualEvidenceInput,
+  ): Promise<{
+    evidence: V2ImplementationVisualEvidenceT;
+    replayed: boolean;
+  }> {
     const { desktop_png: desktopValue, mobile_png: mobileValue, ...metadataValue } = inputValue;
     const input = VisualEvidenceMetadata.parse(metadataValue);
     const desktop = Buffer.from(desktopValue);
     const mobile = Buffer.from(mobileValue);
-    return this.transactions.transaction(async (tx) => {
+    return (async () => {
       const evidenceId = scopedId("visual-evidence", [
         input.project_id,
         input.run_id,
@@ -111,12 +124,18 @@ export class Phase6VisualEvidenceService {
           WHERE run.id=$1 AND run.project_id=$2 AND run.phase_id=$3 AND run.task_id=$4
             AND run.repository_binding_id=$5
             AND (
-              run.runner_id=$6
+              EXISTS (
+                SELECT 1 FROM commands command
+                 WHERE command.run_id=run.id
+                   AND command.runner_id=$6
+                   AND command.runner_generation=$8
+              )
               OR EXISTS (
                 SELECT 1 FROM implementation_visual_evidence_collections collection
                  WHERE collection.run_id=run.id
                    AND collection.approved_mockup_version_id=$7
                    AND collection.runner_id=$6
+                   AND collection.runner_generation=$8
                    AND collection.status IN ('awaiting_runner','delivered','completed')
               )
             )
@@ -129,6 +148,7 @@ export class Phase6VisualEvidenceService {
           input.repository_binding_id,
           input.runner_id,
           input.approved_mockup_version_id,
+          input.runner_generation,
         ],
       );
       if (!ownedRun.rows[0]) {
@@ -142,6 +162,7 @@ export class Phase6VisualEvidenceService {
           WHERE project_id=$1 AND run_id=$2 AND approved_mockup_version_id=$3
             AND verification_result_id=$4 AND deployment_record_id=$5
             AND deployment_observation_id=$6 AND runner_id=$7
+            AND runner_generation=$8
             AND status IN ('awaiting_runner','delivered','completed')
           FOR UPDATE`,
         [
@@ -152,6 +173,7 @@ export class Phase6VisualEvidenceService {
           input.deployment_record_id,
           input.deployment_observation_id,
           input.runner_id,
+          input.runner_generation,
         ],
       );
       if (!collectionFence.rows[0]) {
@@ -408,7 +430,7 @@ export class Phase6VisualEvidenceService {
       await this.appendVisibleMessage(tx, result);
       await this.completeCollection(tx, input, result.id);
       return { evidence: result, replayed: false };
-    });
+    })();
   }
 
   get(projectId: string, evidenceId: string): Promise<V2ImplementationVisualEvidenceT> {
@@ -560,6 +582,7 @@ export class Phase6VisualEvidenceService {
         WHERE project_id=$1 AND run_id=$2 AND approved_mockup_version_id=$3
           AND verification_result_id=$4 AND deployment_record_id=$5
           AND deployment_observation_id=$6 AND runner_id=$7
+          AND runner_generation=$9
           AND status IN ('awaiting_runner','delivered','completed')`,
       [
         input.project_id,
@@ -570,6 +593,7 @@ export class Phase6VisualEvidenceService {
         input.deployment_observation_id,
         input.runner_id,
         evidenceId,
+        input.runner_generation,
       ],
     );
   }

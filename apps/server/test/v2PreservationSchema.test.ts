@@ -24,10 +24,14 @@ import {
   CONVERSATION_PLAN_WORKFLOW_MIGRATION_NAME,
   CONVERSATION_STREAM_LIFECYCLE_MIGRATION_NAME,
   DEBATE_WORKFLOW_MIGRATION_NAME,
+  DEVICE_CANCELLATION_TRACKING_MIGRATION_NAME,
+  DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME,
+  DEVICE_IDENTITY_CORE_MIGRATION_NAME,
   DISPATCH_CONTEXT_SCOPE_MIGRATION_NAME,
   FRONTDOOR_PHASE_BRIDGE_MIGRATION_NAME,
   FRONTDOOR_PROGRESS_TRACKING_MIGRATION_NAME,
   GATEWAY_CREDENTIALS_MIGRATION_NAME,
+  GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
   GITHUB_APP_MANIFEST_MIGRATION_NAME,
   GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME,
   GITHUB_CONNECTION_REMOVAL_MIGRATION_NAME,
@@ -450,6 +454,10 @@ describe.sequential("Phase 2 preservation schema", () => {
         { name: CONVERSATION_ORGANIZATION_MIGRATION_NAME, applied: false },
         { name: CONVERSATION_FILE_ATTACHMENTS_MIGRATION_NAME, applied: false },
         { name: CONVERSATION_MESSAGE_BRANCHES_MIGRATION_NAME, applied: false },
+        { name: DEVICE_IDENTITY_CORE_MIGRATION_NAME, applied: false },
+        { name: DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME, applied: false },
+        { name: DEVICE_CANCELLATION_TRACKING_MIGRATION_NAME, applied: false },
+        { name: GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME, applied: false },
       ]),
     );
     const tracking = await pg.query<{ name: string }>(
@@ -514,6 +522,10 @@ describe.sequential("Phase 2 preservation schema", () => {
         CONVERSATION_ORGANIZATION_MIGRATION_NAME,
         CONVERSATION_FILE_ATTACHMENTS_MIGRATION_NAME,
         CONVERSATION_MESSAGE_BRANCHES_MIGRATION_NAME,
+        DEVICE_IDENTITY_CORE_MIGRATION_NAME,
+        DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME,
+        DEVICE_CANCELLATION_TRACKING_MIGRATION_NAME,
+        GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
       ]),
     );
   });
@@ -1776,6 +1788,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       },
       verified_at: "2026-07-27T13:02:30.000Z",
       runner_id: "phase6-success-visual-runner",
+      runner_generation: 5,
       desktop_png: implementation.desktop,
       mobile_png: implementation.mobile,
     };
@@ -1794,6 +1807,12 @@ describe.sequential("Phase 2 preservation schema", () => {
       ],
     });
     expect(await visualEvidence.record(evidenceInput)).toEqual(recorded);
+    await expect(
+      visualEvidence.record({
+        ...evidenceInput,
+        runner_generation: evidenceInput.runner_generation + 1,
+      }),
+    ).rejects.toMatchObject({ code: "evidence_conflict" });
     await expect(
       visualEvidence.record({
         ...evidenceInput,

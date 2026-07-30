@@ -38,12 +38,23 @@ import {
   DeviceEnrollmentCodeHasher,
   DeviceEnrollmentRuntimeConfigurationError,
   DeviceEnrollmentService,
+  DeviceOnlineControlBroker,
+  DeviceRevocationService,
+  DeviceRunCancellationService,
+  DeviceWssAuthenticationService,
+  PostgresDeviceActionAuthorization,
   PostgresDeviceEnrollmentRepository,
+  PostgresDeviceWssAuthenticationRepository,
   parseDeviceEnrollmentRuntimeConfiguration,
 } from "./devices/index.js";
 import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
-import { RelationalTaskContextAssembler, TaskContextStore } from "./execution/index.js";
+import {
+  DeviceHttpRequestAuthenticator,
+  PostgresDeviceHttpCredentialRepository,
+  RelationalTaskContextAssembler,
+  TaskContextStore,
+} from "./execution/index.js";
 import { GraphSession } from "./graph/session.js";
 import {
   GitHubIntegrationService,
@@ -131,6 +142,8 @@ let projectRuntime = createProjectRuntime({
 });
 let relationalComposition: RelationalCompositionBridge | undefined;
 const isProd = process.env.NODE_ENV === "production";
+const legacyGlobalRunnerCompatibilityEnabled =
+  process.env.NORNS_LEGACY_GLOBAL_RUNNER_COMPATIBILITY?.trim().toLowerCase() === "true";
 
 // Tier-2 persistence: when DATABASE_URL is set (Railway Postgres plugin),
 // hydrate relay state from the last snapshot and flush changes back durably.
@@ -209,6 +222,22 @@ let knowledgeOptions: { service: KnowledgeSystemService } | undefined;
 // runner, and one config change away from silently disabling runner inference.
 let runnerInferenceOptions: { transactions: V2TransactionRunner } | undefined;
 let deviceEnrollmentOptions: { service: DeviceEnrollmentService } | undefined;
+let runnerHttpAuthentication: DeviceHttpRequestAuthenticator | undefined;
+let deviceActionAuthorization: PostgresDeviceActionAuthorization | undefined;
+let deviceActionAuthorizationOptions:
+  | {
+      service: PostgresDeviceActionAuthorization;
+      transactions: V2TransactionRunner;
+    }
+  | undefined;
+let deviceControlOptions:
+  | {
+      broker: DeviceOnlineControlBroker;
+      cancellations: DeviceRunCancellationService;
+      revocations: DeviceRevocationService;
+    }
+  | undefined;
+let deviceWssAuthentication: DeviceWssAuthenticationService | undefined;
 
 const publicOrigin =
   process.env.NORNS_PUBLIC_ORIGIN ??
@@ -226,6 +255,21 @@ try {
   }
   throw error;
 }
+
+const legacyRunnerHttpAuthFlag = process.env.NORNS_ENABLE_LEGACY_RUNNER_HTTP_AUTH;
+if (
+  legacyRunnerHttpAuthFlag !== undefined &&
+  legacyRunnerHttpAuthFlag !== "true" &&
+  legacyRunnerHttpAuthFlag !== "false"
+) {
+  console.error("NORNS_ENABLE_LEGACY_RUNNER_HTTP_AUTH must be exactly true or false");
+  process.exit(1);
+}
+// Current local and Actions runners still carry generation-fenced legacy
+// identities. Their compatibility protocol now has the same body/query/
+// purpose/request-id binding and persistent replay defense as devices, so it
+// remains enabled through cutover unless an operator explicitly disables it.
+const legacyRunnerHttpAuthEnabled = legacyRunnerHttpAuthFlag !== "false";
 
 if (databaseUrl) {
   try {
@@ -248,6 +292,53 @@ if (databaseUrl) {
     const runtimeTransactions = new NodePgTransactionRunner(pool, {
       mode: "runtime",
       role: "norns_app",
+    });
+    deviceActionAuthorization = new PostgresDeviceActionAuthorization();
+    deviceActionAuthorizationOptions = {
+      service: deviceActionAuthorization,
+      transactions: runtimeTransactions,
+    };
+    const deviceOnlineControl = new DeviceOnlineControlBroker(runtimeTransactions);
+    const deviceCancellations = new DeviceRunCancellationService(runtimeTransactions, {
+      afterRequested: ({ record }) => {
+        deviceOnlineControl.requestCancellation(record);
+      },
+    });
+    const deviceRevocations = new DeviceRevocationService(runtimeTransactions, {
+      afterRevoked: async ({ record }) => {
+        for (const runId of record.affected_run_ids) {
+          const cancellation = await deviceCancellations.get(runId);
+          if (cancellation) deviceOnlineControl.requestCancellation(cancellation);
+        }
+        deviceOnlineControl.closeRevokedDevice(record.device_id);
+      },
+    });
+    deviceControlOptions = {
+      broker: deviceOnlineControl,
+      cancellations: deviceCancellations,
+      revocations: deviceRevocations,
+    };
+    if (deviceEnrollmentRuntime.enabled) {
+      deviceWssAuthentication = new DeviceWssAuthenticationService(
+        new PostgresDeviceWssAuthenticationRepository(runtimeTransactions),
+      );
+    }
+    runnerHttpAuthentication = new DeviceHttpRequestAuthenticator({
+      repository: new PostgresDeviceHttpCredentialRepository(runtimeTransactions),
+      legacyCompatibility: legacyRunnerHttpAuthEnabled
+        ? {
+            enabled: true,
+            lookupRunner: (runnerId) => {
+              const runner = stores.runner(runnerId);
+              return runner
+                ? {
+                    public_key_pem: runner.public_key_pem,
+                    generation: runner.generation,
+                  }
+                : null;
+            },
+          }
+        : { enabled: false },
     });
     if (deviceEnrollmentRuntime.enabled) {
       deviceEnrollmentOptions = {
@@ -336,10 +427,12 @@ if (databaseUrl) {
       },
     });
     phase4Services = {
-      coordinator: new Phase4Coordinator(runtimeTransactions),
+      coordinator: new Phase4Coordinator(runtimeTransactions, {
+        deviceAuthorization: deviceActionAuthorization,
+      }),
       completion: new Phase4CompletionService(runtimeTransactions),
-      dispatch: new Phase4DispatchRepository(runtimeTransactions),
-      events: new Phase4EventProcessor(runtimeTransactions),
+      dispatch: new Phase4DispatchRepository(runtimeTransactions, deviceActionAuthorization),
+      events: new Phase4EventProcessor(runtimeTransactions, undefined, deviceActionAuthorization),
       recovery: new Phase4RecoveryMonitor(runtimeTransactions),
     };
     // ONBOARDING O4: Actions-hosted execution. Only constructible when GitHub
@@ -811,8 +904,17 @@ const webDist = process.env.NORNS_WEB_DIST;
 const server = await buildServer({
   stores,
   users,
+  ...(legacyGlobalRunnerCompatibilityEnabled
+    ? { legacyGlobalRunnerCompatibility: { enabled: true as const } }
+    : {}),
   ...(identityRuntime.mode === "relational" ? { identity: identityRuntime.identity } : {}),
   ...(deviceEnrollmentOptions !== undefined ? { deviceEnrollment: deviceEnrollmentOptions } : {}),
+  ...(deviceWssAuthentication !== undefined ? { deviceWssAuthentication } : {}),
+  ...(deviceControlOptions !== undefined ? { deviceControl: deviceControlOptions } : {}),
+  ...(runnerHttpAuthentication !== undefined ? { runnerHttpAuthentication } : {}),
+  ...(deviceActionAuthorizationOptions !== undefined
+    ? { deviceActionAuthorization: deviceActionAuthorizationOptions }
+    : {}),
   projects: projectRuntime.repository,
   ...(relationalComposition !== undefined ? { relationalComposition } : {}),
   ...(phase3Services !== undefined ? { phase3: phase3Services } : {}),

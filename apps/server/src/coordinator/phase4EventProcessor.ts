@@ -7,6 +7,10 @@ import {
   type V2EvidenceRefT,
   resolveV2BudgetReservation,
 } from "@norns/contracts";
+import type {
+  PostgresDeviceActionAuthorization,
+  RunnerAuthorizationIdentity,
+} from "../devices/actionAuthorization.js";
 import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import {
@@ -68,11 +72,58 @@ export class Phase4EventProcessor {
   constructor(
     private readonly transactions: V2TransactionRunner,
     private readonly knowledge = new Phase4KnowledgeEventAdapter(),
+    private readonly deviceAuthorization?: PostgresDeviceActionAuthorization,
   ) {}
 
-  apply(input: EventEnvelopeInputT): Promise<{ duplicate: boolean; ignored?: boolean }> {
+  apply(
+    input: EventEnvelopeInputT,
+    authenticatedIdentity?: RunnerAuthorizationIdentity,
+  ): Promise<{ duplicate: boolean; ignored?: boolean }> {
     const event = EventEnvelope.parse(input);
     return this.transactions.transaction(async (sql) => {
+      if (this.deviceAuthorization && !authenticatedIdentity) {
+        throw new Phase4RunnerEventRejectedError(
+          "authenticated transport identity is required for event ingestion",
+        );
+      }
+      const authorizationIdentity: RunnerAuthorizationIdentity = authenticatedIdentity ?? {
+        subject: "legacy_runner",
+        runner_id: event.runner_id,
+        generation: event.generation,
+      };
+      if (
+        authorizationIdentity.runner_id !== event.runner_id ||
+        authorizationIdentity.generation !== event.generation
+      ) {
+        throw new Phase4RunnerEventRejectedError(
+          "authenticated transport identity does not match the event",
+        );
+      }
+      if (this.deviceAuthorization) {
+        await this.deviceAuthorization
+          .lockTransportIdentity(sql, authorizationIdentity)
+          .catch(() => {
+            throw new Phase4RunnerEventRejectedError(
+              "runner identity is no longer authorized for event ingestion",
+            );
+          });
+      }
+      const directlyNamedRunId =
+        "run_id" in event.payload && typeof event.payload.run_id === "string"
+          ? event.payload.run_id
+          : null;
+      if (directlyNamedRunId && this.deviceAuthorization) {
+        await this.deviceAuthorization
+          .assertRun(sql, {
+            ...authorizationIdentity,
+            run_id: directlyNamedRunId,
+          })
+          .catch(() => {
+            throw new Phase4RunnerEventRejectedError(
+              "runner is not currently authorized for the event run",
+            );
+          });
+      }
       const revocation = await sql.query<{ revoked_through_generation: number }>(
         "SELECT revoked_through_generation FROM runner_revocations WHERE runner_id=$1",
         [event.runner_id],
@@ -130,6 +181,18 @@ export class Phase4EventProcessor {
           event.correlation_id !== row.correlation_id
         ) {
           throw new Phase4RunnerEventRejectedError("command acknowledgement is fenced or unknown");
+        }
+        if (this.deviceAuthorization) {
+          await this.deviceAuthorization
+            .assertRun(sql, {
+              ...authorizationIdentity,
+              run_id: row.run_id,
+            })
+            .catch(() => {
+              throw new Phase4RunnerEventRejectedError(
+                "runner is not currently authorized for the acknowledged command",
+              );
+            });
         }
         await sql.query(
           "UPDATE commands SET status = $2, updated_at = now() WHERE command_id = $1",
@@ -349,6 +412,19 @@ export class Phase4EventProcessor {
       }
       if (scope.runner_id !== event.runner_id) {
         throw new Phase4RunnerEventRejectedError("runner event does not match its designated run");
+      }
+      if (!directlyNamedRunId && this.deviceAuthorization) {
+        await this.deviceAuthorization
+          .assertRun(sql, {
+            ...authorizationIdentity,
+            run_id: scope.id,
+            project_id: scope.project_id,
+          })
+          .catch(() => {
+            throw new Phase4RunnerEventRejectedError(
+              "runner is not currently authorized for the resolved event run",
+            );
+          });
       }
       const commandGeneration = await sql.query<{ runner_generation: number }>(
         `SELECT runner_generation FROM commands

@@ -1,5 +1,10 @@
 import { type KeyObject, generateKeyPairSync, sign } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
+import {
+  LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
+  PROTOCOL_VERSION,
+  canonicalLegacyRunnerWssAuthenticationTranscript,
+} from "@norns/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { Phase4CompletionService } from "../src/coordinator/phase4Completion.js";
@@ -40,6 +45,7 @@ describe.sequential("runner knowledge capability negotiation", () => {
       users,
       projects: new ProjectStore(),
       phase3: phase3Routes,
+      legacyGlobalRunnerCompatibility: { enabled: true },
     });
     url = await listen(server);
   });
@@ -69,6 +75,7 @@ describe.sequential("runner knowledge capability negotiation", () => {
       users: new UserStore(),
       projects: new ProjectStore(),
       phase3: phase3Routes,
+      legacyGlobalRunnerCompatibility: { enabled: true },
       phase4: {
         coordinator: new Phase4Coordinator(transactions),
         completion: new Phase4CompletionService(transactions),
@@ -105,11 +112,22 @@ describe.sequential("runner knowledge capability negotiation", () => {
         body?: { capabilities?: string[] };
       };
       if (frame.type === "challenge" && frame.nonce) {
+        const transcript = canonicalLegacyRunnerWssAuthenticationTranscript({
+          purpose: LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
+          runner_id: runnerId,
+          generation,
+          protocol_version: PROTOCOL_VERSION,
+          challenge: frame.nonce,
+        });
         socket.send(
           JSON.stringify({
             type: "auth",
             runner_id: runnerId,
-            nonce_signature: sign(null, Buffer.from(frame.nonce), privateKey).toString("base64"),
+            generation,
+            protocol_version: PROTOCOL_VERSION,
+            transcript_signature: sign(null, Buffer.from(transcript), privateKey).toString(
+              "base64",
+            ),
           }),
         );
       } else if (frame.type === "auth_ok") {

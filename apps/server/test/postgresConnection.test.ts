@@ -120,6 +120,17 @@ describe("PostgreSQL runtime schema compatibility", () => {
             conversation_plan_review_mode: true,
             conversation_organization: "conversation_organization_v1",
             conversation_message_branches: "conversation_message_branches_v1",
+            devices: "devices",
+            device_credentials: "device_credentials",
+            device_authorization_requests: "device_authorization_requests",
+            device_repository_registrations: "device_repository_registrations",
+            project_device_repository_grants: "project_device_repository_grants",
+            device_http_request_replays: "device_http_request_replays",
+            dispatch_context_runner_generation: true,
+            device_run_cancellations: "device_run_cancellations",
+            device_revocations: "device_revocations",
+            gateway_authentication_subject: true,
+            gateway_device_credential_id: true,
           },
         ],
       }),
@@ -159,6 +170,17 @@ describe("PostgreSQL runtime schema compatibility", () => {
             conversation_plan_review_mode: false,
             conversation_organization: null,
             conversation_message_branches: null,
+            devices: null,
+            device_credentials: null,
+            device_authorization_requests: null,
+            device_repository_registrations: null,
+            project_device_repository_grants: null,
+            device_http_request_replays: null,
+            dispatch_context_runner_generation: false,
+            device_run_cancellations: null,
+            device_revocations: null,
+            gateway_authentication_subject: false,
+            gateway_device_credential_id: false,
           },
         ],
       }),
@@ -177,7 +199,12 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "conversation_plan_workflow_v1, conversation_execution_handoff_v1, " +
         "conversation_human_steering_v1, conversation_mockups_dashboard_v1, " +
         "conversation_inference_reservations, conversation_plan_reviews.review_mode, " +
-        "conversation_organization_v1, conversation_message_branches_v1",
+        "conversation_organization_v1, conversation_message_branches_v1, devices, " +
+        "device_credentials, device_authorization_requests, " +
+        "device_repository_registrations, project_device_repository_grants, " +
+        "device_http_request_replays, dispatch_context_documents.runner_generation, " +
+        "device_run_cancellations, device_revocations, " +
+        "gateway_credentials.authentication_subject, gateway_credentials.device_credential_id",
     });
   });
 
@@ -212,6 +239,17 @@ describe("PostgreSQL runtime schema compatibility", () => {
             conversation_plan_review_mode: false,
             conversation_organization: null,
             conversation_message_branches: null,
+            devices: "devices",
+            device_credentials: "device_credentials",
+            device_authorization_requests: "device_authorization_requests",
+            device_repository_registrations: "device_repository_registrations",
+            project_device_repository_grants: "project_device_repository_grants",
+            device_http_request_replays: "device_http_request_replays",
+            dispatch_context_runner_generation: true,
+            device_run_cancellations: "device_run_cancellations",
+            device_revocations: "device_revocations",
+            gateway_authentication_subject: true,
+            gateway_device_credential_id: true,
           },
         ],
       }),
@@ -229,5 +267,64 @@ describe("PostgreSQL runtime schema compatibility", () => {
           "conversation_message_branches_v1",
       },
     );
+  });
+
+  it("fails closed with precise 0053 through 0056 device migration diagnostics", async () => {
+    const preDeviceMigrations = {
+      query: async () => ({
+        rows: [
+          {
+            planning_mode: true,
+            knowledge_packages: "knowledge_packages",
+            agent_execution_registrations: "agent_execution_registrations",
+            agent_handoffs: "agent_handoffs",
+            knowledge_deltas: "knowledge_deltas",
+            agent_reasoning_effort: true,
+            global_rule_settings: "global_rule_settings",
+            ai_usage_events: "ai_usage_events",
+            project_owner_user_id: true,
+            project_members: "project_members",
+            usage_budget_policies: "usage_budget_policies",
+            ai_usage_calibration_observations: "ai_usage_calibration_observations",
+            shadow_read_recorded_order: true,
+            onboarding_submissions: "project_onboarding_submissions",
+            onboarding_repository_intents: "project_onboarding_repository_intents",
+            onboarding_candidate_columns: true,
+            conversation_domain_complete: true,
+            conversation_stream_lifecycle: "conversation_stream_lifecycle_v1",
+            conversation_plan_workflow: "conversation_plan_workflow_v1",
+            conversation_execution_handoff: "conversation_execution_handoff_v1",
+            conversation_human_steering: "conversation_human_steering_v1",
+            conversation_mockups_dashboard: "conversation_mockups_dashboard_v1",
+            conversation_inference_reservations: "conversation_inference_reservations",
+            conversation_plan_review_mode: true,
+            conversation_organization: "conversation_organization_v1",
+            conversation_message_branches: "conversation_message_branches_v1",
+            devices: null,
+            device_credentials: null,
+            device_authorization_requests: null,
+            device_repository_registrations: null,
+            project_device_repository_grants: null,
+            device_http_request_replays: null,
+            dispatch_context_runner_generation: false,
+            device_run_cancellations: null,
+            device_revocations: null,
+            gateway_authentication_subject: false,
+            gateway_device_credential_id: false,
+          },
+        ],
+      }),
+    };
+
+    await expect(assertCurrentRuntimeSchema(preDeviceMigrations as never)).rejects.toMatchObject({
+      code: "runtime_schema_outdated",
+      message:
+        "database migrations are required before startup; missing: devices, " +
+        "device_credentials, device_authorization_requests, " +
+        "device_repository_registrations, project_device_repository_grants, " +
+        "device_http_request_replays, dispatch_context_documents.runner_generation, " +
+        "device_run_cancellations, device_revocations, " +
+        "gateway_credentials.authentication_subject, gateway_credentials.device_credential_id",
+    });
   });
 });

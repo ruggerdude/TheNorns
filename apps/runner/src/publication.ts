@@ -122,6 +122,8 @@ export interface RunnerPublisher {
     task_id: string;
     verification_passed: boolean;
     verification_summary: string;
+    /** Device/generation fencing aborts publication independently of run stop. */
+    signal?: AbortSignal;
   }): Promise<PublicationResult>;
 }
 
@@ -164,8 +166,10 @@ export class GitPublisher implements RunnerPublisher {
     task_id: string;
     verification_passed: boolean;
     verification_summary: string;
+    signal?: AbortSignal;
   }): Promise<PublicationResult> {
-    const remote = await this.resolveRemote(input.worktree_path);
+    input.signal?.throwIfAborted();
+    const remote = await this.resolveRemote(input.worktree_path, input.signal);
     if (!remote) {
       return {
         outcome: "local_only",
@@ -177,7 +181,15 @@ export class GitPublisher implements RunnerPublisher {
           "repository has no configured remote; the work is retained as a local branch",
       };
     }
-    const outcome = await this.push(input.worktree_path, remote, input.branch, input.commit);
+    input.signal?.throwIfAborted();
+    const outcome = await this.push(
+      input.worktree_path,
+      remote,
+      input.branch,
+      input.commit,
+      input.signal,
+    );
+    input.signal?.throwIfAborted();
     const pullRequest = await this.ensurePullRequest(input);
     return {
       outcome,
@@ -190,9 +202,9 @@ export class GitPublisher implements RunnerPublisher {
   }
 
   /** The configured remote, or null when this repository has none at all. */
-  private async resolveRemote(worktreePath: string): Promise<string | null> {
+  private async resolveRemote(worktreePath: string, signal?: AbortSignal): Promise<string | null> {
     try {
-      const { stdout } = await execFileAsync("git", ["-C", worktreePath, "remote"]);
+      const { stdout } = await execFileAsync("git", ["-C", worktreePath, "remote"], { signal });
       const remotes = stdout
         .split("\n")
         .map((line) => line.trim())
@@ -229,25 +241,33 @@ export class GitPublisher implements RunnerPublisher {
     remote: string,
     branch: string,
     commit: string,
+    signal?: AbortSignal,
   ): Promise<PublicationOutcome> {
     const ref = `refs/heads/${branch}`;
     try {
-      await execFileAsync("git", ["-C", worktreePath, "push", remote, `${commit}:${ref}`]);
+      await execFileAsync("git", ["-C", worktreePath, "push", remote, `${commit}:${ref}`], {
+        signal,
+      });
       return "pushed";
     } catch (error) {
+      signal?.throwIfAborted();
       const detail = error instanceof Error ? error.message : String(error);
-      const tip = await this.remoteTip(worktreePath, remote, ref);
+      const tip = await this.remoteTip(worktreePath, remote, ref, signal);
       if (tip === commit) return "already_published";
       if (tip) {
         try {
-          await execFileAsync("git", [
-            "-C",
-            worktreePath,
-            "push",
-            `--force-with-lease=${ref}:${tip}`,
-            remote,
-            `${commit}:${ref}`,
-          ]);
+          await execFileAsync(
+            "git",
+            [
+              "-C",
+              worktreePath,
+              "push",
+              `--force-with-lease=${ref}:${tip}`,
+              remote,
+              `${commit}:${ref}`,
+            ],
+            { signal },
+          );
           return "republished";
         } catch (leaseError) {
           throw new PublicationError(
@@ -270,12 +290,18 @@ export class GitPublisher implements RunnerPublisher {
     worktreePath: string,
     remote: string,
     ref: string,
+    signal?: AbortSignal,
   ): Promise<string | null> {
     try {
-      const { stdout } = await execFileAsync("git", ["-C", worktreePath, "ls-remote", remote, ref]);
+      const { stdout } = await execFileAsync(
+        "git",
+        ["-C", worktreePath, "ls-remote", remote, ref],
+        { signal },
+      );
       const sha = stdout.split("\n")[0]?.trim().split(/\s+/)[0];
       return sha ? sha : null;
     } catch {
+      signal?.throwIfAborted();
       return null;
     }
   }
@@ -295,6 +321,7 @@ export class GitPublisher implements RunnerPublisher {
     task_id: string;
     verification_passed: boolean;
     verification_summary: string;
+    signal?: AbortSignal;
   }): Promise<{ url: string | null; note: string | null }> {
     if (!this.slug || !this.token) {
       return {
@@ -305,18 +332,20 @@ export class GitPublisher implements RunnerPublisher {
     const owner = this.slug.split("/")[0];
     if (!owner) return { url: null, note: `GITHUB_REPOSITORY "${this.slug}" is not owner/repo` };
     try {
-      const existing = await this.findPullRequest(input.branch, owner);
+      input.signal?.throwIfAborted();
+      const existing = await this.findPullRequest(input.branch, owner, input.signal);
       if (existing) return { url: existing, note: null };
-      const base = await this.defaultBranch();
+      const base = await this.defaultBranch(input.signal);
       const created = await this.createPullRequest(input, base);
       if (created) return { url: created, note: null };
       // A concurrent redelivery may have opened it between our lookup and our
       // create. Converge on theirs rather than reporting a failure.
-      const raced = await this.findPullRequest(input.branch, owner);
+      const raced = await this.findPullRequest(input.branch, owner, input.signal);
       return raced
         ? { url: raced, note: null }
         : { url: null, note: "the pull request could not be created; the branch is pushed" };
     } catch (error) {
+      input.signal?.throwIfAborted();
       // The branch is already durable at this point, so a GitHub API problem
       // must not fail the run — but it must be reported, not swallowed.
       return {
@@ -328,12 +357,19 @@ export class GitPublisher implements RunnerPublisher {
     }
   }
 
-  private async findPullRequest(branch: string, owner: string): Promise<string | null> {
+  private async findPullRequest(
+    branch: string,
+    owner: string,
+    signal?: AbortSignal,
+  ): Promise<string | null> {
     const url = new URL(`${GITHUB_API_BASE}/repos/${this.slug}/pulls`);
     url.searchParams.set("head", `${owner}:${branch}`);
     url.searchParams.set("state", "all");
     url.searchParams.set("per_page", "1");
-    const response = await this.fetchImpl(url, { headers: this.headers() });
+    const response = await this.fetchImpl(url, {
+      headers: this.headers(),
+      ...(signal ? { signal } : {}),
+    });
     if (!response.ok) return null;
     const body = (await response.json()) as unknown;
     if (!Array.isArray(body) || body.length === 0) return null;
@@ -341,9 +377,10 @@ export class GitPublisher implements RunnerPublisher {
     return typeof first.html_url === "string" ? first.html_url : null;
   }
 
-  private async defaultBranch(): Promise<string> {
+  private async defaultBranch(signal?: AbortSignal): Promise<string> {
     const response = await this.fetchImpl(`${GITHUB_API_BASE}/repos/${this.slug}`, {
       headers: this.headers(),
+      ...(signal ? { signal } : {}),
     });
     if (!response.ok) return "main";
     const body = (await response.json()) as { default_branch?: unknown };
@@ -358,6 +395,7 @@ export class GitPublisher implements RunnerPublisher {
       task_id: string;
       verification_passed: boolean;
       verification_summary: string;
+      signal?: AbortSignal;
     },
     base: string,
   ): Promise<string | null> {
@@ -380,6 +418,7 @@ export class GitPublisher implements RunnerPublisher {
         ].join("\n"),
         maintainer_can_modify: true,
       }),
+      ...(input.signal ? { signal: input.signal } : {}),
     });
     if (!response.ok) return null;
     const body = (await response.json()) as { html_url?: unknown };

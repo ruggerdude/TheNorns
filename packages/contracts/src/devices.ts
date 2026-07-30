@@ -188,6 +188,23 @@ export const OwnedDeviceStatusDimensions = z
   .strict();
 export type OwnedDeviceStatusDimensionsT = z.infer<typeof OwnedDeviceStatusDimensions>;
 
+/**
+ * An accepted project target is authorized through a project grant. Its
+ * access label is project-relative and therefore identical for every member
+ * receiving the same projection.
+ */
+export const ProjectExecutionTargetStatusDimensions = z
+  .object({
+    availability: DeviceAvailability,
+    compatibility: DeviceCompatibility,
+    workload: DeviceWorkload,
+    access: z.literal("shared"),
+  })
+  .strict();
+export type ProjectExecutionTargetStatusDimensionsT = z.infer<
+  typeof ProjectExecutionTargetStatusDimensions
+>;
+
 export const DeviceOperatingSystemFamily = z.enum(["macos", "windows", "linux", "other"]);
 export type DeviceOperatingSystemFamilyT = z.infer<typeof DeviceOperatingSystemFamily>;
 
@@ -283,7 +300,7 @@ export const ProjectExecutionTargetProjection = z
     name: z.string().trim().min(1).max(200),
     location_label: NullableLabel,
     os_family: DeviceOperatingSystemFamily,
-    status: DeviceStatusDimensions,
+    status: ProjectExecutionTargetStatusDimensions,
     last_seen_at: V2IsoDateTime.nullable(),
   })
   .strict();
@@ -436,6 +453,7 @@ export const DEVICE_GATEWAY_CREDENTIAL_MINT_HTTP_SIGNATURE_PURPOSE =
 export const DEVICE_VISUAL_EVIDENCE_UPLOAD_HTTP_SIGNATURE_PURPOSE =
   "norns.runner-http.visual-evidence-upload.v1" as const;
 export const DEVICE_WSS_AUTH_SIGNATURE_PURPOSE = "norns.runner-wss-auth.v1" as const;
+export const DEVICE_WSS_PROTOCOL_VERSION = "1" as const;
 
 const SignedDeviceHttpTranscriptFields = {
   device_id: V2EntityId,
@@ -444,7 +462,14 @@ const SignedDeviceHttpTranscriptFields = {
   http_method: z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]),
   canonical_path_and_query: z
     .string()
-    .regex(/^\/[^#\s]*$/, "must be an origin-relative path and canonical query"),
+    .regex(/^\/[^#\s]*$/, "must be an origin-relative path and canonical query")
+    .refine((value) => {
+      try {
+        return canonicalizeDeviceHttpPathAndQuery(value) === value;
+      } catch {
+        return false;
+      }
+    }, "must use the canonical device HTTP path and query encoding"),
   body_sha256: V2Sha256Hex,
   timestamp: V2IsoDateTime,
   request_id: V2EntityId,
@@ -487,6 +512,304 @@ export const SignedDeviceHttpTranscript = z.discriminatedUnion("purpose", [
 ]);
 export type SignedDeviceHttpTranscriptT = z.infer<typeof SignedDeviceHttpTranscript>;
 
+export type DeviceHttpSignaturePurposeT = SignedDeviceHttpTranscriptT["purpose"];
+
+/**
+ * Compatibility-only credential label for a pre-device runner generation.
+ * In this mode the transcript's device_id slot carries the legacy runner id;
+ * the distinct wire scheme prevents confusing that alias with device identity.
+ */
+export function legacyRunnerHttpCredentialId(runnerId: string, generation: number): string {
+  if (!runnerId.trim() || !Number.isSafeInteger(generation) || generation <= 0) {
+    throw new Error("legacy runner HTTP identity is invalid");
+  }
+  return `legacy-runner:${runnerId}:generation:${generation}`;
+}
+
+const RFC3986_UNRESERVED_BYTE = /^[A-Za-z0-9\-._~]$/;
+const RFC3986_RAW_PATH_ASCII = /^[A-Za-z0-9\-._~!$&'()*+,;=:@/]$/;
+const HEX_BYTE = /^[0-9A-Fa-f]{2}$/;
+
+function percentEncodedByte(byte: number): string {
+  return `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+}
+
+function containsControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit <= 0x1f || codeUnit === 0x7f) return true;
+  }
+  return false;
+}
+
+function utf8Bytes(value: string): number[] {
+  const bytes: number[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    let codePoint = codeUnit;
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const following = value.charCodeAt(index + 1);
+      if (!(following >= 0xdc00 && following <= 0xdfff)) {
+        throw new Error("device HTTP signature target contains malformed UTF-16");
+      }
+      codePoint = 0x10000 + ((codeUnit - 0xd800) << 10) + (following - 0xdc00);
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      throw new Error("device HTTP signature target contains malformed UTF-16");
+    }
+    if (codePoint <= 0x7f) {
+      bytes.push(codePoint);
+    } else if (codePoint <= 0x7ff) {
+      bytes.push(0xc0 | (codePoint >> 6), 0x80 | (codePoint & 0x3f));
+    } else if (codePoint <= 0xffff) {
+      bytes.push(
+        0xe0 | (codePoint >> 12),
+        0x80 | ((codePoint >> 6) & 0x3f),
+        0x80 | (codePoint & 0x3f),
+      );
+    } else {
+      bytes.push(
+        0xf0 | (codePoint >> 18),
+        0x80 | ((codePoint >> 12) & 0x3f),
+        0x80 | ((codePoint >> 6) & 0x3f),
+        0x80 | (codePoint & 0x3f),
+      );
+    }
+  }
+  return bytes;
+}
+
+function decodeUtf8Strict(bytes: readonly number[]): string {
+  let decoded = "";
+  for (let index = 0; index < bytes.length; ) {
+    const first = bytes[index] as number;
+    let codePoint: number;
+    let continuationCount: number;
+    if (first <= 0x7f) {
+      codePoint = first;
+      continuationCount = 0;
+    } else if (first >= 0xc2 && first <= 0xdf) {
+      codePoint = first & 0x1f;
+      continuationCount = 1;
+    } else if (first >= 0xe0 && first <= 0xef) {
+      codePoint = first & 0x0f;
+      continuationCount = 2;
+    } else if (first >= 0xf0 && first <= 0xf4) {
+      codePoint = first & 0x07;
+      continuationCount = 3;
+    } else {
+      throw new Error("device HTTP signature target contains malformed UTF-8");
+    }
+    if (index + continuationCount >= bytes.length) {
+      throw new Error("device HTTP signature target contains truncated UTF-8");
+    }
+    for (let offset = 1; offset <= continuationCount; offset += 1) {
+      const continuation = bytes[index + offset] as number;
+      if (continuation < 0x80 || continuation > 0xbf) {
+        throw new Error("device HTTP signature target contains malformed UTF-8");
+      }
+      codePoint = (codePoint << 6) | (continuation & 0x3f);
+    }
+    if (
+      (continuationCount === 2 && codePoint < 0x800) ||
+      (continuationCount === 3 && codePoint < 0x10000) ||
+      codePoint > 0x10ffff ||
+      (codePoint >= 0xd800 && codePoint <= 0xdfff)
+    ) {
+      throw new Error("device HTTP signature target contains non-scalar UTF-8");
+    }
+    decoded += String.fromCodePoint(codePoint);
+    index += continuationCount + 1;
+  }
+  return decoded;
+}
+
+/**
+ * Decode one URI component to Unicode with strict percent and UTF-8 handling.
+ * `+` is deliberately just another byte; form-url-encoding is not used here.
+ */
+function decodeUriComponentStrict(value: string): string {
+  const bytes: number[] = [];
+  for (let index = 0; index < value.length; ) {
+    if (value[index] === "%") {
+      const hexadecimal = value.slice(index + 1, index + 3);
+      if (!HEX_BYTE.test(hexadecimal)) {
+        throw new Error("device HTTP signature target contains an invalid percent escape");
+      }
+      bytes.push(Number.parseInt(hexadecimal, 16));
+      index += 3;
+      continue;
+    }
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+      throw new Error("device HTTP signature target contains malformed Unicode");
+    }
+    const character = String.fromCodePoint(codePoint);
+    bytes.push(...utf8Bytes(character));
+    index += character.length;
+  }
+  const decoded = decodeUtf8Strict(bytes);
+  if (containsControlCharacter(decoded)) {
+    throw new Error("device HTTP signature target contains a control character");
+  }
+  return decoded;
+}
+
+function encodeQueryComponent(value: string): string {
+  let encoded = "";
+  for (const byte of utf8Bytes(value)) {
+    const character = String.fromCharCode(byte);
+    encoded += RFC3986_UNRESERVED_BYTE.test(character) ? character : percentEncodedByte(byte);
+  }
+  return encoded;
+}
+
+function canonicalizePath(rawPath: string): string {
+  const decodedPath = decodeUriComponentStrict(rawPath);
+  if (rawPath.includes("\\")) {
+    throw new Error("device HTTP signature target contains a raw backslash");
+  }
+
+  let encodedPath = "";
+  for (let index = 0; index < rawPath.length; ) {
+    if (rawPath[index] === "%") {
+      const hexadecimal = rawPath.slice(index + 1, index + 3);
+      if (!HEX_BYTE.test(hexadecimal)) {
+        throw new Error("device HTTP signature target contains an invalid percent escape");
+      }
+      const byte = Number.parseInt(hexadecimal, 16);
+      const character = String.fromCharCode(byte);
+      encodedPath += RFC3986_UNRESERVED_BYTE.test(character) ? character : percentEncodedByte(byte);
+      index += 3;
+      continue;
+    }
+
+    const codePoint = rawPath.codePointAt(index);
+    if (codePoint === undefined || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+      throw new Error("device HTTP signature target contains malformed Unicode");
+    }
+    const character = String.fromCodePoint(codePoint);
+    if (codePoint <= 0x7f && RFC3986_RAW_PATH_ASCII.test(character)) {
+      encodedPath += character;
+    } else {
+      for (const byte of utf8Bytes(character)) encodedPath += percentEncodedByte(byte);
+    }
+    index += character.length;
+  }
+
+  // Decoding percent-encoded unreserved octets above makes encoded dot
+  // segments visible before RFC 3986 section 5.2.4 removal.
+  let input = encodedPath;
+  let output = "";
+  while (input.length > 0) {
+    if (input.startsWith("../")) {
+      input = input.slice(3);
+    } else if (input.startsWith("./")) {
+      input = input.slice(2);
+    } else if (input.startsWith("/./")) {
+      input = input.slice(2);
+    } else if (input === "/.") {
+      input = "/";
+    } else if (input.startsWith("/../")) {
+      input = input.slice(3);
+      output = output.replace(/\/?[^/]*$/, "");
+    } else if (input === "/..") {
+      input = "/";
+      output = output.replace(/\/?[^/]*$/, "");
+    } else if (input === "." || input === "..") {
+      input = "";
+    } else {
+      const nextSlash = input.indexOf("/", input.startsWith("/") ? 1 : 0);
+      const segmentEnd = nextSlash === -1 ? input.length : nextSlash;
+      output += input.slice(0, segmentEnd);
+      input = input.slice(segmentEnd);
+    }
+  }
+
+  // `decodedPath` is intentionally retained as a strict validation step for
+  // the combined raw and percent-encoded octet stream.
+  void decodedPath;
+  return output || "/";
+}
+
+/**
+ * ADR-009 §7 canonical origin-form request target. This deliberately does not
+ * use URLSearchParams: form decoding would turn `+` into space, preserve
+ * duplicate names, and conceal empty pairs.
+ */
+export function canonicalizeDeviceHttpPathAndQuery(pathAndQuery: string): string {
+  if (
+    typeof pathAndQuery !== "string" ||
+    pathAndQuery.includes("#") ||
+    pathAndQuery.includes("\\") ||
+    containsControlCharacter(pathAndQuery)
+  ) {
+    throw new Error("device HTTP signature target is not a valid origin-form target");
+  }
+
+  const queryStart = pathAndQuery.indexOf("?");
+  const suppliedPath = queryStart === -1 ? pathAndQuery : pathAndQuery.slice(0, queryStart);
+  const rawQuery = queryStart === -1 ? null : pathAndQuery.slice(queryStart + 1);
+  if ((suppliedPath !== "" && !suppliedPath.startsWith("/")) || suppliedPath.startsWith("//")) {
+    throw new Error("device HTTP signature target must use origin form");
+  }
+  const path = canonicalizePath(suppliedPath || "/");
+  if (rawQuery === null || rawQuery === "") return path;
+  if (rawQuery.includes(";")) {
+    throw new Error("device HTTP signature query cannot use semicolon separators");
+  }
+
+  const seenNames = new Set<string>();
+  const pairs = rawQuery.split("&").map((rawPair) => {
+    if (rawPair.length === 0) {
+      throw new Error("device HTTP signature query contains an empty pair");
+    }
+    const equals = rawPair.indexOf("=");
+    const rawName = equals === -1 ? rawPair : rawPair.slice(0, equals);
+    const rawValue = equals === -1 ? "" : rawPair.slice(equals + 1);
+    const name = decodeUriComponentStrict(rawName);
+    const value = decodeUriComponentStrict(rawValue);
+    if (name.length === 0) {
+      throw new Error("device HTTP signature query contains an empty name");
+    }
+    if (seenNames.has(name)) {
+      throw new Error("device HTTP signature query contains a duplicate decoded name");
+    }
+    seenNames.add(name);
+    return {
+      name: encodeQueryComponent(name),
+      value: encodeQueryComponent(value),
+    };
+  });
+
+  pairs.sort((left, right) => {
+    const byName = left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
+    if (byName !== 0) return byName;
+    return left.value < right.value ? -1 : left.value > right.value ? 1 : 0;
+  });
+  return `${path}?${pairs.map((pair) => `${pair.name}=${pair.value}`).join("&")}`;
+}
+
+/**
+ * Fixed-key JSON is the byte-level transcript contract. It contains exactly
+ * the nine specified fields, with `purpose` providing endpoint domain
+ * separation.
+ */
+export function serializeSignedDeviceHttpTranscript(input: SignedDeviceHttpTranscriptT): string {
+  const transcript = SignedDeviceHttpTranscript.parse(input);
+  return JSON.stringify({
+    purpose: transcript.purpose,
+    device_id: transcript.device_id,
+    credential_id: transcript.credential_id,
+    generation: transcript.generation,
+    http_method: transcript.http_method,
+    canonical_path_and_query: transcript.canonical_path_and_query,
+    body_sha256: transcript.body_sha256,
+    timestamp: transcript.timestamp,
+    request_id: transcript.request_id,
+  });
+}
+
 export const SignedDeviceWssAuthenticationTranscript = z
   .object({
     purpose: z.literal(DEVICE_WSS_AUTH_SIGNATURE_PURPOSE),
@@ -500,3 +823,22 @@ export const SignedDeviceWssAuthenticationTranscript = z
 export type SignedDeviceWssAuthenticationTranscriptT = z.infer<
   typeof SignedDeviceWssAuthenticationTranscript
 >;
+
+/**
+ * Fixed-order JSON is the canonical byte transcript shared by the Local Agent
+ * and relay. The schema is parsed first so aliases, unknown fields, and
+ * non-canonical value types can never change what one side believes it signed.
+ */
+export function canonicalDeviceWssAuthenticationTranscript(
+  input: SignedDeviceWssAuthenticationTranscriptT,
+): string {
+  const transcript = SignedDeviceWssAuthenticationTranscript.parse(input);
+  return JSON.stringify({
+    purpose: transcript.purpose,
+    device_id: transcript.device_id,
+    credential_id: transcript.credential_id,
+    generation: transcript.generation,
+    protocol_version: transcript.protocol_version,
+    challenge: transcript.challenge,
+  });
+}

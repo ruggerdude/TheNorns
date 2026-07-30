@@ -7,6 +7,7 @@ import { CommandEnvelope, EventEnvelope, ReconcileRequest, ReconcileResponse } f
 import { RepositoryInspection } from "./repositoryInspection.js";
 
 const nonEmpty = z.string().min(1);
+const deviceGeneration = z.number().int().nonnegative();
 const opaqueId = z
   .string()
   .min(1)
@@ -34,6 +35,86 @@ const githubCloneUrl = z
     /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/,
     "clone URL must be an uncredentialed GitHub HTTPS URL",
   );
+
+export const LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE = "norns.legacy-runner-wss-auth.v1" as const;
+export const DEVICE_CANCELLATION_EVIDENCE_WSS_SIGNATURE_PURPOSE =
+  "norns.device-cancellation-evidence-wss.v1" as const;
+
+export const SignedLegacyRunnerWssAuthenticationTranscript = z
+  .object({
+    purpose: z.literal(LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE),
+    runner_id: nonEmpty,
+    generation: z.number().int().nonnegative(),
+    protocol_version: z.number().int().nonnegative(),
+    challenge: nonEmpty,
+  })
+  .strict();
+export type SignedLegacyRunnerWssAuthenticationTranscriptT = z.infer<
+  typeof SignedLegacyRunnerWssAuthenticationTranscript
+>;
+
+export function canonicalLegacyRunnerWssAuthenticationTranscript(
+  input: SignedLegacyRunnerWssAuthenticationTranscriptT,
+): string {
+  const transcript = SignedLegacyRunnerWssAuthenticationTranscript.parse(input);
+  return JSON.stringify({
+    purpose: transcript.purpose,
+    runner_id: transcript.runner_id,
+    generation: transcript.generation,
+    protocol_version: transcript.protocol_version,
+    challenge: transcript.challenge,
+  });
+}
+
+export const SignedDeviceCancellationEvidenceWssTranscript = z
+  .object({
+    purpose: z.literal(DEVICE_CANCELLATION_EVIDENCE_WSS_SIGNATURE_PURPOSE),
+    device_id: opaqueId,
+    credential_id: opaqueId,
+    generation: deviceGeneration,
+    run_id: opaqueId,
+    evidence_state: z.enum(["runner_acknowledged", "process_exited"]),
+    acknowledged_at: z.string().datetime(),
+    process_exited_at: z.string().datetime().nullable(),
+    process_tree_reaped: z.boolean(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const acknowledged =
+      value.evidence_state === "runner_acknowledged" &&
+      value.process_exited_at === null &&
+      value.process_tree_reaped === false;
+    const exited =
+      value.evidence_state === "process_exited" &&
+      value.process_exited_at !== null &&
+      value.process_tree_reaped === true;
+    if (!acknowledged && !exited) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "cancellation evidence state does not match its process-exit proof",
+      });
+    }
+  });
+export type SignedDeviceCancellationEvidenceWssTranscriptT = z.infer<
+  typeof SignedDeviceCancellationEvidenceWssTranscript
+>;
+
+export function canonicalDeviceCancellationEvidenceWssTranscript(
+  input: SignedDeviceCancellationEvidenceWssTranscriptT,
+): string {
+  const transcript = SignedDeviceCancellationEvidenceWssTranscript.parse(input);
+  return JSON.stringify({
+    purpose: transcript.purpose,
+    device_id: transcript.device_id,
+    credential_id: transcript.credential_id,
+    generation: transcript.generation,
+    run_id: transcript.run_id,
+    evidence_state: transcript.evidence_state,
+    acknowledged_at: transcript.acknowledged_at,
+    process_exited_at: transcript.process_exited_at,
+    process_tree_reaped: transcript.process_tree_reaped,
+  });
+}
 
 // Local workspace discovery is deliberately a small, transient side channel on
 // the already-authenticated runner socket.  These IDs are opaque handles, not
@@ -160,13 +241,62 @@ export const RunnerWorkspaceResponse = z
 export type RunnerWorkspaceResponseT = z.infer<typeof RunnerWorkspaceResponse>;
 
 // runner -> server
-export const RunnerFrame = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("auth"),
-    runner_id: nonEmpty,
-    // base64 Ed25519 signature over the server-issued nonce
-    nonce_signature: nonEmpty,
-  }),
+export const DeviceRunnerAuthenticationFrame = z
+  .object({
+    type: z.literal("device_auth"),
+    device_id: opaqueId,
+    credential_id: opaqueId,
+    generation: deviceGeneration,
+    protocol_version: nonEmpty,
+    transcript_signature: nonEmpty,
+  })
+  .strict();
+export type DeviceRunnerAuthenticationFrameT = z.infer<typeof DeviceRunnerAuthenticationFrame>;
+
+export const DeviceCancellationEvidenceFrame = z
+  .object({
+    type: z.literal("device_cancellation_evidence"),
+    device_id: opaqueId,
+    credential_id: opaqueId,
+    generation: deviceGeneration,
+    run_id: opaqueId,
+    evidence_state: z.enum(["runner_acknowledged", "process_exited"]),
+    acknowledged_at: z.string().datetime(),
+    process_exited_at: z.string().datetime().nullable(),
+    process_tree_reaped: z.boolean(),
+    transcript_signature: nonEmpty,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const acknowledged =
+      value.evidence_state === "runner_acknowledged" &&
+      value.process_exited_at === null &&
+      value.process_tree_reaped === false;
+    const exited =
+      value.evidence_state === "process_exited" &&
+      value.process_exited_at !== null &&
+      value.process_tree_reaped === true;
+    if (!acknowledged && !exited) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "cancellation evidence state does not match its process-exit proof",
+      });
+    }
+  });
+export type DeviceCancellationEvidenceFrameT = z.infer<typeof DeviceCancellationEvidenceFrame>;
+
+export const RunnerFrame = z.union([
+  z
+    .object({
+      type: z.literal("auth"),
+      runner_id: nonEmpty,
+      generation: z.number().int().nonnegative(),
+      protocol_version: z.number().int().nonnegative(),
+      transcript_signature: nonEmpty,
+    })
+    .strict(),
+  DeviceRunnerAuthenticationFrame,
+  DeviceCancellationEvidenceFrame,
   z.object({ type: z.literal("reconcile_request"), body: ReconcileRequest }),
   z.object({ type: z.literal("event"), event: EventEnvelope }),
   z.object({
@@ -187,8 +317,45 @@ export type RunnerFrameT = z.infer<typeof RunnerFrame>;
 
 // server -> runner
 export const ServerFrame = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("challenge"), nonce: nonEmpty }),
+  z.object({
+    type: z.literal("challenge"),
+    nonce: nonEmpty,
+    device_auth: z
+      .object({
+        challenge: nonEmpty,
+        supported_protocol_versions: z.array(nonEmpty).min(1).max(16),
+      })
+      .strict()
+      .optional(),
+  }),
   z.object({ type: z.literal("auth_ok") }),
+  z
+    .object({
+      type: z.literal("device_auth_ok"),
+      device_id: opaqueId,
+      generation: deviceGeneration,
+      protocol_version: nonEmpty,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("device_cancellation_request"),
+      device_id: opaqueId,
+      credential_id: opaqueId,
+      generation: deviceGeneration,
+      run_id: opaqueId,
+      cause: z.enum(["project_stop", "device_revocation", "emergency_stop"]),
+      requested_at: z.string().datetime(),
+      publication_fenced: z.boolean(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("device_cancellation_evidence_ack"),
+      run_id: opaqueId,
+      evidence_state: z.enum(["runner_acknowledged", "process_exited"]),
+    })
+    .strict(),
   z.object({ type: z.literal("auth_error"), reason: nonEmpty }),
   z.object({ type: z.literal("reconcile_response"), body: ReconcileResponse }),
   z.object({ type: z.literal("command"), command: CommandEnvelope }),

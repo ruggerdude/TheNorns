@@ -67,7 +67,7 @@ export interface LiveRunRegistration {
   runtimeName: string;
   capabilities: RuntimeCapabilities;
   /** Abort the run. Must be idempotent: at-least-once delivery is the norm. */
-  cancel(reason: string): void;
+  cancel(reason: string, options: { publication: "allow_committed" | "fenced" }): void;
   /** The live session, once the runtime has published one. Null before that. */
   session(): LiveRunSession | null;
 }
@@ -122,7 +122,12 @@ export class LiveRunRegistry {
   /** Cancel every live run. Used when the daemon is fenced or stopped. */
   cancelAll(reason: string): void {
     for (const registration of [...this.live.values()]) {
-      registration.cancel(reason);
+      // A daemon-wide stop is used for generation fencing and process
+      // shutdown. Local work remains recoverable, but a fenced installation
+      // must not publish it later through Norns. Registrations therefore treat
+      // this as a monotonic escalation even if a project-level cancellation
+      // already fired the underlying AbortSignal.
+      registration.cancel(reason, { publication: "fenced" });
     }
   }
 
@@ -158,7 +163,7 @@ export class LiveRunRegistry {
         // is the only lever between a misbehaving agent and its whole budget.
         // It is applied even when the matrix says otherwise: aborting the
         // signal at worst stops the runtime the hard way.
-        registration.cancel("cancelled by operator");
+        registration.cancel("cancelled by operator", { publication: "allow_committed" });
         return {
           applied: true,
           state: "succeeded",

@@ -5,6 +5,10 @@ import {
   PROTOCOL_VERSION,
   v2CommandIdForDispatchJob,
 } from "@norns/contracts";
+import type {
+  PostgresDeviceActionAuthorization,
+  RunnerAuthorizationIdentity,
+} from "../devices/actionAuthorization.js";
 import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import { transitionV2TaskLifecycle } from "../persistence/v2/lifecycleMutation.js";
@@ -61,13 +65,18 @@ interface ClaimedDelivery {
  */
 export class ConversationActionDeliveryWorker {
   private readonly workerId: string;
+  private readonly deviceAuthorization: PostgresDeviceActionAuthorization | undefined;
 
   constructor(
     private readonly transactions: V2TransactionRunner,
     private readonly transport: ConversationActionLiveTransport,
-    options: { workerId?: string } = {},
+    options: {
+      workerId?: string;
+      deviceAuthorization?: PostgresDeviceActionAuthorization;
+    } = {},
   ) {
     this.workerId = options.workerId ?? `conversation-action:${process.pid}`;
+    this.deviceAuthorization = options.deviceAuthorization;
   }
 
   async tick(): Promise<ConversationActionDeliveryResult | null> {
@@ -206,8 +215,25 @@ export class ConversationActionDeliveryWorker {
     };
   }
 
-  async applyCommandAck(event: EventEnvelopeT): Promise<boolean> {
+  async applyCommandAck(
+    event: EventEnvelopeT,
+    authenticatedIdentity?: RunnerAuthorizationIdentity,
+  ): Promise<boolean> {
     if (event.payload.kind !== "command_ack") return false;
+    if (this.deviceAuthorization && !authenticatedIdentity) {
+      throw new Error("authenticated transport identity is required for action acknowledgement");
+    }
+    const authorizationIdentity: RunnerAuthorizationIdentity = authenticatedIdentity ?? {
+      subject: "legacy_runner",
+      runner_id: event.runner_id,
+      generation: event.generation,
+    };
+    if (
+      authorizationIdentity.runner_id !== event.runner_id ||
+      authorizationIdentity.generation !== event.generation
+    ) {
+      throw new Error("authenticated transport identity does not match action acknowledgement");
+    }
     const ack = event.payload;
     const state = ack.state;
     const eventId = `runner-event:${event.runner_id}:${event.generation}:${event.event_seq}`;
@@ -277,6 +303,14 @@ export class ConversationActionDeliveryWorker {
         event.causation_id !== row.target_command_id
       ) {
         throw new Error("conversation action acknowledgement scope mismatch");
+      }
+      if (this.deviceAuthorization) {
+        await this.deviceAuthorization.lockTransportIdentity(tx, authorizationIdentity);
+        await this.deviceAuthorization.assertRun(tx, {
+          ...authorizationIdentity,
+          run_id: row.target_run_id,
+          project_id: row.project_id,
+        });
       }
       const persistedAck = await tx.query<{ id: string }>(
         `INSERT INTO runner_events (

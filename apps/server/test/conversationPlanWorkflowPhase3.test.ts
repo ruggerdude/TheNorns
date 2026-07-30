@@ -2091,6 +2091,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       },
       verified_at: verifiedAt,
       runner_id: evidence.runner_id,
+      runner_generation: Number(evidence.runner_generation),
       desktop_png: implementation.desktop,
       mobile_png: implementation.mobile,
     });

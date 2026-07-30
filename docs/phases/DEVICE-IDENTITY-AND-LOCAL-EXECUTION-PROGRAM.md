@@ -707,7 +707,8 @@ Owners: McClintock and Raman.
 - Scoped browser broadcasts.
 
 Gate: cross-user access and background-path bypass tests pass before any
-Computers UI is enabled.
+Computers UI is enabled. Device application dispatch remains fail-closed after
+this phase; cancellation tracking alone is not publication authority.
 
 ### Phase 3 — Device management surfaces
 
@@ -730,9 +731,12 @@ Owners: McClintock, Raman, and Poincaré.
 - Project grants.
 - New immutable device-backed bindings.
 - Project Settings target selection.
+- One-use, signed publication permits bound to the current run, device,
+  credential generation, commit, branch, and active grant chain.
 
 Gate: repository removal means “remove Norns access” and never deletes local
-files.
+files. Device dispatch cannot be enabled until publication fails closed while
+offline and every permit is reauthorized immediately before use.
 
 ### Phase 5 — Conversation execution integration
 
@@ -792,6 +796,31 @@ commit, pushes the exact commit to GitHub `main`, verifies local `main` and
 `origin/main` match, waits for Railway's automatic deployment, verifies Railway
 deployed that exact SHA, and checks the public health endpoint. Installer phases
 also exercise the signed package workflow.
+
+### Railway sequencing for additive device migrations
+
+The ordinary application must never receive the privileged migration database
+URL or run migrations during process startup. For releases containing the
+additive device migrations:
+
+1. Push the reviewed commit while the prior healthy application deployment
+   remains live.
+2. From the Railway operations service built from that exact commit, run
+   `node apps/server/dist/applyMigrations.js` with the privileged migration
+   `DATABASE_URL`.
+3. Verify the `0053` through `0056` ledger checksums and the new relations,
+   columns, constraints, triggers, and `norns_app` privileges before promoting
+   the application deployment.
+4. Allow the automatic application deployment to start or retry, verify it is
+   running the pushed commit, and then check `/health`.
+
+The new application intentionally refuses startup with
+`runtime_schema_outdated` until these migrations are present. If Railway starts
+the new image before the operations service finishes, the failed health check
+must leave the prior healthy deployment serving traffic; finish the additive
+migrations and retry the same application commit. Do not work around the gate
+by granting migration privileges to the application or by removing its schema
+posture checks.
 
 ## Estimate, exclusions, and dependencies
 

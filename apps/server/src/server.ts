@@ -31,7 +31,11 @@ import {
   CommandPayload,
   type CommandStateT,
   DEFAULT_PM_MODEL,
+  DEVICE_CANCELLATION_EVIDENCE_WSS_SIGNATURE_PURPOSE,
+  DEVICE_CONTEXT_RETRIEVAL_HTTP_SIGNATURE_PURPOSE,
+  DEVICE_VISUAL_EVIDENCE_UPLOAD_HTTP_SIGNATURE_PURPOSE,
   type EventEnvelopeT,
+  LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
   OpenAiPmModel,
   PROTOCOL_VERSION,
   PlanContract,
@@ -54,6 +58,8 @@ import {
   V2RepositoryIngestionSeed,
   V2StartDebateRunCommand,
   V2StrategyVersion,
+  canonicalDeviceCancellationEvidenceWssTranscript,
+  canonicalLegacyRunnerWssAuthenticationTranscript,
   isPmModelForProvider,
   parseRunnerFrame,
 } from "@norns/contracts";
@@ -155,19 +161,37 @@ function attachmentContentDisposition(filename: string, inline: boolean): string
   return `${inline ? "inline" : "attachment"}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 import { DebateConflictError, type DebateService } from "./debates/service.js";
+import type { PostgresDeviceActionAuthorization } from "./devices/actionAuthorization.js";
+import { DeviceActionAuthorizationError } from "./devices/actionAuthorization.js";
+import type { ScopedDeviceBrowserDelivery } from "./devices/browserDelivery.js";
+import {
+  DeviceRunCancellationError,
+  type DeviceRunCancellationService,
+} from "./devices/cancellation.js";
+import type { DeviceOnlineControlBroker } from "./devices/onlineControl.js";
+import type { DeviceRevocationService } from "./devices/revocation.js";
 import {
   type DeviceEnrollmentRouteService,
   registerDeviceEnrollmentRoutes,
 } from "./devices/routes.js";
+import type {
+  AuthenticatedDeviceWssIdentity,
+  DeviceWssAuthenticator,
+} from "./devices/wssAuthentication.js";
 import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
 // EXECUTION E1: task-context assembly + the runner-facing context fetch route.
 import {
-  RUNNER_CONTEXT_RUNNER_ID_HEADER,
+  DEVICE_HTTP_DEVICE_ID_HEADER,
+  type DeviceHttpAuthResult,
+  type DeviceHttpRequestAuthenticator,
   RelationalTaskContextAssembler,
   TASK_CONTEXT_ROUTE_PREFIX,
   type TaskContextAssembler,
+  type TaskContextDocumentContent,
   TaskContextStore,
-  authenticateRunnerContextRequest,
+  captureRunnerHttpBodySha256,
+  capturedRunnerHttpBodySha256,
+  routedDeviceHttpPathSegment,
 } from "./execution/index.js";
 // EXECUTION E9 — the provider-native streaming gateway that lets Claude Code
 // and Codex run credential-free. Everything about it lives in src/gateway/.
@@ -324,6 +348,10 @@ import {
   parseRunnerAllowedModels,
 } from "./runners/inferenceProxy.js";
 import {
+  type LegacyRunnerAuthorization,
+  PostgresLegacyRunnerAuthorization,
+} from "./runners/legacyAuthorization.js";
+import {
   RunnerWorkspaceBroker,
   WorkspaceBrokerError,
   WorkspaceSelectionTokens,
@@ -405,6 +433,54 @@ export interface ServerOptions {
   deviceEnrollment?: {
     service: DeviceEnrollmentRouteService;
   };
+  /**
+   * Device installation WSS identity proof. This is deliberately independent
+   * from enrollment and remains absent in production until the Phase 2
+   * authorization-enforcement gate is complete.
+   */
+  deviceWssAuthentication?: DeviceWssAuthenticator;
+  /**
+   * Explicit owner/project-scoped device browser delivery. There is no
+   * administrator or all-session fallback.
+   */
+  deviceBrowserDelivery?: ScopedDeviceBrowserDelivery;
+  /**
+   * Cancellation is the only device control transport available before general
+   * device command execution is enabled. Revocation remains a service concern;
+   * the broker only performs best-effort post-commit socket cleanup.
+   */
+  deviceControl?: {
+    broker: DeviceOnlineControlBroker;
+    cancellations: DeviceRunCancellationService;
+    revocations: DeviceRevocationService;
+  };
+  /**
+   * Strict device HTTP authentication and one-time request-id consumption.
+   * Legacy runner acceptance, when required during cutover, is configured
+   * explicitly inside this authenticator and never inferred here.
+   */
+  runnerHttpAuthentication?: DeviceHttpRequestAuthenticator;
+  /**
+   * Transaction-local JIT authorization for device HTTP acceptance. The
+   * service and transaction runner are paired so the device row lock remains
+   * held through context reads, credential minting, and evidence persistence.
+   */
+  deviceActionAuthorization?: {
+    service: PostgresDeviceActionAuthorization;
+    transactions: V2TransactionRunner;
+  };
+  /**
+   * Temporary escape hatch for pre-project legacy runner workflows. Omission
+   * is fail-closed; production must opt in explicitly while completing
+   * cutover. This never authorizes device identities.
+   */
+  legacyGlobalRunnerCompatibility?: { enabled: true };
+  /**
+   * Injectable project/run attribution seam for compatibility runner
+   * surfaces. Production derives this from the relational transaction runner;
+   * tests can supply an exact fake without enabling global compatibility.
+   */
+  legacyRunnerAuthorization?: LegacyRunnerAuthorization;
   /**
    * Deploy-level secret (Railway env var). Its ONLY job is gating the
    * one-time POST /api/auth/bootstrap that creates the first admin account
@@ -597,6 +673,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const usesLegacyIdentity = options.identity === undefined;
   const identityService: IdentityService = options.identity ?? new LegacyIdentityService(users);
   const now = options.clock ?? (() => new Date());
+  const runnerHttpAuthentication:
+    | DeviceHttpRequestAuthenticator
+    | { authenticate(): Promise<DeviceHttpAuthResult> } = options.runnerHttpAuthentication ?? {
+    async authenticate(): Promise<DeviceHttpAuthResult> {
+      return { ok: false, reason: "missing_credentials" };
+    },
+  };
   // Recovery decision-point ids include durable aggregate identities and can
   // legitimately exceed Fastify's 100-character default. Keep the route
   // bounded while allowing server-generated ids to round-trip through params.
@@ -656,6 +739,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     options.planningRuns?.transactions ??
     options.onboarding?.transactions ??
     options.attachments?.transactions;
+  const legacyGlobalRunnerCompatibilityEnabled =
+    options.legacyGlobalRunnerCompatibility?.enabled === true;
+  const legacyRunnerAuthorization: LegacyRunnerAuthorization | null =
+    options.legacyRunnerAuthorization ??
+    (runtimeTransactionsForInference
+      ? new PostgresLegacyRunnerAuthorization(runtimeTransactionsForInference)
+      : null);
   const phase6Mockups = options.execution
     ? new Phase6MockupService(options.execution.transactions)
     : null;
@@ -813,6 +903,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       ? new ProviderGateway({
           runs: gatewayRuns ?? new SqlProxiedRunLookup(runtimeTransactionsForInference),
           credentials: gatewayCredentials,
+          deviceActionAuthorization: options.deviceActionAuthorization,
           budget: new SqlRunReservationBudget(runtimeTransactionsForInference),
           meter: new SqlInferenceMeter(runtimeTransactionsForInference, options.recordUsage),
           allowedModels: parseRunnerAllowedModels(
@@ -845,9 +936,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       gateway: modelGateway,
       credentials: gatewayCredentials,
       runs: gatewayRuns,
-      runnerPublicKey: (runnerId) => stores.runner(runnerId)?.public_key_pem ?? null,
+      runnerHttpAuthentication,
+      deviceActionAuthorization: options.deviceActionAuthorization,
       audit: (actor, action, detail) => stores.audit(actor, action, detail, now()),
-      now,
       publicOrigin: gatewayOrigin,
     });
   }
@@ -1075,6 +1166,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         };
       },
       {
+        ...(options.deviceActionAuthorization
+          ? { deviceAuthorization: options.deviceActionAuthorization.service }
+          : {}),
         afterProvision: async (provisioned) => {
           if (provisioned.target.kind !== "actions") return;
           if (!options.actionsExecution) {
@@ -1135,6 +1229,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           runner_generation: provisioned.target.runner_generation,
         });
       },
+      undefined,
+      options.deviceActionAuthorization?.service,
     );
     let continuationTicking = false;
     humanWaitContinuationTimer = setInterval(() => {
@@ -1197,6 +1293,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         cancel: (commandId) => {
           stores.setCommandState(commandId, "cancelled", now());
         },
+      },
+      {
+        ...(options.deviceActionAuthorization
+          ? { deviceAuthorization: options.deviceActionAuthorization.service }
+          : {}),
       },
     );
     const conversationActionCheckpoint = new ConversationActionCheckpointWorker(
@@ -1286,33 +1387,120 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     }
   };
 
-  const broadcast = (message: Record<string, unknown>): void => {
+  const queueValidatedSessionDelivery = (
+    binding: SessionSocketBinding,
+    raw: string,
+    authorize: (userId: string) => Promise<boolean> = async () => true,
+  ): Promise<void> => {
+    const delivery = binding.delivery.then(async () => {
+      if (!binding.active) throw new Error("session inactive");
+      const currentUser = await identityService.userForToken(binding.token);
+      if (!currentUser || currentUser.id !== binding.userId || currentUser.status !== "active") {
+        closeSessionSocket(binding, "session no longer valid");
+        throw new Error("session no longer valid");
+      }
+      if (!binding.active) throw new Error("session inactive");
+      if (!(await authorize(binding.userId))) return;
+      try {
+        binding.socket.send(raw);
+      } catch {
+        closeSessionSocket(binding, "connection unavailable");
+        throw new Error("connection unavailable");
+      }
+    });
+    binding.delivery = delivery.catch(() => {
+      closeSessionSocket(binding, "session validation failed");
+    });
+    return delivery;
+  };
+
+  /**
+   * Historical runner frames are project-scoped by durable attribution.
+   * Device metadata must use ScopedDeviceBrowserDelivery instead. The global
+   * branch exists only behind the explicit disabled-by-default compatibility
+   * option.
+   */
+  type LegacyBrowserFrameScope =
+    | { kind: "runner"; runner_id: string }
+    | {
+        kind: "command";
+        command_id: string;
+        runner_id?: string;
+        project_id?: string;
+      }
+    | { kind: "run"; run_id: string; runner_id: string }
+    | { kind: "project_runner"; project_id: string; runner_id: string };
+  const canReceiveLegacyBrowserFrame = async (
+    userId: string,
+    scope: LegacyBrowserFrameScope,
+  ): Promise<boolean> => {
+    if (legacyGlobalRunnerCompatibilityEnabled) return true;
+    if (!legacyRunnerAuthorization) return false;
+    if (scope.kind === "runner") {
+      return (await legacyRunnerAuthorization.runnerIdsForUser(userId)).has(scope.runner_id);
+    }
+    if (scope.kind === "command") {
+      const durableCommandAccess = await legacyRunnerAuthorization.canAccessCommand({
+        user_id: userId,
+        command_id: scope.command_id,
+        ...(scope.runner_id === undefined ? {} : { runner_id: scope.runner_id }),
+      });
+      if (durableCommandAccess || scope.project_id === undefined || scope.runner_id === undefined) {
+        return durableCommandAccess;
+      }
+      // Relay-only compatibility commands are not rows in the v2 command
+      // ledger. Their immutable in-memory envelope still supplies exact
+      // project/runner attribution, which is revalidated at delivery time.
+      return legacyRunnerAuthorization.canAccessProjectRunner({
+        user_id: userId,
+        project_id: scope.project_id,
+        runner_id: scope.runner_id,
+      });
+    }
+    if (scope.kind === "run") {
+      return legacyRunnerAuthorization.canAccessRun({
+        user_id: userId,
+        run_id: scope.run_id,
+        runner_id: scope.runner_id,
+      });
+    }
+    return legacyRunnerAuthorization.canAccessProjectRunner({
+      user_id: userId,
+      project_id: scope.project_id,
+      runner_id: scope.runner_id,
+    });
+  };
+  const broadcastLegacyRunnerCompatibility = (
+    message: Record<string, unknown>,
+    scope: LegacyBrowserFrameScope,
+  ): void => {
     const raw = JSON.stringify(message);
     for (const binding of sessionSockets.values()) {
-      binding.delivery = binding.delivery
-        .then(async () => {
-          if (!binding.active) return;
-          const currentUser = await identityService.userForToken(binding.token);
-          if (
-            !currentUser ||
-            currentUser.id !== binding.userId ||
-            currentUser.status !== "active"
-          ) {
-            closeSessionSocket(binding, "session no longer valid");
-            return;
-          }
-          if (!binding.active) return;
-          try {
-            binding.socket.send(raw);
-          } catch {
-            closeSessionSocket(binding, "connection unavailable");
-          }
-        })
-        .catch(() => {
-          closeSessionSocket(binding, "session validation failed");
-        });
+      void queueValidatedSessionDelivery(binding, raw, (userId) =>
+        canReceiveLegacyBrowserFrame(userId, scope),
+      );
     }
   };
+
+  const legacyRunnerCompatibilitySnapshot = async (userId: string) => {
+    const allowedRunnerIds = legacyGlobalRunnerCompatibilityEnabled
+      ? null
+      : await legacyRunnerAuthorization?.runnerIdsForUser(userId);
+    if (allowedRunnerIds === undefined) return [];
+    return stores
+      .runners()
+      .filter((runner) => allowedRunnerIds?.has(runner.runner_id) ?? true)
+      .map((runner) => ({
+        runner_id: runner.runner_id,
+        connected: runnerSockets.has(runner.runner_id),
+      }));
+  };
+
+  const scopedDeviceBrowserSessions = () =>
+    [...sessionSockets.values()].map((binding) => ({
+      user_id: binding.userId,
+      send: (frame: unknown) => queueValidatedSessionDelivery(binding, JSON.stringify(frame)),
+    }));
 
   /** Resolve the caller's bearer token to a real user, or undefined. Real
    *  per-user sessions are the only session credential — the deploy token is
@@ -1440,6 +1628,64 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   };
   const requireSession = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> =>
     (await requireSessionUser(req, reply)) !== null;
+  const rejectLegacyRunnerAccess = (
+    user: IdentityUser,
+    reply: FastifyReply,
+    operation: string,
+  ): false => {
+    stores.audit(user.id, "legacy_runner.forbidden", operation, now());
+    reply.code(403).send({
+      error: "legacy_runner_access_forbidden",
+      message: "This legacy runner operation is not attributed to one of your projects.",
+    });
+    return false;
+  };
+  const requireLegacyGlobalCompatibility = (
+    user: IdentityUser,
+    reply: FastifyReply,
+    operation: string,
+  ): boolean =>
+    legacyGlobalRunnerCompatibilityEnabled || rejectLegacyRunnerAccess(user, reply, operation);
+  const canUseLegacyProjectRunner = async (input: {
+    user_id: string;
+    project_id: string;
+    runner_id: string;
+    payload: z.infer<typeof CommandPayload>;
+  }): Promise<boolean> => {
+    if (legacyGlobalRunnerCompatibilityEnabled) return true;
+    if (!legacyRunnerAuthorization) return false;
+    const runId = "run_id" in input.payload ? input.payload.run_id : undefined;
+    if (
+      runId !== undefined &&
+      !(await legacyRunnerAuthorization.canAccessRun({
+        user_id: input.user_id,
+        project_id: input.project_id,
+        run_id: runId,
+        runner_id: input.runner_id,
+      }))
+    ) {
+      return false;
+    }
+    if (
+      input.payload.kind !== "launch_run" &&
+      input.payload.kind !== "collect_visual_evidence" &&
+      runId !== undefined
+    ) {
+      return true;
+    }
+    const repositoryBindingId =
+      input.payload.kind === "collect_visual_evidence"
+        ? input.payload.repository_binding_id
+        : input.payload.kind === "launch_run"
+          ? input.payload.dispatch?.repository_binding_id
+          : undefined;
+    return legacyRunnerAuthorization.canAccessProjectRunner({
+      user_id: input.user_id,
+      project_id: input.project_id,
+      runner_id: input.runner_id,
+      ...(repositoryBindingId === undefined ? {} : { repository_binding_id: repositoryBindingId }),
+    });
+  };
 
   if (options.deviceEnrollment) {
     await registerDeviceEnrollmentRoutes(app, {
@@ -2071,6 +2317,16 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       const body = RevokeRunnerBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
       const { runnerId } = req.params as { runnerId: string };
+      if (
+        !legacyGlobalRunnerCompatibilityEnabled &&
+        (!legacyRunnerAuthorization ||
+          !(await legacyRunnerAuthorization.canRevokeRunner({
+            user_id: admin.id,
+            runner_id: runnerId,
+          })))
+      ) {
+        return rejectLegacyRunnerAccess(admin, reply, "admin runner revocation");
+      }
       await options.phase7?.operations.revokeRunner({
         runner_id: runnerId,
         ...body.data,
@@ -2205,7 +2461,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       runnerSockets.delete(runner_id);
       sendFrame(priorSocket, { type: "fenced", current_generation: record.generation });
       priorSocket.close(1008, "runner re-paired");
-      broadcast({ type: "runner_status", runner_id, connected: false });
+      broadcastLegacyRunnerCompatibility(
+        {
+          type: "runner_status",
+          runner_id,
+          connected: false,
+        },
+        { kind: "runner", runner_id },
+      );
     }
     stores.audit(
       `runner:${runner_id}`,
@@ -2375,10 +2638,21 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   });
 
   app.post("/api/commands", async (req, reply) => {
-    if (!(await requireSession(req, reply))) return;
+    const user = await requireSessionUser(req, reply);
+    if (!user) return;
     const parsed = IssueCommand.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: "bad_request" });
     const body = parsed.data;
+    if (
+      !(await canUseLegacyProjectRunner({
+        user_id: user.id,
+        project_id: body.project_id,
+        runner_id: body.runner_id,
+        payload: body.payload,
+      }))
+    ) {
+      return rejectLegacyRunnerAccess(user, reply, "command issuance");
+    }
     const runner = stores.runner(body.runner_id);
     if (!runner) return reply.code(404).send({ error: "unknown_runner" });
     if (stores.killSwitchEngaged()) {
@@ -2396,7 +2670,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       project_id: body.project_id,
       runner_id: body.runner_id,
       generation: runner.generation,
-      issued_by_session: "operator",
+      issued_by_session: user.id,
       issued_at: issuedAt.toISOString(),
       expires_at: new Date(
         issuedAt.getTime() + (body.expires_in_ms ?? DEFAULT_COMMAND_TTL_MS),
@@ -2410,10 +2684,21 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   });
 
   app.get("/api/commands/:id", async (req, reply) => {
-    if (!(await requireSession(req, reply))) return;
+    const user = await requireSessionUser(req, reply);
+    if (!user) return;
     const { id } = req.params as { id: string };
     const record = stores.command(id);
     if (!record) return reply.code(404).send({ error: "not_found" });
+    if (
+      !(await canUseLegacyProjectRunner({
+        user_id: user.id,
+        project_id: record.envelope.project_id,
+        runner_id: record.envelope.runner_id,
+        payload: record.envelope.payload,
+      }))
+    ) {
+      return rejectLegacyRunnerAccess(user, reply, "command observation");
+    }
     return reply.send({
       command_id: id,
       state: record.state,
@@ -2454,30 +2739,93 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       install_command_windows: installCommandWindows({ origin }),
     };
   };
+  const authorizedHelperRunnerSnapshots = async (
+    userId: string,
+  ): Promise<HelperRunnerSnapshot[]> => {
+    if (legacyGlobalRunnerCompatibilityEnabled) return helperRunnerSnapshots();
+    const runnerIds = await legacyRunnerAuthorization?.runnerIdsForUser(userId);
+    if (!runnerIds) return [];
+    return helperRunnerSnapshots().filter((runner) => runnerIds.has(runner.runner_id));
+  };
 
   app.get("/api/runners/helper/status", async (req, reply) => {
-    if (!(await requireSession(req, reply))) return;
+    const user = await requireSessionUser(req, reply);
+    if (!user) return;
+    if (!requireLegacyGlobalCompatibility(user, reply, "global helper status")) return;
     return reply.send(helperStatusPayload(req));
   });
 
   app.get("/api/runners", async (req, reply) => {
-    if (!(await requireSession(req, reply))) return;
-    return reply.send(helperRunnerSnapshots());
+    const user = await requireSessionUser(req, reply);
+    if (!user) return;
+    return reply.send(await authorizedHelperRunnerSnapshots(user.id));
   });
 
   app.get("/api/audit", async (req, reply) => {
-    if (!(await requireSession(req, reply))) return;
-    reply.send(stores.auditEntries());
+    const user = await requireSessionUser(req, reply);
+    if (!user) return;
+    if (legacyGlobalRunnerCompatibilityEnabled) {
+      return reply.send(stores.auditEntries());
+    }
+    const computerActionPrefixes = [
+      "device.",
+      "runner.",
+      "command.",
+      "pairing.",
+      "workspace.",
+      "legacy_runner.",
+      "execution.context.",
+      "gateway.credential_",
+      "phase6.visual_evidence.",
+    ];
+    return reply.send(
+      stores
+        .auditEntries()
+        .filter(
+          (entry) =>
+            !entry.actor.startsWith("device:") &&
+            !entry.actor.startsWith("runner:") &&
+            entry.action !== "kill_switch" &&
+            !computerActionPrefixes.some((prefix) => entry.action.startsWith(prefix)),
+        ),
+    );
   });
 
   app.get("/api/events/:runnerId", async (req, reply) => {
-    if (!(await requireSession(req, reply))) return;
+    const user = await requireSessionUser(req, reply);
+    if (!user) return;
     const { runnerId } = req.params as { runnerId: string };
-    reply.send(stores.eventsFor(runnerId));
+    const events = stores.eventsFor(runnerId);
+    if (legacyGlobalRunnerCompatibilityEnabled) return reply.send(events);
+    if (!legacyRunnerAuthorization) {
+      return rejectLegacyRunnerAccess(user, reply, "runner event listing");
+    }
+    const visible = [];
+    for (const event of events) {
+      const payload = event.payload;
+      const authorized =
+        "run_id" in payload
+          ? await legacyRunnerAuthorization.canAccessRun({
+              user_id: user.id,
+              run_id: payload.run_id,
+              runner_id: runnerId,
+            })
+          : "command_id" in payload
+            ? await legacyRunnerAuthorization.canAccessCommand({
+                user_id: user.id,
+                command_id: payload.command_id,
+                runner_id: runnerId,
+              })
+            : false;
+      if (authorized) visible.push(event);
+    }
+    return reply.send(visible);
   });
 
   app.post("/api/kill-switch", async (req, reply) => {
-    if (!(await requireSession(req, reply))) return;
+    const user = await requireSessionUser(req, reply);
+    if (!user) return;
+    if (!requireLegacyGlobalCompatibility(user, reply, "global kill switch")) return;
     const body = z.object({ engaged: z.boolean() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: "bad_request" });
     stores.setKillSwitch(body.data.engaged);
@@ -4363,6 +4711,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       ) => {
         const user = await resolveUser(req);
         if (!user) return reply.code(401).send({ error: "unauthorized" });
+        if (!requireLegacyGlobalCompatibility(user, reply, "global workspace selection")) return;
         const status = helperStatus(helperRunnerSnapshots());
         const runnerId = requestedRunnerId ?? status.runner_id;
         if (status.state !== "connected" || !runnerId) {
@@ -4433,6 +4782,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       app.get("/api/runners/helper/repositories", async (req, reply) => {
         const user = await resolveUser(req);
         if (!user) return reply.code(401).send({ error: "unauthorized" });
+        if (!requireLegacyGlobalCompatibility(user, reply, "global repository catalog")) return;
         const status = helperStatus(helperRunnerSnapshots());
         if (status.state !== "connected" || !status.runner_id) {
           return reply.send({ ...helperStatusPayload(req), repositories: [] });
@@ -4977,6 +5327,17 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             phaseId: string;
             taskId: string;
           };
+          if (
+            !legacyGlobalRunnerCompatibilityEnabled &&
+            (!legacyRunnerAuthorization ||
+              !(await legacyRunnerAuthorization.canAccessProjectRunner({
+                user_id: user.id,
+                project_id: id,
+                runner_id: body.data.runner_id,
+              })))
+          ) {
+            return rejectLegacyRunnerAccess(user, reply, "task scheduling");
+          }
           const runner = stores.runner(body.data.runner_id);
           if (!runner) return reply.code(409).send({ error: "runner_unavailable" });
           const issuedAt = now();
@@ -6587,13 +6948,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // for its task. Everything else about assembly lives in src/execution/.
   //
   // AUTH: this route is NOT session-authenticated — the caller is a runner, not
-  // a browser. It reuses the runner's EXISTING relay identity: the Ed25519
-  // keypair registered at pairing, the same key /ws/runner challenges. The
-  // runner signs the method, path, its runner id, and a timestamp; the server
-  // verifies with the registered public key inside a 5-minute skew window. No
-  // new credential is minted and nothing secret appears in the URL, so a
-  // `storage_ref` is safe to persist in a dispatch command, a log, or an audit
-  // record.
+  // a browser. The active device credential signs the purpose, identity,
+  // credential, generation, method, canonical path/query, empty body digest,
+  // timestamp, and one-time request id. The compatibility runner identity uses
+  // the same transcript under a distinct scheme. Nothing secret appears in the
+  // URL, so a `storage_ref` is safe to persist in a command, log, or audit.
   //
   // INTEGRITY: the bytes are content-addressed. The runner's
   // HashVerifiedContextLoader recomputes the sha256 and the byte size and
@@ -6614,47 +6973,154 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     dispatchContextScope = new DispatchContextScopeRepository(options.execution.transactions);
 
     app.get(`${TASK_CONTEXT_ROUTE_PREFIX}/:documentId`, async (req, reply) => {
-      const auth = authenticateRunnerContextRequest(
-        {
-          method: req.method,
-          // Sign the path only: the origin is not the runner's to assert, and a
-          // query string is not part of this route's identity.
-          path: new URL(req.url, "http://placeholder.invalid").pathname,
-          headers: req.headers as Record<string, string | string[] | undefined>,
-        },
-        (runnerId) => stores.runner(runnerId)?.public_key_pem ?? null,
-        now().getTime(),
-      );
+      const auth = await runnerHttpAuthentication.authenticate({
+        purpose: DEVICE_CONTEXT_RETRIEVAL_HTTP_SIGNATURE_PURPOSE,
+        method: req.method,
+        path_and_query: req.url,
+        routed_path: `${TASK_CONTEXT_ROUTE_PREFIX}/${routedDeviceHttpPathSegment(
+          (req.params as { documentId: string }).documentId,
+        )}`,
+        body_sha256: capturedRunnerHttpBodySha256(req),
+        headers: req.headers as Record<string, string | string[] | undefined>,
+      });
       if (!auth.ok) {
         stores.audit(
-          `runner:${req.headers[RUNNER_CONTEXT_RUNNER_ID_HEADER] ?? "unknown"}`,
+          `runner:${
+            req.headers[DEVICE_HTTP_DEVICE_ID_HEADER] ??
+            req.headers["x-norns-runner-id"] ??
+            "unknown"
+          }`,
           "execution.context.auth_failed",
           auth.reason,
           now(),
         );
         return reply.code(401).send({ error: "unauthorized" });
       }
+      const subjectId = auth.identity.authorization_subject_id;
       const { documentId } = req.params as { documentId: string };
-      // EXECUTION E2: a valid signature proves WHO is asking, not WHAT they
-      // are entitled to read. Without this, any paired runner could fetch any
-      // project's assembled context by document id. Checked before the
-      // existence lookup below so an unscoped caller learns nothing about
-      // whether the id is real.
-      if (!(await dispatchContextScope?.isAuthorized(auth.runner_id, documentId))) {
+      if (auth.identity.kind === "device") {
+        const deviceIdentity = auth.identity;
+        const authorization = options.deviceActionAuthorization;
+        if (!authorization) {
+          return reply.code(503).send({ error: "device_authorization_unavailable" });
+        }
+        try {
+          const content = await authorization.transactions.transaction(async (sql) => {
+            await authorization.service.lockTransportIdentity(sql, {
+              subject: "device",
+              runner_id: deviceIdentity.device_id,
+              generation: deviceIdentity.generation,
+              credential_id: deviceIdentity.credential_id,
+            });
+            const runId = await dispatchContextScope?.authorizedRunIdInTransaction(
+              sql,
+              deviceIdentity.device_id,
+              deviceIdentity.generation,
+              documentId,
+            );
+            if (!runId) return null;
+            await authorization.service.assertRun(sql, {
+              subject: "device",
+              runner_id: deviceIdentity.device_id,
+              generation: deviceIdentity.generation,
+              credential_id: deviceIdentity.credential_id,
+              run_id: runId,
+            });
+            return taskContextStore.contentInTransaction(sql, documentId);
+          });
+          if (!content) {
+            stores.audit(
+              `device:${deviceIdentity.device_id}`,
+              "execution.context.auth_failed",
+              "not_scoped_to_authorized_device_run",
+              now(),
+            );
+            return reply.code(403).send({ error: "forbidden" });
+          }
+          return reply
+            .type(content.media_type)
+            .header("cache-control", "private, no-store")
+            .send(content.bytes);
+        } catch (error) {
+          if (error instanceof DeviceActionAuthorizationError) {
+            stores.audit(
+              `device:${deviceIdentity.device_id}`,
+              "execution.context.auth_failed",
+              error.code,
+              now(),
+            );
+            return reply.code(403).send({ error: "forbidden" });
+          }
+          throw error;
+        }
+      }
+      if (auth.identity.kind !== "legacy_runner") {
+        return reply.code(401).send({ error: "unauthorized" });
+      }
+      const legacyIdentity = auth.identity;
+      let legacyAuthorized = false;
+      let legacyDocument: TaskContextDocumentContent | null | undefined;
+      try {
+        const authorizationResult = options.deviceActionAuthorization
+          ? await options.deviceActionAuthorization.transactions.transaction(async (sql) => {
+              const runId = await dispatchContextScope?.authorizedRunIdInTransaction(
+                sql,
+                legacyIdentity.runner_id,
+                legacyIdentity.generation,
+                documentId,
+              );
+              if (!runId) return { authorized: false, document: null };
+              await options.deviceActionAuthorization?.service.assertRun(sql, {
+                subject: "legacy_runner",
+                runner_id: legacyIdentity.runner_id,
+                generation: legacyIdentity.generation,
+                run_id: runId,
+              });
+              return {
+                authorized: true,
+                document: await taskContextStore.contentInTransaction(sql, documentId),
+              };
+            })
+          : await (async () => {
+              const authorized = await dispatchContextScope?.isAuthorized(
+                legacyIdentity.runner_id,
+                legacyIdentity.generation,
+                documentId,
+              );
+              return {
+                authorized: authorized === true,
+                document: authorized ? await taskContextStore.content(documentId) : null,
+              };
+            })();
+        legacyAuthorized = authorizationResult.authorized;
+        legacyDocument = authorizationResult.document;
+      } catch (error) {
+        if (!(error instanceof DeviceActionAuthorizationError)) throw error;
         stores.audit(
-          `runner:${auth.runner_id}`,
+          `runner:${legacyIdentity.runner_id}`,
+          "execution.context.auth_failed",
+          error.code,
+          now(),
+        );
+        return reply.code(403).send({ error: "forbidden" });
+      }
+      // EXECUTION E2: a valid signature proves WHO is asking, not WHAT they
+      // are entitled to read. Checked before the existence response so an
+      // unscoped caller learns nothing about whether the id is real.
+      if (!legacyAuthorized) {
+        stores.audit(
+          `runner:${subjectId}`,
           "execution.context.auth_failed",
           "not_scoped_to_runner",
           now(),
         );
         return reply.code(403).send({ error: "forbidden" });
       }
-      const document = await taskContextStore.content(documentId);
-      if (!document) return reply.code(404).send({ error: "not_found" });
+      if (!legacyDocument) return reply.code(404).send({ error: "not_found" });
       return reply
-        .header("content-type", document.media_type)
+        .header("content-type", legacyDocument.media_type)
         .header("cache-control", "private, max-age=0, no-store")
-        .send(document.bytes);
+        .send(legacyDocument.bytes);
     });
   }
 
@@ -6928,10 +7394,31 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
   app.get("/ws/runner", { websocket: true }, (conn) => {
     const socket = asSocket(conn);
-    const challenge = nonce();
+    const legacyRunnerChallenge = nonce();
+    const deviceProtocolVersions = [
+      ...(options.deviceWssAuthentication?.supportedProtocolVersions ?? []),
+    ];
+    const deviceChallenge =
+      options.deviceWssAuthentication && deviceProtocolVersions.length > 0 ? nonce() : null;
+    let authenticationState:
+      | "awaiting"
+      | "authenticating"
+      | "authenticated_legacy_runner"
+      | "authenticated_device"
+      | "closed" = "awaiting";
     let authedRunnerId: string | null = null;
+    let authedDevice: AuthenticatedDeviceWssIdentity | null = null;
+    let disconnectDeviceControl: (() => void) | null = null;
     let runnerEventDelivery = Promise.resolve();
     let runnerEventIngressOpen = true;
+
+    const rejectAuthentication = (principal: string, action: string): void => {
+      if (authenticationState === "closed") return;
+      authenticationState = "closed";
+      stores.audit(principal, action, "authentication failed", now());
+      sendFrame(socket, { type: "auth_error", reason: "authentication failed" });
+      socket.close(1008, "authentication failed");
+    };
 
     const rejectRunnerEvents = (
       runnerId: string,
@@ -6950,13 +7437,31 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       socket.close(1008, "runner event rejected");
     };
 
-    sendFrame(socket, { type: "challenge", nonce: challenge });
+    sendFrame(socket, {
+      type: "challenge",
+      nonce: legacyRunnerChallenge,
+      ...(deviceChallenge === null
+        ? {}
+        : {
+            device_auth: {
+              challenge: deviceChallenge,
+              supported_protocol_versions: deviceProtocolVersions,
+            },
+          }),
+    });
 
     socket.on("message", async (data) => {
       const frame = parseRunnerFrame(String(data));
       if (!frame) return;
 
       if (frame.type === "auth") {
+        // Deprecated compatibility path for paired and ephemeral legacy
+        // runners. Device frames are distinct and can never fall through here.
+        if (authenticationState !== "awaiting") {
+          rejectAuthentication(`runner:${frame.runner_id}`, "runner.auth_failed");
+          return;
+        }
+        authenticationState = "authenticating";
         let runner = stores.runner(frame.runner_id);
         if (frame.runner_id.startsWith("actions:") && options.actionsExecution) {
           try {
@@ -6980,30 +7485,233 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               error instanceof Error ? error.message : String(error),
               now(),
             );
+            authenticationState = "closed";
             socket.close(1011, "runner authentication persistence unavailable");
             return;
           }
         }
+        if (authenticationState !== "authenticating") return;
+        const authenticationTranscript = canonicalLegacyRunnerWssAuthenticationTranscript({
+          purpose: LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
+          runner_id: frame.runner_id,
+          generation: frame.generation,
+          protocol_version: frame.protocol_version,
+          challenge: legacyRunnerChallenge,
+        });
         if (
           !runner ||
-          !verifyRunnerSignature(runner.public_key_pem, challenge, frame.nonce_signature)
+          frame.protocol_version !== PROTOCOL_VERSION ||
+          !verifyRunnerSignature(
+            runner.public_key_pem,
+            authenticationTranscript,
+            frame.transcript_signature,
+          )
         ) {
+          rejectAuthentication(`runner:${frame.runner_id}`, "runner.auth_failed");
+          return;
+        }
+        if (frame.generation !== runner.generation) {
+          authenticationState = "closed";
           stores.audit(
             `runner:${frame.runner_id}`,
-            "runner.auth_failed",
-            "bad signature or unknown",
+            "runner.fenced",
+            `stale generation ${frame.generation} (current ${runner.generation})`,
             now(),
           );
-          sendFrame(socket, { type: "auth_error", reason: "authentication failed" });
-          socket.close();
+          sendFrame(socket, { type: "fenced", current_generation: runner.generation });
+          socket.close(1008, "runner generation fenced");
           return;
         }
         authedRunnerId = frame.runner_id;
+        authenticationState = "authenticated_legacy_runner";
         sendFrame(socket, { type: "auth_ok" });
         return;
       }
 
-      if (!authedRunnerId) return; // everything else requires auth
+      if (frame.type === "device_auth") {
+        const authenticator = options.deviceWssAuthentication;
+        if (authenticationState !== "awaiting" || !authenticator || deviceChallenge === null) {
+          rejectAuthentication(`device:${frame.device_id}`, "device.wss_auth_failed");
+          return;
+        }
+        authenticationState = "authenticating";
+        let authenticated: AuthenticatedDeviceWssIdentity | null;
+        try {
+          authenticated = await authenticator.authenticate({
+            device_id: frame.device_id,
+            credential_id: frame.credential_id,
+            generation: frame.generation,
+            protocol_version: frame.protocol_version,
+            challenge: deviceChallenge,
+            transcript_signature: frame.transcript_signature,
+          });
+        } catch (error) {
+          stores.audit(
+            `device:${frame.device_id}`,
+            "device.wss_auth_unavailable",
+            error instanceof Error ? error.message : String(error),
+            now(),
+          );
+          authenticationState = "closed";
+          socket.close(1011, "device authentication unavailable");
+          return;
+        }
+        if (authenticationState !== "authenticating") return;
+        if (!authenticated) {
+          rejectAuthentication(`device:${frame.device_id}`, "device.wss_auth_failed");
+          return;
+        }
+        authedDevice = authenticated;
+        authenticationState = "authenticated_device";
+        stores.audit(`device:${authenticated.device_id}`, "device.wss_authenticated", "", now());
+        sendFrame(socket, {
+          type: "device_auth_ok",
+          device_id: authenticated.device_id,
+          generation: authenticated.generation,
+          protocol_version: authenticated.protocol_version,
+        });
+        if (options.deviceControl) {
+          try {
+            const connectedDeviceControl = await options.deviceControl.broker.connect({
+              identity: authenticated,
+              send: (frame) => sendFrame(socket, frame),
+              close: (code, reason) => socket.close(code, reason),
+            });
+            if (!connectedDeviceControl) {
+              authenticationState = "closed";
+              return;
+            }
+            disconnectDeviceControl = connectedDeviceControl;
+          } catch (error) {
+            authenticationState = "closed";
+            stores.audit(
+              `device:${authenticated.device_id}`,
+              "device.cancellation_reconcile_failed",
+              error instanceof Error ? error.message : String(error),
+              now(),
+            );
+            socket.close(1011, "device cancellation reconciliation unavailable");
+            return;
+          }
+        }
+        void options.deviceBrowserDelivery
+          ?.deliverOwnerAvailability(
+            {
+              device_id: authenticated.device_id,
+              availability: "online",
+              observed_at: now().toISOString(),
+            },
+            scopedDeviceBrowserSessions(),
+          )
+          .catch(() => {
+            // Browser presence delivery is best-effort and cannot weaken or
+            // retroactively change the authenticated transport decision.
+          });
+        return;
+      }
+
+      if (authenticationState === "authenticated_device") {
+        if (
+          frame.type === "device_cancellation_evidence" &&
+          authedDevice &&
+          options.deviceControl &&
+          options.deviceWssAuthentication
+        ) {
+          const exactConnection =
+            frame.device_id === authedDevice.device_id &&
+            frame.credential_id === authedDevice.credential_id &&
+            frame.generation === authedDevice.generation;
+          let signatureValid = false;
+          if (exactConnection) {
+            try {
+              // Parse the purpose-separated transcript before the repository
+              // verifier so semantically impossible state/proof combinations
+              // never reach durable evidence handling.
+              canonicalDeviceCancellationEvidenceWssTranscript({
+                purpose: DEVICE_CANCELLATION_EVIDENCE_WSS_SIGNATURE_PURPOSE,
+                device_id: frame.device_id,
+                credential_id: frame.credential_id,
+                generation: frame.generation,
+                run_id: frame.run_id,
+                evidence_state: frame.evidence_state,
+                acknowledged_at: frame.acknowledged_at,
+                process_exited_at: frame.process_exited_at,
+                process_tree_reaped: frame.process_tree_reaped,
+              });
+              signatureValid =
+                await options.deviceWssAuthentication.verifyCancellationEvidence(frame);
+            } catch {
+              signatureValid = false;
+            }
+          }
+          if (!signatureValid) {
+            stores.audit(
+              `device:${authedDevice.device_id}`,
+              "device.cancellation_evidence_rejected",
+              `run=${frame.run_id} invalid proof`,
+              now(),
+            );
+            authenticationState = "closed";
+            socket.close(1008, "invalid cancellation evidence");
+            return;
+          }
+          try {
+            if (frame.evidence_state === "process_exited") {
+              await options.deviceControl.cancellations.confirmProcessExited({
+                run_id: frame.run_id,
+                device_id: frame.device_id,
+                credential_id: frame.credential_id,
+                device_generation: frame.generation,
+                acknowledged_at: frame.acknowledged_at,
+                process_exited_at: frame.process_exited_at as string,
+                process_tree_reaped: true,
+              });
+            } else {
+              await options.deviceControl.cancellations.acknowledge({
+                run_id: frame.run_id,
+                device_id: frame.device_id,
+                credential_id: frame.credential_id,
+                device_generation: frame.generation,
+                acknowledged_at: frame.acknowledged_at,
+              });
+            }
+            sendFrame(socket, {
+              type: "device_cancellation_evidence_ack",
+              run_id: frame.run_id,
+              evidence_state: frame.evidence_state,
+            });
+            stores.audit(
+              `device:${authedDevice.device_id}`,
+              "device.cancellation_evidence_recorded",
+              `run=${frame.run_id} state=${frame.evidence_state}`,
+              now(),
+            );
+          } catch (error) {
+            const detail =
+              error instanceof DeviceRunCancellationError ? error.code : "persistence_unavailable";
+            stores.audit(
+              `device:${authedDevice.device_id}`,
+              "device.cancellation_evidence_rejected",
+              `run=${frame.run_id} ${detail}`,
+              now(),
+            );
+            authenticationState = "closed";
+            socket.close(
+              error instanceof DeviceRunCancellationError ? 1008 : 1011,
+              "cancellation evidence rejected",
+            );
+          }
+          return;
+        }
+        // Authentication is available for gated validation, but device
+        // command/event transport stays fail-closed until every Phase 2
+        // per-operation authorization check is wired.
+        authenticationState = "closed";
+        socket.close(1008, "device execution protocol is not enabled");
+        return;
+      }
+
+      if (authenticationState !== "authenticated_legacy_runner" || !authedRunnerId) return;
 
       const runner = stores.runner(authedRunnerId);
       if (!runner) return;
@@ -7039,7 +7747,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         });
         stores.markSeen(authedRunnerId, now());
         stores.audit(`runner:${authedRunnerId}`, "runner.connected", "", now());
-        broadcast({ type: "runner_status", runner_id: authedRunnerId, connected: true });
+        broadcastLegacyRunnerCompatibility(
+          {
+            type: "runner_status",
+            runner_id: authedRunnerId,
+            connected: true,
+          },
+          { kind: "runner", runner_id: authedRunnerId },
+        );
         const recentlyExecuted = new Set(body.recently_executed_command_ids);
         let durablePending: Awaited<
           ReturnType<NonNullable<typeof options.phase4>["dispatch"]["pendingForRunner"]>
@@ -7208,9 +7923,17 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               );
               return;
             }
+            const authenticatedIdentity = {
+              subject: "legacy_runner" as const,
+              runner_id: authenticatedRunnerId,
+              generation: event.generation,
+            };
             const actionAckHandled =
-              (await conversationActionDelivery?.applyCommandAck(event)) ?? false;
-            if (!actionAckHandled) await options.phase4?.events.apply(event);
+              (await conversationActionDelivery?.applyCommandAck(event, authenticatedIdentity)) ??
+              false;
+            if (!actionAckHandled) {
+              await options.phase4?.events.apply(event, authenticatedIdentity);
+            }
             const outcome = stores.ingestEvent(event);
             if (outcome === "accepted") applyEventSideEffects(event);
             sendFrame(socket, {
@@ -7229,12 +7952,38 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
 
     socket.on("close", () => {
+      authenticationState = "closed";
+      if (authedDevice) {
+        disconnectDeviceControl?.();
+        disconnectDeviceControl = null;
+        void options.deviceBrowserDelivery
+          ?.deliverOwnerAvailability(
+            {
+              device_id: authedDevice.device_id,
+              availability: "offline",
+              observed_at: now().toISOString(),
+            },
+            scopedDeviceBrowserSessions(),
+          )
+          .catch(() => {
+            // Connection cleanup must complete even if browser delivery fails.
+          });
+        stores.audit(`device:${authedDevice.device_id}`, "device.wss_disconnected", "", now());
+        authedDevice = null;
+      }
       if (authedRunnerId && runnerSockets.get(authedRunnerId) === socket) {
         runnerSockets.delete(authedRunnerId);
         reconciledRunners.delete(authedRunnerId);
         workspaceBroker.disconnect(authedRunnerId);
         stores.audit(`runner:${authedRunnerId}`, "runner.disconnected", "", now());
-        broadcast({ type: "runner_status", runner_id: authedRunnerId, connected: false });
+        broadcastLegacyRunnerCompatibility(
+          {
+            type: "runner_status",
+            runner_id: authedRunnerId,
+            connected: false,
+          },
+          { kind: "runner", runner_id: authedRunnerId },
+        );
       }
     });
   });
@@ -7244,20 +7993,36 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     const payload = event.payload;
     if (payload.kind === "command_ack") {
       stores.setCommandState(payload.command_id, payload.state as CommandStateT, now());
+      const command = stores.command(payload.command_id);
       stores.audit(
         `runner:${event.runner_id}`,
         "command.ack",
         `${payload.command_id} -> ${payload.state}`,
         now(),
       );
-      broadcast({ type: "command_state", command_id: payload.command_id, state: payload.state });
+      broadcastLegacyRunnerCompatibility(
+        {
+          type: "command_state",
+          command_id: payload.command_id,
+          state: payload.state,
+        },
+        {
+          kind: "command",
+          command_id: payload.command_id,
+          runner_id: event.runner_id,
+          ...(command === undefined ? {} : { project_id: command.envelope.project_id }),
+        },
+      );
     } else if (payload.kind === "run_log") {
-      broadcast({
-        type: "log",
-        runner_id: event.runner_id,
-        run_id: payload.run_id,
-        chunk: payload.chunk,
-      });
+      broadcastLegacyRunnerCompatibility(
+        {
+          type: "log",
+          runner_id: event.runner_id,
+          run_id: payload.run_id,
+          chunk: payload.chunk,
+        },
+        { kind: "run", runner_id: event.runner_id, run_id: payload.run_id },
+      );
     } else if (payload.kind === "run_status") {
       stores.audit(
         `runner:${event.runner_id}`,
@@ -7265,12 +8030,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         `${payload.run_id} ${payload.status}`,
         now(),
       );
-      broadcast({
-        type: "run_status",
-        runner_id: event.runner_id,
-        run_id: payload.run_id,
-        status: payload.status,
-      });
+      broadcastLegacyRunnerCompatibility(
+        {
+          type: "run_status",
+          runner_id: event.runner_id,
+          run_id: payload.run_id,
+          status: payload.status,
+        },
+        { kind: "run", runner_id: event.runner_id, run_id: payload.run_id },
+      );
     }
     // heartbeat: markSeen above is the whole effect
   };
@@ -7280,6 +8048,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   app.get("/ws/session", { websocket: true }, (conn) => {
     const socket = asSocket(conn);
     let authState: "awaiting" | "authenticating" | "authenticated" | "closed" = "awaiting";
+    const authenticationClosed = (): boolean => authState === "closed";
     const authTimeout = setTimeout(() => {
       if (authState !== "awaiting") return;
       authState = "closed";
@@ -7324,14 +8093,16 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       authState = "authenticating";
       void identityService
         .userForToken(frame.data.token)
-        .then((user) => {
-          if (authState === "closed") return;
+        .then(async (user) => {
+          if (authenticationClosed()) return;
           if (!user || user.status !== "active") {
             authState = "closed";
             clearTimeout(authTimeout);
             socket.close(1008, "unauthorized");
             return;
           }
+          const runners = await legacyRunnerCompatibilitySnapshot(user.id);
+          if (authenticationClosed()) return;
           authState = "authenticated";
           clearTimeout(authTimeout);
           const binding: SessionSocketBinding = {
@@ -7346,10 +8117,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             socket.send(
               JSON.stringify({
                 type: "snapshot",
-                runners: stores.runners().map((runner) => ({
-                  runner_id: runner.runner_id,
-                  connected: runnerSockets.has(runner.runner_id),
-                })),
+                // Historical runner visibility remains isolated behind this
+                // explicitly named compatibility projection. Devices never
+                // enter it.
+                runners,
               }),
             );
           } catch {
@@ -7808,31 +8579,39 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       .strict();
     app.post(
       "/api/runner/v2/projects/:projectId/visual-evidence",
-      { bodyLimit: 30 * 1024 * 1024 },
+      {
+        bodyLimit: 30 * 1024 * 1024,
+        preParsing: captureRunnerHttpBodySha256,
+      },
       async (request, reply) => {
-        const path = new URL(request.url, "http://placeholder.invalid").pathname;
-        const auth = authenticateRunnerContextRequest(
-          {
-            method: request.method,
-            path,
-            headers: request.headers as Record<string, string | string[] | undefined>,
-          },
-          (runnerId) => stores.runner(runnerId)?.public_key_pem ?? null,
-          now().getTime(),
-        );
+        const auth = await runnerHttpAuthentication.authenticate({
+          purpose: DEVICE_VISUAL_EVIDENCE_UPLOAD_HTTP_SIGNATURE_PURPOSE,
+          method: request.method,
+          path_and_query: request.url,
+          routed_path: `/api/runner/v2/projects/${routedDeviceHttpPathSegment(
+            (request.params as { projectId: string }).projectId,
+          )}/visual-evidence`,
+          body_sha256: capturedRunnerHttpBodySha256(request),
+          headers: request.headers as Record<string, string | string[] | undefined>,
+        });
         if (!auth.ok) {
           stores.audit(
-            `runner:${request.headers[RUNNER_CONTEXT_RUNNER_ID_HEADER] ?? "unknown"}`,
+            `runner:${
+              request.headers[DEVICE_HTTP_DEVICE_ID_HEADER] ??
+              request.headers["x-norns-runner-id"] ??
+              "unknown"
+            }`,
             "phase6.visual_evidence.auth_failed",
             auth.reason,
             now(),
           );
           return reply.code(401).send({ error: "unauthorized" });
         }
+        const subjectId = auth.identity.authorization_subject_id;
         const { projectId } = request.params as { projectId: string };
         try {
           const body = RunnerVisualEvidenceEnvelope.parse(request.body);
-          const result = await phase6VisualEvidence.recordWithReplay({
+          const evidenceInput = {
             project_id: projectId,
             work_item_id: body.work_item_id,
             conversation_id: body.conversation_id,
@@ -7847,13 +8626,51 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             commit_sha: body.commit_sha,
             capture_profile: body.capture_profile,
             verified_at: body.verified_at,
-            runner_id: auth.runner_id,
+            runner_id: subjectId,
+            runner_generation: auth.identity.generation,
             desktop_png: Buffer.from(body.desktop_png_base64, "base64"),
             mobile_png: Buffer.from(body.mobile_png_base64, "base64"),
-          });
+          };
+          let result: Awaited<ReturnType<typeof phase6VisualEvidence.recordWithReplay>>;
+          if (auth.identity.kind === "device") {
+            const deviceIdentity = auth.identity;
+            const authorization = options.deviceActionAuthorization;
+            if (!authorization) {
+              throw new DeviceActionAuthorizationError("device_run_unauthorized");
+            }
+            result = await authorization.transactions.transaction(async (sql) => {
+              await authorization.service.assertRun(sql, {
+                subject: "device",
+                runner_id: deviceIdentity.device_id,
+                generation: deviceIdentity.generation,
+                credential_id: deviceIdentity.credential_id,
+                run_id: body.run_id,
+                project_id: projectId,
+                repository_binding_id: body.repository_binding_id,
+              });
+              return phase6VisualEvidence.recordWithReplayInTransaction(sql, evidenceInput);
+            });
+          } else if (options.deviceActionAuthorization) {
+            const legacyIdentity = auth.identity;
+            result = await options.deviceActionAuthorization.transactions.transaction(
+              async (sql) => {
+                await options.deviceActionAuthorization?.service.assertRun(sql, {
+                  subject: "legacy_runner",
+                  runner_id: legacyIdentity.runner_id,
+                  generation: legacyIdentity.generation,
+                  run_id: body.run_id,
+                  project_id: projectId,
+                  repository_binding_id: body.repository_binding_id,
+                });
+                return phase6VisualEvidence.recordWithReplayInTransaction(sql, evidenceInput);
+              },
+            );
+          } else {
+            result = await phase6VisualEvidence.recordWithReplay(evidenceInput);
+          }
           if (!result.replayed) {
             stores.audit(
-              `runner:${auth.runner_id}`,
+              `runner:${subjectId}`,
               "phase6.visual_evidence.recorded",
               `${projectId}:${result.evidence.id}`,
               now(),
@@ -7863,6 +8680,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         } catch (error) {
           if (error instanceof z.ZodError) {
             return reply.code(400).send({ error: "bad_request", issues: error.issues });
+          }
+          if (error instanceof DeviceActionAuthorizationError) {
+            stores.audit(
+              `runner:${subjectId}`,
+              "phase6.visual_evidence.auth_failed",
+              error.code,
+              now(),
+            );
+            return reply.code(403).send({ error: "forbidden" });
           }
           if (error instanceof Phase6VisualEvidenceError) {
             return reply

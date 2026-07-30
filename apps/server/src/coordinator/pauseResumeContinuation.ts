@@ -4,6 +4,7 @@ import {
   type V2DispatchCommandT,
   v2CommandIdForDispatchJob,
 } from "@norns/contracts";
+import type { PostgresDeviceActionAuthorization } from "../devices/actionAuthorization.js";
 import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
@@ -55,6 +56,7 @@ export class PauseResumeContinuationWorker {
     private readonly afterProvision: (result: ProvisionedPauseResume) => Promise<void> = async () =>
       undefined,
     owner = `pause-resume:${process.pid}`,
+    private readonly deviceAuthorization?: PostgresDeviceActionAuthorization,
   ) {
     this.owner = owner;
   }
@@ -396,6 +398,18 @@ export class PauseResumeContinuationWorker {
       });
       if (command.command_id !== row.resume_command_id) {
         throw new Error("pause resume command identity is not exact");
+      }
+      if (this.deviceAuthorization) {
+        const identity = await this.deviceAuthorization.resolveDispatchTargetIdentity(tx, {
+          runner_id: target.runner_id,
+          generation: target.runner_generation,
+        });
+        await this.deviceAuthorization.assertDispatchBinding(tx, {
+          ...identity,
+          actor_user_id: row.resumed_by_user_id,
+          project_id: row.project_id,
+          repository_binding_id: row.repository_binding_id,
+        });
       }
       await tx.query(
         `INSERT INTO commands (

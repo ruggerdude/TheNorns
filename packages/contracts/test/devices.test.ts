@@ -19,6 +19,8 @@ import {
   SignedDeviceVisualEvidenceUploadHttpTranscript,
   SignedDeviceWssAuthenticationTranscript,
   canTransitionDeviceAuthorization,
+  canonicalDeviceWssAuthenticationTranscript,
+  canonicalizeDeviceHttpPathAndQuery,
 } from "../src/index.js";
 
 const now = "2026-07-29T12:00:00.000Z";
@@ -218,6 +220,15 @@ describe("device projections", () => {
       last_seen_at: now,
     };
     expect(ProjectExecutionTargetProjection.parse(target)).toEqual(target);
+    for (const access of ["owned", "pending", "revoked"] as const) {
+      expect(
+        ProjectExecutionTargetProjection.safeParse({
+          ...target,
+          status: { ...target.status, access },
+        }).success,
+        access,
+      ).toBe(false);
+    }
 
     const forbiddenFields = {
       public_key_fingerprint: fingerprint,
@@ -350,6 +361,52 @@ describe("cancellation and enrollment polling", () => {
 });
 
 describe("signed transport transcripts", () => {
+  it.each([
+    ["", "/"],
+    ["?mode", "/?mode="],
+    ["/", "/"],
+    ["/?", "/"],
+    ["/a//b/", "/a//b/"],
+    ["/%7euser/%41", "/~user/A"],
+    ["/café", "/caf%C3%A9"],
+    ["/caf%C3%A9", "/caf%C3%A9"],
+    ["/a/./b", "/a/b"],
+    ["/a/%2e/b", "/a/b"],
+    ["/a/%2E%2E/b", "/b"],
+    ["/a/.//b", "/a//b"],
+    ["/a?z=last&a=first", "/a?a=first&z=last"],
+    ["/a?flag", "/a?flag="],
+    ["/a?q=a+b", "/a?q=a%2Bb"],
+    ["/a?q=a%20b", "/a?q=a%20b"],
+    ["/a?%E2%82%AC=%F0%9F%98%80", "/a?%E2%82%AC=%F0%9F%98%80"],
+    ["/a?value=a%26b%3Dc", "/a?value=a%26b%3Dc"],
+  ])("canonicalizes ADR-009 origin target %j", (input, expected) => {
+    expect(canonicalizeDeviceHttpPathAndQuery(input)).toBe(expected);
+  });
+
+  it.each([
+    "https://example.com/api/runner/context",
+    "//example.com/api/runner/context",
+    "user@example.com/api/runner/context",
+    "/a#fragment",
+    "/a\\b",
+    "/a\nb",
+    "/a%",
+    "/a%2",
+    "/a%GG",
+    "/a/%C3%28",
+    "/a?x=%F0%28%8C%28",
+    "/a?x=1;y=2",
+    "/a?&x=1",
+    "/a?x=1&",
+    "/a?x=1&&y=2",
+    "/a?=value",
+    "/a?name=1&%6Eame=2",
+    "/a?é=1&%C3%A9=2",
+  ])("rejects non-canonical or ambiguous ADR-009 target %j", (input) => {
+    expect(() => canonicalizeDeviceHttpPathAndQuery(input)).toThrow();
+  });
+
   it("binds HTTP purpose, identity, generation, request, body, and canonical target", () => {
     const transcript = {
       purpose: "norns.runner-http.context-retrieval.v1" as const,
@@ -380,6 +437,18 @@ describe("signed transport transcripts", () => {
       SignedDeviceHttpTranscript.safeParse({
         ...transcript,
         canonical_path_and_query: "https://example.com/api/runner/context",
+      }).success,
+    ).toBe(false);
+    expect(
+      SignedDeviceHttpTranscript.safeParse({
+        ...transcript,
+        canonical_path_and_query: "/api/runner/context?z=2&a=1",
+      }).success,
+    ).toBe(false);
+    expect(
+      SignedDeviceHttpTranscript.safeParse({
+        ...transcript,
+        canonical_path_and_query: "/api/runner/%63ontext",
       }).success,
     ).toBe(false);
     expect(
@@ -426,5 +495,18 @@ describe("signed transport transcripts", () => {
         purpose: "norns.runner-http.v1",
       }).success,
     ).toBe(false);
+    expect(canonicalDeviceWssAuthenticationTranscript(transcript)).toBe(
+      '{"purpose":"norns.runner-wss-auth.v1","device_id":"device-1","credential_id":"credential-1","generation":3,"protocol_version":"3","challenge":"server-challenge"}',
+    );
+    expect(
+      canonicalDeviceWssAuthenticationTranscript({
+        challenge: "server-challenge",
+        protocol_version: "3",
+        generation: 3,
+        credential_id: "credential-1",
+        device_id: "device-1",
+        purpose: "norns.runner-wss-auth.v1",
+      }),
+    ).toBe(canonicalDeviceWssAuthenticationTranscript(transcript));
   });
 });

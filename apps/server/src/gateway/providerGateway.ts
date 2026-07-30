@@ -45,13 +45,19 @@ import {
   snapshotModelPricing,
 } from "@norns/adapters";
 import type { UsageEventT } from "@norns/contracts";
+import {
+  DeviceActionAuthorizationError,
+  type PostgresDeviceActionAuthorization,
+} from "../devices/actionAuthorization.js";
 import { newId } from "../ids.js";
+import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   type InferenceBudget,
   type InferenceBudgetHold,
   type InferenceMeter,
   type ProxiedRunFacts,
   type ProxiedRunLookup,
+  type TransactionalProxiedRunLookup,
   authorizeProxiedRunAccess,
 } from "../runners/inferenceProxy.js";
 import type { AiInvocationTelemetry, AiInvocationTrace } from "../usage-intelligence/telemetry.js";
@@ -286,6 +292,12 @@ export type GatewayKeyResolver = (provider: GatewayProvider) => string | null;
 export interface ProviderGatewayOptions {
   runs: ProxiedRunLookup;
   credentials: GatewayCredentialService;
+  deviceActionAuthorization?:
+    | {
+        service: PostgresDeviceActionAuthorization;
+        transactions: V2TransactionRunner;
+      }
+    | undefined;
   /** Same resolver the completion proxy uses; returns the raw provider key. */
   apiKey: GatewayKeyResolver;
   budget?: InferenceBudget | undefined;
@@ -606,11 +618,157 @@ export class ProviderGateway {
     const credential = resolution.credential;
     const actor = `runner:${credential.runner_id}`;
 
-    // 2. OWNERSHIP AND LIVENESS. Re-resolved from this server's own records on
-    //    EVERY request, through E3's lookup and E3's decision function. The
-    //    credential names a run; it never grants one. So a run that finished,
-    //    was cancelled, was superseded, or whose runner was revoked stops
-    //    working immediately — no cache, nothing to remember to invalidate.
+    if (credential.authentication_subject === "device") {
+      const authorization = this.options.deviceActionAuthorization;
+      const lookup = this.options.runs as Partial<TransactionalProxiedRunLookup>;
+      if (
+        !authorization ||
+        !credential.device_credential_id ||
+        typeof lookup.lookupInTransaction !== "function"
+      ) {
+        return this.refuse(
+          provider,
+          "unauthorized",
+          "gateway credential is not valid",
+          actor,
+          `run=${credential.run_id} device_authorization_unavailable`,
+        );
+      }
+      try {
+        const authorized = await authorization.transactions.transaction(async (sql) => {
+          await authorization.service.assertRun(sql, {
+            subject: "device",
+            runner_id: credential.runner_id,
+            generation: credential.runner_generation,
+            credential_id: credential.device_credential_id as string,
+            run_id: credential.run_id,
+          });
+          const run = await lookup.lookupInTransaction?.(sql, credential.run_id);
+          const access = authorizeProxiedRunAccess(
+            run ?? null,
+            credential.run_id,
+            credential.runner_id,
+            credential.runner_generation,
+          );
+          if (access === "unauthorized" || !run) {
+            return this.refuse(
+              provider,
+              "unauthorized",
+              "gateway credential is not valid",
+              actor,
+              `run=${credential.run_id} not_authorized`,
+            );
+          }
+          if (access === "run_not_active") {
+            return this.refuse(
+              provider,
+              "run_not_active",
+              "this run is not in a state that may spend",
+              actor,
+              `run=${run.run_id}`,
+            );
+          }
+          return run;
+        });
+        // `assertRun` deliberately takes row locks so authorization has one
+        // linearization point with revocation. Never carry those locks across
+        // provider I/O: a slow or hung upstream must not prevent a later
+        // cancellation/revocation transaction from committing. Budget and
+        // telemetry reservations below each commit before `send` starts the
+        // external request.
+        if ("kind" in authorized) return authorized;
+        return await this.forwardAuthorized(surface, input, authorized, actor);
+      } catch (error) {
+        if (error instanceof DeviceActionAuthorizationError) {
+          return this.refuse(
+            provider,
+            "unauthorized",
+            "gateway credential is not valid",
+            actor,
+            `run=${credential.run_id} ${error.code}`,
+          );
+        }
+        return this.refuse(
+          provider,
+          "gateway_unavailable",
+          "the run could not be verified",
+          actor,
+          `run=${credential.run_id} authorization_failed`,
+        );
+      }
+    }
+
+    const legacyAuthorization = this.options.deviceActionAuthorization;
+    const legacyLookup = this.options.runs as Partial<TransactionalProxiedRunLookup>;
+    if (legacyAuthorization) {
+      if (typeof legacyLookup.lookupInTransaction !== "function") {
+        return this.refuse(
+          provider,
+          "unauthorized",
+          "gateway credential is not valid",
+          actor,
+          `run=${credential.run_id} legacy_authorization_unavailable`,
+        );
+      }
+      try {
+        const authorized = await legacyAuthorization.transactions.transaction(async (sql) => {
+          await legacyAuthorization.service.assertRun(sql, {
+            subject: "legacy_runner",
+            runner_id: credential.runner_id,
+            generation: credential.runner_generation,
+            run_id: credential.run_id,
+          });
+          const run = (await legacyLookup.lookupInTransaction?.(sql, credential.run_id)) ?? null;
+          const access = authorizeProxiedRunAccess(
+            run,
+            credential.run_id,
+            credential.runner_id,
+            credential.runner_generation,
+          );
+          if (access === "unauthorized" || !run) {
+            return this.refuse(
+              provider,
+              "unauthorized",
+              "gateway credential is not valid",
+              actor,
+              `run=${credential.run_id} not_authorized`,
+            );
+          }
+          if (access === "run_not_active") {
+            return this.refuse(
+              provider,
+              "run_not_active",
+              "this run is not in a state that may spend",
+              actor,
+              `run=${run.run_id}`,
+            );
+          }
+          return run;
+        });
+        if ("kind" in authorized) return authorized;
+        return await this.forwardAuthorized(surface, input, authorized, actor);
+      } catch (error) {
+        if (error instanceof DeviceActionAuthorizationError) {
+          return this.refuse(
+            provider,
+            "unauthorized",
+            "gateway credential is not valid",
+            actor,
+            `run=${credential.run_id} ${error.code}`,
+          );
+        }
+        return this.refuse(
+          provider,
+          "gateway_unavailable",
+          "the run could not be verified",
+          actor,
+          `run=${credential.run_id} authorization_failed`,
+        );
+      }
+    }
+
+    // 2. OWNERSHIP AND LIVENESS. Compatibility deployments without the
+    //    relational device authorization service retain the legacy lookup.
     let run: ProxiedRunFacts | null;
     try {
       run = await this.options.runs.lookup(credential.run_id);
@@ -648,6 +806,16 @@ export class ProviderGateway {
       );
     }
 
+    return this.forwardAuthorized(surface, input, run, actor);
+  }
+
+  private async forwardAuthorized(
+    surface: GatewaySurface,
+    input: GatewayForwardInput,
+    run: ProxiedRunFacts,
+    actor: string,
+  ): Promise<GatewayResult> {
+    const provider = input.provider;
     // An unmetered path (a model list, a token count) is authorized exactly
     // like a metered one but skips pricing and budget entirely: it costs
     // nothing, so holding money against it would only refuse work spuriously.
