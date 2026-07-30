@@ -13,6 +13,7 @@ export {
   type AgentDaemonLifecycle,
   type AgentDaemonState,
   type AgentEnrollmentState,
+  type AgentEmergencyStopResult,
   type AgentHostLocalState,
   type AgentHostLoopbackAddress,
   type AgentHostOptions,
@@ -22,6 +23,22 @@ export {
   type AgentHostStartResult,
   type AgentWorkloadState,
 } from "./agentHost.js";
+export {
+  DeviceControlConnection,
+  type DeviceCancellationStopResult,
+  type DeviceControlConnectionOptions,
+} from "./deviceControlConnection.js";
+export {
+  DEVICE_CANCELLATION_JOURNAL_FILENAME,
+  DeviceCancellationJournal,
+  type DeviceCancellationEvidenceRecord,
+  type DeviceCancellationEvidenceState,
+} from "./deviceCancellationJournal.js";
+export {
+  ACTIVE_DEVICE_IDENTITY_FILENAME,
+  ActiveDeviceIdentityStore,
+  type ActiveDeviceIdentity,
+} from "./deviceInstallationIdentity.js";
 export {
   LOCAL_AGENT_CONFIG_FILENAME,
   LOCAL_AGENT_PAIRING_PROTOCOL,
@@ -38,7 +55,16 @@ export {
   type LiveControlOutcome,
   type LiveRunRegistration,
   type LiveRunSession,
+  type LiveRunStopOutcome,
+  type LiveRunTerminalFacts,
 } from "./liveRuns.js";
+export {
+  ManagedProcessTree,
+  managedProcessDetached,
+  type ManagedProcessContainmentKind,
+  type ManagedProcessTreeOptions,
+  type ManagedProcessTreeProof,
+} from "./managedProcessTree.js";
 export { RunnerStateFile } from "./state.js";
 export {
   PENDING_DEVICE_CREDENTIAL_FILENAME,

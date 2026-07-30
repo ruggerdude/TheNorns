@@ -102,10 +102,18 @@ describe("Phase 4 runner-owned execution", () => {
           passed: true,
           output: "all checks passed",
           command_results: [
-            { name: "test", command: ["pnpm", "test"], exit_code: 0, passed: true, output: "ok" },
+            {
+              name: "test",
+              command: ["pnpm", "test"],
+              exit_code: 0,
+              passed: true,
+              output: "ok",
+              process_tree_reaped: true,
+            },
           ],
           reason: null,
           hygiene_only: false,
+          process_tree_reaped: true,
         };
       },
     };

@@ -41,12 +41,41 @@ export class DispatchContextScopeRepository {
       for (const ref of contextRefs) {
         await tx.query(
           `INSERT INTO dispatch_context_documents
-             (runner_id, runner_generation, context_document_id, dispatch_job_id, run_id)
-           VALUES ($1,$2,$3,$4,$5)
+             (
+               runner_id,runner_generation,context_document_id,
+               dispatch_job_id,run_id,revoked_at
+             )
+           VALUES (
+             $1,$2,$3,$4,$5,
+             CASE
+               WHEN NOT EXISTS (
+                 SELECT 1
+                   FROM device_run_cancellations cancellation
+                  WHERE cancellation.run_id=$5
+                    AND cancellation.publication_fenced_at IS NOT NULL
+                    AND cancellation.publication_reauthorized_at IS NULL
+               )
+               THEN NULL
+               ELSE now()
+             END
+           )
            ON CONFLICT (runner_id, context_document_id) DO UPDATE SET
              runner_generation = EXCLUDED.runner_generation,
              dispatch_job_id = EXCLUDED.dispatch_job_id,
              run_id = EXCLUDED.run_id,
+             revoked_at = CASE
+               WHEN EXCLUDED.revoked_at IS NOT NULL THEN EXCLUDED.revoked_at
+               WHEN dispatch_context_documents.revoked_at IS NULL THEN NULL
+               WHEN EXISTS (
+                 SELECT 1
+                   FROM commands command
+                  WHERE command.run_id=EXCLUDED.run_id
+                    AND command.runner_id=EXCLUDED.runner_id
+                    AND command.runner_generation=EXCLUDED.runner_generation
+                    AND command.status IN ('created','queued','dispatched')
+               ) THEN NULL
+               ELSE dispatch_context_documents.revoked_at
+             END,
              created_at = now()`,
           [
             input.runnerId,
@@ -87,6 +116,7 @@ export class DispatchContextScopeRepository {
         WHERE runner_id=$1
           AND context_document_id=$2
           AND runner_generation=$3
+          AND revoked_at IS NULL
         FOR UPDATE`,
       [runnerId, documentId, runnerGeneration],
     );

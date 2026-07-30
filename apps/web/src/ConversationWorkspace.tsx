@@ -22,6 +22,7 @@ import {
 import { AssistantChatTransport, useAISDKChat, useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
 import type {
+  ConversationExecutionProjectionT,
   PmModelT,
   PmProviderT,
   V2ConfirmConversationActionResponseT,
@@ -73,6 +74,7 @@ import { createPortal } from "react-dom";
 import remarkGfm from "remark-gfm";
 import { ArtifactImage } from "./ArtifactImage";
 import { ConversationActionCard } from "./ConversationActionCard";
+import { ProjectRunStopControl, executionTargetHeaderLabel } from "./ConversationExecutionTarget";
 import { ConversationPlanCard } from "./ConversationPlanCard";
 import { ConversationQcCard } from "./ConversationQcCard";
 import {
@@ -97,7 +99,9 @@ import {
   generateConversationPlanChangeProposal,
   generateConversationPlanProposal,
   getConversation,
+  getConversationExecution,
   getProjectConversationPin,
+  getProjectRunCancellation,
   listConversationNavigation,
   listWorkItemConversations,
   messageEndpoint,
@@ -3271,7 +3275,7 @@ function ConversationThread({
   onRefresh,
   onUnauthorized,
 }: {
-  header: (modelControl: ReactNode) => ReactNode;
+  header: (modelControl: ReactNode, executionTargetLabel: string | null) => ReactNode;
   detail: ConversationDetail;
   initialMessage?: string | null;
   onInitialMessageStarted?: () => void;
@@ -3298,8 +3302,9 @@ function ConversationThread({
   const [reviewErrors, setReviewErrors] = useState(() => new Map<string, string>());
   const [executionProposalBusy, setExecutionProposalBusy] = useState(false);
   const [executionProposalError, setExecutionProposalError] = useState<string | null>(null);
-  const [stopTaskId, setStopTaskId] = useState("");
   const [agentsOpen, setAgentsOpen] = useState(false);
+  const [executionProjection, setExecutionProjection] =
+    useState<ConversationExecutionProjectionT | null>(null);
   const [lockedExecutionRequest, setLockedExecutionRequest] =
     useState<V2CreateExecutionActionProposalInputT | null>(() =>
       storedExactRequest(
@@ -3349,6 +3354,82 @@ function ConversationThread({
     () => createConversationAttachmentAdapter(detail.work_item.project_id, onUnauthorized),
     [detail.work_item.project_id, onUnauthorized],
   );
+  const applyRunCancellation = useCallback(
+    (cancellation: NonNullable<ConversationExecutionProjectionT["run"]>["cancellation"]) => {
+      if (!cancellation) return;
+      setExecutionProjection((current) => {
+        if (!current?.run || current.run.run_id !== cancellation.run_id) return current;
+        return {
+          ...current,
+          run: {
+            ...current.run,
+            can_stop: false,
+            cancellation,
+          },
+        };
+      });
+    },
+    [],
+  );
+  const executionProjectionRefreshMarker = `${detail.conversation.updated_at}:${detail.work_item.updated_at}`;
+
+  useEffect(() => {
+    let current = true;
+    // Detail refreshes also refresh the independent execution projection so an
+    // idle target can become active without remounting the conversation.
+    void executionProjectionRefreshMarker;
+    void getConversationExecution(detail.work_item.project_id, detail.conversation.id)
+      .then((projection) => {
+        if (current) setExecutionProjection(projection);
+      })
+      .catch((caught) => {
+        if (!current) return;
+        if (caught instanceof UnauthorizedError) onUnauthorized();
+        else if (caught instanceof ApiError && caught.status === 404) setExecutionProjection(null);
+      });
+    return () => {
+      current = false;
+    };
+  }, [
+    detail.conversation.id,
+    detail.work_item.project_id,
+    executionProjectionRefreshMarker,
+    onUnauthorized,
+  ]);
+
+  useEffect(() => {
+    const cancellation = executionProjection?.run?.cancellation;
+    if (!cancellation || cancellation.state === "process_exited") return;
+    let current = true;
+    const poll = () => {
+      void getProjectRunCancellation(cancellation.project_id, cancellation.run_id)
+        .then(async (next) => {
+          if (!current) return;
+          applyRunCancellation(next);
+          if (next.state === "process_exited") {
+            const projection = await getConversationExecution(
+              detail.work_item.project_id,
+              detail.conversation.id,
+            );
+            if (current) setExecutionProjection(projection);
+          }
+        })
+        .catch((caught) => {
+          if (current && caught instanceof UnauthorizedError) onUnauthorized();
+        });
+    };
+    const timer = window.setInterval(poll, 2_500);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
+  }, [
+    applyRunCancellation,
+    detail.conversation.id,
+    detail.work_item.project_id,
+    executionProjection?.run?.cancellation,
+    onUnauthorized,
+  ]);
   const resources = useMemo<ConversationResources>(
     () => ({
       planVersions: new Map(detail.plan_versions.map((version) => [version.id, version])),
@@ -4323,6 +4404,7 @@ function ConversationThread({
                     </Button>
                   ) : null}
                 </>,
+                executionTargetHeaderLabel(executionProjection),
               )}
               {isPlanning || isExecution ? (
                 <div className="conversation-thread-tools" aria-label="Conversation tools">
@@ -4399,8 +4481,8 @@ function ConversationThread({
                   </header>
                   <p>
                     {taskOptions.length} planned{" "}
-                    {taskOptions.length === 1 ? "agent task" : "agent tasks"}. Stop and pause
-                    requests create a proposal that must still be confirmed.
+                    {taskOptions.length === 1 ? "agent task" : "agent tasks"}. Direction and pause
+                    requests remain proposals that must still be confirmed.
                   </p>
                   {taskOptions.length > 0 ? (
                     <ol className="conversation-agent-list">
@@ -4419,40 +4501,14 @@ function ConversationThread({
                       No execution agents are configured yet.
                     </p>
                   )}
-                  {!isReadOnly ? (
-                    <div className="execution-stop-agents">
-                      <Select
-                        aria-label="Agent task to stop"
-                        value={stopTaskId}
-                        disabled={executionProposalBusy || lockedExecutionRequest !== null}
-                        onChange={(event) => setStopTaskId(event.target.value)}
-                      >
-                        <option value="">All work · pause dispatch</option>
-                        {taskOptions.map((option) => (
-                          <option key={`stop:${option.id}`} value={option.id}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </Select>
-                      <Button
-                        variant="danger"
-                        disabled={executionProposalBusy || lockedExecutionRequest !== null}
-                        onClick={() =>
-                          void proposeExecutionAction("pause_work", {
-                            reason: stopTaskId
-                              ? `Task ${stopTaskId} stopped by the human operator.`
-                              : "All new agent dispatches paused by the human operator.",
-                            ...(stopTaskId ? { task_id: stopTaskId } : {}),
-                          })
-                        }
-                      >
-                        {executionProposalBusy
-                          ? "Preparing…"
-                          : stopTaskId
-                            ? "Prepare stop action"
-                            : "Prepare pause action"}
-                      </Button>
-                    </div>
+                  {executionProjection?.run ? (
+                    <ProjectRunStopControl
+                      key={executionProjection.run.run_id}
+                      projectId={detail.work_item.project_id}
+                      run={executionProjection.run}
+                      onCancellation={applyRunCancellation}
+                      onUnauthorized={onUnauthorized}
+                    />
                   ) : null}
                 </aside>
               </>
@@ -5588,7 +5644,10 @@ export function ConversationWorkspace({
     callbacks.current.onNewConversation?.();
   };
 
-  const conversationHeader = (modelControl?: ReactNode) => (
+  const conversationHeader = (
+    modelControl?: ReactNode,
+    executionTargetLabel: string | null = null,
+  ) => (
     <header className="conversation-header">
       <Button
         className="btn-small conversation-sidebar-toggle"
@@ -5603,8 +5662,13 @@ export function ConversationWorkspace({
         <span aria-hidden="true">☰</span>
       </Button>
       <div className="conversation-header-identity">
-        <span>
-          {showNew ? "New chat" : detail ? conversationKindLabel(detail.conversation.kind) : "Chat"}
+        <span className={executionTargetLabel ? "conversation-header-target" : undefined}>
+          {executionTargetLabel ??
+            (showNew
+              ? "New chat"
+              : detail
+                ? conversationKindLabel(detail.conversation.kind)
+                : "Chat")}
         </span>
         <h2>
           {showNew

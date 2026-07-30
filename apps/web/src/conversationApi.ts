@@ -1,6 +1,9 @@
 import type {
+  ConversationExecutionProjectionT,
   PmModelT,
   PmProviderT,
+  ProjectRunCancellationProjectionT,
+  ProjectRunCancellationRequestT,
   V2ConfirmConversationActionResponseT,
   V2ConversationActionDeliveryEventT,
   V2ConversationActionT,
@@ -28,6 +31,11 @@ import type {
   V2WorkMessagePartT,
   V2WorkMessageT,
   V2WorkPlanVersionT,
+} from "@norns/contracts";
+import {
+  ConversationExecutionProjection,
+  ProjectRunCancellationProjection,
+  ProjectRunCancellationRequest,
 } from "@norns/contracts";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 
@@ -170,6 +178,45 @@ export function resolveConversation(
   conversationId: string,
 ): Promise<ConversationDetail> {
   return requestJson(`/api/v2/projects/${projectId}/conversations/${conversationId}`);
+}
+
+export async function getConversationExecution(
+  projectId: string,
+  conversationId: string,
+): Promise<ConversationExecutionProjectionT> {
+  return ConversationExecutionProjection.parse(
+    await requestJson<unknown>(
+      `/api/projects/${encodeURIComponent(projectId)}/conversations/${encodeURIComponent(conversationId)}/execution`,
+    ),
+  );
+}
+
+export async function getProjectRunCancellation(
+  projectId: string,
+  runId: string,
+): Promise<ProjectRunCancellationProjectionT> {
+  return ProjectRunCancellationProjection.parse(
+    await requestJson<unknown>(
+      `/api/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/cancellation`,
+    ),
+  );
+}
+
+export async function cancelProjectRun(
+  projectId: string,
+  runId: string,
+  input: ProjectRunCancellationRequestT,
+): Promise<ProjectRunCancellationProjectionT> {
+  const body = ProjectRunCancellationRequest.parse(input);
+  return ProjectRunCancellationProjection.parse(
+    await requestJson<unknown>(
+      `/api/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/cancel`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    ),
+  );
 }
 
 export function createConversationMessageBranch(

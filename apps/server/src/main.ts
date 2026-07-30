@@ -355,15 +355,18 @@ if (databaseUrl) {
     };
     const deviceOnlineControl = new DeviceOnlineControlBroker(runtimeTransactions);
     const deviceCancellations = new DeviceRunCancellationService(runtimeTransactions, {
-      afterRequested: ({ record }) => {
-        deviceOnlineControl.requestCancellation(record);
-      },
+      afterRequested: ({ record }) => deviceOnlineControl.requestCancellation(record),
     });
     const deviceRevocations = new DeviceRevocationService(runtimeTransactions, {
       afterRevoked: async ({ record }) => {
         for (const runId of record.affected_run_ids) {
           const cancellation = await deviceCancellations.get(runId);
-          if (cancellation) deviceOnlineControl.requestCancellation(cancellation);
+          if (cancellation && !deviceOnlineControl.requestCancellation(cancellation)) {
+            await deviceCancellations.markUnconfirmedOffline({
+              run_id: runId,
+              recorded_at: record.revoked_at,
+            });
+          }
         }
         deviceOnlineControl.closeRevokedDevice(record.device_id);
       },

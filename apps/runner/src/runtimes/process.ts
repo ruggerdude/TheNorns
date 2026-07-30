@@ -4,6 +4,7 @@
 // are too — subprocesses acting on a worktree. Workers commit locally; the
 // runner pushes from outside (Runner Trust Contract).
 import { spawn } from "node:child_process";
+import { ManagedProcessTree, managedProcessDetached } from "../managedProcessTree.js";
 import type { CodingRuntime, RuntimeRunRequest, RuntimeRunResult } from "./types.js";
 
 export class ProcessRuntime implements CodingRuntime {
@@ -25,13 +26,12 @@ export class ProcessRuntime implements CodingRuntime {
   /** The "prompt" for a process runtime is the script to execute. */
   async run(request: RuntimeRunRequest): Promise<RuntimeRunResult> {
     return new Promise((resolve) => {
-      const managesProcessGroup = process.platform !== "win32";
       const child = spawn("sh", ["-c", request.prompt], {
         cwd: request.worktreePath,
         // On Unix the shell becomes a process-group leader, so cancellation
-        // reaches the shell and every descendant it created. Windows has no
-        // equivalent negative-pid signaling; taskkill /T is used below.
-        detached: managesProcessGroup,
+        // reaches the shell and every descendant it created. The Windows
+        // fallback stops with taskkill but cannot claim verified containment.
+        detached: managedProcessDetached(),
         env: {
           PATH: process.env.PATH ?? "",
           HOME: request.worktreePath, // no host $HOME (Sandbox Contract)
@@ -42,6 +42,7 @@ export class ProcessRuntime implements CodingRuntime {
           ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
         },
       });
+      const processTree = new ManagedProcessTree(child);
       let output = "";
       let settled = false;
       let spawned = false;
@@ -60,30 +61,7 @@ export class ProcessRuntime implements CodingRuntime {
         // Cancellation dominates a timeout that has requested termination but
         // whose process has not closed yet.
         if (!requestedEnd || requested.outcome === "cancelled") requestedEnd = requested;
-        if (!spawned || child.pid === undefined) return;
-        if (managesProcessGroup) {
-          try {
-            process.kill(-child.pid, "SIGKILL");
-          } catch (error) {
-            // ESRCH means the group already exited. Any other failure falls
-            // back to the direct child without claiming its descendants exited.
-            if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
-              child.kill("SIGKILL");
-            }
-          }
-          return;
-        }
-
-        // Windows process trees are not process groups. `taskkill /T` is the
-        // platform operation for the PID and its descendants. We still wait
-        // for the original child `close` event below before resolving.
-        const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
-          stdio: "ignore",
-          windowsHide: true,
-        });
-        killer.once("error", () => {
-          child.kill("SIGKILL");
-        });
+        if (spawned) processTree.requestStop();
       };
 
       // EXECUTION E11 — publish the live session before any output arrives, so
@@ -134,14 +112,17 @@ export class ProcessRuntime implements CodingRuntime {
       child.on("close", (code) => {
         if (timer) clearTimeout(timer);
         request.signal?.removeEventListener("abort", cancel);
-        if (requestedEnd) {
-          finish({ ...requestedEnd, usage });
-          return;
-        }
-        finish({
-          outcome: code === 0 ? "completed" : "failed",
-          detail: output.slice(-2000),
-          usage,
+        void processTree.confirmReaped().then((proof) => {
+          if (requestedEnd) {
+            finish({ ...requestedEnd, usage, process_tree_reaped: proof.process_tree_reaped });
+            return;
+          }
+          finish({
+            outcome: code === 0 ? "completed" : "failed",
+            detail: output.slice(-2000),
+            usage,
+            process_tree_reaped: proof.process_tree_reaped,
+          });
         });
       });
       child.on("error", (error) => {
@@ -149,7 +130,14 @@ export class ProcessRuntime implements CodingRuntime {
         request.signal?.removeEventListener("abort", cancel);
         // A process that never spawned has nothing to reap. Spawned processes
         // settle only from `close`, after Node has reaped the direct child.
-        if (!spawned) finish({ outcome: "failed", detail: error.message, usage });
+        if (!spawned) {
+          finish({
+            outcome: "failed",
+            detail: error.message,
+            usage,
+            process_tree_reaped: true,
+          });
+        }
       });
     });
   }

@@ -5,6 +5,7 @@ import {
   AuthenticatedDeviceIdentity,
   CancellationConfirmation,
   CancellationConfirmationState,
+  ConversationExecutionProjection,
   DeviceAuthorizationDecision,
   DeviceAuthorizationLifecycle,
   DeviceAuthorizationPollOutcome,
@@ -15,6 +16,8 @@ import {
   DeviceStatusDimensions,
   OwnedDeviceProjection,
   ProjectExecutionTargetProjection,
+  ProjectRunCancellationProjection,
+  ProjectRunCancellationRequest,
   SignedDeviceContextRetrievalHttpTranscript,
   SignedDeviceGatewayCredentialMintHttpTranscript,
   SignedDeviceHttpTranscript,
@@ -346,6 +349,102 @@ describe("cancellation and enrollment polling", () => {
         }).state,
       ).toBe(state);
     }
+  });
+
+  it("validates typed project cancellation requests and truthful evidence timestamps", () => {
+    expect(
+      ProjectRunCancellationRequest.parse({
+        reason: "Stop the selected run",
+        idempotency_key: "cancel-run-1-attempt-1",
+      }),
+    ).toEqual({
+      reason: "Stop the selected run",
+      idempotency_key: "cancel-run-1-attempt-1",
+    });
+    expect(
+      ProjectRunCancellationProjection.parse({
+        project_id: "project-1",
+        run_id: "run-1",
+        state: "unconfirmed_offline",
+        cancellation_requested_at: now,
+        runner_acknowledged_at: null,
+        process_exited_at: null,
+        unconfirmed_offline_at: later,
+      }).state,
+    ).toBe("unconfirmed_offline");
+    expect(
+      ProjectRunCancellationProjection.safeParse({
+        project_id: "project-1",
+        run_id: "run-1",
+        state: "process_exited",
+        cancellation_requested_at: now,
+        runner_acknowledged_at: later,
+        process_exited_at: null,
+        unconfirmed_offline_at: null,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("keeps conversation target wording bound to active versus historical run truth", () => {
+    expect(
+      ConversationExecutionProjection.parse({
+        project_id: "project-1",
+        conversation_id: "conversation-1",
+        presentation: "active",
+        target: {
+          execution_target_id: "grant-1",
+          name: "Office Mac mini",
+        },
+        run: {
+          run_id: "run-1",
+          state: "running",
+          can_stop: true,
+          cancellation: null,
+        },
+      }).presentation,
+    ).toBe("active");
+    expect(
+      ConversationExecutionProjection.parse({
+        project_id: "project-1",
+        conversation_id: "conversation-1",
+        presentation: "historical",
+        target: {
+          execution_target_id: "grant-1",
+          name: "Office Mac mini",
+        },
+        run: {
+          run_id: "run-1",
+          state: "cancelled",
+          can_stop: false,
+          cancellation: {
+            project_id: "project-1",
+            run_id: "run-1",
+            state: "process_exited",
+            cancellation_requested_at: now,
+            runner_acknowledged_at: now,
+            process_exited_at: later,
+            unconfirmed_offline_at: null,
+          },
+        },
+      }).presentation,
+    ).toBe("historical");
+    expect(
+      ConversationExecutionProjection.safeParse({
+        project_id: "project-1",
+        conversation_id: "conversation-1",
+        presentation: "historical",
+        target: {
+          execution_target_id: "grant-1",
+          name: "Office Mac mini",
+        },
+        run: {
+          run_id: "run-1",
+          state: "running",
+          can_stop: false,
+          cancellation: null,
+        },
+      }).success,
+    ).toBe(false);
   });
 
   it("supports RFC 8628 polling outcomes, including slow_down", () => {

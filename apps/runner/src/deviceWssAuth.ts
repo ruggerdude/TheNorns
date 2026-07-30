@@ -23,9 +23,8 @@ export interface DeviceWssProofInput extends DeviceWssIdentity {
 /**
  * Builds the device-only WSS proof without exposing private-key material.
  *
- * This is intentionally not wired into RunnerDaemon yet. AgentHost owns the
- * eventual device connection, and production device execution remains off
- * until the Phase 2 authorization gate is complete.
+ * RunnerDaemon uses this only on its cancellation-only companion connection.
+ * General device command/event transport remains independently fail-closed.
  */
 export function createDeviceWssAuthenticationFrame(
   input: DeviceWssProofInput,

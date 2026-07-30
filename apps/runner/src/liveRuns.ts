@@ -81,32 +81,72 @@ export interface LiveControlOutcome {
   detail: string;
 }
 
-/** Terminal facts kept about a run after it stops, so a late control is honest. */
-interface FinishedRun {
+export interface LiveRunTerminalFacts {
   outcome: string;
+  process_tree_reaped: boolean;
+}
+
+export interface LiveRunStopOutcome extends LiveRunTerminalFacts {
+  found: boolean;
+  confirmation_timed_out: boolean;
+  eventual_terminal: Promise<LiveRunTerminalFacts> | null;
+}
+
+/** Terminal facts kept about a run after it stops, so a late control is honest. */
+interface FinishedRun extends LiveRunTerminalFacts {
   at: number;
+}
+
+interface LiveEntry {
+  registration: LiveRunRegistration;
+  terminal: Promise<LiveRunTerminalFacts>;
+  resolveTerminal(facts: LiveRunTerminalFacts): void;
 }
 
 /** How many ended runs stay explainable. Bounded so a long-lived laptop runner
  *  cannot grow this without limit; older entries fall back to "unknown run". */
 const FINISHED_RUN_MEMORY = 200;
+const DEFAULT_TERMINAL_CONFIRMATION_TIMEOUT_MS = 10_000;
 
 export class LiveRunRegistry {
-  private readonly live = new Map<string, LiveRunRegistration>();
+  private readonly live = new Map<string, LiveEntry>();
   private readonly finished = new Map<string, FinishedRun>();
+
+  constructor(
+    private readonly terminalConfirmationTimeoutMs = DEFAULT_TERMINAL_CONFIRMATION_TIMEOUT_MS,
+  ) {
+    if (
+      !Number.isSafeInteger(terminalConfirmationTimeoutMs) ||
+      terminalConfirmationTimeoutMs <= 0
+    ) {
+      throw new Error("live-run terminal confirmation timeout must be a positive integer");
+    }
+  }
 
   /**
    * Register a run as live. Returns the release function; the caller MUST call
    * it in a `finally` so a crashed run cannot leave a permanently "live" entry
    * that swallows later controls.
    */
-  register(registration: LiveRunRegistration): (outcome: string) => void {
-    this.live.set(registration.runId, registration);
-    return (outcome: string) => {
-      if (this.live.get(registration.runId) === registration) {
+  register(
+    registration: LiveRunRegistration,
+  ): (outcome: string, facts?: { process_tree_reaped?: boolean }) => void {
+    let resolveTerminal: (facts: LiveRunTerminalFacts) => void = () => undefined;
+    const terminal = new Promise<LiveRunTerminalFacts>((resolve) => {
+      resolveTerminal = resolve;
+    });
+    const entry: LiveEntry = { registration, terminal, resolveTerminal };
+    this.live.set(registration.runId, entry);
+    return (outcome: string, facts: { process_tree_reaped?: boolean } = {}) => {
+      if (this.live.get(registration.runId) === entry) {
         this.live.delete(registration.runId);
       }
-      this.finished.set(registration.runId, { outcome, at: Date.now() });
+      const terminalFacts = {
+        outcome,
+        process_tree_reaped: facts.process_tree_reaped === true,
+      };
+      entry.resolveTerminal(terminalFacts);
+      this.finished.set(registration.runId, { ...terminalFacts, at: Date.now() });
       while (this.finished.size > FINISHED_RUN_MEMORY) {
         const oldest = this.finished.keys().next();
         if (oldest.done) break;
@@ -121,7 +161,7 @@ export class LiveRunRegistry {
 
   /** Cancel every live run. Used when the daemon is fenced or stopped. */
   cancelAll(reason: string): void {
-    for (const registration of [...this.live.values()]) {
+    for (const { registration } of [...this.live.values()]) {
       // A daemon-wide stop is used for generation fencing and process
       // shutdown. Local work remains recoverable, but a fenced installation
       // must not publish it later through Norns. Registrations therefore treat
@@ -129,6 +169,151 @@ export class LiveRunRegistry {
       // already fired the underlying AbortSignal.
       registration.cancel(reason, { publication: "fenced" });
     }
+  }
+
+  /**
+   * Cancel one exact run and wait until its executor has left the live
+   * registry. A remembered terminal result is returned for response-loss
+   * retries; an unknown run is never treated as proof that its process exited.
+   */
+  async cancelAndWait(
+    runId: string,
+    reason: string,
+    options: { publication: "allow_committed" | "fenced" },
+  ): Promise<LiveRunStopOutcome> {
+    const entry = this.live.get(runId);
+    if (entry) {
+      entry.registration.cancel(reason, options);
+      const terminal = await this.boundedTerminal(entry.terminal);
+      if (!terminal) {
+        return {
+          found: true,
+          outcome: "cancellation_requested",
+          process_tree_reaped: false,
+          confirmation_timed_out: true,
+          eventual_terminal: entry.terminal,
+        };
+      }
+      return {
+        found: true,
+        ...terminal,
+        confirmation_timed_out: false,
+        eventual_terminal: null,
+      };
+    }
+    const finished = this.finished.get(runId);
+    if (finished) {
+      if (options.publication === "fenced") {
+        // Publication cannot still be in flight after the registration's
+        // terminal release. The durable server-side publication fence remains
+        // authoritative for future attempts.
+      }
+      return {
+        found: true,
+        outcome: finished.outcome,
+        process_tree_reaped: finished.process_tree_reaped,
+        confirmation_timed_out: false,
+        eventual_terminal: null,
+      };
+    }
+    return {
+      found: false,
+      outcome: "unknown",
+      process_tree_reaped: false,
+      confirmation_timed_out: false,
+      eventual_terminal: null,
+    };
+  }
+
+  /**
+   * Fence every run that is live at the time of the call and await their
+   * terminal containment facts. New dispatch remains a server/daemon gate;
+   * this method does not pretend an empty registry proves an old unknown run
+   * exited.
+   */
+  async cancelAllAndWait(reason: string): Promise<{
+    stop_requested: number;
+    process_trees_reaped: number;
+    unconfirmed: number;
+    eventual: Promise<{
+      stop_requested: number;
+      process_trees_reaped: number;
+      unconfirmed: number;
+    }> | null;
+  }> {
+    const entries = [...this.live.values()];
+    for (const entry of entries) {
+      entry.registration.cancel(reason, { publication: "fenced" });
+    }
+    const terminal = await Promise.all(
+      entries.map((entry) => this.boundedTerminal(entry.terminal)),
+    );
+    const processTreesReaped = terminal.filter(
+      (facts) => facts?.process_tree_reaped === true,
+    ).length;
+    const timedOut = terminal.some((facts) => facts === null);
+    const summarize = (
+      facts: readonly LiveRunTerminalFacts[],
+    ): {
+      stop_requested: number;
+      process_trees_reaped: number;
+      unconfirmed: number;
+    } => {
+      const reaped = facts.filter((item) => item.process_tree_reaped).length;
+      return {
+        stop_requested: facts.length,
+        process_trees_reaped: reaped,
+        unconfirmed: facts.length - reaped,
+      };
+    };
+    return {
+      stop_requested: terminal.length,
+      process_trees_reaped: processTreesReaped,
+      unconfirmed: terminal.length - processTreesReaped,
+      eventual: timedOut
+        ? Promise.all(entries.map((entry) => entry.terminal)).then(summarize)
+        : null,
+    };
+  }
+
+  terminalFacts(runId: string): LiveRunTerminalFacts | null {
+    const finished = this.finished.get(runId);
+    return finished
+      ? {
+          outcome: finished.outcome,
+          process_tree_reaped: finished.process_tree_reaped,
+        }
+      : null;
+  }
+
+  liveCount(): number {
+    return this.live.size;
+  }
+
+  waitForTerminal(runId: string): Promise<LiveRunTerminalFacts> | null {
+    const live = this.live.get(runId);
+    if (live) return live.terminal;
+    const finished = this.terminalFacts(runId);
+    return finished ? Promise.resolve(finished) : null;
+  }
+
+  private boundedTerminal(
+    terminal: Promise<LiveRunTerminalFacts>,
+  ): Promise<LiveRunTerminalFacts | null> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve(null);
+      }, this.terminalConfirmationTimeoutMs);
+      void terminal.then((facts) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(facts);
+      });
+    });
   }
 
   /**
@@ -143,8 +328,8 @@ export class LiveRunRegistry {
     kind: LiveControlKind,
     input: { message?: string } = {},
   ): Promise<LiveControlOutcome | null> {
-    const registration = this.live.get(runId);
-    if (!registration) {
+    const entry = this.live.get(runId);
+    if (!entry) {
       const ended = this.finished.get(runId);
       if (!ended) return null;
       return {
@@ -156,6 +341,7 @@ export class LiveRunRegistry {
         detail: `run ${runId} has already ended (${ended.outcome}); the ${kind} was not delivered`,
       };
     }
+    const registration = entry.registration;
     const runtime = registration.runtimeName;
     switch (kind) {
       case "cancel": {

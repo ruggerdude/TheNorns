@@ -11,6 +11,7 @@ import {
   loadDeviceCancellationTrackingMigrationSql,
   loadDeviceHttpRequestReplaysMigrationSql,
   loadDeviceIdentityCoreMigrationSql,
+  loadProjectRunCancellationMigrationSql,
 } from "../src/persistence/v2/migrate.js";
 
 describe.sequential("device revocation enforcement", () => {
@@ -104,6 +105,7 @@ describe.sequential("device revocation enforcement", () => {
     await database.exec(await loadDeviceIdentityCoreMigrationSql());
     await database.exec(await loadDeviceHttpRequestReplaysMigrationSql());
     await database.exec(await loadDeviceCancellationTrackingMigrationSql());
+    await database.exec(await loadProjectRunCancellationMigrationSql());
     await database.exec(`
       INSERT INTO devices (
         id,owner_user_id,display_name,os_family,architecture

@@ -71,6 +71,11 @@ export interface RuntimeSession {
 interface RuntimeRunResultBase {
   detail: string;
   usage: RuntimeUsage;
+  /**
+   * True only when the runtime's containment implementation verified that no
+   * managed descendant remains. Omission is deliberately unproven, not true.
+   */
+  process_tree_reaped?: boolean;
   /** session/thread id when the runtime supports resumption */
   sessionId?: string;
   /** Provider/SDK-native reason the agent loop stopped, when reported. */

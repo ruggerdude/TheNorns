@@ -7,6 +7,7 @@ import {
   V2NonEmptyString,
   V2Sha256Hex,
 } from "./v2/common.js";
+import { V2AgentRunState } from "./v2/lifecycle.js";
 
 const DeviceGeneration = z.number().int().nonnegative();
 const NonNegativeCount = z.number().int().nonnegative();
@@ -412,6 +413,148 @@ export const CancellationConfirmation = z
   })
   .strict();
 export type CancellationConfirmationT = z.infer<typeof CancellationConfirmation>;
+
+export const ProjectRunCancellationRequest = z
+  .object({
+    reason: z.string().trim().min(1).max(1_000),
+    idempotency_key: z.string().trim().min(1).max(200),
+  })
+  .strict();
+export type ProjectRunCancellationRequestT = z.infer<typeof ProjectRunCancellationRequest>;
+
+export const ProjectRunCancellationProjection = z
+  .object({
+    project_id: V2EntityId,
+    run_id: V2EntityId,
+    state: CancellationConfirmationState,
+    cancellation_requested_at: V2IsoDateTime,
+    runner_acknowledged_at: V2IsoDateTime.nullable(),
+    process_exited_at: V2IsoDateTime.nullable(),
+    unconfirmed_offline_at: V2IsoDateTime.nullable(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (
+      (value.state === "runner_acknowledged" || value.state === "process_exited") &&
+      value.runner_acknowledged_at === null
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runner_acknowledged_at"],
+        message: `${value.state} requires runner acknowledgement evidence`,
+      });
+    }
+    if ((value.state === "process_exited") !== (value.process_exited_at !== null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["process_exited_at"],
+        message: "process exit time must exist exactly when process exit is confirmed",
+      });
+    }
+    if (value.state === "unconfirmed_offline" && value.unconfirmed_offline_at === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["unconfirmed_offline_at"],
+        message: "unconfirmed offline state requires its observation time",
+      });
+    }
+  });
+export type ProjectRunCancellationProjectionT = z.infer<typeof ProjectRunCancellationProjection>;
+
+export const ConversationExecutionPresentation = z.enum(["idle", "active", "historical"]);
+export type ConversationExecutionPresentationT = z.infer<typeof ConversationExecutionPresentation>;
+
+export const ConversationExecutionProjection = z
+  .object({
+    project_id: V2EntityId,
+    conversation_id: V2EntityId,
+    presentation: ConversationExecutionPresentation,
+    target: z
+      .object({
+        execution_target_id: V2EntityId,
+        name: z.string().trim().min(1).max(200),
+      })
+      .strict()
+      .nullable(),
+    run: z
+      .object({
+        run_id: V2EntityId,
+        state: V2AgentRunState,
+        can_stop: z.boolean(),
+        cancellation: ProjectRunCancellationProjection.nullable(),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const liveRunStates = new Set([
+      "created",
+      "dispatched",
+      "running",
+      "waiting_for_human",
+      "verifying",
+    ]);
+    if (value.presentation === "idle" && value.run !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["run"],
+        message: "idle execution target projections cannot identify a run",
+      });
+    }
+    if (value.presentation !== "idle" && (value.target === null || value.run === null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["target"],
+        message: `${value.presentation} execution projections require a target and run`,
+      });
+    }
+    if (
+      value.presentation === "active" &&
+      value.run !== null &&
+      !liveRunStates.has(value.run.state)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["run", "state"],
+        message: "active presentation requires a live run",
+      });
+    }
+    if (
+      value.presentation === "historical" &&
+      value.run !== null &&
+      liveRunStates.has(value.run.state)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["run", "state"],
+        message: "historical presentation requires a terminal run",
+      });
+    }
+    if (
+      value.run?.can_stop === true &&
+      (value.presentation !== "active" || !liveRunStates.has(value.run.state))
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["run", "can_stop"],
+        message: "only an active run may expose project stop authority",
+      });
+    }
+    if (
+      value.run?.cancellation !== null &&
+      value.run?.cancellation !== undefined &&
+      (value.run.cancellation.project_id !== value.project_id ||
+        value.run.cancellation.run_id !== value.run.run_id)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["run", "cancellation"],
+        message: "cancellation projection must match the projected project and run",
+      });
+    }
+  });
+export type ConversationExecutionProjectionT = z.infer<typeof ConversationExecutionProjection>;
 
 export const DeviceAuthorizationPollOutcome = z.discriminatedUnion("outcome", [
   z

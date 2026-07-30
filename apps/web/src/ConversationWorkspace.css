@@ -692,9 +692,16 @@
 }
 
 .conversation-header-identity > span {
+  overflow: hidden;
   color: var(--ink-muted);
   font-size: var(--text-xs);
   font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-header-target {
+  max-width: min(42vw, 32rem);
 }
 
 .conversation-thread-chrome {
@@ -870,11 +877,6 @@
   margin-top: 0.25rem;
   border-radius: 50%;
   background: var(--info);
-}
-
-.conversation-agents-drawer .execution-stop-agents {
-  display: grid;
-  margin-top: auto;
 }
 
 .conversation-branch-lineage {
@@ -1918,29 +1920,58 @@
   background: color-mix(in srgb, var(--accent) 3%, var(--surface));
 }
 
-.execution-stop-agents {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
+.project-run-stop {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: auto;
   padding: 0.7rem 0.8rem;
   border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line));
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--danger) 5%, var(--surface));
 }
 
-.execution-stop-agents > div {
-  display: grid;
-  gap: 0.12rem;
+.project-run-stop-heading,
+.project-run-cancellation-status > div {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.7rem;
 }
 
-.execution-stop-agents span {
+.project-run-stop-heading > div,
+.project-run-stop form,
+.project-run-cancellation-status {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.project-run-stop h3,
+.project-run-stop p,
+.project-run-cancellation-status p {
+  margin: 0;
+}
+
+.project-run-stop > p,
+.project-run-cancellation-status p,
+.project-run-cancellation-status small {
   color: var(--ink-muted);
   font-size: var(--text-sm);
+  line-height: 1.45;
 }
 
-.execution-stop-agents select {
-  min-width: 15rem;
+.project-run-stop code {
+  overflow-wrap: anywhere;
+}
+
+.project-run-cancellation-status {
+  padding: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.project-run-stop form .btn {
+  justify-self: end;
 }
 
 .execution-conversation-controls > details,
@@ -3256,14 +3287,17 @@
     padding-inline: 0.75rem;
   }
 
-  .execution-stop-agents {
-    align-items: stretch;
-    flex-direction: column;
+  .conversation-header-target {
+    max-width: min(58vw, 24rem);
   }
 
-  .execution-stop-agents select {
+  .project-run-stop-heading,
+  .project-run-cancellation-status > div {
+    display: grid;
+  }
+
+  .project-run-stop form .btn {
     width: 100%;
-    min-width: 0;
   }
 
   .mockup-request-composer > form {
@@ -3296,5 +3330,19 @@
 @media (prefers-reduced-motion: reduce) {
   .conversation-message-actions {
     transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .project-run-stop,
+  .project-run-cancellation-status {
+    border-color: CanvasText;
+  }
+
+  .conversation-header-target,
+  .project-run-stop > p,
+  .project-run-cancellation-status p,
+  .project-run-cancellation-status small {
+    color: CanvasText;
   }
 }

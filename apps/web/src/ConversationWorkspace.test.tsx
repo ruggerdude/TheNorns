@@ -3593,7 +3593,7 @@ describe("conversation workspace", () => {
     );
   });
 
-  it("opens execution agent activity from the header and keeps stop controls proposal-based", async () => {
+  it("keeps the target read-only and separates project-run stop from pause proposals", async () => {
     const execution = executionConversation();
     const approvedVersion = planVersion({ status: "approved" });
     const baseHandoff = handoffFor(approvedVersion, execution.id);
@@ -3626,6 +3626,23 @@ describe("conversation workspace", () => {
             handoff,
           });
         }
+        if (url.endsWith(`/conversations/${execution.id}/execution`)) {
+          return Response.json({
+            project_id: projectId,
+            conversation_id: execution.id,
+            presentation: "active",
+            target: {
+              execution_target_id: "grant-office",
+              name: "Office Mac mini",
+            },
+            run: {
+              run_id: "run-office-1",
+              state: "running",
+              can_stop: true,
+              cancellation: null,
+            },
+          });
+        }
         throw new Error(`Unexpected request: ${url}`);
       }),
     );
@@ -3640,16 +3657,21 @@ describe("conversation workspace", () => {
     );
 
     const agents = await screen.findByRole("button", { name: "Agents 1" });
+    expect(await screen.findByText("Running on · Office Mac mini")).toBeVisible();
     expect(screen.queryByRole("complementary", { name: "Agent activity" })).not.toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "Agent task to stop" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /save execution target/i }),
+    ).not.toBeInTheDocument();
     await user.click(agents);
 
     const drawer = screen.getByRole("complementary", { name: "Agent activity" });
     expect(drawer).toHaveTextContent("1 planned agent task");
     expect(drawer).toHaveTextContent("task-api");
-    expect(screen.getByRole("combobox", { name: "Agent task to stop" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Prepare pause action" })).toBeInTheDocument();
-    expect(drawer).toHaveTextContent("must still be confirmed");
+    expect(screen.queryByRole("combobox", { name: "Agent task to stop" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Stop reason" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop project work" })).toBeDisabled();
+    expect(drawer).toHaveTextContent("pause requests remain proposals");
 
     const closeAgentActivity = screen
       .getAllByRole("button", { name: "Close agent activity" })

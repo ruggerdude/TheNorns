@@ -6,7 +6,10 @@ import {
   DeviceRunCancellationService,
 } from "../src/devices/cancellation.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
-import { loadDeviceCancellationTrackingMigrationSql } from "../src/persistence/v2/migrate.js";
+import {
+  loadDeviceCancellationTrackingMigrationSql,
+  loadProjectRunCancellationMigrationSql,
+} from "../src/persistence/v2/migrate.js";
 
 describe.sequential("device run cancellation tracking", () => {
   let database: PGlite;
@@ -73,8 +76,17 @@ describe.sequential("device run cancellation tracking", () => {
       CREATE TABLE agent_runs (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL REFERENCES projects(id),
+        phase_id TEXT NOT NULL DEFAULT 'phase-1',
+        task_id TEXT NOT NULL DEFAULT 'task-1',
         repository_binding_id TEXT NOT NULL REFERENCES repository_bindings(id),
-        initiated_by_user_id TEXT NOT NULL REFERENCES users(id)
+        initiated_by_user_id TEXT NOT NULL REFERENCES users(id),
+        state TEXT NOT NULL DEFAULT 'running',
+        lifecycle_version INTEGER NOT NULL DEFAULT 0,
+        aggregate_version INTEGER NOT NULL DEFAULT 1,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        started_at TIMESTAMPTZ,
+        finished_at TIMESTAMPTZ
       );
       CREATE TABLE commands (
         command_id TEXT PRIMARY KEY,
@@ -82,6 +94,55 @@ describe.sequential("device run cancellation tracking", () => {
         runner_id TEXT NOT NULL,
         runner_generation BIGINT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE TABLE dispatch_context_documents (
+        runner_id TEXT NOT NULL,
+        runner_generation INTEGER NOT NULL,
+        context_document_id TEXT NOT NULL,
+        dispatch_job_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (runner_id, context_document_id)
+      );
+      CREATE TABLE domain_events (
+        event_id TEXT PRIMARY KEY,
+        stream_type TEXT NOT NULL,
+        stream_id TEXT NOT NULL,
+        stream_version BIGINT NOT NULL,
+        event_type TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        phase_id TEXT,
+        task_id TEXT,
+        actor_type TEXT NOT NULL,
+        actor_id TEXT,
+        correlation_id TEXT NOT NULL,
+        causation_id TEXT,
+        occurred_at TIMESTAMPTZ NOT NULL,
+        payload JSONB NOT NULL
+      );
+      CREATE TABLE audit_events (
+        audit_id TEXT PRIMARY KEY,
+        audit_type TEXT NOT NULL,
+        project_id TEXT,
+        phase_id TEXT,
+        task_id TEXT,
+        actor_type TEXT NOT NULL,
+        actor_id TEXT,
+        outcome TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        correlation_id TEXT NOT NULL,
+        causation_id TEXT,
+        occurred_at TIMESTAMPTZ NOT NULL,
+        targets JSONB NOT NULL,
+        summary TEXT NOT NULL,
+        details JSONB NOT NULL,
+        redaction_applied BOOLEAN NOT NULL
+      );
+      CREATE TABLE lifecycle_integrity_findings (
+        id TEXT PRIMARY KEY,
+        aggregate_kind TEXT NOT NULL,
+        aggregate_id TEXT NOT NULL,
+        status TEXT NOT NULL
       );
 
       INSERT INTO users (id,status)
@@ -166,6 +227,7 @@ describe.sequential("device run cancellation tracking", () => {
         );
     `);
     await database.exec(await loadDeviceCancellationTrackingMigrationSql());
+    await database.exec(await loadProjectRunCancellationMigrationSql());
     service = new DeviceRunCancellationService(new PGliteTransactionRunner(database), {
       afterRequested: async (outcome) => {
         afterRequestedOutcomes.push(outcome);
@@ -175,6 +237,7 @@ describe.sequential("device run cancellation tracking", () => {
         );
         cancellationStateObservedByHook = selected.rows[0]?.state ?? null;
         if (rejectAfterRequested) throw new Error("online stop delivery unavailable");
+        return undefined;
       },
     });
   });
@@ -414,6 +477,11 @@ describe.sequential("device run cancellation tracking", () => {
       process_exited_at: "2026-07-29T14:13:00.000Z",
       unconfirmed_offline_at: "2026-07-29T14:11:00.000Z",
     });
+    const run = await database.query<{ state: string; finished_at: Date | string | null }>(
+      "SELECT state,finished_at FROM agent_runs WHERE id='run-offline'",
+    );
+    expect(run.rows[0]?.state).toBe("cancelled");
+    expect(run.rows[0]?.finished_at).not.toBeNull();
   });
 
   it("rejects evidence from another device, credential, or generation", async () => {

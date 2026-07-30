@@ -272,20 +272,14 @@ export class PostgresDeviceAuthorizationPolicy {
            SELECT 1
              FROM users actor
              JOIN projects project ON project.id = $2
-             JOIN agent_runs run
+            JOIN agent_runs run
                ON run.id = $3
               AND run.project_id = project.id
             WHERE actor.id = $1
               AND actor.status = 'active'
-              AND (
-                project.owner_user_id = actor.id
-                OR EXISTS (
-                  SELECT 1
-                    FROM project_members membership
-                   WHERE membership.project_id = project.id
-                     AND membership.user_id = actor.id
-                     AND membership.status = 'active'
-                )
+              AND project.owner_user_id = actor.id
+              AND run.state IN (
+                'created','dispatched','running','waiting_for_human','verifying'
               )
          ) AS allowed`,
         [input.actor_user_id, input.project_id, input.run_id],

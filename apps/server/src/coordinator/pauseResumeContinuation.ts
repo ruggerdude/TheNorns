@@ -469,10 +469,24 @@ export class PauseResumeContinuationWorker {
       for (const reference of command.context_refs) {
         await tx.query(
           `INSERT INTO dispatch_context_documents (
-             runner_id,context_document_id,dispatch_job_id,run_id
-           ) VALUES ($1,$2,$3,$4)
+             runner_id,context_document_id,dispatch_job_id,run_id,revoked_at
+           ) VALUES (
+             $1,$2,$3,$4,
+             CASE WHEN EXISTS (
+               SELECT 1
+                 FROM device_run_cancellations cancellation
+                WHERE cancellation.run_id=$4
+                  AND cancellation.publication_fenced_at IS NOT NULL
+                  AND cancellation.publication_reauthorized_at IS NULL
+             ) THEN now() ELSE NULL END
+           )
            ON CONFLICT(runner_id,context_document_id) DO UPDATE SET
-             dispatch_job_id=EXCLUDED.dispatch_job_id,run_id=EXCLUDED.run_id,created_at=now()`,
+             dispatch_job_id=EXCLUDED.dispatch_job_id,run_id=EXCLUDED.run_id,
+             revoked_at=COALESCE(
+               EXCLUDED.revoked_at,
+               dispatch_context_documents.revoked_at
+             ),
+             created_at=now()`,
           [target.runner_id, reference.artifact_id, command.dispatch_job_id, row.run_id],
         );
       }

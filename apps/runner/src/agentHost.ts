@@ -49,6 +49,7 @@ const SECURITY_HEADERS = {
 } as const;
 
 const AGENT_HOST_VERSION = "0.1.0";
+const EMERGENCY_STOP_CONFIRMATION = "STOP ALL NORNS WORK";
 const MANUAL_UPDATE_GUIDANCE =
   "Install a newer signed Norns Local Agent package manually. Automatic updates are not enabled.";
 const SUPPORT_BUNDLE_REDACTOR = new Redactor();
@@ -104,6 +105,14 @@ const CONTROL_CENTER_HTML = `<!doctype html>
         <button id="start" type="button">Start daemon</button>
         <button id="stop" type="button">Stop daemon</button>
       </div>
+      <section class="emergency-control" aria-labelledby="emergency-heading">
+        <h3 id="emergency-heading">Emergency stop</h3>
+        <p>Stops every process currently managed by Norns on this OS-user installation, fences publication, and preserves recovery worktrees. The Control Center stays open.</p>
+        <label for="emergency-confirmation">Type <code>STOP ALL NORNS WORK</code> to confirm</label>
+        <input id="emergency-confirmation" type="text" autocomplete="off" spellcheck="false">
+        <button id="emergency-stop" class="danger" type="button">Emergency stop all Norns work</button>
+        <p id="emergency-result" class="muted">No local emergency stop has been requested.</p>
+      </section>
     </section>
 
     <section id="security" role="tabpanel" aria-labelledby="tab-security" tabindex="0" hidden>
@@ -168,6 +177,9 @@ button,.button-link{font:inherit;padding:.65rem .9rem;border:1px solid ButtonTex
 .boundary{padding:1rem;border-left:.3rem solid GrayText}
 .repository-list{display:grid;gap:1rem;padding:0;list-style:none}.repository-list>li{padding:1rem;border:1px solid GrayText;border-radius:.6rem}
 .repository-list p{margin:.25rem 0}.repository-path{overflow-wrap:anywhere}
+.emergency-control{margin-top:1.5rem;padding:1rem;border:2px solid GrayText;border-radius:.6rem}
+.emergency-control label{display:block;font-weight:700}.emergency-control input{display:block;width:min(100%,24rem);font:inherit;margin:.5rem 0;padding:.6rem}
+.danger{border-width:2px}
 code{overflow-wrap:anywhere}
 @media(max-width:34rem){dl{grid-template-columns:1fr;gap:.2rem}dd{margin:0 0 .8rem}nav{overflow-x:auto}}
 @media(forced-colors:active){main,.boundary,button,.button-link{forced-color-adjust:auto}.tab[aria-selected="true"]{border-width:3px}}
@@ -206,6 +218,14 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
     text("#start-at-login", status.home.start_at_login ? "Enabled" : "Not configured");
     text("#agent-version", status.home.agent_version);
     text("#recent-activity", status.home.recent_activity || "No recent local Norns activity.");
+    if (status.home.emergency_stop) {
+      const result = status.home.emergency_stop;
+      text("#emergency-result",
+        "Last emergency stop: " + result.requested_at + " · " +
+        result.stop_requested + " stop requested · " +
+        result.process_trees_reaped + " process trees exited · " +
+        result.unconfirmed + " unconfirmed");
+    }
     text("#account", status.security.enrolled_account || "Not enrolled");
     text("#fingerprint", status.security.public_key_fingerprint || "Not prepared");
     text("#repository-access", status.security.repository_access_summary);
@@ -333,6 +353,30 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
     await request("/api/daemon/restart", { method: "POST", body: "{}" });
     await refresh();
   });
+  document.querySelector("#emergency-stop").addEventListener("click", async () => {
+    const button = document.querySelector("#emergency-stop");
+    const confirmation = document.querySelector("#emergency-confirmation");
+    button.disabled = true;
+    try {
+      const result = await request("/api/emergency-stop", {
+        method: "POST",
+        body: JSON.stringify({ confirmation: confirmation.value }),
+      });
+      confirmation.value = "";
+      text("#emergency-result",
+        "Emergency stop: " + result.emergency_stop.stop_requested +
+        " stop requested · " + result.emergency_stop.process_trees_reaped +
+        " process trees exited · " + result.emergency_stop.unconfirmed + " unconfirmed");
+      message.textContent = result.emergency_stop.unconfirmed === 0
+        ? "All registered Norns-managed process trees stopped. Recovery worktrees were preserved."
+        : "Emergency stop was requested, but some process trees remain unconfirmed.";
+      await refresh();
+    } catch (error) {
+      message.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
   document.querySelector("#choose-repository").addEventListener("click", async () => {
     const button = document.querySelector("#choose-repository");
     button.disabled = true;
@@ -429,6 +473,13 @@ export interface AgentHostLocalState {
 export interface AgentDaemonLifecycle {
   start(): void | Promise<void>;
   stop(): void | Promise<void>;
+  emergencyStop?(): Promise<AgentEmergencyStopResult>;
+}
+
+export interface AgentEmergencyStopResult {
+  stop_requested: number;
+  process_trees_reaped: number;
+  unconfirmed: number;
 }
 
 export interface AgentHostSingleInstanceLock {
@@ -466,6 +517,8 @@ export interface AgentHostOptions {
   repositoryAccess?: LocalRepositoryAccessController;
   localState?: Partial<AgentHostLocalState>;
   detectLocalTools?: boolean;
+  /** Persistent installed mode starts the owned daemon with the loopback host. */
+  startDaemonOnHostStart?: boolean;
 }
 
 function commandVersion(command: string): string | null {
@@ -747,6 +800,7 @@ export class AgentHost {
   private daemonState: AgentDaemonState = "stopped";
   private enrollmentState: AgentEnrollmentState;
   private daemonTransition: Promise<void> = Promise.resolve();
+  private lastEmergencyStop: (AgentEmergencyStopResult & { requested_at: string }) | null = null;
   private shuttingDown = false;
 
   constructor(private readonly options: AgentHostOptions) {
@@ -849,6 +903,9 @@ export class AgentHost {
           "Repository access reconciliation could not start safely.",
         );
       });
+      if (this.options.startDaemonOnHostStart === true) {
+        await this.transitionDaemon("start");
+      }
       return { ...this.publicRecord(), bootstrap_url: this.issueBootstrapUrl() };
     } catch (error) {
       this.server = null;
@@ -1004,6 +1061,7 @@ export class AgentHost {
       case "/api/daemon/start":
       case "/api/daemon/stop":
       case "/api/daemon/restart":
+      case "/api/emergency-stop":
       case "/api/repositories/choose":
       case "/api/repositories/remove":
         throw new AgentHostHttpError(405, "method not allowed");
@@ -1079,6 +1137,21 @@ export class AgentHost {
         await this.transitionDaemon("restart");
         sendJson(response, 200, this.statusBody());
         return;
+      case "/api/emergency-stop": {
+        if (body.confirmation !== EMERGENCY_STOP_CONFIRMATION) {
+          throw new AgentHostHttpError(
+            400,
+            `confirmation must exactly match ${EMERGENCY_STOP_CONFIRMATION}`,
+          );
+        }
+        const emergencyStop = this.options.daemon.emergencyStop;
+        if (!emergencyStop) {
+          throw new AgentHostHttpError(503, "managed-process emergency stop is unavailable");
+        }
+        const result = await this.emergencyStopDaemon(emergencyStop);
+        sendJson(response, 200, { emergency_stop: result });
+        return;
+      }
       case "/api/repositories/choose": {
         const repository = await this.repositoryAccess.choose();
         sendJson(
@@ -1144,6 +1217,7 @@ export class AgentHost {
         start_at_login: this.localState.start_at_login,
         agent_version: this.localState.agent_version,
         recent_activity: this.localState.recent_activity,
+        emergency_stop: this.lastEmergencyStop ? { ...this.lastEmergencyStop } : null,
       },
       security: {
         enrolled_account: this.localState.enrolled_account,
@@ -1256,6 +1330,41 @@ export class AgentHost {
       }
     });
     this.daemonTransition = operation.catch(() => undefined);
+    return operation;
+  }
+
+  private emergencyStopDaemon(
+    emergencyStop: () => Promise<AgentEmergencyStopResult>,
+  ): Promise<AgentEmergencyStopResult & { requested_at: string }> {
+    const operation = this.daemonTransition.then(async () => {
+      const result = await emergencyStop.call(this.options.daemon);
+      if (
+        !Number.isSafeInteger(result.stop_requested) ||
+        result.stop_requested < 0 ||
+        !Number.isSafeInteger(result.process_trees_reaped) ||
+        result.process_trees_reaped < 0 ||
+        !Number.isSafeInteger(result.unconfirmed) ||
+        result.unconfirmed < 0 ||
+        result.process_trees_reaped + result.unconfirmed !== result.stop_requested
+      ) {
+        throw new Error("daemon returned an invalid emergency-stop result");
+      }
+      const recorded = {
+        ...result,
+        requested_at: new Date(this.now()).toISOString(),
+      };
+      this.lastEmergencyStop = recorded;
+      this.localState.workload = result.unconfirmed === 0 ? "idle" : "busy";
+      this.localState.recent_activity =
+        result.unconfirmed === 0
+          ? "Local emergency stop completed; recovery worktrees were preserved."
+          : "Local emergency stop requested; one or more process trees remain unconfirmed.";
+      return recorded;
+    });
+    this.daemonTransition = operation.then(
+      () => undefined,
+      () => undefined,
+    );
     return operation;
   }
 }

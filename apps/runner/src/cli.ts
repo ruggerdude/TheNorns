@@ -20,9 +20,11 @@ import {
 } from "./agentPairing.js";
 import { type RunnerContextIdentity, RunnerSignedContextFetcher } from "./contextAuth.js";
 import { RunnerDaemon } from "./daemon.js";
+import { ActiveDeviceIdentityStore } from "./deviceInstallationIdentity.js";
 import type { RelayInferenceClient } from "./inferenceClient.js";
 import type { LiveRunRegistry } from "./liveRuns.js";
 import { type GatewayCredential, ModelGatewayClient } from "./modelGateway.js";
+import { PendingDeviceCredentialStore } from "./pendingDeviceCredential.js";
 import { GitPublisher } from "./publication.js";
 import { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
 import { CodexRuntime } from "./runtimes/codex.js";
@@ -69,6 +71,13 @@ function parseArgs(argv: string[]): Args {
     }
   }
   return { command, positional, flags };
+}
+
+function strictFeatureFlag(name: string): boolean {
+  const value = process.env[name];
+  if (value === undefined || value === "false") return false;
+  if (value === "true") return true;
+  throw new Error(`${name} must be exactly "true" or "false" when set`);
 }
 
 function resolveOptions(flags: Record<string, string>) {
@@ -231,6 +240,131 @@ function createV2Executor(
   );
 }
 
+function persistentDeviceIdentity(
+  dataDir: string,
+  enabled: boolean,
+): {
+  identity: RunnerContextIdentity & { mode: "device" };
+  wss: {
+    identity: {
+      device_id: string;
+      credential_id: string;
+      generation: number;
+    };
+    sign(payload: string): string;
+  };
+} | null {
+  if (!enabled) return null;
+  const active = new ActiveDeviceIdentityStore(dataDir).read();
+  if (!active) {
+    throw new Error(
+      "device control is enabled but no server-validated active device identity is persisted",
+    );
+  }
+  const credential = new PendingDeviceCredentialStore(dataDir);
+  if (!credential.read()) throw new Error("active device identity has no persisted credential");
+  return {
+    identity: {
+      mode: "device",
+      deviceId: active.device_id,
+      credentialId: active.credential_id,
+      generation: active.generation,
+      sign: (payload) => credential.sign(payload),
+    },
+    wss: {
+      identity: {
+        device_id: active.device_id,
+        credential_id: active.credential_id,
+        generation: active.generation,
+      },
+      sign: (payload) => credential.sign(payload),
+    },
+  };
+}
+
+/**
+ * The single persistent production runner construction path used by both the
+ * foreground `start` command and AgentHost. Sharing the instance is what lets
+ * the local emergency control reach the exact LiveRunRegistry that owns work.
+ */
+function createPersistentRunner(input: {
+  server: string;
+  runnerId: string;
+  dataDir: string;
+  deviceControlEnabled: boolean;
+}): RunnerDaemon {
+  const device = persistentDeviceIdentity(input.dataDir, input.deviceControlEnabled);
+  const execution: {
+    executor?: V2RunnerExecutor;
+    repositories?: ApprovedRepositoryRegistry;
+  } = {};
+  const workspaces = new WorkspaceRegistry(input.dataDir);
+  const daemon = new RunnerDaemon({
+    serverUrl: input.server,
+    runnerId: input.runnerId,
+    dataDir: input.dataDir,
+    workspaces,
+    ...(device ? { deviceControl: device.wss } : {}),
+    executeV2: async (command, emit, capabilities) => {
+      if (!execution.executor) throw new Error("Phase 4 executor is not initialized");
+      return (await execution.executor.execute(command, emit, capabilities)).outcome;
+    },
+    collectVisualEvidence: async (command) => {
+      if (!execution.repositories) {
+        throw new Error("visual evidence repository registry is not initialized");
+      }
+      const evidence = await readRunnerVisualEvidence({
+        worktree_path: execution.repositories.resolve(command.repository_binding_id),
+        expected_commit: command.commit_sha,
+      });
+      if (evidence.approved_mockup_version_id !== command.approved_mockup_version_id) {
+        throw new Error("visual evidence manifest names a different approved mockup");
+      }
+      await new RunnerVisualEvidenceUploader(
+        input.server,
+        device?.identity ?? {
+          mode: "legacy_runner",
+          runnerId: input.runnerId,
+          generation: daemon.generation,
+          sign: (payload) => daemon.sign(payload),
+        },
+      ).upload(evidence, {
+        project_id: command.project_id,
+        work_item_id: command.work_item_id,
+        conversation_id: command.conversation_id,
+        phase_id: command.phase_id,
+        task_id: command.task_id,
+        run_id: command.run_id,
+        repository_binding_id: command.repository_binding_id,
+        verification_result_id: command.verification_result_id,
+        deployment_record_id: command.deployment_record_id,
+        deployment_observation_id: command.deployment_observation_id,
+        verified_at: new Date().toISOString(),
+      });
+    },
+  });
+  daemon.loadState();
+  execution.executor = createV2Executor(
+    input.runnerId,
+    daemon.generation,
+    input.dataDir,
+    workspaces,
+    device?.identity ?? {
+      mode: "legacy_runner",
+      runnerId: input.runnerId,
+      generation: daemon.generation,
+      sign: (payload) => daemon.sign(payload),
+    },
+    daemon.inference,
+    input.server,
+    daemon.liveRuns,
+    (repositories) => {
+      execution.repositories = repositories;
+    },
+  );
+  return daemon;
+}
+
 const USAGE = `norns-runner — TheNorns Local Runner
 
 Usage:
@@ -251,8 +385,10 @@ Flags:
 
 Device AgentHost preview:
   agent-host starts only the foreground, loopback Control Center. Enable it
-  explicitly with NORNS_ENABLE_DEVICE_AGENT_HOST=true. Cloud device dispatch
-  remains disabled until the device enrollment cutover is complete.
+  explicitly with NORNS_ENABLE_DEVICE_AGENT_HOST=true. Enrolled device control
+  additionally requires NORNS_ENABLE_DEVICE_CONTROL=true plus a validated,
+  persisted active redemption result. Installed agent-start owns both the
+  Control Center and runner lifecycle when that device-control flag is enabled.
 
 Ephemeral (GitHub Actions) mode:
   --ephemeral  Enroll for one dispatched job, run it, then exit. Reads the
@@ -266,31 +402,51 @@ Ephemeral (GitHub Actions) mode:
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const resolved = resolveOptions(args.flags);
-  const agentConfig =
-    args.command === "agent-start" ? readLocalAgentConfig(resolved.dataDir) : undefined;
+  const installedAgentStart = args.command === "agent-start";
+  const agentConfig = installedAgentStart ? readLocalAgentConfig(resolved.dataDir) : undefined;
   const runnerId = agentConfig?.runner_id ?? resolved.runnerId;
   const server = agentConfig?.server ?? resolved.server;
   const dataDir = resolved.dataDir;
-  const command = args.command === "agent-start" ? "start" : args.command;
+  const command = installedAgentStart
+    ? strictFeatureFlag("NORNS_ENABLE_DEVICE_CONTROL")
+      ? "agent-host"
+      : "start"
+    : args.command;
 
   if (!command || command === "help" || args.flags.help) {
     process.stdout.write(USAGE);
     return;
   }
   if (command === "agent-host") {
-    if (process.env.NORNS_ENABLE_DEVICE_AGENT_HOST !== "true") {
+    if (!installedAgentStart && process.env.NORNS_ENABLE_DEVICE_AGENT_HOST !== "true") {
       throw new Error(
         "AgentHost is disabled; set NORNS_ENABLE_DEVICE_AGENT_HOST=true to run the local preview",
       );
     }
 
-    const disabledDaemon: AgentDaemonLifecycle = {
-      async start() {
-        throw new Error("cloud device dispatch is disabled until device enrollment is complete");
-      },
-      async stop() {},
-    };
-    const agentHost = new AgentHost({ dataDir, daemon: disabledDaemon });
+    const deviceControlEnabled = strictFeatureFlag("NORNS_ENABLE_DEVICE_CONTROL");
+    let agentDaemon: AgentDaemonLifecycle;
+    if (deviceControlEnabled) {
+      const config = readLocalAgentConfig(dataDir);
+      agentDaemon = createPersistentRunner({
+        server: config.server,
+        runnerId: config.runner_id,
+        dataDir,
+        deviceControlEnabled: true,
+      });
+    } else {
+      agentDaemon = {
+        async start() {
+          throw new Error("cloud device dispatch is disabled until device enrollment is complete");
+        },
+        async stop() {},
+      };
+    }
+    const agentHost = new AgentHost({
+      dataDir,
+      daemon: agentDaemon,
+      startDaemonOnHostStart: deviceControlEnabled,
+    });
     const started = await agentHost.start();
     let stopping = false;
     const stopAgentHost = (): void => {
@@ -316,7 +472,9 @@ async function main(): Promise<void> {
     process.stdout.write(
       [
         `Norns Local Agent Control Center: ${started.bootstrap_url}`,
-        "Cloud device dispatch is disabled in this preview.",
+        deviceControlEnabled
+          ? "Enrolled device control and the managed runner are active."
+          : "Cloud device dispatch is disabled in this preview.",
         "Press Ctrl-C to stop.",
         "",
       ].join("\n"),
@@ -397,6 +555,29 @@ async function main(): Promise<void> {
     // runners. With it, the runner enrolls instead of loading paired state,
     // binds the checked-out CI workspace, and exits when its one job is done.
     const ephemeral = args.flags.ephemeral === "true";
+    const deviceControlEnabled = strictFeatureFlag("NORNS_ENABLE_DEVICE_CONTROL");
+    if (ephemeral && deviceControlEnabled) {
+      throw new Error("device control is not available in ephemeral runner mode");
+    }
+    if (!ephemeral) {
+      const daemon = createPersistentRunner({
+        server,
+        runnerId,
+        dataDir,
+        deviceControlEnabled,
+      });
+      daemon.connect();
+      process.stdout.write(`runner "${runnerId}" connecting to ${server} — Ctrl-C to stop\n`);
+      for (const signal of ["SIGINT", "SIGTERM"] as const) {
+        process.on(signal, () => {
+          daemon.stop();
+          process.stdout.write("\nrunner stopped\n");
+          process.exit(0);
+        });
+      }
+      await new Promise<never>(() => {});
+      return;
+    }
     const execution: { executor?: V2RunnerExecutor; repositories?: ApprovedRepositoryRegistry } =
       {};
     const workspaces = new WorkspaceRegistry(dataDir);
@@ -406,13 +587,9 @@ async function main(): Promise<void> {
       runnerId,
       dataDir,
       workspaces,
-      ...(ephemeral
-        ? {
-            onRunSettled: (event: { state: string }) => {
-              settled.state = event.state;
-            },
-          }
-        : {}),
+      onRunSettled: (event: { state: string }) => {
+        settled.state = event.state;
+      },
       executeV2: async (command, emit, capabilities) => {
         if (!execution.executor) throw new Error("Phase 4 executor is not initialized");
         // In CI the repository binding is only knowable from the command, and
@@ -468,26 +645,17 @@ async function main(): Promise<void> {
         });
       },
     });
-    if (ephemeral) {
-      const enrollmentToken = process.env.NORNS_RUNNER_ENROLLMENT_TOKEN;
-      const dispatchJobId = args.flags.job;
-      if (!enrollmentToken) {
-        process.stderr.write("error: NORNS_RUNNER_ENROLLMENT_TOKEN is required in --ephemeral\n");
-        process.exit(2);
-      }
-      if (!dispatchJobId) {
-        process.stderr.write("error: --job <dispatchJobId> is required in --ephemeral\n");
-        process.exit(2);
-      }
-      await daemon.enroll({ enrollmentToken, dispatchJobId });
-    } else {
-      try {
-        daemon.loadState();
-      } catch {
-        process.stderr.write(`error: runner "${runnerId}" is not paired — run \`pair\` first\n`);
-        process.exit(2);
-      }
+    const enrollmentToken = process.env.NORNS_RUNNER_ENROLLMENT_TOKEN;
+    const dispatchJobId = args.flags.job;
+    if (!enrollmentToken) {
+      process.stderr.write("error: NORNS_RUNNER_ENROLLMENT_TOKEN is required in --ephemeral\n");
+      process.exit(2);
     }
+    if (!dispatchJobId) {
+      process.stderr.write("error: --job <dispatchJobId> is required in --ephemeral\n");
+      process.exit(2);
+    }
+    await daemon.enroll({ enrollmentToken, dispatchJobId });
     // Folder onboarding binds this named policy. A conservative Git commit
     // check is available by default; deployments may replace it with an
     // explicit approved command map through NORNS_VERIFICATION_POLICIES_JSON.
@@ -521,22 +689,18 @@ async function main(): Promise<void> {
         process.exit(0);
       });
     }
-    if (ephemeral) {
-      // Wait for the one dispatched job to reach a terminal state, then stop.
-      // The job's own `timeout-minutes` is the outer ceiling; this loop simply
-      // means the machine is not held open for a second longer than the work.
-      while (settled.state === undefined) {
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-      // Let the terminal ack drain to the relay before tearing down the socket.
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      daemon.stop();
-      const outcome = settled.state;
-      process.stdout.write(`norns run ${outcome}\n`);
-      process.exit(outcome === "succeeded" ? 0 : 1);
+    // Wait for the one dispatched job to reach a terminal state, then stop.
+    // The job's own `timeout-minutes` is the outer ceiling; this loop simply
+    // means the machine is not held open for a second longer than the work.
+    while (settled.state === undefined) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    // keep the process alive; the daemon's socket + timers drive the loop
-    await new Promise<never>(() => {});
+    // Let the terminal ack drain to the relay before tearing down the socket.
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    daemon.stop();
+    const outcome = settled.state;
+    process.stdout.write(`norns run ${outcome}\n`);
+    process.exit(outcome === "succeeded" ? 0 : 1);
     return;
   }
 

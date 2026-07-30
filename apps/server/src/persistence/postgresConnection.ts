@@ -117,7 +117,9 @@ interface RuntimeSchemaPosture {
   project_device_repository_grants: string | null;
   device_http_request_replays: string | null;
   dispatch_context_runner_generation: boolean;
+  dispatch_context_revoked_at: boolean;
   device_run_cancellations: string | null;
+  device_run_cancellation_idempotency_key: boolean;
   device_revocations: string | null;
   gateway_authentication_subject: boolean;
   gateway_device_credential_id: boolean;
@@ -249,8 +251,22 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                  AND table_name='dispatch_context_documents'
                  AND column_name='runner_generation'
             ) AS dispatch_context_runner_generation,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='dispatch_context_documents'
+                 AND column_name='revoked_at'
+            ) AS dispatch_context_revoked_at,
             to_regclass('public.device_run_cancellations')::text
               AS device_run_cancellations,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='device_run_cancellations'
+                 AND column_name='idempotency_key'
+            ) AS device_run_cancellation_idempotency_key,
             to_regclass('public.device_revocations')::text AS device_revocations,
             EXISTS (
               SELECT 1
@@ -345,7 +361,11 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.dispatch_context_runner_generation
       ? ["dispatch_context_documents.runner_generation"]
       : []),
+    ...(!posture?.dispatch_context_revoked_at ? ["dispatch_context_documents.revoked_at"] : []),
     ...(!posture?.device_run_cancellations ? ["device_run_cancellations"] : []),
+    ...(!posture?.device_run_cancellation_idempotency_key
+      ? ["device_run_cancellations.idempotency_key"]
+      : []),
     ...(!posture?.device_revocations ? ["device_revocations"] : []),
     ...(!posture?.gateway_authentication_subject
       ? ["gateway_credentials.authentication_subject"]

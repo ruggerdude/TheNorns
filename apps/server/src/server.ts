@@ -173,6 +173,7 @@ import {
   registerDeviceManagementRoutes,
 } from "./devices/managementRoutes.js";
 import type { DeviceOnlineControlBroker } from "./devices/onlineControl.js";
+import { registerProjectCancellationRoutes } from "./devices/projectCancellationRoutes.js";
 import {
   type DeviceRepositoryAccessRouteOptions,
   registerDeviceRepositoryAccessRoutes,
@@ -1725,6 +1726,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     await registerDeviceRepositoryAccessRoutes(app, {
       ...options.deviceRepositoryAccess,
       requireUser: requireSessionUser,
+    });
+  }
+  if (options.deviceControl) {
+    await registerProjectCancellationRoutes(app, {
+      service: options.deviceControl.cancellations,
+      requireUser: requireSessionUser,
+      now,
     });
   }
 

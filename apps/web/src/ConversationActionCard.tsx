@@ -66,10 +66,10 @@ const EXECUTION_ACTIONS = {
     description: "Approve this exact plan-change proposal and immutable plan reference.",
   },
   pause_work: {
-    title: "Stop active agents",
-    button: "Stop active agents",
+    title: "Pause work",
+    button: "Pause work",
     description:
-      "Stop a named live task immediately, or pause the whole work item at safe checkpoints and block new work. Work can be resumed later.",
+      "Request a named live task to suspend, or pause the whole work item at safe checkpoints and block new dispatches. This does not confirm local process exit.",
   },
   resume_work: {
     title: "Resume work",

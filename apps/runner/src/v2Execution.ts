@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -13,6 +13,7 @@ import {
   type V2DispatchCommandT,
 } from "@norns/contracts";
 import type { LiveRunRegistry } from "./liveRuns.js";
+import { ManagedProcessTree, managedProcessDetached } from "./managedProcessTree.js";
 import { PublicationError, type PublicationResult, type RunnerPublisher } from "./publication.js";
 import {
   type HumanWaitEnvelopeT,
@@ -301,6 +302,7 @@ export interface VerificationCommandResult {
   exit_code: number;
   passed: boolean;
   output: string;
+  process_tree_reaped: boolean;
 }
 
 export interface RunnerVerificationResult {
@@ -320,6 +322,8 @@ export interface RunnerVerificationResult {
    * nothing more, and the caller says so out loud.
    */
   hygiene_only: boolean;
+  /** True only when every spawned verification process tree was proven empty. */
+  process_tree_reaped: boolean;
 }
 
 export interface RunnerVerifier {
@@ -402,6 +406,7 @@ export class CommandPolicyVerifier implements RunnerVerifier {
       command_results: [],
       reason,
       hygiene_only: false,
+      process_tree_reaped: true,
     });
 
     // An agent that committed nothing has produced nothing to verify. This is
@@ -497,6 +502,7 @@ export class CommandPolicyVerifier implements RunnerVerifier {
           command_results: results,
           reason: "verification was cancelled before all commands completed",
           hygiene_only: false,
+          process_tree_reaped: results.every((result) => result.process_tree_reaped),
         };
       }
       results.push(await this.runCommand(entry, input.worktree_path, input.signal));
@@ -507,6 +513,7 @@ export class CommandPolicyVerifier implements RunnerVerifier {
           command_results: results,
           reason: "verification was cancelled before all commands completed",
           hygiene_only: false,
+          process_tree_reaped: results.every((result) => result.process_tree_reaped),
         };
       }
     }
@@ -519,6 +526,7 @@ export class CommandPolicyVerifier implements RunnerVerifier {
         command_results: results,
         reason: `verification commands moved HEAD from ${input.expected_commit} to ${headAfter}; the result does not describe the commit under test`,
         hygiene_only: false,
+        process_tree_reaped: results.every((result) => result.process_tree_reaped),
       };
     }
 
@@ -529,6 +537,7 @@ export class CommandPolicyVerifier implements RunnerVerifier {
       command_results: results,
       reason: null,
       hygiene_only: isHygieneOnly(commands),
+      process_tree_reaped: results.every((result) => result.process_tree_reaped),
     };
   }
 
@@ -545,40 +554,68 @@ export class CommandPolicyVerifier implements RunnerVerifier {
     signal?: AbortSignal,
   ): Promise<VerificationCommandResult> {
     const [file, ...args] = entry.command;
-    try {
-      const result = await execFileAsync(file, args, {
+    return new Promise((resolve) => {
+      const child = spawn(file, args, {
         cwd: worktreePath,
-        maxBuffer: 10 * 1024 * 1024,
-        timeout: VERIFICATION_COMMAND_TIMEOUT_MS,
-        signal,
+        detached: managedProcessDetached(),
         // No shell, ever. `entry.command` is an argv vector and stays one.
         shell: false,
       });
-      return {
-        name: entry.name,
-        command: entry.command,
-        exit_code: 0,
-        passed: true,
-        output: `${result.stdout}\n${result.stderr}`.slice(0, VERIFICATION_OUTPUT_LIMIT),
+      const processTree = new ManagedProcessTree(child);
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      let spawned = false;
+      let terminationRequested = false;
+      const finish = async (exitCode: number, fallback: string): Promise<void> => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", stop);
+        const proof = await processTree.confirmReaped();
+        const output = `${stdout}\n${stderr}`.trim();
+        resolve({
+          name: entry.name,
+          command: entry.command,
+          exit_code: exitCode,
+          passed: exitCode === 0 && !terminationRequested,
+          output: (output || fallback).slice(0, VERIFICATION_OUTPUT_LIMIT),
+          process_tree_reaped: proof.process_tree_reaped,
+        });
       };
-    } catch (error) {
-      const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown };
-      const stdout = typeof failure.stdout === "string" ? failure.stdout : "";
-      const stderr = typeof failure.stderr === "string" ? failure.stderr : "";
-      const detail = `${stdout}\n${stderr}`.trim();
-      return {
-        name: entry.name,
-        command: entry.command,
-        // A command killed by signal, or one that could not be spawned at all,
-        // has no numeric exit code. -1 records "did not exit cleanly".
-        exit_code: typeof failure.code === "number" ? failure.code : -1,
-        passed: false,
-        output: (detail || (error instanceof Error ? error.message : String(error))).slice(
-          0,
-          VERIFICATION_OUTPUT_LIMIT,
-        ),
+      const append = (target: "stdout" | "stderr", chunk: unknown): void => {
+        const value = String(chunk);
+        if (target === "stdout") {
+          stdout = `${stdout}${value}`.slice(-VERIFICATION_OUTPUT_LIMIT);
+        } else {
+          stderr = `${stderr}${value}`.slice(-VERIFICATION_OUTPUT_LIMIT);
+        }
       };
-    }
+      const stop = (): void => {
+        terminationRequested = true;
+        if (spawned) processTree.requestStop();
+      };
+      child.stdout?.on("data", (chunk) => append("stdout", chunk));
+      child.stderr?.on("data", (chunk) => append("stderr", chunk));
+      child.once("spawn", () => {
+        spawned = true;
+        if (terminationRequested) processTree.requestStop();
+      });
+      child.once("error", (error) => {
+        if (!spawned) void finish(-1, error.message);
+      });
+      child.once("close", (code, closeSignal) => {
+        void finish(
+          typeof code === "number" ? code : -1,
+          terminationRequested
+            ? "verification command was terminated"
+            : `verification command exited by signal ${closeSignal ?? "unknown"}`,
+        );
+      });
+      const timer = setTimeout(stop, VERIFICATION_COMMAND_TIMEOUT_MS);
+      signal?.addEventListener("abort", stop, { once: true });
+      if (signal?.aborted) stop();
+    });
   }
 
   private async head(worktreePath: string): Promise<string> {
@@ -772,6 +809,10 @@ export class V2RunnerExecutor {
     let sessionId: string | null = null;
     let session: RuntimeSession | null = null;
     let settled: V2RunnerExecutionResult["outcome"] = "failed";
+    // Starts true because no managed process exists before a runtime or
+    // verification command is spawned. Every spawned boundary may only turn
+    // this false; process-exit evidence consumes the final conjunction.
+    let processTreeReaped = true;
     let preserveWorktree = false;
     let knowledgeHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
     let knowledgeTerminalEmitted = false;
@@ -1115,6 +1156,10 @@ export class V2RunnerExecutor {
       const humanWaitDirectory = resolve(worktree.path, humanWaitDirectoryName);
       await mkdir(humanWaitDirectory);
       const humanWaitPath = resolve(humanWaitDirectory, "human-wait.json");
+      const processProofBeforeRuntime = processTreeReaped;
+      // If the adapter throws after spawning but before returning a proof, the
+      // result must remain unconfirmed.
+      processTreeReaped = false;
       let runtimeResult = await runtime.run({
         runId: command.run_id,
         worktreePath: worktree.path,
@@ -1143,6 +1188,7 @@ export class V2RunnerExecutor {
             ]),
           }),
       });
+      processTreeReaped = processProofBeforeRuntime && runtimeResult.process_tree_reaped === true;
       let humanWaitEnvelope: HumanWaitEnvelopeT | null;
       try {
         humanWaitEnvelope = await readHumanWaitEnvelope(humanWaitPath);
@@ -1178,6 +1224,9 @@ export class V2RunnerExecutor {
           outcome: "waiting_for_human",
           detail: humanWaitEnvelope.compact_summary,
           usage: runtimeResult.usage,
+          ...(runtimeResult.process_tree_reaped !== undefined
+            ? { process_tree_reaped: runtimeResult.process_tree_reaped }
+            : {}),
           ...(runtimeResult.sessionId ? { sessionId: runtimeResult.sessionId } : {}),
           stopReason: "waiting_for_human",
           humanWait: hashHumanWaitEnvelope(humanWaitEnvelope),
@@ -1192,6 +1241,9 @@ export class V2RunnerExecutor {
           outcome: "cancelled",
           detail: cancelReason ?? "the run was cancelled after the runtime returned",
           usage: runtimeResult.usage,
+          ...(runtimeResult.process_tree_reaped !== undefined
+            ? { process_tree_reaped: runtimeResult.process_tree_reaped }
+            : {}),
           ...(runtimeResult.sessionId ? { sessionId: runtimeResult.sessionId } : {}),
           stopReason: "cancelled",
         };
@@ -1480,6 +1532,8 @@ export class V2RunnerExecutor {
         return await cancelledWithWorktree(runtimeResult.usage);
       }
       stage = "verification";
+      const processProofBeforeVerification = processTreeReaped;
+      processTreeReaped = false;
       const verification = await this.verifier.verify({
         worktree_path: worktree.path,
         policy_ref: command.verification_policy_ref,
@@ -1501,6 +1555,7 @@ export class V2RunnerExecutor {
           : {}),
         signal: controller.signal,
       });
+      processTreeReaped = processProofBeforeVerification && verification.process_tree_reaped;
       if (controller.signal.aborted) {
         return await cancelledWithWorktree(runtimeResult.usage);
       }
@@ -1753,7 +1808,7 @@ export class V2RunnerExecutor {
       // Deregister before cleanup or recovery handoff: from this moment a
       // control aimed at this run is answered with "already ended (<outcome>)"
       // rather than being applied to a process that no longer exists.
-      release?.(settled);
+      release?.(settled, { process_tree_reaped: processTreeReaped });
       // Cancellation preserves the managed worktree for local diagnosis and
       // recovery. In particular, generation fencing must stop the process tree
       // without destroying evidence or publishing through a revoked device.

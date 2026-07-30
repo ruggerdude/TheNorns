@@ -127,7 +127,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
             project_device_repository_grants: "project_device_repository_grants",
             device_http_request_replays: "device_http_request_replays",
             dispatch_context_runner_generation: true,
+            dispatch_context_revoked_at: true,
             device_run_cancellations: "device_run_cancellations",
+            device_run_cancellation_idempotency_key: true,
             device_revocations: "device_revocations",
             gateway_authentication_subject: true,
             gateway_device_credential_id: true,
@@ -183,7 +185,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
             project_device_repository_grants: null,
             device_http_request_replays: null,
             dispatch_context_runner_generation: false,
+            dispatch_context_revoked_at: false,
             device_run_cancellations: null,
+            device_run_cancellation_idempotency_key: false,
             device_revocations: null,
             gateway_authentication_subject: false,
             gateway_device_credential_id: false,
@@ -215,7 +219,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "device_credentials, device_authorization_requests, " +
         "device_repository_registrations, project_device_repository_grants, " +
         "device_http_request_replays, dispatch_context_documents.runner_generation, " +
-        "device_run_cancellations, device_revocations, " +
+        "dispatch_context_documents.revoked_at, device_run_cancellations, " +
+        "device_run_cancellations.idempotency_key, device_revocations, " +
         "gateway_credentials.authentication_subject, gateway_credentials.device_credential_id, " +
         "devices.os_version, devices.agent_version, devices.agent_protocol_version, " +
         "devices.agent_capabilities, devices.last_seen_at, device_publication_permits",
@@ -260,7 +265,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
             project_device_repository_grants: "project_device_repository_grants",
             device_http_request_replays: "device_http_request_replays",
             dispatch_context_runner_generation: true,
+            dispatch_context_revoked_at: true,
             device_run_cancellations: "device_run_cancellations",
+            device_run_cancellation_idempotency_key: true,
             device_revocations: "device_revocations",
             gateway_authentication_subject: true,
             gateway_device_credential_id: true,
@@ -327,7 +334,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
             project_device_repository_grants: null,
             device_http_request_replays: null,
             dispatch_context_runner_generation: false,
+            dispatch_context_revoked_at: false,
             device_run_cancellations: null,
+            device_run_cancellation_idempotency_key: false,
             device_revocations: null,
             gateway_authentication_subject: false,
             gateway_device_credential_id: false,
@@ -349,7 +358,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "device_credentials, device_authorization_requests, " +
         "device_repository_registrations, project_device_repository_grants, " +
         "device_http_request_replays, dispatch_context_documents.runner_generation, " +
-        "device_run_cancellations, device_revocations, " +
+        "dispatch_context_documents.revoked_at, device_run_cancellations, " +
+        "device_run_cancellations.idempotency_key, device_revocations, " +
         "gateway_credentials.authentication_subject, gateway_credentials.device_credential_id, " +
         "devices.os_version, devices.agent_version, devices.agent_protocol_version, " +
         "devices.agent_capabilities, devices.last_seen_at, device_publication_permits",

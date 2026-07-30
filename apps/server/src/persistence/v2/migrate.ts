@@ -387,6 +387,12 @@ export const DEVICE_REPOSITORY_ACCESS_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const PROJECT_RUN_CANCELLATION_MIGRATION_NAME = "0059_project_run_cancellation";
+export const PROJECT_RUN_CANCELLATION_MIGRATION_URL = new URL(
+  "../../../drizzle/0059_project_run_cancellation.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -649,6 +655,10 @@ export async function loadDeviceManagementObservationsMigrationSql(): Promise<st
 
 export async function loadDeviceRepositoryAccessMigrationSql(): Promise<string> {
   return readFile(DEVICE_REPOSITORY_ACCESS_MIGRATION_URL, "utf8");
+}
+
+export async function loadProjectRunCancellationMigrationSql(): Promise<string> {
+  return readFile(PROJECT_RUN_CANCELLATION_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -994,6 +1004,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: DEVICE_REPOSITORY_ACCESS_MIGRATION_NAME,
       sql: await loadDeviceRepositoryAccessMigrationSql(),
+    },
+    {
+      name: PROJECT_RUN_CANCELLATION_MIGRATION_NAME,
+      sql: await loadProjectRunCancellationMigrationSql(),
     },
   ];
 }

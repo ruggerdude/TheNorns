@@ -212,10 +212,12 @@ describe.sequential("runner knowledge transport", () => {
             exit_code: verificationPassed ? 0 : 1,
             passed: verificationPassed,
             output: verificationPassed ? "ok" : "failure",
+            process_tree_reaped: true,
           },
         ],
         reason: verificationPassed ? null : "test failed",
         hygiene_only: false,
+        process_tree_reaped: true,
       }),
     };
     const publisher: RunnerPublisher = {

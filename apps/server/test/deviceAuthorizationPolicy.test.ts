@@ -41,7 +41,8 @@ describe.sequential("action-specific device authorization policy", () => {
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL REFERENCES projects(id),
         repository_binding_id TEXT NOT NULL REFERENCES repository_bindings(id),
-        initiated_by_user_id TEXT NOT NULL REFERENCES users(id)
+        initiated_by_user_id TEXT NOT NULL REFERENCES users(id),
+        state TEXT NOT NULL DEFAULT 'running'
       );
       CREATE TABLE commands (
         command_id TEXT PRIMARY KEY,
@@ -375,18 +376,16 @@ describe.sequential("action-specific device authorization policy", () => {
     }
   });
 
-  it("authorizes project stop independently of device ownership or current grants", async () => {
-    for (const actor_user_id of ["project-owner", "project-member"]) {
-      await expect(
-        policy.canStopProjectRun({
-          actor_user_id,
-          project_id: "project-1",
-          run_id: "run-revoked-grant",
-        }),
-      ).resolves.toMatchObject({ action: "canStopProjectRun", allowed: true });
-    }
+  it("authorizes project stop only for the project owner on a live run", async () => {
+    await expect(
+      policy.canStopProjectRun({
+        actor_user_id: "project-owner",
+        project_id: "project-1",
+        run_id: "run-revoked-grant",
+      }),
+    ).resolves.toMatchObject({ action: "canStopProjectRun", allowed: true });
 
-    for (const actor_user_id of ["device-owner", "outsider", "admin-only"]) {
+    for (const actor_user_id of ["project-member", "device-owner", "outsider", "admin-only"]) {
       await expect(
         policy.canStopProjectRun({
           actor_user_id,

@@ -1,6 +1,17 @@
-import type { CancellationConfirmationStateT } from "@norns/contracts";
+import { createHash } from "node:crypto";
+import {
+  type CancellationConfirmationStateT,
+  ConversationExecutionProjection,
+  type ConversationExecutionProjectionT,
+  ProjectRunCancellationProjection,
+  type ProjectRunCancellationProjectionT,
+  type V2AgentRunStateT,
+} from "@norns/contracts";
 
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
+import { transitionV2AgentRunLifecycle } from "../persistence/v2/lifecycleMutation.js";
+import { SqlV2ApplicationTransaction } from "../persistence/v2/sqlRepositories.js";
+import { PostgresDeviceAuthorizationPolicy } from "./policy.js";
 
 export type DeviceRunCancellationCause = "project_stop" | "device_revocation" | "emergency_stop";
 
@@ -20,6 +31,7 @@ export interface DeviceRunCancellationRecord {
   publication_fenced_at: string | null;
   publication_reauthorized_by_user_id: string | null;
   publication_reauthorized_at: string | null;
+  idempotency_key?: string | null;
 }
 
 export interface DeviceRunCancellationRequestOutcome {
@@ -33,7 +45,9 @@ export interface DeviceRunCancellationServiceOptions {
    * Authorized idempotent replays invoke the hook so lost delivery can be
    * retried; hook failures cannot change the committed cancellation record.
    */
-  afterRequested?: (outcome: DeviceRunCancellationRequestOutcome) => void | Promise<void>;
+  afterRequested?: (
+    outcome: DeviceRunCancellationRequestOutcome,
+  ) => boolean | undefined | Promise<boolean | undefined>;
 }
 
 interface DeviceRunCancellationRow
@@ -56,11 +70,34 @@ interface DeviceRunCancellationRow
   publication_reauthorized_at: string | Date | null;
 }
 
+interface ProjectRunScopeRow {
+  phase_id: string;
+  task_id: string;
+  state: string;
+  device_id: string;
+  credential_id: string;
+  device_generation: number | string;
+  never_dispatched: boolean;
+}
+
+interface ConversationLinkedRunRow {
+  run_id: string;
+  run_state: V2AgentRunStateT;
+  binding_id: string;
+}
+
+interface ConversationTargetRow {
+  execution_target_id: string;
+  name: string;
+  stoppable: boolean;
+}
+
 const CANCELLATION_COLUMNS = `
   run_id,device_id,credential_id,device_generation,cause,state,
   requested_by_user_id,reason,requested_at,runner_acknowledged_at,
   process_exited_at,unconfirmed_offline_at,publication_fenced_at,
-  publication_reauthorized_by_user_id,publication_reauthorized_at`;
+  publication_reauthorized_by_user_id,publication_reauthorized_at,
+  idempotency_key`;
 
 function timestamp(value: string | Date | null): string | null {
   if (value === null) return null;
@@ -110,6 +147,30 @@ export class DeviceRunCancellationError extends Error {
   }
 }
 
+export class ProjectRunCancellationError extends Error {
+  constructor(
+    readonly code:
+      | "project_run_not_found"
+      | "project_run_not_stoppable"
+      | "idempotency_conflict"
+      | "conversation_not_found"
+      | "conversation_execution_unavailable",
+  ) {
+    super(
+      code === "project_run_not_found"
+        ? "The project run was not found."
+        : code === "project_run_not_stoppable"
+          ? "The selected run cannot be stopped through a device cancellation."
+          : code === "idempotency_conflict"
+            ? "The idempotency key was already used for a different cancellation request."
+            : code === "conversation_not_found"
+              ? "The conversation was not found."
+              : "The conversation run has no truthful device execution target.",
+    );
+    this.name = "ProjectRunCancellationError";
+  }
+}
+
 async function selectedCancellation(
   sql: V2SqlExecutor,
   runId: string,
@@ -121,6 +182,27 @@ async function selectedCancellation(
     [runId],
   );
   return selected.rows[0] ?? null;
+}
+
+function projectCancellationProjection(
+  projectId: string,
+  record: DeviceRunCancellationRecord,
+): ProjectRunCancellationProjectionT {
+  return ProjectRunCancellationProjection.parse({
+    project_id: projectId,
+    run_id: record.run_id,
+    state: record.state,
+    cancellation_requested_at: record.requested_at,
+    runner_acknowledged_at: record.runner_acknowledged_at,
+    process_exited_at: record.process_exited_at,
+    unconfirmed_offline_at: record.unconfirmed_offline_at,
+  });
+}
+
+function auditIdentity(actorUserId: string, idempotencyKey: string): string {
+  return createHash("sha256")
+    .update(`project-run-cancellation\u0000${actorUserId}\u0000${idempotencyKey}`)
+    .digest("hex");
 }
 
 function sameRequest(
@@ -234,12 +316,434 @@ export class DeviceRunCancellationService {
       return { record: cancellationRecord(existing), replayed: true };
     });
     try {
-      await this.options.afterRequested?.(outcome);
+      const delivered = await this.options.afterRequested?.(outcome);
+      if (delivered === false) {
+        return {
+          ...outcome,
+          record: await this.markUnconfirmedOffline({
+            run_id: outcome.record.run_id,
+            recorded_at: outcome.record.requested_at,
+          }),
+        };
+      }
     } catch {
       // The request or authorized replay is already committed. Online stop
       // delivery is best-effort and cannot rewrite that durable result.
     }
     return outcome;
+  }
+
+  async requestProjectStop(input: {
+    actor_user_id: string;
+    project_id: string;
+    run_id: string;
+    reason: string;
+    idempotency_key: string;
+    requested_at: string;
+  }): Promise<ProjectRunCancellationProjectionT> {
+    const outcome = await this.transactions.transaction(async (sql) => {
+      const ownerScope = await sql.query<{
+        phase_id: string;
+        task_id: string;
+      }>(
+        `SELECT run.phase_id,run.task_id
+           FROM users actor
+           JOIN projects project
+             ON project.owner_user_id=actor.id
+            AND project.id=$2
+            AND project.status='active'
+           JOIN agent_runs run
+             ON run.id=$3
+            AND run.project_id=project.id
+          WHERE actor.id=$1
+            AND actor.status='active'
+          FOR UPDATE OF actor,project,run`,
+        [input.actor_user_id, input.project_id, input.run_id],
+      );
+      const owner = ownerScope.rows[0];
+      if (!owner) throw new ProjectRunCancellationError("project_run_not_found");
+
+      const keyed = await sql.query<DeviceRunCancellationRow>(
+        `SELECT ${CANCELLATION_COLUMNS}
+           FROM device_run_cancellations
+          WHERE requested_by_user_id=$1
+            AND idempotency_key=$2
+          FOR UPDATE`,
+        [input.actor_user_id, input.idempotency_key],
+      );
+      const prior = keyed.rows[0];
+      if (prior) {
+        if (
+          prior.run_id !== input.run_id ||
+          prior.cause !== "project_stop" ||
+          prior.reason !== input.reason
+        ) {
+          throw new ProjectRunCancellationError("idempotency_conflict");
+        }
+        return {
+          outcome: {
+            record: cancellationRecord(prior),
+            replayed: true,
+          },
+          phase_id: owner.phase_id,
+          task_id: owner.task_id,
+        };
+      }
+
+      const decision = await new PostgresDeviceAuthorizationPolicy(sql).canStopProjectRun(input);
+      if (!decision.allowed) throw new ProjectRunCancellationError("project_run_not_stoppable");
+
+      const scope = await sql.query<ProjectRunScopeRow>(
+        `SELECT
+           run.phase_id,
+           run.task_id,
+           run.state,
+           device.id AS device_id,
+           credential.id AS credential_id,
+           credential.generation AS device_generation,
+           (
+             NOT EXISTS (
+               SELECT 1
+                 FROM dispatch_jobs prior_job
+                WHERE prior_job.run_id=run.id
+                  AND prior_job.status IN ('delivered','completed')
+             )
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM commands prior_command
+                WHERE prior_command.run_id=run.id
+                  AND prior_command.status NOT IN ('created','queued')
+             )
+           ) AS never_dispatched
+         FROM agent_runs run
+         JOIN repository_bindings binding
+           ON binding.id=run.repository_binding_id
+          AND binding.project_id=run.project_id
+          AND binding.binding_type='local_runner'
+          AND binding.status IN ('connected','degraded','disconnected')
+         JOIN project_device_repository_grants grant_record
+           ON grant_record.id=binding.project_device_repository_grant_id
+          AND grant_record.project_id=binding.project_id
+          AND grant_record.state='active'
+         JOIN device_repository_registrations registration
+           ON registration.id=grant_record.repository_registration_id
+          AND registration.state='active'
+          AND registration.workspace_id=binding.workspace_id
+          AND registration.repository_id=binding.repository_id
+         JOIN devices device
+           ON device.id=registration.device_id
+          AND device.lifecycle='active'
+         JOIN users device_owner
+           ON device_owner.id=device.owner_user_id
+          AND device_owner.status='active'
+         JOIN device_credentials credential
+           ON credential.device_id=device.id
+          AND credential.id=registration.approved_credential_id
+          AND credential.generation=registration.approved_generation
+          AND credential.generation=device.current_generation
+          AND credential.state='active'
+         JOIN commands command
+           ON command.command_id=(
+             SELECT latest.command_id
+               FROM commands latest
+              WHERE latest.run_id=run.id
+              ORDER BY latest.created_at DESC,latest.command_id DESC
+              LIMIT 1
+           )
+          AND command.runner_id=device.id
+          AND command.runner_generation=device.current_generation
+        WHERE run.id=$1
+          AND run.project_id=$2
+        FOR UPDATE OF run,binding,grant_record,registration,
+                      device,device_owner,credential,command`,
+        [input.run_id, input.project_id],
+      );
+      const run = scope.rows[0];
+      if (!run) throw new ProjectRunCancellationError("project_run_not_stoppable");
+
+      const inserted = await sql.query<DeviceRunCancellationRow>(
+        `INSERT INTO device_run_cancellations (
+           run_id,device_id,credential_id,device_generation,cause,state,
+           requested_by_user_id,reason,requested_at,publication_fenced_at,
+           updated_at,idempotency_key
+         ) VALUES (
+           $1,$2,$3,$4,'project_stop','cancellation_requested',
+           $5,$6,$7,$7,$7,$8
+         )
+         ON CONFLICT DO NOTHING
+         RETURNING ${CANCELLATION_COLUMNS}`,
+        [
+          input.run_id,
+          run.device_id,
+          run.credential_id,
+          Number(run.device_generation),
+          input.actor_user_id,
+          input.reason,
+          input.requested_at,
+          input.idempotency_key,
+        ],
+      );
+      const created = inserted.rows[0];
+      if (!created) {
+        const collision = await selectedCancellation(sql, input.run_id);
+        if (
+          collision?.requested_by_user_id === input.actor_user_id &&
+          collision.idempotency_key === input.idempotency_key &&
+          collision.cause === "project_stop" &&
+          collision.reason === input.reason
+        ) {
+          return {
+            outcome: {
+              record: cancellationRecord(collision),
+              replayed: true,
+            },
+            phase_id: owner.phase_id,
+            task_id: owner.task_id,
+          };
+        }
+        throw new ProjectRunCancellationError("idempotency_conflict");
+      }
+
+      await sql.query(
+        `UPDATE commands
+            SET status='cancelled',updated_at=$2
+          WHERE run_id=$1
+            AND status IN ('created','queued')`,
+        [input.run_id, input.requested_at],
+      );
+      await sql.query(
+        `UPDATE dispatch_jobs
+            SET status='cancelled',
+                completed_at=$2,
+                updated_at=$2,
+                lease_owner=NULL,
+                lease_expires_at=NULL
+          WHERE run_id=$1
+            AND status IN ('queued','leased')`,
+        [input.run_id, input.requested_at],
+      );
+      await sql.query(
+        `UPDATE gateway_credentials
+            SET revoked_at=COALESCE(revoked_at,$2)
+          WHERE run_id=$1
+            AND revoked_at IS NULL`,
+        [input.run_id, input.requested_at],
+      );
+      await sql.query(
+        `UPDATE dispatch_context_documents
+            SET revoked_at=COALESCE(revoked_at,$2)
+          WHERE run_id=$1
+            AND revoked_at IS NULL`,
+        [input.run_id, input.requested_at],
+      );
+
+      const auditKey = auditIdentity(input.actor_user_id, input.idempotency_key);
+      if (run.never_dispatched) {
+        const lifecycle = new SqlV2ApplicationTransaction(sql);
+        const lockedRun = await lifecycle.lockAgentRunLifecycle(input.run_id);
+        if (lockedRun && ["created", "dispatched"].includes(lockedRun.state)) {
+          await transitionV2AgentRunLifecycle(lifecycle, {
+            project_id: input.project_id,
+            phase_id: run.phase_id,
+            task_id: run.task_id,
+            run_id: input.run_id,
+            expected_aggregate_version: lockedRun.aggregate_version,
+            to: "cancelled",
+            reason: "project owner cancelled the run before runner dispatch",
+            actor_type: "human",
+            actor_id: input.actor_user_id,
+            correlation_id: `project-run-cancellation:${auditKey}`,
+            causation_id: input.run_id,
+            occurred_at: input.requested_at,
+          });
+        }
+      }
+      await sql.query(
+        `INSERT INTO audit_events (
+           audit_id,audit_type,project_id,phase_id,task_id,
+           actor_type,actor_id,outcome,severity,correlation_id,
+           causation_id,occurred_at,targets,summary,details,redaction_applied
+         ) VALUES (
+           $1,'device.project_run_cancellation_requested',$2,$3,$4,
+           'human',$5,'succeeded','warning',$6,$7,$8,$9::jsonb,
+           'Project run cancellation requested',$10::jsonb,true
+         )
+         ON CONFLICT (audit_id) DO NOTHING`,
+        [
+          `audit:project-run-cancellation:${auditKey}`,
+          input.project_id,
+          run.phase_id,
+          run.task_id,
+          input.actor_user_id,
+          `project-run-cancellation:${auditKey}`,
+          input.run_id,
+          input.requested_at,
+          JSON.stringify([{ entity_type: "agent_run", entity_id: input.run_id }]),
+          JSON.stringify({
+            cause: "project_stop",
+            reason: input.reason,
+            publication_fenced: true,
+          }),
+        ],
+      );
+      return {
+        outcome: {
+          record: cancellationRecord(created),
+          replayed: false,
+        },
+        phase_id: owner.phase_id,
+        task_id: owner.task_id,
+      };
+    });
+
+    let record = outcome.outcome.record;
+    try {
+      const delivered = await this.options.afterRequested?.(outcome.outcome);
+      if (delivered === false) {
+        record = await this.markUnconfirmedOffline({
+          run_id: record.run_id,
+          recorded_at: record.requested_at,
+        });
+      }
+    } catch {
+      // Durable cancellation and every authorization fence already committed.
+    }
+    return projectCancellationProjection(input.project_id, record);
+  }
+
+  getProjectCancellation(
+    actorUserId: string,
+    projectId: string,
+    runId: string,
+  ): Promise<ProjectRunCancellationProjectionT | null> {
+    return this.transactions.transaction(async (sql) => {
+      const selected = await sql.query<DeviceRunCancellationRow>(
+        `SELECT ${CANCELLATION_COLUMNS}
+           FROM device_run_cancellations
+          WHERE run_id=$3
+            AND EXISTS (
+              SELECT 1
+                FROM users actor
+                JOIN projects project
+                  ON project.id=$2
+                 AND project.status='active'
+                JOIN agent_runs run
+                  ON run.project_id=project.id
+                 AND run.id=device_run_cancellations.run_id
+               WHERE actor.id=$1
+                 AND actor.status='active'
+                 AND (
+                   project.owner_user_id=actor.id
+                   OR EXISTS (
+                     SELECT 1
+                       FROM project_members membership
+                      WHERE membership.project_id=project.id
+                        AND membership.user_id=actor.id
+                        AND membership.status='active'
+                   )
+                 )
+            )`,
+        [actorUserId, projectId, runId],
+      );
+      const row = selected.rows[0];
+      return row ? projectCancellationProjection(projectId, cancellationRecord(row)) : null;
+    });
+  }
+
+  getConversationExecution(
+    actorUserId: string,
+    projectId: string,
+    conversationId: string,
+  ): Promise<ConversationExecutionProjectionT> {
+    return this.transactions.transaction(async (sql) => {
+      const access = await sql.query<{ is_owner: boolean }>(
+        `SELECT project.owner_user_id=actor.id AS is_owner
+           FROM users actor
+           JOIN projects project
+             ON project.id=$2
+            AND project.status='active'
+           JOIN work_conversations conversation
+             ON conversation.id=$3
+            AND conversation.project_id=project.id
+          WHERE actor.id=$1
+            AND actor.status='active'
+            AND (
+              project.owner_user_id=actor.id
+              OR EXISTS (
+                SELECT 1
+                  FROM project_members membership
+                 WHERE membership.project_id=project.id
+                   AND membership.user_id=actor.id
+                   AND membership.status='active'
+              )
+            )`,
+        [actorUserId, projectId, conversationId],
+      );
+      const conversation = access.rows[0];
+      if (!conversation) throw new ProjectRunCancellationError("conversation_not_found");
+
+      const linked = await sql.query<ConversationLinkedRunRow>(
+        `SELECT
+           run.id AS run_id,
+           run.state AS run_state,
+           run.repository_binding_id AS binding_id
+         FROM conversation_task_package_bindings package_binding
+         JOIN conversation_task_package_runs package_run
+           ON package_run.package_id=package_binding.package_id
+          AND package_run.project_id=package_binding.project_id
+          AND package_run.task_id=package_binding.task_id
+         JOIN agent_runs run
+           ON run.id=package_run.run_id
+          AND run.project_id=package_binding.project_id
+          AND run.task_id=package_binding.task_id
+        WHERE package_binding.project_id=$1
+          AND package_binding.conversation_id=$2
+        ORDER BY run.created_at DESC,run.id DESC
+        LIMIT 1`,
+        [projectId, conversationId],
+      );
+      const run = linked.rows[0];
+      if (!run) {
+        const idleTarget = await this.selectedProjectTarget(sql, projectId);
+        return ConversationExecutionProjection.parse({
+          project_id: projectId,
+          conversation_id: conversationId,
+          presentation: "idle",
+          target: idleTarget,
+          run: null,
+        });
+      }
+
+      const target = await this.bindingTarget(sql, run.binding_id, run.run_id);
+      if (!target) {
+        throw new ProjectRunCancellationError("conversation_execution_unavailable");
+      }
+      const cancellation = await selectedCancellation(sql, run.run_id);
+      const live = new Set<V2AgentRunStateT>([
+        "created",
+        "dispatched",
+        "running",
+        "waiting_for_human",
+        "verifying",
+      ]).has(run.run_state);
+      return ConversationExecutionProjection.parse({
+        project_id: projectId,
+        conversation_id: conversationId,
+        presentation: live ? "active" : "historical",
+        target: {
+          execution_target_id: target.execution_target_id,
+          name: target.name,
+        },
+        run: {
+          run_id: run.run_id,
+          state: run.run_state,
+          can_stop: conversation.is_owner && live && target.stoppable && cancellation === null,
+          cancellation: cancellation
+            ? projectCancellationProjection(projectId, cancellationRecord(cancellation))
+            : null,
+        },
+      });
+    });
   }
 
   markUnconfirmedOffline(input: {
@@ -454,6 +958,99 @@ export class DeviceRunCancellationService {
     });
   }
 
+  private async selectedProjectTarget(
+    sql: V2SqlExecutor,
+    projectId: string,
+  ): Promise<{ execution_target_id: string; name: string } | null> {
+    const selected = await sql.query<{ execution_target_id: string; name: string }>(
+      `SELECT grant_record.id AS execution_target_id,device.display_name AS name
+         FROM projects project
+         JOIN repository_bindings binding
+           ON binding.id=project.primary_repository_binding_id
+          AND binding.project_id=project.id
+          AND binding.binding_type='local_runner'
+          AND binding.status IN ('connected','degraded','disconnected')
+         JOIN project_device_repository_grants grant_record
+           ON grant_record.id=binding.project_device_repository_grant_id
+          AND grant_record.project_id=project.id
+          AND grant_record.state='active'
+         JOIN device_repository_registrations registration
+           ON registration.id=grant_record.repository_registration_id
+          AND registration.state='active'
+          AND registration.workspace_id=binding.workspace_id
+          AND registration.repository_id=binding.repository_id
+         JOIN devices device
+           ON device.id=registration.device_id
+          AND device.lifecycle='active'
+         JOIN users owner
+           ON owner.id=device.owner_user_id
+          AND owner.status='active'
+         JOIN device_credentials credential
+           ON credential.device_id=device.id
+          AND credential.id=registration.approved_credential_id
+          AND credential.generation=registration.approved_generation
+          AND credential.generation=device.current_generation
+          AND credential.state='active'
+        WHERE project.id=$1`,
+      [projectId],
+    );
+    return selected.rows[0] ?? null;
+  }
+
+  private async bindingTarget(
+    sql: V2SqlExecutor,
+    bindingId: string,
+    runId: string,
+  ): Promise<ConversationTargetRow | null> {
+    const selected = await sql.query<ConversationTargetRow>(
+      `SELECT
+         grant_record.id AS execution_target_id,
+         device.display_name AS name,
+         (
+           binding.status IN ('connected','degraded','disconnected')
+           AND grant_record.state='active'
+           AND registration.state='active'
+           AND device.lifecycle='active'
+           AND owner.status='active'
+           AND credential.id IS NOT NULL
+           AND EXISTS (
+             SELECT 1
+               FROM commands command
+              WHERE command.command_id=(
+                SELECT latest.command_id
+                  FROM commands latest
+                 WHERE latest.run_id=$2
+                 ORDER BY latest.created_at DESC,latest.command_id DESC
+                 LIMIT 1
+              )
+                AND command.runner_id=device.id
+                AND command.runner_generation=device.current_generation
+           )
+         ) AS stoppable
+       FROM repository_bindings binding
+       JOIN project_device_repository_grants grant_record
+         ON grant_record.id=binding.project_device_repository_grant_id
+        AND grant_record.project_id=binding.project_id
+       JOIN device_repository_registrations registration
+         ON registration.id=grant_record.repository_registration_id
+        AND registration.workspace_id=binding.workspace_id
+        AND registration.repository_id=binding.repository_id
+       JOIN devices device
+         ON device.id=registration.device_id
+       LEFT JOIN users owner
+         ON owner.id=device.owner_user_id
+       LEFT JOIN device_credentials credential
+         ON credential.device_id=device.id
+        AND credential.id=registration.approved_credential_id
+        AND credential.generation=registration.approved_generation
+        AND credential.generation=device.current_generation
+        AND credential.state='active'
+      WHERE binding.id=$1`,
+      [bindingId, runId],
+    );
+    return selected.rows[0] ?? null;
+  }
+
   private recordDeviceEvidence(
     input: {
       run_id: string;
@@ -497,18 +1094,43 @@ export class DeviceRunCancellationService {
           input.process_exited_at ?? input.acknowledged_at,
         ],
       );
-      if (updated.rows[0]) return cancellationRecord(updated.rows[0]);
-
-      const existing = await selectedCancellation(sql, input.run_id);
-      if (!existing) throw new DeviceRunCancellationError("cancellation_not_found");
-      if (
-        existing.device_id !== input.device_id ||
-        existing.credential_id !== input.credential_id ||
-        Number(existing.device_generation) !== input.device_generation
-      ) {
-        throw new DeviceRunCancellationError("device_evidence_mismatch");
+      let evidence: DeviceRunCancellationRow | null = updated.rows[0] ?? null;
+      if (!evidence) {
+        evidence = await selectedCancellation(sql, input.run_id);
+        if (!evidence) throw new DeviceRunCancellationError("cancellation_not_found");
+        if (
+          evidence.device_id !== input.device_id ||
+          evidence.credential_id !== input.credential_id ||
+          Number(evidence.device_generation) !== input.device_generation
+        ) {
+          throw new DeviceRunCancellationError("device_evidence_mismatch");
+        }
       }
-      return cancellationRecord(existing);
+
+      if (state === "process_exited") {
+        const lifecycle = new SqlV2ApplicationTransaction(sql);
+        const run = await lifecycle.lockAgentRunLifecycle(input.run_id);
+        if (
+          run &&
+          ["created", "dispatched", "running", "waiting_for_human", "verifying"].includes(run.state)
+        ) {
+          await transitionV2AgentRunLifecycle(lifecycle, {
+            project_id: run.project_id,
+            phase_id: run.phase_id,
+            task_id: run.task_id,
+            run_id: input.run_id,
+            expected_aggregate_version: run.aggregate_version,
+            to: "cancelled",
+            reason: "authenticated runner evidence confirmed the managed process tree exited",
+            actor_type: "runner",
+            actor_id: input.device_id,
+            correlation_id: `device-process-exit:${input.run_id}:${input.device_generation}`,
+            causation_id: input.run_id,
+            occurred_at: input.process_exited_at ?? input.acknowledged_at,
+          });
+        }
+      }
+      return cancellationRecord(evidence);
     });
   }
 }

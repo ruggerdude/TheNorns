@@ -17,6 +17,11 @@ import {
   parseServerFrame,
 } from "@norns/contracts";
 import WebSocket from "ws";
+import {
+  type DeviceCancellationStopResult,
+  DeviceControlConnection,
+} from "./deviceControlConnection.js";
+import type { DeviceWssIdentity } from "./deviceWssAuth.js";
 import { FixtureExecutor } from "./fixture.js";
 import { RelayInferenceClient } from "./inferenceClient.js";
 import { type LiveControlKind, LiveRunRegistry } from "./liveRuns.js";
@@ -33,6 +38,8 @@ export interface DaemonOptions {
   heartbeatMs?: number;
   reconnect?: boolean;
   reconnectDelayMs?: number;
+  /** Bound for local stop confirmation; late proof remains subscribed. */
+  liveRunConfirmationTimeoutMs?: number;
   executeV2?: (
     command: V2DispatchCommandT,
     emit: (event: EventPayloadT) => void,
@@ -50,13 +57,31 @@ export interface DaemonOptions {
    * the one job it was created for is finished.
    */
   onRunSettled?: (settled: { command_id: string; state: CommandStateT }) => void;
+  /**
+   * Explicit enrolled-device cancellation channel. General device execution
+   * is still disabled; this separate authenticated socket receives only
+   * cancellation and generation-fence control.
+   */
+  deviceControl?: {
+    identity: DeviceWssIdentity;
+    sign(canonicalTranscript: string): string;
+    reconnect?: boolean;
+    reconnectDelayMs?: number;
+    evidenceRetryMs?: number;
+  };
 }
 
 export class RunnerDaemon {
   private readonly opts: Required<
-    Omit<DaemonOptions, "executeV2" | "collectVisualEvidence" | "workspaces" | "onRunSettled">
+    Omit<
+      DaemonOptions,
+      "executeV2" | "collectVisualEvidence" | "workspaces" | "onRunSettled" | "deviceControl"
+    >
   > &
-    Pick<DaemonOptions, "executeV2" | "collectVisualEvidence" | "workspaces" | "onRunSettled">;
+    Pick<
+      DaemonOptions,
+      "executeV2" | "collectVisualEvidence" | "workspaces" | "onRunSettled" | "deviceControl"
+    >;
   /** ONBOARDING O4: launch_run commands awaiting a terminal ack. */
   private readonly launchCommands = new Set<string>();
   private settledReported = false;
@@ -66,6 +91,7 @@ export class RunnerDaemon {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private fenced = false;
+  private executionPaused = false;
   private highestEventSeqSent = 0;
   private readonly executor: FixtureExecutor;
   private serverAckSeq = 0;
@@ -89,15 +115,18 @@ export class RunnerDaemon {
    * FIRST and fall through to the fixture only for runs it has never heard of,
    * so the demo path is untouched.
    */
-  readonly liveRuns = new LiveRunRegistry();
+  readonly liveRuns: LiveRunRegistry;
+  private readonly deviceControl: DeviceControlConnection | null;
 
   constructor(options: DaemonOptions) {
     this.opts = {
       heartbeatMs: 2000,
       reconnect: true,
       reconnectDelayMs: 150,
+      liveRunConfirmationTimeoutMs: 10_000,
       ...options,
     };
+    this.liveRuns = new LiveRunRegistry(this.opts.liveRunConfirmationTimeoutMs);
     this.executor = new FixtureExecutor((payload, meta) => this.emit(payload, meta));
     this.inference = new RelayInferenceClient({
       send: (request) => {
@@ -114,6 +143,41 @@ export class RunnerDaemon {
         return true;
       },
     });
+    this.deviceControl = this.opts.deviceControl
+      ? new DeviceControlConnection({
+          serverUrl: this.opts.serverUrl,
+          dataDir: this.opts.dataDir,
+          identity: this.opts.deviceControl.identity,
+          sign: this.opts.deviceControl.sign,
+          ...(this.opts.deviceControl.reconnect !== undefined
+            ? { reconnect: this.opts.deviceControl.reconnect }
+            : {}),
+          ...(this.opts.deviceControl.reconnectDelayMs !== undefined
+            ? { reconnectDelayMs: this.opts.deviceControl.reconnectDelayMs }
+            : {}),
+          ...(this.opts.deviceControl.evidenceRetryMs !== undefined
+            ? { evidenceRetryMs: this.opts.deviceControl.evidenceRetryMs }
+            : {}),
+          stopRun: async (runId, reason, publication) => {
+            const result = await this.liveRuns.cancelAndWait(runId, reason, {
+              publication,
+            });
+            return {
+              target_found: result.found,
+              process_tree_reaped: result.process_tree_reaped,
+              ...(result.eventual_terminal
+                ? {
+                    eventual_process_tree_reaped: result.eventual_terminal.then(
+                      (facts) => facts.process_tree_reaped,
+                    ),
+                  }
+                : {}),
+            };
+          },
+          stopAll: (runId, reason) => this.stopAllManagedForEvidence(runId, reason),
+          fence: (reason) => this.fenceInstallation(reason),
+        })
+      : null;
   }
 
   get isFenced(): boolean {
@@ -122,6 +186,10 @@ export class RunnerDaemon {
 
   get connected(): boolean {
     return this.socket?.readyState === WebSocket.OPEN;
+  }
+
+  get deviceControlConnected(): boolean {
+    return this.deviceControl?.connected ?? false;
   }
 
   get generation(): number {
@@ -237,6 +305,7 @@ export class RunnerDaemon {
 
   connect(): void {
     if (this.stopped || this.fenced) return;
+    this.deviceControl?.start();
     if (this.socket !== null) return;
     const state = this.requireState();
     const wsUrl = `${this.opts.serverUrl.replace(/^http/, "ws")}/ws/runner`;
@@ -341,12 +410,7 @@ export class RunnerDaemon {
         }
         case "fenced": {
           // A newer pairing owns this runner id. Stop acting entirely.
-          this.fenced = true;
-          this.inference.abortAll("runner generation fenced");
-          this.executor.cancelAll();
-          this.liveRuns.cancelAll("runner generation fenced");
-          this.stopHeartbeat();
-          socket.close();
+          this.fenceInstallation("runner generation fenced");
           break;
         }
         case "inference_response": {
@@ -426,14 +490,50 @@ export class RunnerDaemon {
     this.socket?.terminate();
   }
 
+  /** Test hook for response-loss/reconnect coverage on the device channel. */
+  disconnectDeviceControlNow(): void {
+    this.deviceControl?.disconnectNow();
+  }
+
+  /** AgentHost lifecycle start. A restart clears a prior local emergency stop. */
+  start(): void {
+    if (this.fenced) throw new Error("runner credential generation is fenced");
+    this.stopped = false;
+    this.executionPaused = false;
+    this.connect();
+  }
+
+  /**
+   * Local Control Center emergency stop. It fences publication and waits for
+   * every currently registered run, but deliberately leaves AgentHost and the
+   * device cancellation channel alive.
+   */
+  async emergencyStop(): Promise<{
+    stop_requested: number;
+    process_trees_reaped: number;
+    unconfirmed: number;
+  }> {
+    this.executionPaused = true;
+    this.inference.abortAll("local emergency stop");
+    this.executor.cancelAll();
+    const result = await this.liveRuns.cancelAllAndWait("local emergency stop");
+    return {
+      stop_requested: result.stop_requested,
+      process_trees_reaped: result.process_trees_reaped,
+      unconfirmed: result.unconfirmed,
+    };
+  }
+
   stop(): void {
     this.stopped = true;
+    this.executionPaused = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.stopHeartbeat();
     this.inference.abortAll("runner stopped");
     this.executor.cancelAll();
     this.liveRuns.cancelAll("runner stopped");
     this.socket?.close();
+    this.deviceControl?.stop();
   }
 
   // -- internals ---------------------------------------------------------------
@@ -441,6 +541,49 @@ export class RunnerDaemon {
   private requireState(): RunnerStateFile {
     if (!this.stateFile) throw new Error("runner not paired: call pair() or loadState() first");
     return this.stateFile;
+  }
+
+  private async stopAllManagedForEvidence(
+    runId: string,
+    reason: string,
+  ): Promise<DeviceCancellationStopResult> {
+    this.executionPaused = true;
+    const targetWasLive = this.liveRuns.isLive(runId);
+    const priorTarget = this.liveRuns.terminalFacts(runId);
+    const targetEventual = this.liveRuns.waitForTerminal(runId);
+    this.inference.abortAll(reason);
+    this.executor.cancelAll();
+    const stopped = await this.liveRuns.cancelAllAndWait(reason);
+    const target = this.liveRuns.terminalFacts(runId) ?? priorTarget;
+    const initial = {
+      target_found: targetWasLive || target !== null,
+      process_tree_reaped: target?.process_tree_reaped === true && stopped.unconfirmed === 0,
+    };
+    const allEventual = stopped.eventual;
+    if (!initial.process_tree_reaped && targetEventual && allEventual) {
+      return {
+        ...initial,
+        eventual_process_tree_reaped: Promise.all([targetEventual, allEventual]).then(
+          ([targetFacts, allFacts]) =>
+            targetFacts.process_tree_reaped && allFacts.unconfirmed === 0,
+        ),
+      };
+    }
+    return initial;
+  }
+
+  private fenceInstallation(reason: string): void {
+    if (this.fenced) return;
+    this.fenced = true;
+    this.executionPaused = true;
+    this.inference.abortAll(reason);
+    this.executor.cancelAll();
+    this.liveRuns.cancelAll(reason);
+    this.stopHeartbeat();
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.socket?.close(1008, "runner generation fenced");
+    this.deviceControl?.stop();
   }
 
   private scheduleReconnect(): void {
@@ -487,12 +630,7 @@ export class RunnerDaemon {
   private handleCommand(command: CommandEnvelopeT): void {
     const state = this.requireState();
     if (command.runner_id !== this.opts.runnerId || command.generation !== state.state.generation) {
-      this.fenced = true;
-      this.inference.abortAll("runner generation fenced");
-      this.executor.cancelAll();
-      this.liveRuns.cancelAll("runner generation fenced");
-      this.stopHeartbeat();
-      this.socket?.close(1008, "runner generation fenced");
+      this.fenceInstallation("runner generation fenced");
       return;
     }
     // ONBOARDING O4: registered before any ack so that a replayed, already
@@ -527,6 +665,22 @@ export class RunnerDaemon {
     if (isCommandExpired(command, new Date())) {
       state.recordExecution(command.command_id, "expired");
       this.ack(command.command_id, "expired", meta);
+      return;
+    }
+    if (
+      this.executionPaused &&
+      (command.payload.kind === "launch_fixture" ||
+        command.payload.kind === "launch_run" ||
+        command.payload.kind === "collect_visual_evidence" ||
+        command.payload.kind === "run_verification")
+    ) {
+      state.recordExecution(command.command_id, "rejected");
+      this.ack(
+        command.command_id,
+        "rejected",
+        meta,
+        "local emergency stop is engaged; restart the daemon before dispatching work",
+      );
       return;
     }
     state.recordExecution(command.command_id, "executing");

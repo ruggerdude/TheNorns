@@ -252,6 +252,7 @@ test("AgentHost exchanges one bootstrap token for a CSRF-protected local session
         start_at_login: false,
         agent_version: "0.1.0",
         recent_activity: null,
+        emergency_stop: null,
       },
       security: {
         enrolled_account: null,
@@ -535,6 +536,95 @@ test("AgentHost reports separate local status dimensions and restarts the daemon
   } finally {
     await host.stop();
     assert.equal(lifecycle.stops, 2);
+    removeTemporaryDataDir(dataDir);
+  }
+});
+
+test("AgentHost emergency stop is distinct, confirmed, and leaves Control Center alive", async () => {
+  const dataDir = temporaryDataDir();
+  const lifecycle = {
+    starts: 0,
+    stops: 0,
+    emergencyStops: 0,
+    start() {
+      this.starts += 1;
+    },
+    stop() {
+      this.stops += 1;
+    },
+    async emergencyStop() {
+      this.emergencyStops += 1;
+      return { stop_requested: 3, process_trees_reaped: 2, unconfirmed: 1 };
+    },
+  };
+  const host = new AgentHost({ dataDir, daemon: lifecycle, detectLocalTools: false });
+
+  try {
+    const started = await host.start();
+    const session = await exchangeBootstrap(started);
+    const startDaemon = await fetch(`${started.origin}/api/daemon/start`, {
+      method: "POST",
+      headers: authenticatedHeaders(started, session, true),
+      body: "{}",
+    });
+    assert.equal(startDaemon.status, 200);
+    const page = await fetch(started.origin);
+    const html = await page.text();
+    assert.match(html, /Emergency stop all Norns work/);
+    assert.match(html, /same OS user/);
+
+    const stateChangingGet = await fetch(`${started.origin}/api/emergency-stop`, {
+      headers: { cookie: session.cookie },
+    });
+    assert.equal(stateChangingGet.status, 405);
+
+    const missingCsrf = await fetch(`${started.origin}/api/emergency-stop`, {
+      method: "POST",
+      headers: authenticatedHeaders(started, session),
+      body: JSON.stringify({ confirmation: "STOP ALL NORNS WORK" }),
+    });
+    assert.equal(missingCsrf.status, 403);
+
+    const wrongConfirmation = await fetch(`${started.origin}/api/emergency-stop`, {
+      method: "POST",
+      headers: authenticatedHeaders(started, session, true),
+      body: JSON.stringify({ confirmation: "stop" }),
+    });
+    assert.equal(wrongConfirmation.status, 400);
+    assert.equal(lifecycle.emergencyStops, 0);
+
+    const stopped = await fetch(`${started.origin}/api/emergency-stop`, {
+      method: "POST",
+      headers: authenticatedHeaders(started, session, true),
+      body: JSON.stringify({ confirmation: "STOP ALL NORNS WORK" }),
+    });
+    assert.equal(stopped.status, 200);
+    const stoppedBody = await stopped.json();
+    assert.deepEqual(
+      {
+        stop_requested: stoppedBody.emergency_stop.stop_requested,
+        process_trees_reaped: stoppedBody.emergency_stop.process_trees_reaped,
+        unconfirmed: stoppedBody.emergency_stop.unconfirmed,
+      },
+      { stop_requested: 3, process_trees_reaped: 2, unconfirmed: 1 },
+    );
+    assert.equal(lifecycle.emergencyStops, 1);
+    assert.equal(lifecycle.stops, 0);
+
+    const status = await fetch(`${started.origin}/api/status`, {
+      headers: { cookie: session.cookie },
+    });
+    assert.equal(status.status, 200);
+    const statusBody = await status.json();
+    assert.equal(statusBody.home.workload, "busy");
+    assert.equal(statusBody.home.emergency_stop.unconfirmed, 1);
+    assert.equal(statusBody.daemon_state, "running");
+
+    // The loopback host remains available after emergency stop.
+    const stillAlive = await fetch(started.origin);
+    assert.equal(stillAlive.status, 200);
+  } finally {
+    await host.stop();
     removeTemporaryDataDir(dataDir);
   }
 });

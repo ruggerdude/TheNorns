@@ -84,17 +84,21 @@ export class DeviceOnlineControlBroker {
     ) {
       return false;
     }
-    connection.send({
-      type: "device_cancellation_request",
-      device_id: record.device_id,
-      credential_id: record.credential_id,
-      generation: record.device_generation,
-      run_id: record.run_id,
-      cause: record.cause,
-      requested_at: record.requested_at,
-      publication_fenced: record.publication_fenced_at !== null,
-    });
-    return true;
+    try {
+      connection.send({
+        type: "device_cancellation_request",
+        device_id: record.device_id,
+        credential_id: record.credential_id,
+        generation: record.device_generation,
+        run_id: record.run_id,
+        cause: record.cause,
+        requested_at: record.requested_at,
+        publication_fenced: record.publication_fenced_at !== null,
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   closeRevokedDevice(deviceId: string): void {
