@@ -3,6 +3,10 @@
   padding-bottom: 6rem;
 }
 
+.admin-computers-page {
+  padding-top: 0;
+}
+
 .computers-installer {
   display: flex;
   align-items: center;

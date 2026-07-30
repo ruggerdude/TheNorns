@@ -79,9 +79,6 @@ const GraphCanvas = lazy(() =>
 );
 const Account = lazy(() => import("./Account").then(({ Account }) => ({ default: Account })));
 const Admin = lazy(() => import("./Admin").then(({ Admin }) => ({ default: Admin })));
-const Computers = lazy(() =>
-  import("./Computers").then(({ Computers }) => ({ default: Computers })),
-);
 const DeviceAuthorizationApproval = lazy(() =>
   import("./DeviceAuthorizationApproval").then(({ DeviceAuthorizationApproval }) => ({
     default: DeviceAuthorizationApproval,
@@ -805,7 +802,6 @@ function ProjectGraph({
   user,
   onOpenAccount,
   onOpenAdmin,
-  onOpenComputers,
   onOpenUsage,
   initialWorkRoute,
   initialConversationId,
@@ -821,7 +817,6 @@ function ProjectGraph({
   user: CurrentUser | null;
   onOpenAccount: () => void;
   onOpenAdmin: () => void;
-  onOpenComputers: () => void;
   onOpenUsage: () => void;
   initialWorkRoute?: boolean;
   initialConversationId?: string | null;
@@ -1878,15 +1873,6 @@ function ProjectGraph({
                 type="button"
                 onClick={() => {
                   setMobileWorkspaceNavOpen(false);
-                  onOpenComputers();
-                }}
-              >
-                Computers
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMobileWorkspaceNavOpen(false);
                   onOpenUsage();
                 }}
               >
@@ -1931,7 +1917,6 @@ function ProjectGraph({
         {user ? (
           <AuthenticatedHeaderActions
             user={user}
-            onOpenComputers={onOpenComputers}
             onOpenUsage={onOpenUsage}
             onOpenAccount={onOpenAccount}
             onOpenAdmin={onOpenAdmin}
@@ -2836,7 +2821,7 @@ function ProjectGraph({
   );
 }
 
-type GlobalPage = "computers" | "usage" | "settings" | "admin" | "device-authorization";
+type GlobalPage = "usage" | "settings" | "admin" | "device-authorization";
 
 function GlobalPageShell({
   page,
@@ -2844,7 +2829,6 @@ function GlobalPageShell({
   activeProject,
   onOpenPortfolio,
   onOpenProject,
-  onOpenComputers,
   onOpenUsage,
   onOpenAccount,
   onOpenAdmin,
@@ -2856,7 +2840,6 @@ function GlobalPageShell({
   activeProject: ProjectSummary | null;
   onOpenPortfolio: () => void;
   onOpenProject: (project: ProjectSummary) => void;
-  onOpenComputers: () => void;
   onOpenUsage: () => void;
   onOpenAccount: (tab?: SettingsTab) => void;
   onOpenAdmin: () => void;
@@ -2878,7 +2861,6 @@ function GlobalPageShell({
         <AuthenticatedHeaderActions
           user={user}
           activeView={page === "device-authorization" ? null : page}
-          onOpenComputers={onOpenComputers}
           onOpenUsage={onOpenUsage}
           onOpenAccount={onOpenAccount}
           onOpenAdmin={onOpenAdmin}
@@ -2923,7 +2905,6 @@ export function App(): React.ReactElement {
     requestedSettingsTab === "connections" ? "connections" : "profile",
   );
   const [showAdmin, setShowAdmin] = useState(false);
-  const [showComputers, setShowComputers] = useState(false);
   const [showUsage, setShowUsage] = useState(false);
 
   useEffect(() => {
@@ -3035,7 +3016,6 @@ export function App(): React.ReactElement {
     setOpenProjects([]);
     setShowAccount(false);
     setShowAdmin(false);
-    setShowComputers(false);
     setShowUsage(false);
   }, []);
 
@@ -3092,43 +3072,31 @@ export function App(): React.ReactElement {
   const openAccount = useCallback((tab: SettingsTab = "profile") => {
     setAccountTab(tab);
     setShowAdmin(false);
-    setShowComputers(false);
     setShowUsage(false);
     setShowAccount(true);
   }, []);
 
   const openAdmin = useCallback(() => {
     setShowAccount(false);
-    setShowComputers(false);
     setShowUsage(false);
     setShowAdmin(true);
-  }, []);
-
-  const openComputers = useCallback(() => {
-    setShowAccount(false);
-    setShowAdmin(false);
-    setShowUsage(false);
-    setShowComputers(true);
   }, []);
 
   const openUsage = useCallback(() => {
     setShowAccount(false);
     setShowAdmin(false);
-    setShowComputers(false);
     setShowUsage(true);
   }, []);
 
   const closeGlobalPage = useCallback(() => {
     setShowAccount(false);
     setShowAdmin(false);
-    setShowComputers(false);
     setShowUsage(false);
   }, []);
 
   const openPortfolio = useCallback(() => {
     setShowAccount(false);
     setShowAdmin(false);
-    setShowComputers(false);
     setShowUsage(false);
     setActiveProject(null);
     setWorkConversationRoute(null);
@@ -3144,15 +3112,13 @@ export function App(): React.ReactElement {
     [closeGlobalPage, openProject],
   );
 
-  const globalPage: GlobalPage | null = showComputers
-    ? "computers"
-    : showAccount
-      ? "settings"
-      : showAdmin && user?.role === "admin"
-        ? "admin"
-        : showUsage
-          ? "usage"
-          : null;
+  const globalPage: GlobalPage | null = showAccount
+    ? "settings"
+    : showAdmin && user?.role === "admin"
+      ? "admin"
+      : showUsage
+        ? "usage"
+        : null;
   const deviceAuthorizationRoute =
     typeof window !== "undefined" && window.location.pathname === "/device-authorization";
 
@@ -3191,7 +3157,6 @@ export function App(): React.ReactElement {
         activeProject={activeProject}
         onOpenPortfolio={openPortfolio}
         onOpenProject={openProjectFromGlobalNavigation}
-        onOpenComputers={openComputers}
         onOpenUsage={openUsage}
         onOpenAccount={openAccount}
         onOpenAdmin={openAdmin}
@@ -3215,17 +3180,12 @@ export function App(): React.ReactElement {
         activeProject={activeProject}
         onOpenPortfolio={openPortfolio}
         onOpenProject={openProjectFromGlobalNavigation}
-        onOpenComputers={openComputers}
         onOpenUsage={openUsage}
         onOpenAccount={openAccount}
         onOpenAdmin={openAdmin}
         onSignOut={() => logout("Signed out.")}
       >
-        {globalPage === "computers" ? (
-          <Suspense fallback={<Spinner label="Loading computers…" />}>
-            <Computers embedded onUnauthorized={() => logout("Session expired. Sign in again.")} />
-          </Suspense>
-        ) : globalPage === "settings" ? (
+        {globalPage === "settings" ? (
           <Suspense fallback={<Spinner label="Loading settings…" />}>
             <Account
               embedded
@@ -3271,7 +3231,6 @@ export function App(): React.ReactElement {
       user={user}
       onOpenAccount={openAccount}
       onOpenAdmin={openAdmin}
-      onOpenComputers={openComputers}
       onOpenUsage={openUsage}
     />
   ) : (
@@ -3284,7 +3243,6 @@ export function App(): React.ReactElement {
       user={user}
       onOpenAccount={openAccount}
       onOpenAdmin={openAdmin}
-      onOpenComputers={openComputers}
       onOpenUsage={openUsage}
       initialWorkRoute={workConversationRoute?.projectId === activeProject.id}
       initialConversationId={

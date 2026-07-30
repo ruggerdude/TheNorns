@@ -136,8 +136,18 @@ async function prepare(page: Page): Promise<void> {
         id: "phase4-owner",
         email: "phase4-owner@norns.test",
         name: "Phase 4 Owner",
-        role: "member",
+        role: "admin",
         status: "active",
+      });
+    }
+    if (path === "/api/admin/users") return fulfill(route, []);
+    if (path === "/api/admin/projects/archived") return fulfill(route, []);
+    if (path === "/api/v2/admin/rules") {
+      return fulfill(route, {
+        filename: "NORN.md",
+        content: "",
+        version: 0,
+        updated_at: null,
       });
     }
     if (path === "/api/auth/sessions") return fulfill(route, { sessions: [] });
@@ -184,7 +194,8 @@ test("Computers repository access stays usable on narrow and forced-color layout
   await page.setViewportSize({ width: 1440, height: 900 });
   await prepare(page);
   await page.goto("/");
-  await page.getByRole("button", { name: "Computers", exact: true }).click();
+  await page.getByRole("button", { name: "Admin", exact: true }).click();
+  await page.getByRole("tab", { name: "Computers", exact: true }).click();
   await page.getByRole("button", { name: "View details for Office Mac mini" }).click();
 
   const access = page.getByRole("region", { name: "Repository access" });

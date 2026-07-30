@@ -43,6 +43,7 @@ describe("Admin panel", () => {
 
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "Users",
+      "Computers",
       "Rules",
       "Archive",
     ]);
@@ -50,6 +51,29 @@ describe("Admin panel", () => {
     const list = await screen.findByTestId("user-list");
     expect(list).toHaveTextContent("admin@x.com");
     expect(list).toHaveTextContent("member@x.com");
+  });
+
+  test("opens computer management inside Administration", async () => {
+    mock.get("/api/admin/users", { body: makeRoster() });
+    mock.get("/api/devices", {
+      body: {
+        devices: [],
+        downloads: {
+          macos: "https://downloads.example.com/Norns-Local-Agent-macOS.pkg",
+          windows: null,
+          macos_release: "notarized",
+        },
+      },
+    });
+    mock.install();
+
+    const user = userEvent.setup();
+    render(<Admin onClose={vi.fn()} onUnauthorized={vi.fn()} />);
+    await user.click(screen.getByRole("tab", { name: "Computers" }));
+
+    expect(await screen.findByTestId("computers-page")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Download for macOS" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Computers" })).toHaveAttribute("aria-selected", "true");
   });
 
   test("loads and saves the global NORN.md", async () => {

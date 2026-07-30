@@ -1051,116 +1051,124 @@ export function Computers({
     }
   };
 
-  return (
-    <div
-      className={embedded ? "embedded-page-view" : "full-page-view"}
-      data-testid="computers-page"
-    >
-      <main className="page-container computers-page">
-        <PageHeader
-          eyebrow="Local execution"
-          title="Computers"
-          lede="Manage Local Agent installations enrolled under your OS user. Reinstalling without recovering its credential creates a new computer entry."
-        />
+  const content = (
+    <>
+      <PageHeader
+        eyebrow="Local execution"
+        title="Computers"
+        lede="Manage Local Agent installations enrolled under your OS user. Reinstalling without recovering its credential creates a new computer entry."
+      />
 
-        <section className="card computers-installer" aria-labelledby="local-agent-installer-title">
+      <section className="card computers-installer" aria-labelledby="local-agent-installer-title">
+        <div>
+          <div className="eyebrow">Install or update</div>
+          <h2 id="local-agent-installer-title">Norns Local Agent</h2>
+          <p className="muted">
+            Install the agent on each computer you want Norns to use, then authorize it here.
+          </p>
+          {downloads?.macos_release === "unsigned_preview" ? (
+            <small className="computers-installer-warning">
+              The current macOS download is an unsigned preview and will trigger a security warning.
+            </small>
+          ) : null}
+        </div>
+        <div className="computers-installer-actions">
+          {downloads?.macos ? (
+            <a className="btn btn-primary" href={downloads.macos}>
+              Download for macOS
+            </a>
+          ) : null}
+          {downloads?.windows ? (
+            <a className="btn" href={downloads.windows}>
+              Download for Windows
+            </a>
+          ) : null}
+          {!downloads?.macos && !downloads?.windows ? (
+            <span className="muted">Installer downloads have not been published yet.</span>
+          ) : null}
+        </div>
+      </section>
+
+      {error ? <Alert testId="computers-error">{error}</Alert> : null}
+      <div className="sr-only" aria-live="polite">
+        {notice}
+      </div>
+
+      {devices === null ? (
+        <Spinner label="Loading computers…" />
+      ) : devices.length === 0 ? (
+        <section className="card computers-empty" aria-labelledby="computers-empty-title">
           <div>
-            <div className="eyebrow">Install or update</div>
-            <h2 id="local-agent-installer-title">Norns Local Agent</h2>
+            <div className="eyebrow">No enrolled computers</div>
+            <h2 id="computers-empty-title">Authorize a Local Agent to get started</h2>
             <p className="muted">
-              Install the agent on each computer you want Norns to use, then authorize it here.
+              Enrollment begins on the computer. Enter its human verification code on the
+              authorization page when prompted.
             </p>
-            {downloads?.macos_release === "unsigned_preview" ? (
-              <small className="computers-installer-warning">
-                The current macOS download is an unsigned preview and will trigger a security
-                warning.
-              </small>
-            ) : null}
-          </div>
-          <div className="computers-installer-actions">
-            {downloads?.macos ? (
-              <a className="btn btn-primary" href={downloads.macos}>
-                Download for macOS
-              </a>
-            ) : null}
-            {downloads?.windows ? (
-              <a className="btn" href={downloads.windows}>
-                Download for Windows
-              </a>
-            ) : null}
-            {!downloads?.macos && !downloads?.windows ? (
-              <span className="muted">Installer downloads have not been published yet.</span>
-            ) : null}
           </div>
         </section>
-
-        {error ? <Alert testId="computers-error">{error}</Alert> : null}
-        <div className="sr-only" aria-live="polite">
-          {notice}
-        </div>
-
-        {devices === null ? (
-          <Spinner label="Loading computers…" />
-        ) : devices.length === 0 ? (
-          <section className="card computers-empty" aria-labelledby="computers-empty-title">
-            <div>
-              <div className="eyebrow">No enrolled computers</div>
-              <h2 id="computers-empty-title">Authorize a Local Agent to get started</h2>
-              <p className="muted">
-                Enrollment begins on the computer. Enter its human verification code on the
-                authorization page when prompted.
-              </p>
-            </div>
-          </section>
-        ) : (
-          <div className="computers-layout">
-            <section className="computers-inventory" aria-labelledby="computers-inventory-title">
-              <div className="computers-section-heading">
-                <div>
-                  <div className="eyebrow">Owned by you</div>
-                  <h2 id="computers-inventory-title">Your computers</h2>
-                </div>
-                <Badge>{devices.length}</Badge>
+      ) : (
+        <div className="computers-layout">
+          <section className="computers-inventory" aria-labelledby="computers-inventory-title">
+            <div className="computers-section-heading">
+              <div>
+                <div className="eyebrow">Owned by you</div>
+                <h2 id="computers-inventory-title">Your computers</h2>
               </div>
-              <ul className="computer-list">
-                {devices.map((device) => (
-                  <ComputerCard
-                    key={device.device_id}
-                    device={device}
-                    selected={device.device_id === selectedId}
-                    onSelect={() => void loadDetail(device.device_id, true)}
-                  />
-                ))}
-              </ul>
-            </section>
-
-            <section className="computers-detail-region" aria-label="Computer details">
-              {detail ? (
-                <ComputerDetails
-                  key={detail.device_id}
-                  detailRef={detailHeading}
-                  device={detail}
-                  loading={detailLoading}
-                  onRename={rename}
-                  onRevoke={revoke}
-                  onUnauthorized={onUnauthorized}
+              <Badge>{devices.length}</Badge>
+            </div>
+            <ul className="computer-list">
+              {devices.map((device) => (
+                <ComputerCard
+                  key={device.device_id}
+                  device={device}
+                  selected={device.device_id === selectedId}
+                  onSelect={() => void loadDetail(device.device_id, true)}
                 />
-              ) : (
-                <div className="card computers-detail-empty">
-                  <div>
-                    <div className="eyebrow">Installation details</div>
-                    <h2>Select a computer</h2>
-                    <p className="muted">
-                      Review its credential, compatibility, capabilities, grants, and manual update
-                      guidance.
-                    </p>
-                  </div>
+              ))}
+            </ul>
+          </section>
+
+          <section className="computers-detail-region" aria-label="Computer details">
+            {detail ? (
+              <ComputerDetails
+                key={detail.device_id}
+                detailRef={detailHeading}
+                device={detail}
+                loading={detailLoading}
+                onRename={rename}
+                onRevoke={revoke}
+                onUnauthorized={onUnauthorized}
+              />
+            ) : (
+              <div className="card computers-detail-empty">
+                <div>
+                  <div className="eyebrow">Installation details</div>
+                  <h2>Select a computer</h2>
+                  <p className="muted">
+                    Review its credential, compatibility, capabilities, grants, and manual update
+                    guidance.
+                  </p>
                 </div>
-              )}
-            </section>
-          </div>
-        )}
-      </main>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <div className="computers-page admin-computers-page" data-testid="computers-page">
+        {content}
+      </div>
+    );
+  }
+
+  return (
+    <div className="full-page-view" data-testid="computers-page">
+      <main className="page-container computers-page">{content}</main>
     </div>
   );
 }

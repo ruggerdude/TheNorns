@@ -70,7 +70,6 @@ export function HeaderUserMenu({
 
 export function AuthenticatedHeaderActions({
   user,
-  onOpenComputers,
   onOpenUsage,
   onOpenAccount,
   onOpenAdmin,
@@ -79,12 +78,11 @@ export function AuthenticatedHeaderActions({
   portfolioNavigation,
 }: {
   user: CurrentUser;
-  onOpenComputers?: () => void;
   onOpenUsage: () => void;
   onOpenAccount: (tab?: SettingsTab) => void;
   onOpenAdmin: () => void;
   onSignOut: () => void;
-  activeView?: "computers" | "usage" | "settings" | "admin" | null;
+  activeView?: "usage" | "settings" | "admin" | null;
   portfolioNavigation?: {
     projects?: ProjectSummary[] | null;
     activeProjectId?: string | null;
@@ -118,16 +116,6 @@ export function AuthenticatedHeaderActions({
         <span aria-hidden="true">☰</span>
         Menu
       </Button>
-      {onOpenComputers ? (
-        <Button
-          className={`btn-small${activeView === "computers" ? " is-active" : ""}`}
-          variant="ghost"
-          aria-current={activeView === "computers" ? "page" : undefined}
-          onClick={onOpenComputers}
-        >
-          Computers
-        </Button>
-      ) : null}
       <Button
         className={`btn-small${activeView === "usage" ? " is-active" : ""}`}
         variant="ghost"
@@ -198,19 +186,6 @@ export function AuthenticatedHeaderActions({
               }}
               onUnauthorized={portfolioNavigation.onUnauthorized}
             />
-          ) : null}
-          {onOpenComputers ? (
-            <Button
-              className={activeView === "computers" ? "is-active" : ""}
-              variant="ghost"
-              aria-current={activeView === "computers" ? "page" : undefined}
-              onClick={() => {
-                closeMobileNavigation();
-                onOpenComputers();
-              }}
-            >
-              Computers
-            </Button>
           ) : null}
           <Button
             className={activeView === "usage" ? "is-active" : ""}

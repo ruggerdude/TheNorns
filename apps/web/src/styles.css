@@ -2569,14 +2569,22 @@ button:disabled {
 .admin-tabs {
   display: flex;
   gap: 0.25rem;
+  max-width: 100%;
   margin: 0 0 1.5rem;
   padding: 0.3rem;
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  overflow-x: auto;
   background: color-mix(in srgb, var(--surface-2) 68%, transparent);
+  scrollbar-width: none;
+}
+
+.admin-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .admin-tabs button {
+  flex: none;
   min-height: 42px;
   padding: 0.55rem 1rem;
   border: 0;

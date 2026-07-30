@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Computers } from "./Computers";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Badge, Brand, Button, Field, Input, PageHeader, Select, TextArea } from "./ui";
 
@@ -48,7 +49,7 @@ type InviteOutcome =
   | { ok: false; recoverable: true; message: string; url: string }
   | { ok: false; recoverable: false; message: string };
 
-type AdminTab = "users" | "rules" | "archive";
+type AdminTab = "users" | "computers" | "rules" | "archive";
 
 /** Unlike adminRequest, a 502 here (email delivery failed) is not a plain
  *  error — the invited user record was still created, and the response
@@ -253,7 +254,7 @@ export function Admin({
         <PageHeader
           eyebrow="Workspace controls"
           title="Administration"
-          lede="Manage members, global agent rules, and archived projects."
+          lede="Manage members, computers, global agent rules, and archived projects."
         />
         {error ? <Alert testId="admin-error">{error}</Alert> : null}
 
@@ -261,6 +262,7 @@ export function Admin({
           {(
             [
               ["users", "Users"],
+              ["computers", "Computers"],
               ["rules", "Rules"],
               ["archive", "Archive"],
             ] as const
@@ -279,6 +281,17 @@ export function Admin({
             </button>
           ))}
         </nav>
+
+        <div
+          id="admin-panel-computers"
+          role="tabpanel"
+          aria-labelledby="admin-tab-computers"
+          hidden={activeTab !== "computers"}
+        >
+          {activeTab === "computers" ? (
+            <Computers embedded onUnauthorized={onUnauthorized} />
+          ) : null}
+        </div>
 
         <section
           className="card admin-archived-projects"

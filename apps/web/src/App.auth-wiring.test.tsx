@@ -89,24 +89,16 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     expect(getToken()).toBeNull();
   });
 
-  test("shows Computers, Settings, and Usage but not Admin for a member", async () => {
+  test("shows Settings and Usage, but keeps Computers inside the admin-only menu", async () => {
     mock.get("/api/auth/me", {
       body: { id: "u1", email: "member@x.com", name: null, role: "member", status: "active" },
     });
-    mock.get("/api/devices", { body: { devices: [] } });
     mock.install();
-    const user = userEvent.setup();
     render(<App />);
 
     expect(await screen.findByRole("button", { name: /settings/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^usage$/i })).toBeInTheDocument();
-    const computersButton = screen.getByRole("button", { name: /^computers$/i });
-    await user.click(computersButton);
-    expect(await screen.findByTestId("computers-page")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Computers" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    expect(screen.queryByRole("button", { name: /^computers$/i })).not.toBeInTheDocument();
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: /^admin$/i })).not.toBeInTheDocument(),
     );
@@ -117,6 +109,7 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
       body: { id: "u1", email: "admin@x.com", name: null, role: "admin", status: "active" },
     });
     mock.get("/api/admin/users", { body: [] });
+    mock.get("/api/devices", { body: { devices: [] } });
     mock.install();
     const user = userEvent.setup();
     render(<App />);
@@ -128,14 +121,13 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     const headerButtons = within(headerActions as HTMLElement).getAllByRole("button");
     // Desktop exposes the destinations inline; the same action group also
     // owns the mobile drawer trigger.
-    expect(headerButtons).toHaveLength(7);
+    expect(headerButtons).toHaveLength(6);
     expect(headerButtons[0]).toHaveAccessibleName("Open navigation menu");
-    expect(headerButtons[1]).toHaveAccessibleName("Computers");
-    expect(headerButtons[2]).toHaveAccessibleName("Usage");
-    expect(headerButtons[3]).toHaveAccessibleName("Settings");
-    expect(headerButtons[4]).toHaveAccessibleName("Admin");
-    expect(headerButtons[5]).toHaveAccessibleName(/switch to (light|dark) mode/i);
-    expect(headerButtons[6]).toHaveAccessibleName("admin@x.com");
+    expect(headerButtons[1]).toHaveAccessibleName("Usage");
+    expect(headerButtons[2]).toHaveAccessibleName("Settings");
+    expect(headerButtons[3]).toHaveAccessibleName("Admin");
+    expect(headerButtons[4]).toHaveAccessibleName(/switch to (light|dark) mode/i);
+    expect(headerButtons[5]).toHaveAccessibleName("admin@x.com");
     await user.click(adminButton);
     expect(await screen.findByTestId("admin-panel")).toBeInTheDocument();
     expect(screen.getByTestId("admin-panel")).toHaveClass("embedded-page-view");
@@ -143,6 +135,9 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     expect(screen.getByRole("button", { name: "Usage" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Computers" }));
+    expect(await screen.findByTestId("computers-page")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Settings" }));
     expect(await screen.findByTestId("account-panel")).toHaveClass("embedded-page-view");
