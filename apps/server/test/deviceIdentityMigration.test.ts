@@ -5,9 +5,11 @@ import {
   DEVICE_CANCELLATION_TRACKING_MIGRATION_NAME,
   DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME,
   DEVICE_IDENTITY_CORE_MIGRATION_NAME,
+  DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_NAME,
   GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
   currentV2MigrationSources,
   loadDeviceIdentityCoreMigrationSql,
+  loadDeviceManagementObservationsMigrationSql,
   loadGatewayDeviceAuthorizationMigrationSql,
 } from "../src/persistence/v2/migrate.js";
 
@@ -37,13 +39,15 @@ describe.sequential("device identity core migration", () => {
 
   it("is registered before the additive Phase 2 device migrations", async () => {
     const sources = await currentV2MigrationSources();
-    expect(sources.slice(-4).map((source) => source.name)).toEqual([
+    expect(sources.slice(-5).map((source) => source.name)).toEqual([
       DEVICE_IDENTITY_CORE_MIGRATION_NAME,
       DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME,
       DEVICE_CANCELLATION_TRACKING_MIGRATION_NAME,
       GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
+      DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_NAME,
     ]);
-    expect(sources.at(-4)?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
+    expect(sources.at(-5)?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
+    expect(sources.at(-1)?.sql).toContain("ADD COLUMN os_version TEXT");
   });
 
   it("creates the five core tables, privacy-safe columns, and runtime grants", async () => {
@@ -406,5 +410,248 @@ describe.sequential("device identity core migration", () => {
     } finally {
       await gatewayDatabase.close();
     }
+  });
+});
+
+describe.sequential("device management observations migration", () => {
+  let database: PGlite;
+
+  beforeAll(async () => {
+    database = new PGlite();
+    await database.exec(`
+      CREATE ROLE norns_app NOLOGIN;
+      CREATE TABLE users (id TEXT PRIMARY KEY);
+      CREATE TABLE projects (id TEXT PRIMARY KEY);
+      CREATE TABLE repository_bindings (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        binding_type TEXT NOT NULL
+      );
+      INSERT INTO users (id) VALUES ('owner-1');
+      INSERT INTO projects (id) VALUES ('project-1');
+    `);
+    await database.exec(await loadDeviceIdentityCoreMigrationSql());
+    await database.exec(`
+      INSERT INTO devices (
+        id,owner_user_id,display_name,os_family,architecture,created_at,updated_at
+      ) VALUES
+        (
+          'historical-device','owner-1','Historical Mac','macos','arm64',
+          '2026-07-01T12:00:00Z','2026-07-01T12:00:00Z'
+        ),
+        (
+          'validation-device','owner-1','Validation PC','windows','x86_64',
+          '2026-07-01T12:00:00Z','2026-07-01T12:00:00Z'
+        );
+    `);
+    await database.exec(await loadDeviceManagementObservationsMigrationSql());
+  });
+
+  afterAll(async () => {
+    await database.close();
+  });
+
+  it("adds nullable projection observations without adding derived status columns", async () => {
+    const columns = await database.query<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+    }>(
+      `SELECT column_name,data_type,is_nullable
+         FROM information_schema.columns
+        WHERE table_name='devices'
+          AND column_name IN (
+            'os_version','agent_version','agent_protocol_version',
+            'agent_capabilities','last_seen_at'
+          )
+        ORDER BY column_name`,
+    );
+    expect(columns.rows).toEqual([
+      { column_name: "agent_capabilities", data_type: "jsonb", is_nullable: "YES" },
+      { column_name: "agent_protocol_version", data_type: "text", is_nullable: "YES" },
+      { column_name: "agent_version", data_type: "text", is_nullable: "YES" },
+      {
+        column_name: "last_seen_at",
+        data_type: "timestamp with time zone",
+        is_nullable: "YES",
+      },
+      { column_name: "os_version", data_type: "text", is_nullable: "YES" },
+    ]);
+
+    const forbidden = await database.query<{ column_name: string }>(
+      `SELECT column_name
+         FROM information_schema.columns
+        WHERE table_name='devices'
+          AND column_name IN (
+            'availability','workload','compatibility','connection_status','hostname'
+          )`,
+    );
+    expect(forbidden.rows).toEqual([]);
+
+    const historical = await database.query<{
+      os_version: string | null;
+      agent_version: string | null;
+      agent_protocol_version: string | null;
+      agent_capabilities: unknown;
+      last_seen_at: Date | null;
+    }>(
+      `SELECT
+         os_version,agent_version,agent_protocol_version,
+         agent_capabilities,last_seen_at
+       FROM devices
+       WHERE id='historical-device'`,
+    );
+    expect(historical.rows[0]).toEqual({
+      os_version: null,
+      agent_version: null,
+      agent_protocol_version: null,
+      agent_capabilities: null,
+      last_seen_at: null,
+    });
+  });
+
+  it("installs validated constraints, the owner-list index, and the monotonic guard", async () => {
+    const constraints = await database.query<{ conname: string; convalidated: boolean }>(
+      `SELECT conname,convalidated
+         FROM pg_constraint
+        WHERE conrelid='devices'::regclass
+          AND conname IN (
+            'devices_os_version_check',
+            'devices_agent_observation_shape_check',
+            'devices_last_seen_check'
+          )
+        ORDER BY conname`,
+    );
+    expect(constraints.rows).toEqual([
+      { conname: "devices_agent_observation_shape_check", convalidated: true },
+      { conname: "devices_last_seen_check", convalidated: true },
+      { conname: "devices_os_version_check", convalidated: true },
+    ]);
+    const index = await database.query<{ indexname: string }>(
+      `SELECT indexname
+         FROM pg_indexes
+        WHERE schemaname='public'
+          AND indexname='devices_owner_last_seen_idx'`,
+    );
+    expect(index.rows).toEqual([{ indexname: "devices_owner_last_seen_idx" }]);
+    const trigger = await database.query<{ tgname: string; tgenabled: string }>(
+      `SELECT tgname,tgenabled
+         FROM pg_trigger
+        WHERE tgrelid='devices'::regclass
+          AND NOT tgisinternal
+          AND tgname='devices_observation_guard'`,
+    );
+    expect(trigger.rows).toEqual([{ tgname: "devices_observation_guard", tgenabled: "O" }]);
+    const privileges = await database.query<{
+      can_select: boolean;
+      can_update: boolean;
+      can_execute_guard: boolean;
+      can_execute_capability_validator: boolean;
+    }>(
+      `SELECT
+         has_table_privilege('norns_app','devices','SELECT') AS can_select,
+         has_table_privilege('norns_app','devices','UPDATE') AS can_update,
+         has_function_privilege(
+           'norns_app','norns_guard_device_observation()','EXECUTE'
+         ) AS can_execute_guard,
+         has_function_privilege(
+           'norns_app','norns_valid_agent_capabilities(jsonb)','EXECUTE'
+         ) AS can_execute_capability_validator`,
+    );
+    expect(privileges.rows[0]).toEqual({
+      can_select: true,
+      can_update: true,
+      can_execute_guard: true,
+      can_execute_capability_validator: true,
+    });
+  });
+
+  it("accepts a complete observation and rejects partial, malformed, or regressing facts", async () => {
+    await database.exec(`
+      UPDATE devices
+         SET os_version='14.6',
+             agent_version='0.1.0',
+             agent_protocol_version='1',
+             agent_capabilities='["execution","visual_evidence"]'::jsonb,
+             last_seen_at='2026-07-01T12:05:00Z'
+       WHERE id='historical-device';
+    `);
+    const observed = await database.query<{
+      os_version: string;
+      agent_version: string;
+      agent_protocol_version: string;
+      agent_capabilities: string[];
+      last_seen_at: Date;
+    }>(
+      `SELECT
+         os_version,agent_version,agent_protocol_version,
+         agent_capabilities,last_seen_at
+       FROM devices
+       WHERE id='historical-device'`,
+    );
+    expect(observed.rows[0]).toMatchObject({
+      os_version: "14.6",
+      agent_version: "0.1.0",
+      agent_protocol_version: "1",
+      agent_capabilities: ["execution", "visual_evidence"],
+      last_seen_at: new Date("2026-07-01T12:05:00Z"),
+    });
+
+    await expect(
+      database.query("UPDATE devices SET agent_version='0.1.0' WHERE id='validation-device'"),
+    ).rejects.toThrow();
+    await expect(
+      database.query(
+        `UPDATE devices
+            SET agent_version='0.1.0',
+                agent_protocol_version='1',
+                agent_capabilities='{}'::jsonb
+          WHERE id='validation-device'`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      database.query(
+        `UPDATE devices
+            SET agent_version='0.1.0',
+                agent_protocol_version='1',
+                agent_capabilities='["execution",{"unexpected":true}]'::jsonb
+          WHERE id='validation-device'`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      database.query(
+        `UPDATE devices
+            SET agent_version='0.1.0',
+                agent_protocol_version='1',
+                agent_capabilities='["execution",""]'::jsonb
+          WHERE id='validation-device'`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      database.query(
+        `UPDATE devices
+            SET agent_version='0.1.0',
+                agent_protocol_version='1',
+                agent_capabilities='["execution","   "]'::jsonb
+          WHERE id='validation-device'`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      database.query(
+        `UPDATE devices
+            SET last_seen_at='2026-06-30T12:00:00Z'
+          WHERE id='validation-device'`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      database.query(
+        `UPDATE devices
+            SET last_seen_at='2026-07-01T12:04:00Z'
+          WHERE id='historical-device'`,
+      ),
+    ).rejects.toThrow(/cannot regress/);
+    await expect(
+      database.query("UPDATE devices SET last_seen_at=NULL WHERE id='historical-device'"),
+    ).rejects.toThrow(/cannot regress/);
   });
 });

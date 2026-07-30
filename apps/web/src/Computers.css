@@ -1,0 +1,388 @@
+.computers-page {
+  padding-top: clamp(1.6rem, 4vw, 3.5rem);
+  padding-bottom: 6rem;
+}
+
+.computers-layout {
+  display: grid;
+  grid-template-columns: minmax(18rem, 0.78fr) minmax(28rem, 1.35fr);
+  align-items: start;
+  gap: clamp(1rem, 2.4vw, 2rem);
+}
+
+.computers-inventory,
+.computers-detail-region {
+  min-width: 0;
+}
+
+.computers-section-heading,
+.computer-detail-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.computers-section-heading {
+  margin-bottom: 0.8rem;
+}
+
+.computers-section-heading h2,
+.computer-detail-heading h3 {
+  margin: 0.15rem 0 0;
+}
+
+.computer-list {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.computer-card {
+  width: 100%;
+  display: grid;
+  gap: 0.9rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface) 95%, transparent);
+  color: var(--ink);
+  text-align: left;
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+}
+
+.computer-card:hover {
+  border-color: var(--line-strong);
+  background: color-mix(in srgb, var(--surface-2) 80%, var(--surface));
+}
+
+.computer-card:focus-visible {
+  border-color: var(--brand-600);
+  outline: 3px solid color-mix(in srgb, var(--brand-600) 48%, transparent);
+  outline-offset: 2px;
+}
+
+.computer-card.is-selected {
+  border-color: color-mix(in srgb, var(--brand-600) 62%, var(--line));
+  box-shadow: inset 3px 0 0 var(--gold), var(--shadow-sm);
+}
+
+.computer-card.is-revoked,
+.computer-detail.is-revoked {
+  color: var(--ink-muted);
+  background: color-mix(in srgb, var(--surface-2) 58%, var(--surface));
+  box-shadow: none;
+}
+
+.computer-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.computer-card-head > span:first-child {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.computer-card-head strong,
+.computer-card-head small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.computer-card-head strong {
+  font-size: var(--text-md);
+}
+
+.computer-card-head small,
+.computer-card-os,
+.computer-card-last-seen {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.computer-card-os {
+  flex: none;
+}
+
+.computer-card-statuses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.computer-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.computer-status-label {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  text-transform: capitalize;
+}
+
+.computer-card-statuses .computer-status-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.computer-card-last-seen {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+}
+
+.computer-detail {
+  display: grid;
+  gap: 1.2rem;
+  padding: clamp(1rem, 2.2vw, 1.5rem);
+}
+
+.computer-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.computer-detail-header h2 {
+  margin: 0.15rem 0 0.2rem;
+  font-size: clamp(1.5rem, 3vw, 2rem);
+}
+
+.computer-detail-header p {
+  margin: 0;
+  color: var(--ink-muted);
+}
+
+.computer-detail-actions,
+.computer-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.computer-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.65rem;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-2) 64%, transparent);
+}
+
+.computer-status-grid .computer-status {
+  display: grid;
+  justify-items: start;
+  gap: 0.35rem;
+}
+
+.computer-management-form {
+  display: grid;
+  gap: 0.85rem;
+  padding: 1rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.computer-revoke-form {
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
+}
+
+.computer-revoke-form p {
+  margin: 0.35rem 0 0;
+}
+
+.computer-detail-section {
+  min-width: 0;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--line);
+}
+
+.computer-detail-section > h3,
+.computer-detail-heading h3 {
+  margin: 0.15rem 0 0.8rem;
+}
+
+.computer-detail-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem 1.2rem;
+  margin: 0.9rem 0 0;
+}
+
+.computer-detail-list > div {
+  min-width: 0;
+}
+
+.computer-detail-list dt {
+  margin-bottom: 0.2rem;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.computer-detail-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.computer-detail-wide {
+  grid-column: 1 / -1;
+}
+
+.computer-fingerprint {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  line-height: 1.8;
+  word-spacing: 0.25em;
+}
+
+.computer-token-list,
+.computer-grant-list {
+  margin: 0.8rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.computer-token-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.computer-token-list li {
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink-muted);
+  font: 500 var(--text-xs) "DM Mono", monospace;
+}
+
+.computer-grant-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.computer-grant-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.computer-grant-list li > span:first-child {
+  display: grid;
+  min-width: 0;
+}
+
+.computer-grant-list small {
+  overflow: hidden;
+  color: var(--ink-muted);
+  font-family: "DM Mono", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.computers-detail-empty,
+.computers-empty {
+  min-height: 18rem;
+  display: grid;
+  place-items: center;
+  text-align: center;
+}
+
+.computers-detail-empty > div,
+.computers-empty > div {
+  max-width: 34rem;
+}
+
+@media (max-width: 980px) {
+  .computers-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .computers-detail-region {
+    scroll-margin-top: 1rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .computer-detail-header,
+  .computer-card-head,
+  .computer-card-last-seen {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .computer-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .computer-detail-list {
+    grid-template-columns: 1fr;
+  }
+
+  .computer-detail-wide {
+    grid-column: auto;
+  }
+
+  .computer-detail-actions,
+  .computer-form-actions {
+    width: 100%;
+  }
+
+  .computer-detail-actions .btn,
+  .computer-form-actions .btn {
+    flex: 1 1 auto;
+  }
+}
+
+@media (forced-colors: active) {
+  .computer-card,
+  .computer-detail,
+  .computer-status-grid,
+  .computer-management-form,
+  .computer-token-list li,
+  .computer-grant-list li {
+    border-color: CanvasText;
+  }
+
+  .computer-card.is-selected {
+    border: 3px solid Highlight;
+    box-shadow: none;
+  }
+
+  .computer-card:focus-visible {
+    outline: 3px solid Highlight;
+  }
+
+  .computer-card.is-revoked,
+  .computer-detail.is-revoked {
+    color: GrayText;
+  }
+
+  .computer-status .badge::before {
+    border: 1px solid currentColor;
+  }
+}

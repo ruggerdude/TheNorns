@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { DeviceEnrollmentCodeHasher } from "../src/devices/crypto.js";
 import {
   DeviceEnrollmentRuntimeConfigurationError,
+  type DeviceManagementRuntimeConfigurationError,
   parseDeviceEnrollmentRuntimeConfiguration,
+  parseDeviceManagementRuntimeConfiguration,
 } from "../src/devices/runtimeConfig.js";
 
 describe("device enrollment runtime configuration", () => {
@@ -130,4 +132,38 @@ describe("device enrollment runtime configuration", () => {
       expect(String(error)).not.toContain(rawSecret);
     }
   });
+});
+
+describe("device management runtime configuration", () => {
+  it("is independently disabled by default and for exact false", () => {
+    expect(parseDeviceManagementRuntimeConfiguration({})).toEqual({ enabled: false });
+    expect(
+      parseDeviceManagementRuntimeConfiguration({
+        NORNS_ENABLE_DEVICE_MANAGEMENT: "false",
+      }),
+    ).toEqual({ enabled: false });
+  });
+
+  it("enables only for exact true", () => {
+    expect(
+      parseDeviceManagementRuntimeConfiguration({
+        NORNS_ENABLE_DEVICE_MANAGEMENT: "true",
+      }),
+    ).toEqual({ enabled: true });
+  });
+
+  it.each(["", "TRUE", "False", "1", "yes", " true", "true "])(
+    "rejects unknown management enable value %j",
+    (flag) => {
+      expect(() =>
+        parseDeviceManagementRuntimeConfiguration({
+          NORNS_ENABLE_DEVICE_MANAGEMENT: flag,
+        }),
+      ).toThrowError(
+        expect.objectContaining<Partial<DeviceManagementRuntimeConfigurationError>>({
+          code: "device_management_flag_invalid",
+        }),
+      );
+    },
+  );
 });

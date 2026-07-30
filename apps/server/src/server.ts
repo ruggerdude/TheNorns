@@ -168,6 +168,10 @@ import {
   DeviceRunCancellationError,
   type DeviceRunCancellationService,
 } from "./devices/cancellation.js";
+import {
+  type DeviceManagementRouteService,
+  registerDeviceManagementRoutes,
+} from "./devices/managementRoutes.js";
 import type { DeviceOnlineControlBroker } from "./devices/onlineControl.js";
 import type { DeviceRevocationService } from "./devices/revocation.js";
 import {
@@ -432,6 +436,13 @@ export interface ServerOptions {
    */
   deviceEnrollment?: {
     service: DeviceEnrollmentRouteService;
+  };
+  /**
+   * Owner device-management and privacy-reduced project-target projections.
+   * This remains absent unless the separate management rollout flag is on.
+   */
+  deviceManagement?: {
+    service: DeviceManagementRouteService;
   };
   /**
    * Device installation WSS identity proof. This is deliberately independent
@@ -1692,6 +1703,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       service: options.deviceEnrollment.service,
       requireUser: requireSessionUser,
       now,
+    });
+  }
+
+  if (options.deviceManagement) {
+    await registerDeviceManagementRoutes(app, {
+      service: options.deviceManagement.service,
+      requireUser: requireSessionUser,
     });
   }
 

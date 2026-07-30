@@ -6,6 +6,21 @@ export interface DeviceEnrollmentRuntimeEnvironment {
   NORNS_DEVICE_ENROLLMENT_HMAC_KEY?: string | undefined;
 }
 
+export interface DeviceManagementRuntimeEnvironment {
+  NORNS_ENABLE_DEVICE_MANAGEMENT?: string | undefined;
+}
+
+export type DeviceManagementRuntimeConfiguration = {
+  enabled: boolean;
+};
+
+export class DeviceManagementRuntimeConfigurationError extends Error {
+  constructor(readonly code: "device_management_flag_invalid") {
+    super("NORNS_ENABLE_DEVICE_MANAGEMENT must be exactly true or false");
+    this.name = "DeviceManagementRuntimeConfigurationError";
+  }
+}
+
 export type DeviceEnrollmentRuntimeConfiguration =
   | {
       enabled: false;
@@ -98,4 +113,20 @@ export function parseDeviceEnrollmentRuntimeConfiguration(
       secret,
     },
   };
+}
+
+/**
+ * Owned-device and project-target HTTP surfaces are a separate rollout gate.
+ * They do not become reachable merely because enrollment or device transport
+ * is enabled.
+ */
+export function parseDeviceManagementRuntimeConfiguration(
+  environment: DeviceManagementRuntimeEnvironment,
+): DeviceManagementRuntimeConfiguration {
+  const flag = environment.NORNS_ENABLE_DEVICE_MANAGEMENT;
+  if (flag === undefined || flag === "false") return { enabled: false };
+  if (flag !== "true") {
+    throw new DeviceManagementRuntimeConfigurationError("device_management_flag_invalid");
+  }
+  return { enabled: true };
 }

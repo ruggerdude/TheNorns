@@ -121,6 +121,11 @@ interface RuntimeSchemaPosture {
   device_revocations: string | null;
   gateway_authentication_subject: boolean;
   gateway_device_credential_id: boolean;
+  device_os_version: boolean;
+  device_agent_version: boolean;
+  device_agent_protocol_version: boolean;
+  device_agent_capabilities: boolean;
+  device_last_seen_at: boolean;
 }
 
 /**
@@ -259,7 +264,42 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                WHERE table_schema='public'
                  AND table_name='gateway_credentials'
                  AND column_name='device_credential_id'
-            ) AS gateway_device_credential_id`,
+            ) AS gateway_device_credential_id,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='devices'
+                 AND column_name='os_version'
+            ) AS device_os_version,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='devices'
+                 AND column_name='agent_version'
+            ) AS device_agent_version,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='devices'
+                 AND column_name='agent_protocol_version'
+            ) AS device_agent_protocol_version,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='devices'
+                 AND column_name='agent_capabilities'
+            ) AS device_agent_capabilities,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='devices'
+                 AND column_name='last_seen_at'
+            ) AS device_last_seen_at`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -308,6 +348,11 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
       ? ["gateway_credentials.authentication_subject"]
       : []),
     ...(!posture?.gateway_device_credential_id ? ["gateway_credentials.device_credential_id"] : []),
+    ...(!posture?.device_os_version ? ["devices.os_version"] : []),
+    ...(!posture?.device_agent_version ? ["devices.agent_version"] : []),
+    ...(!posture?.device_agent_protocol_version ? ["devices.agent_protocol_version"] : []),
+    ...(!posture?.device_agent_capabilities ? ["devices.agent_capabilities"] : []),
+    ...(!posture?.device_last_seen_at ? ["devices.last_seen_at"] : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

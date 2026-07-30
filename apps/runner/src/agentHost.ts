@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   chmodSync,
@@ -17,6 +18,7 @@ import {
   PendingDeviceCredentialStore,
   type PendingDeviceCredentialSummary,
 } from "./pendingDeviceCredential.js";
+import { Redactor } from "./redact.js";
 
 export const AGENT_HOST_LOCK_FILENAME = "agent-host.lock";
 export const AGENT_HOST_PORT_FILENAME = "agent-host.json";
@@ -44,48 +46,124 @@ const SECURITY_HEADERS = {
   "x-frame-options": "DENY",
 } as const;
 
-const ENROLLMENT_HTML = `<!doctype html>
+const AGENT_HOST_VERSION = "0.1.0";
+const MANUAL_UPDATE_GUIDANCE =
+  "Install a newer signed Norns Local Agent package manually. Automatic updates are not enabled.";
+const SUPPORT_BUNDLE_REDACTOR = new Redactor();
+const SUPPORT_PATH_PATTERN =
+  /(?:[A-Za-z]:\\(?:[^\\\s"'<>|]+\\)*[^\\\s"'<>|]+|\/(?:(?:Users|home|tmp|var|etc|opt|private|Volumes|Applications)(?:\/[^/\s"'<>]+)*|[^/\s"'<>]+\/[^/\s"'<>]+(?:\/[^/\s"'<>]+)*))/g;
+const SUPPORT_EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+
+function redactSupportValue(value: string): string {
+  return SUPPORT_BUNDLE_REDACTOR.redact(value)
+    .replace(SUPPORT_PATH_PATTERN, "[REDACTED_PATH]")
+    .replace(SUPPORT_EMAIL_PATTERN, "[REDACTED_IDENTITY]")
+    .slice(0, 200);
+}
+
+const CONTROL_CENTER_HTML = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Norns Local Agent</title>
+  <title>Norns Local Agent Control Center</title>
   <link rel="stylesheet" href="/agent-host.css">
   <script defer src="/agent-host.js"></script>
 </head>
 <body>
-  <main>
+  <header>
     <p class="eyebrow">Norns Local Agent</p>
-    <h1>Enrollment</h1>
-    <p id="message">Opening the local Control Center…</p>
-    <dl>
-      <dt>Enrollment</dt><dd id="enrollment">Checking…</dd>
-      <dt>Daemon</dt><dd id="daemon">Checking…</dd>
-    </dl>
-    <div class="actions">
-      <button id="prepare" type="button">Prepare enrollment</button>
-      <button id="start" type="button">Start daemon</button>
-      <button id="stop" type="button">Stop daemon</button>
-    </div>
+    <h1>Control Center</h1>
+    <p id="message" role="status">Opening the local Control Center…</p>
+  </header>
+  <nav aria-label="Control Center sections" role="tablist">
+    <button class="tab" id="tab-home" role="tab" type="button" data-panel="home" aria-controls="home" aria-selected="true" tabindex="0">Home</button>
+    <button class="tab" id="tab-security" role="tab" type="button" data-panel="security" aria-controls="security" aria-selected="false" tabindex="-1">Security</button>
+    <button class="tab" id="tab-diagnostics" role="tab" type="button" data-panel="diagnostics" aria-controls="diagnostics" aria-selected="false" tabindex="-1">Diagnostics</button>
+  </nav>
+  <main>
+    <section id="home" role="tabpanel" aria-labelledby="tab-home" tabindex="0">
+      <h2 id="home-heading">Home</h2>
+      <p class="device-name" id="device-name">This computer</p>
+      <p id="location" class="muted">No location label</p>
+      <dl>
+        <dt>Enrollment</dt><dd id="enrollment">Checking…</dd>
+        <dt>Availability</dt><dd id="availability">Checking…</dd>
+        <dt>Compatibility</dt><dd id="compatibility">Checking…</dd>
+        <dt>Workload</dt><dd id="workload">Checking…</dd>
+        <dt>Daemon</dt><dd id="daemon">Checking…</dd>
+        <dt>Start at login</dt><dd id="start-at-login">Checking…</dd>
+        <dt>Agent version</dt><dd id="agent-version">Checking…</dd>
+      </dl>
+      <p id="recent-activity" class="muted">No recent local Norns activity.</p>
+      <div class="actions">
+        <button id="prepare" type="button">Prepare enrollment</button>
+        <button id="start" type="button">Start daemon</button>
+        <button id="stop" type="button">Stop daemon</button>
+      </div>
+    </section>
+
+    <section id="security" role="tabpanel" aria-labelledby="tab-security" tabindex="0" hidden>
+      <h2 id="security-heading">Security</h2>
+      <dl>
+        <dt>Enrolled account</dt><dd id="account">Not enrolled</dd>
+        <dt>Device fingerprint</dt><dd><code id="fingerprint">Not prepared</code></dd>
+        <dt>Repository access</dt><dd id="repository-access">No repository access is configured.</dd>
+      </dl>
+      <h3>Authorization notices</h3>
+      <ul id="authorization-notices"><li>None</li></ul>
+      <p class="boundary">This Control Center protects against malicious websites and other OS users. It cannot protect against a compromised process running as this same OS user.</p>
+    </section>
+
+    <section id="diagnostics" role="tabpanel" aria-labelledby="tab-diagnostics" tabindex="0" hidden>
+      <h2 id="diagnostics-heading">Diagnostics</h2>
+      <dl>
+        <dt>Server connectivity</dt><dd id="connectivity">Checking…</dd>
+        <dt>Protocol</dt><dd id="protocol-version">Checking…</dd>
+        <dt>Capabilities</dt><dd id="capabilities">Checking…</dd>
+        <dt>Git</dt><dd id="git-version">Not detected</dd>
+        <dt>Runtimes</dt><dd id="runtimes">Not detected</dd>
+      </dl>
+      <h3>Updates</h3>
+      <p id="update-guidance"></p>
+      <p class="muted">Uninstalling the package and revoking this computer on the server are separate actions.</p>
+      <div class="actions">
+        <button id="restart" type="button">Restart daemon</button>
+        <a class="button-link" href="/api/diagnostics/support" download="norns-agent-support.json">Download redacted support bundle</a>
+      </div>
+    </section>
   </main>
 </body>
 </html>
 `;
 
-const ENROLLMENT_CSS = `:root{color-scheme:light dark;font-family:system-ui,sans-serif}
-body{margin:0;min-height:100vh;display:grid;place-items:center;background:Canvas;color:CanvasText}
-main{width:min(36rem,calc(100% - 2rem));padding:2rem;border:1px solid GrayText;border-radius:1rem}
+const CONTROL_CENTER_CSS = `:root{color-scheme:light dark;font-family:system-ui,sans-serif}
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:Canvas;color:CanvasText}
+header,nav,main{width:min(48rem,calc(100% - 2rem));margin-inline:auto}
+header{padding-top:2rem}nav{display:flex;gap:.5rem;margin-block:1.25rem}
+main{padding:1.5rem;border:1px solid GrayText;border-radius:1rem;margin-bottom:2rem}
 .eyebrow{font-weight:700;letter-spacing:.08em;text-transform:uppercase}
-dl{display:grid;grid-template-columns:max-content 1fr;gap:.5rem 1rem}
+.device-name{font-size:1.25rem;font-weight:700}.muted{color:GrayText}
+dl{display:grid;grid-template-columns:minmax(9rem,max-content) 1fr;gap:.65rem 1rem}
 dt{font-weight:700}.actions{display:flex;flex-wrap:wrap;gap:.75rem;margin-top:1.5rem}
-button{font:inherit;padding:.65rem .9rem}
+button,.button-link{font:inherit;padding:.65rem .9rem;border:1px solid ButtonText;background:ButtonFace;color:ButtonText;border-radius:.4rem}
+.button-link{text-decoration:none}button:focus-visible,.button-link:focus-visible{outline:3px solid Highlight;outline-offset:2px}
+.tab[aria-selected="true"]{background:Highlight;color:HighlightText}
+.boundary{padding:1rem;border-left:.3rem solid GrayText}
+code{overflow-wrap:anywhere}
+@media(max-width:34rem){dl{grid-template-columns:1fr;gap:.2rem}dd{margin:0 0 .8rem}nav{overflow-x:auto}}
+@media(forced-colors:active){main,.boundary,button,.button-link{forced-color-adjust:auto}.tab[aria-selected="true"]{border-width:3px}}
 `;
 
-const ENROLLMENT_JAVASCRIPT = `(() => {
+const CONTROL_CENTER_JAVASCRIPT = `(() => {
   let csrf = null;
   const message = document.querySelector("#message");
   const enrollment = document.querySelector("#enrollment");
   const daemon = document.querySelector("#daemon");
+  const text = (selector, value) => {
+    document.querySelector(selector).textContent = value == null || value === "" ? "Not available" : String(value);
+  };
 
   async function request(path, options = {}) {
     const headers = { "content-type": "application/json", ...(options.headers || {}) };
@@ -103,6 +181,31 @@ const ENROLLMENT_JAVASCRIPT = `(() => {
   function render(status) {
     enrollment.textContent = status.enrollment_state;
     daemon.textContent = status.daemon_state;
+    text("#device-name", status.home.device_name);
+    text("#location", status.home.location_label || "No location label");
+    text("#availability", status.home.availability);
+    text("#compatibility", status.home.compatibility);
+    text("#workload", status.home.workload);
+    text("#start-at-login", status.home.start_at_login ? "Enabled" : "Not configured");
+    text("#agent-version", status.home.agent_version);
+    text("#recent-activity", status.home.recent_activity || "No recent local Norns activity.");
+    text("#account", status.security.enrolled_account || "Not enrolled");
+    text("#fingerprint", status.security.public_key_fingerprint || "Not prepared");
+    text("#repository-access", status.security.repository_access_summary);
+    const notices = document.querySelector("#authorization-notices");
+    notices.replaceChildren(...(status.security.failed_authorization_notices.length
+      ? status.security.failed_authorization_notices
+      : ["None"]).map((notice) => {
+        const item = document.createElement("li");
+        item.textContent = notice;
+        return item;
+      }));
+    text("#connectivity", status.diagnostics.connectivity);
+    text("#protocol-version", status.diagnostics.protocol_version);
+    text("#capabilities", status.diagnostics.capabilities.join(", ") || "None reported");
+    text("#git-version", status.diagnostics.git_version || "Not detected");
+    text("#runtimes", status.diagnostics.runtimes.join(", ") || "Not detected");
+    text("#update-guidance", status.diagnostics.manual_update_guidance);
     message.textContent = "This page is served only by the Local Agent on loopback.";
   }
 
@@ -119,6 +222,9 @@ const ENROLLMENT_JAVASCRIPT = `(() => {
       });
       csrf = result.csrf_token;
       history.replaceState(null, "", "/");
+    } else {
+      const result = await request("/api/session", { method: "GET", headers: {} });
+      csrf = result.csrf_token;
     }
     await refresh();
   }
@@ -135,6 +241,39 @@ const ENROLLMENT_JAVASCRIPT = `(() => {
     await request("/api/daemon/stop", { method: "POST", body: "{}" });
     await refresh();
   });
+  document.querySelector("#restart").addEventListener("click", async () => {
+    await request("/api/daemon/restart", { method: "POST", body: "{}" });
+    await refresh();
+  });
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  function selectTab(tab, moveFocus) {
+    for (const candidate of tabs) {
+      const selected = candidate === tab;
+      candidate.setAttribute("aria-selected", String(selected));
+      candidate.tabIndex = selected ? 0 : -1;
+      document.querySelector("#" + candidate.dataset.panel).hidden = !selected;
+    }
+    if (moveFocus) tab.focus();
+  }
+  for (const tab of tabs) {
+    tab.addEventListener("click", () => selectTab(tab, false));
+    tab.addEventListener("keydown", (event) => {
+      const current = tabs.indexOf(tab);
+      const target = event.key === "ArrowRight"
+        ? tabs[(current + 1) % tabs.length]
+        : event.key === "ArrowLeft"
+          ? tabs[(current - 1 + tabs.length) % tabs.length]
+          : event.key === "Home"
+            ? tabs[0]
+            : event.key === "End"
+              ? tabs[tabs.length - 1]
+              : null;
+      if (target) {
+        event.preventDefault();
+        selectTab(target, true);
+      }
+    });
+  }
 
   bootstrap().catch((error) => {
     message.textContent = error.message;
@@ -146,6 +285,9 @@ const ENROLLMENT_JAVASCRIPT = `(() => {
 
 export type AgentHostLoopbackAddress = "127.0.0.1" | "::1";
 export type AgentDaemonState = "stopped" | "starting" | "running" | "stopping" | "failed";
+export type AgentAvailabilityState = "online" | "connecting" | "offline";
+export type AgentCompatibilityState = "ready" | "limited" | "update_required";
+export type AgentWorkloadState = "idle" | "busy";
 export type AgentEnrollmentState =
   | "not_enrolled"
   | "credential_prepared"
@@ -154,6 +296,25 @@ export type AgentEnrollmentState =
   | "active"
   | "denied"
   | "expired";
+
+export interface AgentHostLocalState {
+  device_name: string;
+  location_label: string | null;
+  enrolled_account: string | null;
+  availability: AgentAvailabilityState;
+  compatibility: AgentCompatibilityState;
+  workload: AgentWorkloadState;
+  agent_version: string;
+  protocol_version: string;
+  capabilities: string[];
+  start_at_login: boolean;
+  recent_activity: string | null;
+  repository_access_summary: string;
+  failed_authorization_notices: string[];
+  connectivity: "connected" | "connecting" | "disconnected";
+  git_version: string | null;
+  runtimes: string[];
+}
 
 export interface AgentDaemonLifecycle {
   start(): void | Promise<void>;
@@ -192,6 +353,60 @@ export interface AgentHostOptions {
   lock?: AgentHostSingleInstanceLock;
   portDiscovery?: AgentHostPortDiscovery;
   credentialStore?: PendingDeviceCredentialStore;
+  localState?: Partial<AgentHostLocalState>;
+  detectLocalTools?: boolean;
+}
+
+function commandVersion(command: string): string | null {
+  const result = spawnSync(command, ["--version"], {
+    encoding: "utf8",
+    timeout: 1_500,
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (result.status !== 0 || typeof result.stdout !== "string") return null;
+  const firstLine = [...(result.stdout.split(/\r?\n/, 1)[0] ?? "")]
+    .filter((character) => {
+      const code = character.charCodeAt(0);
+      return code >= 32 && code !== 127;
+    })
+    .join("")
+    .trim();
+  return firstLine ? firstLine.slice(0, 200) : null;
+}
+
+function detectLocalTools(): Pick<AgentHostLocalState, "git_version" | "runtimes"> {
+  const runtimes = [
+    ["Codex", commandVersion("codex")],
+    ["Claude Code", commandVersion("claude")],
+  ]
+    .filter((entry): entry is [string, string] => entry[1] !== null)
+    .map(([name, version]) => `${name} · ${version}`);
+  return {
+    git_version: commandVersion("git"),
+    runtimes,
+  };
+}
+
+function defaultLocalState(): AgentHostLocalState {
+  return {
+    device_name: "This computer",
+    location_label: null,
+    enrolled_account: null,
+    availability: "offline",
+    compatibility: "limited",
+    workload: "idle",
+    agent_version: AGENT_HOST_VERSION,
+    protocol_version: "Not negotiated",
+    capabilities: [],
+    start_at_login: false,
+    recent_activity: null,
+    repository_access_summary: "No repository access is configured.",
+    failed_authorization_notices: [],
+    connectivity: "disconnected",
+    git_version: null,
+    runtimes: [],
+  };
 }
 
 interface BoundAgentHost extends AgentHostPortRecord {
@@ -204,6 +419,7 @@ interface BootstrapGrant {
 }
 
 interface LocalSession {
+  csrfToken: string;
   csrfDigest: Buffer;
   expiresAt: number;
 }
@@ -411,6 +627,7 @@ export class AgentHost {
   private readonly lock: AgentHostSingleInstanceLock;
   private readonly portDiscovery: AgentHostPortDiscovery;
   private readonly credentialStore: PendingDeviceCredentialStore;
+  private readonly localState: AgentHostLocalState;
   private readonly sessions = new Map<string, LocalSession>();
   private server: Server | null = null;
   private bound: BoundAgentHost | null = null;
@@ -418,6 +635,7 @@ export class AgentHost {
   private daemonState: AgentDaemonState = "stopped";
   private enrollmentState: AgentEnrollmentState;
   private daemonTransition: Promise<void> = Promise.resolve();
+  private shuttingDown = false;
 
   constructor(private readonly options: AgentHostOptions) {
     this.host = options.host ?? "127.0.0.1";
@@ -437,6 +655,19 @@ export class AgentHost {
     this.portDiscovery = options.portDiscovery ?? new FileAgentHostPortDiscovery(options.dataDir);
     this.credentialStore =
       options.credentialStore ?? new PendingDeviceCredentialStore(options.dataDir);
+    const defaults = defaultLocalState();
+    const detected = options.detectLocalTools === false ? {} : detectLocalTools();
+    this.localState = {
+      ...defaults,
+      ...detected,
+      ...options.localState,
+      capabilities: [...(options.localState?.capabilities ?? defaults.capabilities)],
+      failed_authorization_notices: [
+        ...(options.localState?.failed_authorization_notices ??
+          defaults.failed_authorization_notices),
+      ],
+      runtimes: [...(options.localState?.runtimes ?? defaults.runtimes)],
+    };
     this.enrollmentState = this.credentialStore.exists() ? "credential_prepared" : "not_enrolled";
   }
 
@@ -462,6 +693,7 @@ export class AgentHost {
 
   async start(): Promise<AgentHostStartResult> {
     if (this.server) throw new Error("AgentHost has already started");
+    this.shuttingDown = false;
     this.lock.acquire();
     const server = createServer((request, response) => {
       void this.handleRequest(request, response);
@@ -526,15 +758,17 @@ export class AgentHost {
   async stop(): Promise<void> {
     const server = this.server;
     if (!server) return;
+    this.shuttingDown = true;
+    const closeServer = new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
     try {
       if (this.daemonState !== "stopped") {
         await this.transitionDaemon("stop");
       }
     } finally {
       try {
-        await new Promise<void>((resolve, reject) => {
-          server.close((error) => (error ? reject(error) : resolve()));
-        });
+        await closeServer;
       } finally {
         this.server = null;
         this.bound = null;
@@ -566,6 +800,9 @@ export class AgentHost {
 
   private async handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
+      if (this.shuttingDown) {
+        throw new AgentHostHttpError(503, "AgentHost is shutting down");
+      }
       const bound = this.requireBound();
       if (request.headers.host !== bound.expectedHostHeader) {
         throw new AgentHostHttpError(403, "invalid loopback Host");
@@ -612,22 +849,34 @@ export class AgentHost {
   ): Promise<void> {
     switch (path) {
       case "/":
-        send(response, 200, "text/html; charset=utf-8", ENROLLMENT_HTML);
+        send(response, 200, "text/html; charset=utf-8", CONTROL_CENTER_HTML);
         return;
       case "/agent-host.css":
-        send(response, 200, "text/css; charset=utf-8", ENROLLMENT_CSS);
+        send(response, 200, "text/css; charset=utf-8", CONTROL_CENTER_CSS);
         return;
       case "/agent-host.js":
-        send(response, 200, "text/javascript; charset=utf-8", ENROLLMENT_JAVASCRIPT);
+        send(response, 200, "text/javascript; charset=utf-8", CONTROL_CENTER_JAVASCRIPT);
         return;
       case "/api/status":
         this.requireSession(request);
         sendJson(response, 200, this.statusBody());
         return;
+      case "/api/session": {
+        const session = this.requireSession(request);
+        sendJson(response, 200, { csrf_token: session.csrfToken });
+        return;
+      }
+      case "/api/diagnostics/support":
+        this.requireSession(request);
+        sendJson(response, 200, this.supportBundleBody(), {
+          "content-disposition": 'attachment; filename="norns-agent-support.json"',
+        });
+        return;
       case "/api/session/bootstrap":
       case "/api/enrollment/prepare":
       case "/api/daemon/start":
       case "/api/daemon/stop":
+      case "/api/daemon/restart":
         throw new AgentHostHttpError(405, "method not allowed");
       default:
         throw new AgentHostHttpError(404, "not found");
@@ -659,6 +908,7 @@ export class AgentHost {
       const csrfToken = randomBytes(32).toString("base64url");
       const sessionKey = sha256(sessionToken).toString("hex");
       this.sessions.set(sessionKey, {
+        csrfToken,
         csrfDigest: sha256(csrfToken),
         expiresAt: this.now() + this.sessionTtlMs,
       });
@@ -696,6 +946,10 @@ export class AgentHost {
         await this.transitionDaemon("stop");
         sendJson(response, 200, this.statusBody());
         return;
+      case "/api/daemon/restart":
+        await this.transitionDaemon("restart");
+        sendJson(response, 200, this.statusBody());
+        return;
       default:
         throw new AgentHostHttpError(404, "not found");
     }
@@ -715,10 +969,46 @@ export class AgentHost {
   }
 
   private statusBody(): Record<string, unknown> {
+    const prepared = this.credentialStore.read();
+    const availability: AgentAvailabilityState =
+      this.daemonState === "running"
+        ? this.localState.availability === "offline"
+          ? "connecting"
+          : this.localState.availability
+        : "offline";
+    const connectivity =
+      this.daemonState === "running" && this.localState.connectivity === "disconnected"
+        ? "connecting"
+        : this.localState.connectivity;
     return {
       enrollment_state: this.enrollmentState,
       daemon_state: this.daemonState,
-      credential_prepared: this.credentialStore.exists(),
+      credential_prepared: prepared !== null,
+      home: {
+        device_name: this.localState.device_name,
+        location_label: this.localState.location_label,
+        availability,
+        compatibility: this.localState.compatibility,
+        workload: this.localState.workload,
+        start_at_login: this.localState.start_at_login,
+        agent_version: this.localState.agent_version,
+        recent_activity: this.localState.recent_activity,
+      },
+      security: {
+        enrolled_account: this.localState.enrolled_account,
+        public_key_fingerprint: prepared?.public_key_fingerprint ?? null,
+        repository_access_summary: this.localState.repository_access_summary,
+        failed_authorization_notices: [...this.localState.failed_authorization_notices],
+      },
+      diagnostics: {
+        connectivity,
+        protocol_version: this.localState.protocol_version,
+        capabilities: [...this.localState.capabilities],
+        git_version: this.localState.git_version,
+        runtimes: [...this.localState.runtimes],
+        manual_update_guidance: MANUAL_UPDATE_GUIDANCE,
+        automatic_updates_enabled: false,
+      },
     };
   }
 
@@ -733,10 +1023,50 @@ export class AgentHost {
     };
   }
 
-  private transitionDaemon(action: "start" | "stop"): Promise<void> {
+  private supportBundleBody(): Record<string, unknown> {
+    const status = this.statusBody();
+    const home = status.home as Record<string, unknown>;
+    const diagnostics = status.diagnostics as Record<string, unknown>;
+    return {
+      format: "norns-agent-support-v1",
+      generated_at: new Date(this.now()).toISOString(),
+      enrollment_state: status.enrollment_state,
+      daemon_state: status.daemon_state,
+      availability: home.availability,
+      compatibility: home.compatibility,
+      workload: home.workload,
+      agent_version: redactSupportValue(String(home.agent_version ?? "")),
+      connectivity: diagnostics.connectivity,
+      protocol_version: redactSupportValue(String(diagnostics.protocol_version ?? "")),
+      capabilities: Array.isArray(diagnostics.capabilities)
+        ? diagnostics.capabilities.map((value) => redactSupportValue(String(value)))
+        : [],
+      git_version:
+        diagnostics.git_version === null || diagnostics.git_version === undefined
+          ? null
+          : redactSupportValue(String(diagnostics.git_version)),
+      runtimes: Array.isArray(diagnostics.runtimes)
+        ? diagnostics.runtimes.map((value) => redactSupportValue(String(value)))
+        : [],
+      failed_authorization_notice_count: this.localState.failed_authorization_notices.length,
+      redaction: {
+        includes_secrets: false,
+        includes_credentials: false,
+        includes_raw_paths: false,
+        includes_hostname: false,
+        includes_account_identity: false,
+      },
+    };
+  }
+
+  private transitionDaemon(action: "start" | "stop" | "restart"): Promise<void> {
+    if (action !== "stop" && this.shuttingDown) {
+      return Promise.reject(new AgentHostHttpError(503, "AgentHost is shutting down"));
+    }
     const operation = this.daemonTransition.then(async () => {
-      if (action === "start") {
+      const startDaemon = async (): Promise<void> => {
         if (this.daemonState === "running") return;
+        if (this.shuttingDown) return;
         this.daemonState = "starting";
         try {
           await this.options.daemon.start();
@@ -745,17 +1075,27 @@ export class AgentHost {
           this.daemonState = "failed";
           throw error;
         }
+      };
+
+      const stopDaemon = async (): Promise<void> => {
+        if (this.daemonState === "stopped") return;
+        this.daemonState = "stopping";
+        try {
+          await this.options.daemon.stop();
+          this.daemonState = "stopped";
+        } catch (error) {
+          this.daemonState = "failed";
+          throw error;
+        }
+      };
+
+      if (action === "start") {
+        await startDaemon();
         return;
       }
-
-      if (this.daemonState === "stopped") return;
-      this.daemonState = "stopping";
-      try {
-        await this.options.daemon.stop();
-        this.daemonState = "stopped";
-      } catch (error) {
-        this.daemonState = "failed";
-        throw error;
+      await stopDaemon();
+      if (action === "restart" && !this.shuttingDown) {
+        await startDaemon();
       }
     });
     this.daemonTransition = operation.catch(() => undefined);

@@ -375,6 +375,12 @@ export const GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_NAME = "0057_device_management_observations";
+export const DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_URL = new URL(
+  "../../../drizzle/0057_device_management_observations.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -629,6 +635,10 @@ export async function loadDeviceCancellationTrackingMigrationSql(): Promise<stri
 
 export async function loadGatewayDeviceAuthorizationMigrationSql(): Promise<string> {
   return readFile(GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_URL, "utf8");
+}
+
+export async function loadDeviceManagementObservationsMigrationSql(): Promise<string> {
+  return readFile(DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -966,6 +976,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
       sql: await loadGatewayDeviceAuthorizationMigrationSql(),
+    },
+    {
+      name: DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_NAME,
+      sql: await loadDeviceManagementObservationsMigrationSql(),
     },
   ];
 }

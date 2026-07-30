@@ -106,6 +106,11 @@ export class DeviceOnlineControlBroker {
     connection.close(1008, "device revoked");
   }
 
+  /** Ephemeral presence only. Absence means offline, never revoked. */
+  isConnected(deviceId: string): boolean {
+    return this.connections.has(deviceId);
+  }
+
   private revalidateActiveIdentity(connection: ConnectedDevice): Promise<boolean> {
     return this.transactions.transaction(async (sql) => {
       const selected = await sql.query<ActiveConnectionIdentityRow>(

@@ -99,7 +99,7 @@ test("AgentHost serves only a hardened, bundled loopback UI", async () => {
       this.stops += 1;
     },
   };
-  const host = new AgentHost({ dataDir, daemon: lifecycle });
+  const host = new AgentHost({ dataDir, daemon: lifecycle, detectLocalTools: false });
 
   try {
     const started = await host.start();
@@ -127,13 +127,31 @@ test("AgentHost serves only a hardened, bundled loopback UI", async () => {
     const html = await page.text();
     assert.match(html, /<script defer src="\/agent-host\.js"><\/script>/);
     assert.doesNotMatch(html, /<script(?! defer src)/);
+    assert.match(html, />Home</);
+    assert.match(html, />Security</);
+    assert.match(html, />Diagnostics</);
+    assert.match(html, /role="tablist"/);
+    assert.match(html, /role="tab"/);
+    assert.match(html, /role="tabpanel"/);
+    assert.match(html, /Download redacted support bundle/);
+    assert.doesNotMatch(html, /hostname|raw local path/i);
 
     const queryBootstrap = await fetch(`${started.origin}/?bootstrap=not-accepted`);
     assert.equal(queryBootstrap.status, 400);
 
     const javascript = await fetch(`${started.origin}/agent-host.js`);
     assert.equal(javascript.status, 200);
-    assert.match(await javascript.text(), /\/api\/enrollment\/prepare/);
+    const javascriptBody = await javascript.text();
+    assert.match(javascriptBody, /\/api\/enrollment\/prepare/);
+    assert.match(javascriptBody, /\/api\/daemon\/restart/);
+    assert.match(javascriptBody, /\/api\/session/);
+    assert.match(javascriptBody, /ArrowRight/);
+
+    const stylesheet = await fetch(`${started.origin}/agent-host.css`);
+    assert.equal(stylesheet.status, 200);
+    const stylesheetBody = await stylesheet.text();
+    assert.match(stylesheetBody, /forced-colors:active/);
+    assert.match(stylesheetBody, /box-sizing:border-box/);
 
     const wrongHost = await requestWithHost(started.origin, `localhost:${started.port}`);
     assert.equal(wrongHost.status, 403);
@@ -153,6 +171,8 @@ test("AgentHost serves only a hardened, bundled loopback UI", async () => {
 
     const stateChangingGet = await fetch(`${started.origin}/api/daemon/start`);
     assert.equal(stateChangingGet.status, 405);
+    const restartGet = await fetch(`${started.origin}/api/daemon/restart`);
+    assert.equal(restartGet.status, 405);
     assert.equal(lifecycle.starts, 0);
   } finally {
     await host.stop();
@@ -173,7 +193,12 @@ test("AgentHost exchanges one bootstrap token for a CSRF-protected local session
     },
   };
   const credentialStore = new PendingDeviceCredentialStore(dataDir);
-  const host = new AgentHost({ dataDir, daemon: lifecycle, credentialStore });
+  const host = new AgentHost({
+    dataDir,
+    daemon: lifecycle,
+    credentialStore,
+    detectLocalTools: false,
+  });
 
   try {
     const started = await host.start();
@@ -203,7 +228,39 @@ test("AgentHost exchanges one bootstrap token for a CSRF-protected local session
       enrollment_state: "not_enrolled",
       daemon_state: "stopped",
       credential_prepared: false,
+      home: {
+        device_name: "This computer",
+        location_label: null,
+        availability: "offline",
+        compatibility: "limited",
+        workload: "idle",
+        start_at_login: false,
+        agent_version: "0.1.0",
+        recent_activity: null,
+      },
+      security: {
+        enrolled_account: null,
+        public_key_fingerprint: null,
+        repository_access_summary: "No repository access is configured.",
+        failed_authorization_notices: [],
+      },
+      diagnostics: {
+        connectivity: "disconnected",
+        protocol_version: "Not negotiated",
+        capabilities: [],
+        git_version: null,
+        runtimes: [],
+        manual_update_guidance:
+          "Install a newer signed Norns Local Agent package manually. Automatic updates are not enabled.",
+        automatic_updates_enabled: false,
+      },
     });
+
+    const recoveredSession = await fetch(`${started.origin}/api/session`, {
+      headers: { cookie: session.cookie },
+    });
+    assert.equal(recoveredSession.status, 200);
+    assert.deepEqual(await recoveredSession.json(), { csrf_token: session.csrf });
 
     const missingCsrf = await fetch(`${started.origin}/api/enrollment/prepare`, {
       method: "POST",
@@ -263,6 +320,211 @@ test("AgentHost exchanges one bootstrap token for a CSRF-protected local session
   }
 });
 
+test("AgentHost reports separate local status dimensions and restarts the daemon", async () => {
+  const dataDir = temporaryDataDir();
+  const lifecycle = {
+    starts: 0,
+    stops: 0,
+    start() {
+      this.starts += 1;
+    },
+    stop() {
+      this.stops += 1;
+    },
+  };
+  const credentialStore = new PendingDeviceCredentialStore(dataDir);
+  const prepared = credentialStore.prepare();
+  const host = new AgentHost({
+    dataDir,
+    daemon: lifecycle,
+    credentialStore,
+    detectLocalTools: false,
+    localState: {
+      device_name: "Office Mac mini",
+      location_label: "Studio",
+      enrolled_account: "owner@example.com",
+      availability: "online",
+      compatibility: "ready",
+      workload: "busy",
+      agent_version: "1.4.2",
+      protocol_version: "device-wss/1",
+      capabilities: ["context", "visual-evidence"],
+      start_at_login: true,
+      recent_activity: "Completed a Norns task 4 minutes ago.",
+      repository_access_summary: "Two repositories approved for Norns.",
+      failed_authorization_notices: ["A revoked project request was refused."],
+      connectivity: "connected",
+      git_version: "git version 2.50.1",
+      runtimes: ["Codex", "Claude Code"],
+    },
+  });
+
+  try {
+    const started = await host.start();
+    const session = await exchangeBootstrap(started);
+    const initial = await fetch(`${started.origin}/api/status`, {
+      headers: { cookie: session.cookie },
+    });
+    assert.equal(initial.status, 200);
+    const initialBody = await initial.json();
+    assert.equal(initialBody.home.device_name, "Office Mac mini");
+    assert.equal(initialBody.home.location_label, "Studio");
+    assert.equal(initialBody.home.availability, "offline");
+    assert.equal(initialBody.home.compatibility, "ready");
+    assert.equal(initialBody.home.workload, "busy");
+    assert.equal(initialBody.security.enrolled_account, "owner@example.com");
+    assert.equal(initialBody.security.public_key_fingerprint, prepared.public_key_fingerprint);
+    assert.deepEqual(initialBody.diagnostics.capabilities, ["context", "visual-evidence"]);
+    assert.equal("hostname" in initialBody.home, false);
+    assert.equal("automatic_update_url" in initialBody.diagnostics, false);
+
+    const support = await fetch(`${started.origin}/api/diagnostics/support`, {
+      headers: { cookie: session.cookie },
+    });
+    assert.equal(support.status, 200);
+    assert.match(support.headers.get("content-disposition") ?? "", /attachment/);
+    const supportBody = await support.json();
+    assert.equal(supportBody.format, "norns-agent-support-v1");
+    assert.deepEqual(supportBody.redaction, {
+      includes_secrets: false,
+      includes_credentials: false,
+      includes_raw_paths: false,
+      includes_hostname: false,
+      includes_account_identity: false,
+    });
+    assert.equal("public_key_fingerprint" in supportBody, false);
+    assert.equal("enrolled_account" in supportBody, false);
+    assert.equal("device_name" in supportBody, false);
+
+    const start = await fetch(`${started.origin}/api/daemon/start`, {
+      method: "POST",
+      headers: authenticatedHeaders(started, session, true),
+      body: "{}",
+    });
+    assert.equal(start.status, 200);
+    assert.equal((await start.json()).home.availability, "online");
+
+    const restart = await fetch(`${started.origin}/api/daemon/restart`, {
+      method: "POST",
+      headers: authenticatedHeaders(started, session, true),
+      body: "{}",
+    });
+    assert.equal(restart.status, 200);
+    assert.equal((await restart.json()).daemon_state, "running");
+    assert.equal(lifecycle.starts, 2);
+    assert.equal(lifecycle.stops, 1);
+  } finally {
+    await host.stop();
+    assert.equal(lifecycle.stops, 2);
+    removeTemporaryDataDir(dataDir);
+  }
+});
+
+test("AgentHost redacts support fields that contain secrets, identities, or local paths", async () => {
+  const dataDir = temporaryDataDir();
+  const host = new AgentHost({
+    dataDir,
+    daemon: { start() {}, stop() {} },
+    detectLocalTools: false,
+    localState: {
+      agent_version: "build sk-abcdefghijklmnopqrstuvwxyz /Users/alice/Norns",
+      protocol_version: "device-wss/1 owner@example.com",
+      capabilities: ["context", "path:/private/tmp/norns-worktree"],
+      git_version: "git from C:\\Users\\alice\\bin",
+      runtimes: ["Codex token=super-secret-value"],
+    },
+  });
+
+  try {
+    const started = await host.start();
+    const session = await exchangeBootstrap(started);
+    const support = await fetch(`${started.origin}/api/diagnostics/support`, {
+      headers: { cookie: session.cookie },
+    });
+    assert.equal(support.status, 200);
+    const serialized = JSON.stringify(await support.json());
+    assert.doesNotMatch(
+      serialized,
+      /sk-abcdefghijklmnopqrstuvwxyz|\/Users\/alice|owner@example\.com|C:\\\\Users\\\\alice|super-secret-value/,
+    );
+    assert.match(serialized, /REDACTED/);
+    assert.match(serialized, /device-wss\/1/);
+  } finally {
+    await host.stop();
+    removeTemporaryDataDir(dataDir);
+  }
+});
+
+test("AgentHost fences late daemon starts while shutting down", async () => {
+  const dataDir = temporaryDataDir();
+  const lifecycle = {
+    starts: 0,
+    stops: 0,
+    start() {
+      this.starts += 1;
+    },
+    stop() {
+      this.stops += 1;
+    },
+  };
+  const host = new AgentHost({ dataDir, daemon: lifecycle, detectLocalTools: false });
+
+  try {
+    const started = await host.start();
+    const session = await exchangeBootstrap(started);
+    const startedDaemon = await fetch(`${started.origin}/api/daemon/start`, {
+      method: "POST",
+      headers: authenticatedHeaders(started, session, true),
+      body: "{}",
+    });
+    assert.equal(startedDaemon.status, 200);
+
+    let stoppingPromise = null;
+    const lateResponse = new Promise((resolve, reject) => {
+      const url = new URL(`${started.origin}/api/daemon/start`);
+      const request = httpRequest(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: url.pathname,
+          method: "POST",
+          headers: {
+            ...authenticatedHeaders(started, session, true),
+            "content-length": "2",
+          },
+        },
+        (response) => {
+          response.resume();
+          response.once("end", () => resolve(response.statusCode));
+        },
+      );
+      request.once("error", reject);
+      request.once("socket", (socket) => {
+        const beginRequest = () => {
+          request.write("{");
+          setTimeout(() => {
+            stoppingPromise = host.stop();
+            request.end("}");
+            void stoppingPromise.catch(reject);
+          }, 20);
+        };
+        if (socket.connecting) socket.once("connect", beginRequest);
+        else beginRequest();
+      });
+      request.flushHeaders();
+    });
+
+    assert.equal(await lateResponse, 503);
+    await stoppingPromise;
+    assert.equal(host.daemon, "stopped");
+    assert.equal(lifecycle.starts, 1);
+    assert.equal(lifecycle.stops, 1);
+  } finally {
+    await host.stop();
+    removeTemporaryDataDir(dataDir);
+  }
+});
+
 test("AgentHost expires bootstrap tokens and enforces one host per data directory", async () => {
   const dataDir = temporaryDataDir();
   let now = 1_000;
@@ -272,11 +534,12 @@ test("AgentHost expires bootstrap tokens and enforces one host per data director
     daemon,
     now: () => now,
     bootstrapTokenTtlMs: 10,
+    detectLocalTools: false,
   });
 
   try {
     const started = await first.start();
-    const second = new AgentHost({ dataDir, daemon });
+    const second = new AgentHost({ dataDir, daemon, detectLocalTools: false });
     await assert.rejects(() => second.start(), AgentHostAlreadyRunningError);
 
     now += 11;
@@ -293,7 +556,7 @@ test("AgentHost expires bootstrap tokens and enforces one host per data director
     await first.stop();
   }
 
-  const replacement = new AgentHost({ dataDir, daemon });
+  const replacement = new AgentHost({ dataDir, daemon, detectLocalTools: false });
   try {
     await replacement.start();
   } finally {

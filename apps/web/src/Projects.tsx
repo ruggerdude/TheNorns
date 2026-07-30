@@ -422,6 +422,7 @@ export function Projects({
   user,
   onOpenAccount,
   onOpenAdmin,
+  onOpenComputers,
   onOpenUsage,
 }: {
   onOpenProject: (p: ProjectSummary) => void;
@@ -431,6 +432,7 @@ export function Projects({
   user: CurrentUser | null;
   onOpenAccount: (tab?: SettingsTab) => void;
   onOpenAdmin: () => void;
+  onOpenComputers?: () => void;
   onOpenUsage?: () => void;
 }): React.ReactElement {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
@@ -1267,6 +1269,7 @@ export function Projects({
         {user && onOpenUsage ? (
           <AuthenticatedHeaderActions
             user={user}
+            onOpenComputers={onOpenComputers}
             onOpenUsage={onOpenUsage}
             onOpenAccount={onOpenAccount}
             onOpenAdmin={onOpenAdmin}

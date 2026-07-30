@@ -38,14 +38,18 @@ import {
   DeviceEnrollmentCodeHasher,
   DeviceEnrollmentRuntimeConfigurationError,
   DeviceEnrollmentService,
+  DeviceManagementRuntimeConfigurationError,
+  DeviceManagementService,
   DeviceOnlineControlBroker,
   DeviceRevocationService,
   DeviceRunCancellationService,
   DeviceWssAuthenticationService,
   PostgresDeviceActionAuthorization,
   PostgresDeviceEnrollmentRepository,
+  PostgresDeviceManagementRepository,
   PostgresDeviceWssAuthenticationRepository,
   parseDeviceEnrollmentRuntimeConfiguration,
+  parseDeviceManagementRuntimeConfiguration,
 } from "./devices/index.js";
 import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
@@ -222,6 +226,7 @@ let knowledgeOptions: { service: KnowledgeSystemService } | undefined;
 // runner, and one config change away from silently disabling runner inference.
 let runnerInferenceOptions: { transactions: V2TransactionRunner } | undefined;
 let deviceEnrollmentOptions: { service: DeviceEnrollmentService } | undefined;
+let deviceManagementOptions: { service: DeviceManagementService } | undefined;
 let runnerHttpAuthentication: DeviceHttpRequestAuthenticator | undefined;
 let deviceActionAuthorization: PostgresDeviceActionAuthorization | undefined;
 let deviceActionAuthorizationOptions:
@@ -254,6 +259,21 @@ try {
     process.exit(1);
   }
   throw error;
+}
+
+let deviceManagementRuntime: ReturnType<typeof parseDeviceManagementRuntimeConfiguration>;
+try {
+  deviceManagementRuntime = parseDeviceManagementRuntimeConfiguration(process.env);
+} catch (error) {
+  if (error instanceof DeviceManagementRuntimeConfigurationError) {
+    console.error(`device management startup refused [${error.code}]: ${error.message}`);
+    process.exit(1);
+  }
+  throw error;
+}
+if (deviceManagementRuntime.enabled && !databaseUrl) {
+  console.error("device management startup refused: PostgreSQL persistence is required");
+  process.exit(1);
 }
 
 const legacyRunnerHttpAuthFlag = process.env.NORNS_ENABLE_LEGACY_RUNNER_HTTP_AUTH;
@@ -318,6 +338,20 @@ if (databaseUrl) {
       cancellations: deviceCancellations,
       revocations: deviceRevocations,
     };
+    if (deviceManagementRuntime.enabled) {
+      deviceManagementOptions = {
+        service: new DeviceManagementService(
+          new PostgresDeviceManagementRepository(runtimeTransactions),
+          deviceRevocations,
+          {
+            presence: {
+              availability: (deviceId) =>
+                deviceOnlineControl.isConnected(deviceId) ? "online" : "offline",
+            },
+          },
+        ),
+      };
+    }
     if (deviceEnrollmentRuntime.enabled) {
       deviceWssAuthentication = new DeviceWssAuthenticationService(
         new PostgresDeviceWssAuthenticationRepository(runtimeTransactions),
@@ -788,6 +822,12 @@ if (deviceEnrollmentRuntime.enabled && !deviceEnrollmentOptions) {
   );
   process.exit(1);
 }
+if (deviceManagementRuntime.enabled && !deviceManagementOptions) {
+  console.error(
+    "device management startup refused [device_management_database_required]: DATABASE_URL is required",
+  );
+  process.exit(1);
+}
 
 // demo engine over the same plan, driven partway for a live-looking dashboard
 const budget = new BudgetLedger(2000);
@@ -909,6 +949,7 @@ const server = await buildServer({
     : {}),
   ...(identityRuntime.mode === "relational" ? { identity: identityRuntime.identity } : {}),
   ...(deviceEnrollmentOptions !== undefined ? { deviceEnrollment: deviceEnrollmentOptions } : {}),
+  ...(deviceManagementOptions !== undefined ? { deviceManagement: deviceManagementOptions } : {}),
   ...(deviceWssAuthentication !== undefined ? { deviceWssAuthentication } : {}),
   ...(deviceControlOptions !== undefined ? { deviceControl: deviceControlOptions } : {}),
   ...(runnerHttpAuthentication !== undefined ? { runnerHttpAuthentication } : {}),
