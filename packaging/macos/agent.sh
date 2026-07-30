@@ -2,7 +2,7 @@
 set -eu
 
 ACTION="${1:-}"
-RESOURCE_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+RESOURCE_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
 DATA_DIR="$HOME/.norns/runner-1"
 LOG_DIR="$HOME/.norns/logs"
 SERVICE="$HOME/Library/LaunchAgents/com.thenorns.local-agent.plist"
@@ -52,6 +52,10 @@ install_launch_agent() {
     printf '%s\n' '</array>'
     printf '%s\n' '<key>RunAtLoad</key><true/>'
     printf '%s\n' '<key>KeepAlive</key><true/>'
+    printf '%s\n' '<key>EnvironmentVariables</key><dict>'
+    printf '%s\n' '<key>NORNS_SERVER</key><string>https://thenorns.up.railway.app</string>'
+    printf '%s\n' '<key>NORNS_ENABLE_DEVICE_ENROLLMENT</key><string>true</string>'
+    printf '%s\n' '</dict>'
     printf '<key>StandardOutPath</key><string>%s/runner.log</string>\n' "$LOG_DIR"
     printf '<key>StandardErrorPath</key><string>%s/runner.err.log</string>\n' "$LOG_DIR"
     printf '%s\n' '</dict></plist>'
@@ -63,12 +67,7 @@ install_launch_agent() {
 }
 
 case "$ACTION" in
-  pair)
-    PAIRING_URI="${2:-}"
-    if [ -z "$PAIRING_URI" ]; then
-      printf '%s\n' "A Norns connection link is required." >&2
-      exit 2
-    fi
+  install)
     if ! /usr/bin/git --version >/dev/null 2>&1; then
       /usr/bin/xcode-select --install >/dev/null 2>&1 || true
       printf '%s\n' "Apple needs to install its Command Line Tools for Git. Click Install in Apple's dialog, then return to The Norns and click Connect installed agent again." >&2
@@ -77,15 +76,28 @@ case "$ACTION" in
     mkdir -p "$DATA_DIR" "$LOG_DIR"
     chmod 700 "$HOME/.norns" "$DATA_DIR"
     stop_old_agents
-    NORNS_AGENT_ALLOWED_ORIGIN="https://thenorns.up.railway.app" \
-      "$NODE" "$CLI" pair-url "$PAIRING_URI" --data "$DATA_DIR"
     install_launch_agent
     ;;
+  open)
+    if [ ! -f "$SERVICE" ]; then
+      "$0" install
+      exit 0
+    fi
+    if launchctl print "gui/$(id -u)/com.thenorns.local-agent" 2>/dev/null |
+      grep -q 'state = running'
+    then
+      exit 0
+    fi
+    launchctl bootstrap "gui/$(id -u)" "$SERVICE" >/dev/null 2>&1 || true
+    launchctl kickstart "gui/$(id -u)/com.thenorns.local-agent"
+    ;;
   start)
-    exec "$NODE" "$CLI" agent-start --data "$DATA_DIR"
+    NORNS_SERVER="https://thenorns.up.railway.app" \
+      NORNS_ENABLE_DEVICE_ENROLLMENT="true" \
+      exec "$NODE" "$CLI" agent-start --data "$DATA_DIR"
     ;;
   *)
-    printf '%s\n' "Usage: agent.sh pair <norns-agent-url> | start" >&2
+    printf '%s\n' "Usage: agent.sh install | open | start" >&2
     exit 2
     ;;
 esac

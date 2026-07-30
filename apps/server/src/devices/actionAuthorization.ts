@@ -38,6 +38,7 @@ export class DeviceActionAuthorizationError extends Error {
       | "device_inactive"
       | "device_generation_fenced"
       | "device_credential_inactive"
+      | "device_dispatch_disabled"
       | "device_binding_unauthorized"
       | "device_run_unauthorized",
   ) {
@@ -55,6 +56,12 @@ export class DeviceActionAuthorizationError extends Error {
  * grant-backed binding to legacy compatibility.
  */
 export class PostgresDeviceActionAuthorization {
+  constructor(
+    private readonly options: { deviceDispatchEnabled: boolean } = {
+      deviceDispatchEnabled: false,
+    },
+  ) {}
+
   private async bindingAuthorizationShape(
     sql: V2SqlExecutor,
     input: {
@@ -178,6 +185,9 @@ export class PostgresDeviceActionAuthorization {
         runner_id: input.runner_id,
         generation: input.generation,
       };
+    }
+    if (this.options.deviceDispatchEnabled !== true) {
+      throw new DeviceActionAuthorizationError("device_dispatch_disabled");
     }
     if (device.lifecycle !== "active" || !device.owner_active) {
       throw new DeviceActionAuthorizationError("device_inactive");
@@ -304,7 +314,7 @@ export class PostgresDeviceActionAuthorization {
            ON binding.id=$3
           AND binding.project_id=project.id
           AND binding.binding_type='local_runner'
-          AND binding.status='connected'
+          AND binding.status IN ('connected','degraded','disconnected')
          JOIN project_device_repository_grants grant_record
            ON grant_record.id=binding.project_device_repository_grant_id
           AND grant_record.project_id=project.id

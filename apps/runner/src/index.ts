@@ -8,6 +8,8 @@ export {
   AgentHostAlreadyRunningError,
   FileAgentHostPortDiscovery,
   FileAgentHostSingleInstanceLock,
+  createAgentHostNativeLaunchRequestProof,
+  createAgentHostNativeLaunchResponseProof,
   type AgentAvailabilityState,
   type AgentCompatibilityState,
   type AgentDaemonLifecycle,
@@ -39,6 +41,22 @@ export {
   ActiveDeviceIdentityStore,
   type ActiveDeviceIdentity,
 } from "./deviceInstallationIdentity.js";
+export {
+  DevelopmentFileDeviceCredentialSecretStore,
+  InMemoryDeviceCredentialSecretStore,
+  LinuxSecretServiceDeviceCredentialSecretStore,
+  MacOsKeychainDeviceCredentialSecretStore,
+  WindowsDpapiDeviceCredentialSecretStore,
+  createInstalledDeviceCredentialSecretStore,
+  type DeviceCredentialSecretStore,
+} from "./deviceCredentialSecretStore.js";
+export {
+  DEVICE_ENROLLMENT_STATE_FILENAME,
+  DeviceEnrollmentCoordinator,
+  type DeviceEnrollmentCoordinatorOptions,
+  type DeviceEnrollmentState,
+  type PublicDeviceEnrollmentStatus,
+} from "./deviceEnrollment.js";
 export {
   LOCAL_AGENT_CONFIG_FILENAME,
   LOCAL_AGENT_PAIRING_PROTOCOL,
@@ -78,10 +96,15 @@ export {
   type DeviceWssProofInput,
 } from "./deviceWssAuth.js";
 export {
+  selectPersistentExecutionIdentity,
+  type PersistentExecutionIdentitySelection,
+} from "./persistentExecutionIdentity.js";
+export {
   WorkspaceRegistry,
   type LocalRepositoryApproval,
 } from "./workspaceRegistry.js";
 export {
+  ActiveDeviceRepositoryRegistrationClient,
   LOCAL_REPOSITORY_ACCESS_FILENAME,
   LocalRepositoryAccessController,
   SignedDeviceRepositoryRegistrationClient,

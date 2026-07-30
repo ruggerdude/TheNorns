@@ -1,5 +1,6 @@
 import type {
   CanAcceptProjectTargetDecisionT,
+  CanClaimLegacyRepositoryDecisionT,
   CanDispatchDecisionT,
   CanEmergencyStopDeviceDecisionT,
   CanGrantRepositoryDecisionT,
@@ -166,6 +167,33 @@ export class PostgresDeviceAuthorizationPolicy {
     };
   }
 
+  async canClaimLegacyRepository(input: {
+    actor_user_id: string;
+    project_id: string;
+  }): Promise<CanClaimLegacyRepositoryDecisionT> {
+    const isAllowed =
+      validIds(input.actor_user_id, input.project_id) &&
+      (await allowed(
+        this.sql,
+        `SELECT EXISTS (
+           SELECT 1
+             FROM users actor
+             JOIN projects project
+               ON project.owner_user_id=actor.id
+              AND project.id=$2
+              AND project.status='active'
+            WHERE actor.id=$1
+              AND actor.status='active'
+         ) AS allowed`,
+        [input.actor_user_id, input.project_id],
+      ));
+    return {
+      action: "canClaimLegacyRepository",
+      project_id: input.project_id,
+      ...decisionResult(isAllowed),
+    };
+  }
+
   async canDispatch(input: {
     actor_user_id: string;
     project_id: string;
@@ -193,7 +221,7 @@ export class PostgresDeviceAuthorizationPolicy {
                ON binding.id = run.repository_binding_id
               AND binding.project_id = project.id
               AND binding.binding_type = 'local_runner'
-              AND binding.status = 'connected'
+              AND binding.status IN ('connected','degraded','disconnected')
              JOIN project_device_repository_grants grant_record
                ON grant_record.id = binding.project_device_repository_grant_id
               AND grant_record.project_id = project.id

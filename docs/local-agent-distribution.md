@@ -14,18 +14,24 @@ Both include:
 
 - the built Norns runner and production dependencies;
 - its own Node.js runtime;
-- login startup and `norns-agent://` pairing registration.
+- per-user login startup and the loopback AgentHost Control Center;
+- persisted-key device enrollment through the Control Center, without a custom
+  URI or an enrollment secret on a command line.
 
 The Windows installer also includes the pinned 64-bit MinGit distribution. macOS uses Apple's Git;
 on a Mac without Command Line Tools, the app opens Apple's own installer and tells the subscriber to
-click the connection link again after it finishes.
+open the Control Center again after it finishes.
 
-The public beta installers pin pairing to `https://thenorns.up.railway.app`; another website cannot
-re-pair either app to an arbitrary relay through the registered protocol.
+The public beta installers pin enrollment to `https://thenorns.up.railway.app`.
+The native launcher authenticates the loopback AgentHost before opening its
+short-lived, one-use browser bootstrap. AgentHost applies exact IP-literal
+Host/Origin checks, CSRF protection, no CORS, bundled assets, and a strict CSP.
 
 Unsigned and unnotarized workflow runs are retained only as authenticated GitHub Actions artifacts.
 The workflow refuses to publish a GitHub prerelease unless Windows Authenticode signing and Mac
-Developer ID signing plus notarization all succeed.
+Developer ID signing plus notarization all succeed. Published version tags and
+assets are immutable: updates use a newly versioned signed package and are
+installed manually.
 
 Configure Windows:
 
@@ -55,9 +61,11 @@ NORNS_MACOS_AGENT_DOWNLOAD_URL=https://github.com/ruggerdude/TheNorns/releases/d
 NORNS_MACOS_AGENT_RELEASE_CHANNEL=notarized
 ```
 
-The Connections page will then offer **Download for Windows**, **Download for Mac**, and a one-use
-**Connect installed agent** link. Without configured signed downloads, it honestly retains the
-existing command-line installers under **Advanced command-line setup**.
+The configured URLs identify the immutable signed packages used by the
+deployment's manual installation and update guidance. Device approval itself
+uses the code-free website approval page and a throttled POSTed human code; the
+256-bit device code stays in protected agent storage and enrollment POST
+bodies.
 
 ## Temporary unsigned Mac preview
 

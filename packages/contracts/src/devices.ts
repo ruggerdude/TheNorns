@@ -5,6 +5,7 @@ import {
   V2GitCommitSha,
   V2IsoDateTime,
   V2NonEmptyString,
+  V2PositiveVersion,
   V2Sha256Hex,
 } from "./v2/common.js";
 import { V2AgentRunState } from "./v2/lifecycle.js";
@@ -356,6 +357,15 @@ export const CanAcceptProjectTargetDecision = z
   .strict();
 export type CanAcceptProjectTargetDecisionT = z.infer<typeof CanAcceptProjectTargetDecision>;
 
+export const CanClaimLegacyRepositoryDecision = z
+  .object({
+    action: z.literal("canClaimLegacyRepository"),
+    project_id: V2EntityId,
+    ...AuthorizationDecisionResult,
+  })
+  .strict();
+export type CanClaimLegacyRepositoryDecisionT = z.infer<typeof CanClaimLegacyRepositoryDecision>;
+
 export const CanDispatchDecision = z
   .object({
     action: z.literal("canDispatch"),
@@ -391,6 +401,7 @@ export const DeviceAuthorizationDecision = z.discriminatedUnion("action", [
   CanManageDeviceDecision,
   CanGrantRepositoryDecision,
   CanAcceptProjectTargetDecision,
+  CanClaimLegacyRepositoryDecision,
   CanDispatchDecision,
   CanStopProjectRunDecision,
   CanEmergencyStopDeviceDecision,
@@ -555,6 +566,134 @@ export const ConversationExecutionProjection = z
     }
   });
 export type ConversationExecutionProjectionT = z.infer<typeof ConversationExecutionProjection>;
+
+export const LegacyRepositoryBindingClaimState = z.enum(["claim_required", "finalized"]);
+export type LegacyRepositoryBindingClaimStateT = z.infer<typeof LegacyRepositoryBindingClaimState>;
+
+export const LegacyRepositoryBindingClaimTarget = z
+  .object({
+    execution_target_id: V2EntityId,
+    name: z.string().trim().min(1).max(200),
+    location_label: NullableLabel,
+    repository_display_name: z.string().trim().min(1).max(240),
+  })
+  .strict();
+export type LegacyRepositoryBindingClaimTargetT = z.infer<
+  typeof LegacyRepositoryBindingClaimTarget
+>;
+
+export const LegacyRepositoryBindingClaimProjection = z
+  .object({
+    project_id: V2EntityId,
+    claim_id: V2EntityId,
+    state: LegacyRepositoryBindingClaimState,
+    repository_display_name: z.string().trim().min(1).max(240),
+    claim_version: V2PositiveVersion,
+    project_version: V2PositiveVersion,
+    can_finalize: z.boolean(),
+    candidate_targets: z.array(LegacyRepositoryBindingClaimTarget),
+    finalized_execution_target_id: V2EntityId.nullable(),
+    created_at: V2IsoDateTime,
+    finalized_at: V2IsoDateTime.nullable(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (
+      value.state === "claim_required" &&
+      (value.finalized_execution_target_id !== null || value.finalized_at !== null)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["state"],
+        message: "open legacy claims cannot expose finalization fields",
+      });
+    }
+    if (
+      value.state === "finalized" &&
+      (value.finalized_execution_target_id === null || value.finalized_at === null)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["state"],
+        message: "finalized legacy claims require their selected target and timestamp",
+      });
+    }
+    if (value.can_finalize && value.state !== "claim_required") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["can_finalize"],
+        message: "only an open legacy claim may be finalized",
+      });
+    }
+  });
+export type LegacyRepositoryBindingClaimProjectionT = z.infer<
+  typeof LegacyRepositoryBindingClaimProjection
+>;
+
+export const BeginLegacyRepositoryBindingClaimRequest = z
+  .object({
+    expected_project_version: V2PositiveVersion,
+    idempotency_key: z.string().trim().min(1).max(200),
+  })
+  .strict();
+export type BeginLegacyRepositoryBindingClaimRequestT = z.infer<
+  typeof BeginLegacyRepositoryBindingClaimRequest
+>;
+
+export const FinalizeLegacyRepositoryBindingClaimRequest = z
+  .object({
+    execution_target_id: V2EntityId,
+    expected_claim_version: V2PositiveVersion,
+    expected_project_version: V2PositiveVersion,
+    idempotency_key: z.string().trim().min(1).max(200),
+    confirmation: z.literal("use_this_repository"),
+  })
+  .strict();
+export type FinalizeLegacyRepositoryBindingClaimRequestT = z.infer<
+  typeof FinalizeLegacyRepositoryBindingClaimRequest
+>;
+
+export const CreateDeviceAuthorizationRequest = z
+  .object({
+    device_code: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{43}$/, "must be canonical base64url for 256 bits"),
+    user_code: z
+      .string()
+      .regex(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/),
+    public_key_pem: z.string().min(1).max(2_000),
+    proposed_name: z.string().trim().min(1).max(200),
+    os_family: DeviceOperatingSystemFamily,
+    architecture: z.string().trim().min(1).max(100),
+  })
+  .strict();
+export type CreateDeviceAuthorizationRequestT = z.infer<typeof CreateDeviceAuthorizationRequest>;
+
+export const CreateDeviceAuthorizationResponse = z
+  .object({
+    authorization_request_id: V2EntityId,
+    device_code: CreateDeviceAuthorizationRequest.shape.device_code,
+    user_code: CreateDeviceAuthorizationRequest.shape.user_code,
+    verification_uri: z.string().url(),
+    expires_at: V2IsoDateTime,
+    interval_seconds: PositivePollingIntervalSeconds,
+  })
+  .strict();
+export type CreateDeviceAuthorizationResponseT = z.infer<typeof CreateDeviceAuthorizationResponse>;
+
+export const LocalExecutionCapabilitiesProjection = z
+  .object({
+    schema_version: z.literal(1),
+    enrollment_available: z.boolean(),
+    computers_available: z.boolean(),
+    repository_grants_available: z.boolean(),
+    legacy_claim_available: z.boolean(),
+    legacy_local_creation_available: z.boolean(),
+  })
+  .strict();
+export type LocalExecutionCapabilitiesProjectionT = z.infer<
+  typeof LocalExecutionCapabilitiesProjection
+>;
 
 export const DeviceAuthorizationPollOutcome = z.discriminatedUnion("outcome", [
   z

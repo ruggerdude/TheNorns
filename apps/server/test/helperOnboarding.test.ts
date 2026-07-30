@@ -131,7 +131,11 @@ describe("local helper installer", () => {
     try {
       const uri = localAgentPairingUri({ origin, code: "a1b2c3d4" });
       await execFileAsync(process.execPath, [runnerCliPath, "pair-url", uri, "--data", data], {
-        env: { ...process.env, NORNS_AGENT_ALLOWED_ORIGIN: origin },
+        env: {
+          ...process.env,
+          NORNS_AGENT_ALLOWED_ORIGIN: origin,
+          NORNS_ENABLE_LEGACY_LOCAL_COMPATIBILITY: "true",
+        },
       });
       expect(received).toMatchObject({ code: "a1b2c3d4", runner_id: "runner-1" });
       expect(readLocalAgentConfig(data)).toEqual({

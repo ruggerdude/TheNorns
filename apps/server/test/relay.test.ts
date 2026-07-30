@@ -168,6 +168,8 @@ describe("phase 1A — remote control", () => {
       // Preserve the test stack's explicit compatibility setting across the
       // simulated restart. Production remains fail-closed when this is absent.
       legacyGlobalRunnerCompatibility: { enabled: true },
+      legacyHelperRoutes: { enabled: true },
+      legacyLocalRunnerAuth: { enabled: true },
     });
     const url = await listen(restored);
     const restoredToken = stack.token;

@@ -115,6 +115,7 @@ interface RuntimeSchemaPosture {
   device_authorization_requests: string | null;
   device_repository_registrations: string | null;
   project_device_repository_grants: string | null;
+  legacy_repository_binding_claims: string | null;
   device_http_request_replays: string | null;
   dispatch_context_runner_generation: boolean;
   dispatch_context_revoked_at: boolean;
@@ -242,6 +243,8 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
               AS device_repository_registrations,
             to_regclass('public.project_device_repository_grants')::text
               AS project_device_repository_grants,
+            to_regclass('public.legacy_repository_binding_claims')::text
+              AS legacy_repository_binding_claims,
             to_regclass('public.device_http_request_replays')::text
               AS device_http_request_replays,
             EXISTS (
@@ -357,6 +360,7 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.device_authorization_requests ? ["device_authorization_requests"] : []),
     ...(!posture?.device_repository_registrations ? ["device_repository_registrations"] : []),
     ...(!posture?.project_device_repository_grants ? ["project_device_repository_grants"] : []),
+    ...(!posture?.legacy_repository_binding_claims ? ["legacy_repository_binding_claims"] : []),
     ...(!posture?.device_http_request_replays ? ["device_http_request_replays"] : []),
     ...(!posture?.dispatch_context_runner_generation
       ? ["dispatch_context_documents.runner_generation"]

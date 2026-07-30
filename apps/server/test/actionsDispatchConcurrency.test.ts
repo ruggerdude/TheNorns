@@ -340,6 +340,7 @@ async function buildStack(taskCount: number, cap: number): Promise<Stack> {
     stores,
     users,
     legacyRunnerAuthorization: new PostgresLegacyRunnerAuthorization(transactions),
+    legacyLocalRunnerAuth: { enabled: true },
     phase4,
     actionsExecution: {
       coordinator: actionsCoordinator,

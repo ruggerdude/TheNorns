@@ -115,6 +115,9 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
       projects: new RelationalProjectReadRepository(transactions, "github-local-test"),
       integrations: { github },
       onboarding: { transactions },
+      legacyPairingRoutes: { enabled: true },
+      legacyHelperRoutes: { enabled: true },
+      legacyLocalRunnerAuth: { enabled: true },
       phase3: {
         sourceBindings,
         ingestion,

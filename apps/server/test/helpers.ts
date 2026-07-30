@@ -64,6 +64,8 @@ export async function startStack(runnerId = "runner-1"): Promise<Stack> {
     stores,
     users,
     legacyGlobalRunnerCompatibility: { enabled: true },
+    legacyHelperRoutes: { enabled: true },
+    legacyLocalRunnerAuth: { enabled: true },
   });
   const url = await listen(server);
 

@@ -90,4 +90,38 @@ describe("DeviceAuthorizationApproval", () => {
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalledOnce());
   });
+
+  it("requires a fresh sign-in for a stale approval session without retrying the decision", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse({
+          authorization_request_id: "authorization-1",
+          authorization_context: "context-1",
+          proposed_name: "Office Mac mini",
+          os_family: "macos",
+          architecture: "arm64",
+          public_key_fingerprint: "a".repeat(64),
+          expires_at: "2026-07-29T13:00:00.000Z",
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ error: "recent_auth_required" }, 403));
+    const onUnauthorized = vi.fn();
+
+    render(<DeviceAuthorizationApproval user={user} onUnauthorized={onUnauthorized} />);
+    fireEvent.change(screen.getByLabelText(/human verification code/i), {
+      target: { value: "ABCD-EFGH" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByText("Office Mac mini");
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    expect(
+      await screen.findByText(/sign in again before approving or denying this computer/i),
+    ).toBeVisible();
+    expect(screen.getByText(/decision was not retried/i)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
 });

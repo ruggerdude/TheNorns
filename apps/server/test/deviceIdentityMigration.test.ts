@@ -8,6 +8,7 @@ import {
   DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_NAME,
   DEVICE_REPOSITORY_ACCESS_MIGRATION_NAME,
   GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
+  LEGACY_REPOSITORY_BINDING_CLAIMS_MIGRATION_NAME,
   PROJECT_RUN_CANCELLATION_MIGRATION_NAME,
   currentV2MigrationSources,
   loadDeviceIdentityCoreMigrationSql,
@@ -41,7 +42,7 @@ describe.sequential("device identity core migration", () => {
 
   it("is registered before the additive Phase 2 device migrations", async () => {
     const sources = await currentV2MigrationSources();
-    expect(sources.slice(-7).map((source) => source.name)).toEqual([
+    expect(sources.slice(-8).map((source) => source.name)).toEqual([
       DEVICE_IDENTITY_CORE_MIGRATION_NAME,
       DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME,
       DEVICE_CANCELLATION_TRACKING_MIGRATION_NAME,
@@ -49,11 +50,13 @@ describe.sequential("device identity core migration", () => {
       DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_NAME,
       DEVICE_REPOSITORY_ACCESS_MIGRATION_NAME,
       PROJECT_RUN_CANCELLATION_MIGRATION_NAME,
+      LEGACY_REPOSITORY_BINDING_CLAIMS_MIGRATION_NAME,
     ]);
-    expect(sources.at(-7)?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
-    expect(sources.at(-3)?.sql).toContain("ADD COLUMN os_version TEXT");
-    expect(sources.at(-2)?.sql).toContain("CREATE TABLE IF NOT EXISTS device_publication_permits");
-    expect(sources.at(-1)?.sql).toContain("ADD COLUMN idempotency_key TEXT");
+    expect(sources.at(-8)?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
+    expect(sources.at(-4)?.sql).toContain("ADD COLUMN os_version TEXT");
+    expect(sources.at(-3)?.sql).toContain("CREATE TABLE IF NOT EXISTS device_publication_permits");
+    expect(sources.at(-2)?.sql).toContain("ADD COLUMN idempotency_key TEXT");
+    expect(sources.at(-1)?.sql).toContain("CREATE TABLE legacy_repository_binding_claims");
   });
 
   it("creates the five core tables, privacy-safe columns, and runtime grants", async () => {

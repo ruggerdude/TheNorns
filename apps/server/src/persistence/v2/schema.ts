@@ -131,7 +131,7 @@ export const repositoryBindings = pgTable(
       .references(() => projects.id, { onDelete: "cascade" }),
     bindingType: text("binding_type").notNull(),
     status: text("status").notNull(),
-    runnerId: text("runner_id").notNull(),
+    runnerId: text("runner_id"),
     workspaceId: text("workspace_id"),
     repositoryId: text("repository_id").notNull(),
     repositoryDisplayName: text("repository_display_name").notNull(),
@@ -160,7 +160,7 @@ export const repositoryBindings = pgTable(
     ),
     check(
       "repository_bindings_status_check",
-      sql`${table.status} IN ('unverified_candidate', 'validating', 'connected', 'degraded', 'disconnected', 'revoked')`,
+      sql`${table.status} IN ('unverified_candidate', 'validating', 'connected', 'degraded', 'disconnected', 'legacy_claim_required', 'revoked')`,
     ),
     check(
       "repository_bindings_health_check",

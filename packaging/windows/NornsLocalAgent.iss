@@ -20,7 +20,6 @@ OutputBaseFilename=Norns-Local-Agent-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-ChangesAssociations=yes
 CloseApplications=no
 UninstallDisplayIcon={app}\runtime\node.exe
 
@@ -28,15 +27,58 @@ UninstallDisplayIcon={app}\runtime\node.exe
 Source: "..\..\dist-agent\windows\payload\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Registry]
-Root: HKCU; Subkey: "Software\Classes\norns-agent"; ValueType: string; ValueData: "URL:Norns Local Agent"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\norns-agent"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\norns-agent\DefaultIcon"; ValueType: string; ValueData: "{app}\runtime\node.exe,0"
-Root: HKCU; Subkey: "Software\Classes\norns-agent\shell\open\command"; ValueType: string; ValueData: """{sys}\wscript.exe"" ""{app}\pair-agent.vbs"" ""%1"""
+Root: HKCU; Subkey: "Software\Classes\norns-agent"; Flags: deletekey dontcreatekey
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Norns Local Agent"; ValueData: """{sys}\wscript.exe"" ""{app}\start-agent.vbs"""; Flags: uninsdeletevalue
 
+[Icons]
+Name: "{group}\Norns Local Agent Control Center"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\open-control-center.vbs"""; WorkingDir: "{app}"
+
 [Run]
-Filename: "{sys}\wscript.exe"; Parameters: """{app}\stop-agent.vbs"""; Flags: runhidden waituntilterminated
-Filename: "{sys}\wscript.exe"; Parameters: """{app}\start-agent.vbs"""; Flags: runhidden nowait
+Filename: "{sys}\wscript.exe"; Parameters: """{app}\open-control-center.vbs"""; Flags: runhidden nowait postinstall
 
 [UninstallRun]
 Filename: "{sys}\wscript.exe"; Parameters: """{app}\stop-agent.vbs"""; Flags: runhidden waituntilterminated
+
+[Code]
+var
+  WasPreviouslyConfigured: Boolean;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+  StopScript: String;
+begin
+  Result := '';
+  WasPreviouslyConfigured :=
+    FileExists(ExpandConstant('{app}\start-agent.vbs')) or
+    RegValueExists(
+      HKCU,
+      'Software\Microsoft\Windows\CurrentVersion\Run',
+      'Norns Local Agent'
+    );
+  if not WasPreviouslyConfigured then
+    exit;
+
+  StopScript := ExpandConstant('{app}\stop-agent.vbs');
+  if not FileExists(StopScript) then
+  begin
+    Result :=
+      'The existing Norns Local Agent could not be stopped safely. ' +
+      'Close it and run this installer again.';
+    exit;
+  end;
+
+  if (not Exec(
+    ExpandConstant('{sys}\wscript.exe'),
+    '"' + StopScript + '"',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  )) or (ResultCode <> 0) then
+  begin
+    Result :=
+      'The existing Norns Local Agent did not stop before upgrade. ' +
+      'Close it and run this installer again.';
+  end;
+end;

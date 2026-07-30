@@ -83,6 +83,10 @@ export const CommandPayload = z.discriminatedUnion("kind", [
     run_id: nonEmpty,
     approved_mockup_version_id: nonEmpty,
     repository_binding_id: nonEmpty,
+    // Local device installations resolve the immutable repository registration
+    // by repository id; legacy and Actions runners may continue using their
+    // already-scoped workspace when this additive field is absent.
+    runner_repository_id: nonEmpty.optional(),
     verification_result_id: nonEmpty,
     deployment_record_id: nonEmpty,
     deployment_observation_id: nonEmpty,

@@ -3,8 +3,6 @@ import {
   type DeviceEnrollmentCodeHasher,
   canonicalDevicePublicKey,
   enrollmentRedemptionProofPayload,
-  generateDeviceCode,
-  generateHumanCode,
   isValidDeviceCode,
   normalizeHumanCode,
   timingSafeHexEqual,
@@ -31,8 +29,6 @@ export interface DeviceEnrollmentServiceOptions {
   redemptionResultTtlMs?: number;
   initialPollIntervalSeconds?: number;
   newId?: (prefix: string) => string;
-  generateDeviceCode?: () => string;
-  generateHumanCode?: () => string;
 }
 
 export class DeviceEnrollmentService {
@@ -41,8 +37,6 @@ export class DeviceEnrollmentService {
   private readonly initialPollIntervalSeconds: number;
   private readonly redemptionResultTtlMs: number;
   private readonly createId: (prefix: string) => string;
-  private readonly createDeviceCode: () => string;
-  private readonly createHumanCode: () => string;
 
   constructor(
     private readonly repository: DeviceEnrollmentRepository,
@@ -54,8 +48,6 @@ export class DeviceEnrollmentService {
       options.initialPollIntervalSeconds ?? DEFAULT_POLL_INTERVAL_SECONDS;
     this.redemptionResultTtlMs = options.redemptionResultTtlMs ?? DEFAULT_REDEMPTION_RESULT_TTL_MS;
     this.createId = options.newId ?? newId;
-    this.createDeviceCode = options.generateDeviceCode ?? generateDeviceCode;
-    this.createHumanCode = options.generateHumanCode ?? generateHumanCode;
     if (this.authorizationTtlMs <= 0 || !Number.isSafeInteger(this.authorizationTtlMs)) {
       throw new Error("device authorization TTL must be a positive integer");
     }
@@ -78,6 +70,8 @@ export class DeviceEnrollmentService {
   }
 
   async createAuthorization(input: {
+    device_code: string;
+    user_code: string;
     public_key_pem: string;
     proposed_name: string;
     os_family: DeviceOsFamily;
@@ -101,9 +95,8 @@ export class DeviceEnrollmentService {
       throw new DeviceEnrollmentError("invalid_public_key");
     }
     const issuedAt = this.now();
-    const deviceCode = this.createDeviceCode();
-    const humanCode = this.createHumanCode();
-    const normalizedHumanCode = normalizeHumanCode(humanCode);
+    const deviceCode = input.device_code;
+    const normalizedHumanCode = normalizeHumanCode(input.user_code);
     if (!isValidDeviceCode(deviceCode) || !normalizedHumanCode) {
       throw new Error("device enrollment code generator returned an invalid code");
     }
@@ -122,16 +115,16 @@ export class DeviceEnrollmentService {
       poll_interval_seconds: this.initialPollIntervalSeconds,
       created_at: issuedAt.toISOString(),
     });
-    if (created !== "created") {
+    if (!created) {
       throw new DeviceEnrollmentError("authorization_not_available");
     }
     return {
-      authorization_request_id: authorizationRequestId,
+      authorization_request_id: created.authorization_request_id,
       device_code: deviceCode,
-      user_code: humanCode,
+      user_code: `${normalizedHumanCode.slice(0, 4)}-${normalizedHumanCode.slice(4)}`,
       verification_uri: this.options.verificationUri,
-      expires_at: expiresAt.toISOString(),
-      interval_seconds: this.initialPollIntervalSeconds,
+      expires_at: created.expires_at,
+      interval_seconds: created.poll_interval_seconds,
     };
   }
 

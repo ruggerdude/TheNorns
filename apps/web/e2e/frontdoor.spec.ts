@@ -194,6 +194,16 @@ async function prepare(
     ) {
       return fulfill(route, [repository]);
     }
+    if (path === "/api/v2/capabilities/local-execution") {
+      return fulfill(route, {
+        schema_version: 1,
+        enrollment_available: true,
+        computers_available: true,
+        repository_grants_available: true,
+        legacy_claim_available: false,
+        legacy_local_creation_available: true,
+      });
+    }
     if (path === "/api/runners/helper/repositories") {
       return fulfill(route, {
         state: "connected",

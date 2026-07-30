@@ -44,6 +44,7 @@ describe.sequential("Phase 3 authenticated API", () => {
       stores: new RelayStores(),
       users,
       projects: new ProjectStore(),
+      legacyHelperRoutes: { enabled: true },
       phase3: {
         sourceBindings: new SourceBindingService(transactions),
         ingestion: new RepositoryIngestionService(transactions),

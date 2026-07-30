@@ -126,6 +126,31 @@ label.execution-target-option {
   border-top: 1px solid var(--line);
 }
 
+.execution-target-repository {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.7fr) minmax(0, 1.3fr);
+  gap: 1rem;
+  padding: 0.7rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.execution-target-repository > span:first-child,
+.execution-target-repository small {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.execution-target-repository > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 0.2rem;
+}
+
+.execution-target-repository strong,
+.execution-target-repository small {
+  overflow-wrap: anywhere;
+}
+
 .execution-target-read-only,
 .execution-target-empty,
 .execution-target-active-work,
@@ -147,6 +172,82 @@ label.execution-target-option {
 
 .execution-target-read-only-list .execution-target-option {
   grid-template-columns: minmax(0, 1fr);
+}
+
+.legacy-claim,
+.legacy-claim-member {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-2) 66%, var(--surface));
+}
+
+.legacy-claim-member {
+  gap: 0.35rem;
+}
+
+.legacy-claim-member p,
+.legacy-claim-heading p,
+.legacy-claim-guidance p,
+.legacy-claim-confirmation p {
+  margin: 0;
+}
+
+.legacy-claim-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.legacy-claim-heading > div {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.legacy-claim-heading h3 {
+  margin: 0;
+}
+
+.legacy-claim-repository {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.legacy-claim-repository > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.2rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.legacy-claim-repository dt {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.legacy-claim-repository dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.legacy-claim-guidance,
+.legacy-claim-confirmation {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.85rem;
+  border-left: 3px solid var(--info);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
 }
 
 .execution-target-retry {
@@ -191,6 +292,16 @@ label.execution-target-option {
     gap: 0.25rem;
   }
 
+  .execution-target-repository,
+  .legacy-claim-repository {
+    grid-template-columns: 1fr;
+  }
+
+  .legacy-claim-heading {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
   .execution-target-save-row .btn {
     width: 100%;
   }
@@ -200,5 +311,11 @@ label.execution-target-option {
   .execution-target-option.is-chosen {
     border-width: 3px;
     box-shadow: none;
+  }
+
+  .legacy-claim,
+  .legacy-claim-member,
+  .legacy-claim-repository > div {
+    border: 1px solid CanvasText;
   }
 }

@@ -46,6 +46,7 @@ async function startWithDemoProject(): Promise<{ server: NornsServer; projectId:
     stores: new RelayStores(),
     users,
     projects: new ProjectStore(),
+    legacyHelperRoutes: { enabled: true },
   });
   const created = await inject(server, "POST", "/api/projects", {
     name: "Demo",
@@ -66,6 +67,7 @@ describe("projects API", () => {
       stores: new RelayStores(),
       users,
       projects: new ProjectStore(),
+      legacyHelperRoutes: { enabled: true },
     });
     const created = await inject(server, "POST", "/api/projects", {
       name: "OAuth Login",
@@ -109,6 +111,7 @@ describe("projects API", () => {
       stores: new RelayStores(),
       users,
       projects: new ProjectStore(),
+      legacyHelperRoutes: { enabled: true },
     });
 
     const mismatch = await inject(server, "POST", "/api/projects", {
@@ -135,6 +138,7 @@ describe("projects API", () => {
       stores: new RelayStores(),
       users,
       projects: new ProjectStore(),
+      legacyHelperRoutes: { enabled: true },
     });
     const res = await inject(server, "GET", "/api/projects/proj-does-not-exist");
     expect(res.statusCode).toBe(404);
@@ -147,6 +151,7 @@ describe("projects API", () => {
       stores: new RelayStores(),
       users,
       projects: new ProjectStore(),
+      legacyHelperRoutes: { enabled: true },
     });
     const removed = await inject(server, "POST", "/api/projects", {
       name: "Remove me",
@@ -268,6 +273,7 @@ describe("project graph API", () => {
       stores: new RelayStores(),
       users,
       projects: new ProjectStore(),
+      legacyHelperRoutes: { enabled: true },
       integrationEnvironment: {
         ANTHROPIC_API_KEY: "test-anthropic",
         OPENAI_API_KEY: "test-openai",

@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+STATE_DIR="/var/tmp/com.thenorns.local-agent.pkg-state"
+RESTART_RECORDS="$STATE_DIR/restart-records"
+
+if [ ! -f "$RESTART_RECORDS" ]; then
+  /bin/rm -rf "$STATE_DIR"
+  exit 0
+fi
+
+TAB=$(printf '\t')
+while IFS="$TAB" read -r USER_ID USER_HOME SERVICE_LABEL EXTRA
+do
+  [ -n "$USER_ID" ] || continue
+  case "$USER_ID" in
+    *[!0-9]*)
+      printf '%s\n' "Norns upgrade restart user is invalid." >&2
+      exit 1
+      ;;
+  esac
+  case "$USER_HOME" in
+    /*) ;;
+    *)
+      printf '%s\n' "Norns upgrade restart home is invalid." >&2
+      exit 1
+      ;;
+  esac
+  case "$USER_HOME" in
+    *'
+'*|*'	'*)
+      printf '%s\n' "Norns upgrade restart home is invalid." >&2
+      exit 1
+      ;;
+  esac
+  case "$SERVICE_LABEL" in
+    com.thenorns.local-agent|com.thenorns.runner|app.thenorns.runner) ;;
+    *)
+      printf '%s\n' "Norns upgrade restart service label is invalid." >&2
+      exit 1
+      ;;
+  esac
+  [ -z "$EXTRA" ] || {
+    printf '%s\n' "Norns upgrade restart state is malformed." >&2
+    exit 1
+  }
+
+  SERVICE="$USER_HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
+  if [ ! -f "$SERVICE" ] || [ -L "$SERVICE" ]; then
+    printf 'Configured Norns service %s is missing after upgrade.\n' "$SERVICE_LABEL" >&2
+    exit 1
+  fi
+  if [ "$(/usr/bin/stat -f '%u' "$SERVICE")" != "$USER_ID" ]; then
+    printf 'Configured Norns service %s has unexpected ownership.\n' "$SERVICE_LABEL" >&2
+    exit 1
+  fi
+  /bin/launchctl bootstrap "gui/$USER_ID" "$SERVICE"
+  /bin/launchctl kickstart "gui/$USER_ID/$SERVICE_LABEL"
+done <"$RESTART_RECORDS"
+
+/bin/rm -rf "$STATE_DIR"

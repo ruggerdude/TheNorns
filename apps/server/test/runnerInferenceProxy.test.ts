@@ -643,6 +643,8 @@ describe.sequential("EXECUTION E3 proxied inference end to end", () => {
     server = await buildServer({
       stores,
       users,
+      legacyGlobalRunnerCompatibility: { enabled: true },
+      legacyLocalRunnerAuth: { enabled: true },
       inferenceProxy: new InferenceProxy({
         // The run is dispatched to THIS runner at the generation its key
         // registration assigns (1 for a first registration).
@@ -748,7 +750,12 @@ describe.sequential("EXECUTION E3 proxied inference end to end", () => {
     // refuse explicitly, not hang and not silently execute unmetered.
     const users = new UserStore();
     const bareStores = new RelayStores();
-    const bare = await buildServer({ stores: bareStores, users });
+    const bare = await buildServer({
+      stores: bareStores,
+      users,
+      legacyGlobalRunnerCompatibility: { enabled: true },
+      legacyLocalRunnerAuth: { enabled: true },
+    });
     const bareUrl = await listen(bare);
     const bareDataDir = mkdtempSync(join(tmpdir(), "norns-e3-bare-"));
     seedRunner(bareStores, "runner-bare", bareDataDir);

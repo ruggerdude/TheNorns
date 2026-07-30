@@ -3,13 +3,58 @@ import { describe, expect, it } from "vitest";
 
 import { DeviceEnrollmentCodeHasher } from "../src/devices/crypto.js";
 import {
+  type DeviceCutoverRuntimeConfigurationError,
   DeviceEnrollmentRuntimeConfigurationError,
   type DeviceManagementRuntimeConfigurationError,
   type DeviceRepositoryAccessRuntimeConfigurationError,
+  parseDeviceCutoverRuntimeConfiguration,
   parseDeviceEnrollmentRuntimeConfiguration,
   parseDeviceManagementRuntimeConfiguration,
   parseDeviceRepositoryAccessRuntimeConfiguration,
 } from "../src/devices/runtimeConfig.js";
+
+describe("device cutover runtime configuration", () => {
+  it("keeps every compatibility and dispatch capability independently default-off", () => {
+    expect(parseDeviceCutoverRuntimeConfiguration({})).toEqual({
+      legacy_repository_claims_enabled: false,
+      legacy_pairing_routes_enabled: false,
+      legacy_helper_routes_enabled: false,
+      legacy_local_runner_auth_enabled: false,
+      legacy_global_runner_compatibility_enabled: false,
+      device_dispatch_enabled: false,
+    });
+    expect(
+      parseDeviceCutoverRuntimeConfiguration({
+        NORNS_ENABLE_LEGACY_REPOSITORY_CLAIMS: "true",
+        NORNS_ENABLE_LEGACY_PAIRING_ROUTES: "false",
+        NORNS_ENABLE_LEGACY_HELPER_ROUTES: "true",
+        NORNS_ENABLE_LEGACY_LOCAL_RUNNER_AUTH: "false",
+        NORNS_LEGACY_GLOBAL_RUNNER_COMPATIBILITY: "false",
+        NORNS_ENABLE_DEVICE_DISPATCH: "true",
+      }),
+    ).toEqual({
+      legacy_repository_claims_enabled: true,
+      legacy_pairing_routes_enabled: false,
+      legacy_helper_routes_enabled: true,
+      legacy_local_runner_auth_enabled: false,
+      legacy_global_runner_compatibility_enabled: false,
+      device_dispatch_enabled: true,
+    });
+  });
+
+  it.each([
+    "NORNS_ENABLE_LEGACY_REPOSITORY_CLAIMS",
+    "NORNS_ENABLE_LEGACY_PAIRING_ROUTES",
+    "NORNS_ENABLE_LEGACY_HELPER_ROUTES",
+    "NORNS_ENABLE_LEGACY_LOCAL_RUNNER_AUTH",
+    "NORNS_LEGACY_GLOBAL_RUNNER_COMPATIBILITY",
+    "NORNS_ENABLE_DEVICE_DISPATCH",
+  ] as const)("rejects a non-exact boolean for %s", (variable) => {
+    expect(() => parseDeviceCutoverRuntimeConfiguration({ [variable]: "TRUE" })).toThrowError(
+      expect.objectContaining<Partial<DeviceCutoverRuntimeConfigurationError>>({ variable }),
+    );
+  });
+});
 
 describe("device enrollment runtime configuration", () => {
   it("is disabled by default and for the exact false value", () => {

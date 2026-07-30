@@ -43,6 +43,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     throw new ApiError(
       payload.detail ?? payload.error ?? `request failed: ${response.status}`,
       response.status,
+      payload.error ?? null,
     );
   }
   return payload;
@@ -50,6 +51,9 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 
 function describeFailure(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.code === "recent_auth_required") {
+      return "For your security, sign in again before approving or denying this computer. This decision was not retried.";
+    }
     if (error.status === 404) return "That code is invalid or no longer available.";
     if (error.status === 429) return "Too many attempts. Wait before trying another code.";
     if (error.status === 409) return "This request has already been completed or has expired.";

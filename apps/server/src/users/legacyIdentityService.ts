@@ -49,6 +49,10 @@ export class LegacyIdentityService implements IdentityService {
     return user ? identity(user) : undefined;
   }
 
+  async isRecentSession(token: string, maximumAgeMs: number): Promise<boolean> {
+    return this.store.isRecentSession(token, maximumAgeMs);
+  }
+
   async login(
     email: string,
     password: string,

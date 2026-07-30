@@ -57,6 +57,68 @@ function envelope(
   };
 }
 
+function claimCapabilities(enabled = true) {
+  return {
+    schema_version: 1,
+    enrollment_available: true,
+    computers_available: true,
+    repository_grants_available: true,
+    legacy_claim_available: enabled,
+    legacy_local_creation_available: false,
+  };
+}
+
+function ownerClaimEnvelope({
+  workActive = false,
+  claimed = false,
+}: {
+  workActive?: boolean;
+  claimed?: boolean;
+} = {}) {
+  return {
+    schema_version: 1,
+    project_id: projectId,
+    viewer_role: "owner",
+    work_active: workActive,
+    selected_execution_target_id: claimed ? "grant-office" : null,
+    execution_targets: [target("grant-office", "Office Mac mini", claimed ? "shared" : "pending")],
+    legacy_claim_required: !claimed,
+  };
+}
+
+function claimProjection({
+  workActive = false,
+  candidates = true,
+  finalized = false,
+}: {
+  workActive?: boolean;
+  candidates?: boolean;
+  finalized?: boolean;
+} = {}) {
+  return {
+    project_id: projectId,
+    claim_id: "claim-opaque-1",
+    state: finalized ? "finalized" : "claim_required",
+    repository_display_name: "The Norns",
+    claim_version: finalized ? 4 : 3,
+    project_version: finalized ? 10 : 9,
+    can_finalize: !finalized && !workActive && candidates,
+    candidate_targets: candidates
+      ? [
+          {
+            execution_target_id: "grant-office",
+            name: "Office Mac mini",
+            location_label: "Office",
+            repository_display_name: "The Norns",
+          },
+        ]
+      : [],
+    finalized_execution_target_id: finalized ? "grant-office" : null,
+    created_at: "2026-07-30T14:00:00.000Z",
+    finalized_at: finalized ? "2026-07-30T15:00:00.000Z" : null,
+  };
+}
+
 function deferred<T>(): {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -167,6 +229,212 @@ describe("ExecutionTargetSettings", () => {
     expect(screen.queryByRole("radio")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Save execution target" })).not.toBeInTheDocument();
     expect(container).not.toHaveTextContent("grant-office");
+  });
+
+  it("requires the owner to select and type the exact re-cataloged repository before finalizing", async () => {
+    let reads = 0;
+    let claimReads = 0;
+    mock.get(`/api/v2/projects/${projectId}/access`, { body: access() });
+    mock.get("/api/v2/capabilities/local-execution", {
+      body: claimCapabilities(),
+    });
+    mock.get(`/api/projects/${projectId}/execution-targets`, () => {
+      reads += 1;
+      return { body: ownerClaimEnvelope({ claimed: reads > 1 }) };
+    });
+    mock.get(`/api/projects/${projectId}/legacy-repository-claim`, () => {
+      claimReads += 1;
+      return { body: claimProjection({ finalized: claimReads > 1 }) };
+    });
+    mock.post(`/api/projects/${projectId}/legacy-repository-claims/claim-opaque-1/finalize`, {
+      body: claimProjection({ finalized: true }),
+    });
+    mock.install();
+    const user = userEvent.setup();
+
+    const { container } = render(
+      <ExecutionTargetSettings projectId={projectId} onUnauthorized={vi.fn()} />,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Reconnect historical local repository" }),
+    ).toBeVisible();
+    expect(screen.getAllByText("The Norns")).toHaveLength(2);
+    expect(screen.getByText("Confirmation required")).toBeVisible();
+    expect(container).not.toHaveTextContent("claim-opaque-1");
+    expect(container).not.toHaveTextContent("grant-office");
+
+    const targetChoice = screen.getByRole("radio", { name: /Office Mac mini/ });
+    await user.click(targetChoice);
+    const confirmation = screen.getByRole("textbox", {
+      name: "Type The Norns to confirm",
+    });
+    const finalize = screen.getByRole("button", {
+      name: "Confirm repository and switch",
+    });
+    expect(finalize).toBeDisabled();
+    await user.type(confirmation, "the norns");
+    expect(finalize).toBeDisabled();
+    await user.clear(confirmation);
+    await user.type(confirmation, "The Norns");
+    expect(finalize).toBeEnabled();
+    await user.click(finalize);
+
+    expect(
+      await screen.findByText("Repository confirmed and execution target updated."),
+    ).toBeVisible();
+    const mutation = mock.calls.find(
+      (call) =>
+        call.method === "POST" &&
+        call.url === `/api/projects/${projectId}/legacy-repository-claims/claim-opaque-1/finalize`,
+    );
+    expect(mutation?.body).toMatchObject({
+      execution_target_id: "grant-office",
+      expected_claim_version: 3,
+      expected_project_version: 9,
+      confirmation: "use_this_repository",
+      idempotency_key: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      ),
+    });
+    expect(Object.keys(mutation?.body as Record<string, unknown>).sort()).toEqual([
+      "confirmation",
+      "execution_target_id",
+      "expected_claim_version",
+      "expected_project_version",
+      "idempotency_key",
+    ]);
+  });
+
+  it("retries a lost finalization response with the same idempotency key", async () => {
+    let reads = 0;
+    let claimReads = 0;
+    let attempts = 0;
+    mock.get(`/api/v2/projects/${projectId}/access`, { body: access() });
+    mock.get("/api/v2/capabilities/local-execution", {
+      body: claimCapabilities(),
+    });
+    mock.get(`/api/projects/${projectId}/execution-targets`, () => {
+      reads += 1;
+      return { body: ownerClaimEnvelope({ claimed: reads > 1 }) };
+    });
+    mock.get(`/api/projects/${projectId}/legacy-repository-claim`, () => {
+      claimReads += 1;
+      return { body: claimProjection({ finalized: claimReads > 1 }) };
+    });
+    mock.post(`/api/projects/${projectId}/legacy-repository-claims/claim-opaque-1/finalize`, () => {
+      attempts += 1;
+      if (attempts === 1) throw new TypeError("connection reset");
+      return { body: claimProjection({ finalized: true }) };
+    });
+    mock.install();
+    const user = userEvent.setup();
+
+    render(<ExecutionTargetSettings projectId={projectId} onUnauthorized={vi.fn()} />);
+    await user.click(await screen.findByRole("radio", { name: /Office Mac mini/ }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Type The Norns to confirm" }),
+      "The Norns",
+    );
+    await user.click(screen.getByRole("button", { name: "Confirm repository and switch" }));
+
+    expect(await screen.findByText(/did not return a usable response/i)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Retry confirmed switch" }));
+    expect(
+      await screen.findByText("Repository confirmed and execution target updated."),
+    ).toBeVisible();
+
+    const attemptsMade = mock.calls.filter(
+      (call) =>
+        call.method === "POST" &&
+        call.url === `/api/projects/${projectId}/legacy-repository-claims/claim-opaque-1/finalize`,
+    );
+    expect(attemptsMade).toHaveLength(2);
+    expect(attemptsMade[0]?.body).toEqual(attemptsMade[1]?.body);
+  });
+
+  it("gives members only a generic claim blocker without candidate or repository metadata", async () => {
+    mock.get(`/api/v2/projects/${projectId}/access`, { body: access("membership") });
+    mock.get("/api/v2/capabilities/local-execution", {
+      body: claimCapabilities(),
+    });
+    mock.get(`/api/projects/${projectId}/execution-targets`, {
+      body: {
+        schema_version: 1,
+        project_id: projectId,
+        viewer_role: "member",
+        work_active: false,
+        selected_execution_target_id: null,
+        execution_targets: [],
+        legacy_claim_required: true,
+      },
+    });
+    mock.install();
+
+    const { container } = render(
+      <ExecutionTargetSettings projectId={projectId} onUnauthorized={vi.fn()} />,
+    );
+
+    expect(await screen.findByText("Local repository claim required")).toBeVisible();
+    expect(screen.getByText(/project owner must reconnect/i)).toBeVisible();
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /confirm repository/i })).not.toBeInTheDocument();
+    for (const forbidden of [
+      "The Norns",
+      "Office Mac mini",
+      "legacy-binding-1",
+      "grant-office",
+      "fingerprint",
+      "runner-1",
+    ]) {
+      expect(container).not.toHaveTextContent(forbidden);
+    }
+  });
+
+  it("shows owner guidance without guessing a computer when no repository grant exists", async () => {
+    mock.get(`/api/v2/projects/${projectId}/access`, { body: access() });
+    mock.get("/api/v2/capabilities/local-execution", {
+      body: claimCapabilities(),
+    });
+    mock.get(`/api/projects/${projectId}/execution-targets`, {
+      body: {
+        ...ownerClaimEnvelope(),
+        execution_targets: [],
+      },
+    });
+    mock.get(`/api/projects/${projectId}/legacy-repository-claim`, {
+      body: claimProjection({ candidates: false }),
+    });
+    mock.install();
+
+    render(<ExecutionTargetSettings projectId={projectId} onUnauthorized={vi.fn()} />);
+    expect(await screen.findByText("Grant required")).toBeVisible();
+    expect(screen.getByText("Enroll and approve the actual computer first")).toBeVisible();
+    expect(screen.getByText(/No historical runner name or online computer/i)).toBeVisible();
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+  });
+
+  it("blocks only the final claim switch while project work is active", async () => {
+    mock.get(`/api/v2/projects/${projectId}/access`, { body: access() });
+    mock.get("/api/v2/capabilities/local-execution", {
+      body: claimCapabilities(),
+    });
+    mock.get(`/api/projects/${projectId}/execution-targets`, {
+      body: ownerClaimEnvelope({ workActive: true }),
+    });
+    mock.get(`/api/projects/${projectId}/legacy-repository-claim`, {
+      body: claimProjection({ workActive: true }),
+    });
+    mock.install();
+
+    render(<ExecutionTargetSettings projectId={projectId} onUnauthorized={vi.fn()} />);
+    const targetChoice = await screen.findByRole("radio", { name: /Office Mac mini/ });
+    expect(targetChoice).toBeDisabled();
+    expect(
+      screen.getByText("The final binding switch is blocked while project work is active."),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Confirm repository and switch" })).toBeDisabled();
   });
 
   it("blocks every selection control while project work is active", async () => {
@@ -330,7 +598,14 @@ describe("ExecutionTargetSettings", () => {
       /\.execution-target-option[\s\S]*grid-template-columns: 1fr/,
     );
     expect(executionTargetStyles).toMatch(/\.execution-target-save-row \.btn[\s\S]*width: 100%/);
+    expect(executionTargetStyles).toMatch(
+      /\.legacy-claim-repository[\s\S]*grid-template-columns: 1fr/,
+    );
+    expect(executionTargetStyles).toMatch(
+      /\.legacy-claim-heading[\s\S]*grid-template-columns: 1fr/,
+    );
     expect(executionTargetStyles).toMatch(/@media \(forced-colors: active\)/);
     expect(executionTargetStyles).toMatch(/\.execution-target-option:focus-within/);
+    expect(executionTargetStyles).toMatch(/\.legacy-claim,[\s\S]*border: 1px solid CanvasText/);
   });
 });

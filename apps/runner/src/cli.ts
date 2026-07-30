@@ -1,31 +1,36 @@
 #!/usr/bin/env node
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 // norns-runner — the Local Runner CLI. Runs on the operator's own machine and
-// dials the relay outbound (ADR-002 topology). Two commands:
-//
-//   norns-runner pair <code> --server <url> [--id <runnerId>] [--data <dir>]
-//     One-time enrollment: generates an Ed25519 keypair, redeems the pairing
-//     code shown in the web UI, and persists runner state to --data.
-//
-//   norns-runner start --server <url> [--id <runnerId>] [--data <dir>]
-//     Connects the paired runner and stays running, streaming logs and
-//     handling commands until Ctrl-C.
+// dials the relay outbound (ADR-002 topology). Installed devices enroll only
+// through AgentHost. Legacy pair commands are tombstoned behind an explicit
+// compatibility flag and are intentionally absent from normal help.
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type AgentDaemonLifecycle, AgentHost } from "./agentHost.js";
 import {
+  LOCAL_AGENT_CONFIG_FILENAME,
   parseLocalAgentPairingUri,
   readLocalAgentConfig,
   writeLocalAgentConfig,
 } from "./agentPairing.js";
 import { type RunnerContextIdentity, RunnerSignedContextFetcher } from "./contextAuth.js";
 import { RunnerDaemon } from "./daemon.js";
+import {
+  type DeviceCredentialSecretStore,
+  createInstalledDeviceCredentialSecretStore,
+} from "./deviceCredentialSecretStore.js";
+import { DeviceEnrollmentCoordinator } from "./deviceEnrollment.js";
 import { ActiveDeviceIdentityStore } from "./deviceInstallationIdentity.js";
 import type { RelayInferenceClient } from "./inferenceClient.js";
 import type { LiveRunRegistry } from "./liveRuns.js";
 import { type GatewayCredential, ModelGatewayClient } from "./modelGateway.js";
 import { PendingDeviceCredentialStore } from "./pendingDeviceCredential.js";
+import { selectPersistentExecutionIdentity } from "./persistentExecutionIdentity.js";
 import { GitPublisher } from "./publication.js";
+import {
+  ActiveDeviceRepositoryRegistrationClient,
+  LocalRepositoryAccessController,
+} from "./repositoryAccess.js";
 import { ClaudeCodeRuntime } from "./runtimes/claudeCode.js";
 import { CodexRuntime } from "./runtimes/codex.js";
 import { ProxiedCompletionRuntime } from "./runtimes/proxiedCompletion.js";
@@ -78,6 +83,12 @@ function strictFeatureFlag(name: string): boolean {
   if (value === undefined || value === "false") return false;
   if (value === "true") return true;
   throw new Error(`${name} must be exactly "true" or "false" when set`);
+}
+
+function installedDeviceSecretStore(dataDir: string): DeviceCredentialSecretStore {
+  return createInstalledDeviceCredentialSecretStore(dataDir, {
+    allowInsecureDevelopmentFile: strictFeatureFlag("NORNS_ALLOW_INSECURE_DEVICE_KEY_FILE"),
+  });
 }
 
 function resolveOptions(flags: Record<string, string>) {
@@ -243,6 +254,7 @@ function createV2Executor(
 function persistentDeviceIdentity(
   dataDir: string,
   enabled: boolean,
+  preparedCredential?: PendingDeviceCredentialStore,
 ): {
   identity: RunnerContextIdentity & { mode: "device" };
   wss: {
@@ -261,7 +273,14 @@ function persistentDeviceIdentity(
       "device control is enabled but no server-validated active device identity is persisted",
     );
   }
-  const credential = new PendingDeviceCredentialStore(dataDir);
+  const credential =
+    preparedCredential ??
+    new PendingDeviceCredentialStore(
+      dataDir,
+      createInstalledDeviceCredentialSecretStore(dataDir, {
+        allowInsecureDevelopmentFile: strictFeatureFlag("NORNS_ALLOW_INSECURE_DEVICE_KEY_FILE"),
+      }),
+    );
   if (!credential.read()) throw new Error("active device identity has no persisted credential");
   return {
     identity: {
@@ -292,19 +311,44 @@ function createPersistentRunner(input: {
   runnerId: string;
   dataDir: string;
   deviceControlEnabled: boolean;
+  deviceExecutionEnabled?: boolean;
+  legacyLocalCompatibilityEnabled?: boolean;
+  credentialStore?: PendingDeviceCredentialStore;
+  workspaces?: WorkspaceRegistry;
 }): RunnerDaemon {
-  const device = persistentDeviceIdentity(input.dataDir, input.deviceControlEnabled);
+  if (input.deviceExecutionEnabled === true && !input.deviceControlEnabled) {
+    throw new Error("device execution requires authenticated device control");
+  }
+  const device = persistentDeviceIdentity(
+    input.dataDir,
+    input.deviceControlEnabled,
+    input.credentialStore,
+  );
   const execution: {
     executor?: V2RunnerExecutor;
     repositories?: ApprovedRepositoryRegistry;
   } = {};
-  const workspaces = new WorkspaceRegistry(input.dataDir);
+  const workspaces = input.workspaces ?? new WorkspaceRegistry(input.dataDir);
+  const legacyHttpIdentity = (): RunnerContextIdentity => ({
+    mode: "legacy_runner",
+    runnerId: input.runnerId,
+    generation: daemon.generation,
+    sign: (payload) => daemon.sign(payload),
+  });
   const daemon = new RunnerDaemon({
     serverUrl: input.server,
     runnerId: input.runnerId,
     dataDir: input.dataDir,
     workspaces,
-    ...(device ? { deviceControl: device.wss } : {}),
+    ...(device
+      ? {
+          deviceControl: {
+            ...device.wss,
+            execution: input.deviceExecutionEnabled === true,
+            legacyLocalCompatibility: input.legacyLocalCompatibilityEnabled === true,
+          },
+        }
+      : {}),
     executeV2: async (command, emit, capabilities) => {
       if (!execution.executor) throw new Error("Phase 4 executor is not initialized");
       return (await execution.executor.execute(command, emit, capabilities)).outcome;
@@ -313,8 +357,14 @@ function createPersistentRunner(input: {
       if (!execution.repositories) {
         throw new Error("visual evidence repository registry is not initialized");
       }
+      const repositoryPath = command.runner_repository_id
+        ? workspaces.repositoryPath(command.runner_repository_id)
+        : execution.repositories.resolve(command.repository_binding_id);
+      if (!repositoryPath) {
+        throw new Error("approved local repository is no longer available");
+      }
       const evidence = await readRunnerVisualEvidence({
-        worktree_path: execution.repositories.resolve(command.repository_binding_id),
+        worktree_path: repositoryPath,
         expected_commit: command.commit_sha,
       });
       if (evidence.approved_mockup_version_id !== command.approved_mockup_version_id) {
@@ -322,12 +372,7 @@ function createPersistentRunner(input: {
       }
       await new RunnerVisualEvidenceUploader(
         input.server,
-        device?.identity ?? {
-          mode: "legacy_runner",
-          runnerId: input.runnerId,
-          generation: daemon.generation,
-          sign: (payload) => daemon.sign(payload),
-        },
+        input.deviceExecutionEnabled === true && device ? device.identity : legacyHttpIdentity(),
       ).upload(evidence, {
         project_id: command.project_id,
         work_item_id: command.work_item_id,
@@ -344,17 +389,27 @@ function createPersistentRunner(input: {
     },
   });
   daemon.loadState();
+  const executionIdentity = selectPersistentExecutionIdentity({
+    device_execution_enabled: input.deviceExecutionEnabled === true,
+    device: device
+      ? {
+          runner_id: device.wss.identity.device_id,
+          generation: device.wss.identity.generation,
+          http_identity: device.identity,
+        }
+      : null,
+    legacy: {
+      runner_id: input.runnerId,
+      generation: daemon.generation,
+      http_identity: legacyHttpIdentity(),
+    },
+  });
   execution.executor = createV2Executor(
-    input.runnerId,
-    daemon.generation,
+    executionIdentity.runner_id,
+    executionIdentity.generation,
     input.dataDir,
     workspaces,
-    device?.identity ?? {
-      mode: "legacy_runner",
-      runnerId: input.runnerId,
-      generation: daemon.generation,
-      sign: (payload) => daemon.sign(payload),
-    },
+    executionIdentity.http_identity,
     daemon.inference,
     input.server,
     daemon.liveRuns,
@@ -368,8 +423,6 @@ function createPersistentRunner(input: {
 const USAGE = `norns-runner — TheNorns Local Runner
 
 Usage:
-  norns-runner pair <code> --server <url> [--id <runnerId>] [--data <dir>]
-  norns-runner pair-url <norns-agent://pair?...> [--data <dir>]
   norns-runner agent-host [--data <dir>]
   norns-runner agent-start [--data <dir>]
   norns-runner start --server <url> [--id <runnerId>] [--data <dir>]
@@ -389,6 +442,9 @@ Device AgentHost preview:
   additionally requires NORNS_ENABLE_DEVICE_CONTROL=true plus a validated,
   persisted active redemption result. Installed agent-start owns both the
   Control Center and runner lifecycle when that device-control flag is enabled.
+  Enrollment is independently default-off and requires
+  NORNS_ENABLE_DEVICE_ENROLLMENT=true. Device dispatch additionally requires
+  NORNS_ENABLE_DEVICE_EXECUTION=true; cancellation alone never enables it.
 
 Ephemeral (GitHub Actions) mode:
   --ephemeral  Enroll for one dispatched job, run it, then exit. Reads the
@@ -403,12 +459,25 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const resolved = resolveOptions(args.flags);
   const installedAgentStart = args.command === "agent-start";
-  const agentConfig = installedAgentStart ? readLocalAgentConfig(resolved.dataDir) : undefined;
+  const deviceEnrollmentEnabled = strictFeatureFlag("NORNS_ENABLE_DEVICE_ENROLLMENT");
+  const deviceControlEnabled = strictFeatureFlag("NORNS_ENABLE_DEVICE_CONTROL");
+  const deviceExecutionEnabled = strictFeatureFlag("NORNS_ENABLE_DEVICE_EXECUTION");
+  const legacyLocalCompatibilityEnabled = strictFeatureFlag(
+    "NORNS_ENABLE_LEGACY_LOCAL_COMPATIBILITY",
+  );
+  if (deviceExecutionEnabled && !deviceControlEnabled) {
+    throw new Error("NORNS_ENABLE_DEVICE_EXECUTION requires NORNS_ENABLE_DEVICE_CONTROL");
+  }
+  const agentConfigPath = join(resolved.dataDir, LOCAL_AGENT_CONFIG_FILENAME);
+  const agentConfig =
+    installedAgentStart && existsSync(agentConfigPath)
+      ? readLocalAgentConfig(resolved.dataDir)
+      : undefined;
   const runnerId = agentConfig?.runner_id ?? resolved.runnerId;
   const server = agentConfig?.server ?? resolved.server;
   const dataDir = resolved.dataDir;
   const command = installedAgentStart
-    ? strictFeatureFlag("NORNS_ENABLE_DEVICE_CONTROL")
+    ? deviceEnrollmentEnabled || deviceControlEnabled
       ? "agent-host"
       : "start"
     : args.command;
@@ -424,27 +493,65 @@ async function main(): Promise<void> {
       );
     }
 
-    const deviceControlEnabled = strictFeatureFlag("NORNS_ENABLE_DEVICE_CONTROL");
-    let agentDaemon: AgentDaemonLifecycle;
-    if (deviceControlEnabled) {
-      const config = readLocalAgentConfig(dataDir);
-      agentDaemon = createPersistentRunner({
-        server: config.server,
-        runnerId: config.runner_id,
+    if ((deviceEnrollmentEnabled || deviceControlEnabled) && !server) {
+      throw new Error("device enrollment/control requires NORNS_SERVER or persisted server config");
+    }
+    if (server && !agentConfig && (deviceEnrollmentEnabled || deviceControlEnabled)) {
+      writeLocalAgentConfig(dataDir, { version: 1, server, runner_id: runnerId });
+    }
+    const secretStore =
+      deviceEnrollmentEnabled || deviceControlEnabled ? installedDeviceSecretStore(dataDir) : null;
+    const credentialStore = secretStore
+      ? new PendingDeviceCredentialStore(dataDir, secretStore)
+      : null;
+    const enrollment =
+      deviceEnrollmentEnabled && server && secretStore && credentialStore
+        ? new DeviceEnrollmentCoordinator({
+            serverUrl: server,
+            dataDir,
+            credentialStore,
+            secretStore,
+          })
+        : undefined;
+    const workspaces = new WorkspaceRegistry(dataDir);
+    const repositoryAccess = new LocalRepositoryAccessController(
+      dataDir,
+      workspaces,
+      server && credentialStore
+        ? new ActiveDeviceRepositoryRegistrationClient(server, dataDir, credentialStore)
+        : undefined,
+    );
+    let managedDaemon: RunnerDaemon | null = null;
+    const requireManagedDaemon = (): RunnerDaemon => {
+      if (!deviceControlEnabled || !server || !credentialStore) {
+        throw new Error("cloud device control is disabled until enrollment is active");
+      }
+      managedDaemon ??= createPersistentRunner({
+        server,
+        runnerId,
         dataDir,
         deviceControlEnabled: true,
+        deviceExecutionEnabled,
+        legacyLocalCompatibilityEnabled,
+        credentialStore,
+        workspaces,
       });
-    } else {
-      agentDaemon = {
-        async start() {
-          throw new Error("cloud device dispatch is disabled until device enrollment is complete");
-        },
-        async stop() {},
-      };
-    }
+      return managedDaemon;
+    };
+    const agentDaemon: AgentDaemonLifecycle = {
+      start: () => requireManagedDaemon().start(),
+      stop: () => managedDaemon?.stop(),
+      emergencyStop: async () =>
+        managedDaemon
+          ? managedDaemon.emergencyStop()
+          : { stop_requested: 0, process_trees_reaped: 0, unconfirmed: 0 },
+    };
     const agentHost = new AgentHost({
       dataDir,
       daemon: agentDaemon,
+      ...(credentialStore ? { credentialStore } : {}),
+      ...(enrollment ? { enrollment } : {}),
+      repositoryAccess,
       startDaemonOnHostStart: deviceControlEnabled,
     });
     const started = await agentHost.start();
@@ -471,10 +578,16 @@ async function main(): Promise<void> {
     process.once("SIGTERM", stopAgentHost);
     process.stdout.write(
       [
-        `Norns Local Agent Control Center: ${started.bootstrap_url}`,
-        deviceControlEnabled
-          ? "Enrolled device control and the managed runner are active."
-          : "Cloud device dispatch is disabled in this preview.",
+        installedAgentStart
+          ? "Norns Local Agent Control Center started."
+          : `Norns Local Agent Control Center: ${started.bootstrap_url}`,
+        deviceExecutionEnabled
+          ? "Authenticated device execution is enabled."
+          : deviceControlEnabled
+            ? "Authenticated cancellation is enabled; device dispatch remains disabled."
+            : deviceEnrollmentEnabled
+              ? "Device enrollment is enabled; device dispatch remains disabled."
+              : "Cloud device capability is disabled in this preview.",
         "Press Ctrl-C to stop.",
         "",
       ].join("\n"),
@@ -508,6 +621,9 @@ async function main(): Promise<void> {
     throw new Error("workspace command must be add, list, or remove");
   }
   if (command === "pair-url") {
+    if (!legacyLocalCompatibilityEnabled) {
+      throw new Error("legacy custom-URI pairing is disabled; use AgentHost enrollment");
+    }
     const pairingUri = args.positional[0];
     if (!pairingUri) throw new Error("local-agent pairing link required");
     const pairing = parseLocalAgentPairingUri(pairingUri);
@@ -536,6 +652,9 @@ async function main(): Promise<void> {
   }
 
   if (command === "pair") {
+    if (!legacyLocalCompatibilityEnabled) {
+      throw new Error("legacy pairing is disabled; use AgentHost enrollment");
+    }
     const code = args.positional[0];
     if (!code) {
       process.stderr.write("error: pairing code required — `norns-runner pair <code> ...`\n");
@@ -555,9 +674,8 @@ async function main(): Promise<void> {
     // runners. With it, the runner enrolls instead of loading paired state,
     // binds the checked-out CI workspace, and exits when its one job is done.
     const ephemeral = args.flags.ephemeral === "true";
-    const deviceControlEnabled = strictFeatureFlag("NORNS_ENABLE_DEVICE_CONTROL");
-    if (ephemeral && deviceControlEnabled) {
-      throw new Error("device control is not available in ephemeral runner mode");
+    if (ephemeral && (deviceEnrollmentEnabled || deviceControlEnabled || deviceExecutionEnabled)) {
+      throw new Error("installed device capability is not available in ephemeral runner mode");
     }
     if (!ephemeral) {
       const daemon = createPersistentRunner({
@@ -565,6 +683,8 @@ async function main(): Promise<void> {
         runnerId,
         dataDir,
         deviceControlEnabled,
+        deviceExecutionEnabled,
+        legacyLocalCompatibilityEnabled,
       });
       daemon.connect();
       process.stdout.write(`runner "${runnerId}" connecting to ${server} — Ctrl-C to stop\n`);

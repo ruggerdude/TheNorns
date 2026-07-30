@@ -513,6 +513,7 @@ describe.sequential("device WSS authentication state machine", () => {
       stores,
       users: new UserStore(),
       deviceWssAuthentication: new DeviceWssAuthenticationService(repository),
+      legacyLocalRunnerAuth: { enabled: true },
     });
     const url = await listen(server);
     const socket = new WebSocket(`${url.replace(/^http/, "ws")}/ws/runner`);
@@ -545,7 +546,11 @@ describe.sequential("device WSS authentication state machine", () => {
       "legacy-runner",
       keys.publicKey.export({ type: "spki", format: "pem" }).toString(),
     );
-    const server = await buildServer({ stores, users: new UserStore() });
+    const server = await buildServer({
+      stores,
+      users: new UserStore(),
+      legacyLocalRunnerAuth: { enabled: true },
+    });
     const url = await listen(server);
     const socket = new WebSocket(`${url.replace(/^http/, "ws")}/ws/runner`);
 
@@ -590,7 +595,11 @@ describe.sequential("device WSS authentication state machine", () => {
       "legacy-runner",
       keys.publicKey.export({ type: "spki", format: "pem" }).toString(),
     );
-    const server = await buildServer({ stores, users: new UserStore() });
+    const server = await buildServer({
+      stores,
+      users: new UserStore(),
+      legacyLocalRunnerAuth: { enabled: true },
+    });
     const url = await listen(server);
     const first = new WebSocket(`${url.replace(/^http/, "ws")}/ws/runner`);
     let second: WebSocket | null = null;

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -16,10 +17,16 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   AGENT_HOST_CSRF_HEADER,
+  AGENT_HOST_LOCK_FILENAME,
   AgentHost,
   AgentHostAlreadyRunningError,
   FileAgentHostPortDiscovery,
+  FileAgentHostSingleInstanceLock,
+  createAgentHostNativeLaunchRequestProof,
+  createAgentHostNativeLaunchResponseProof,
 } from "../dist/agentHost.js";
+import { InMemoryDeviceCredentialSecretStore } from "../dist/deviceCredentialSecretStore.js";
+import { DeviceEnrollmentCoordinator } from "../dist/deviceEnrollment.js";
 import {
   PENDING_DEVICE_CREDENTIAL_FILENAME,
   PendingDeviceCredentialStore,
@@ -39,6 +46,21 @@ function tokenFromBootstrapUrl(bootstrapUrl) {
   const value = new URLSearchParams(new URL(bootstrapUrl).hash.slice(1)).get("bootstrap");
   assert.ok(value);
   return value;
+}
+
+function nativeLaunchProof(discovery) {
+  const requestId = randomBytes(32).toString("base64url");
+  return {
+    requestId,
+    body: {
+      request_id: requestId,
+      request_proof: createAgentHostNativeLaunchRequestProof({
+        native_launch_secret: discovery.native_launch_secret,
+        origin: discovery.origin,
+        request_id: requestId,
+      }),
+    },
+  };
 }
 
 async function exchangeBootstrap(started) {
@@ -121,12 +143,16 @@ test("AgentHost serves only a hardened, bundled loopback UI", async () => {
     assert.match(started.bootstrap_url, /^http:\/\/127\.0\.0\.1:\d+\/#bootstrap=/);
 
     const discovery = new FileAgentHostPortDiscovery(dataDir);
-    assert.deepEqual(discovery.read(), {
+    const discoveryRecord = discovery.read();
+    assert.deepEqual(discoveryRecord, {
       version: 1,
       host: started.host,
       port: started.port,
       origin: started.origin,
+      native_launch_secret: discoveryRecord.native_launch_secret,
     });
+    assert.match(discoveryRecord.native_launch_secret, /^[A-Za-z0-9_-]{43}$/);
+    assert.equal(statSync(dataDir).mode & 0o777, 0o700);
     assert.equal(statSync(discovery.filePath).mode & 0o777, 0o600);
     assert.equal(statSync(join(dataDir, "agent-host.lock")).mode & 0o777, 0o600);
 
@@ -155,7 +181,7 @@ test("AgentHost serves only a hardened, bundled loopback UI", async () => {
     const javascript = await fetch(`${started.origin}/agent-host.js`);
     assert.equal(javascript.status, 200);
     const javascriptBody = await javascript.text();
-    assert.match(javascriptBody, /\/api\/enrollment\/prepare/);
+    assert.match(javascriptBody, /\/api\/enrollment\/start/);
     assert.match(javascriptBody, /\/api\/daemon\/restart/);
     assert.match(javascriptBody, /\/api\/repositories\/choose/);
     assert.match(javascriptBody, /\/api\/repositories\/remove/);
@@ -188,6 +214,60 @@ test("AgentHost serves only a hardened, bundled loopback UI", async () => {
     assert.equal(stateChangingGet.status, 405);
     const restartGet = await fetch(`${started.origin}/api/daemon/restart`);
     assert.equal(restartGet.status, 405);
+    const nativeLaunchGet = await fetch(`${started.origin}/api/session/native-launch`);
+    assert.equal(nativeLaunchGet.status, 405);
+    const hostileProof = nativeLaunchProof(discoveryRecord);
+    const hostileNativeLaunch = await fetch(`${started.origin}/api/session/native-launch`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://malicious.example",
+      },
+      body: JSON.stringify(hostileProof.body),
+    });
+    assert.equal(hostileNativeLaunch.status, 403);
+    const invalidProof = nativeLaunchProof(discoveryRecord);
+    const invalidNativeLaunch = await fetch(`${started.origin}/api/session/native-launch`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: started.origin,
+      },
+      body: JSON.stringify({ ...invalidProof.body, request_proof: "x".repeat(43) }),
+    });
+    assert.equal(invalidNativeLaunch.status, 401);
+    const validProof = nativeLaunchProof(discoveryRecord);
+    const serializedNativeLaunch = JSON.stringify(validProof.body);
+    assert.doesNotMatch(serializedNativeLaunch, new RegExp(discoveryRecord.native_launch_secret));
+    const nativeLaunch = await fetch(`${started.origin}/api/session/native-launch`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: started.origin,
+      },
+      body: serializedNativeLaunch,
+    });
+    assert.equal(nativeLaunch.status, 200);
+    const nativeLaunchBody = await nativeLaunch.json();
+    assert.match(nativeLaunchBody.bootstrap_url, /^http:\/\/127\.0\.0\.1:\d+\/#bootstrap=/);
+    assert.equal(
+      nativeLaunchBody.response_proof,
+      createAgentHostNativeLaunchResponseProof({
+        native_launch_secret: discoveryRecord.native_launch_secret,
+        origin: discoveryRecord.origin,
+        request_id: validProof.requestId,
+        bootstrap_url: nativeLaunchBody.bootstrap_url,
+      }),
+    );
+    const replayedNativeLaunch = await fetch(`${started.origin}/api/session/native-launch`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: started.origin,
+      },
+      body: serializedNativeLaunch,
+    });
+    assert.equal(replayedNativeLaunch.status, 409);
     assert.equal(lifecycle.starts, 0);
   } finally {
     await host.stop();
@@ -207,7 +287,10 @@ test("AgentHost exchanges one bootstrap token for a CSRF-protected local session
       this.stops += 1;
     },
   };
-  const credentialStore = new PendingDeviceCredentialStore(dataDir);
+  const credentialStore = new PendingDeviceCredentialStore(
+    dataDir,
+    new InMemoryDeviceCredentialSecretStore(),
+  );
   const host = new AgentHost({
     dataDir,
     daemon: lifecycle,
@@ -235,12 +318,46 @@ test("AgentHost exchanges one bootstrap token for a CSRF-protected local session
     });
     assert.equal(replay.status, 401);
 
+    const discovery = new FileAgentHostPortDiscovery(dataDir).read();
+    assert.ok(discovery);
+    const reopenProof = nativeLaunchProof(discovery);
+    const nativeLaunch = await fetch(`${started.origin}/api/session/native-launch`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: started.origin,
+      },
+      body: JSON.stringify(reopenProof.body),
+    });
+    assert.equal(nativeLaunch.status, 200);
+    const nativeLaunchBody = await nativeLaunch.json();
+    assert.equal(
+      nativeLaunchBody.response_proof,
+      createAgentHostNativeLaunchResponseProof({
+        native_launch_secret: discovery.native_launch_secret,
+        origin: discovery.origin,
+        request_id: reopenProof.requestId,
+        bootstrap_url: nativeLaunchBody.bootstrap_url,
+      }),
+    );
+    const reopened = await exchangeBootstrap({
+      ...started,
+      bootstrap_url: nativeLaunchBody.bootstrap_url,
+    });
+    assert.notEqual(reopened.token, session.token);
+
     const status = await fetch(`${started.origin}/api/status`, {
       headers: { cookie: session.cookie },
     });
     assert.equal(status.status, 200);
     assert.deepEqual(await status.json(), {
       enrollment_state: "not_enrolled",
+      enrollment: {
+        user_code: null,
+        verification_uri: null,
+        expires_at: null,
+        next_poll_at: null,
+      },
       daemon_state: "stopped",
       credential_prepared: false,
       home: {
@@ -330,6 +447,178 @@ test("AgentHost exchanges one bootstrap token for a CSRF-protected local session
       readFileSync(join(dataDir, PENDING_DEVICE_CREDENTIAL_FILENAME), "utf8"),
       /bootstrap|csrf|norns_agent_session/,
     );
+  } finally {
+    await host.stop();
+    removeTemporaryDataDir(dataDir);
+  }
+});
+
+test("native launch proofs cannot cross AgentHost process secrets", async () => {
+  const dataDir = temporaryDataDir();
+  const first = new AgentHost({
+    dataDir,
+    daemon: { start() {}, stop() {} },
+    detectLocalTools: false,
+  });
+  let second = null;
+
+  try {
+    await first.start();
+    const firstDiscovery = new FileAgentHostPortDiscovery(dataDir).read();
+    assert.ok(firstDiscovery);
+    await first.stop();
+
+    second = new AgentHost({
+      dataDir,
+      daemon: { start() {}, stop() {} },
+      detectLocalTools: false,
+    });
+    const secondStarted = await second.start();
+    const secondDiscovery = new FileAgentHostPortDiscovery(dataDir).read();
+    assert.ok(secondDiscovery);
+    assert.notEqual(firstDiscovery.native_launch_secret, secondDiscovery.native_launch_secret);
+
+    const staleRequestId = randomBytes(32).toString("base64url");
+    const staleProof = createAgentHostNativeLaunchRequestProof({
+      native_launch_secret: firstDiscovery.native_launch_secret,
+      origin: secondDiscovery.origin,
+      request_id: staleRequestId,
+    });
+    const stale = await fetch(`${secondStarted.origin}/api/session/native-launch`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: secondStarted.origin,
+      },
+      body: JSON.stringify({
+        request_id: staleRequestId,
+        request_proof: staleProof,
+      }),
+    });
+    assert.equal(stale.status, 401);
+  } finally {
+    await first.stop();
+    await second?.stop();
+    removeTemporaryDataDir(dataDir);
+  }
+});
+
+test("AgentHost starts enrollment only through a CSRF-protected POST and never returns the device code", async () => {
+  const dataDir = temporaryDataDir();
+  const secrets = new InMemoryDeviceCredentialSecretStore();
+  const credentialStore = new PendingDeviceCredentialStore(dataDir, secrets);
+  let deviceCode = "";
+  let userCode = "";
+  const enrollment = new DeviceEnrollmentCoordinator({
+    serverUrl: "https://norns.example",
+    dataDir,
+    credentialStore,
+    secretStore: secrets,
+    setTimer: (_callback, delay) => ({ delay, unref() {} }),
+    clearTimer() {},
+    fetch: async (_url, init) => {
+      const request = JSON.parse(String(init.body));
+      deviceCode = request.device_code;
+      userCode = request.user_code;
+      return new Response(
+        JSON.stringify({
+          authorization_request_id: "deviceauth-agent-host",
+          device_code: deviceCode,
+          user_code: userCode,
+          verification_uri: "https://norns.example/device-authorization",
+          expires_at: new Date(Date.now() + 600_000).toISOString(),
+          interval_seconds: 5,
+        }),
+        { status: 201, headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+  const host = new AgentHost({
+    dataDir,
+    daemon: { start() {}, stop() {} },
+    credentialStore,
+    enrollment,
+    detectLocalTools: false,
+  });
+
+  try {
+    const started = await host.start();
+    const session = await exchangeBootstrap(started);
+    const getAttempt = await fetch(`${started.origin}/api/enrollment/start`, {
+      headers: { cookie: session.cookie },
+    });
+    assert.equal(getAttempt.status, 405);
+
+    const response = await fetch(`${started.origin}/api/enrollment/start`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: started.origin,
+        cookie: session.cookie,
+        [AGENT_HOST_CSRF_HEADER]: session.csrf,
+      },
+      body: "{}",
+    });
+    assert.equal(response.status, 202);
+    const body = await response.json();
+    assert.equal(body.enrollment_state, "pending");
+    assert.equal(body.user_code, userCode);
+    assert.equal(body.verification_uri, "https://norns.example/device-authorization");
+    assert.equal("device_code" in body, false);
+    assert.doesNotMatch(JSON.stringify(body), new RegExp(deviceCode));
+  } finally {
+    await host.stop();
+    removeTemporaryDataDir(dataDir);
+  }
+});
+
+test("AgentHost retries pending repository registration immediately after enrollment becomes active", async () => {
+  const dataDir = temporaryDataDir();
+  let enrollmentListener = null;
+  let synchronizations = 0;
+  const enrollment = {
+    status: {
+      state: "pending",
+      user_code: "ABCD-EFGH",
+      verification_uri: "https://norns.example/device-authorization",
+      expires_at: "2026-07-30T12:10:00.000Z",
+      next_poll_at: "2026-07-30T12:00:05.000Z",
+    },
+    start() {},
+    stop() {},
+    subscribe(listener) {
+      enrollmentListener = listener;
+      return () => {
+        enrollmentListener = null;
+      };
+    },
+  };
+  const repositoryAccess = {
+    async synchronize() {
+      synchronizations += 1;
+    },
+  };
+  const host = new AgentHost({
+    dataDir,
+    daemon: { start() {}, stop() {} },
+    enrollment,
+    repositoryAccess,
+    detectLocalTools: false,
+  });
+
+  try {
+    await host.start();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(synchronizations, 1, "startup reconciles pending local approvals");
+    enrollmentListener({
+      state: "active",
+      user_code: null,
+      verification_uri: null,
+      expires_at: null,
+      next_poll_at: null,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(synchronizations, 2, "activation retries without restarting AgentHost");
   } finally {
     await host.stop();
     removeTemporaryDataDir(dataDir);
@@ -452,7 +741,10 @@ test("AgentHost reports separate local status dimensions and restarts the daemon
       this.stops += 1;
     },
   };
-  const credentialStore = new PendingDeviceCredentialStore(dataDir);
+  const credentialStore = new PendingDeviceCredentialStore(
+    dataDir,
+    new InMemoryDeviceCredentialSecretStore(),
+  );
   const prepared = credentialStore.prepare();
   const host = new AgentHost({
     dataDir,
@@ -774,4 +1066,26 @@ test("AgentHost expires bootstrap tokens and enforces one host per data director
 
   assert.equal(existsSync(join(dataDir, "agent-host.lock")), false);
   removeTemporaryDataDir(dataDir);
+});
+
+test("AgentHost recovers an exact dead-PID lock but never deletes malformed ownership", () => {
+  const dataDir = temporaryDataDir();
+  const lockPath = join(dataDir, AGENT_HOST_LOCK_FILENAME);
+  try {
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    writeFileSync(lockPath, "99999999\n", { encoding: "utf8", mode: 0o600 });
+    const recovered = new FileAgentHostSingleInstanceLock(dataDir);
+    recovered.acquire();
+    recovered.release();
+    assert.equal(existsSync(lockPath), false);
+
+    writeFileSync(lockPath, "not-a-pid\n", { encoding: "utf8", mode: 0o600 });
+    assert.throws(
+      () => new FileAgentHostSingleInstanceLock(dataDir).acquire(),
+      AgentHostAlreadyRunningError,
+    );
+    assert.equal(readFileSync(lockPath, "utf8"), "not-a-pid\n");
+  } finally {
+    removeTemporaryDataDir(dataDir);
+  }
 });

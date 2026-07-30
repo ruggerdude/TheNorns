@@ -1,4 +1,11 @@
-import { DEVICE_WSS_PROTOCOL_VERSION, type ServerFrameT, parseServerFrame } from "@norns/contracts";
+import {
+  type CommandEnvelopeT,
+  DEVICE_WSS_PROTOCOL_VERSION,
+  type ReconcileResponseT,
+  type RunnerFrameT,
+  type ServerFrameT,
+  parseServerFrame,
+} from "@norns/contracts";
 import WebSocket from "ws";
 import {
   type DeviceCancellationEvidenceRecord,
@@ -29,6 +36,17 @@ export interface DeviceControlConnectionOptions {
   ): Promise<DeviceCancellationStopResult>;
   stopAll(runId: string, reason: string): Promise<DeviceCancellationStopResult>;
   fence(reason: string): void;
+  /**
+   * Independent, default-off device execution transport. Cancellation remains
+   * authenticated and connected when this is absent.
+   */
+  execution?: {
+    authenticated(): void;
+    disconnected(): void;
+    reconcile(response: ReconcileResponseT): void;
+    command(command: CommandEnvelopeT): void;
+    eventAcknowledged(eventSequence: number): void;
+  };
   reconnect?: boolean;
   reconnectDelayMs?: number;
   evidenceRetryMs?: number;
@@ -117,6 +135,22 @@ export class DeviceControlConnection {
     return this.journal.records();
   }
 
+  sendExecutionFrame(frame: RunnerFrameT): boolean {
+    if (
+      !this.options.execution ||
+      !this.connected ||
+      !this.socket ||
+      frame.type === "auth" ||
+      frame.type === "device_auth" ||
+      frame.type === "device_cancellation_evidence" ||
+      (frame.type !== "reconcile_request" && frame.type !== "event")
+    ) {
+      return false;
+    }
+    this.socket.send(JSON.stringify(frame));
+    return true;
+  }
+
   private connect(): void {
     if (this.stopped || this.fenced || this.socket !== null) return;
     const socket = new WebSocket(`${this.options.serverUrl.replace(/^http/, "ws")}/ws/runner`);
@@ -137,6 +171,7 @@ export class DeviceControlConnection {
       this.authenticated = false;
       if (this.evidenceRetryTimer) clearTimeout(this.evidenceRetryTimer);
       this.evidenceRetryTimer = null;
+      this.options.execution?.disconnected();
       this.scheduleReconnect();
     });
     socket.on("error", () => {
@@ -178,6 +213,7 @@ export class DeviceControlConnection {
           return;
         }
         this.authenticated = true;
+        this.options.execution?.authenticated();
         this.flushEvidence();
         return;
       }
@@ -204,11 +240,29 @@ export class DeviceControlConnection {
       case "auth_error":
         this.fenceAndClose("device credential rejected");
         return;
+      case "reconcile_response":
+        if (!this.authenticated || !this.options.execution) {
+          this.fenceAndClose("unexpected device reconciliation response");
+          return;
+        }
+        this.options.execution.reconcile(frame.body);
+        return;
+      case "command":
+        if (!this.authenticated || !this.options.execution) {
+          this.fenceAndClose("unexpected device command");
+          return;
+        }
+        this.options.execution.command(frame.command);
+        return;
+      case "event_ack":
+        if (!this.authenticated || !this.options.execution) {
+          this.fenceAndClose("unexpected device event acknowledgement");
+          return;
+        }
+        this.options.execution.eventAcknowledged(frame.ack_event_seq);
+        return;
       default:
-        // The server currently exposes only cancellation on a device socket.
-        // Treating command/event/reconcile traffic as a protocol error keeps
-        // preview and not-yet-authorized device execution fail-closed.
-        this.fenceAndClose("unexpected frame on cancellation-only device socket");
+        this.fenceAndClose("unexpected frame on device socket");
     }
   }
 

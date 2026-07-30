@@ -48,8 +48,16 @@ export interface CreateDeviceAuthorizationRecord {
   created_at: string;
 }
 
+export interface CreatedDeviceAuthorizationRecord {
+  authorization_request_id: string;
+  expires_at: string;
+  poll_interval_seconds: number;
+}
+
 export interface DeviceEnrollmentRepository {
-  createAuthorization(input: CreateDeviceAuthorizationRecord): Promise<"created" | "not_created">;
+  createAuthorization(
+    input: CreateDeviceAuthorizationRecord,
+  ): Promise<CreatedDeviceAuthorizationRecord | null>;
   lookupByHumanCode(input: {
     human_code_hash: HashedEnrollmentCode;
     now: string;

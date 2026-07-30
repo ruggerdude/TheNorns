@@ -249,6 +249,18 @@ export class Phase6VisualEvidenceCollectionWorker {
       const dispatchJobId = stableId("visual-dispatch", [collection.id]);
       const commandId = stableId("visual-command", [collection.id]);
       const issuedAt = this.clock();
+      const binding = (
+        await tx.query<{ binding_type: string; repository_id: string }>(
+          `SELECT binding_type,repository_id
+             FROM repository_bindings
+            WHERE id=$1
+              AND project_id=$2
+              AND status IN ('connected','degraded','disconnected')
+            FOR UPDATE`,
+          [collection.repository_binding_id, collection.project_id],
+        )
+      ).rows[0];
+      if (!binding) throw new Error("visual evidence repository binding is no longer available");
       const command = CommandEnvelope.parse({
         protocol: 1,
         command_id: commandId,
@@ -272,6 +284,9 @@ export class Phase6VisualEvidenceCollectionWorker {
           run_id: collection.run_id,
           approved_mockup_version_id: collection.approved_mockup_version_id,
           repository_binding_id: collection.repository_binding_id,
+          ...(binding.binding_type === "local_runner"
+            ? { runner_repository_id: binding.repository_id }
+            : {}),
           verification_result_id: collection.verification_result_id,
           deployment_record_id: collection.deployment_record_id,
           deployment_observation_id: collection.deployment_observation_id,

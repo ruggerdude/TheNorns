@@ -55,8 +55,10 @@ export interface ProjectExecutionTargetOptionRecord {
 
 export interface ProjectExecutionTargetsRecord {
   project_id: string;
+  viewer_role: "owner" | "member";
   selected_execution_target_id: string | null;
   work_active: boolean;
+  legacy_claim_required: boolean;
   execution_targets: ProjectExecutionTargetOptionRecord[];
 }
 
@@ -87,6 +89,7 @@ interface TargetAccessRow {
   is_owner: boolean;
   selected_grant_id: string | null;
   work_active: boolean;
+  legacy_claim_required: boolean;
 }
 
 interface TargetRow {
@@ -612,7 +615,14 @@ export class PostgresDeviceRepositoryAccessRepository {
                 AND run.state IN (
                   'created','dispatched','running','waiting_for_human','verifying'
                 )
-           ) AS work_active
+           ) AS work_active,
+           EXISTS (
+             SELECT 1
+               FROM repository_bindings legacy_binding
+              WHERE legacy_binding.id=project.primary_repository_binding_id
+                AND legacy_binding.project_id=project.id
+                AND legacy_binding.status='legacy_claim_required'
+           ) AS legacy_claim_required
          FROM users actor
          JOIN projects project
            ON project.id=$2
@@ -710,8 +720,10 @@ export class PostgresDeviceRepositoryAccessRepository {
       );
       return {
         project_id: projectId,
+        viewer_role: context.is_owner ? "owner" : "member",
         selected_execution_target_id: context.selected_grant_id,
         work_active: context.work_active,
+        legacy_claim_required: context.legacy_claim_required,
         execution_targets: selected.rows.map((row) => ({
           project_id: row.project_id,
           execution_target_id: row.execution_target_id,

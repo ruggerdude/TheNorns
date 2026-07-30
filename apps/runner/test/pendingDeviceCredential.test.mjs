@@ -5,6 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  DevelopmentFileDeviceCredentialSecretStore,
+  InMemoryDeviceCredentialSecretStore,
+  createInstalledDeviceCredentialSecretStore,
+} from "../dist/deviceCredentialSecretStore.js";
+import {
   PENDING_DEVICE_CREDENTIAL_FILENAME,
   PendingDeviceCredentialStore,
 } from "../dist/pendingDeviceCredential.js";
@@ -16,7 +21,8 @@ function temporaryDataDir() {
 test("pending credential is durably protected before enrollment can use its public key", () => {
   const dataDir = temporaryDataDir();
   const createdAt = new Date("2026-07-29T12:00:00.000Z");
-  const store = new PendingDeviceCredentialStore(dataDir, () => createdAt);
+  const secrets = new InMemoryDeviceCredentialSecretStore();
+  const store = new PendingDeviceCredentialStore(dataDir, secrets, () => createdAt);
 
   try {
     assert.equal(store.read(), null);
@@ -33,7 +39,9 @@ test("pending credential is durably protected before enrollment can use its publ
     assert.equal(statSync(dataDir).mode & 0o777, 0o700);
     assert.equal(statSync(path).mode & 0o777, 0o600);
     const persisted = readFileSync(path, "utf8");
-    assert.match(persisted, /BEGIN PRIVATE KEY/);
+    assert.doesNotMatch(persisted, /BEGIN PRIVATE KEY/);
+    assert.match(persisted, /secret_reference/);
+    assert.equal(secrets.size, 1);
 
     const payload = "norns:device-enrollment-proof:v1\nrequest-1";
     const signature = Buffer.from(store.sign(payload), "base64");
@@ -42,7 +50,7 @@ test("pending credential is durably protected before enrollment can use its publ
       true,
     );
 
-    const reloaded = new PendingDeviceCredentialStore(dataDir);
+    const reloaded = new PendingDeviceCredentialStore(dataDir, secrets);
     assert.deepEqual(reloaded.read(), prepared);
     assert.deepEqual(reloaded.prepare(), prepared);
   } finally {
@@ -53,8 +61,14 @@ test("pending credential is durably protected before enrollment can use its publ
 test("pending credential rejects a persisted public/private key mismatch", () => {
   const firstDir = temporaryDataDir();
   const secondDir = temporaryDataDir();
-  const first = new PendingDeviceCredentialStore(firstDir);
-  const second = new PendingDeviceCredentialStore(secondDir);
+  const first = new PendingDeviceCredentialStore(
+    firstDir,
+    new InMemoryDeviceCredentialSecretStore(),
+  );
+  const second = new PendingDeviceCredentialStore(
+    secondDir,
+    new InMemoryDeviceCredentialSecretStore(),
+  );
 
   try {
     first.prepare();
@@ -71,5 +85,54 @@ test("pending credential rejects a persisted public/private key mismatch", () =>
   } finally {
     rmSync(firstDir, { recursive: true, force: true });
     rmSync(secondDir, { recursive: true, force: true });
+  }
+});
+
+test("concurrent preparation converges and removes the losing protected secret", () => {
+  const dataDir = temporaryDataDir();
+  class RacingSecretStore extends InMemoryDeviceCredentialSecretStore {
+    nested = null;
+    raced = false;
+
+    writeOnce(reference, secret) {
+      super.writeOnce(reference, secret);
+      if (!this.raced && this.nested) {
+        this.raced = true;
+        this.nested.prepare();
+      }
+    }
+  }
+  const secrets = new RacingSecretStore();
+  const first = new PendingDeviceCredentialStore(dataDir, secrets);
+  const second = new PendingDeviceCredentialStore(dataDir, secrets);
+  secrets.nested = second;
+
+  try {
+    const prepared = first.prepare();
+    assert.deepEqual(second.read(), prepared);
+    assert.equal(secrets.size, 1);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("installed credential storage fails closed unless an OS vault or explicit dev fallback exists", () => {
+  const dataDir = temporaryDataDir();
+  try {
+    assert.throws(
+      () =>
+        createInstalledDeviceCredentialSecretStore(dataDir, {
+          platform: "aix",
+        }),
+      /no supported OS-protected/,
+    );
+    const development = createInstalledDeviceCredentialSecretStore(dataDir, {
+      platform: "aix",
+      allowInsecureDevelopmentFile: true,
+    });
+    assert.ok(development instanceof DevelopmentFileDeviceCredentialSecretStore);
+    assert.equal(development.protection, "development-file");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });

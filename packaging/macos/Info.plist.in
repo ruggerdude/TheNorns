@@ -20,19 +20,6 @@
   <string>__VERSION__</string>
   <key>CFBundleVersion</key>
   <string>__VERSION__</string>
-  <key>CFBundleURLTypes</key>
-  <array>
-    <dict>
-      <key>CFBundleTypeRole</key>
-      <string>Viewer</string>
-      <key>CFBundleURLName</key>
-      <string>com.thenorns.local-agent.pair</string>
-      <key>CFBundleURLSchemes</key>
-      <array>
-        <string>norns-agent</string>
-      </array>
-    </dict>
-  </array>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>

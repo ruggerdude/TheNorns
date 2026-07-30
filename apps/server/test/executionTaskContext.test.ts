@@ -598,7 +598,7 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
           },
         }),
         deviceActionAuthorization: {
-          service: new PostgresDeviceActionAuthorization(),
+          service: new PostgresDeviceActionAuthorization({ deviceDispatchEnabled: true }),
           transactions,
         },
       });

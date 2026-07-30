@@ -121,6 +121,8 @@ describe.sequential("legacy runner access isolation", () => {
       stores,
       users,
       legacyRunnerAuthorization: authorization,
+      legacyHelperRoutes: { enabled: true },
+      legacyLocalRunnerAuth: { enabled: true },
     });
     const url = await listen(server);
     const ownerSession = await connectBrowser(url, tokens.owner);

@@ -15,7 +15,7 @@ describe.sequential("transaction-local device action authorization", () => {
   beforeAll(async () => {
     database = new PGlite();
     transactions = new PGliteTransactionRunner(database);
-    authorization = new PostgresDeviceActionAuthorization();
+    authorization = new PostgresDeviceActionAuthorization({ deviceDispatchEnabled: true });
     await database.exec(`
       CREATE TABLE users (
         id TEXT PRIMARY KEY,
@@ -408,6 +408,42 @@ describe.sequential("transaction-local device action authorization", () => {
           run_id: "run-actions",
         }),
       ),
+    ).resolves.toBe("legacy_runner");
+  });
+
+  it("stops new device dispatch while leaving durable Actions-shaped authorization intact", async () => {
+    await expect(
+      transactions.transaction((sql) =>
+        new PostgresDeviceActionAuthorization().resolveDispatchTargetIdentity(sql, {
+          runner_id: "device-1",
+          generation: 3,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "device_dispatch_disabled" });
+
+    const dispatchDisabled = new PostgresDeviceActionAuthorization({
+      deviceDispatchEnabled: false,
+    });
+    await expect(
+      transactions.transaction((sql) =>
+        dispatchDisabled.resolveDispatchTargetIdentity(sql, {
+          runner_id: "device-1",
+          generation: 3,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "device_dispatch_disabled" });
+
+    await expect(
+      transactions.transaction(async (sql) => {
+        const identity = await dispatchDisabled.resolveDispatchTargetIdentity(sql, {
+          runner_id: "actions-attempt-runner",
+          generation: 2,
+        });
+        return dispatchDisabled.assertRun(sql, {
+          ...identity,
+          run_id: "run-actions",
+        });
+      }),
     ).resolves.toBe("legacy_runner");
   });
 });

@@ -36,6 +36,7 @@ import {
   DEVICE_VISUAL_EVIDENCE_UPLOAD_HTTP_SIGNATURE_PURPOSE,
   type EventEnvelopeT,
   LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
+  LocalExecutionCapabilitiesProjection,
   OpenAiPmModel,
   PROTOCOL_VERSION,
   PlanContract,
@@ -168,6 +169,10 @@ import {
   DeviceRunCancellationError,
   type DeviceRunCancellationService,
 } from "./devices/cancellation.js";
+import {
+  type LegacyRepositoryClaimRouteOptions,
+  registerLegacyRepositoryClaimRoutes,
+} from "./devices/legacyRepositoryClaimRoutes.js";
 import {
   type DeviceManagementRouteService,
   registerDeviceManagementRoutes,
@@ -454,6 +459,8 @@ export interface ServerOptions {
    * supplies this under its independent default-off rollout flag.
    */
   deviceRepositoryAccess?: Omit<DeviceRepositoryAccessRouteOptions, "requireUser">;
+  /** Phase 6A exact-project claim APIs. Omission is a strict default-off gate. */
+  legacyRepositoryClaims?: Omit<LegacyRepositoryClaimRouteOptions, "requireUser" | "now">;
   /**
    * Device installation WSS identity proof. This is deliberately independent
    * from enrollment and remains absent in production until the Phase 2
@@ -490,6 +497,12 @@ export interface ServerOptions {
     service: PostgresDeviceActionAuthorization;
     transactions: V2TransactionRunner;
   };
+  /** Device-backed local WSS command/event delivery canary gate. */
+  deviceDispatch?: { enabled: true };
+  /** Deprecated local enrollment routes. Each compatibility gate defaults off. */
+  legacyPairingRoutes?: { enabled: true };
+  legacyHelperRoutes?: { enabled: true };
+  legacyLocalRunnerAuth?: { enabled: true };
   /**
    * Temporary escape hatch for pre-project legacy runner workflows. Omission
    * is fail-closed; production must opt in explicitly while completing
@@ -762,6 +775,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     options.attachments?.transactions;
   const legacyGlobalRunnerCompatibilityEnabled =
     options.legacyGlobalRunnerCompatibility?.enabled === true;
+  const legacyPairingRoutesEnabled = options.legacyPairingRoutes?.enabled === true;
+  const legacyHelperRoutesEnabled = options.legacyHelperRoutes?.enabled === true;
+  const legacyLocalRunnerAuthEnabled = options.legacyLocalRunnerAuth?.enabled === true;
+  const deviceDispatchEnabled = options.deviceDispatch?.enabled === true;
   const legacyRunnerAuthorization: LegacyRunnerAuthorization | null =
     options.legacyRunnerAuthorization ??
     (runtimeTransactionsForInference
@@ -1649,6 +1666,41 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   };
   const requireSession = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> =>
     (await requireSessionUser(req, reply)) !== null;
+  const requireRecentSessionUser = async (
+    req: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<IdentityUser | null> => {
+    const user = await requireSessionUser(req, reply);
+    if (!user) return null;
+    const token = credentialFor(req);
+    if (
+      !token ||
+      !identityService.isRecentSession ||
+      !(await identityService.isRecentSession(token, RECENT_AUTH_MS))
+    ) {
+      stores.audit(user.email, "auth.recent_required", `${req.method} ${req.url}`, now());
+      reply.code(403).send({ error: "recent_auth_required" });
+      return null;
+    }
+    return user;
+  };
+
+  app.get("/api/v2/capabilities/local-execution", async (req, reply) => {
+    if (!(await requireSession(req, reply))) return;
+    return reply
+      .header("Cache-Control", "no-store")
+      .header("Pragma", "no-cache")
+      .send(
+        LocalExecutionCapabilitiesProjection.parse({
+          schema_version: 1,
+          enrollment_available: options.deviceEnrollment !== undefined,
+          computers_available: options.deviceManagement !== undefined,
+          repository_grants_available: options.deviceRepositoryAccess !== undefined,
+          legacy_claim_available: options.legacyRepositoryClaims !== undefined,
+          legacy_local_creation_available: legacyHelperRoutesEnabled,
+        }),
+      );
+  });
   const rejectLegacyRunnerAccess = (
     user: IdentityUser,
     reply: FastifyReply,
@@ -1667,6 +1719,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     operation: string,
   ): boolean =>
     legacyGlobalRunnerCompatibilityEnabled || rejectLegacyRunnerAccess(user, reply, operation);
+  const requireLegacyHelperRoutes = (reply: FastifyReply): boolean => {
+    if (legacyHelperRoutesEnabled) return true;
+    reply.code(404).send({ error: "not_found" });
+    return false;
+  };
   const canUseLegacyProjectRunner = async (input: {
     user_id: string;
     project_id: string;
@@ -1712,6 +1769,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     await registerDeviceEnrollmentRoutes(app, {
       service: options.deviceEnrollment.service,
       requireUser: requireSessionUser,
+      requireRecentUser: requireRecentSessionUser,
       now,
     });
   }
@@ -1731,6 +1789,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   if (options.deviceControl) {
     await registerProjectCancellationRoutes(app, {
       service: options.deviceControl.cancellations,
+      requireUser: requireSessionUser,
+      now,
+    });
+  }
+  if (options.legacyRepositoryClaims) {
+    await registerLegacyRepositoryClaimRoutes(app, {
+      ...options.legacyRepositoryClaims,
       requireUser: requireSessionUser,
       now,
     });
@@ -2458,6 +2523,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // ---- native local-folder helper -------------------------------------------
 
   app.post("/api/pairing/start", async (req, reply) => {
+    if (!legacyPairingRoutesEnabled) {
+      return reply.code(404).send({ error: "not_found" });
+    }
     if (!(await requireSession(req, reply))) return;
     const code = pairingCode();
     const expiresAt = new Date(now().getTime() + PAIRING_TTL_MS);
@@ -2487,6 +2555,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   });
 
   app.post("/api/pairing/complete", (req, reply) => {
+    if (!legacyPairingRoutesEnabled) {
+      return reply.code(404).send({ error: "not_found" });
+    }
     const parsed = PairingComplete.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: "bad_request" });
     const { code, runner_id, public_key_pem } = parsed.data;
@@ -2520,7 +2591,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     return reply.send({ runner_id, generation: record.generation });
   });
 
-  if (options.installScriptsDir) {
+  if (options.installScriptsDir && legacyHelperRoutesEnabled) {
     for (const [route, filename] of Object.entries({
       "/install/runner.sh": "install-runner.sh",
       "/install/runner.ps1": "install-runner.ps1",
@@ -2790,6 +2861,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   };
 
   app.get("/api/runners/helper/status", async (req, reply) => {
+    if (!requireLegacyHelperRoutes(reply)) return;
     const user = await requireSessionUser(req, reply);
     if (!user) return;
     if (!requireLegacyGlobalCompatibility(user, reply, "global helper status")) return;
@@ -2797,6 +2869,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   });
 
   app.get("/api/runners", async (req, reply) => {
+    if (!requireLegacyHelperRoutes(reply)) return;
     const user = await requireSessionUser(req, reply);
     if (!user) return;
     return reply.send(await authorizedHelperRunnerSnapshots(user.id));
@@ -2833,6 +2906,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   });
 
   app.get("/api/events/:runnerId", async (req, reply) => {
+    if (!requireLegacyHelperRoutes(reply)) return;
     const user = await requireSessionUser(req, reply);
     if (!user) return;
     const { runnerId } = req.params as { runnerId: string };
@@ -4114,6 +4188,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       if (!user) return reply.code(401).send({ error: "unauthorized" });
       const body = CreateProjectBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      // The source-less legacy form creates a local project. Retiring its UI
+      // is insufficient: keep the mutation absent unless the independent
+      // local-helper compatibility gate is explicitly enabled. GitHub-backed
+      // creation remains available.
+      if (body.data.source_type !== "github" && !requireLegacyHelperRoutes(reply)) return;
       let resolvedGitHubRepository:
         | Awaited<ReturnType<GitHubIntegrationService["resolveRepository"]>>
         | undefined;
@@ -4314,6 +4393,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               }
             | undefined;
           if (scenario.data.scenario === "new_repo" && scenario.data.local_working_copy) {
+            if (!requireLegacyHelperRoutes(reply)) return;
             if (!github || !options.phase3) {
               console.error(
                 "project onboarding refused: local_working_copy_unavailable (503) — GitHub integration or local execution services not configured",
@@ -4810,6 +4890,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       };
 
       app.post("/api/runners/:runnerId/workspaces/choose", async (req, reply) => {
+        if (!requireLegacyHelperRoutes(reply)) return;
         const { runnerId } = req.params as { runnerId: string };
         return chooseLocalRepository(req, reply, runnerId);
       });
@@ -4817,10 +4898,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       // Account-level local source setup. Projects consume this reusable
       // inventory and never install/pair helpers or open native pickers.
       app.post("/api/runners/helper/repositories/choose", async (req, reply) => {
+        if (!requireLegacyHelperRoutes(reply)) return;
         return chooseLocalRepository(req, reply);
       });
 
       app.get("/api/runners/helper/repositories", async (req, reply) => {
+        if (!requireLegacyHelperRoutes(reply)) return;
         const user = await resolveUser(req);
         if (!user) return reply.code(401).send({ error: "unauthorized" });
         if (!requireLegacyGlobalCompatibility(user, reply, "global repository catalog")) return;
@@ -4881,6 +4964,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       app.post("/api/v2/projects/local", async (req, reply) => {
         const user = await resolveUser(req);
         if (!user) return reply.code(401).send({ error: "unauthorized" });
+        if (!requireLegacyHelperRoutes(reply)) return;
         const body = LocalProjectBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: "bad_request" });
         const reserved = workspaceSelections.reserve(user.id, body.data.selection_token);
@@ -5000,6 +5084,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       app.post("/api/v2/projects/:id/source-bindings/local", async (req, reply) => {
         const user = await resolveUser(req);
         if (!user) return reply.code(401).send({ error: "unauthorized" });
+        if (!requireLegacyHelperRoutes(reply)) return;
         const body = LocalBindingBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: "bad_request" });
         const { id } = req.params as { id: string };
@@ -7504,6 +7589,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
         authenticationState = "authenticating";
         let runner = stores.runner(frame.runner_id);
+        let durableActionsIdentity = false;
         if (frame.runner_id.startsWith("actions:") && options.actionsExecution) {
           try {
             const durable = await options.actionsExecution.repository.enrolledRunnerIdentity(
@@ -7512,6 +7598,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             if (!durable) {
               runner = undefined;
             } else {
+              durableActionsIdentity = true;
               const restored = stores.restoreDurableRunnerIdentity(
                 frame.runner_id,
                 durable.public_key_pem,
@@ -7530,6 +7617,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             socket.close(1011, "runner authentication persistence unavailable");
             return;
           }
+        }
+        if (!durableActionsIdentity && !legacyLocalRunnerAuthEnabled) {
+          rejectAuthentication(`runner:${frame.runner_id}`, "runner.auth_disabled");
+          return;
         }
         if (authenticationState !== "authenticating") return;
         const authenticationTranscript = canonicalLegacyRunnerWssAuthenticationTranscript({
@@ -7744,11 +7835,138 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           }
           return;
         }
-        // Authentication is available for gated validation, but device
-        // command/event transport stays fail-closed until every Phase 2
-        // per-operation authorization check is wired.
+        if (!deviceDispatchEnabled) {
+          authenticationState = "closed";
+          socket.close(1008, "device execution protocol is disabled");
+          return;
+        }
+        if (!authedDevice || !options.deviceActionAuthorization || !options.phase4) {
+          authenticationState = "closed";
+          socket.close(1011, "device execution authorization is unavailable");
+          return;
+        }
+        const deviceIdentity = authedDevice;
+        const deviceActionAuthorization = options.deviceActionAuthorization;
+        if (frame.type === "reconcile_request") {
+          const body = ReconcileRequest.parse(frame.body);
+          if (
+            body.runner_id !== deviceIdentity.device_id ||
+            body.generation !== deviceIdentity.generation
+          ) {
+            authenticationState = "closed";
+            socket.close(1008, "device reconciliation identity changed");
+            return;
+          }
+          try {
+            await deviceActionAuthorization.transactions.transaction((sql) =>
+              deviceActionAuthorization.service.lockTransportIdentity(sql, {
+                subject: "device",
+                runner_id: deviceIdentity.device_id,
+                generation: deviceIdentity.generation,
+                credential_id: deviceIdentity.credential_id,
+              }),
+            );
+            const priorSocket = runnerSockets.get(deviceIdentity.device_id);
+            if (priorSocket && priorSocket !== socket) {
+              reconciledRunners.delete(deviceIdentity.device_id);
+              priorSocket.close(1008, "superseded device connection");
+            }
+            runnerSockets.set(deviceIdentity.device_id, socket);
+            reconciledRunners.set(deviceIdentity.device_id, {
+              socket,
+              generation: deviceIdentity.generation,
+              workspacePicker: false,
+              workspaceRepositoryInventory: false,
+              workspaceClone: false,
+            });
+            const recentlyExecuted = new Set(body.recently_executed_command_ids);
+            sendFrame(socket, {
+              type: "reconcile_response",
+              body: {
+                protocol: PROTOCOL_VERSION as 1,
+                ack_event_seq: stores.eventWatermark(deviceIdentity.device_id),
+                generation: deviceIdentity.generation,
+                capabilities: body.capabilities.includes("knowledge_transport")
+                  ? (["knowledge_transport"] as const)
+                  : [],
+                resend_commands: [],
+              },
+            });
+            await options.phase4.dispatch.deliverPendingForRunner(
+              deviceIdentity.device_id,
+              deviceIdentity.generation,
+              recentlyExecuted,
+              async (command) => {
+                if (
+                  runnerSockets.get(deviceIdentity.device_id) !== socket ||
+                  reconciledRunners.get(deviceIdentity.device_id)?.socket !== socket
+                ) {
+                  throw new Error("device socket changed before pending command delivery");
+                }
+                sendFrame(socket, { type: "command", command: v2WireCommand(command) });
+              },
+            );
+          } catch (error) {
+            stores.audit(
+              `device:${deviceIdentity.device_id}`,
+              "device.reconcile_failed",
+              error instanceof Error ? error.message : String(error),
+              now(),
+            );
+            authenticationState = "closed";
+            socket.close(1011, "device reconciliation failed");
+          }
+          return;
+        }
+        if (frame.type === "event") {
+          const event: EventEnvelopeT = frame.event;
+          if (
+            !runnerEventIngressOpen ||
+            runnerSockets.get(deviceIdentity.device_id) !== socket ||
+            reconciledRunners.get(deviceIdentity.device_id)?.socket !== socket ||
+            event.runner_id !== deviceIdentity.device_id ||
+            event.generation !== deviceIdentity.generation
+          ) {
+            authenticationState = "closed";
+            runnerEventIngressOpen = false;
+            socket.close(1008, "device event identity changed");
+            return;
+          }
+          runnerEventDelivery = runnerEventDelivery
+            .then(async () => {
+              const authenticatedIdentity = {
+                subject: "device" as const,
+                runner_id: deviceIdentity.device_id,
+                generation: deviceIdentity.generation,
+                credential_id: deviceIdentity.credential_id,
+              };
+              const actionAckHandled =
+                (await conversationActionDelivery?.applyCommandAck(event, authenticatedIdentity)) ??
+                false;
+              if (!actionAckHandled) {
+                await options.phase4?.events.apply(event, authenticatedIdentity);
+              }
+              stores.ingestEvent(event);
+              sendFrame(socket, {
+                type: "event_ack",
+                ack_event_seq: stores.eventWatermark(deviceIdentity.device_id),
+              });
+            })
+            .catch((error) => {
+              runnerEventIngressOpen = false;
+              stores.audit(
+                `device:${deviceIdentity.device_id}`,
+                "device.event_rejected",
+                error instanceof Error ? error.message : String(error),
+                now(),
+              );
+              authenticationState = "closed";
+              socket.close(1008, "device event rejected");
+            });
+          return;
+        }
         authenticationState = "closed";
-        socket.close(1008, "device execution protocol is not enabled");
+        socket.close(1008, "unsupported device execution frame");
         return;
       }
 
@@ -7995,6 +8213,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     socket.on("close", () => {
       authenticationState = "closed";
       if (authedDevice) {
+        if (runnerSockets.get(authedDevice.device_id) === socket) {
+          runnerSockets.delete(authedDevice.device_id);
+          reconciledRunners.delete(authedDevice.device_id);
+        }
         disconnectDeviceControl?.();
         disconnectDeviceControl = null;
         void options.deviceBrowserDelivery

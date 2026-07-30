@@ -10,6 +10,7 @@ import {
   canonicalDeviceCancellationEvidenceWssTranscript,
   canonicalDeviceWssAuthenticationTranscript,
 } from "@norns/contracts";
+import { InMemoryDeviceCredentialSecretStore } from "../dist/deviceCredentialSecretStore.js";
 import {
   PendingDeviceCredentialStore,
   createDeviceCancellationEvidenceFrame,
@@ -19,7 +20,10 @@ import {
 test("device WSS proof signs the canonical domain-separated transcript", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "norns-device-wss-test-"));
   try {
-    const credential = new PendingDeviceCredentialStore(dataDir);
+    const credential = new PendingDeviceCredentialStore(
+      dataDir,
+      new InMemoryDeviceCredentialSecretStore(),
+    );
     const prepared = credential.prepare();
     const frame = createDeviceWssAuthenticationFrame({
       device_id: "device-1",
@@ -65,7 +69,10 @@ test("device WSS proof signs the canonical domain-separated transcript", () => {
 test("device cancellation evidence signs only the exact state-bound transcript", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "norns-device-cancellation-wss-test-"));
   try {
-    const credential = new PendingDeviceCredentialStore(dataDir);
+    const credential = new PendingDeviceCredentialStore(
+      dataDir,
+      new InMemoryDeviceCredentialSecretStore(),
+    );
     const prepared = credential.prepare();
     const frame = createDeviceCancellationEvidenceFrame({
       identity: {

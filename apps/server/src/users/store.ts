@@ -208,6 +208,14 @@ export class UserStore {
     return this.users.get(session.userId);
   }
 
+  isRecentSession(token: string, maximumAgeMs: number, at = new Date()): boolean {
+    const session = this.sessions.get(token);
+    if (!session) return false;
+    const authenticatedAt = Date.parse(session.createdAt);
+    const age = at.getTime() - authenticatedAt;
+    return Number.isFinite(age) && age >= 0 && age <= maximumAgeMs;
+  }
+
   snapshot(): UserStoreSnapshot {
     return {
       users: [...this.users.values()],

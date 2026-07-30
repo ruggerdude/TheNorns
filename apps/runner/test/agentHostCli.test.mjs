@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,8 +11,11 @@ import { DEVICE_WSS_PROTOCOL_VERSION } from "@norns/contracts";
 import { WebSocketServer } from "ws";
 import {
   ActiveDeviceIdentityStore,
+  DevelopmentFileDeviceCredentialSecretStore,
   PendingDeviceCredentialStore,
   RunnerStateFile,
+  createAgentHostNativeLaunchRequestProof,
+  createAgentHostNativeLaunchResponseProof,
   writeLocalAgentConfig,
 } from "../dist/index.js";
 
@@ -89,6 +92,30 @@ test("agent-host remains disabled unless its preview feature flag is explicit", 
     assert.equal(result.status, 1);
     assert.match(result.stderr, /AgentHost is disabled/);
     assert.equal(existsSync(join(dataDir, "agent-host.json")), false);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("normal help and default CLI path retire raw and custom-URI pairing", () => {
+  const dataDir = temporaryDataDir();
+  try {
+    const help = spawnSync(process.execPath, [CLI_PATH, "--help"], {
+      encoding: "utf8",
+      env: environmentWith(),
+    });
+    assert.equal(help.status, 0);
+    assert.doesNotMatch(help.stdout, /pair-url|norns-agent:\/\/|pair <code>/);
+
+    const pairingUri = "norns-agent://pair?server=https%3A%2F%2Fnorns.example&code=deadbeef";
+    const retired = spawnSync(
+      process.execPath,
+      [CLI_PATH, "pair-url", pairingUri, "--data", dataDir],
+      { encoding: "utf8", env: environmentWith() },
+    );
+    assert.equal(retired.status, 1);
+    assert.match(retired.stderr, /legacy custom-URI pairing is disabled/);
+    assert.doesNotMatch(retired.stderr, /deadbeef/);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
@@ -214,7 +241,10 @@ test("production start and installed agent-start share AgentHost-owned device co
     });
   });
 
-  const pending = new PendingDeviceCredentialStore(dataDir);
+  const pending = new PendingDeviceCredentialStore(
+    dataDir,
+    new DevelopmentFileDeviceCredentialSecretStore(dataDir),
+  );
   pending.prepare();
   new ActiveDeviceIdentityStore(dataDir).activateFromRedemption({
     device_id: "device-production",
@@ -248,6 +278,8 @@ test("production start and installed agent-start share AgentHost-owned device co
     {
       env: environmentWith({
         NORNS_ENABLE_DEVICE_CONTROL: "true",
+        NORNS_ENABLE_LEGACY_LOCAL_COMPATIBILITY: "true",
+        NORNS_ALLOW_INSECURE_DEVICE_KEY_FILE: "true",
         NORNS_APPROVED_ROOTS_JSON: "[]",
       }),
       stdio: ["ignore", "pipe", "pipe"],
@@ -268,16 +300,51 @@ test("production start and installed agent-start share AgentHost-owned device co
     agentChild = spawn(process.execPath, [CLI_PATH, "agent-start", "--data", dataDir], {
       env: environmentWith({
         NORNS_ENABLE_DEVICE_CONTROL: "true",
+        NORNS_ENABLE_LEGACY_LOCAL_COMPATIBILITY: "true",
+        NORNS_ALLOW_INSECURE_DEVICE_KEY_FILE: "true",
         NORNS_APPROVED_ROOTS_JSON: "[]",
       }),
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const started = await waitForBootstrapUrl(agentChild);
+    await waitFor(
+      () => existsSync(join(dataDir, "agent-host.json")),
+      "AgentHost native discovery record",
+    );
+    const discovery = JSON.parse(readFileSync(join(dataDir, "agent-host.json"), "utf8"));
+    const requestId = randomBytes(32).toString("base64url");
+    const requestBody = {
+      request_id: requestId,
+      request_proof: createAgentHostNativeLaunchRequestProof({
+        native_launch_secret: discovery.native_launch_secret,
+        origin: discovery.origin,
+        request_id: requestId,
+      }),
+    };
+    assert.doesNotMatch(JSON.stringify(requestBody), new RegExp(discovery.native_launch_secret));
+    const nativeLaunch = await fetch(`${discovery.origin}/api/session/native-launch`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: discovery.origin,
+      },
+      body: JSON.stringify(requestBody),
+    });
+    assert.equal(nativeLaunch.status, 200);
+    const started = await nativeLaunch.json();
+    assert.equal(
+      started.response_proof,
+      createAgentHostNativeLaunchResponseProof({
+        native_launch_secret: discovery.native_launch_secret,
+        origin: discovery.origin,
+        request_id: requestId,
+        bootstrap_url: started.bootstrap_url,
+      }),
+    );
     await waitFor(
       () => observed.includes("auth") && observed.includes("device_auth"),
       "AgentHost-owned legacy and device authentication frames",
     );
-    const page = await fetch(started.bootstrapUrl);
+    const page = await fetch(started.bootstrap_url);
     assert.equal(page.status, 200);
     assert.match(await page.text(), /Emergency stop all Norns work/);
     agentChild.kill("SIGTERM");

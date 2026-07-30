@@ -11,6 +11,7 @@ import {
   DEVICE_CANCELLATION_JOURNAL_FILENAME,
   DeviceCancellationJournal,
   DeviceControlConnection,
+  InMemoryDeviceCredentialSecretStore,
   LiveRunRegistry,
   ManagedProcessTree,
   PendingDeviceCredentialStore,
@@ -21,6 +22,10 @@ import {
 
 function temporaryDataDir() {
   return mkdtempSync(join(tmpdir(), "norns-device-control-test-"));
+}
+
+function pendingCredential(dataDir) {
+  return new PendingDeviceCredentialStore(dataDir, new InMemoryDeviceCredentialSecretStore());
 }
 
 async function waitFor(condition, label, timeoutMs = 5_000) {
@@ -80,7 +85,7 @@ async function createRelay() {
 test("device cancellation evidence survives response loss and replays in state order", async () => {
   const dataDir = temporaryDataDir();
   const relay = await createRelay();
-  const credential = new PendingDeviceCredentialStore(dataDir);
+  const credential = pendingCredential(dataDir);
   credential.prepare();
   const identity = {
     device_id: "device-1",
@@ -254,7 +259,7 @@ test("device cancellation journal rejects unbounded pending evidence", () => {
 test("unproven containment never emits process-exit evidence", async () => {
   const dataDir = temporaryDataDir();
   const relay = await createRelay();
-  const credential = new PendingDeviceCredentialStore(dataDir);
+  const credential = pendingCredential(dataDir);
   credential.prepare();
   const identity = {
     device_id: "device-2",
@@ -332,7 +337,7 @@ test("unproven containment never emits process-exit evidence", async () => {
 test("wrong device identity and generation fence without acknowledgement", async () => {
   const dataDir = temporaryDataDir();
   const relay = await createRelay();
-  const credential = new PendingDeviceCredentialStore(dataDir);
+  const credential = pendingCredential(dataDir);
   credential.prepare();
   const identity = {
     device_id: "device-fenced",
@@ -393,7 +398,7 @@ test("wrong device identity and generation fence without acknowledgement", async
 test("project stop fences only the selected run even when publication is fenced", async () => {
   const dataDir = temporaryDataDir();
   const relay = await createRelay();
-  const credential = new PendingDeviceCredentialStore(dataDir);
+  const credential = pendingCredential(dataDir);
   credential.prepare();
   const identity = {
     device_id: "device-project-stop",
@@ -493,7 +498,7 @@ test("project stop fences only the selected run even when publication is fenced"
 test("a stop completed offline is journaled and replayed only after authentication", async () => {
   const dataDir = temporaryDataDir();
   const relay = await createRelay();
-  const credential = new PendingDeviceCredentialStore(dataDir);
+  const credential = pendingCredential(dataDir);
   credential.prepare();
   const identity = {
     device_id: "device-offline",
@@ -603,7 +608,7 @@ test("a stop completed offline is journaled and replayed only after authenticati
 test("late terminal proof after the confirmation timeout emits process-exit evidence", async () => {
   const dataDir = temporaryDataDir();
   const relay = await createRelay();
-  const credential = new PendingDeviceCredentialStore(dataDir);
+  const credential = pendingCredential(dataDir);
   credential.prepare();
   const identity = {
     device_id: "device-late",
@@ -692,7 +697,7 @@ test("late terminal proof after the confirmation timeout emits process-exit evid
 test("RunnerDaemon forwards late exact-run proof after its bounded stop window", async () => {
   const dataDir = temporaryDataDir();
   const relay = await createRelay();
-  const credential = new PendingDeviceCredentialStore(dataDir);
+  const credential = pendingCredential(dataDir);
   credential.prepare();
   const identity = {
     device_id: "device-daemon-late",

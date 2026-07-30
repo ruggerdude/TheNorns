@@ -46,6 +46,8 @@ describe.sequential("runner knowledge capability negotiation", () => {
       projects: new ProjectStore(),
       phase3: phase3Routes,
       legacyGlobalRunnerCompatibility: { enabled: true },
+      legacyHelperRoutes: { enabled: true },
+      legacyLocalRunnerAuth: { enabled: true },
     });
     url = await listen(server);
   });
@@ -76,6 +78,8 @@ describe.sequential("runner knowledge capability negotiation", () => {
       projects: new ProjectStore(),
       phase3: phase3Routes,
       legacyGlobalRunnerCompatibility: { enabled: true },
+      legacyHelperRoutes: { enabled: true },
+      legacyLocalRunnerAuth: { enabled: true },
       phase4: {
         coordinator: new Phase4Coordinator(transactions),
         completion: new Phase4CompletionService(transactions),

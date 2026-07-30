@@ -8,7 +8,7 @@ if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)
 fi
 BUNDLE_VERSION="${VERSION%%-*}"
 
-WORKSPACE=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+WORKSPACE=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 RUNNER_PACK="$WORKSPACE/apps/runner/dist-pack"
 MANIFEST="$RUNNER_PACK/runner-tarball.json"
 STAGE="$WORKSPACE/dist-agent/macos"
@@ -18,6 +18,7 @@ CONTENTS="$APP/Contents"
 RESOURCES="$CONTENTS/Resources"
 MACOS="$CONTENTS/MacOS"
 OUTPUT="$STAGE/installer/Norns-Local-Agent-macOS.pkg"
+PACKAGE_SCRIPTS="$STAGE/package-scripts"
 NODE_VERSION="24.18.0"
 
 [ -f "$MANIFEST" ] || {
@@ -32,7 +33,10 @@ TARBALL="$RUNNER_PACK/$TARBALL_NAME"
 }
 
 rm -rf "$STAGE"
-mkdir -p "$MACOS" "$RESOURCES/runtime" "$RESOURCES/app" "$STAGE/installer"
+mkdir -p "$MACOS" "$RESOURCES/runtime" "$RESOURCES/app" "$STAGE/installer" "$PACKAGE_SCRIPTS"
+cp "$WORKSPACE/packaging/macos/package-scripts/preinstall" "$PACKAGE_SCRIPTS/preinstall"
+cp "$WORKSPACE/packaging/macos/package-scripts/postinstall" "$PACKAGE_SCRIPTS/postinstall"
+chmod 755 "$PACKAGE_SCRIPTS/preinstall" "$PACKAGE_SCRIPTS/postinstall"
 
 for ARCH in arm64 x64; do
   APP_PAYLOAD="$RESOURCES/app/$ARCH"
@@ -62,11 +66,15 @@ for ARCH in arm64 x64; do
 done
 
 swiftc -O -target arm64-apple-macos13.0 \
-  -framework AppKit -framework Carbon \
+  -framework AppKit \
+  -framework CryptoKit \
+  -framework Security \
   "$WORKSPACE/packaging/macos/NornsLocalAgent.swift" \
   -o "$STAGE/NornsLocalAgent-arm64"
 swiftc -O -target x86_64-apple-macos13.0 \
-  -framework AppKit -framework Carbon \
+  -framework AppKit \
+  -framework CryptoKit \
+  -framework Security \
   "$WORKSPACE/packaging/macos/NornsLocalAgent.swift" \
   -o "$STAGE/NornsLocalAgent-x64"
 lipo -create "$STAGE/NornsLocalAgent-arm64" "$STAGE/NornsLocalAgent-x64" \
@@ -85,6 +93,7 @@ xattr -cr "$APP"
 
 COPYFILE_DISABLE=1 pkgbuild \
   --root "$PKG_ROOT" \
+  --scripts "$PACKAGE_SCRIPTS" \
   --identifier "com.thenorns.local-agent.pkg" \
   --version "$BUNDLE_VERSION" \
   --install-location / \

@@ -13,6 +13,10 @@ import { PortfolioMenu } from "./PortfolioMenu";
 import { AuthenticatedHeaderActions } from "./UserMenu";
 import { ApiError, type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
 import {
+  DISABLED_LOCAL_EXECUTION_CAPABILITIES,
+  loadLocalExecutionCapabilities,
+} from "./localExecutionCapabilities";
+import {
   type LocalRepositoryInventory,
   type LocalRepositorySelection,
   loadLocalRepositories,
@@ -479,6 +483,9 @@ export function Projects({
   const [localSources, setLocalSources] = useState<LocalRepositoryInventory | null>(null);
   const [localSourcesError, setLocalSourcesError] = useState<string | null>(null);
   const [localSelection, setLocalSelection] = useState<LocalRepositorySelection | null>(null);
+  const [localExecutionCapabilities, setLocalExecutionCapabilities] = useState(
+    DISABLED_LOCAL_EXECUTION_CAPABILITIES,
+  );
   const [creating, setCreating] = useState(false);
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
   const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
@@ -653,6 +660,30 @@ export function Projects({
 
   useEffect(() => void refreshGitHub(), [refreshGitHub]);
 
+  useEffect(() => {
+    let current = true;
+    void loadLocalExecutionCapabilities()
+      .then((capabilities) => {
+        if (!current) return;
+        setLocalExecutionCapabilities(capabilities);
+        if (!capabilities.legacy_local_creation_available) {
+          setSourceKind("github");
+          setExecutionLocation("github_actions");
+          setLocalSelection(null);
+          setLocalSources(null);
+          setLocalSourcesError(null);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!current) return;
+        if (error instanceof UnauthorizedError) onUnauthorized();
+        else setLocalExecutionCapabilities(DISABLED_LOCAL_EXECUTION_CAPABILITIES);
+      });
+    return () => {
+      current = false;
+    };
+  }, [onUnauthorized]);
+
   const continueGitHubSetup = useCallback(async (): Promise<void> => {
     if (!githubStatus?.configured) {
       onOpenAccount("connections");
@@ -712,6 +743,7 @@ export function Projects({
   useSingleFlightPolling({
     enabled:
       dialog &&
+      localExecutionCapabilities.legacy_local_creation_available &&
       (sourceKind === "local" ||
         (startingPoint === "new" && sourceKind === "github" && executionLocation === "local")),
     intervalMs: 4_000,
@@ -970,6 +1002,12 @@ export function Projects({
     setSubmissionError(null);
     try {
       if (sourceKind === "local") {
+        if (!localExecutionCapabilities.legacy_local_creation_available) {
+          setSourceError(
+            "Creating projects from the legacy local helper is disabled. Choose a GitHub repository.",
+          );
+          return;
+        }
         if (!localSelection) {
           setSourceError("Choose a local Git repository first.");
           return;
@@ -998,6 +1036,16 @@ export function Projects({
         return;
       }
       const repository = repositories.find((candidate) => candidate.id === selectedRepositoryId);
+      if (
+        scenario === "new_repo" &&
+        executionLocation === "local" &&
+        !localExecutionCapabilities.legacy_local_creation_available
+      ) {
+        setSourceError(
+          "Creating a local working copy is disabled. Choose GitHub Actions for this project.",
+        );
+        return;
+      }
       if (scenario === "new_repo" && !selectedConnectionId) {
         setSourceError("Choose a GitHub account or organization to create the repository under.");
         return;
@@ -1089,6 +1137,7 @@ export function Projects({
     startingPoint,
     sourceKind,
     executionLocation,
+    localExecutionCapabilities.legacy_local_creation_available,
     localSelection,
     selectedConnectionId,
     derivedIdentity,
@@ -1211,8 +1260,9 @@ export function Projects({
   );
   const githubConnected = connectedGitHub.length > 0;
   const isLocalSource = sourceKind === "local";
+  const legacyLocalCreationAvailable = localExecutionCapabilities.legacy_local_creation_available;
   const sourceReady = isLocalSource
-    ? Boolean(localSelection)
+    ? legacyLocalCreationAvailable && Boolean(localSelection)
     : scenario === "existing_repo"
       ? Boolean(selectedRepositoryId)
       : Boolean(selectedConnectionId);
@@ -1220,7 +1270,9 @@ export function Projects({
     isLocalSource ||
     startingPoint !== "new" ||
     executionLocation !== "local" ||
-    (localSources?.state === "connected" && localSources.workspace_clone_ready);
+    (legacyLocalCreationAvailable &&
+      localSources?.state === "connected" &&
+      localSources.workspace_clone_ready);
   const canCreate =
     !creating &&
     (isLocalSource || githubConnected) &&
@@ -1859,7 +1911,11 @@ export function Projects({
                         }}
                       >
                         <strong>Existing</strong>
-                        <span>Choose an existing GitHub or approved local Git repository.</span>
+                        <span>
+                          {legacyLocalCreationAvailable
+                            ? "Choose an existing GitHub or approved local Git repository."
+                            : "Choose an existing GitHub repository."}
+                        </span>
                       </button>
                     </div>
                   </fieldset>
@@ -1890,24 +1946,26 @@ export function Projects({
                             : "Select from a connected account or organization."}
                         </span>
                       </button>
-                      <button
-                        type="button"
-                        className={sourceKind === "local" ? "is-selected" : ""}
-                        onClick={() => {
-                          setSourceKind("local");
-                          setExecutionLocation("github_actions");
-                          setSelectedRepositoryId("");
-                          setSourceError(null);
-                          setLocalSourcesError(null);
-                          setSubmissionError(null);
-                        }}
-                      >
-                        <strong>Approved local Git repository</strong>
-                        <span>
-                          Use a repository already initialized and approved in Connections. Norns
-                          does not create the folder.
-                        </span>
-                      </button>
+                      {legacyLocalCreationAvailable ? (
+                        <button
+                          type="button"
+                          className={sourceKind === "local" ? "is-selected" : ""}
+                          onClick={() => {
+                            setSourceKind("local");
+                            setExecutionLocation("github_actions");
+                            setSelectedRepositoryId("");
+                            setSourceError(null);
+                            setLocalSourcesError(null);
+                            setSubmissionError(null);
+                          }}
+                        >
+                          <strong>Approved local Git repository</strong>
+                          <span>
+                            Use a repository already initialized and approved in Connections. Norns
+                            does not create the folder.
+                          </span>
+                        </button>
+                      ) : null}
                     </div>
                   </fieldset>
 
@@ -2115,7 +2173,10 @@ export function Projects({
                     </div>
                   )}
 
-                  {!isLocalSource && startingPoint === "new" && githubConnected ? (
+                  {!isLocalSource &&
+                  startingPoint === "new" &&
+                  githubConnected &&
+                  legacyLocalCreationAvailable ? (
                     <fieldset className="source-picker" data-testid="execution-location-picker">
                       <legend>Project location</legend>
                       <div className="source-options">

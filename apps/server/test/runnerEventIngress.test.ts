@@ -26,6 +26,8 @@ describe.sequential("runner event ingress fencing", () => {
       stores,
       users,
       legacyGlobalRunnerCompatibility: { enabled: true },
+      legacyHelperRoutes: { enabled: true },
+      legacyLocalRunnerAuth: { enabled: true },
     });
     url = await listen(server);
   });

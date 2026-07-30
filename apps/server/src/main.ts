@@ -35,6 +35,7 @@ import { buildDashboard } from "./dashboard.js";
 import { DebateService } from "./debates/service.js";
 import { DebateWorker } from "./debates/worker.js";
 import {
+  DeviceCutoverRuntimeConfigurationError,
   DeviceEnrollmentCodeHasher,
   DeviceEnrollmentRuntimeConfigurationError,
   DeviceEnrollmentService,
@@ -47,11 +48,13 @@ import {
   DeviceRevocationService,
   DeviceRunCancellationService,
   DeviceWssAuthenticationService,
+  LegacyRepositoryClaimService,
   PostgresDeviceActionAuthorization,
   PostgresDeviceEnrollmentRepository,
   PostgresDeviceManagementRepository,
   PostgresDeviceRepositoryAccessRepository,
   PostgresDeviceWssAuthenticationRepository,
+  parseDeviceCutoverRuntimeConfiguration,
   parseDeviceEnrollmentRuntimeConfiguration,
   parseDeviceManagementRuntimeConfiguration,
   parseDeviceRepositoryAccessRuntimeConfiguration,
@@ -151,9 +154,6 @@ let projectRuntime = createProjectRuntime({
 });
 let relationalComposition: RelationalCompositionBridge | undefined;
 const isProd = process.env.NODE_ENV === "production";
-const legacyGlobalRunnerCompatibilityEnabled =
-  process.env.NORNS_LEGACY_GLOBAL_RUNNER_COMPATIBILITY?.trim().toLowerCase() === "true";
-
 // Tier-2 persistence: when DATABASE_URL is set (Railway Postgres plugin),
 // hydrate relay state from the last snapshot and flush changes back durably.
 // Development can still run in memory. Production identity state must never
@@ -255,6 +255,7 @@ let deviceControlOptions:
     }
   | undefined;
 let deviceWssAuthentication: DeviceWssAuthenticationService | undefined;
+let legacyRepositoryClaimsOptions: { service: LegacyRepositoryClaimService } | undefined;
 
 const publicOrigin =
   process.env.NORNS_PUBLIC_ORIGIN ??
@@ -305,20 +306,24 @@ if (deviceRepositoryAccessRuntime.enabled && !databaseUrl) {
   process.exit(1);
 }
 
-const legacyRunnerHttpAuthFlag = process.env.NORNS_ENABLE_LEGACY_RUNNER_HTTP_AUTH;
-if (
-  legacyRunnerHttpAuthFlag !== undefined &&
-  legacyRunnerHttpAuthFlag !== "true" &&
-  legacyRunnerHttpAuthFlag !== "false"
-) {
-  console.error("NORNS_ENABLE_LEGACY_RUNNER_HTTP_AUTH must be exactly true or false");
+let deviceCutoverRuntime: ReturnType<typeof parseDeviceCutoverRuntimeConfiguration>;
+try {
+  deviceCutoverRuntime = parseDeviceCutoverRuntimeConfiguration(process.env);
+} catch (error) {
+  if (error instanceof DeviceCutoverRuntimeConfigurationError) {
+    console.error(`device cutover startup refused [${error.variable}]: ${error.message}`);
+    process.exit(1);
+  }
+  throw error;
+}
+if (deviceCutoverRuntime.legacy_repository_claims_enabled && !databaseUrl) {
+  console.error("legacy repository claims startup refused: PostgreSQL persistence is required");
   process.exit(1);
 }
-// Current local and Actions runners still carry generation-fenced legacy
-// identities. Their compatibility protocol now has the same body/query/
-// purpose/request-id binding and persistent replay defense as devices, so it
-// remains enabled through cutover unless an operator explicitly disables it.
-const legacyRunnerHttpAuthEnabled = legacyRunnerHttpAuthFlag !== "false";
+if (deviceCutoverRuntime.device_dispatch_enabled && !databaseUrl) {
+  console.error("device dispatch startup refused: PostgreSQL persistence is required");
+  process.exit(1);
+}
 
 if (databaseUrl) {
   try {
@@ -348,7 +353,9 @@ if (databaseUrl) {
       mode: "runtime",
       role: "norns_app",
     });
-    deviceActionAuthorization = new PostgresDeviceActionAuthorization();
+    deviceActionAuthorization = new PostgresDeviceActionAuthorization({
+      deviceDispatchEnabled: deviceCutoverRuntime.device_dispatch_enabled,
+    });
     deviceActionAuthorizationOptions = {
       service: deviceActionAuthorization,
       transactions: runtimeTransactions,
@@ -390,27 +397,45 @@ if (databaseUrl) {
         ),
       };
     }
-    if (deviceEnrollmentRuntime.enabled) {
-      deviceWssAuthentication = new DeviceWssAuthenticationService(
-        new PostgresDeviceWssAuthenticationRepository(runtimeTransactions),
-      );
+    // Existing enrolled installations must retain authenticated cancellation
+    // and management connectivity even when new enrollment and general device
+    // dispatch are both disabled.
+    deviceWssAuthentication = new DeviceWssAuthenticationService(
+      new PostgresDeviceWssAuthenticationRepository(runtimeTransactions),
+    );
+    if (deviceCutoverRuntime.legacy_repository_claims_enabled) {
+      legacyRepositoryClaimsOptions = {
+        service: new LegacyRepositoryClaimService(runtimeTransactions),
+      };
     }
     runnerHttpAuthentication = new DeviceHttpRequestAuthenticator({
       repository: new PostgresDeviceHttpCredentialRepository(runtimeTransactions),
-      legacyCompatibility: legacyRunnerHttpAuthEnabled
-        ? {
-            enabled: true,
-            lookupRunner: (runnerId) => {
-              const runner = stores.runner(runnerId);
-              return runner
-                ? {
-                    public_key_pem: runner.public_key_pem,
-                    generation: runner.generation,
-                  }
-                : null;
-            },
+      // Durable GitHub Actions runners remain independently authenticated even
+      // when local-runner compatibility is retired. The local snapshot lookup
+      // is reachable only under its own strict default-off cutover gate.
+      legacyCompatibility: {
+        enabled: true,
+        lookupRunner: async (runnerId) => {
+          const durableActionsIdentity =
+            await actionsExecutionServices?.repository.enrolledRunnerIdentity(runnerId);
+          if (durableActionsIdentity) {
+            return {
+              public_key_pem: durableActionsIdentity.public_key_pem,
+              generation: durableActionsIdentity.runner_generation,
+            };
           }
-        : { enabled: false },
+          if (deviceCutoverRuntime.legacy_local_runner_auth_enabled) {
+            const runner = stores.runner(runnerId);
+            return runner
+              ? {
+                  public_key_pem: runner.public_key_pem,
+                  generation: runner.generation,
+                }
+              : null;
+          }
+          return null;
+        },
+      },
     });
     if (deviceRepositoryAccessRuntime.enabled) {
       const repositoryAccess = new PostgresDeviceRepositoryAccessRepository(runtimeTransactions);
@@ -1007,7 +1032,7 @@ const webDist = process.env.NORNS_WEB_DIST;
 const server = await buildServer({
   stores,
   users,
-  ...(legacyGlobalRunnerCompatibilityEnabled
+  ...(deviceCutoverRuntime.legacy_global_runner_compatibility_enabled
     ? { legacyGlobalRunnerCompatibility: { enabled: true as const } }
     : {}),
   ...(identityRuntime.mode === "relational" ? { identity: identityRuntime.identity } : {}),
@@ -1016,7 +1041,22 @@ const server = await buildServer({
   ...(deviceRepositoryAccessOptions !== undefined
     ? { deviceRepositoryAccess: deviceRepositoryAccessOptions }
     : {}),
+  ...(legacyRepositoryClaimsOptions !== undefined
+    ? { legacyRepositoryClaims: legacyRepositoryClaimsOptions }
+    : {}),
   ...(deviceWssAuthentication !== undefined ? { deviceWssAuthentication } : {}),
+  ...(deviceCutoverRuntime.device_dispatch_enabled
+    ? { deviceDispatch: { enabled: true as const } }
+    : {}),
+  ...(deviceCutoverRuntime.legacy_pairing_routes_enabled
+    ? { legacyPairingRoutes: { enabled: true as const } }
+    : {}),
+  ...(deviceCutoverRuntime.legacy_helper_routes_enabled
+    ? { legacyHelperRoutes: { enabled: true as const } }
+    : {}),
+  ...(deviceCutoverRuntime.legacy_local_runner_auth_enabled
+    ? { legacyLocalRunnerAuth: { enabled: true as const } }
+    : {}),
   ...(deviceControlOptions !== undefined ? { deviceControl: deviceControlOptions } : {}),
   ...(runnerHttpAuthentication !== undefined ? { runnerHttpAuthentication } : {}),
   ...(deviceActionAuthorizationOptions !== undefined

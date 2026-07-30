@@ -63,6 +63,7 @@ describe("UI-6 containment — demo dashboard is structurally isolated from real
       stores: new RelayStores(),
       users,
       projects: new ProjectStore(),
+      legacyHelperRoutes: { enabled: true },
       dashboard: provider,
     });
 
@@ -112,6 +113,7 @@ describe("UI-6 containment — demo dashboard is structurally isolated from real
       stores: new RelayStores(),
       users,
       projects: new ProjectStore(),
+      legacyHelperRoutes: { enabled: true },
       dashboard: provider,
     });
 

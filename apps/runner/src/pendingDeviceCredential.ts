@@ -19,14 +19,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import type { DeviceCredentialSecretStore } from "./deviceCredentialSecretStore.js";
 
 export const PENDING_DEVICE_CREDENTIAL_FILENAME = "pending-device-credential.json";
 
 interface PendingDeviceCredentialRecord {
-  version: 1;
+  version: 2;
   algorithm: "Ed25519";
   public_key_pem: string;
-  private_key_pem: string;
+  secret_reference: string;
   created_at: string;
 }
 
@@ -56,51 +57,66 @@ function summary(record: PendingDeviceCredentialRecord): PendingDeviceCredential
   };
 }
 
-function parseRecord(raw: string): PendingDeviceCredentialRecord {
+function parseRecord(
+  raw: string,
+  secretStore: DeviceCredentialSecretStore,
+): PendingDeviceCredentialRecord {
   const parsed = JSON.parse(raw) as Partial<PendingDeviceCredentialRecord>;
   if (
-    parsed.version !== 1 ||
+    parsed.version !== 2 ||
     parsed.algorithm !== "Ed25519" ||
     typeof parsed.public_key_pem !== "string" ||
-    typeof parsed.private_key_pem !== "string" ||
+    typeof parsed.secret_reference !== "string" ||
+    !/^[A-Za-z0-9_-]{32,128}$/.test(parsed.secret_reference) ||
     typeof parsed.created_at !== "string"
   ) {
     throw new Error("pending device credential is malformed");
   }
 
-  const privateKey = createPrivateKey(parsed.private_key_pem);
-  const normalizedPrivate = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-  const derivedPublic = createPublicKey(normalizedPrivate)
-    .export({ type: "spki", format: "pem" })
-    .toString();
-  const expected = createPublicKey(parsed.public_key_pem)
-    .export({ type: "spki", format: "pem" })
-    .toString();
-  if (derivedPublic !== expected) {
+  const protectedPrivateKey = secretStore.read(parsed.secret_reference);
+  if (!protectedPrivateKey) {
+    throw new Error("pending device credential secret is unavailable");
+  }
+  const privateKeyInput = {
+    key: Buffer.from(protectedPrivateKey, "base64"),
+    format: "der",
+    type: "pkcs8",
+  } as const;
+  const privateKey = createPrivateKey(privateKeyInput);
+  const privateJwk = privateKey.export({ format: "jwk" });
+  const expectedKey = createPublicKey(parsed.public_key_pem);
+  const expectedJwk = expectedKey.export({ format: "jwk" });
+  const expected = expectedKey.export({ type: "spki", format: "pem" }).toString();
+  if (
+    privateJwk.kty !== expectedJwk.kty ||
+    privateJwk.crv !== expectedJwk.crv ||
+    privateJwk.x !== expectedJwk.x
+  ) {
     throw new Error("pending device credential keypair does not match");
   }
 
   return {
-    version: 1,
+    version: 2,
     algorithm: "Ed25519",
     public_key_pem: expected,
-    private_key_pem: normalizedPrivate,
+    secret_reference: parsed.secret_reference,
     created_at: parsed.created_at,
   };
 }
 
 /**
- * Portable, pre-enrollment credential persistence.
+ * Pre-enrollment credential persistence with an OS-protected private key.
  *
- * This is deliberately a file-mode baseline rather than a claim that every OS
- * credential vault is integrated. A future platform adapter may replace this
- * store without changing AgentHost's prepare-before-request contract.
+ * The mode-0600 metadata file contains only the public key and an opaque secret
+ * reference. Installed AgentHost construction supplies a platform vault
+ * adapter; the private key never enters this metadata file.
  */
 export class PendingDeviceCredentialStore {
   private readonly path: string;
 
   constructor(
     private readonly dataDir: string,
+    private readonly secretStore: DeviceCredentialSecretStore,
     private readonly now: () => Date = () => new Date(),
   ) {
     this.path = join(dataDir, PENDING_DEVICE_CREDENTIAL_FILENAME);
@@ -128,13 +144,17 @@ export class PendingDeviceCredentialStore {
     if (this.exists()) return summary(this.readRecord());
 
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const secretReference = randomBytes(32).toString("base64url");
     const record: PendingDeviceCredentialRecord = {
-      version: 1,
+      version: 2,
       algorithm: "Ed25519",
       public_key_pem: publicKey.export({ type: "spki", format: "pem" }).toString(),
-      private_key_pem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      secret_reference: secretReference,
       created_at: this.now().toISOString(),
     };
+    const protectedPrivateKey = privateKey
+      .export({ type: "pkcs8", format: "der" })
+      .toString("base64");
 
     const temporaryPath = join(
       this.dataDir,
@@ -142,6 +162,7 @@ export class PendingDeviceCredentialStore {
     );
     let descriptor: number | null = null;
     try {
+      this.secretStore.writeOnce(secretReference, protectedPrivateKey);
       descriptor = openSync(temporaryPath, "wx", 0o600);
       writeFileSync(descriptor, JSON.stringify(record), "utf8");
       fsyncSync(descriptor);
@@ -164,21 +185,33 @@ export class PendingDeviceCredentialStore {
         // The original persistence or publication error remains authoritative.
       }
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        this.secretStore.delete(secretReference);
         return summary(this.readRecord());
       }
+      this.secretStore.delete(secretReference);
       throw error;
     }
   }
 
   sign(payload: string): string {
     const record = this.readRecord();
-    return edSign(null, Buffer.from(payload, "utf8"), record.private_key_pem).toString("base64");
+    const protectedPrivateKey = this.secretStore.read(record.secret_reference);
+    if (!protectedPrivateKey) throw new Error("pending device credential secret is unavailable");
+    return edSign(
+      null,
+      Buffer.from(payload, "utf8"),
+      createPrivateKey({
+        key: Buffer.from(protectedPrivateKey, "base64"),
+        format: "der",
+        type: "pkcs8",
+      }),
+    ).toString("base64");
   }
 
   private readRecord(): PendingDeviceCredentialRecord {
     ensurePrivateDirectory(this.dataDir);
     if (!this.exists()) throw new Error("pending device credential has not been prepared");
     chmodSync(this.path, 0o600);
-    return parseRecord(readFileSync(this.path, "utf8"));
+    return parseRecord(readFileSync(this.path, "utf8"), this.secretStore);
   }
 }

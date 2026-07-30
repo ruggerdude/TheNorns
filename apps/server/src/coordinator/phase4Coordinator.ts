@@ -386,11 +386,15 @@ export class Phase4Coordinator {
           context_ref: matches[0],
         };
       });
-      if (row.repository_binding_status !== "connected") {
+      const deviceBackedBinding = row.project_device_repository_grant_id !== null;
+      const bindingReady =
+        row.repository_binding_status === "connected" ||
+        (deviceBackedBinding &&
+          (row.repository_binding_status === "degraded" ||
+            row.repository_binding_status === "disconnected"));
+      if (!bindingReady) {
         throw new Phase4CoordinatorConflictError(
-          "execution requires a verified repository binding and an online runner; " +
-            "connect and verify a runner workspace (or GitHub repository) for this " +
-            "project before dispatching this task",
+          "execution requires a verified repository binding that has not been revoked",
         );
       }
       const revocation = await sql.query<{ revoked_through_generation: number }>(
@@ -411,7 +415,6 @@ export class Phase4Coordinator {
           "device dispatch requires an immutable repository binding",
         );
       }
-      const deviceBackedBinding = row.project_device_repository_grant_id !== null;
       if (deviceBackedBinding && !this.deviceAuthorization) {
         throw new Phase4CoordinatorConflictError(
           "device repository binding requires typed authorization",

@@ -1,0 +1,82 @@
+#!/bin/sh
+set -eu
+
+STATE_DIR="/var/tmp/com.thenorns.local-agent.pkg-state"
+RESTART_RECORDS="$STATE_DIR/restart-records"
+USER_LIST="$STATE_DIR/local-users"
+KNOWN_LABELS="com.thenorns.local-agent com.thenorns.runner app.thenorns.runner"
+
+/bin/rm -rf "$STATE_DIR"
+/bin/mkdir -m 700 "$STATE_DIR"
+: >"$RESTART_RECORDS"
+/bin/chmod 600 "$RESTART_RECORDS"
+if ! /usr/bin/dscl . -list /Users UniqueID >"$USER_LIST"; then
+  printf '%s\n' "Could not enumerate local users before Norns upgrade." >&2
+  exit 1
+fi
+/bin/chmod 600 "$USER_LIST"
+
+# A system-wide /Applications payload may be in use by more than the console
+# user. Enumerate every local OS user and record only exact known services that
+# are actually loaded. Merely having a plist must not turn a stopped service on
+# after upgrade.
+while read -r USER_NAME USER_ID
+do
+  case "$USER_NAME" in
+    ""|*[!A-Za-z0-9._-]*) continue ;;
+  esac
+  case "$USER_ID" in
+    ""|*[!0-9]*) continue ;;
+  esac
+  USER_HOME=$(
+    /usr/bin/dscl . -read "/Users/$USER_NAME" NFSHomeDirectory 2>/dev/null |
+      /usr/bin/sed -n 's/^NFSHomeDirectory: //p'
+  )
+  case "$USER_HOME" in
+    /*) ;;
+    *) continue ;;
+  esac
+  case "$USER_HOME" in
+    *'
+'*|*'	'*) continue ;;
+  esac
+
+  for SERVICE_LABEL in $KNOWN_LABELS
+  do
+    TARGET="gui/$USER_ID/$SERVICE_LABEL"
+    if ! /bin/launchctl print "$TARGET" >/dev/null 2>&1; then
+      continue
+    fi
+    SERVICE="$USER_HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
+    if [ ! -f "$SERVICE" ] || [ -L "$SERVICE" ]; then
+      printf 'Loaded Norns service %s has no safe service definition.\n' "$TARGET" >&2
+      exit 1
+    fi
+    if [ "$(/usr/bin/stat -f '%u' "$SERVICE")" != "$USER_ID" ]; then
+      printf 'Loaded Norns service %s has unexpected ownership.\n' "$TARGET" >&2
+      exit 1
+    fi
+    printf '%s\t%s\t%s\n' "$USER_ID" "$USER_HOME" "$SERVICE_LABEL" >>"$RESTART_RECORDS"
+  done
+done <"$USER_LIST"
+
+TAB=$(printf '\t')
+while IFS="$TAB" read -r USER_ID USER_HOME SERVICE_LABEL EXTRA
+do
+  [ -n "$USER_ID" ] || continue
+  [ -z "$EXTRA" ] || {
+    printf '%s\n' "Norns upgrade restart state is malformed." >&2
+    exit 1
+  }
+  /bin/launchctl bootout "gui/$USER_ID/$SERVICE_LABEL"
+done <"$RESTART_RECORDS"
+
+while IFS="$TAB" read -r USER_ID USER_HOME SERVICE_LABEL EXTRA
+do
+  [ -n "$USER_ID" ] || continue
+  if /bin/launchctl print "gui/$USER_ID/$SERVICE_LABEL" >/dev/null 2>&1; then
+    printf 'Norns Local Agent service gui/%s/%s did not stop before upgrade.\n' \
+      "$USER_ID" "$SERVICE_LABEL" >&2
+    exit 1
+  fi
+done <"$RESTART_RECORDS"

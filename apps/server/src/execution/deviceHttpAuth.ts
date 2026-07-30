@@ -107,7 +107,12 @@ export type LegacyRunnerHttpCompatibility =
   | { enabled: false }
   | {
       enabled: true;
-      lookupRunner: (runnerId: string) => { public_key_pem: string; generation: number } | null;
+      lookupRunner: (
+        runnerId: string,
+      ) =>
+        | { public_key_pem: string; generation: number }
+        | null
+        | Promise<{ public_key_pem: string; generation: number } | null>;
     };
 
 export interface DeviceHttpAuthenticatorOptions {
@@ -345,7 +350,7 @@ export class DeviceHttpRequestAuthenticator {
       request_id: requestId,
     });
     if (!parsed.success) return { ok: false, reason: "malformed_credentials" };
-    const runner = this.options.legacyCompatibility.lookupRunner(runnerId);
+    const runner = await this.options.legacyCompatibility.lookupRunner(runnerId);
     if (!runner || runner.generation !== generation) {
       return { ok: false, reason: "unknown_runner" };
     }
@@ -358,7 +363,7 @@ export class DeviceHttpRequestAuthenticator {
     ) {
       return { ok: false, reason: "bad_signature" };
     }
-    const current = this.options.legacyCompatibility.lookupRunner(runnerId);
+    const current = await this.options.legacyCompatibility.lookupRunner(runnerId);
     if (
       !current ||
       current.generation !== generation ||

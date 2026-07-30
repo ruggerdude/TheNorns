@@ -17,6 +17,31 @@ export interface DeviceRepositoryAccessRuntimeEnvironment {
   NORNS_DEVICE_PUBLICATION_SIGNING_PRIVATE_KEY?: string | undefined;
 }
 
+export interface DeviceCutoverRuntimeEnvironment {
+  NORNS_ENABLE_LEGACY_REPOSITORY_CLAIMS?: string | undefined;
+  NORNS_ENABLE_LEGACY_PAIRING_ROUTES?: string | undefined;
+  NORNS_ENABLE_LEGACY_HELPER_ROUTES?: string | undefined;
+  NORNS_ENABLE_LEGACY_LOCAL_RUNNER_AUTH?: string | undefined;
+  NORNS_LEGACY_GLOBAL_RUNNER_COMPATIBILITY?: string | undefined;
+  NORNS_ENABLE_DEVICE_DISPATCH?: string | undefined;
+}
+
+export interface DeviceCutoverRuntimeConfiguration {
+  legacy_repository_claims_enabled: boolean;
+  legacy_pairing_routes_enabled: boolean;
+  legacy_helper_routes_enabled: boolean;
+  legacy_local_runner_auth_enabled: boolean;
+  legacy_global_runner_compatibility_enabled: boolean;
+  device_dispatch_enabled: boolean;
+}
+
+export class DeviceCutoverRuntimeConfigurationError extends Error {
+  constructor(readonly variable: keyof DeviceCutoverRuntimeEnvironment) {
+    super(`${variable} must be exactly true or false`);
+    this.name = "DeviceCutoverRuntimeConfigurationError";
+  }
+}
+
 export type DeviceRepositoryAccessRuntimeConfiguration =
   | { enabled: false }
   | {
@@ -249,5 +274,48 @@ export function parseDeviceRepositoryAccessRuntimeConfiguration(
     enabled: true,
     publication_signing_key_id: keyId,
     publication_signing_private_key: privateKey,
+  };
+}
+
+function strictDefaultOffFlag(
+  environment: DeviceCutoverRuntimeEnvironment,
+  variable: keyof DeviceCutoverRuntimeEnvironment,
+): boolean {
+  const value = environment[variable];
+  if (value === undefined || value === "false") return false;
+  if (value === "true") return true;
+  throw new DeviceCutoverRuntimeConfigurationError(variable);
+}
+
+/**
+ * Phase 6/7 cutover gates are independent and default off. Device dispatch is
+ * deliberately separate from the global engine kill switch so canaries can
+ * stop local-device delivery while GitHub Actions remains available.
+ */
+export function parseDeviceCutoverRuntimeConfiguration(
+  environment: DeviceCutoverRuntimeEnvironment,
+): DeviceCutoverRuntimeConfiguration {
+  return {
+    legacy_repository_claims_enabled: strictDefaultOffFlag(
+      environment,
+      "NORNS_ENABLE_LEGACY_REPOSITORY_CLAIMS",
+    ),
+    legacy_pairing_routes_enabled: strictDefaultOffFlag(
+      environment,
+      "NORNS_ENABLE_LEGACY_PAIRING_ROUTES",
+    ),
+    legacy_helper_routes_enabled: strictDefaultOffFlag(
+      environment,
+      "NORNS_ENABLE_LEGACY_HELPER_ROUTES",
+    ),
+    legacy_local_runner_auth_enabled: strictDefaultOffFlag(
+      environment,
+      "NORNS_ENABLE_LEGACY_LOCAL_RUNNER_AUTH",
+    ),
+    legacy_global_runner_compatibility_enabled: strictDefaultOffFlag(
+      environment,
+      "NORNS_LEGACY_GLOBAL_RUNNER_COMPATIBILITY",
+    ),
+    device_dispatch_enabled: strictDefaultOffFlag(environment, "NORNS_ENABLE_DEVICE_DISPATCH"),
   };
 }

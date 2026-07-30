@@ -47,6 +47,9 @@ describe.sequential("Front Door secure local-folder creation", () => {
       // This fixture exercises the deprecated global helper onboarding path.
       // Production omits this explicit cutover-only compatibility option.
       legacyGlobalRunnerCompatibility: { enabled: true },
+      legacyPairingRoutes: { enabled: true },
+      legacyHelperRoutes: { enabled: true },
+      legacyLocalRunnerAuth: { enabled: true },
       projects: new RelationalProjectReadRepository(transactions, "secure-local-test"),
       phase3: {
         sourceBindings: new SourceBindingService(transactions),

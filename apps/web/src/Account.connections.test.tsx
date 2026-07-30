@@ -22,20 +22,7 @@ describe("workspace connections settings", () => {
   });
 
   function accountMock(): MockFetch {
-    const next = new MockFetch();
-    next.get("/api/runners/helper/repositories", {
-      body: {
-        state: "not_installed",
-        runner_id: null,
-        workspace_clone_ready: false,
-        message: "Set up the local helper once.",
-        downloads: { windows: null, macos: null, macos_release: null },
-        install_command: "install-helper",
-        install_command_windows: "install-helper-windows",
-        repositories: [],
-      },
-    });
-    return next;
+    return new MockFetch();
   }
 
   it("shows GitHub identity and reusable workspace installations", async () => {
@@ -306,7 +293,7 @@ describe("workspace connections settings", () => {
     expect(screen.getByText(/Connect GitHub with guided setup/i)).toBeInTheDocument();
   });
 
-  it("keeps one-time local helper setup in Connections", async () => {
+  it("does not expose legacy helper pairing secrets or global repository selection", async () => {
     mock = accountMock();
     mock.get("/api/auth/sessions", { body: { sessions: [] } });
     mock.get("/api/integrations/github/status", {
@@ -318,44 +305,31 @@ describe("workspace connections settings", () => {
         connections: [],
       },
     });
-    mock.post("/api/pairing/start", {
-      body: {
-        code: "a1b2c3d4",
-        expires_at: "2026-07-27T21:00:00.000Z",
-        runner_id: "runner-1",
-        pairing_uri:
-          "norns-agent://pair?server=https%3A%2F%2Fnorns.example&code=a1b2c3d4&runner_id=runner-1",
-        downloads: {
-          windows: "https://downloads.example/Norns-Local-Agent-Setup.exe",
-          macos: "https://downloads.example/Norns-Local-Agent-macOS.pkg",
-          macos_release: "unsigned_preview",
-        },
-        install_command: "curl https://norns.example/install | sh",
-        install_command_windows: "Install-NornsHelper",
-      },
-    });
     mock.install();
 
-    render(<Account user={admin} initialTab="connections" onClose={vi.fn()} onSignOut={vi.fn()} />);
+    const { container } = render(
+      <Account user={admin} initialTab="connections" onClose={vi.fn()} onSignOut={vi.fn()} />,
+    );
 
     expect(await screen.findByText("Not configured")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /manage agent/i }));
-    expect(screen.getByText(/set up the local helper once/i)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /set up norns local agent/i }));
-    expect(await screen.findByRole("link", { name: "Download for Windows" })).toHaveAttribute(
-      "href",
-      "https://downloads.example/Norns-Local-Agent-Setup.exe",
-    );
-    expect(screen.getByRole("link", { name: "Download unsigned Mac preview" })).toHaveAttribute(
-      "href",
-      "https://downloads.example/Norns-Local-Agent-macOS.pkg",
-    );
-    expect(screen.getByText(/not yet Developer ID signed or notarized/i)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Connect installed agent" })).toHaveAttribute(
-      "href",
-      expect.stringMatching(/^norns-agent:\/\/pair/),
-    );
-    expect(screen.getByText("curl https://norns.example/install | sh")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /manage agent/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/norns local agent/i)).not.toBeInTheDocument();
+    expect(
+      mock.calls.some(
+        (call) =>
+          call.url === "/api/pairing/start" ||
+          call.url === "/api/runners/helper/repositories" ||
+          call.url === "/api/runners/helper/repositories/choose",
+      ),
+    ).toBe(false);
+    expect(
+      [...container.querySelectorAll("a")].some((anchor) =>
+        (anchor.getAttribute("href") ?? "").startsWith("norns-agent:"),
+      ),
+    ).toBe(false);
+    expect(container).not.toHaveTextContent("runner-1");
+    expect(container).not.toHaveTextContent("a1b2c3d4");
+    expect(screen.getByRole("button", { name: "Set up GitHub" })).toBeInTheDocument();
   });
 
   it("shows provider readiness and the exact missing deployment variables", async () => {

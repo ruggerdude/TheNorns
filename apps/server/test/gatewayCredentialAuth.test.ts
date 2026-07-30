@@ -241,12 +241,14 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
     },
   });
   const deviceActionAuthorization = {
-    service: new PostgresDeviceActionAuthorization(),
+    service: new PostgresDeviceActionAuthorization({ deviceDispatchEnabled: true }),
     transactions,
   };
   const server = await buildServer({
     stores,
     users,
+    legacyGlobalRunnerCompatibility: { enabled: true },
+    legacyLocalRunnerAuth: { enabled: true },
     // The gateway is composed by buildServer's own E9 section from these; only
     // the credential store is swapped so the test can inspect it.
     planningRuns: { transactions },
@@ -284,7 +286,7 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
   await waitFor(() => server.connectedRunners().includes(runnerId), "runner connected");
 
   const scheduled = await new Phase4Coordinator(transactions, {
-    deviceAuthorization: new PostgresDeviceActionAuthorization(),
+    deviceAuthorization: new PostgresDeviceActionAuthorization({ deviceDispatchEnabled: true }),
   }).schedule({
     project_id: "project-1",
     phase_id: "phase-1",
@@ -545,7 +547,7 @@ describe.sequential("EXECUTION E9 gateway credential mint route", () => {
       runs,
       credentials: stack.credentials,
       deviceActionAuthorization: {
-        service: new PostgresDeviceActionAuthorization(),
+        service: new PostgresDeviceActionAuthorization({ deviceDispatchEnabled: true }),
         transactions: stack.transactions,
       },
       apiKey: () => "provider-key",

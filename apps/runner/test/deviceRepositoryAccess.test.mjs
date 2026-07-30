@@ -20,13 +20,17 @@ import {
   serializeSignedDeviceHttpTranscript,
 } from "@norns/contracts";
 import {
+  ActiveDeviceIdentityStore,
+  ActiveDeviceRepositoryRegistrationClient,
   DEVICE_HTTP_CREDENTIAL_ID_HEADER,
   DEVICE_HTTP_DEVICE_ID_HEADER,
   DEVICE_HTTP_GENERATION_HEADER,
   DEVICE_HTTP_REQUEST_ID_HEADER,
   DEVICE_HTTP_TIMESTAMP_HEADER,
   DeviceBackedGitPublisher,
+  InMemoryDeviceCredentialSecretStore,
   LocalRepositoryAccessController,
+  PendingDeviceCredentialStore,
   SignedDevicePublicationPermitClient,
   SignedDeviceRepositoryRegistrationClient,
   WorkspaceRegistry,
@@ -187,6 +191,59 @@ test("repository registration signs only opaque identity and cloud-safe Git meta
     new Headers(calls[0].init.headers).get(DEVICE_HTTP_REQUEST_ID_HEADER),
     new Headers(calls[1].init.headers).get(DEVICE_HTTP_REQUEST_ID_HEADER),
   );
+});
+
+test("AgentHost repository registration remains pending before enrollment and activates without restart", async () => {
+  const dataDir = temporaryDirectory();
+  const secrets = new InMemoryDeviceCredentialSecretStore();
+  const credential = new PendingDeviceCredentialStore(dataDir, secrets);
+  credential.prepare();
+  const calls = [];
+  const client = new ActiveDeviceRepositoryRegistrationClient(
+    "http://127.0.0.1:4400",
+    dataDir,
+    credential,
+    async (input, init) => {
+      const call = { url: new URL(input), init };
+      calls.push(call);
+      const body = JSON.parse(init.body);
+      return Response.json({
+        registration_id: "registration-active",
+        status: "active",
+        workspace_id: body.workspace_id,
+        repository_id: body.repository_id,
+      });
+    },
+  );
+  const repository = {
+    workspace_id: "local:workspace-active",
+    repository_id: "local:repository-active",
+    repository_display_name: "Active repository",
+    default_branch: "main",
+    observed_head: "a".repeat(40),
+  };
+
+  try {
+    await assert.rejects(client.register(repository), /device enrollment is not active/);
+    assert.equal(calls.length, 0);
+
+    new ActiveDeviceIdentityStore(dataDir).activateFromRedemption({
+      device_id: "device-active",
+      credential_id: "credential-active",
+      generation: 9,
+      activated_at: "2026-07-30T12:00:00.000Z",
+    });
+    const registered = await client.register(repository);
+    assert.equal(registered.registration_id, "registration-active");
+    assert.equal(calls.length, 1);
+    const headers = new Headers(calls[0].init.headers);
+    assert.equal(headers.get(DEVICE_HTTP_DEVICE_ID_HEADER), "device-active");
+    assert.equal(headers.get(DEVICE_HTTP_CREDENTIAL_ID_HEADER), "credential-active");
+    assert.equal(headers.get(DEVICE_HTTP_GENERATION_HEADER), "9");
+    assert.ok(headers.get(DEVICE_HTTP_REQUEST_ID_HEADER));
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 test("local approval and removal preserve repository files and never upload its path", async () => {

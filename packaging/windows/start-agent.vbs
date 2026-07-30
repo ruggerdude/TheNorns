@@ -35,6 +35,8 @@ Next
 shell.Environment("PROCESS")("PATH") = _
   fso.BuildPath(appDir, "runtime") & ";" & packageBinPath & ";" & gitPath & ";" & _
   shell.Environment("PROCESS")("PATH")
+shell.Environment("PROCESS")("NORNS_SERVER") = "https://thenorns.up.railway.app"
+shell.Environment("PROCESS")("NORNS_ENABLE_DEVICE_ENROLLMENT") = "true"
 shell.CurrentDirectory = appDir
 command = Quote(nodePath) & " " & Quote(cliPath) & " agent-start --data " & Quote(dataDir)
 shell.Run command, 0, False

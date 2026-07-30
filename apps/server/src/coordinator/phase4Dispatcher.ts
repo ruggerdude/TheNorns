@@ -242,6 +242,50 @@ export class Phase4DispatchRepository {
   }
 
   /**
+   * Reconnect delivery variant for device transports. Authorization and the
+   * socket write execute inside one transaction while the device/grant/binding
+   * locks acquired by authorizeCommand remain held. Revocation therefore
+   * happens wholly before or wholly after a pending command write.
+   */
+  deliverPendingForRunner(
+    runnerId: string,
+    runnerGeneration: number,
+    recentlyExecutedCommandIds: ReadonlySet<string>,
+    deliver: (command: V2DispatchCommandT) => Promise<void>,
+  ): Promise<number> {
+    return this.transactions.transaction(async (sql) => {
+      const selected = await sql.query<{
+        id: string;
+        envelope: unknown;
+      }>(
+        `SELECT job.id,command.envelope
+           FROM dispatch_jobs job
+           JOIN commands command ON command.command_id=job.command_id
+          WHERE job.runner_id=$1
+            AND command.kind='launch_run'
+            AND command.runner_id=$1
+            AND command.runner_generation=$2
+            AND job.status='delivered'
+            AND command.status NOT IN ('succeeded','failed','rejected','expired','cancelled')
+            AND (command.envelope->>'expires_at')::timestamptz>now()
+          ORDER BY job.delivered_at,job.created_at,job.id
+          FOR UPDATE OF job,command`,
+        [runnerId, runnerGeneration],
+      );
+      let delivered = 0;
+      for (const pending of selected.rows) {
+        const command = V2DispatchCommand.parse(pending.envelope);
+        if (!(await this.authorizeOrCancel(sql, pending.id, command))) continue;
+        if (!recentlyExecutedCommandIds.has(command.command_id)) {
+          await deliver(command);
+          delivered += 1;
+        }
+      }
+      return delivered;
+    });
+  }
+
+  /**
    * Re-authorizes a claimed command while holding the same device row lock
    * revocation uses, sends it, and records delivery before releasing that lock.
    * This closes the claim-to-send race and makes reconnect redelivery obey the

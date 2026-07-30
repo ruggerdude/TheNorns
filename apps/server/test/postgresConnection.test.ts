@@ -125,6 +125,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_authorization_requests: "device_authorization_requests",
             device_repository_registrations: "device_repository_registrations",
             project_device_repository_grants: "project_device_repository_grants",
+            legacy_repository_binding_claims: "legacy_repository_binding_claims",
             device_http_request_replays: "device_http_request_replays",
             dispatch_context_runner_generation: true,
             dispatch_context_revoked_at: true,
@@ -183,6 +184,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_authorization_requests: null,
             device_repository_registrations: null,
             project_device_repository_grants: null,
+            legacy_repository_binding_claims: null,
             device_http_request_replays: null,
             dispatch_context_runner_generation: false,
             dispatch_context_revoked_at: false,
@@ -218,7 +220,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "conversation_organization_v1, conversation_message_branches_v1, devices, " +
         "device_credentials, device_authorization_requests, " +
         "device_repository_registrations, project_device_repository_grants, " +
-        "device_http_request_replays, dispatch_context_documents.runner_generation, " +
+        "legacy_repository_binding_claims, device_http_request_replays, " +
+        "dispatch_context_documents.runner_generation, " +
         "dispatch_context_documents.revoked_at, device_run_cancellations, " +
         "device_run_cancellations.idempotency_key, device_revocations, " +
         "gateway_credentials.authentication_subject, gateway_credentials.device_credential_id, " +
@@ -263,6 +266,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_authorization_requests: "device_authorization_requests",
             device_repository_registrations: "device_repository_registrations",
             project_device_repository_grants: "project_device_repository_grants",
+            legacy_repository_binding_claims: "legacy_repository_binding_claims",
             device_http_request_replays: "device_http_request_replays",
             dispatch_context_runner_generation: true,
             dispatch_context_revoked_at: true,
@@ -296,7 +300,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
     );
   });
 
-  it("fails closed with precise 0053 through 0057 device migration diagnostics", async () => {
+  it("fails closed with precise 0053 through 0060 device migration diagnostics", async () => {
     const preDeviceMigrations = {
       query: async () => ({
         rows: [
@@ -332,6 +336,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_authorization_requests: null,
             device_repository_registrations: null,
             project_device_repository_grants: null,
+            legacy_repository_binding_claims: null,
             device_http_request_replays: null,
             dispatch_context_runner_generation: false,
             dispatch_context_revoked_at: false,
@@ -357,7 +362,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "database migrations are required before startup; missing: devices, " +
         "device_credentials, device_authorization_requests, " +
         "device_repository_registrations, project_device_repository_grants, " +
-        "device_http_request_replays, dispatch_context_documents.runner_generation, " +
+        "legacy_repository_binding_claims, device_http_request_replays, " +
+        "dispatch_context_documents.runner_generation, " +
         "dispatch_context_documents.revoked_at, device_run_cancellations, " +
         "device_run_cancellations.idempotency_key, device_revocations, " +
         "gateway_credentials.authentication_subject, gateway_credentials.device_credential_id, " +

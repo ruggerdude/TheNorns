@@ -32,6 +32,7 @@ async function start(
     stores: new RelayStores(),
     users,
     projects: new ProjectStore(),
+    legacyHelperRoutes: { enabled: true },
     ...(recordUsage ? { recordUsage } : {}),
     ...(createPlanningAdapter ? { createPlanningAdapter } : {}),
   });

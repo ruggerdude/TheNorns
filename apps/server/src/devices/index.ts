@@ -13,6 +13,8 @@ export * from "./repository.js";
 export * from "./repositoryAccess.js";
 export * from "./repositoryAccessRoutes.js";
 export * from "./projectCancellationRoutes.js";
+export * from "./legacyRepositoryClaims.js";
+export * from "./legacyRepositoryClaimRoutes.js";
 export * from "./repositoryAccessService.js";
 export * from "./revocation.js";
 export * from "./routes.js";

@@ -89,6 +89,16 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     mock.get("/api/integrations/github/connections/github%3A43/repositories", {
       body: [repository],
     });
+    mock.get("/api/v2/capabilities/local-execution", {
+      body: {
+        schema_version: 1,
+        enrollment_available: true,
+        computers_available: true,
+        repository_grants_available: true,
+        legacy_claim_available: false,
+        legacy_local_creation_available: true,
+      },
+    });
     mock.get("/api/runners/helper/repositories", {
       body: {
         state: "connected",
@@ -239,6 +249,38 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     expect(
       mock.calls.some((call) => call.method === "POST" && call.url.endsWith("/planning-runs")),
     ).toBe(false);
+  });
+
+  it("defaults legacy local creation off without affecting GitHub-only onboarding", async () => {
+    mock.get("/api/v2/capabilities/local-execution", {
+      status: 404,
+      body: { error: "not_found" },
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+
+    expect(
+      screen.queryByRole("button", { name: /^approved local git repository/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^this computer \+ github/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("execution-location-picker")).not.toBeInTheDocument();
+
+    await user.type(screen.getByTestId("project-name"), "GitHub only");
+    await user.click(screen.getByRole("button", { name: /create project/i }));
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
+
+    const onboardingCall = mock.calls.find(
+      (call) => call.method === "POST" && call.url === "/api/v2/projects/onboarding",
+    );
+    expect(onboardingCall?.body).toMatchObject({
+      scenario: "new_repo",
+      local_working_copy: false,
+    });
+    expect(mock.calls.some((call) => call.url.startsWith("/api/runners/helper/"))).toBe(false);
+    expect(mock.calls.some((call) => call.url === "/api/v2/projects/local")).toBe(false);
   });
 
   it("switches to Existing and selects a repository from the searchable list, reaching scenario=existing_repo", async () => {

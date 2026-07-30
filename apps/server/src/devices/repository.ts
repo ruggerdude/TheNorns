@@ -1,6 +1,7 @@
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import type {
   CreateDeviceAuthorizationRecord,
+  CreatedDeviceAuthorizationRecord,
   DeviceAuthorizationDecisionRecord,
   DeviceAuthorizationRequestRecord,
   DeviceEnrollmentRepository,
@@ -108,8 +109,31 @@ async function expireIfDue(
 export class PostgresDeviceEnrollmentRepository implements DeviceEnrollmentRepository {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
-  createAuthorization(input: CreateDeviceAuthorizationRecord): Promise<"created" | "not_created"> {
+  createAuthorization(
+    input: CreateDeviceAuthorizationRecord,
+  ): Promise<CreatedDeviceAuthorizationRecord | null> {
     return this.transactions.transaction(async (sql) => {
+      // Expiry cannot depend on the offline agent polling an old request. Lock
+      // the live request for this persisted key before releasing its partial
+      // unique-index slot. `created_at` is trusted server time supplied by the
+      // enrollment service, never an agent timestamp.
+      await sql.query<{ id: string }>(
+        `SELECT id
+           FROM device_authorization_requests
+          WHERE public_key_fingerprint=$1
+            AND state IN ('pending','approved_pending_redemption')
+          FOR UPDATE`,
+        [input.public_key_fingerprint],
+      );
+      await sql.query(
+        `UPDATE device_authorization_requests
+            SET state='expired',expired_at=$2,updated_at=$2
+          WHERE public_key_fingerprint=$1
+            AND state IN ('pending','approved_pending_redemption')
+            AND expires_at <= $2`,
+        [input.public_key_fingerprint, input.created_at],
+      );
+
       const inserted = await sql.query<{ id: string }>(
         `INSERT INTO device_authorization_requests (
            id,state,public_key_spki_der,public_key_fingerprint,
@@ -146,7 +170,62 @@ export class PostgresDeviceEnrollmentRepository implements DeviceEnrollmentRepos
           input.created_at,
         ],
       );
-      return inserted.rows[0] ? "created" : "not_created";
+      if (inserted.rows[0]) {
+        return {
+          authorization_request_id: inserted.rows[0].id,
+          expires_at: input.expires_at,
+          poll_interval_seconds: input.poll_interval_seconds,
+        };
+      }
+
+      // A retry after a lost create response carries the same agent-persisted
+      // key and codes. Return only that exact request; conflicts on any one of
+      // those values (or metadata) are not silently rebound to another live
+      // authorization.
+      const replay = await sql.query<{
+        id: string;
+        expires_at: string | Date;
+        effective_poll_interval_seconds: number | string;
+      }>(
+        `SELECT id,expires_at,effective_poll_interval_seconds
+           FROM device_authorization_requests
+          WHERE public_key_fingerprint=$1
+            AND public_key_spki_der=$2
+            AND device_code_hash_version=$3
+            AND device_code_hash_key_id=$4
+            AND device_code_keyed_hash=$5
+            AND user_code_hash_version=$6
+            AND user_code_hash_key_id=$7
+            AND user_code_keyed_hash=$8
+            AND proposed_name=$9
+            AND os_family=$10
+            AND architecture=$11
+            AND state IN ('pending','approved_pending_redemption','active')
+          ORDER BY created_at DESC,id DESC
+          LIMIT 1
+          FOR UPDATE`,
+        [
+          input.public_key_fingerprint,
+          input.public_key_spki_der,
+          input.device_code_hash.version,
+          input.device_code_hash.key_id,
+          input.device_code_hash.keyed_hash,
+          input.human_code_hash.version,
+          input.human_code_hash.key_id,
+          input.human_code_hash.keyed_hash,
+          input.proposed_name,
+          input.os_family,
+          input.architecture,
+        ],
+      );
+      const existing = replay.rows[0];
+      return existing
+        ? {
+            authorization_request_id: existing.id,
+            expires_at: timestamp(existing.expires_at) ?? input.expires_at,
+            poll_interval_seconds: Number(existing.effective_poll_interval_seconds),
+          }
+        : null;
     });
   }
 

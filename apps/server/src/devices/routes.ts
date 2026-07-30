@@ -1,21 +1,15 @@
+import {
+  CreateDeviceAuthorizationRequest,
+  CreateDeviceAuthorizationResponse,
+} from "@norns/contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { LoginAttemptThrottle } from "../users/loginThrottle.js";
 import { DeviceEnrollmentError } from "./domain.js";
 import type { DeviceEnrollmentService } from "./service.js";
 
-const DeviceOsFamily = z.enum(["macos", "windows", "linux", "other"]);
 const AuthorizationRequestId = z.string().trim().min(1).max(512);
 const AuthorizationContext = z.string().min(1).max(512);
-
-const CreateAuthorizationBody = z
-  .object({
-    public_key_pem: z.string().min(1).max(2_000),
-    proposed_name: z.string().trim().min(1).max(200),
-    os_family: DeviceOsFamily,
-    architecture: z.string().trim().min(1).max(100),
-  })
-  .strict();
 
 const PollAuthorizationBody = z
   .object({
@@ -66,6 +60,10 @@ export interface DeviceEnrollmentRouteOptions {
     request: FastifyRequest,
     reply: FastifyReply,
   ): Promise<DeviceEnrollmentRouteUser | null>;
+  requireRecentUser(
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<DeviceEnrollmentRouteUser | null>;
   now?: () => Date;
   lookupThrottle?: LoginAttemptThrottle;
 }
@@ -98,12 +96,16 @@ export async function registerDeviceEnrollmentRoutes(
   const lookupThrottle = options.lookupThrottle ?? new LoginAttemptThrottle(10, 15 * 60_000);
 
   app.post("/api/device-authorizations", async (request, reply) => {
-    const parsed = CreateAuthorizationBody.safeParse(request.body);
+    const parsed = CreateDeviceAuthorizationRequest.safeParse(request.body);
     if (!parsed.success) return invalidBody(reply);
     try {
       return noStore(reply)
         .code(201)
-        .send(await options.service.createAuthorization(parsed.data));
+        .send(
+          CreateDeviceAuthorizationResponse.parse(
+            await options.service.createAuthorization(parsed.data),
+          ),
+        );
     } catch (error) {
       if (error instanceof DeviceEnrollmentError) return sendEnrollmentError(reply, error);
       return noStore(reply).code(500).send({ error: "device_enrollment_unavailable" });
@@ -161,7 +163,7 @@ export async function registerDeviceEnrollmentRoutes(
   });
 
   app.post("/api/device-authorizations/:authorizationRequestId/approve", async (request, reply) => {
-    const user = await options.requireUser(request, reply);
+    const user = await options.requireRecentUser(request, reply);
     if (!user) return;
     const params = AuthorizationDecisionParams.safeParse(request.params);
     const body = AuthorizationDecisionBody.safeParse(request.body);
@@ -181,7 +183,7 @@ export async function registerDeviceEnrollmentRoutes(
   });
 
   app.post("/api/device-authorizations/:authorizationRequestId/deny", async (request, reply) => {
-    const user = await options.requireUser(request, reply);
+    const user = await options.requireRecentUser(request, reply);
     if (!user) return;
     const params = AuthorizationDecisionParams.safeParse(request.params);
     const body = AuthorizationDecisionBody.safeParse(request.body);

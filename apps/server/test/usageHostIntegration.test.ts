@@ -199,6 +199,7 @@ describe.sequential("production usage-intelligence host composition", () => {
       users: new UserStore(),
       identity,
       projects: legacyProjects,
+      legacyHelperRoutes: { enabled: true },
       runnerInference: { transactions },
       clock: () => NOW,
       publicOrigin: "https://norns.test",

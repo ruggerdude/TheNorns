@@ -1162,7 +1162,7 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
     await poisonLocalBindingWithMismatchedDeviceGrant();
     const dispatch = new Phase4DispatchRepository(
       transactions,
-      new PostgresDeviceActionAuthorization(),
+      new PostgresDeviceActionAuthorization({ deviceDispatchEnabled: true }),
     );
     await expect(dispatch.claim("phase5-poisoned-dispatcher", 30_000)).resolves.toBeNull();
     const state = await pg.query<{
@@ -2206,7 +2206,9 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
       },
       {
         workerId: "poisoned-action-ack-delivery",
-        deviceAuthorization: new PostgresDeviceActionAuthorization(),
+        deviceAuthorization: new PostgresDeviceActionAuthorization({
+          deviceDispatchEnabled: true,
+        }),
       },
     );
     await expect(delivery.tick()).resolves.toMatchObject({

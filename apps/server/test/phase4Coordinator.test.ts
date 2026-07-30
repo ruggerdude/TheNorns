@@ -93,13 +93,13 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     await pg.close();
   });
 
-  function schedule() {
-    return coordinator.schedule({
+  function schedule(runnerId = "runner-1", scheduler = coordinator) {
+    return scheduler.schedule({
       project_id: "project-1",
       phase_id: "phase-1",
       task_id: "task-1",
       assignment_id: "assignment-1",
-      runner_id: "runner-1",
+      runner_id: runnerId,
       runner_generation: 3,
       authorized_by: { actor_type: "human", actor_id: "admin-1" },
       authorized_by_session_id: "session-1",
@@ -252,7 +252,9 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
   it("keeps exact runner matching for legacy local bindings under typed authorization", async () => {
     await pg.exec("UPDATE projects SET owner_user_id='admin-1' WHERE id='project-1'");
     coordinator = new Phase4Coordinator(new PGliteTransactionRunner(pg), {
-      deviceAuthorization: new PostgresDeviceActionAuthorization(),
+      deviceAuthorization: new PostgresDeviceActionAuthorization({
+        deviceDispatchEnabled: true,
+      }),
     });
 
     await expect(schedule()).resolves.toMatchObject({
@@ -286,7 +288,9 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
   it("dispatches through a typed grant-backed binding without duplicating device identity", async () => {
     await replacePrimaryWithDeviceBinding("runner-1");
     coordinator = new Phase4Coordinator(new PGliteTransactionRunner(pg), {
-      deviceAuthorization: new PostgresDeviceActionAuthorization(),
+      deviceAuthorization: new PostgresDeviceActionAuthorization({
+        deviceDispatchEnabled: true,
+      }),
     });
 
     const scheduled = await schedule();
@@ -303,7 +307,9 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
   it("rejects a grant-backed binding whose registration belongs to another device", async () => {
     await replacePrimaryWithDeviceBinding("runner-other");
     coordinator = new Phase4Coordinator(new PGliteTransactionRunner(pg), {
-      deviceAuthorization: new PostgresDeviceActionAuthorization(),
+      deviceAuthorization: new PostgresDeviceActionAuthorization({
+        deviceDispatchEnabled: true,
+      }),
     });
 
     await expect(schedule()).rejects.toThrow(
@@ -395,7 +401,7 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     let delivered = false;
     const secured = new Phase4DispatchRepository(
       transactions,
-      new PostgresDeviceActionAuthorization(),
+      new PostgresDeviceActionAuthorization({ deviceDispatchEnabled: true }),
     );
     await expect(
       secured.deliverClaimed(
@@ -429,11 +435,10 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       "dispatcher-a",
       "2026-07-16T20:01:00.000Z",
     );
-
     await poisonPrimaryBindingWithMismatchedDeviceGrant();
     const secured = new Phase4DispatchRepository(
       transactions,
-      new PostgresDeviceActionAuthorization(),
+      new PostgresDeviceActionAuthorization({ deviceDispatchEnabled: true }),
     );
     await expect(secured.pendingForRunner("runner-1", 3)).resolves.toEqual([]);
     const state = await pg.query<{ job: string; command: string }>(
@@ -444,6 +449,55 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       [scheduled.dispatch_job_id],
     );
     expect(state.rows[0]).toEqual({ job: "cancelled", command: "cancelled" });
+  });
+
+  it("holds device authorization locks through reconnect command delivery", async () => {
+    await replacePrimaryWithDeviceBinding("device-1");
+    await pg.query(
+      "UPDATE repository_bindings SET status='disconnected' WHERE id='binding-device'",
+    );
+    const transactions = new PGliteTransactionRunner(pg);
+    const deviceAuthorization = new PostgresDeviceActionAuthorization({
+      deviceDispatchEnabled: true,
+    });
+    const scheduled = await schedule(
+      "device-1",
+      new Phase4Coordinator(transactions, { deviceAuthorization }),
+    );
+    const unsecured = new Phase4DispatchRepository(transactions);
+    await unsecured.claim("dispatcher-a", 30_000);
+    await unsecured.markDelivered(
+      scheduled.dispatch_job_id,
+      "dispatcher-a",
+      "2026-07-16T20:01:00.000Z",
+    );
+    await pg.query(
+      `UPDATE commands
+          SET envelope=jsonb_set(envelope,'{expires_at}','"2099-01-01T00:00:00.000Z"'::jsonb)
+        WHERE command_id=$1`,
+      [scheduled.command_id],
+    );
+
+    const secured = new Phase4DispatchRepository(transactions, deviceAuthorization);
+    let revocationCommitted = false;
+    let revocation: Promise<unknown> | undefined;
+    await expect(
+      secured.deliverPendingForRunner("device-1", 3, new Set(), async () => {
+        revocation = pg
+          .query(
+            `UPDATE devices
+                  SET lifecycle='revoked',revoked_at=now()
+                WHERE id='device-1'`,
+          )
+          .then(() => {
+            revocationCommitted = true;
+          });
+        await Promise.resolve();
+        expect(revocationCommitted).toBe(false);
+      }),
+    ).resolves.toBe(1);
+    await revocation;
+    expect(revocationCommitted).toBe(true);
   });
 
   it("does not requeue a lease that revocation cancelled after delivery failed", async () => {
@@ -486,7 +540,7 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     const processor = new Phase4EventProcessor(
       new PGliteTransactionRunner(pg),
       undefined,
-      new PostgresDeviceActionAuthorization(),
+      new PostgresDeviceActionAuthorization({ deviceDispatchEnabled: true }),
     );
     const identity = {
       subject: "legacy_runner" as const,

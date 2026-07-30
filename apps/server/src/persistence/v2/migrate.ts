@@ -393,6 +393,13 @@ export const PROJECT_RUN_CANCELLATION_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const LEGACY_REPOSITORY_BINDING_CLAIMS_MIGRATION_NAME =
+  "0060_legacy_repository_binding_claims";
+export const LEGACY_REPOSITORY_BINDING_CLAIMS_MIGRATION_URL = new URL(
+  "../../../drizzle/0060_legacy_repository_binding_claims.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -659,6 +666,10 @@ export async function loadDeviceRepositoryAccessMigrationSql(): Promise<string> 
 
 export async function loadProjectRunCancellationMigrationSql(): Promise<string> {
   return readFile(PROJECT_RUN_CANCELLATION_MIGRATION_URL, "utf8");
+}
+
+export async function loadLegacyRepositoryBindingClaimsMigrationSql(): Promise<string> {
+  return readFile(LEGACY_REPOSITORY_BINDING_CLAIMS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1008,6 +1019,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: PROJECT_RUN_CANCELLATION_MIGRATION_NAME,
       sql: await loadProjectRunCancellationMigrationSql(),
+    },
+    {
+      name: LEGACY_REPOSITORY_BINDING_CLAIMS_MIGRATION_NAME,
+      sql: await loadLegacyRepositoryBindingClaimsMigrationSql(),
     },
   ];
 }

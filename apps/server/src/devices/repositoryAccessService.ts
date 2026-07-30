@@ -19,9 +19,12 @@ export interface DeviceRepositoryAccessPresence {
 }
 
 export interface ProjectExecutionTargetsProjection {
+  schema_version: 1;
   project_id: string;
+  viewer_role: "owner" | "member";
   selected_execution_target_id: string | null;
   work_active: boolean;
+  legacy_claim_required: boolean;
   execution_targets: ProjectExecutionTargetProjectionT[];
 }
 
@@ -122,9 +125,12 @@ export class DeviceRepositoryAccessService {
     const record = await this.repository.listTargets(actorUserId, projectId);
     if (!record) throw new DeviceRepositoryAccessError("project_not_found");
     return {
+      schema_version: 1,
       project_id: record.project_id,
+      viewer_role: record.viewer_role,
       selected_execution_target_id: record.selected_execution_target_id,
       work_active: record.work_active,
+      legacy_claim_required: record.legacy_claim_required,
       execution_targets: record.execution_targets.map((target) => this.target(target)),
     };
   }

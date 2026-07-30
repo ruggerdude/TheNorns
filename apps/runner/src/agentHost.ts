@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -8,15 +8,20 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import {
+import type {
+  DeviceEnrollmentCoordinator,
+  PublicDeviceEnrollmentStatus,
+} from "./deviceEnrollment.js";
+import type {
   PendingDeviceCredentialStore,
-  type PendingDeviceCredentialSummary,
+  PendingDeviceCredentialSummary,
 } from "./pendingDeviceCredential.js";
 import { Redactor } from "./redact.js";
 import { LocalRepositoryAccessController } from "./repositoryAccess.js";
@@ -31,6 +36,9 @@ const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"] as const);
 const DEFAULT_BOOTSTRAP_TTL_MS = 60_000;
 const DEFAULT_SESSION_TTL_MS = 15 * 60_000;
 const MAX_JSON_BODY_BYTES = 8 * 1024;
+const MAX_NATIVE_LAUNCH_REQUEST_IDS = 4_096;
+const NATIVE_LAUNCH_REQUEST_PURPOSE = "norns:agent-host-native-launch-request:v1";
+const NATIVE_LAUNCH_RESPONSE_PURPOSE = "norns:agent-host-native-launch-response:v1";
 const SECURITY_HEADERS = {
   "cache-control": "no-store",
   "content-security-policy": [
@@ -92,6 +100,8 @@ const CONTROL_CENTER_HTML = `<!doctype html>
       <p id="location" class="muted">No location label</p>
       <dl>
         <dt>Enrollment</dt><dd id="enrollment">Checking…</dd>
+        <dt>Authorization code</dt><dd><code id="authorization-code">Not requested</code></dd>
+        <dt>Approval page</dt><dd><a id="verification-uri" rel="noreferrer noopener" target="_blank" hidden>Open approval page</a><span id="verification-unavailable">Not requested</span></dd>
         <dt>Availability</dt><dd id="availability">Checking…</dd>
         <dt>Compatibility</dt><dd id="compatibility">Checking…</dd>
         <dt>Workload</dt><dd id="workload">Checking…</dd>
@@ -101,7 +111,7 @@ const CONTROL_CENTER_HTML = `<!doctype html>
       </dl>
       <p id="recent-activity" class="muted">No recent local Norns activity.</p>
       <div class="actions">
-        <button id="prepare" type="button">Prepare enrollment</button>
+        <button id="prepare" type="button">Start enrollment</button>
         <button id="start" type="button">Start daemon</button>
         <button id="stop" type="button">Stop daemon</button>
       </div>
@@ -209,6 +219,18 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
 
   function render(status) {
     enrollment.textContent = status.enrollment_state;
+    text("#authorization-code", status.enrollment.user_code || "Not requested");
+    const verificationLink = document.querySelector("#verification-uri");
+    const verificationUnavailable = document.querySelector("#verification-unavailable");
+    if (status.enrollment.verification_uri) {
+      verificationLink.href = status.enrollment.verification_uri;
+      verificationLink.hidden = false;
+      verificationUnavailable.hidden = true;
+    } else {
+      verificationLink.removeAttribute("href");
+      verificationLink.hidden = true;
+      verificationUnavailable.hidden = false;
+    }
     daemon.textContent = status.daemon_state;
     text("#device-name", status.home.device_name);
     text("#location", status.home.location_label || "No location label");
@@ -335,11 +357,23 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
       csrf = result.csrf_token;
     }
     await Promise.all([refresh(), refreshRepositories()]);
+    setInterval(() => {
+      refresh().catch(() => {});
+    }, 2000);
   }
 
   document.querySelector("#prepare").addEventListener("click", async () => {
-    await request("/api/enrollment/prepare", { method: "POST", body: "{}" });
-    await refresh();
+    const button = document.querySelector("#prepare");
+    button.disabled = true;
+    try {
+      await request("/api/enrollment/start", { method: "POST", body: "{}" });
+      await refresh();
+      message.textContent = "Enter the authorization code on the code-free approval page.";
+    } catch (error) {
+      message.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
   });
   document.querySelector("#start").addEventListener("click", async () => {
     await request("/api/daemon/start", { method: "POST", body: "{}" });
@@ -492,6 +526,7 @@ export interface AgentHostPortRecord {
   host: AgentHostLoopbackAddress;
   port: number;
   origin: string;
+  native_launch_secret: string;
 }
 
 export interface AgentHostPortDiscovery {
@@ -499,7 +534,11 @@ export interface AgentHostPortDiscovery {
   clear(): void;
 }
 
-export interface AgentHostStartResult extends AgentHostPortRecord {
+export interface AgentHostStartResult {
+  version: 1;
+  host: AgentHostLoopbackAddress;
+  port: number;
+  origin: string;
   bootstrap_url: string;
 }
 
@@ -514,6 +553,7 @@ export interface AgentHostOptions {
   lock?: AgentHostSingleInstanceLock;
   portDiscovery?: AgentHostPortDiscovery;
   credentialStore?: PendingDeviceCredentialStore;
+  enrollment?: DeviceEnrollmentCoordinator;
   repositoryAccess?: LocalRepositoryAccessController;
   localState?: Partial<AgentHostLocalState>;
   detectLocalTools?: boolean;
@@ -573,8 +613,13 @@ function defaultLocalState(): AgentHostLocalState {
   };
 }
 
-interface BoundAgentHost extends AgentHostPortRecord {
+interface BoundAgentHost {
+  version: 1;
+  host: AgentHostLoopbackAddress;
+  port: number;
+  origin: string;
   expectedHostHeader: string;
+  nativeLaunchSecret: string;
 }
 
 interface BootstrapGrant {
@@ -615,6 +660,79 @@ function sha256(value: string): Buffer {
 function secretMatches(candidate: string, expected: Buffer): boolean {
   const actual = sha256(candidate);
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function nativeLaunchKey(secret: string): Buffer {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(secret)) {
+    throw new Error("native launch secret is malformed");
+  }
+  const key = Buffer.from(secret, "base64url");
+  if (key.byteLength !== 32 || key.toString("base64url") !== secret) {
+    throw new Error("native launch secret is malformed");
+  }
+  return key;
+}
+
+function nativeLaunchTranscript(
+  purpose: string,
+  fields: readonly (readonly [name: string, value: string])[],
+): string {
+  let transcript = `${purpose}\n`;
+  for (const [name, value] of fields) {
+    transcript += `${name}:${Buffer.byteLength(value, "utf8")}:${value}\n`;
+  }
+  return transcript;
+}
+
+export function createAgentHostNativeLaunchRequestProof(input: {
+  native_launch_secret: string;
+  origin: string;
+  request_id: string;
+}): string {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(input.request_id)) {
+    throw new Error("native launch request ID is malformed");
+  }
+  return createHmac("sha256", nativeLaunchKey(input.native_launch_secret))
+    .update(
+      nativeLaunchTranscript(NATIVE_LAUNCH_REQUEST_PURPOSE, [
+        ["origin", input.origin],
+        ["request_id", input.request_id],
+      ]),
+      "utf8",
+    )
+    .digest("base64url");
+}
+
+export function createAgentHostNativeLaunchResponseProof(input: {
+  native_launch_secret: string;
+  origin: string;
+  request_id: string;
+  bootstrap_url: string;
+}): string {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(input.request_id)) {
+    throw new Error("native launch request ID is malformed");
+  }
+  return createHmac("sha256", nativeLaunchKey(input.native_launch_secret))
+    .update(
+      nativeLaunchTranscript(NATIVE_LAUNCH_RESPONSE_PURPOSE, [
+        ["origin", input.origin],
+        ["request_id", input.request_id],
+        ["bootstrap_url", input.bootstrap_url],
+      ]),
+      "utf8",
+    )
+    .digest("base64url");
+}
+
+function proofMatches(candidate: unknown, expected: string): boolean {
+  if (typeof candidate !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(candidate)) return false;
+  const actualBytes = Buffer.from(candidate, "base64url");
+  const expectedBytes = Buffer.from(expected, "base64url");
+  return (
+    actualBytes.toString("base64url") === candidate &&
+    actualBytes.byteLength === expectedBytes.byteLength &&
+    timingSafeEqual(actualBytes, expectedBytes)
+  );
 }
 
 function loopbackOrigin(host: AgentHostLoopbackAddress, port: number): string {
@@ -704,6 +822,7 @@ export class FileAgentHostSingleInstanceLock implements AgentHostSingleInstanceL
   acquire(): void {
     if (this.descriptor !== null) throw new AgentHostAlreadyRunningError();
     ensurePrivateDirectory(this.dataDir);
+    this.recoverStaleLock();
     try {
       this.descriptor = openSync(this.filePath, "wx", 0o600);
       writeFileSync(this.descriptor, `${process.pid}\n`, "utf8");
@@ -723,6 +842,45 @@ export class FileAgentHostSingleInstanceLock implements AgentHostSingleInstanceL
         throw new AgentHostAlreadyRunningError();
       }
       throw error;
+    }
+  }
+
+  private recoverStaleLock(): void {
+    if (!existsSync(this.filePath)) return;
+    let raw: string;
+    try {
+      const stat = statSync(this.filePath);
+      if (
+        typeof process.getuid === "function" &&
+        typeof stat.uid === "number" &&
+        stat.uid !== process.getuid()
+      ) {
+        throw new AgentHostAlreadyRunningError();
+      }
+      raw = readFileSync(this.filePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (!/^[1-9][0-9]*\n$/.test(raw)) {
+      throw new AgentHostAlreadyRunningError();
+    }
+    const ownerPid = Number(raw.trim());
+    if (!Number.isSafeInteger(ownerPid)) throw new AgentHostAlreadyRunningError();
+    try {
+      process.kill(ownerPid, 0);
+      // A live PID is never deleted, even if PID reuse means it is no longer
+      // AgentHost. Failing closed is safer than breaking another live owner.
+      throw new AgentHostAlreadyRunningError();
+    } catch (error) {
+      if (error instanceof AgentHostAlreadyRunningError) throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH") throw new AgentHostAlreadyRunningError();
+    }
+    try {
+      unlinkSync(this.filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
 
@@ -761,7 +919,9 @@ export class FileAgentHostPortDiscovery implements AgentHostPortDiscovery {
       !Number.isInteger(parsed.port) ||
       parsed.port < 1 ||
       parsed.port > 65_535 ||
-      parsed.origin !== loopbackOrigin(parsed.host as AgentHostLoopbackAddress, parsed.port)
+      parsed.origin !== loopbackOrigin(parsed.host as AgentHostLoopbackAddress, parsed.port) ||
+      typeof parsed.native_launch_secret !== "string" ||
+      !/^[A-Za-z0-9_-]{43}$/.test(parsed.native_launch_secret)
     ) {
       throw new Error("AgentHost port discovery file is malformed");
     }
@@ -770,6 +930,7 @@ export class FileAgentHostPortDiscovery implements AgentHostPortDiscovery {
       host: parsed.host as AgentHostLoopbackAddress,
       port: parsed.port,
       origin: parsed.origin,
+      native_launch_secret: parsed.native_launch_secret,
     };
   }
 
@@ -790,10 +951,12 @@ export class AgentHost {
   private readonly now: () => number;
   private readonly lock: AgentHostSingleInstanceLock;
   private readonly portDiscovery: AgentHostPortDiscovery;
-  private readonly credentialStore: PendingDeviceCredentialStore;
+  private readonly credentialStore: PendingDeviceCredentialStore | null;
   private readonly repositoryAccess: LocalRepositoryAccessController;
+  private readonly enrollmentCoordinator: DeviceEnrollmentCoordinator | null;
   private readonly localState: AgentHostLocalState;
   private readonly sessions = new Map<string, LocalSession>();
+  private readonly consumedNativeLaunchRequestIds = new Set<string>();
   private server: Server | null = null;
   private bound: BoundAgentHost | null = null;
   private bootstrapGrant: BootstrapGrant | null = null;
@@ -802,6 +965,7 @@ export class AgentHost {
   private daemonTransition: Promise<void> = Promise.resolve();
   private lastEmergencyStop: (AgentEmergencyStopResult & { requested_at: string }) | null = null;
   private shuttingDown = false;
+  private unsubscribeEnrollment: (() => void) | null = null;
 
   constructor(private readonly options: AgentHostOptions) {
     this.host = options.host ?? "127.0.0.1";
@@ -819,8 +983,8 @@ export class AgentHost {
     this.now = options.now ?? Date.now;
     this.lock = options.lock ?? new FileAgentHostSingleInstanceLock(options.dataDir);
     this.portDiscovery = options.portDiscovery ?? new FileAgentHostPortDiscovery(options.dataDir);
-    this.credentialStore =
-      options.credentialStore ?? new PendingDeviceCredentialStore(options.dataDir);
+    this.credentialStore = options.credentialStore ?? null;
+    this.enrollmentCoordinator = options.enrollment ?? null;
     this.repositoryAccess =
       options.repositoryAccess ??
       new LocalRepositoryAccessController(options.dataDir, new WorkspaceRegistry(options.dataDir));
@@ -837,7 +1001,9 @@ export class AgentHost {
       ],
       runtimes: [...(options.localState?.runtimes ?? defaults.runtimes)],
     };
-    this.enrollmentState = this.credentialStore.exists() ? "credential_prepared" : "not_enrolled";
+    this.enrollmentState =
+      this.enrollmentCoordinator?.status.state ??
+      (this.credentialStore?.exists() ? "credential_prepared" : "not_enrolled");
   }
 
   get localPort(): number | null {
@@ -890,26 +1056,61 @@ export class AgentHost {
       }
       const port = (address as AddressInfo).port;
       const origin = loopbackOrigin(this.host, port);
+      const nativeLaunchSecret = randomBytes(32).toString("base64url");
+      this.consumedNativeLaunchRequestIds.clear();
       this.bound = {
         version: 1,
         host: this.host,
         port,
         origin,
         expectedHostHeader: expectedHostHeader(this.host, port),
+        nativeLaunchSecret,
       };
-      this.portDiscovery.publish(this.bound);
+      this.portDiscovery.publish({
+        ...this.publicRecord(),
+        native_launch_secret: nativeLaunchSecret,
+      });
       void this.repositoryAccess.synchronize().catch(() => {
         this.localState.failed_authorization_notices.push(
           "Repository access reconciliation could not start safely.",
         );
       });
-      if (this.options.startDaemonOnHostStart === true) {
+      this.enrollmentCoordinator?.start();
+      this.unsubscribeEnrollment =
+        this.enrollmentCoordinator?.subscribe((status) => {
+          this.enrollmentState = status.state;
+          if (status.state === "active") {
+            void this.repositoryAccess.synchronize().catch(() => {
+              this.localState.failed_authorization_notices.push(
+                "Repository access reconciliation could not start safely.",
+              );
+            });
+          }
+          if (
+            status.state === "active" &&
+            this.options.startDaemonOnHostStart === true &&
+            this.daemonState !== "running" &&
+            this.daemonState !== "starting"
+          ) {
+            void this.transitionDaemon("start").catch(() => {
+              // The status endpoint exposes the failed daemon state without
+              // leaking enrollment or credential material.
+            });
+          }
+        }) ?? null;
+      if (
+        this.options.startDaemonOnHostStart === true &&
+        (!this.enrollmentCoordinator || this.enrollmentCoordinator.status.state === "active")
+      ) {
         await this.transitionDaemon("start");
       }
       return { ...this.publicRecord(), bootstrap_url: this.issueBootstrapUrl() };
     } catch (error) {
       this.server = null;
       this.bound = null;
+      this.unsubscribeEnrollment?.();
+      this.unsubscribeEnrollment = null;
+      this.enrollmentCoordinator?.stop();
       if (server.listening) {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
@@ -947,10 +1148,14 @@ export class AgentHost {
       try {
         await closeServer;
       } finally {
+        this.unsubscribeEnrollment?.();
+        this.unsubscribeEnrollment = null;
+        this.enrollmentCoordinator?.stop();
         this.server = null;
         this.bound = null;
         this.bootstrapGrant = null;
         this.sessions.clear();
+        this.consumedNativeLaunchRequestIds.clear();
         try {
           this.portDiscovery.clear();
         } finally {
@@ -960,7 +1165,7 @@ export class AgentHost {
     }
   }
 
-  private publicRecord(): AgentHostPortRecord {
+  private publicRecord(): Omit<AgentHostPortRecord, "native_launch_secret"> {
     const bound = this.requireBound();
     return {
       version: 1,
@@ -1057,7 +1262,9 @@ export class AgentHost {
         });
         return;
       case "/api/session/bootstrap":
+      case "/api/session/native-launch":
       case "/api/enrollment/prepare":
+      case "/api/enrollment/start":
       case "/api/daemon/start":
       case "/api/daemon/stop":
       case "/api/daemon/restart":
@@ -1075,6 +1282,45 @@ export class AgentHost {
     request: IncomingMessage,
     response: ServerResponse,
   ): Promise<void> {
+    if (path === "/api/session/native-launch") {
+      const body = await readJsonBody(request);
+      const requestId = body.request_id;
+      const requestProof = body.request_proof;
+      const bound = this.requireBound();
+      if (
+        typeof requestId !== "string" ||
+        !/^[A-Za-z0-9_-]{43}$/.test(requestId) ||
+        !proofMatches(
+          requestProof,
+          createAgentHostNativeLaunchRequestProof({
+            native_launch_secret: bound.nativeLaunchSecret,
+            origin: bound.origin,
+            request_id: requestId,
+          }),
+        )
+      ) {
+        throw new AgentHostHttpError(401, "invalid native launch credential");
+      }
+      if (this.consumedNativeLaunchRequestIds.has(requestId)) {
+        throw new AgentHostHttpError(409, "native launch request was already consumed");
+      }
+      if (this.consumedNativeLaunchRequestIds.size >= MAX_NATIVE_LAUNCH_REQUEST_IDS) {
+        throw new AgentHostHttpError(503, "native launch request capacity is exhausted");
+      }
+      this.consumedNativeLaunchRequestIds.add(requestId);
+      const bootstrapUrl = this.issueBootstrapUrl();
+      sendJson(response, 200, {
+        bootstrap_url: bootstrapUrl,
+        response_proof: createAgentHostNativeLaunchResponseProof({
+          native_launch_secret: bound.nativeLaunchSecret,
+          origin: bound.origin,
+          request_id: requestId,
+          bootstrap_url: bootstrapUrl,
+        }),
+      });
+      return;
+    }
+
     if (path === "/api/session/bootstrap") {
       const body = await readJsonBody(request);
       const token = body.bootstrap_token;
@@ -1120,9 +1366,23 @@ export class AgentHost {
 
     switch (path) {
       case "/api/enrollment/prepare": {
+        if (!this.credentialStore) {
+          throw new AgentHostHttpError(503, "device enrollment is disabled");
+        }
         const prepared = this.credentialStore.prepare();
         this.enrollmentState = "credential_prepared";
         sendJson(response, 200, this.preparedCredentialBody(prepared));
+        return;
+      }
+      case "/api/enrollment/start": {
+        if (!this.enrollmentCoordinator) {
+          throw new AgentHostHttpError(503, "device enrollment is disabled");
+        }
+        const status = await this.enrollmentCoordinator.begin({
+          proposed_name: this.localState.device_name,
+        });
+        this.enrollmentState = status.state;
+        sendJson(response, 202, this.enrollmentStatusBody(status));
         return;
       }
       case "/api/daemon/start":
@@ -1192,7 +1452,15 @@ export class AgentHost {
   }
 
   private statusBody(): Record<string, unknown> {
-    const prepared = this.credentialStore.read();
+    const prepared = this.credentialStore?.read() ?? null;
+    const enrollment = this.enrollmentCoordinator?.status ?? {
+      state: this.enrollmentState,
+      user_code: null,
+      verification_uri: null,
+      expires_at: null,
+      next_poll_at: null,
+    };
+    this.enrollmentState = enrollment.state;
     const repositoryCount = this.repositoryAccess.count();
     const availability: AgentAvailabilityState =
       this.daemonState === "running"
@@ -1206,6 +1474,12 @@ export class AgentHost {
         : this.localState.connectivity;
     return {
       enrollment_state: this.enrollmentState,
+      enrollment: {
+        user_code: enrollment.user_code,
+        verification_uri: enrollment.verification_uri,
+        expires_at: enrollment.expires_at,
+        next_poll_at: enrollment.next_poll_at,
+      },
       daemon_state: this.daemonState,
       credential_prepared: prepared !== null,
       home: {
@@ -1250,6 +1524,16 @@ export class AgentHost {
       algorithm: prepared.algorithm,
       public_key_fingerprint: prepared.public_key_fingerprint,
       created_at: prepared.created_at,
+    };
+  }
+
+  private enrollmentStatusBody(status: PublicDeviceEnrollmentStatus): Record<string, unknown> {
+    return {
+      enrollment_state: status.state,
+      user_code: status.user_code,
+      verification_uri: status.verification_uri,
+      expires_at: status.expires_at,
+      next_poll_at: status.next_poll_at,
     };
   }
 

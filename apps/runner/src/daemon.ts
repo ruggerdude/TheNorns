@@ -3,6 +3,7 @@
 // on disk and replay from the server's watermark; replayed commands never
 // execute twice (durable dedup); a stale generation fences the daemon off.
 import { sign as edSign, generateKeyPairSync } from "node:crypto";
+import { join } from "node:path";
 import {
   type CommandEnvelopeT,
   type CommandStateT,
@@ -10,6 +11,9 @@ import {
   type EventPayloadT,
   LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
   PROTOCOL_VERSION,
+  type ReconcileResponseT,
+  type RunnerInferenceResponseT,
+  type RunnerWorkspaceRequestT,
   TERMINAL_COMMAND_STATES,
   type V2DispatchCommandT,
   canonicalLegacyRunnerWssAuthenticationTranscript,
@@ -65,6 +69,10 @@ export interface DaemonOptions {
   deviceControl?: {
     identity: DeviceWssIdentity;
     sign(canonicalTranscript: string): string;
+    /** Independent dispatch kill switch; cancellation does not imply this. */
+    execution?: boolean;
+    /** Explicit deprecated local runner transport; never implied by control. */
+    legacyLocalCompatibility?: boolean;
     reconnect?: boolean;
     reconnectDelayMs?: number;
     evidenceRetryMs?: number;
@@ -86,6 +94,7 @@ export class RunnerDaemon {
   private readonly launchCommands = new Set<string>();
   private settledReported = false;
   private stateFile: RunnerStateFile | null = null;
+  private readonly deviceStateFile: RunnerStateFile | null;
   private socket: WebSocket | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -127,20 +136,36 @@ export class RunnerDaemon {
       ...options,
     };
     this.liveRuns = new LiveRunRegistry(this.opts.liveRunConfirmationTimeoutMs);
+    this.deviceStateFile =
+      this.opts.deviceControl?.execution === true
+        ? new RunnerStateFile(join(this.opts.dataDir, "device-execution"), {
+            runner_id: this.opts.deviceControl.identity.device_id,
+            private_key_pem: "",
+            generation: this.opts.deviceControl.identity.generation,
+          })
+        : null;
+    if (
+      this.deviceStateFile &&
+      this.opts.deviceControl &&
+      (this.deviceStateFile.state.runner_id !== this.opts.deviceControl.identity.device_id ||
+        this.deviceStateFile.state.generation !== this.opts.deviceControl.identity.generation)
+    ) {
+      throw new Error("device execution state identity does not match the active installation");
+    }
     this.executor = new FixtureExecutor((payload, meta) => this.emit(payload, meta));
     this.inference = new RelayInferenceClient({
       send: (request) => {
         // The generation travels with every frame, so a fenced runner's
         // request is refused server-side rather than silently spending.
-        if (!this.connected || this.fenced || !this.stateFile) return false;
-        this.socket?.send(
-          JSON.stringify({
-            type: "inference_request",
-            generation: this.requireState().state.generation,
-            request,
-          }),
-        );
-        return true;
+        if (!this.connected || this.fenced) return false;
+        const frame = {
+          type: "inference_request" as const,
+          generation: this.requireState().state.generation,
+          request,
+        };
+        return this.deviceExecutionEnabled
+          ? (this.deviceControl?.sendExecutionFrame(frame) ?? false)
+          : this.sendLegacyFrame(frame);
       },
     });
     this.deviceControl = this.opts.deviceControl
@@ -176,6 +201,19 @@ export class RunnerDaemon {
           },
           stopAll: (runId, reason) => this.stopAllManagedForEvidence(runId, reason),
           fence: (reason) => this.fenceInstallation(reason),
+          ...(this.opts.deviceControl.execution === true
+            ? {
+                execution: {
+                  authenticated: () => this.authenticateDeviceExecution(),
+                  disconnected: () => this.deviceExecutionDisconnected(),
+                  reconcile: (response: ReconcileResponseT) =>
+                    this.handleReconcileResponse(response),
+                  command: (command: CommandEnvelopeT) => this.handleCommand(command),
+                  eventAcknowledged: (eventSequence: number) =>
+                    this.handleEventAcknowledgement(eventSequence),
+                },
+              }
+            : {}),
         })
       : null;
   }
@@ -185,7 +223,9 @@ export class RunnerDaemon {
   }
 
   get connected(): boolean {
-    return this.socket?.readyState === WebSocket.OPEN;
+    return this.deviceExecutionEnabled
+      ? (this.deviceControl?.connected ?? false)
+      : this.socket?.readyState === WebSocket.OPEN;
   }
 
   get deviceControlConnected(): boolean {
@@ -194,6 +234,14 @@ export class RunnerDaemon {
 
   get generation(): number {
     return this.requireState().state.generation;
+  }
+
+  private get deviceExecutionEnabled(): boolean {
+    return this.opts.deviceControl?.execution === true;
+  }
+
+  private get legacyLocalTransportEnabled(): boolean {
+    return !this.opts.deviceControl || this.opts.deviceControl.legacyLocalCompatibility === true;
   }
 
   /**
@@ -296,6 +344,7 @@ export class RunnerDaemon {
 
   /** Load previously-paired state from disk (after a daemon restart). */
   loadState(): void {
+    if (this.deviceExecutionEnabled) return;
     this.stateFile = new RunnerStateFile(this.opts.dataDir, {
       runner_id: this.opts.runnerId,
       private_key_pem: "",
@@ -306,6 +355,7 @@ export class RunnerDaemon {
   connect(): void {
     if (this.stopped || this.fenced) return;
     this.deviceControl?.start();
+    if (this.deviceExecutionEnabled || !this.legacyLocalTransportEnabled) return;
     if (this.socket !== null) return;
     const state = this.requireState();
     const wsUrl = `${this.opts.serverUrl.replace(/^http/, "ws")}/ws/runner`;
@@ -341,27 +391,7 @@ export class RunnerDaemon {
           break;
         }
         case "auth_ok": {
-          socket.send(
-            JSON.stringify({
-              type: "reconcile_request",
-              body: {
-                protocol: PROTOCOL_VERSION,
-                runner_id: this.opts.runnerId,
-                generation: state.state.generation,
-                // EXECUTION E3 adds model_proxy. Advertised unconditionally:
-                // it costs nothing if the server does not offer it.
-                capabilities: [
-                  "workspace_picker",
-                  "workspace_repository_inventory",
-                  "workspace_clone",
-                  "model_proxy",
-                  "knowledge_transport",
-                ],
-                last_event_seq_sent: state.state.seq,
-                recently_executed_command_ids: state.executedIds(),
-              },
-            }),
-          );
+          this.sendReconcileRequest();
           break;
         }
         case "auth_error": {
@@ -369,32 +399,7 @@ export class RunnerDaemon {
           break;
         }
         case "reconcile_response": {
-          this.serverAckSeq = frame.body.ack_event_seq;
-          this.knowledgeTransportEnabled =
-            frame.body.capabilities?.includes("knowledge_transport") ?? false;
-          state.pruneAcked(frame.body.ack_event_seq);
-          this.highestEventSeqSent = frame.body.ack_event_seq;
-          // Keep reconnect replay bounded. A small acknowledgement window
-          // preserves normal throughput without allowing an old daemon to
-          // enqueue its entire durable history against the relay at once.
-          this.sendBufferedEvents();
-          // A crash may have landed after the terminal execution state was
-          // persisted but before its acknowledgement was buffered. The relay
-          // excludes recently executed commands from resend_commands, so the
-          // runner must repair that gap proactively rather than wait for a
-          // duplicate command that will never arrive.
-          for (const [commandId, terminalState] of state.terminalExecutions()) {
-            this.terminalAck(
-              commandId,
-              terminalState,
-              { causation: commandId },
-              "recovered terminal acknowledgement from durable execution state",
-            );
-          }
-          for (const command of frame.body.resend_commands) {
-            this.handleCommand(command);
-          }
-          this.startHeartbeat();
+          this.handleReconcileResponse(frame.body);
           break;
         }
         case "command": {
@@ -402,10 +407,7 @@ export class RunnerDaemon {
           break;
         }
         case "event_ack": {
-          this.serverAckSeq = Math.max(this.serverAckSeq, frame.ack_event_seq);
-          state.pruneAcked(this.serverAckSeq);
-          this.highestEventSeqSent = Math.max(this.highestEventSeqSent, this.serverAckSeq);
-          this.sendBufferedEvents();
+          this.handleEventAcknowledgement(frame.ack_event_seq);
           break;
         }
         case "fenced": {
@@ -414,56 +416,11 @@ export class RunnerDaemon {
           break;
         }
         case "inference_response": {
-          // EXECUTION E3. Generation-checked like every other frame: a
-          // response minted for a superseded generation is not ours.
-          if (frame.generation === state.state.generation) {
-            this.inference.receive(frame.response);
-          }
+          this.handleInferenceResponse(frame.response, frame.generation);
           break;
         }
         case "workspace_request": {
-          if (frame.generation !== state.state.generation) {
-            socket.send(
-              JSON.stringify({
-                type: "workspace_response",
-                generation: state.state.generation,
-                response: {
-                  request_id: frame.request.request_id,
-                  operation: frame.request.operation,
-                  status: "unavailable",
-                },
-              }),
-            );
-            break;
-          }
-          if (!this.opts.workspaces) {
-            socket.send(
-              JSON.stringify({
-                type: "workspace_response",
-                generation: state.state.generation,
-                response: {
-                  request_id: frame.request.request_id,
-                  operation: frame.request.operation,
-                  status: "unavailable",
-                },
-              }),
-            );
-            break;
-          }
-          // Native selection is asynchronous so the runner can keep its relay
-          // connection alive while the operating-system dialog is open.
-          // WorkspaceRegistry converts every failure to a stable code and no
-          // local pathname or operating-system message crosses this socket.
-          void this.opts.workspaces.handleAsync(frame.request).then((response) => {
-            if (this.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
-            socket.send(
-              JSON.stringify({
-                type: "workspace_response",
-                generation: state.state.generation,
-                response,
-              }),
-            );
-          });
+          this.handleWorkspaceRequest(frame.request, frame.generation);
           break;
         }
       }
@@ -539,6 +496,7 @@ export class RunnerDaemon {
   // -- internals ---------------------------------------------------------------
 
   private requireState(): RunnerStateFile {
+    if (this.deviceExecutionEnabled && this.deviceStateFile) return this.deviceStateFile;
     if (!this.stateFile) throw new Error("runner not paired: call pair() or loadState() first");
     return this.stateFile;
   }
@@ -586,6 +544,130 @@ export class RunnerDaemon {
     this.deviceControl?.stop();
   }
 
+  private executionCapabilities(): Array<
+    | "workspace_picker"
+    | "workspace_repository_inventory"
+    | "workspace_clone"
+    | "model_proxy"
+    | "knowledge_transport"
+  > {
+    return this.deviceExecutionEnabled
+      ? ["knowledge_transport"]
+      : [
+          "workspace_picker",
+          "workspace_repository_inventory",
+          "workspace_clone",
+          "model_proxy",
+          "knowledge_transport",
+        ];
+  }
+
+  private authenticateDeviceExecution(): void {
+    if (!this.deviceExecutionEnabled || this.fenced || this.stopped) return;
+    this.serverAckSeq = 0;
+    this.highestEventSeqSent = 0;
+    this.sendReconcileRequest();
+  }
+
+  private deviceExecutionDisconnected(): void {
+    if (!this.deviceExecutionEnabled) return;
+    this.inference.abortAll();
+    this.stopHeartbeat();
+    this.highestEventSeqSent = this.serverAckSeq;
+  }
+
+  private sendReconcileRequest(): void {
+    const state = this.requireState();
+    this.sendTransportFrame({
+      type: "reconcile_request",
+      body: {
+        protocol: PROTOCOL_VERSION,
+        runner_id: state.state.runner_id,
+        generation: state.state.generation,
+        capabilities: this.executionCapabilities(),
+        last_event_seq_sent: state.state.seq,
+        recently_executed_command_ids: state.executedIds(),
+      },
+    });
+  }
+
+  private handleReconcileResponse(response: ReconcileResponseT): void {
+    const state = this.requireState();
+    if (response.generation !== state.state.generation) {
+      this.fenceInstallation("runner reconciliation identity changed");
+      return;
+    }
+    this.serverAckSeq = response.ack_event_seq;
+    this.knowledgeTransportEnabled =
+      response.capabilities?.includes("knowledge_transport") ?? false;
+    state.pruneAcked(response.ack_event_seq);
+    this.highestEventSeqSent = response.ack_event_seq;
+    this.sendBufferedEvents();
+    for (const [commandId, terminalState] of state.terminalExecutions()) {
+      this.terminalAck(
+        commandId,
+        terminalState,
+        { causation: commandId },
+        "recovered terminal acknowledgement from durable execution state",
+      );
+    }
+    for (const command of response.resend_commands) this.handleCommand(command);
+    this.startHeartbeat();
+  }
+
+  private handleEventAcknowledgement(eventSequence: number): void {
+    const state = this.requireState();
+    this.serverAckSeq = Math.max(this.serverAckSeq, eventSequence);
+    state.pruneAcked(this.serverAckSeq);
+    this.highestEventSeqSent = Math.max(this.highestEventSeqSent, this.serverAckSeq);
+    this.sendBufferedEvents();
+  }
+
+  private handleInferenceResponse(response: RunnerInferenceResponseT, generation: number): void {
+    if (generation === this.requireState().state.generation) {
+      this.inference.receive(response);
+    }
+  }
+
+  private handleWorkspaceRequest(request: RunnerWorkspaceRequestT, generation: number): void {
+    const state = this.requireState();
+    const unavailable = () =>
+      this.sendTransportFrame({
+        type: "workspace_response" as const,
+        generation: state.state.generation,
+        response: {
+          request_id: request.request_id,
+          operation: request.operation,
+          status: "unavailable" as const,
+        },
+      });
+    if (generation !== state.state.generation || !this.opts.workspaces) {
+      unavailable();
+      return;
+    }
+    void this.opts.workspaces.handleAsync(request).then((response) => {
+      this.sendTransportFrame({
+        type: "workspace_response",
+        generation: state.state.generation,
+        response,
+      });
+    });
+  }
+
+  private sendTransportFrame(
+    frame: Parameters<DeviceControlConnection["sendExecutionFrame"]>[0],
+  ): boolean {
+    return this.deviceExecutionEnabled
+      ? (this.deviceControl?.sendExecutionFrame(frame) ?? false)
+      : this.sendLegacyFrame(frame);
+  }
+
+  private sendLegacyFrame(frame: object): boolean {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return false;
+    this.socket.send(JSON.stringify(frame));
+    return true;
+  }
+
   private scheduleReconnect(): void {
     if (this.stopped || this.fenced || !this.opts.reconnect) return;
     if (this.reconnectTimer) return;
@@ -606,7 +688,7 @@ export class RunnerDaemon {
       .filter((event) => event.event_seq > this.highestEventSeqSent)
       .slice(0, available);
     for (const event of events) {
-      this.socket?.send(JSON.stringify({ type: "event", event }));
+      if (!this.sendTransportFrame({ type: "event", event })) break;
       this.highestEventSeqSent = event.event_seq;
     }
   }
@@ -629,7 +711,10 @@ export class RunnerDaemon {
    */
   private handleCommand(command: CommandEnvelopeT): void {
     const state = this.requireState();
-    if (command.runner_id !== this.opts.runnerId || command.generation !== state.state.generation) {
+    if (
+      command.runner_id !== state.state.runner_id ||
+      command.generation !== state.state.generation
+    ) {
       this.fenceInstallation("runner generation fenced");
       return;
     }
@@ -899,9 +984,9 @@ export class RunnerDaemon {
     const ensured = state.ensureTerminalAck({
       command_id: commandId,
       state: ackState,
-      runner_id: this.opts.runnerId,
+      runner_id: state.state.runner_id,
       generation: state.state.generation,
-      correlation_id: meta.correlation ?? `runner:${this.opts.runnerId}`,
+      correlation_id: meta.correlation ?? `runner:${state.state.runner_id}`,
       causation_id: meta.causation ?? null,
       occurred_at: new Date().toISOString(),
       detail,
@@ -939,9 +1024,9 @@ export class RunnerDaemon {
     const event: EventEnvelopeT = {
       protocol: PROTOCOL_VERSION as 1,
       event_seq: state.nextSeq(),
-      runner_id: this.opts.runnerId,
+      runner_id: state.state.runner_id,
       generation: state.state.generation,
-      correlation_id: meta.correlation ?? `runner:${this.opts.runnerId}`,
+      correlation_id: meta.correlation ?? `runner:${state.state.runner_id}`,
       causation_id: meta.causation ?? null,
       occurred_at: new Date().toISOString(),
       payload: safePayload,

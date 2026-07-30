@@ -23,6 +23,8 @@ import {
   DeviceRepositoryRegistrationRevocationResponse,
 } from "@norns/contracts";
 import { type DeviceRunnerHttpIdentity, signRunnerHttpRequest } from "./contextAuth.js";
+import { ActiveDeviceIdentityStore } from "./deviceInstallationIdentity.js";
+import type { PendingDeviceCredentialStore } from "./pendingDeviceCredential.js";
 import type { LocalRepositoryApproval, WorkspaceRegistry } from "./workspaceRegistry.js";
 
 export const LOCAL_REPOSITORY_ACCESS_FILENAME = "repository-access.json";
@@ -293,6 +295,63 @@ export class SignedDeviceRepositoryRegistrationClient
       throw new Error("device repository revocation response did not match the request");
     }
     return value;
+  }
+}
+
+/**
+ * Resolves the active device identity at the moment each registration is sent.
+ *
+ * AgentHost exists before enrollment is complete, so caching an identity in
+ * its constructor would either fail startup or require a restart after
+ * approval. Looking up the durable activation record for each operation keeps
+ * pre-enrollment approvals pending and lets the same process synchronize them
+ * immediately after successful redemption.
+ */
+export class ActiveDeviceRepositoryRegistrationClient
+  implements DeviceRepositoryRegistrationClient
+{
+  private readonly activeIdentity: ActiveDeviceIdentityStore;
+
+  constructor(
+    private readonly server: string,
+    dataDir: string,
+    private readonly credentialStore: PendingDeviceCredentialStore,
+    private readonly httpFetch: typeof fetch = fetch,
+  ) {
+    this.activeIdentity = new ActiveDeviceIdentityStore(dataDir);
+  }
+
+  async register(identity: CloudRepositoryIdentity): Promise<DeviceRepositoryRegistration> {
+    return await this.client().register(identity);
+  }
+
+  async revoke(input: {
+    registration_id: string;
+    workspace_id: string;
+    repository_id: string;
+  }): Promise<{ registration_id: string; status: "revoked" }> {
+    return await this.client().revoke(input);
+  }
+
+  private client(): SignedDeviceRepositoryRegistrationClient {
+    const active = this.activeIdentity.read();
+    if (!active) {
+      throw new Error("device enrollment is not active");
+    }
+    if (!this.credentialStore.read()) {
+      throw new Error("active device credential is unavailable");
+    }
+    return new SignedDeviceRepositoryRegistrationClient(
+      this.server,
+      {
+        mode: "device",
+        deviceId: active.device_id,
+        credentialId: active.credential_id,
+        generation: active.generation,
+        sign: (payload) => this.credentialStore.sign(payload),
+      },
+      this.httpFetch,
+    );
   }
 }
 

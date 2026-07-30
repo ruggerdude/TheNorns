@@ -123,8 +123,6 @@ describe.sequential("PostgreSQL device enrollment", () => {
         verificationUri: "https://norns.example/device-authorization",
         now: () => new Date(now),
         newId: (prefix) => `${prefix}-${++idSequence}`,
-        generateDeviceCode: () => Buffer.alloc(32, codeSequence++).toString("base64url"),
-        generateHumanCode: () => humanCodes.shift() ?? "CDEF-GHJK",
       },
     );
   }, 30_000);
@@ -133,9 +131,17 @@ describe.sequential("PostgreSQL device enrollment", () => {
     if (!pg.closed) await pg.close();
   });
 
+  function persistedCodes(): { device_code: string; user_code: string } {
+    return {
+      device_code: Buffer.alloc(32, codeSequence++).toString("base64url"),
+      user_code: humanCodes.shift() ?? "CDEF-GHJK",
+    };
+  }
+
   it("stores only keyed code hashes and returns a non-consuming approval summary", async () => {
     const key = ed25519KeyPair();
     const created = await service.createAuthorization({
+      ...persistedCodes(),
       public_key_pem: key.public_key_pem,
       proposed_name: "  Office Mac mini  ",
       os_family: "macos",
@@ -203,10 +209,158 @@ describe.sequential("PostgreSQL device enrollment", () => {
     });
   });
 
+  it("replays the exact initiation after a lost create response and rejects a changed tuple", async () => {
+    const key = ed25519KeyPair();
+    const request = {
+      device_code: Buffer.alloc(32, 91).toString("base64url"),
+      user_code: "ABCD-EFGH",
+      public_key_pem: key.public_key_pem,
+      proposed_name: "Office Mac mini",
+      os_family: "macos" as const,
+      architecture: "arm64",
+    };
+    const first = await service.createAuthorization(request);
+    await expect(service.createAuthorization(request)).resolves.toEqual(first);
+    expect(
+      (
+        await pg.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM device_authorization_requests",
+        )
+      ).rows[0]?.count,
+    ).toBe(1);
+
+    await expect(
+      service.createAuthorization({ ...request, user_code: "JKLM-NPQR" }),
+    ).rejects.toMatchObject({ code: "authorization_not_available" });
+  });
+
+  it("converges concurrent exact creates and rejects a conflicting tuple for the same fresh key", async () => {
+    const exactKey = ed25519KeyPair();
+    const exactRequest = {
+      device_code: Buffer.alloc(32, 81).toString("base64url"),
+      user_code: "ABCD-EFGH",
+      public_key_pem: exactKey.public_key_pem,
+      proposed_name: "Concurrent exact request",
+      os_family: "macos" as const,
+      architecture: "arm64",
+    };
+    const exact = await Promise.all([
+      service.createAuthorization(exactRequest),
+      service.createAuthorization(exactRequest),
+    ]);
+    expect(exact[1]).toEqual(exact[0]);
+
+    const conflictingKey = ed25519KeyPair();
+    const common = {
+      public_key_pem: conflictingKey.public_key_pem,
+      proposed_name: "Concurrent conflicting request",
+      os_family: "linux" as const,
+      architecture: "x86_64",
+    };
+    const conflicting = await Promise.allSettled([
+      service.createAuthorization({
+        ...common,
+        device_code: Buffer.alloc(32, 82).toString("base64url"),
+        user_code: "JKLM-NPQR",
+      }),
+      service.createAuthorization({
+        ...common,
+        device_code: Buffer.alloc(32, 83).toString("base64url"),
+        user_code: "STUV-WXYZ",
+      }),
+    ]);
+    expect(conflicting.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = conflicting.find((result) => result.status === "rejected");
+    expect(rejected).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({ code: "authorization_not_available" }),
+    });
+    expect(
+      (
+        await pg.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM device_authorization_requests",
+        )
+      ).rows[0]?.count,
+    ).toBe(2);
+  });
+
+  it.each(["pending", "approved_pending_redemption"] as const)(
+    "expires an unpolled %s request before reusing its persisted key",
+    async (initialState) => {
+      const key = ed25519KeyPair();
+      const first = await service.createAuthorization({
+        ...persistedCodes(),
+        public_key_pem: key.public_key_pem,
+        proposed_name: "Offline Mac",
+        os_family: "macos",
+        architecture: "arm64",
+      });
+      if (initialState === "approved_pending_redemption") {
+        const lookup = await service.lookup({ user_code: first.user_code });
+        await service.approve({
+          authorization_request_id: first.authorization_request_id,
+          authorization_context: lookup.authorization_context,
+          owner_user_id: "owner-1",
+        });
+      }
+
+      // The agent stayed offline beyond expiry. No lookup or poll transitions
+      // the old row before the same persisted key starts a fresh request.
+      now = new Date(now.getTime() + 10 * 60 * 1_000 + 1);
+      const second = await service.createAuthorization({
+        ...persistedCodes(),
+        public_key_pem: key.public_key_pem,
+        proposed_name: "Offline Mac",
+        os_family: "macos",
+        architecture: "arm64",
+      });
+      expect(second.authorization_request_id).not.toBe(first.authorization_request_id);
+
+      const requests = await pg.query<{
+        id: string;
+        state: string;
+        approved_by_user_id: string | null;
+        approved_at: Date | null;
+        expired_at: Date | null;
+        denied_at: Date | null;
+        redeemed_at: Date | null;
+      }>(
+        `SELECT
+           id,state,approved_by_user_id,approved_at,expired_at,denied_at,redeemed_at
+           FROM device_authorization_requests
+          ORDER BY created_at,id`,
+      );
+      expect(requests.rows).toHaveLength(2);
+      expect(requests.rows[0]).toMatchObject({
+        id: first.authorization_request_id,
+        state: "expired",
+        approved_by_user_id: initialState === "approved_pending_redemption" ? "owner-1" : null,
+        denied_at: null,
+        redeemed_at: null,
+      });
+      expect(requests.rows[0]?.expired_at).not.toBeNull();
+      expect(requests.rows[0]?.approved_at === null).toBe(initialState === "pending");
+      expect(requests.rows[1]).toMatchObject({
+        id: second.authorization_request_id,
+        state: "pending",
+        approved_by_user_id: null,
+        approved_at: null,
+        expired_at: null,
+      });
+      await expect(service.poll({ device_code: first.device_code })).resolves.toEqual({
+        outcome: "expired_token",
+      });
+      await expect(service.lookup({ user_code: second.user_code })).resolves.toMatchObject({
+        authorization_request_id: second.authorization_request_id,
+      });
+    },
+  );
+
   it("redeems with the persisted private key and replays the exact active identity after response loss", async () => {
     const key = ed25519KeyPair();
     const changedKey = ed25519KeyPair();
     const created = await service.createAuthorization({
+      ...persistedCodes(),
       public_key_pem: key.public_key_pem,
       proposed_name: "Office Mac mini",
       os_family: "macos",
@@ -303,6 +457,7 @@ describe.sequential("PostgreSQL device enrollment", () => {
 
     await expect(
       service.createAuthorization({
+        ...persistedCodes(),
         public_key_pem: key.public_key_pem,
         proposed_name: "Duplicate key attempt",
         os_family: "macos",
@@ -320,6 +475,7 @@ describe.sequential("PostgreSQL device enrollment", () => {
 
   it("implements authorization_pending, slow_down, access_denied, and expired_token", async () => {
     const first = await service.createAuthorization({
+      ...persistedCodes(),
       public_key_pem: ed25519KeyPair().public_key_pem,
       proposed_name: "Linux workstation",
       os_family: "linux",
@@ -364,6 +520,7 @@ describe.sequential("PostgreSQL device enrollment", () => {
     expect(denial.rows[0]).toEqual({ state: "denied", denied_by_user_id: "owner-1" });
 
     const second = await service.createAuthorization({
+      ...persistedCodes(),
       public_key_pem: ed25519KeyPair().public_key_pem,
       proposed_name: "Windows desktop",
       os_family: "windows",
@@ -387,6 +544,7 @@ describe.sequential("PostgreSQL device enrollment", () => {
 
   it("binds approval to one active owner and never exposes submitted codes in failures", async () => {
     const created = await service.createAuthorization({
+      ...persistedCodes(),
       public_key_pem: ed25519KeyPair().public_key_pem,
       proposed_name: "Shared-looking name",
       os_family: "other",

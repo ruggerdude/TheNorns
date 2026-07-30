@@ -45,7 +45,10 @@ function serviceMock(): DeviceEnrollmentRouteService {
   };
 }
 
-async function start(service?: DeviceEnrollmentRouteService): Promise<{
+async function start(
+  service?: DeviceEnrollmentRouteService,
+  options: { staleSession?: boolean } = {},
+): Promise<{
   stack: NornsServer;
   token: string;
   userId: string;
@@ -57,6 +60,13 @@ async function start(service?: DeviceEnrollmentRouteService): Promise<{
     role: "member",
   });
   const token = users.login("owner@example.com", "owner-password").token;
+  if (options.staleSession) {
+    const snapshot = users.snapshot();
+    snapshot.sessions = snapshot.sessions.map((session) =>
+      session.token === token ? { ...session, createdAt: "2000-01-01T00:00:00.000Z" } : session,
+    );
+    users.restoreFrom(snapshot);
+  }
   server = await buildServer({
     stores: new RelayStores(),
     users,
@@ -67,6 +77,31 @@ async function start(service?: DeviceEnrollmentRouteService): Promise<{
 }
 
 describe("device enrollment HTTP routes", () => {
+  it("projects authenticated, no-store local-execution capability gates", async () => {
+    const { stack, token } = await start(serviceMock());
+    const unauthorized = await stack.app.inject({
+      method: "GET",
+      url: "/api/v2/capabilities/local-execution",
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const response = await stack.app.inject({
+      method: "GET",
+      url: "/api/v2/capabilities/local-execution",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.json()).toEqual({
+      schema_version: 1,
+      enrollment_available: true,
+      computers_available: false,
+      repository_grants_available: false,
+      legacy_claim_available: false,
+      legacy_local_creation_available: false,
+    });
+  });
+
   it("remain unmounted unless the explicit runtime is supplied", async () => {
     const { stack } = await start();
     const response = await stack.app.inject({
@@ -84,6 +119,8 @@ describe("device enrollment HTTP routes", () => {
       method: "POST",
       url: "/api/device-authorizations",
       payload: {
+        device_code: Buffer.alloc(32, 1).toString("base64url"),
+        user_code: "ABCD-EFGH",
         public_key_pem: "-----BEGIN PUBLIC KEY-----\nkey\n-----END PUBLIC KEY-----",
         proposed_name: "Office Mac mini",
         os_family: "macos",
@@ -165,6 +202,36 @@ describe("device enrollment HTTP routes", () => {
       authorization_context: "context-1",
       denied_by_user_id: userId,
     });
+  });
+
+  it("requires a recent owner session for approve and deny but not lookup", async () => {
+    const service = serviceMock();
+    const { stack, token } = await start(service, { staleSession: true });
+    const headers = { authorization: `Bearer ${token}` };
+
+    expect(
+      (
+        await stack.app.inject({
+          method: "POST",
+          url: "/api/device-authorizations/lookup",
+          headers,
+          payload: { user_code: "ABCDEFGH" },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    for (const decision of ["approve", "deny"]) {
+      const response = await stack.app.inject({
+        method: "POST",
+        url: `/api/device-authorizations/deviceauth-1/${decision}`,
+        headers,
+        payload: { authorization_context: "context-1" },
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual({ error: "recent_auth_required" });
+    }
+    expect(service.approve).not.toHaveBeenCalled();
+    expect(service.deny).not.toHaveBeenCalled();
   });
 
   it("throttles every human-code submission and returns Retry-After", async () => {

@@ -201,6 +201,7 @@ describe.sequential("Phase 2 project runtime routing", () => {
       stores: new RelayStores(),
       users,
       projects: runtime.repository,
+      legacyHelperRoutes: { enabled: true },
       ...(github ? { integrations: { github } } : {}),
       phase3: {
         sourceBindings: new SourceBindingService(transactions),

@@ -1530,6 +1530,7 @@ describe.sequential("Phase 2 preservation schema", () => {
         kind: "collect_visual_evidence",
         run_id: "phase6-collection-run",
         approved_mockup_version_id: "phase6-collection-version",
+        runner_repository_id: "phase6-delivery-repository",
         commit_sha: "e".repeat(40),
       },
     });

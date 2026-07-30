@@ -13,6 +13,7 @@ export const V2RepositoryBindingStatus = z.enum([
   "connected",
   "degraded",
   "disconnected",
+  "legacy_claim_required",
   "revoked",
 ]);
 export type V2RepositoryBindingStatusT = z.infer<typeof V2RepositoryBindingStatus>;
