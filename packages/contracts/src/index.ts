@@ -1,4 +1,5 @@
 export * from "./version.js";
+export * from "./devices.js";
 export * from "./plan.js";
 export * from "./lifecycle.js";
 export * from "./reducer.js";
