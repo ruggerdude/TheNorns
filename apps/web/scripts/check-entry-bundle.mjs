@@ -13,7 +13,10 @@ const gzipBytes = entryScripts.reduce((total, asset) => {
   const source = readFileSync(`${webRoot}/dist/${asset.replace(/^\//, "")}`);
   return total + gzipSync(source).byteLength;
 }, 0);
-const maxEntryJsGzipBytes = 161 * 1024;
+// Node's bundled zlib can differ by a few hundred bytes across supported
+// runtime releases. Keep the production Node 24 image and local CI within the
+// same narrow ceiling without making the gate depend on one zlib patch level.
+const maxEntryJsGzipBytes = 162 * 1024;
 
 if (gzipBytes > maxEntryJsGzipBytes) {
   throw new Error(
