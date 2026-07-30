@@ -21,6 +21,7 @@ ICON_SOURCE="$WORKSPACE/apps/web/public/favicon.svg"
 ICONSET="$STAGE/NornsLocalAgent.iconset"
 OUTPUT="$STAGE/installer/Norns-Local-Agent-macOS.pkg"
 PACKAGE_SCRIPTS="$STAGE/package-scripts"
+COMPONENT_PLIST="$WORKSPACE/packaging/macos/component.plist"
 NODE_VERSION="24.18.0"
 
 [ -f "$MANIFEST" ] || {
@@ -106,6 +107,7 @@ sed "s/__VERSION__/$BUNDLE_VERSION/g" \
 cp "$WORKSPACE/packaging/macos/agent.sh" "$RESOURCES/agent.sh"
 chmod 755 "$MACOS/NornsLocalAgent" "$RESOURCES/agent.sh"
 plutil -lint "$CONTENTS/Info.plist" >/dev/null
+plutil -lint "$COMPONENT_PLIST" >/dev/null
 lipo -archs "$MACOS/NornsLocalAgent" | grep -q arm64
 lipo -archs "$MACOS/NornsLocalAgent" | grep -q x86_64
 chmod -R u+w "$APP"
@@ -114,6 +116,7 @@ xattr -cr "$APP"
 COPYFILE_DISABLE=1 pkgbuild \
   --root "$PKG_ROOT" \
   --scripts "$PACKAGE_SCRIPTS" \
+  --component-plist "$COMPONENT_PLIST" \
   --identifier "com.thenorns.local-agent.pkg" \
   --version "$BUNDLE_VERSION" \
   --install-location / \

@@ -45,9 +45,14 @@ describe("desktop local-agent packaging", () => {
     expect(packaging).toContain("-target arm64-apple-macos13.0");
     expect(packaging).toContain("-target x86_64-apple-macos13.0");
     expect(packaging).toContain("lipo -create");
+    expect(packaging).toContain('--component-plist "$COMPONENT_PLIST"');
 
     const info = read("packaging/macos/Info.plist.in");
     expect(info).not.toContain("<string>norns-agent</string>");
+    const component = read("packaging/macos/component.plist");
+    expect(component).toContain("<key>BundleIsRelocatable</key>");
+    expect(component).toContain("<false/>");
+    expect(component).toContain("Applications/Norns Local Agent.app");
     const launcher = read("packaging/macos/NornsLocalAgent.swift");
     expect(launcher).toContain("HMAC<SHA256>");
     expect(launcher).toContain('("request_id", requestID)');
