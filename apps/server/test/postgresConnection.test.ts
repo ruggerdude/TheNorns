@@ -136,6 +136,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_agent_protocol_version: true,
             device_agent_capabilities: true,
             device_last_seen_at: true,
+            device_publication_permits: "device_publication_permits",
           },
         ],
       }),
@@ -191,6 +192,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_agent_protocol_version: false,
             device_agent_capabilities: false,
             device_last_seen_at: false,
+            device_publication_permits: null,
           },
         ],
       }),
@@ -216,7 +218,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "device_run_cancellations, device_revocations, " +
         "gateway_credentials.authentication_subject, gateway_credentials.device_credential_id, " +
         "devices.os_version, devices.agent_version, devices.agent_protocol_version, " +
-        "devices.agent_capabilities, devices.last_seen_at",
+        "devices.agent_capabilities, devices.last_seen_at, device_publication_permits",
     });
   });
 
@@ -267,6 +269,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_agent_protocol_version: true,
             device_agent_capabilities: true,
             device_last_seen_at: true,
+            device_publication_permits: "device_publication_permits",
           },
         ],
       }),
@@ -333,6 +336,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_agent_protocol_version: false,
             device_agent_capabilities: false,
             device_last_seen_at: false,
+            device_publication_permits: null,
           },
         ],
       }),
@@ -348,7 +352,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "device_run_cancellations, device_revocations, " +
         "gateway_credentials.authentication_subject, gateway_credentials.device_credential_id, " +
         "devices.os_version, devices.agent_version, devices.agent_protocol_version, " +
-        "devices.agent_capabilities, devices.last_seen_at",
+        "devices.agent_capabilities, devices.last_seen_at, device_publication_permits",
     });
   });
 });

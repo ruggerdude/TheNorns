@@ -137,19 +137,73 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       );
       INSERT INTO device_repository_registrations (
         id,device_id,workspace_id,repository_id,repository_display_name,
-        state,approved_by_user_id,approved_at
+        state,approved_by_user_id,approved_at,default_branch,
+        approved_credential_id,approved_generation
       ) VALUES (
         'registration-actual','device-actual','workspace-1','repository-1',
-        'Project One','active','admin-1',now()
+        'Project One','active','admin-1',now(),'main',
+        'credential-actual',1
       );
       INSERT INTO project_device_repository_grants (
         id,project_id,repository_registration_id,state,granted_by_user_id
       ) VALUES (
         'grant-actual','project-1','registration-actual','active','admin-1'
       );
+      ALTER TABLE repository_bindings
+        DISABLE TRIGGER repository_bindings_identity_guard;
       UPDATE repository_bindings
-         SET project_device_repository_grant_id='grant-actual'
+         SET project_device_repository_grant_id='grant-actual',
+             runner_id=NULL
        WHERE id='binding-1';
+      ALTER TABLE repository_bindings
+        ENABLE TRIGGER repository_bindings_identity_guard;
+    `);
+  }
+
+  async function replacePrimaryWithDeviceBinding(deviceId: string): Promise<void> {
+    await pg.query("UPDATE projects SET owner_user_id='admin-1' WHERE id='project-1'");
+    await pg.query(
+      `INSERT INTO devices (
+         id,owner_user_id,display_name,os_family,architecture,lifecycle,current_generation
+       ) VALUES ($1,'admin-1','Coordinator device','linux','x64','active',0)`,
+      [deviceId],
+    );
+    await pg.query(
+      `INSERT INTO device_credentials (
+         id,device_id,generation,public_key_spki_der,public_key_fingerprint,state
+       ) VALUES ('credential-device-binding',$1,3,'\\x02',$2,'active')`,
+      [deviceId, "e".repeat(64)],
+    );
+    await pg.query(
+      `INSERT INTO device_repository_registrations (
+         id,device_id,workspace_id,repository_id,repository_display_name,state,
+         approved_by_user_id,approved_at,default_branch,observed_head,
+         approved_credential_id,approved_generation
+       ) VALUES (
+         'registration-device-binding',$1,'workspace-1','repository-1','Project One',
+         'active','admin-1',now(),'main','commit-1','credential-device-binding',3
+       )`,
+      [deviceId],
+    );
+    await pg.exec(`
+      INSERT INTO project_device_repository_grants (
+        id,project_id,repository_registration_id,state,granted_by_user_id
+      ) VALUES (
+        'grant-device-binding','project-1','registration-device-binding','active','admin-1'
+      );
+      INSERT INTO repository_bindings (
+        id,project_id,binding_type,status,runner_id,workspace_id,repository_id,
+        repository_display_name,granted_permissions,default_branch,observed_head,
+        verification_policy_ref,repository_health,created_by_actor_type,
+        created_by_actor_id,project_device_repository_grant_id
+      ) VALUES (
+        'binding-device','project-1','local_runner','connected',NULL,'workspace-1',
+        'repository-1','Project One','{}'::jsonb,'main','commit-1','verification',
+        'healthy','human','admin-1','grant-device-binding'
+      );
+      UPDATE projects
+         SET primary_repository_binding_id='binding-device'
+       WHERE id='project-1';
     `);
   }
 
@@ -193,6 +247,68 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       command_status: "queued",
       task_events: 2,
     });
+  });
+
+  it("keeps exact runner matching for legacy local bindings under typed authorization", async () => {
+    await pg.exec("UPDATE projects SET owner_user_id='admin-1' WHERE id='project-1'");
+    coordinator = new Phase4Coordinator(new PGliteTransactionRunner(pg), {
+      deviceAuthorization: new PostgresDeviceActionAuthorization(),
+    });
+
+    await expect(schedule()).resolves.toMatchObject({
+      command: {
+        runner_id: "runner-1",
+        repository_binding_id: "binding-1",
+      },
+    });
+  });
+
+  it("rejects a legacy local binding assigned to another runner", async () => {
+    await pg.exec(`
+      INSERT INTO repository_bindings (
+        id,project_id,binding_type,status,runner_id,workspace_id,repository_id,
+        repository_display_name,granted_permissions,default_branch,observed_head,
+        verification_policy_ref,repository_health,created_by_actor_type,
+        created_by_actor_id
+      ) VALUES (
+        'binding-other','project-1','local_runner','connected','runner-other',
+        'workspace-other','repository-other','Other repository','{}'::jsonb,'main',
+        'commit-other','verification','healthy','human','admin-1'
+      );
+      UPDATE projects
+         SET primary_repository_binding_id='binding-other'
+       WHERE id='project-1';
+    `);
+
+    await expect(schedule()).rejects.toThrow(/belongs to a different runner/i);
+  });
+
+  it("dispatches through a typed grant-backed binding without duplicating device identity", async () => {
+    await replacePrimaryWithDeviceBinding("runner-1");
+    coordinator = new Phase4Coordinator(new PGliteTransactionRunner(pg), {
+      deviceAuthorization: new PostgresDeviceActionAuthorization(),
+    });
+
+    const scheduled = await schedule();
+    expect(scheduled.command).toMatchObject({
+      runner_id: "runner-1",
+      repository_binding_id: "binding-device",
+    });
+    const binding = await pg.query<{ runner_id: string | null }>(
+      "SELECT runner_id FROM repository_bindings WHERE id='binding-device'",
+    );
+    expect(binding.rows[0]?.runner_id).toBeNull();
+  });
+
+  it("rejects a grant-backed binding whose registration belongs to another device", async () => {
+    await replacePrimaryWithDeviceBinding("runner-other");
+    coordinator = new Phase4Coordinator(new PGliteTransactionRunner(pg), {
+      deviceAuthorization: new PostgresDeviceActionAuthorization(),
+    });
+
+    await expect(schedule()).rejects.toThrow(
+      /device repository binding is not currently authorized/i,
+    );
   });
 
   // FRONT DOOR P2b (D2): planning/staffing/approval work with no repository

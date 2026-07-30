@@ -24,6 +24,7 @@ import { promisify } from "node:util";
 import type {
   RepositoryInspectionT,
   RunnerWorkspaceEntryT,
+  RunnerWorkspaceRepositoryT,
   RunnerWorkspaceRequestT,
   RunnerWorkspaceResponseT,
 } from "@norns/contracts";
@@ -74,6 +75,12 @@ export type RepositoryCloner = (input: {
   target: string;
   token: string;
 }) => Promise<void>;
+
+export interface LocalRepositoryApproval extends RunnerWorkspaceRepositoryT {
+  /** Loopback-only value. It must never be serialized onto a cloud request. */
+  local_path: string;
+  git_status: "clean" | "modified";
+}
 
 const cloneGitHubRepository: RepositoryCloner = async ({ cloneUrl, target, token }) => {
   const authorization = Buffer.from(`x-access-token:${token}`, "utf8").toString("base64");
@@ -349,6 +356,70 @@ export class WorkspaceRegistry {
     }));
   }
 
+  approvedRepositoryCount(): number {
+    this.reload();
+    return this.state.repositories.length;
+  }
+
+  /**
+   * Opens the OS-native folder picker and records only the repository the
+   * local human selected. No caller-supplied path crosses the loopback API.
+   */
+  async chooseLocalRepository(): Promise<LocalRepositoryApproval | null> {
+    const result = await this.handleAsync({
+      request_id: `local:${randomUUID().replaceAll("-", "")}`,
+      operation: "choose",
+    });
+    if (result.status === "cancelled") return null;
+    if (result.status !== "ok" || !result.repository) {
+      throw new Error("the selected folder is not an available Git repository");
+    }
+    const selected = this.localRepository(result.repository.repository_id);
+    if (!selected) throw new Error("the selected repository is no longer available");
+    return selected;
+  }
+
+  /**
+   * Loopback-only projection. Raw paths deliberately exist here and nowhere
+   * in the runner/server registration client.
+   */
+  listLocalRepositoryApprovals(): readonly LocalRepositoryApproval[] {
+    this.reload();
+    return this.state.repositories.flatMap((record) => {
+      const repository = this.localRepository(record.repository_id);
+      return repository ? [repository] : [];
+    });
+  }
+
+  /**
+   * Removes only Norns' local authorization record. It never removes, moves,
+   * checks out, resets, or otherwise mutates the selected repository.
+   */
+  removeRepositoryAccess(workspaceId: string, repositoryId: string): boolean {
+    return this.withMutationLock(() => {
+      this.reloadOrRecover();
+      const repository = this.state.repositories.find(
+        (entry) => entry.workspace_id === workspaceId && entry.repository_id === repositoryId,
+      );
+      if (!repository) return false;
+      this.state.repositories = this.state.repositories.filter(
+        (entry) => entry.workspace_id !== workspaceId || entry.repository_id !== repositoryId,
+      );
+      if (
+        !this.state.repositories.some((entry) => entry.workspace_id === repository.workspace_id)
+      ) {
+        this.state.workspaces = this.state.workspaces.filter(
+          (entry) => entry.workspace_id !== repository.workspace_id,
+        );
+      }
+      for (const [id, handle] of this.handles) {
+        if (handle.workspace_id === repository.workspace_id) this.handles.delete(id);
+      }
+      this.persist();
+      return true;
+    });
+  }
+
   /** Handles a wire request.  It never throws or returns a raw filesystem path. */
   handle(request: RunnerWorkspaceRequestT): RunnerWorkspaceResponseT {
     try {
@@ -571,6 +642,40 @@ export class WorkspaceRegistry {
     return repositories.slice(0, 200);
   }
 
+  private localRepository(repositoryId: string): LocalRepositoryApproval | null {
+    const path = this.repositoryPath(repositoryId);
+    if (!path) return null;
+    const record = this.state.repositories.find((entry) => entry.repository_id === repositoryId);
+    if (!record) return null;
+    const metadata = this.gitMetadata(path, 3_000);
+    if (!metadata) return null;
+    let gitStatus: LocalRepositoryApproval["git_status"] = "modified";
+    try {
+      const status = execFileSync(
+        "git",
+        ["-C", path, "status", "--porcelain=v1", "--untracked-files=normal"],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 3_000,
+          maxBuffer: 1024 * 1024,
+        },
+      );
+      gitStatus = status.length === 0 ? "clean" : "modified";
+    } catch {
+      // An unreadable status is never presented as clean.
+    }
+    return {
+      workspace_id: record.workspace_id,
+      repository_id: record.repository_id,
+      repository_display_name: safeLabel(basename(path), "Repository"),
+      default_branch: metadata.defaultBranch,
+      observed_head: metadata.head,
+      local_path: path,
+      git_status: gitStatus,
+    };
+  }
+
   private browse(workspace: WorkspaceRecord, path: string): RunnerWorkspaceEntryT[] {
     // One directory level only.  No recursive traversal and no symlink following.
     const entries: RunnerWorkspaceEntryT[] = [];
@@ -738,10 +843,43 @@ export class WorkspaceRegistry {
       const topLevel = realpathSync(rawTopLevel);
       // Choosing a nested folder must not silently bind its parent repository.
       if (topLevel !== path) return null;
-      return { head, defaultBranch: branch };
+      return { head, defaultBranch: this.defaultBranch(path, branch, timeoutMs) };
     } catch {
       return null;
     }
+  }
+
+  private defaultBranch(path: string, currentBranch: string, timeoutMs: number): string {
+    try {
+      const remoteHead = execFileSync(
+        "git",
+        ["-C", path, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: timeoutMs,
+        },
+      ).trim();
+      const separator = remoteHead.indexOf("/");
+      if (separator > 0 && separator < remoteHead.length - 1) {
+        return remoteHead.slice(separator + 1);
+      }
+    } catch {
+      // A repository need not have an origin or a remote HEAD.
+    }
+    for (const conventional of ["main", "master"]) {
+      try {
+        execFileSync(
+          "git",
+          ["-C", path, "show-ref", "--verify", "--quiet", `refs/heads/${conventional}`],
+          { stdio: "ignore", timeout: timeoutMs },
+        );
+        return conventional;
+      } catch {
+        // Try the next local convention before falling back to the checked-out branch.
+      }
+    }
+    return currentBranch;
   }
 
   private mightBeGitRepository(path: string): boolean {

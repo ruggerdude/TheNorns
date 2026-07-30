@@ -10,12 +10,19 @@ import {
   DeviceAuthorizationPollOutcome,
   DeviceIdentity,
   DeviceLifecycleState,
+  DevicePublicationPermitConsumeRequest,
+  DevicePublicationPermitIssueRequest,
   DeviceStatusDimensions,
   OwnedDeviceProjection,
   ProjectExecutionTargetProjection,
   SignedDeviceContextRetrievalHttpTranscript,
   SignedDeviceGatewayCredentialMintHttpTranscript,
   SignedDeviceHttpTranscript,
+  SignedDevicePublicationPermit,
+  SignedDevicePublicationPermitConsumeHttpTranscript,
+  SignedDevicePublicationPermitIssueHttpTranscript,
+  SignedDeviceRepositoryRegistrationHttpTranscript,
+  SignedDeviceRepositoryRegistrationRevocationHttpTranscript,
   SignedDeviceVisualEvidenceUploadHttpTranscript,
   SignedDeviceWssAuthenticationTranscript,
   canTransitionDeviceAuthorization,
@@ -220,7 +227,13 @@ describe("device projections", () => {
       last_seen_at: now,
     };
     expect(ProjectExecutionTargetProjection.parse(target)).toEqual(target);
-    for (const access of ["owned", "pending", "revoked"] as const) {
+    expect(
+      ProjectExecutionTargetProjection.parse({
+        ...target,
+        status: { ...target.status, access: "pending" },
+      }).status.access,
+    ).toBe("pending");
+    for (const access of ["owned", "revoked"] as const) {
       expect(
         ProjectExecutionTargetProjection.safeParse({
           ...target,
@@ -433,6 +446,26 @@ describe("signed transport transcripts", () => {
         purpose: "norns.runner-http.visual-evidence-upload.v1",
       }).purpose,
     ).toBe("norns.runner-http.visual-evidence-upload.v1");
+    for (const [schema, purpose] of [
+      [
+        SignedDeviceRepositoryRegistrationHttpTranscript,
+        "norns.runner-http.repository-registration.v1",
+      ],
+      [
+        SignedDeviceRepositoryRegistrationRevocationHttpTranscript,
+        "norns.runner-http.repository-registration-revocation.v1",
+      ],
+      [
+        SignedDevicePublicationPermitIssueHttpTranscript,
+        "norns.runner-http.publication-permit-issue.v1",
+      ],
+      [
+        SignedDevicePublicationPermitConsumeHttpTranscript,
+        "norns.runner-http.publication-permit-consume.v1",
+      ],
+    ] as const) {
+      expect(schema.parse({ ...transcript, purpose }).purpose).toBe(purpose);
+    }
     expect(
       SignedDeviceHttpTranscript.safeParse({
         ...transcript,
@@ -470,6 +503,58 @@ describe("signed transport transcripts", () => {
       SignedDeviceVisualEvidenceUploadHttpTranscript.safeParse({
         ...transcript,
         purpose: "norns.runner-http.gateway-credential-mint.v1",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires exact canonical Ed25519 publication signatures and strict bound claims", () => {
+    const request = DevicePublicationPermitIssueRequest.parse({
+      run_id: "run-1",
+      repository_registration_id: "registration-1",
+      project_device_repository_grant_id: "grant-1",
+      repository_binding_id: "binding-1",
+      repository_id: "local:repository1",
+      branch: "norns/task-1",
+      commit_sha: "a".repeat(40),
+    });
+    const signed = {
+      permit: {
+        purpose: "norns.device-publication-permit.v1",
+        permit_id: "permit-1",
+        ...request,
+        device_id: "device-1",
+        credential_id: "credential-1",
+        generation: 3,
+        issued_at: now,
+        expires_at: "2026-07-29T12:00:30.000Z",
+      },
+      key_id: "publication-signing-key-1",
+      signature_base64: Buffer.alloc(64).toString("base64"),
+    };
+    expect(SignedDevicePublicationPermit.parse(signed)).toEqual(signed);
+    expect(DevicePublicationPermitConsumeRequest.parse(signed)).toEqual(signed);
+    expect(
+      SignedDevicePublicationPermit.safeParse({
+        ...signed,
+        signature_base64: `${signed.signature_base64.slice(0, -2)}=`,
+      }).success,
+    ).toBe(false);
+    expect(
+      SignedDevicePublicationPermit.safeParse({
+        ...signed,
+        signature_base64: `${signed.signature_base64.slice(0, -3)}B==`,
+      }).success,
+    ).toBe(false);
+    expect(
+      SignedDevicePublicationPermit.safeParse({
+        ...signed,
+        signature_base64: Buffer.alloc(63).toString("base64"),
+      }).success,
+    ).toBe(false);
+    expect(
+      SignedDevicePublicationPermit.safeParse({
+        ...signed,
+        permit: { ...signed.permit, unexpected: true },
       }).success,
     ).toBe(false);
   });

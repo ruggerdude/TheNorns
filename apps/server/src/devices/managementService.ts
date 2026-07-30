@@ -4,14 +4,11 @@ import {
   type DeviceCompatibilityT,
   OwnedDeviceProjection,
   type OwnedDeviceProjectionT,
-  ProjectExecutionTargetProjection,
-  type ProjectExecutionTargetProjectionT,
 } from "@norns/contracts";
 
 import type {
   OwnedDeviceRecord,
   PostgresDeviceManagementRepository,
-  ProjectExecutionTargetRecord,
 } from "./managementRepository.js";
 import { DeviceRevocationError, type DeviceRevocationService } from "./revocation.js";
 
@@ -128,15 +125,6 @@ export class DeviceManagementService {
     return this.getOwnedDevice(input.actor_user_id, input.device_id);
   }
 
-  async listProjectExecutionTargets(
-    actorUserId: string,
-    projectId: string,
-  ): Promise<ProjectExecutionTargetProjectionT[]> {
-    const records = await this.repository.projectTargets(actorUserId, projectId);
-    if (records === null) throw new DeviceManagementError("project_not_found");
-    return records.map((record) => this.targetProjection(record));
-  }
-
   private ownedProjection(record: OwnedDeviceRecord): OwnedDeviceProjectionT {
     const availability =
       record.lifecycle === "revoked" ? "offline" : this.presence.availability(record.device_id);
@@ -165,25 +153,6 @@ export class DeviceManagementService {
         active_run_count: record.active_run_count,
         queued_command_count: record.queued_command_count,
       },
-    });
-  }
-
-  private targetProjection(
-    record: ProjectExecutionTargetRecord,
-  ): ProjectExecutionTargetProjectionT {
-    return ProjectExecutionTargetProjection.parse({
-      project_id: record.project_id,
-      execution_target_id: record.execution_target_id,
-      name: record.name,
-      location_label: record.location_label,
-      os_family: record.os_family,
-      status: {
-        availability: this.presence.availability(record.device_id),
-        compatibility: this.compatibility(record.agent_protocol_version, record.agent_capabilities),
-        workload: record.active_run_count > 0 ? "busy" : "idle",
-        access: "shared",
-      },
-      last_seen_at: record.last_seen_at,
     });
   }
 

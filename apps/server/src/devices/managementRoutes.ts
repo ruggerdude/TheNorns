@@ -9,12 +9,6 @@ const DeviceParams = z
   })
   .strict();
 
-const ProjectParams = z
-  .object({
-    projectId: z.string().trim().min(1).max(512),
-  })
-  .strict();
-
 const RenameDeviceBody = z
   .object({
     name: z.string().trim().min(1).max(200),
@@ -34,11 +28,7 @@ export interface DeviceManagementRouteUser {
 
 export type DeviceManagementRouteService = Pick<
   DeviceManagementService,
-  | "listOwnedDevices"
-  | "getOwnedDevice"
-  | "renameOwnedDevice"
-  | "revokeOwnedDevice"
-  | "listProjectExecutionTargets"
+  "listOwnedDevices" | "getOwnedDevice" | "renameOwnedDevice" | "revokeOwnedDevice"
 >;
 
 export interface DeviceManagementRouteOptions {
@@ -125,18 +115,5 @@ export async function registerDeviceManagementRoutes(
         reason: body.data.reason,
       }),
     );
-  });
-
-  app.get("/api/projects/:projectId/execution-targets", async (request, reply) => {
-    const user = await options.requireUser(request, reply);
-    if (!user) return;
-    const params = ProjectParams.safeParse(request.params);
-    if (!params.success) return invalidBody(reply);
-    return handle(reply, async () => ({
-      execution_targets: await options.service.listProjectExecutionTargets(
-        user.id,
-        params.data.projectId,
-      ),
-    }));
   });
 }

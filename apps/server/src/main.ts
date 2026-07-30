@@ -41,15 +41,20 @@ import {
   DeviceManagementRuntimeConfigurationError,
   DeviceManagementService,
   DeviceOnlineControlBroker,
+  DevicePublicationPermitService,
+  DeviceRepositoryAccessRuntimeConfigurationError,
+  DeviceRepositoryAccessService,
   DeviceRevocationService,
   DeviceRunCancellationService,
   DeviceWssAuthenticationService,
   PostgresDeviceActionAuthorization,
   PostgresDeviceEnrollmentRepository,
   PostgresDeviceManagementRepository,
+  PostgresDeviceRepositoryAccessRepository,
   PostgresDeviceWssAuthenticationRepository,
   parseDeviceEnrollmentRuntimeConfiguration,
   parseDeviceManagementRuntimeConfiguration,
+  parseDeviceRepositoryAccessRuntimeConfiguration,
 } from "./devices/index.js";
 import { BudgetLedger } from "./engine/budget.js";
 import { WorkflowEngine } from "./engine/workflow.js";
@@ -227,6 +232,13 @@ let knowledgeOptions: { service: KnowledgeSystemService } | undefined;
 let runnerInferenceOptions: { transactions: V2TransactionRunner } | undefined;
 let deviceEnrollmentOptions: { service: DeviceEnrollmentService } | undefined;
 let deviceManagementOptions: { service: DeviceManagementService } | undefined;
+let deviceRepositoryAccessOptions:
+  | {
+      service: DeviceRepositoryAccessService;
+      publicationPermits: DevicePublicationPermitService;
+      runnerAuthentication: DeviceHttpRequestAuthenticator;
+    }
+  | undefined;
 let runnerHttpAuthentication: DeviceHttpRequestAuthenticator | undefined;
 let deviceActionAuthorization: PostgresDeviceActionAuthorization | undefined;
 let deviceActionAuthorizationOptions:
@@ -273,6 +285,23 @@ try {
 }
 if (deviceManagementRuntime.enabled && !databaseUrl) {
   console.error("device management startup refused: PostgreSQL persistence is required");
+  process.exit(1);
+}
+
+let deviceRepositoryAccessRuntime: ReturnType<
+  typeof parseDeviceRepositoryAccessRuntimeConfiguration
+>;
+try {
+  deviceRepositoryAccessRuntime = parseDeviceRepositoryAccessRuntimeConfiguration(process.env);
+} catch (error) {
+  if (error instanceof DeviceRepositoryAccessRuntimeConfigurationError) {
+    console.error(`device repository access startup refused [${error.code}]: ${error.message}`);
+    process.exit(1);
+  }
+  throw error;
+}
+if (deviceRepositoryAccessRuntime.enabled && !databaseUrl) {
+  console.error("device repository access startup refused: PostgreSQL persistence is required");
   process.exit(1);
 }
 
@@ -374,6 +403,24 @@ if (databaseUrl) {
           }
         : { enabled: false },
     });
+    if (deviceRepositoryAccessRuntime.enabled) {
+      const repositoryAccess = new PostgresDeviceRepositoryAccessRepository(runtimeTransactions);
+      deviceRepositoryAccessOptions = {
+        service: new DeviceRepositoryAccessService(repositoryAccess, {
+          availability: (deviceId) =>
+            deviceOnlineControl.isConnected(deviceId) ? "online" : "offline",
+        }),
+        publicationPermits: new DevicePublicationPermitService(
+          runtimeTransactions,
+          deviceOnlineControl,
+          {
+            key_id: deviceRepositoryAccessRuntime.publication_signing_key_id,
+            private_key: deviceRepositoryAccessRuntime.publication_signing_private_key,
+          },
+        ),
+        runnerAuthentication: runnerHttpAuthentication,
+      };
+    }
     if (deviceEnrollmentRuntime.enabled) {
       deviceEnrollmentOptions = {
         service: new DeviceEnrollmentService(
@@ -828,6 +875,12 @@ if (deviceManagementRuntime.enabled && !deviceManagementOptions) {
   );
   process.exit(1);
 }
+if (deviceRepositoryAccessRuntime.enabled && !deviceRepositoryAccessOptions) {
+  console.error(
+    "device repository access startup refused [device_repository_access_database_required]: DATABASE_URL is required",
+  );
+  process.exit(1);
+}
 
 // demo engine over the same plan, driven partway for a live-looking dashboard
 const budget = new BudgetLedger(2000);
@@ -950,6 +1003,9 @@ const server = await buildServer({
   ...(identityRuntime.mode === "relational" ? { identity: identityRuntime.identity } : {}),
   ...(deviceEnrollmentOptions !== undefined ? { deviceEnrollment: deviceEnrollmentOptions } : {}),
   ...(deviceManagementOptions !== undefined ? { deviceManagement: deviceManagementOptions } : {}),
+  ...(deviceRepositoryAccessOptions !== undefined
+    ? { deviceRepositoryAccess: deviceRepositoryAccessOptions }
+    : {}),
   ...(deviceWssAuthentication !== undefined ? { deviceWssAuthentication } : {}),
   ...(deviceControlOptions !== undefined ? { deviceControl: deviceControlOptions } : {}),
   ...(runnerHttpAuthentication !== undefined ? { runnerHttpAuthentication } : {}),

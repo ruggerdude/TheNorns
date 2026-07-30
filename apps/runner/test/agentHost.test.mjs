@@ -1,5 +1,15 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +24,8 @@ import {
   PENDING_DEVICE_CREDENTIAL_FILENAME,
   PendingDeviceCredentialStore,
 } from "../dist/pendingDeviceCredential.js";
+import { LocalRepositoryAccessController } from "../dist/repositoryAccess.js";
+import { WorkspaceRegistry } from "../dist/workspaceRegistry.js";
 
 function temporaryDataDir() {
   return mkdtempSync(join(tmpdir(), "norns-agent-host-test-"));
@@ -129,6 +141,7 @@ test("AgentHost serves only a hardened, bundled loopback UI", async () => {
     assert.doesNotMatch(html, /<script(?! defer src)/);
     assert.match(html, />Home</);
     assert.match(html, />Security</);
+    assert.match(html, />Repositories</);
     assert.match(html, />Diagnostics</);
     assert.match(html, /role="tablist"/);
     assert.match(html, /role="tab"/);
@@ -144,6 +157,8 @@ test("AgentHost serves only a hardened, bundled loopback UI", async () => {
     const javascriptBody = await javascript.text();
     assert.match(javascriptBody, /\/api\/enrollment\/prepare/);
     assert.match(javascriptBody, /\/api\/daemon\/restart/);
+    assert.match(javascriptBody, /\/api\/repositories\/choose/);
+    assert.match(javascriptBody, /\/api\/repositories\/remove/);
     assert.match(javascriptBody, /\/api\/session/);
     assert.match(javascriptBody, /ArrowRight/);
 
@@ -314,6 +329,110 @@ test("AgentHost exchanges one bootstrap token for a CSRF-protected local session
       readFileSync(join(dataDir, PENDING_DEVICE_CREDENTIAL_FILENAME), "utf8"),
       /bootstrap|csrf|norns_agent_session/,
     );
+  } finally {
+    await host.stop();
+    removeTemporaryDataDir(dataDir);
+  }
+});
+
+test("AgentHost requires an explicit local repository choice and removal preserves files", async () => {
+  const dataDir = temporaryDataDir();
+  const repositoryPath = join(dataDir, "selected-repository");
+  mkdirSync(repositoryPath);
+  execFileSync("git", ["-C", repositoryPath, "init"], { stdio: "ignore" });
+  execFileSync("git", ["-C", repositoryPath, "config", "user.email", "test@example.com"]);
+  execFileSync("git", ["-C", repositoryPath, "config", "user.name", "Norns Test"]);
+  writeFileSync(join(repositoryPath, "sentinel.txt"), "keep\n");
+  execFileSync("git", ["-C", repositoryPath, "add", "sentinel.txt"]);
+  execFileSync("git", ["-C", repositoryPath, "commit", "-m", "initial"], {
+    stdio: "ignore",
+  });
+  const physicalRepositoryPath = realpathSync(repositoryPath);
+  let pickerCalls = 0;
+  const cloudRegistrations = [];
+  const registry = new WorkspaceRegistry(dataDir, async () => {
+    pickerCalls += 1;
+    return repositoryPath;
+  });
+  const access = new LocalRepositoryAccessController(dataDir, registry, {
+    async register(repository) {
+      cloudRegistrations.push(structuredClone(repository));
+      return {
+        registration_id: "registration-1",
+        status: "active",
+        workspace_id: repository.workspace_id,
+        repository_id: repository.repository_id,
+      };
+    },
+    async revoke(input) {
+      return { registration_id: input.registration_id, status: "revoked" };
+    },
+  });
+  const host = new AgentHost({
+    dataDir,
+    daemon: { start() {}, stop() {} },
+    repositoryAccess: access,
+    detectLocalTools: false,
+  });
+
+  try {
+    const started = await host.start();
+    const session = await exchangeBootstrap(started);
+    const initial = await fetch(`${started.origin}/api/repositories`, {
+      headers: { cookie: session.cookie },
+    });
+    assert.deepEqual(await initial.json(), { repositories: [], history: [] });
+
+    const missingCsrf = await fetch(`${started.origin}/api/repositories/choose`, {
+      method: "POST",
+      headers: authenticatedHeaders(started, session),
+      body: "{}",
+    });
+    assert.equal(missingCsrf.status, 403);
+    assert.equal(pickerCalls, 0);
+
+    const chosen = await fetch(`${started.origin}/api/repositories/choose`, {
+      method: "POST",
+      headers: authenticatedHeaders(started, session, true),
+      body: "{}",
+    });
+    assert.equal(chosen.status, 200);
+    const chosenBody = await chosen.json();
+    assert.equal(chosenBody.cancelled, false);
+    assert.equal(chosenBody.repository.local_path, physicalRepositoryPath);
+    assert.equal(chosenBody.repository.sync_state, "active");
+    assert.equal(pickerCalls, 1);
+    assert.equal(cloudRegistrations.length, 1);
+    assert.equal("local_path" in cloudRegistrations[0], false);
+    assert.doesNotMatch(JSON.stringify(cloudRegistrations[0]), new RegExp(physicalRepositoryPath));
+
+    const repositories = await fetch(`${started.origin}/api/repositories`, {
+      headers: { cookie: session.cookie },
+    });
+    const repositoryBody = await repositories.json();
+    assert.equal(repositoryBody.repositories[0].local_path, physicalRepositoryPath);
+    assert.equal(repositoryBody.history[0].action, "approved");
+
+    const stateChangingGet = await fetch(`${started.origin}/api/repositories/remove`);
+    assert.equal(stateChangingGet.status, 405);
+
+    const removed = await fetch(`${started.origin}/api/repositories/remove`, {
+      method: "POST",
+      headers: authenticatedHeaders(started, session, true),
+      body: JSON.stringify({
+        workspace_id: chosenBody.repository.workspace_id,
+        repository_id: chosenBody.repository.repository_id,
+      }),
+    });
+    assert.equal(removed.status, 200);
+    assert.equal((await removed.json()).local_access_removed, true);
+    assert.equal(existsSync(join(repositoryPath, ".git")), true);
+    assert.equal(readFileSync(join(repositoryPath, "sentinel.txt"), "utf8"), "keep\n");
+
+    const support = await fetch(`${started.origin}/api/diagnostics/support`, {
+      headers: { cookie: session.cookie },
+    });
+    assert.doesNotMatch(JSON.stringify(await support.json()), new RegExp(repositoryPath));
   } finally {
     await host.stop();
     removeTemporaryDataDir(dataDir);

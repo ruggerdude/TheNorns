@@ -121,6 +121,7 @@ export class PostgresDeviceBrowserAudienceRepository implements DeviceBrowserAud
               JOIN project_device_repository_grants grant_record
                 ON grant_record.id = binding.project_device_repository_grant_id
                AND grant_record.project_id = binding.project_id
+               AND grant_record.id = $3
                AND grant_record.state = 'active'
               JOIN device_repository_registrations registration
                 ON registration.id = grant_record.repository_registration_id
@@ -135,9 +136,11 @@ export class PostgresDeviceBrowserAudienceRepository implements DeviceBrowserAud
                AND device_owner.status = 'active'
               JOIN device_credentials credential
                 ON credential.device_id = device.id
+               AND credential.id = registration.approved_credential_id
                AND credential.state = 'active'
                AND credential.generation = device.current_generation
-             WHERE binding.id = $3
+               AND credential.generation = registration.approved_generation
+             WHERE binding.id = project.primary_repository_binding_id
                AND binding.project_id = project.id
                AND binding.binding_type = 'local_runner'
                AND binding.status IN ('connected', 'degraded', 'disconnected')

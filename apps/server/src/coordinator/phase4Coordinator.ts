@@ -160,6 +160,7 @@ interface SchedulingRow {
   runner_repository_id: string | null;
   repository_binding_type: "local_runner" | "github" | null;
   repository_runner_id: string | null;
+  project_device_repository_grant_id: string | null;
   /**
    * FRONT DOOR P2b (D2): null when the project has no repository binding at
    * all (e.g. a folder-first local project that only has an unverified
@@ -239,6 +240,7 @@ export class Phase4Coordinator {
                 binding.repository_id AS runner_repository_id,
                 binding.binding_type AS repository_binding_type,
                 binding.runner_id AS repository_runner_id,
+                binding.project_device_repository_grant_id,
                 binding.status AS repository_binding_status
          FROM tasks t
          JOIN phases p ON p.id = t.phase_id AND p.project_id = t.project_id
@@ -409,6 +411,12 @@ export class Phase4Coordinator {
           "device dispatch requires an immutable repository binding",
         );
       }
+      const deviceBackedBinding = row.project_device_repository_grant_id !== null;
+      if (deviceBackedBinding && !this.deviceAuthorization) {
+        throw new Phase4CoordinatorConflictError(
+          "device repository binding requires typed authorization",
+        );
+      }
       if (this.deviceAuthorization) {
         try {
           if (!row.initiated_by_user_id) {
@@ -435,6 +443,7 @@ export class Phase4Coordinator {
       }
       if (
         row.repository_binding_type === "local_runner" &&
+        !deviceBackedBinding &&
         row.repository_runner_id !== input.runner_id
       ) {
         throw new Phase4CoordinatorConflictError(

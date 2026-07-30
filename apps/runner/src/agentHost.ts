@@ -19,6 +19,8 @@ import {
   type PendingDeviceCredentialSummary,
 } from "./pendingDeviceCredential.js";
 import { Redactor } from "./redact.js";
+import { LocalRepositoryAccessController } from "./repositoryAccess.js";
+import { WorkspaceRegistry } from "./workspaceRegistry.js";
 
 export const AGENT_HOST_LOCK_FILENAME = "agent-host.lock";
 export const AGENT_HOST_PORT_FILENAME = "agent-host.json";
@@ -79,6 +81,7 @@ const CONTROL_CENTER_HTML = `<!doctype html>
   <nav aria-label="Control Center sections" role="tablist">
     <button class="tab" id="tab-home" role="tab" type="button" data-panel="home" aria-controls="home" aria-selected="true" tabindex="0">Home</button>
     <button class="tab" id="tab-security" role="tab" type="button" data-panel="security" aria-controls="security" aria-selected="false" tabindex="-1">Security</button>
+    <button class="tab" id="tab-repositories" role="tab" type="button" data-panel="repositories" aria-controls="repositories" aria-selected="false" tabindex="-1">Repositories</button>
     <button class="tab" id="tab-diagnostics" role="tab" type="button" data-panel="diagnostics" aria-controls="diagnostics" aria-selected="false" tabindex="-1">Diagnostics</button>
   </nav>
   <main>
@@ -113,6 +116,18 @@ const CONTROL_CENTER_HTML = `<!doctype html>
       <h3>Authorization notices</h3>
       <ul id="authorization-notices"><li>None</li></ul>
       <p class="boundary">This Control Center protects against malicious websites and other OS users. It cannot protect against a compromised process running as this same OS user.</p>
+    </section>
+
+    <section id="repositories" role="tabpanel" aria-labelledby="tab-repositories" tabindex="0" hidden>
+      <h2 id="repositories-heading">Repositories</h2>
+      <p>Choose a Git repository on this computer to give Norns access. Its local path stays in this Control Center.</p>
+      <div class="actions">
+        <button id="choose-repository" type="button">Choose repository</button>
+      </div>
+      <ul id="repository-list" class="repository-list"><li>No repositories approved.</li></ul>
+      <h3>Local access history</h3>
+      <ul id="repository-history"><li>No repository access changes recorded.</li></ul>
+      <p class="muted">Removing access never deletes or changes the repository or its files.</p>
     </section>
 
     <section id="diagnostics" role="tabpanel" aria-labelledby="tab-diagnostics" tabindex="0" hidden>
@@ -151,6 +166,8 @@ button,.button-link{font:inherit;padding:.65rem .9rem;border:1px solid ButtonTex
 .button-link{text-decoration:none}button:focus-visible,.button-link:focus-visible{outline:3px solid Highlight;outline-offset:2px}
 .tab[aria-selected="true"]{background:Highlight;color:HighlightText}
 .boundary{padding:1rem;border-left:.3rem solid GrayText}
+.repository-list{display:grid;gap:1rem;padding:0;list-style:none}.repository-list>li{padding:1rem;border:1px solid GrayText;border-radius:.6rem}
+.repository-list p{margin:.25rem 0}.repository-path{overflow-wrap:anywhere}
 code{overflow-wrap:anywhere}
 @media(max-width:34rem){dl{grid-template-columns:1fr;gap:.2rem}dd{margin:0 0 .8rem}nav{overflow-x:auto}}
 @media(forced-colors:active){main,.boundary,button,.button-link{forced-color-adjust:auto}.tab[aria-selected="true"]{border-width:3px}}
@@ -209,8 +226,79 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
     message.textContent = "This page is served only by the Local Agent on loopback.";
   }
 
+  function renderRepositories(result) {
+    const list = document.querySelector("#repository-list");
+    const repositories = Array.isArray(result.repositories) ? result.repositories : [];
+    if (repositories.length === 0) {
+      const empty = document.createElement("li");
+      empty.textContent = "No repositories approved.";
+      list.replaceChildren(empty);
+    } else {
+      list.replaceChildren(...repositories.map((repository) => {
+        const item = document.createElement("li");
+        const name = document.createElement("strong");
+        name.textContent = repository.repository_display_name;
+        const path = document.createElement("p");
+        path.className = "repository-path";
+        path.textContent = repository.local_path;
+        const details = document.createElement("p");
+        details.className = "muted";
+        details.textContent = repository.default_branch + " · " + repository.git_status + " · " +
+          (repository.sync_state === "active" ? "registered" : "registration pending");
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "Remove Norns access";
+        remove.setAttribute("aria-label", "Remove Norns access to " + repository.repository_display_name);
+        remove.addEventListener("click", async () => {
+          remove.disabled = true;
+          try {
+            const result = await request("/api/repositories/remove", {
+              method: "POST",
+              body: JSON.stringify({
+                workspace_id: repository.workspace_id,
+                repository_id: repository.repository_id,
+              }),
+            });
+            message.textContent = result.server_sync === "complete"
+              ? "Norns access was removed. Local files were not changed."
+              : "Local access was removed. Server revocation will retry when connected.";
+            await refreshRepositories();
+            await refresh();
+          } catch (error) {
+            message.textContent = error.message;
+            remove.disabled = false;
+          }
+        });
+        item.append(name, path, details, remove);
+        return item;
+      }));
+    }
+
+    const history = document.querySelector("#repository-history");
+    const entries = Array.isArray(result.history) ? result.history : [];
+    history.replaceChildren(...(entries.length ? entries : [{
+      action: "none",
+      repository_display_name: "No repository access changes recorded.",
+      occurred_at: "",
+      server_sync: "complete",
+    }]).map((entry) => {
+      const item = document.createElement("li");
+      if (entry.action === "none") {
+        item.textContent = entry.repository_display_name;
+      } else {
+        item.textContent = entry.repository_display_name + " · " + entry.action + " · " +
+          entry.occurred_at + (entry.server_sync === "pending" ? " · server sync pending" : "");
+      }
+      return item;
+    }));
+  }
+
   async function refresh() {
     render(await request("/api/status", { method: "GET", headers: {} }));
+  }
+
+  async function refreshRepositories() {
+    renderRepositories(await request("/api/repositories", { method: "GET", headers: {} }));
   }
 
   async function bootstrap() {
@@ -226,7 +314,7 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
       const result = await request("/api/session", { method: "GET", headers: {} });
       csrf = result.csrf_token;
     }
-    await refresh();
+    await Promise.all([refresh(), refreshRepositories()]);
   }
 
   document.querySelector("#prepare").addEventListener("click", async () => {
@@ -244,6 +332,28 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
   document.querySelector("#restart").addEventListener("click", async () => {
     await request("/api/daemon/restart", { method: "POST", body: "{}" });
     await refresh();
+  });
+  document.querySelector("#choose-repository").addEventListener("click", async () => {
+    const button = document.querySelector("#choose-repository");
+    button.disabled = true;
+    message.textContent = "Choose a Git repository in the system folder picker.";
+    try {
+      const result = await request("/api/repositories/choose", {
+        method: "POST",
+        body: "{}",
+      });
+      message.textContent = result.cancelled
+        ? "Repository selection was cancelled."
+        : result.repository.sync_state === "active"
+          ? "Repository access approved and registered."
+          : "Repository access approved locally; server registration is pending.";
+      await refreshRepositories();
+      await refresh();
+    } catch (error) {
+      message.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
   });
   const tabs = [...document.querySelectorAll('[role="tab"]')];
   function selectTab(tab, moveFocus) {
@@ -353,6 +463,7 @@ export interface AgentHostOptions {
   lock?: AgentHostSingleInstanceLock;
   portDiscovery?: AgentHostPortDiscovery;
   credentialStore?: PendingDeviceCredentialStore;
+  repositoryAccess?: LocalRepositoryAccessController;
   localState?: Partial<AgentHostLocalState>;
   detectLocalTools?: boolean;
 }
@@ -627,6 +738,7 @@ export class AgentHost {
   private readonly lock: AgentHostSingleInstanceLock;
   private readonly portDiscovery: AgentHostPortDiscovery;
   private readonly credentialStore: PendingDeviceCredentialStore;
+  private readonly repositoryAccess: LocalRepositoryAccessController;
   private readonly localState: AgentHostLocalState;
   private readonly sessions = new Map<string, LocalSession>();
   private server: Server | null = null;
@@ -655,6 +767,9 @@ export class AgentHost {
     this.portDiscovery = options.portDiscovery ?? new FileAgentHostPortDiscovery(options.dataDir);
     this.credentialStore =
       options.credentialStore ?? new PendingDeviceCredentialStore(options.dataDir);
+    this.repositoryAccess =
+      options.repositoryAccess ??
+      new LocalRepositoryAccessController(options.dataDir, new WorkspaceRegistry(options.dataDir));
     const defaults = defaultLocalState();
     const detected = options.detectLocalTools === false ? {} : detectLocalTools();
     this.localState = {
@@ -729,6 +844,11 @@ export class AgentHost {
         expectedHostHeader: expectedHostHeader(this.host, port),
       };
       this.portDiscovery.publish(this.bound);
+      void this.repositoryAccess.synchronize().catch(() => {
+        this.localState.failed_authorization_notices.push(
+          "Repository access reconciliation could not start safely.",
+        );
+      });
       return { ...this.publicRecord(), bootstrap_url: this.issueBootstrapUrl() };
     } catch (error) {
       this.server = null;
@@ -861,6 +981,13 @@ export class AgentHost {
         this.requireSession(request);
         sendJson(response, 200, this.statusBody());
         return;
+      case "/api/repositories":
+        this.requireSession(request);
+        sendJson(response, 200, {
+          repositories: [...this.repositoryAccess.list()],
+          history: [...this.repositoryAccess.history()],
+        });
+        return;
       case "/api/session": {
         const session = this.requireSession(request);
         sendJson(response, 200, { csrf_token: session.csrfToken });
@@ -877,6 +1004,8 @@ export class AgentHost {
       case "/api/daemon/start":
       case "/api/daemon/stop":
       case "/api/daemon/restart":
+      case "/api/repositories/choose":
+      case "/api/repositories/remove":
         throw new AgentHostHttpError(405, "method not allowed");
       default:
         throw new AgentHostHttpError(404, "not found");
@@ -929,7 +1058,7 @@ export class AgentHost {
     if (typeof csrfToken !== "string" || !secretMatches(csrfToken, session.csrfDigest)) {
       throw new AgentHostHttpError(403, "valid CSRF token is required");
     }
-    await readJsonBody(request);
+    const body = await readJsonBody(request);
 
     switch (path) {
       case "/api/enrollment/prepare": {
@@ -950,6 +1079,27 @@ export class AgentHost {
         await this.transitionDaemon("restart");
         sendJson(response, 200, this.statusBody());
         return;
+      case "/api/repositories/choose": {
+        const repository = await this.repositoryAccess.choose();
+        sendJson(
+          response,
+          200,
+          repository ? { cancelled: false, repository } : { cancelled: true },
+        );
+        return;
+      }
+      case "/api/repositories/remove": {
+        if (typeof body.workspace_id !== "string" || typeof body.repository_id !== "string") {
+          throw new AgentHostHttpError(400, "workspace_id and repository_id are required");
+        }
+        const removed = await this.repositoryAccess.remove({
+          workspace_id: body.workspace_id,
+          repository_id: body.repository_id,
+        });
+        if (!removed) throw new AgentHostHttpError(404, "repository access was not found");
+        sendJson(response, removed.server_sync === "complete" ? 200 : 202, { ...removed });
+        return;
+      }
       default:
         throw new AgentHostHttpError(404, "not found");
     }
@@ -970,6 +1120,7 @@ export class AgentHost {
 
   private statusBody(): Record<string, unknown> {
     const prepared = this.credentialStore.read();
+    const repositoryCount = this.repositoryAccess.count();
     const availability: AgentAvailabilityState =
       this.daemonState === "running"
         ? this.localState.availability === "offline"
@@ -997,7 +1148,12 @@ export class AgentHost {
       security: {
         enrolled_account: this.localState.enrolled_account,
         public_key_fingerprint: prepared?.public_key_fingerprint ?? null,
-        repository_access_summary: this.localState.repository_access_summary,
+        repository_access_summary:
+          repositoryCount === 0
+            ? this.localState.repository_access_summary
+            : `${repositoryCount} ${
+                repositoryCount === 1 ? "repository" : "repositories"
+              } approved for Norns.`,
         failed_authorization_notices: [...this.localState.failed_authorization_notices],
       },
       diagnostics: {
@@ -1069,6 +1225,7 @@ export class AgentHost {
         if (this.shuttingDown) return;
         this.daemonState = "starting";
         try {
+          await this.repositoryAccess.synchronize();
           await this.options.daemon.start();
           this.daemonState = "running";
         } catch (error) {

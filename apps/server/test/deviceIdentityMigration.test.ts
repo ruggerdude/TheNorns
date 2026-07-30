@@ -6,6 +6,7 @@ import {
   DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME,
   DEVICE_IDENTITY_CORE_MIGRATION_NAME,
   DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_NAME,
+  DEVICE_REPOSITORY_ACCESS_MIGRATION_NAME,
   GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
   currentV2MigrationSources,
   loadDeviceIdentityCoreMigrationSql,
@@ -39,15 +40,17 @@ describe.sequential("device identity core migration", () => {
 
   it("is registered before the additive Phase 2 device migrations", async () => {
     const sources = await currentV2MigrationSources();
-    expect(sources.slice(-5).map((source) => source.name)).toEqual([
+    expect(sources.slice(-6).map((source) => source.name)).toEqual([
       DEVICE_IDENTITY_CORE_MIGRATION_NAME,
       DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME,
       DEVICE_CANCELLATION_TRACKING_MIGRATION_NAME,
       GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
       DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_NAME,
+      DEVICE_REPOSITORY_ACCESS_MIGRATION_NAME,
     ]);
-    expect(sources.at(-5)?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
-    expect(sources.at(-1)?.sql).toContain("ADD COLUMN os_version TEXT");
+    expect(sources.at(-6)?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
+    expect(sources.at(-2)?.sql).toContain("ADD COLUMN os_version TEXT");
+    expect(sources.at(-1)?.sql).toContain("CREATE TABLE IF NOT EXISTS device_publication_permits");
   });
 
   it("creates the five core tables, privacy-safe columns, and runtime grants", async () => {

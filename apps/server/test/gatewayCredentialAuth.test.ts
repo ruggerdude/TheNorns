@@ -134,15 +134,6 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
     ) VALUES (
       'project-1','Project One','','active','assignment','verification','budget','admin-1'
     );
-    INSERT INTO repository_bindings (
-      id, project_id, binding_type, status, runner_id, workspace_id,
-      repository_id, repository_display_name, granted_permissions,
-      default_branch, observed_head, verification_policy_ref,
-      repository_health, created_by_actor_type, created_by_actor_id
-    ) VALUES ('binding-1','project-1','local_runner','connected','${runnerId}',
-      'workspace-1','repository-1','Project One','{}'::jsonb,'main','commit-1',
-      'verification','healthy','human','admin-1');
-    UPDATE projects SET primary_repository_binding_id = 'binding-1' WHERE id = 'project-1';
     INSERT INTO phases (
       id, project_id, objective_summary, priority, status, approved_budget_usd
     ) VALUES ('phase-1','project-1','Slice',1,'awaiting_approval',100);
@@ -160,11 +151,12 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
       id, project_id, phase_id, objective_id, strategy_version_id, title,
       description, deliverables, acceptance_criteria, complexity, risk,
       required_roles, required_capabilities, required_inputs, expected_outputs,
-      environment_policy_ref, verification_policy_ref, state, lifecycle_version
+      environment_policy_ref, verification_policy_ref, state, lifecycle_version,
+      initiated_by_user_id
     ) VALUES ('task-1','project-1','phase-1','objective-1','strategy-1','Do work',
       'Slice','["change"]'::jsonb,'["verified"]'::jsonb,
       'M','medium','["implementation"]'::jsonb,'[]'::jsonb,'[]'::jsonb,
-      '["commit"]'::jsonb,'environment','verification','pending',0);
+      '["commit"]'::jsonb,'environment','verification','pending',0,'admin-1');
     INSERT INTO agent_profiles (
       id, provider, runtime, model, roles, capabilities, context_limit_tokens,
       security_restrictions, status, active_workload, cost_metadata
@@ -198,10 +190,10 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
   await pg.query(
     `INSERT INTO device_repository_registrations (
        id,device_id,workspace_id,repository_id,repository_display_name,
-       state,approved_by_user_id,approved_at
+       state,approved_by_user_id,approved_at,approved_credential_id,approved_generation
      ) VALUES (
        'gateway-registration',$1,'workspace-1','repository-1','Project One',
-       'active','admin-1',now()
+       'active','admin-1',now(),'gateway-device-credential',1
      )`,
     [runnerId],
   );
@@ -213,9 +205,19 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
      )`,
   );
   await pg.query(
-    `UPDATE repository_bindings
-        SET project_device_repository_grant_id='gateway-grant'
-      WHERE id='binding-1'`,
+    `INSERT INTO repository_bindings (
+       id,project_id,binding_type,status,runner_id,workspace_id,repository_id,
+       repository_display_name,granted_permissions,default_branch,observed_head,
+       verification_policy_ref,repository_health,created_by_actor_type,
+       created_by_actor_id,project_device_repository_grant_id
+     ) VALUES (
+       'binding-1','project-1','local_runner','connected',NULL,'workspace-1',
+       'repository-1','Project One','{}'::jsonb,'main','commit-1','verification',
+       'healthy','human','admin-1','gateway-grant'
+     )`,
+  );
+  await pg.query(
+    "UPDATE projects SET primary_repository_binding_id='binding-1' WHERE id='project-1'",
   );
 
   const stores = new RelayStores();
@@ -281,7 +283,9 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
   daemon.connect();
   await waitFor(() => server.connectedRunners().includes(runnerId), "runner connected");
 
-  const scheduled = await new Phase4Coordinator(transactions).schedule({
+  const scheduled = await new Phase4Coordinator(transactions, {
+    deviceAuthorization: new PostgresDeviceActionAuthorization(),
+  }).schedule({
     project_id: "project-1",
     phase_id: "phase-1",
     task_id: "task-1",
@@ -312,9 +316,16 @@ async function startStack(runnerId = "runner-1"): Promise<Stack> {
     expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
   });
   await transactions.transaction(async (sql) => {
-    await sql.query("UPDATE agent_runs SET initiated_by_user_id='admin-1' WHERE id=$1", [
-      scheduled.run_id,
-    ]);
+    await sql.query(
+      `UPDATE agent_runs
+          SET initiated_by_user_id='admin-1',
+              repository_binding_id='binding-1'
+        WHERE id=$1`,
+      [scheduled.run_id],
+    );
+    await sql.query(
+      "UPDATE projects SET primary_repository_binding_id='binding-1' WHERE id='project-1'",
+    );
   });
 
   return {

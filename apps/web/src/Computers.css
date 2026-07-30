@@ -299,9 +299,80 @@
 .computer-grant-list small {
   overflow: hidden;
   color: var(--ink-muted);
-  font-family: "DM Mono", monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.computer-access-error {
+  display: grid;
+  justify-items: start;
+  gap: 0.6rem;
+  margin-top: 0.8rem;
+}
+
+.computer-repository-list {
+  display: grid;
+  gap: 0.8rem;
+  margin-top: 0.9rem;
+}
+
+.computer-repository {
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-2) 62%, transparent);
+}
+
+.computer-repository.is-revoked {
+  color: var(--ink-muted);
+}
+
+.computer-repository > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.computer-repository h4,
+.computer-repository p {
+  margin: 0;
+}
+
+.computer-repository header p,
+.computer-repository-empty {
+  margin-top: 0.25rem;
+  font-size: var(--text-xs);
+}
+
+.computer-grant-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.65rem;
+  margin-top: 0.8rem;
+}
+
+.computer-grant-form .field {
+  margin: 0;
+}
+
+.computer-grant-confirmation {
+  display: grid;
+  justify-items: end;
+  gap: 0.45rem;
+  max-width: 19rem;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  text-align: right;
+}
+
+.computer-grant-confirmation > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.45rem;
 }
 
 .computers-detail-empty,
@@ -352,6 +423,30 @@
     width: 100%;
   }
 
+  .computer-repository > header,
+  .computer-grant-list li {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .computer-grant-form {
+    grid-template-columns: 1fr;
+  }
+
+  .computer-grant-form .btn {
+    width: 100%;
+  }
+
+  .computer-grant-confirmation {
+    justify-items: start;
+    max-width: none;
+    text-align: left;
+  }
+
+  .computer-grant-confirmation > div {
+    justify-content: flex-start;
+  }
+
   .computer-detail-actions .btn,
   .computer-form-actions .btn {
     flex: 1 1 auto;
@@ -364,6 +459,7 @@
   .computer-status-grid,
   .computer-management-form,
   .computer-token-list li,
+  .computer-repository,
   .computer-grant-list li {
     border-color: CanvasText;
   }

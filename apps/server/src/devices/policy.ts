@@ -131,20 +131,16 @@ export class PostgresDeviceAuthorizationPolicy {
                ON project.owner_user_id = actor.id
               AND project.id = $2
               AND project.status = 'active'
-             JOIN repository_bindings binding
-               ON binding.id = $3
-              AND binding.project_id = project.id
-              AND binding.binding_type = 'local_runner'
-              AND binding.status IN ('connected', 'degraded', 'disconnected')
              JOIN project_device_repository_grants grant_record
                ON grant_record.project_id = project.id
-              AND grant_record.id = binding.project_device_repository_grant_id
+              AND grant_record.id = $3
               AND grant_record.state = 'active'
              JOIN device_repository_registrations registration
                ON registration.id = grant_record.repository_registration_id
               AND registration.state = 'active'
-              AND registration.workspace_id = binding.workspace_id
-              AND registration.repository_id = binding.repository_id
+              AND registration.default_branch IS NOT NULL
+              AND registration.approved_credential_id IS NOT NULL
+              AND registration.approved_generation IS NOT NULL
              JOIN devices device
                ON device.id = registration.device_id
               AND device.lifecycle = 'active'
@@ -153,8 +149,10 @@ export class PostgresDeviceAuthorizationPolicy {
               AND device_owner.status = 'active'
              JOIN device_credentials credential
                ON credential.device_id = device.id
+              AND credential.id = registration.approved_credential_id
               AND credential.state = 'active'
               AND credential.generation = device.current_generation
+              AND credential.generation = registration.approved_generation
             WHERE actor.id = $1
               AND actor.status = 'active'
          ) AS allowed`,
@@ -213,8 +211,10 @@ export class PostgresDeviceAuthorizationPolicy {
               AND device_owner.status = 'active'
              JOIN device_credentials credential
                ON credential.device_id = device.id
+              AND credential.id = registration.approved_credential_id
               AND credential.state = 'active'
               AND credential.generation = device.current_generation
+              AND credential.generation = registration.approved_generation
              JOIN commands command
                ON command.command_id = (
                  SELECT latest.command_id

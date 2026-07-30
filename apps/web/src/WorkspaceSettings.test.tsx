@@ -17,6 +17,21 @@ describe("WorkspaceSettings project archiving", () => {
     mock.get(`/api/v2/projects/${projectId}/rules`, {
       body: { filename: "NORN.md", content: "", version: 0, updated_at: null },
     });
+    mock.get(`/api/v2/projects/${projectId}/access`, {
+      body: {
+        schema_version: 2,
+        project_id: projectId,
+        user_id: "owner-1",
+        owner_user_id: "owner-1",
+        can_access: true,
+        can_manage_members: true,
+        source: "owner",
+      },
+    });
+    mock.get(`/api/projects/${projectId}/execution-targets`, {
+      status: 404,
+      body: { error: "not_found" },
+    });
     mock.del(`/api/projects/${projectId}`, { status: 204 });
     mock.install();
   });

@@ -1,10 +1,48 @@
 import { OwnedDeviceProjection, type OwnedDeviceProjectionT } from "@norns/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { z } from "zod";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
-import { Alert, Badge, Button, Field, Input, PageHeader, Spinner, TextArea } from "./ui";
+import { Alert, Badge, Button, Field, Input, PageHeader, Select, Spinner, TextArea } from "./ui";
 import "./Computers.css";
 
 type Device = OwnedDeviceProjectionT;
+
+const RepositoryAccessProjection = z
+  .object({
+    device_id: z.string().trim().min(1),
+    registrations: z.array(
+      z
+        .object({
+          registration_id: z.string().trim().min(1),
+          repository_id: z.string().trim().min(1),
+          repository_display_name: z.string().trim().min(1).max(240),
+          default_branch: z.string().trim().min(1).max(240),
+          state: z.enum(["active", "revoked"]),
+          grants: z.array(
+            z
+              .object({
+                grant_id: z.string().trim().min(1),
+                project_id: z.string().trim().min(1),
+                state: z.enum(["active", "revoked"]),
+              })
+              .strict(),
+          ),
+        })
+        .strict(),
+    ),
+    eligible_projects: z.array(
+      z
+        .object({
+          project_id: z.string().trim().min(1),
+          name: z.string().trim().min(1).max(200),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
+type RepositoryAccess = z.infer<typeof RepositoryAccessProjection>;
+type RepositoryRegistration = RepositoryAccess["registrations"][number];
 
 function unwrapDevice(payload: unknown): Device {
   const candidate =
@@ -41,6 +79,7 @@ async function deviceRequest(path: string, init?: RequestInit): Promise<unknown>
         errorPayload?.error ??
         `Computer request failed (${response.status}).`,
       response.status,
+      errorPayload?.error ?? null,
     );
   }
   return payload;
@@ -55,6 +94,37 @@ function describeDeviceError(error: unknown): string {
     return error.message;
   }
   return error instanceof Error ? error.message : "The computer service is unavailable.";
+}
+
+function unwrapRepositoryAccess(payload: unknown, deviceId: string): RepositoryAccess {
+  const parsed = RepositoryAccessProjection.safeParse(payload);
+  if (!parsed.success || parsed.data.device_id !== deviceId) {
+    throw new Error("Repository access response is invalid.");
+  }
+
+  const registrationIds = new Set<string>();
+  const grantIds = new Set<string>();
+  for (const registration of parsed.data.registrations) {
+    if (registrationIds.has(registration.registration_id)) {
+      throw new Error("Repository access response is invalid.");
+    }
+    registrationIds.add(registration.registration_id);
+    for (const grant of registration.grants) {
+      if (grantIds.has(grant.grant_id)) {
+        throw new Error("Repository access response is invalid.");
+      }
+      grantIds.add(grant.grant_id);
+    }
+  }
+
+  const projectIds = new Set<string>();
+  for (const project of parsed.data.eligible_projects) {
+    if (projectIds.has(project.project_id)) {
+      throw new Error("Repository access response is invalid.");
+    }
+    projectIds.add(project.project_id);
+  }
+  return parsed.data;
 }
 
 function humanize(value: string): string {
@@ -183,17 +253,389 @@ function ManualUpdateGuidance({ device }: { device: Device }): React.ReactElemen
   );
 }
 
+function activeGrants(registration: RepositoryRegistration): RepositoryRegistration["grants"] {
+  return registration.grants.filter((grant) => grant.state === "active");
+}
+
+function RepositoryAccessManager({
+  deviceId,
+  lifecycle,
+  onUnauthorized,
+}: {
+  deviceId: string;
+  lifecycle: Device["lifecycle"];
+  onUnauthorized: () => void;
+}): React.ReactElement | null {
+  const [access, setAccess] = useState<RepositoryAccess | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  const [loading, setLoading] = useState(lifecycle === "active");
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [mutating, setMutating] = useState<string | null>(null);
+  const [confirmingGrantId, setConfirmingGrantId] = useState<string | null>(null);
+  const [selections, setSelections] = useState<Record<string, string>>({});
+  const requestGeneration = useRef(0);
+
+  const acceptProjection = useCallback(
+    (payload: unknown): RepositoryAccess => {
+      const projected = unwrapRepositoryAccess(payload, deviceId);
+      setAccess(projected);
+      setSelections((current) => {
+        const next: Record<string, string> = {};
+        for (const registration of projected.registrations) {
+          const grantedProjects = new Set(
+            activeGrants(registration).map((grant) => grant.project_id),
+          );
+          const candidates = projected.eligible_projects.filter(
+            (project) => !grantedProjects.has(project.project_id),
+          );
+          const selected = current[registration.registration_id];
+          next[registration.registration_id] =
+            selected && candidates.some((project) => project.project_id === selected)
+              ? selected
+              : (candidates[0]?.project_id ?? "");
+        }
+        return next;
+      });
+      return projected;
+    },
+    [deviceId],
+  );
+
+  const fetchAccess = useCallback(
+    async (clearError = true): Promise<void> => {
+      const generation = ++requestGeneration.current;
+      if (clearError) setError(null);
+      setLoading(true);
+      try {
+        const payload = await deviceRequest(
+          `/api/devices/${encodeURIComponent(deviceId)}/repository-access`,
+        );
+        if (generation !== requestGeneration.current) return;
+        acceptProjection(payload);
+        setUnavailable(false);
+      } catch (caught) {
+        if (generation !== requestGeneration.current) return;
+        if (caught instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
+        if (caught instanceof ApiError && caught.status === 404) {
+          setUnavailable(true);
+          setAccess(null);
+          return;
+        }
+        setError(
+          caught instanceof ApiError && caught.status === 409
+            ? "Repository access changed while this page was open. Reload it and try again."
+            : caught instanceof Error
+              ? caught.message
+              : "Repository access is unavailable.",
+        );
+      } finally {
+        if (generation === requestGeneration.current) setLoading(false);
+      }
+    },
+    [acceptProjection, deviceId, onUnauthorized],
+  );
+
+  useEffect(() => {
+    if (lifecycle === "active") {
+      void fetchAccess();
+    } else {
+      requestGeneration.current += 1;
+      setLoading(false);
+    }
+    return () => {
+      requestGeneration.current += 1;
+    };
+  }, [fetchAccess, lifecycle]);
+
+  const handleMutationError = async (caught: unknown): Promise<void> => {
+    if (caught instanceof UnauthorizedError) {
+      onUnauthorized();
+      return;
+    }
+    if (caught instanceof ApiError && caught.status === 404) {
+      setError(
+        "That repository access choice is no longer available. The current state was reloaded.",
+      );
+      await fetchAccess(false);
+      return;
+    }
+    if (caught instanceof ApiError && caught.status === 409) {
+      setError(
+        "Repository access changed while this page was open. The current state was reloaded.",
+      );
+      await fetchAccess(false);
+      return;
+    }
+    setError(caught instanceof Error ? caught.message : "Repository access could not be changed.");
+  };
+
+  const grantProject = async (registrationId: string, projectId: string): Promise<void> => {
+    if (!projectId || mutating) return;
+    setMutating(`grant:${registrationId}`);
+    setError(null);
+    setNotice(null);
+    try {
+      acceptProjection(
+        await deviceRequest(`/api/devices/${encodeURIComponent(deviceId)}/repository-grants`, {
+          method: "POST",
+          body: JSON.stringify({
+            repository_registration_id: registrationId,
+            project_id: projectId,
+          }),
+        }),
+      );
+      const project = access?.eligible_projects.find(
+        (candidate) => candidate.project_id === projectId,
+      );
+      setNotice(`Repository access granted${project ? ` to ${project.name}` : ""}.`);
+    } catch (caught) {
+      await handleMutationError(caught);
+    } finally {
+      setMutating(null);
+    }
+  };
+
+  const revokeGrant = async (grantId: string, projectName: string): Promise<void> => {
+    if (mutating) return;
+    setMutating(`revoke:${grantId}`);
+    setError(null);
+    setNotice(null);
+    try {
+      acceptProjection(
+        await deviceRequest(
+          `/api/devices/${encodeURIComponent(deviceId)}/repository-grants/${encodeURIComponent(
+            grantId,
+          )}/revoke`,
+          {
+            method: "POST",
+            body: JSON.stringify({}),
+          },
+        ),
+      );
+      setConfirmingGrantId(null);
+      setNotice(`Repository access removed from ${projectName}. Local files were not deleted.`);
+    } catch (caught) {
+      await handleMutationError(caught);
+    } finally {
+      setMutating(null);
+    }
+  };
+
+  if (lifecycle === "revoked") {
+    return (
+      <section className="computer-detail-section" aria-labelledby="computer-access-title">
+        <div className="eyebrow">Authorization</div>
+        <h3 id="computer-access-title">Repository access</h3>
+        <p className="muted">
+          This computer is revoked. Its project grants can no longer authorize work.
+        </p>
+      </section>
+    );
+  }
+
+  if (unavailable) return null;
+
+  const projectNames = new Map(
+    access?.eligible_projects.map((project) => [project.project_id, project.name]),
+  );
+  const activeGrantCount =
+    access?.registrations.reduce(
+      (count, registration) => count + activeGrants(registration).length,
+      0,
+    ) ?? 0;
+
+  return (
+    <section className="computer-detail-section" aria-labelledby="computer-access-title">
+      <div className="computer-detail-heading">
+        <div>
+          <div className="eyebrow">Authorization</div>
+          <h3 id="computer-access-title">Repository access</h3>
+        </div>
+        {access ? <Badge>{activeGrantCount}</Badge> : null}
+      </div>
+      <p className="muted">
+        Choose which of your projects may use a repository approved on this computer. Removing
+        access never deletes local files.
+      </p>
+      {error ? (
+        <div className="computer-access-error">
+          <Alert testId="repository-access-error">{error}</Alert>
+          <Button
+            type="button"
+            variant="ghost"
+            className="btn-small"
+            disabled={loading || Boolean(mutating)}
+            onClick={() => void fetchAccess()}
+          >
+            Reload access
+          </Button>
+        </div>
+      ) : null}
+      <div className="sr-only" aria-live="polite">
+        {notice}
+      </div>
+      {loading && !access ? (
+        <Spinner label="Loading repository access…" />
+      ) : access?.registrations.length ? (
+        <div className="computer-repository-list">
+          {access.registrations.map((registration) => {
+            const grants = activeGrants(registration);
+            const grantedProjectIds = new Set(grants.map((grant) => grant.project_id));
+            const candidates =
+              registration.state === "active"
+                ? access.eligible_projects.filter(
+                    (project) => !grantedProjectIds.has(project.project_id),
+                  )
+                : [];
+            const selection = selections[registration.registration_id] ?? "";
+            return (
+              <article
+                className={`computer-repository${registration.state === "revoked" ? " is-revoked" : ""}`}
+                key={registration.registration_id}
+                aria-label={registration.repository_display_name}
+              >
+                <header>
+                  <div>
+                    <h4>{registration.repository_display_name}</h4>
+                    <p>
+                      Default branch <strong>{registration.default_branch}</strong>
+                    </p>
+                  </div>
+                  <Badge tone={registration.state === "active" ? "success" : "default"}>
+                    {registration.state}
+                  </Badge>
+                </header>
+
+                {grants.length ? (
+                  <ul className="computer-grant-list" aria-label="Active project access">
+                    {grants.map((grant) => {
+                      const projectName =
+                        projectNames.get(grant.project_id) ?? "Unavailable project";
+                      return (
+                        <li key={grant.grant_id}>
+                          <span>
+                            <strong>{projectName}</strong>
+                            <small>Active project access</small>
+                          </span>
+                          {confirmingGrantId === grant.grant_id ? (
+                            <div className="computer-grant-confirmation">
+                              <span>Remove Norns access? Local files will not be deleted.</span>
+                              <div>
+                                <Button
+                                  type="button"
+                                  variant="danger"
+                                  className="btn-small"
+                                  disabled={Boolean(mutating)}
+                                  onClick={() => void revokeGrant(grant.grant_id, projectName)}
+                                >
+                                  {mutating === `revoke:${grant.grant_id}`
+                                    ? "Removing…"
+                                    : "Remove access"}
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  className="btn-small"
+                                  disabled={Boolean(mutating)}
+                                  onClick={() => setConfirmingGrantId(null)}
+                                >
+                                  Cancel
+                                </Button>
+                              </div>
+                            </div>
+                          ) : (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              className="btn-small"
+                              disabled={Boolean(mutating)}
+                              aria-label={`Remove ${projectName} access`}
+                              onClick={() => setConfirmingGrantId(grant.grant_id)}
+                            >
+                              Remove
+                            </Button>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <p className="muted computer-repository-empty">
+                    No projects can use this repository.
+                  </p>
+                )}
+
+                {candidates.length ? (
+                  <form
+                    className="computer-grant-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void grantProject(registration.registration_id, selection);
+                    }}
+                  >
+                    <Field label={`Project for ${registration.repository_display_name}`}>
+                      <Select
+                        value={selection}
+                        disabled={Boolean(mutating)}
+                        onChange={(event) =>
+                          setSelections((current) => ({
+                            ...current,
+                            [registration.registration_id]: event.target.value,
+                          }))
+                        }
+                      >
+                        {candidates.map((project) => (
+                          <option key={project.project_id} value={project.project_id}>
+                            {project.name}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      disabled={!selection || Boolean(mutating)}
+                    >
+                      {mutating === `grant:${registration.registration_id}`
+                        ? "Granting…"
+                        : "Grant project access"}
+                    </Button>
+                  </form>
+                ) : registration.state === "active" ? (
+                  <p className="muted computer-repository-empty">
+                    No additional eligible projects.
+                  </p>
+                ) : null}
+              </article>
+            );
+          })}
+        </div>
+      ) : access ? (
+        <p className="muted">
+          Approve a repository in the Local Control Center before sharing it with a project.
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
 function ComputerDetails({
   device,
   loading,
   onRename,
   onRevoke,
+  onUnauthorized,
   detailRef,
 }: {
   device: Device;
   loading: boolean;
   onRename: (input: { name: string; location_label: string | null }) => Promise<void>;
   onRevoke: (reason: string) => Promise<void>;
+  onUnauthorized: () => void;
   detailRef: React.RefObject<HTMLElement | null>;
 }): React.ReactElement {
   const [editing, setEditing] = useState(false);
@@ -465,30 +907,11 @@ function ComputerDetails({
         )}
       </section>
 
-      <section className="computer-detail-section" aria-labelledby="computer-grants-title">
-        <div className="computer-detail-heading">
-          <div>
-            <div className="eyebrow">Authorization</div>
-            <h3 id="computer-grants-title">Repository grants</h3>
-          </div>
-          <Badge>{device.repository_grants.length}</Badge>
-        </div>
-        {device.repository_grants.length ? (
-          <ul className="computer-grant-list">
-            {device.repository_grants.map((grant) => (
-              <li key={grant.grant_id}>
-                <span>
-                  <strong>{grant.project_id}</strong>
-                  <small>{grant.repository_registration_id}</small>
-                </span>
-                <Badge tone={grant.state === "active" ? "success" : "default"}>{grant.state}</Badge>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="muted">No repository grants.</p>
-        )}
-      </section>
+      <RepositoryAccessManager
+        deviceId={device.device_id}
+        lifecycle={device.lifecycle}
+        onUnauthorized={onUnauthorized}
+      />
 
       <ManualUpdateGuidance device={device} />
     </article>
@@ -668,6 +1091,7 @@ export function Computers({
                   loading={detailLoading}
                   onRename={rename}
                   onRevoke={revoke}
+                  onUnauthorized={onUnauthorized}
                 />
               ) : (
                 <div className="card computers-detail-empty">

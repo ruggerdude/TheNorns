@@ -111,6 +111,20 @@ export class DeviceOnlineControlBroker {
     return this.connections.has(deviceId);
   }
 
+  /** Exact live WSS capability check; device-only presence is insufficient. */
+  isConnectedIdentity(identity: {
+    device_id: string;
+    credential_id: string;
+    generation: number;
+  }): boolean {
+    const connection = this.connections.get(identity.device_id);
+    return (
+      connection?.identity.device_id === identity.device_id &&
+      connection.identity.credential_id === identity.credential_id &&
+      connection.identity.generation === identity.generation
+    );
+  }
+
   private revalidateActiveIdentity(connection: ConnectedDevice): Promise<boolean> {
     return this.transactions.transaction(async (sql) => {
       const selected = await sql.query<ActiveConnectionIdentityRow>(

@@ -245,10 +245,12 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
       );
       INSERT INTO device_repository_registrations (
         id,device_id,workspace_id,repository_id,repository_display_name,
-        state,approved_by_user_id,approved_at
+        state,approved_by_user_id,approved_at,approved_credential_id,
+        approved_generation
       ) VALUES (
         'registration-phase5-actual','device-phase5-actual','workspace-phase5',
-        'repository-phase5','Phase 5 Waits','active','${ownerId}',now()
+        'repository-phase5','Phase 5 Waits','active','${ownerId}',now(),
+        'credential-phase5-actual',1
       );
       INSERT INTO project_device_repository_grants (
         id,project_id,repository_registration_id,state,granted_by_user_id
@@ -256,9 +258,21 @@ describe.sequential("Phase 5 durable human-wait persistence acceptance", () => {
         'grant-phase5-actual','${projectId}','registration-phase5-actual',
         'active','${ownerId}'
       );
-      UPDATE repository_bindings
-         SET project_device_repository_grant_id='grant-phase5-actual'
-       WHERE id='binding-phase5';
+      INSERT INTO repository_bindings (
+        id,project_id,binding_type,status,runner_id,workspace_id,repository_id,
+        repository_display_name,granted_permissions,default_branch,observed_head,
+        verification_policy_ref,repository_health,created_by_actor_type,
+        created_by_actor_id,project_device_repository_grant_id
+      ) VALUES (
+        'binding-phase5-poisoned','${projectId}','local_runner','connected',NULL,
+        'workspace-phase5','repository-phase5','Phase 5 Waits','{}'::jsonb,'main',
+        '${"a".repeat(40)}','verification','healthy','human','${ownerId}',
+        'grant-phase5-actual'
+      );
+      UPDATE agent_runs
+         SET repository_binding_id='binding-phase5-poisoned'
+       WHERE project_id='${projectId}'
+         AND repository_binding_id='binding-phase5';
     `);
   }
 

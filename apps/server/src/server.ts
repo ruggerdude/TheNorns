@@ -173,6 +173,10 @@ import {
   registerDeviceManagementRoutes,
 } from "./devices/managementRoutes.js";
 import type { DeviceOnlineControlBroker } from "./devices/onlineControl.js";
+import {
+  type DeviceRepositoryAccessRouteOptions,
+  registerDeviceRepositoryAccessRoutes,
+} from "./devices/repositoryAccessRoutes.js";
 import type { DeviceRevocationService } from "./devices/revocation.js";
 import {
   type DeviceEnrollmentRouteService,
@@ -444,6 +448,11 @@ export interface ServerOptions {
   deviceManagement?: {
     service: DeviceManagementRouteService;
   };
+  /**
+   * Phase 4 repository authorization and publication gates. Production only
+   * supplies this under its independent default-off rollout flag.
+   */
+  deviceRepositoryAccess?: Omit<DeviceRepositoryAccessRouteOptions, "requireUser">;
   /**
    * Device installation WSS identity proof. This is deliberately independent
    * from enrollment and remains absent in production until the Phase 2
@@ -1709,6 +1718,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   if (options.deviceManagement) {
     await registerDeviceManagementRoutes(app, {
       service: options.deviceManagement.service,
+      requireUser: requireSessionUser,
+    });
+  }
+  if (options.deviceRepositoryAccess) {
+    await registerDeviceRepositoryAccessRoutes(app, {
+      ...options.deviceRepositoryAccess,
       requireUser: requireSessionUser,
     });
   }

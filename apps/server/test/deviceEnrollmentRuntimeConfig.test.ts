@@ -1,11 +1,14 @@
+import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { DeviceEnrollmentCodeHasher } from "../src/devices/crypto.js";
 import {
   DeviceEnrollmentRuntimeConfigurationError,
   type DeviceManagementRuntimeConfigurationError,
+  type DeviceRepositoryAccessRuntimeConfigurationError,
   parseDeviceEnrollmentRuntimeConfiguration,
   parseDeviceManagementRuntimeConfiguration,
+  parseDeviceRepositoryAccessRuntimeConfiguration,
 } from "../src/devices/runtimeConfig.js";
 
 describe("device enrollment runtime configuration", () => {
@@ -132,6 +135,105 @@ describe("device enrollment runtime configuration", () => {
       expect(String(error)).not.toContain(rawSecret);
     }
   });
+});
+
+describe("device repository access runtime configuration", () => {
+  const ed25519 = generateKeyPairSync("ed25519").privateKey.export({
+    format: "der",
+    type: "pkcs8",
+  });
+
+  it("is independently disabled by default and ignores signing material while false", () => {
+    expect(parseDeviceRepositoryAccessRuntimeConfiguration({})).toEqual({ enabled: false });
+    expect(
+      parseDeviceRepositoryAccessRuntimeConfiguration({
+        NORNS_ENABLE_DEVICE_REPOSITORY_ACCESS: "false",
+        NORNS_DEVICE_PUBLICATION_SIGNING_KEY_ID: "ignored",
+        NORNS_DEVICE_PUBLICATION_SIGNING_PRIVATE_KEY: "ignored",
+      }),
+    ).toEqual({ enabled: false });
+  });
+
+  it.each(["", "TRUE", "False", "1", "yes", " true", "true "])(
+    "rejects unknown repository-access enable value %j",
+    (flag) => {
+      expect(() =>
+        parseDeviceRepositoryAccessRuntimeConfiguration({
+          NORNS_ENABLE_DEVICE_REPOSITORY_ACCESS: flag,
+        }),
+      ).toThrowError(
+        expect.objectContaining<Partial<DeviceRepositoryAccessRuntimeConfigurationError>>({
+          code: "device_repository_access_flag_invalid",
+        }),
+      );
+    },
+  );
+
+  it.each([
+    [{ NORNS_ENABLE_DEVICE_REPOSITORY_ACCESS: "true" }, "publication_signing_key_id_missing"],
+    [
+      {
+        NORNS_ENABLE_DEVICE_REPOSITORY_ACCESS: "true",
+        NORNS_DEVICE_PUBLICATION_SIGNING_KEY_ID: " bad key ",
+      },
+      "publication_signing_key_id_invalid",
+    ],
+    [
+      {
+        NORNS_ENABLE_DEVICE_REPOSITORY_ACCESS: "true",
+        NORNS_DEVICE_PUBLICATION_SIGNING_KEY_ID: "permit-key",
+      },
+      "publication_signing_private_key_missing",
+    ],
+    [
+      {
+        NORNS_ENABLE_DEVICE_REPOSITORY_ACCESS: "true",
+        NORNS_DEVICE_PUBLICATION_SIGNING_KEY_ID: "permit-key",
+        NORNS_DEVICE_PUBLICATION_SIGNING_PRIVATE_KEY: Buffer.alloc(31).toString("base64"),
+      },
+      "publication_signing_private_key_too_short",
+    ],
+    [
+      {
+        NORNS_ENABLE_DEVICE_REPOSITORY_ACCESS: "true",
+        NORNS_DEVICE_PUBLICATION_SIGNING_KEY_ID: "permit-key",
+        NORNS_DEVICE_PUBLICATION_SIGNING_PRIVATE_KEY: "not*base64",
+      },
+      "publication_signing_private_key_invalid",
+    ],
+    [
+      {
+        NORNS_ENABLE_DEVICE_REPOSITORY_ACCESS: "true",
+        NORNS_DEVICE_PUBLICATION_SIGNING_KEY_ID: "permit-key",
+        NORNS_DEVICE_PUBLICATION_SIGNING_PRIVATE_KEY: generateKeyPairSync("rsa", {
+          modulusLength: 2048,
+        })
+          .privateKey.export({ format: "der", type: "pkcs8" })
+          .toString("base64"),
+      },
+      "publication_signing_private_key_not_ed25519",
+    ],
+  ] as const)("fails closed for invalid enabled signing configuration", (environment, code) => {
+    expect(() => parseDeviceRepositoryAccessRuntimeConfiguration(environment)).toThrowError(
+      expect.objectContaining<Partial<DeviceRepositoryAccessRuntimeConfigurationError>>({ code }),
+    );
+  });
+
+  it.each(["base64", "base64url"] as const)(
+    "accepts a canonical Ed25519 PKCS8 %s key",
+    (encoding) => {
+      const configuration = parseDeviceRepositoryAccessRuntimeConfiguration({
+        NORNS_ENABLE_DEVICE_REPOSITORY_ACCESS: "true",
+        NORNS_DEVICE_PUBLICATION_SIGNING_KEY_ID: "permit-key-2026-07",
+        NORNS_DEVICE_PUBLICATION_SIGNING_PRIVATE_KEY: ed25519.toString(encoding),
+      });
+      expect(configuration.enabled).toBe(true);
+      if (configuration.enabled) {
+        expect(configuration.publication_signing_key_id).toBe("permit-key-2026-07");
+        expect(configuration.publication_signing_private_key.asymmetricKeyType).toBe("ed25519");
+      }
+    },
+  );
 });
 
 describe("device management runtime configuration", () => {

@@ -417,6 +417,21 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     mock.get(`/api/v2/projects/${projectAlpha.id}/rules`, {
       body: { filename: "NORN.md", content: "", version: 0, updated_at: null },
     });
+    mock.get(`/api/v2/projects/${projectAlpha.id}/access`, {
+      body: {
+        schema_version: 2,
+        project_id: projectAlpha.id,
+        user_id: "test-user",
+        owner_user_id: "test-user",
+        can_access: true,
+        can_manage_members: true,
+        source: "owner",
+      },
+    });
+    mock.get(`/api/projects/${projectAlpha.id}/execution-targets`, {
+      status: 404,
+      body: { error: "not_found" },
+    });
     mock.put(`/api/v2/projects/${projectAlpha.id}/rules`, (_url, init) => ({
       body: {
         filename: "NORN.md",

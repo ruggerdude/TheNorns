@@ -628,6 +628,9 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
           'command:test','dispatch-job:test','${PROJECT}','${PHASE}','${TASK}',
           'run:test','${RUNNER}',1,'launch_run','{}'::jsonb,'queued','context-test'
         );
+        UPDATE projects
+           SET primary_repository_binding_id='context-legacy-binding'
+         WHERE id='${PROJECT}';
       `);
     });
 
@@ -671,10 +674,11 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
       await pg.query(
         `INSERT INTO device_repository_registrations (
            id,device_id,workspace_id,repository_id,repository_display_name,
-           state,approved_by_user_id,approved_at
+           state,approved_by_user_id,approved_at,approved_credential_id,
+           approved_generation
          ) VALUES (
            'context-registration',$1,'context-workspace','context-repository',
-           'Context repository','active',$2,now()
+           'Context repository','active',$2,now(),'context-device-credential',1
          )`,
         [RUNNER, USER],
       );
@@ -693,15 +697,11 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
            verification_policy_ref,repository_health,created_by_actor_type,
            created_by_actor_id,project_device_repository_grant_id
          ) VALUES (
-           'context-binding',$1,'local_runner','connected',$2,'context-workspace',
+           'context-binding',$1,'local_runner','connected',NULL,'context-workspace',
            'context-repository','Context repository','{}'::jsonb,'main','abc123',
-           'verification/strict','healthy','human',$3,'context-grant'
+           'verification/strict','healthy','human',$2,'context-grant'
          )`,
-        [PROJECT, RUNNER, USER],
-      );
-      await pg.query(
-        "UPDATE projects SET primary_repository_binding_id='context-binding' WHERE id=$1",
-        [PROJECT],
+        [PROJECT, USER],
       );
       const scheduled = await new Phase4Coordinator(transactions).schedule({
         project_id: PROJECT,
@@ -731,6 +731,13 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
         scheduled.run_id,
         USER,
       ]);
+      await pg.query("UPDATE agent_runs SET repository_binding_id='context-binding' WHERE id=$1", [
+        scheduled.run_id,
+      ]);
+      await pg.query(
+        "UPDATE projects SET primary_repository_binding_id='context-binding' WHERE id=$1",
+        [PROJECT],
+      );
       await dispatchScope.recordScope(
         {
           runnerId: RUNNER,

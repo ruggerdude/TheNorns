@@ -113,18 +113,20 @@ export class PublicationError extends Error {
   }
 }
 
+export interface RunnerPublicationInput {
+  worktree_path: string;
+  branch: string;
+  commit: string;
+  run_id: string;
+  task_id: string;
+  verification_passed: boolean;
+  verification_summary: string;
+  /** Device/generation fencing aborts publication independently of run stop. */
+  signal?: AbortSignal;
+}
+
 export interface RunnerPublisher {
-  publish(input: {
-    worktree_path: string;
-    branch: string;
-    commit: string;
-    run_id: string;
-    task_id: string;
-    verification_passed: boolean;
-    verification_summary: string;
-    /** Device/generation fencing aborts publication independently of run stop. */
-    signal?: AbortSignal;
-  }): Promise<PublicationResult>;
+  publish(input: RunnerPublicationInput): Promise<PublicationResult>;
 }
 
 export interface GitPublisherOptions {
@@ -136,6 +138,12 @@ export interface GitPublisherOptions {
   token?: string;
   /** Injected in tests. Defaults to global `fetch`. */
   fetchImpl?: typeof fetch;
+  /**
+   * Device-backed publication uses this hook to issue and consume a fresh
+   * one-use permit immediately before every actual `git push`. Omitted for
+   * legacy and GitHub Actions publication, whose behavior is unchanged.
+   */
+  beforePush?: (input: RunnerPublicationInput) => void | Promise<void>;
 }
 
 /**
@@ -150,24 +158,17 @@ export class GitPublisher implements RunnerPublisher {
   private readonly slug: string | undefined;
   private readonly token: string | undefined;
   private readonly fetchImpl: typeof fetch;
+  private readonly beforePush: GitPublisherOptions["beforePush"];
 
   constructor(options: GitPublisherOptions = {}) {
     this.remote = options.remote ?? process.env.NORNS_PUBLISH_REMOTE ?? "origin";
     this.slug = options.repositorySlug ?? process.env.GITHUB_REPOSITORY;
     this.token = options.token ?? process.env.GITHUB_TOKEN;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.beforePush = options.beforePush;
   }
 
-  async publish(input: {
-    worktree_path: string;
-    branch: string;
-    commit: string;
-    run_id: string;
-    task_id: string;
-    verification_passed: boolean;
-    verification_summary: string;
-    signal?: AbortSignal;
-  }): Promise<PublicationResult> {
+  async publish(input: RunnerPublicationInput): Promise<PublicationResult> {
     input.signal?.throwIfAborted();
     const remote = await this.resolveRemote(input.worktree_path, input.signal);
     if (!remote) {
@@ -182,13 +183,7 @@ export class GitPublisher implements RunnerPublisher {
       };
     }
     input.signal?.throwIfAborted();
-    const outcome = await this.push(
-      input.worktree_path,
-      remote,
-      input.branch,
-      input.commit,
-      input.signal,
-    );
+    const outcome = await this.push(input, remote);
     input.signal?.throwIfAborted();
     const pullRequest = await this.ensurePullRequest(input);
     return {
@@ -236,48 +231,54 @@ export class GitPublisher implements RunnerPublisher {
    *     run fails with a reason. We never blind-force, so we can never
    *     overwrite work we did not see.
    */
-  private async push(
-    worktreePath: string,
-    remote: string,
-    branch: string,
-    commit: string,
-    signal?: AbortSignal,
-  ): Promise<PublicationOutcome> {
-    const ref = `refs/heads/${branch}`;
+  private async push(input: RunnerPublicationInput, remote: string): Promise<PublicationOutcome> {
+    const ref = `refs/heads/${input.branch}`;
+    input.signal?.throwIfAborted();
+    await this.beforePush?.(input);
+    input.signal?.throwIfAborted();
     try {
-      await execFileAsync("git", ["-C", worktreePath, "push", remote, `${commit}:${ref}`], {
-        signal,
-      });
+      await execFileAsync(
+        "git",
+        ["-C", input.worktree_path, "push", remote, `${input.commit}:${ref}`],
+        {
+          signal: input.signal,
+        },
+      );
       return "pushed";
     } catch (error) {
-      signal?.throwIfAborted();
+      input.signal?.throwIfAborted();
       const detail = error instanceof Error ? error.message : String(error);
-      const tip = await this.remoteTip(worktreePath, remote, ref, signal);
-      if (tip === commit) return "already_published";
+      const tip = await this.remoteTip(input.worktree_path, remote, ref, input.signal);
+      if (tip === input.commit) return "already_published";
       if (tip) {
+        input.signal?.throwIfAborted();
+        // The first permit authorized only the first bounded push attempt.
+        // A force-with-lease retry receives a fresh, reauthorized permit.
+        await this.beforePush?.(input);
+        input.signal?.throwIfAborted();
         try {
           await execFileAsync(
             "git",
             [
               "-C",
-              worktreePath,
+              input.worktree_path,
               "push",
               `--force-with-lease=${ref}:${tip}`,
               remote,
-              `${commit}:${ref}`,
+              `${input.commit}:${ref}`,
             ],
-            { signal },
+            { signal: input.signal },
           );
           return "republished";
         } catch (leaseError) {
           throw new PublicationError(
-            `could not update branch ${branch} on ${remote}`,
+            `could not update branch ${input.branch} on ${remote}`,
             leaseError instanceof Error ? leaseError.message : String(leaseError),
           );
         }
       }
       throw new PublicationError(
-        `could not push branch ${branch} to ${remote}`,
+        `could not push branch ${input.branch} to ${remote}`,
         // The message may name the physical worktree; the caller redacts it
         // before any of this reaches an event.
         detail,

@@ -55,6 +55,33 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function repositoryAccess(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    device_id: "device-1",
+    registrations: [
+      {
+        registration_id: "registration-1",
+        repository_id: "repository-1",
+        repository_display_name: "The Norns",
+        default_branch: "main",
+        state: "active",
+        grants: [
+          {
+            grant_id: "grant-1",
+            project_id: "project-1",
+            state: "active",
+          },
+        ],
+      },
+    ],
+    eligible_projects: [
+      { project_id: "project-1", name: "Apollo" },
+      { project_id: "project-2", name: "Borealis" },
+    ],
+    ...overrides,
+  };
+}
+
 function deferredResponse(): {
   promise: Promise<Response>;
   resolve: (response: Response) => void;
@@ -77,7 +104,8 @@ describe("Computers", () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(jsonResponse({ devices: [device()] }))
-      .mockResolvedValueOnce(jsonResponse(device()));
+      .mockResolvedValueOnce(jsonResponse(device()))
+      .mockResolvedValueOnce(jsonResponse({ error: "not_found" }, 404));
     const user = userEvent.setup();
 
     render(<Computers embedded onUnauthorized={vi.fn()} />);
@@ -106,7 +134,7 @@ describe("Computers", () => {
     );
     expect(screen.getByText("device-v1")).toBeInTheDocument();
     expect(screen.getByText("visual-evidence")).toBeInTheDocument();
-    expect(screen.getByText("project-1")).toBeInTheDocument();
+    expect(screen.queryByText("project-1")).not.toBeInTheDocument();
     expect(screen.getByText(/aaaa aaaa aaaa/)).toBeInTheDocument();
     const details = screen.getByRole("article", { name: "Office Mac mini" });
     expect(details).toHaveTextContent("Active runs1");
@@ -125,6 +153,7 @@ describe("Computers", () => {
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(jsonResponse({ devices: [device()] }))
       .mockResolvedValueOnce(jsonResponse(device()))
+      .mockResolvedValueOnce(jsonResponse({ error: "not_found" }, 404))
       .mockResolvedValueOnce(jsonResponse(renamed))
       .mockResolvedValueOnce(jsonResponse({ devices: [renamed] }))
       .mockResolvedValueOnce(jsonResponse(renamed));
@@ -142,9 +171,8 @@ describe("Computers", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await screen.findByRole("heading", { name: "Build Mac" });
-    const patch = fetchMock.mock.calls[2];
-    expect(patch?.[0]).toBe("/api/devices/device-1");
-    expect(patch?.[1]).toMatchObject({
+    expect(fetchMock.mock.calls[3]?.[0]).toBe("/api/devices/device-1");
+    expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({
       method: "PATCH",
       body: JSON.stringify({ name: "Build Mac", location_label: "Studio" }),
     });
@@ -170,7 +198,8 @@ describe("Computers", () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(jsonResponse({ devices: [first, second] }))
       .mockReturnValueOnce(firstDetail.promise)
-      .mockReturnValueOnce(secondDetail.promise);
+      .mockReturnValueOnce(secondDetail.promise)
+      .mockResolvedValueOnce(jsonResponse({ error: "not_found" }, 404));
     const user = userEvent.setup();
 
     render(<Computers embedded onUnauthorized={vi.fn()} />);
@@ -204,6 +233,7 @@ describe("Computers", () => {
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(jsonResponse({ devices: [device()] }))
       .mockResolvedValueOnce(jsonResponse(device()))
+      .mockResolvedValueOnce(jsonResponse({ error: "not_found" }, 404))
       .mockResolvedValueOnce(jsonResponse(revoked))
       .mockResolvedValueOnce(jsonResponse({ devices: [revoked] }))
       .mockResolvedValueOnce(jsonResponse(revoked));
@@ -234,10 +264,202 @@ describe("Computers", () => {
     expect(within(screen.getByLabelText("Computer status")).getByText("revoked")).toHaveClass(
       "badge-default",
     );
-    expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({
+    expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({ reason: "Retiring this installation" }),
     });
+  });
+
+  it("grants and removes project access without exposing repository or grant identifiers", async () => {
+    let apolloActive = true;
+    let borealisActive = false;
+    const currentAccess = (): Record<string, unknown> =>
+      repositoryAccess({
+        registrations: [
+          {
+            registration_id: "registration-1",
+            repository_id: "repository-1",
+            repository_display_name: "The Norns",
+            default_branch: "main",
+            state: "active",
+            grants: [
+              ...(apolloActive
+                ? [
+                    {
+                      grant_id: "grant-1",
+                      project_id: "project-1",
+                      state: "active",
+                    },
+                  ]
+                : []),
+              ...(borealisActive
+                ? [
+                    {
+                      grant_id: "grant-2",
+                      project_id: "project-2",
+                      state: "active",
+                    },
+                  ]
+                : []),
+            ],
+          },
+        ],
+      });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = String(input);
+      const method = init?.method ?? "GET";
+      if (path === "/api/devices" && method === "GET") {
+        return jsonResponse({ devices: [device()] });
+      }
+      if (path === "/api/devices/device-1" && method === "GET") {
+        return jsonResponse(device());
+      }
+      if (path === "/api/devices/device-1/repository-access" && method === "GET") {
+        return jsonResponse(currentAccess());
+      }
+      if (path === "/api/devices/device-1/repository-grants" && method === "POST") {
+        borealisActive = true;
+        return jsonResponse(currentAccess());
+      }
+      if (path === "/api/devices/device-1/repository-grants/grant-1/revoke" && method === "POST") {
+        apolloActive = false;
+        return jsonResponse(currentAccess());
+      }
+      return jsonResponse({ error: "not_found" }, 404);
+    });
+    const user = userEvent.setup();
+
+    render(<Computers embedded onUnauthorized={vi.fn()} />);
+    await user.click(
+      await screen.findByRole("button", { name: "View details for Office Mac mini" }),
+    );
+
+    const accessHeading = await screen.findByRole("heading", { name: "Repository access" });
+    const accessSection = accessHeading.closest("section");
+    expect(accessSection).not.toBeNull();
+    const scoped = within(accessSection as HTMLElement);
+    expect(scoped.getByRole("article", { name: "The Norns" })).toHaveTextContent(
+      "Default branch main",
+    );
+    expect(scoped.getByText("Apollo")).toBeInTheDocument();
+    expect(accessSection).not.toHaveTextContent("registration-1");
+    expect(accessSection).not.toHaveTextContent("repository-1");
+    expect(accessSection).not.toHaveTextContent("grant-1");
+    expect(accessSection).not.toHaveTextContent("project-1");
+
+    expect(scoped.getByRole("combobox", { name: "Project for The Norns" })).toHaveValue(
+      "project-2",
+    );
+    await user.click(scoped.getByRole("button", { name: "Grant project access" }));
+    await waitFor(() => {
+      const grants = scoped.getByRole("list", { name: "Active project access" });
+      expect(grants).toHaveTextContent("Apollo");
+      expect(grants).toHaveTextContent("Borealis");
+    });
+
+    const grantCall = fetchMock.mock.calls.find(
+      ([path, init]) =>
+        path === "/api/devices/device-1/repository-grants" && init?.method === "POST",
+    );
+    expect(grantCall?.[1]?.body).toBe(
+      JSON.stringify({
+        repository_registration_id: "registration-1",
+        project_id: "project-2",
+      }),
+    );
+
+    await user.click(scoped.getByRole("button", { name: "Remove Apollo access" }));
+    expect(scoped.getByText(/local files will not be deleted/i)).toBeInTheDocument();
+    await user.click(scoped.getByRole("button", { name: "Remove access" }));
+    await waitFor(() =>
+      expect(scoped.getByRole("list", { name: "Active project access" })).not.toHaveTextContent(
+        "Apollo",
+      ),
+    );
+    const revokeCall = fetchMock.mock.calls.find(
+      ([path, init]) =>
+        path === "/api/devices/device-1/repository-grants/grant-1/revoke" &&
+        init?.method === "POST",
+    );
+    expect(revokeCall?.[1]?.body).toBe(JSON.stringify({}));
+    expect(accessSection).not.toHaveTextContent("grant-2");
+  });
+
+  it("fails closed when repository access is widened with a local path", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({ devices: [device()] }))
+      .mockResolvedValueOnce(jsonResponse(device()))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          repositoryAccess({
+            registrations: [
+              {
+                registration_id: "registration-1",
+                repository_id: "repository-1",
+                repository_display_name: "The Norns",
+                default_branch: "main",
+                state: "active",
+                grants: [],
+                workspace_path: "/Users/owner/secret-worktree",
+              },
+            ],
+          }),
+        ),
+      );
+    const user = userEvent.setup();
+
+    render(<Computers embedded onUnauthorized={vi.fn()} />);
+    await user.click(
+      await screen.findByRole("button", { name: "View details for Office Mac mini" }),
+    );
+
+    expect(await screen.findByTestId("repository-access-error")).toHaveTextContent(
+      "Repository access response is invalid.",
+    );
+    expect(screen.queryByText("/Users/owner/secret-worktree")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Grant project access" })).not.toBeInTheDocument();
+  });
+
+  it("reloads owner access when a project grant choice disappears during submission", async () => {
+    let accessRequests = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = String(input);
+      const method = init?.method ?? "GET";
+      if (path === "/api/devices" && method === "GET") {
+        return jsonResponse({ devices: [device()] });
+      }
+      if (path === "/api/devices/device-1" && method === "GET") {
+        return jsonResponse(device());
+      }
+      if (path === "/api/devices/device-1/repository-access" && method === "GET") {
+        accessRequests += 1;
+        return jsonResponse(
+          accessRequests === 1
+            ? repositoryAccess()
+            : repositoryAccess({
+                eligible_projects: [{ project_id: "project-1", name: "Apollo" }],
+              }),
+        );
+      }
+      if (path === "/api/devices/device-1/repository-grants" && method === "POST") {
+        return jsonResponse({ error: "not_found" }, 404);
+      }
+      return jsonResponse({ error: "not_found" }, 404);
+    });
+    const user = userEvent.setup();
+
+    render(<Computers embedded onUnauthorized={vi.fn()} />);
+    await user.click(
+      await screen.findByRole("button", { name: "View details for Office Mac mini" }),
+    );
+    await user.click(await screen.findByRole("button", { name: "Grant project access" }));
+
+    expect(await screen.findByTestId("repository-access-error")).toHaveTextContent(
+      "no longer available",
+    );
+    expect(accessRequests).toBe(2);
+    expect(screen.getByRole("heading", { name: "Repository access" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Grant project access" })).not.toBeInTheDocument();
   });
 
   it("returns an expired session to the application", async () => {

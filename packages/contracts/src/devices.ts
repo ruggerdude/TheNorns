@@ -1,6 +1,12 @@
 import { z } from "zod";
 
-import { V2EntityId, V2IsoDateTime, V2NonEmptyString, V2Sha256Hex } from "./v2/common.js";
+import {
+  V2EntityId,
+  V2GitCommitSha,
+  V2IsoDateTime,
+  V2NonEmptyString,
+  V2Sha256Hex,
+} from "./v2/common.js";
 
 const DeviceGeneration = z.number().int().nonnegative();
 const NonNegativeCount = z.number().int().nonnegative();
@@ -198,7 +204,7 @@ export const ProjectExecutionTargetStatusDimensions = z
     availability: DeviceAvailability,
     compatibility: DeviceCompatibility,
     workload: DeviceWorkload,
-    access: z.literal("shared"),
+    access: z.union([z.literal("shared"), z.literal("pending")]),
   })
   .strict();
 export type ProjectExecutionTargetStatusDimensionsT = z.infer<
@@ -452,8 +458,124 @@ export const DEVICE_GATEWAY_CREDENTIAL_MINT_HTTP_SIGNATURE_PURPOSE =
   "norns.runner-http.gateway-credential-mint.v1" as const;
 export const DEVICE_VISUAL_EVIDENCE_UPLOAD_HTTP_SIGNATURE_PURPOSE =
   "norns.runner-http.visual-evidence-upload.v1" as const;
+export const DEVICE_REPOSITORY_REGISTRATION_HTTP_SIGNATURE_PURPOSE =
+  "norns.runner-http.repository-registration.v1" as const;
+export const DEVICE_REPOSITORY_REGISTRATION_REVOCATION_HTTP_SIGNATURE_PURPOSE =
+  "norns.runner-http.repository-registration-revocation.v1" as const;
+export const DEVICE_PUBLICATION_PERMIT_ISSUE_HTTP_SIGNATURE_PURPOSE =
+  "norns.runner-http.publication-permit-issue.v1" as const;
+export const DEVICE_PUBLICATION_PERMIT_CONSUME_HTTP_SIGNATURE_PURPOSE =
+  "norns.runner-http.publication-permit-consume.v1" as const;
+export const DEVICE_PUBLICATION_PERMIT_PURPOSE = "norns.device-publication-permit.v1" as const;
 export const DEVICE_WSS_AUTH_SIGNATURE_PURPOSE = "norns.runner-wss-auth.v1" as const;
 export const DEVICE_WSS_PROTOCOL_VERSION = "1" as const;
+
+export const DeviceRepositoryRegistrationRequest = z
+  .object({
+    workspace_id: V2EntityId,
+    repository_id: V2EntityId,
+    repository_display_name: z.string().trim().min(1).max(240),
+    default_branch: z.string().trim().min(1).max(240),
+    observed_head: V2GitCommitSha,
+  })
+  .strict();
+export type DeviceRepositoryRegistrationRequestT = z.infer<
+  typeof DeviceRepositoryRegistrationRequest
+>;
+
+export const DeviceRepositoryRegistrationResponse = z
+  .object({
+    registration_id: V2EntityId,
+    status: z.literal("active"),
+    workspace_id: V2EntityId,
+    repository_id: V2EntityId,
+  })
+  .strict();
+export type DeviceRepositoryRegistrationResponseT = z.infer<
+  typeof DeviceRepositoryRegistrationResponse
+>;
+
+export const DeviceRepositoryRegistrationRevocationRequest = z
+  .object({
+    workspace_id: V2EntityId,
+    repository_id: V2EntityId,
+  })
+  .strict();
+export type DeviceRepositoryRegistrationRevocationRequestT = z.infer<
+  typeof DeviceRepositoryRegistrationRevocationRequest
+>;
+
+export const DeviceRepositoryRegistrationRevocationResponse = z
+  .object({
+    registration_id: V2EntityId,
+    status: z.literal("revoked"),
+  })
+  .strict();
+export type DeviceRepositoryRegistrationRevocationResponseT = z.infer<
+  typeof DeviceRepositoryRegistrationRevocationResponse
+>;
+
+export const DevicePublicationPermitIssueRequest = z
+  .object({
+    run_id: V2EntityId,
+    repository_registration_id: V2EntityId,
+    project_device_repository_grant_id: V2EntityId,
+    repository_binding_id: V2EntityId,
+    repository_id: V2EntityId,
+    branch: z.string().trim().min(1).max(240),
+    commit_sha: V2GitCommitSha,
+  })
+  .strict();
+export type DevicePublicationPermitIssueRequestT = z.infer<
+  typeof DevicePublicationPermitIssueRequest
+>;
+
+export const DevicePublicationPermitClaims = DevicePublicationPermitIssueRequest.extend({
+  purpose: z.literal(DEVICE_PUBLICATION_PERMIT_PURPOSE),
+  permit_id: V2EntityId,
+  device_id: V2EntityId,
+  credential_id: V2EntityId,
+  generation: DeviceGeneration,
+  issued_at: V2IsoDateTime,
+  expires_at: V2IsoDateTime,
+}).strict();
+export type DevicePublicationPermitClaimsT = z.infer<typeof DevicePublicationPermitClaims>;
+
+const SignedDevicePublicationPermitFields = {
+  permit: DevicePublicationPermitClaims,
+  key_id: V2EntityId,
+  // An Ed25519 signature is exactly 64 bytes. Its canonical RFC 4648 base64
+  // encoding is 88 characters, ends in `==`, and has zero unused low bits in
+  // the final data character (whose alphabet index is therefore a multiple of
+  // sixteen).
+  signature_base64: z
+    .string()
+    .regex(
+      /^[A-Za-z0-9+/]{85}[AQgw]==$/,
+      "must be canonical base64 for an exact 64-byte Ed25519 signature",
+    ),
+} as const;
+
+export const SignedDevicePublicationPermit = z.object(SignedDevicePublicationPermitFields).strict();
+export type SignedDevicePublicationPermitT = z.infer<typeof SignedDevicePublicationPermit>;
+
+export const DevicePublicationPermitConsumeRequest = z
+  .object(SignedDevicePublicationPermitFields)
+  .strict();
+export type DevicePublicationPermitConsumeRequestT = z.infer<
+  typeof DevicePublicationPermitConsumeRequest
+>;
+
+export const DevicePublicationPermitConsumeResponse = z
+  .object({
+    outcome: z.literal("authorized"),
+    permit_id: V2EntityId,
+    consumed_at: V2IsoDateTime,
+  })
+  .strict();
+export type DevicePublicationPermitConsumeResponseT = z.infer<
+  typeof DevicePublicationPermitConsumeResponse
+>;
 
 const SignedDeviceHttpTranscriptFields = {
   device_id: V2EntityId,
@@ -505,10 +627,54 @@ export type SignedDeviceVisualEvidenceUploadHttpTranscriptT = z.infer<
   typeof SignedDeviceVisualEvidenceUploadHttpTranscript
 >;
 
+export const SignedDeviceRepositoryRegistrationHttpTranscript = z
+  .object({
+    purpose: z.literal(DEVICE_REPOSITORY_REGISTRATION_HTTP_SIGNATURE_PURPOSE),
+    ...SignedDeviceHttpTranscriptFields,
+  })
+  .strict();
+export type SignedDeviceRepositoryRegistrationHttpTranscriptT = z.infer<
+  typeof SignedDeviceRepositoryRegistrationHttpTranscript
+>;
+
+export const SignedDeviceRepositoryRegistrationRevocationHttpTranscript = z
+  .object({
+    purpose: z.literal(DEVICE_REPOSITORY_REGISTRATION_REVOCATION_HTTP_SIGNATURE_PURPOSE),
+    ...SignedDeviceHttpTranscriptFields,
+  })
+  .strict();
+export type SignedDeviceRepositoryRegistrationRevocationHttpTranscriptT = z.infer<
+  typeof SignedDeviceRepositoryRegistrationRevocationHttpTranscript
+>;
+
+export const SignedDevicePublicationPermitIssueHttpTranscript = z
+  .object({
+    purpose: z.literal(DEVICE_PUBLICATION_PERMIT_ISSUE_HTTP_SIGNATURE_PURPOSE),
+    ...SignedDeviceHttpTranscriptFields,
+  })
+  .strict();
+export type SignedDevicePublicationPermitIssueHttpTranscriptT = z.infer<
+  typeof SignedDevicePublicationPermitIssueHttpTranscript
+>;
+
+export const SignedDevicePublicationPermitConsumeHttpTranscript = z
+  .object({
+    purpose: z.literal(DEVICE_PUBLICATION_PERMIT_CONSUME_HTTP_SIGNATURE_PURPOSE),
+    ...SignedDeviceHttpTranscriptFields,
+  })
+  .strict();
+export type SignedDevicePublicationPermitConsumeHttpTranscriptT = z.infer<
+  typeof SignedDevicePublicationPermitConsumeHttpTranscript
+>;
+
 export const SignedDeviceHttpTranscript = z.discriminatedUnion("purpose", [
   SignedDeviceContextRetrievalHttpTranscript,
   SignedDeviceGatewayCredentialMintHttpTranscript,
   SignedDeviceVisualEvidenceUploadHttpTranscript,
+  SignedDeviceRepositoryRegistrationHttpTranscript,
+  SignedDeviceRepositoryRegistrationRevocationHttpTranscript,
+  SignedDevicePublicationPermitIssueHttpTranscript,
+  SignedDevicePublicationPermitConsumeHttpTranscript,
 ]);
 export type SignedDeviceHttpTranscriptT = z.infer<typeof SignedDeviceHttpTranscript>;
 
@@ -807,6 +973,29 @@ export function serializeSignedDeviceHttpTranscript(input: SignedDeviceHttpTrans
     body_sha256: transcript.body_sha256,
     timestamp: transcript.timestamp,
     request_id: transcript.request_id,
+  });
+}
+
+/** Fixed-order bytes signed by the server for a one-use publication permit. */
+export function serializeDevicePublicationPermitClaims(
+  input: DevicePublicationPermitClaimsT,
+): string {
+  const permit = DevicePublicationPermitClaims.parse(input);
+  return JSON.stringify({
+    purpose: permit.purpose,
+    permit_id: permit.permit_id,
+    run_id: permit.run_id,
+    device_id: permit.device_id,
+    credential_id: permit.credential_id,
+    generation: permit.generation,
+    repository_registration_id: permit.repository_registration_id,
+    project_device_repository_grant_id: permit.project_device_repository_grant_id,
+    repository_binding_id: permit.repository_binding_id,
+    repository_id: permit.repository_id,
+    branch: permit.branch,
+    commit_sha: permit.commit_sha,
+    issued_at: permit.issued_at,
+    expires_at: permit.expires_at,
   });
 }
 

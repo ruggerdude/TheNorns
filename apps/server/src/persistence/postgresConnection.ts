@@ -126,6 +126,7 @@ interface RuntimeSchemaPosture {
   device_agent_protocol_version: boolean;
   device_agent_capabilities: boolean;
   device_last_seen_at: boolean;
+  device_publication_permits: string | null;
 }
 
 /**
@@ -299,7 +300,9 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                WHERE table_schema='public'
                  AND table_name='devices'
                  AND column_name='last_seen_at'
-            ) AS device_last_seen_at`,
+            ) AS device_last_seen_at,
+            to_regclass('public.device_publication_permits')::text
+              AS device_publication_permits`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -353,6 +356,7 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.device_agent_protocol_version ? ["devices.agent_protocol_version"] : []),
     ...(!posture?.device_agent_capabilities ? ["devices.agent_capabilities"] : []),
     ...(!posture?.device_last_seen_at ? ["devices.last_seen_at"] : []),
+    ...(!posture?.device_publication_permits ? ["device_publication_permits"] : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

@@ -1,3 +1,4 @@
+import { type KeyObject, createPrivateKey } from "node:crypto";
 import type { DeviceCodeHmacKey } from "./crypto.js";
 
 export interface DeviceEnrollmentRuntimeEnvironment {
@@ -8,6 +9,50 @@ export interface DeviceEnrollmentRuntimeEnvironment {
 
 export interface DeviceManagementRuntimeEnvironment {
   NORNS_ENABLE_DEVICE_MANAGEMENT?: string | undefined;
+}
+
+export interface DeviceRepositoryAccessRuntimeEnvironment {
+  NORNS_ENABLE_DEVICE_REPOSITORY_ACCESS?: string | undefined;
+  NORNS_DEVICE_PUBLICATION_SIGNING_KEY_ID?: string | undefined;
+  NORNS_DEVICE_PUBLICATION_SIGNING_PRIVATE_KEY?: string | undefined;
+}
+
+export type DeviceRepositoryAccessRuntimeConfiguration =
+  | { enabled: false }
+  | {
+      enabled: true;
+      publication_signing_key_id: string;
+      publication_signing_private_key: KeyObject;
+    };
+
+export type DeviceRepositoryAccessRuntimeConfigurationErrorCode =
+  | "device_repository_access_flag_invalid"
+  | "publication_signing_key_id_missing"
+  | "publication_signing_key_id_invalid"
+  | "publication_signing_private_key_missing"
+  | "publication_signing_private_key_invalid"
+  | "publication_signing_private_key_too_short"
+  | "publication_signing_private_key_not_ed25519";
+
+export class DeviceRepositoryAccessRuntimeConfigurationError extends Error {
+  constructor(readonly code: DeviceRepositoryAccessRuntimeConfigurationErrorCode) {
+    super(
+      code === "device_repository_access_flag_invalid"
+        ? "NORNS_ENABLE_DEVICE_REPOSITORY_ACCESS must be exactly true or false"
+        : code === "publication_signing_key_id_missing"
+          ? "device repository access requires a publication signing key ID"
+          : code === "publication_signing_key_id_invalid"
+            ? "the publication signing key ID is invalid"
+            : code === "publication_signing_private_key_missing"
+              ? "device repository access requires a publication signing private key"
+              : code === "publication_signing_private_key_too_short"
+                ? "the publication signing private key must contain at least 256 bits"
+                : code === "publication_signing_private_key_not_ed25519"
+                  ? "the publication signing private key must be Ed25519"
+                  : "the publication signing private key encoding is invalid",
+    );
+    this.name = "DeviceRepositoryAccessRuntimeConfigurationError";
+  }
 }
 
 export type DeviceManagementRuntimeConfiguration = {
@@ -129,4 +174,80 @@ export function parseDeviceManagementRuntimeConfiguration(
     throw new DeviceManagementRuntimeConfigurationError("device_management_flag_invalid");
   }
   return { enabled: true };
+}
+
+/**
+ * Phase 4 remains absent unless explicitly enabled. Publication permits use a
+ * dedicated Ed25519 key; enrollment HMAC material is never accepted here.
+ */
+export function parseDeviceRepositoryAccessRuntimeConfiguration(
+  environment: DeviceRepositoryAccessRuntimeEnvironment,
+): DeviceRepositoryAccessRuntimeConfiguration {
+  const flag = environment.NORNS_ENABLE_DEVICE_REPOSITORY_ACCESS;
+  if (flag === undefined || flag === "false") return { enabled: false };
+  if (flag !== "true") {
+    throw new DeviceRepositoryAccessRuntimeConfigurationError(
+      "device_repository_access_flag_invalid",
+    );
+  }
+
+  const keyId = environment.NORNS_DEVICE_PUBLICATION_SIGNING_KEY_ID;
+  if (keyId === undefined || keyId.length === 0) {
+    throw new DeviceRepositoryAccessRuntimeConfigurationError("publication_signing_key_id_missing");
+  }
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(keyId)) {
+    throw new DeviceRepositoryAccessRuntimeConfigurationError("publication_signing_key_id_invalid");
+  }
+
+  const encoded = environment.NORNS_DEVICE_PUBLICATION_SIGNING_PRIVATE_KEY;
+  if (encoded === undefined || encoded.length === 0) {
+    throw new DeviceRepositoryAccessRuntimeConfigurationError(
+      "publication_signing_private_key_missing",
+    );
+  }
+
+  let der: Buffer;
+  try {
+    if (
+      encoded.length % 4 === 0 &&
+      /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)
+    ) {
+      der = Buffer.from(encoded, "base64");
+      if (der.toString("base64") !== encoded) throw new Error("non-canonical base64");
+    } else if (/^[A-Za-z0-9_-]+$/.test(encoded)) {
+      der = Buffer.from(encoded, "base64url");
+      if (der.toString("base64url") !== encoded) throw new Error("non-canonical base64url");
+    } else {
+      throw new Error("invalid alphabet");
+    }
+  } catch {
+    throw new DeviceRepositoryAccessRuntimeConfigurationError(
+      "publication_signing_private_key_invalid",
+    );
+  }
+  if (der.byteLength < 32) {
+    throw new DeviceRepositoryAccessRuntimeConfigurationError(
+      "publication_signing_private_key_too_short",
+    );
+  }
+
+  let privateKey: KeyObject;
+  try {
+    privateKey = createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+  } catch {
+    throw new DeviceRepositoryAccessRuntimeConfigurationError(
+      "publication_signing_private_key_invalid",
+    );
+  }
+  if (privateKey.asymmetricKeyType !== "ed25519") {
+    throw new DeviceRepositoryAccessRuntimeConfigurationError(
+      "publication_signing_private_key_not_ed25519",
+    );
+  }
+
+  return {
+    enabled: true,
+    publication_signing_key_id: keyId,
+    publication_signing_private_key: privateKey,
+  };
 }

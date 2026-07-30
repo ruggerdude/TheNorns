@@ -28,6 +28,7 @@ describe.sequential("scoped device browser delivery", () => {
       CREATE TABLE projects (
         id TEXT PRIMARY KEY,
         owner_user_id TEXT REFERENCES users(id),
+        primary_repository_binding_id TEXT,
         status TEXT NOT NULL
       );
       CREATE TABLE project_members (
@@ -48,6 +49,12 @@ describe.sequential("scoped device browser delivery", () => {
     await database.exec(
       await readFile(new URL("../drizzle/0053_device_identity_core.sql", import.meta.url), "utf8"),
     );
+    await database.exec(`
+      ALTER TABLE device_repository_registrations
+        ADD COLUMN approved_credential_id TEXT;
+      ALTER TABLE device_repository_registrations
+        ADD COLUMN approved_generation BIGINT;
+    `);
     await database.exec(`
       INSERT INTO users (id, role, status) VALUES
         ('device-owner', 'member', 'active'),
@@ -106,25 +113,28 @@ describe.sequential("scoped device browser delivery", () => {
 
       INSERT INTO device_repository_registrations (
         id, device_id, workspace_id, repository_id,
-        repository_display_name, state, approved_by_user_id, approved_at
+        repository_display_name, state, approved_by_user_id, approved_at,
+        approved_credential_id, approved_generation
       ) VALUES
         (
           'registration-1', 'device-1', 'workspace-1', 'repository-1',
-          'Repository 1', 'active', 'device-owner', now()
+          'Repository 1', 'active', 'device-owner', now(), 'credential-1', 1
         ),
         (
           'registration-2', 'device-1', 'workspace-2', 'repository-2',
-          'Repository 2', 'active', 'device-owner', now()
+          'Repository 2', 'active', 'device-owner', now(), 'credential-1', 1
         ),
         (
           'registration-disabled-owner', 'device-disabled-owner',
           'workspace-disabled-owner', 'repository-disabled-owner',
-          'Disabled owner repository', 'active', 'disabled-device-owner', now()
+          'Disabled owner repository', 'active', 'disabled-device-owner', now(),
+          'credential-disabled-owner', 1
         ),
         (
           'registration-revoked-credential', 'device-revoked-credential',
           'workspace-revoked-credential', 'repository-revoked-credential',
-          'Revoked credential repository', 'active', 'device-owner', now()
+          'Revoked credential repository', 'active', 'device-owner', now(),
+          'credential-revoked', 1
         );
 
       INSERT INTO project_device_repository_grants (
@@ -176,6 +186,10 @@ describe.sequential("scoped device browser delivery", () => {
           'workspace-revoked-credential', 'repository-revoked-credential',
           'grant-revoked-credential'
         );
+
+      UPDATE projects
+         SET primary_repository_binding_id = 'target-1'
+       WHERE id = 'project-1';
     `);
     delivery = new ScopedDeviceBrowserDelivery(
       new PostgresDeviceBrowserAudienceRepository(database),
@@ -231,7 +245,7 @@ describe.sequential("scoped device browser delivery", () => {
       {
         device_id: "device-1",
         project_id: "project-1",
-        execution_target_id: "target-1",
+        execution_target_id: "grant-1",
         target: projectTarget(),
       },
       sessions,
@@ -267,10 +281,10 @@ describe.sequential("scoped device browser delivery", () => {
         {
           device_id: "device-1",
           project_id: "project-1",
-          execution_target_id: "target-revoked",
+          execution_target_id: "grant-revoked",
           target: {
             ...projectTarget(),
-            execution_target_id: "target-revoked",
+            execution_target_id: "grant-revoked",
           },
         },
         sessions,
@@ -285,7 +299,7 @@ describe.sequential("scoped device browser delivery", () => {
         {
           device_id: "device-1",
           project_id: "project-2",
-          execution_target_id: "target-1",
+          execution_target_id: "grant-1",
           target: projectTarget(),
         },
         sessions,
@@ -300,8 +314,8 @@ describe.sequential("scoped device browser delivery", () => {
 
   it("excludes targets whose owner or current credential is inactive", async () => {
     for (const [device_id, execution_target_id] of [
-      ["device-disabled-owner", "target-disabled-owner"],
-      ["device-revoked-credential", "target-revoked-credential"],
+      ["device-disabled-owner", "grant-disabled-owner"],
+      ["device-revoked-credential", "grant-revoked-credential"],
     ] as const) {
       await expect(
         delivery.deliverProjectTargetStatus(
@@ -345,7 +359,7 @@ describe.sequential("scoped device browser delivery", () => {
         {
           device_id: "device-1",
           project_id: "project-1",
-          execution_target_id: "target-1",
+          execution_target_id: "grant-1",
           target: projectTarget(),
         },
         sessions,
@@ -373,7 +387,7 @@ describe.sequential("scoped device browser delivery", () => {
         {
           device_id: "device-1",
           project_id: "project-1",
-          execution_target_id: "target-1",
+          execution_target_id: "grant-1",
           target: unsafeTarget,
         },
         sessions,
@@ -408,7 +422,7 @@ describe.sequential("scoped device browser delivery", () => {
   function projectTarget() {
     return {
       project_id: "project-1",
-      execution_target_id: "target-1",
+      execution_target_id: "grant-1",
       name: "Office Mac mini",
       location_label: "Office",
       os_family: "macos" as const,

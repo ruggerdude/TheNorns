@@ -381,6 +381,12 @@ export const DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const DEVICE_REPOSITORY_ACCESS_MIGRATION_NAME = "0058_device_repository_access";
+export const DEVICE_REPOSITORY_ACCESS_MIGRATION_URL = new URL(
+  "../../../drizzle/0058_device_repository_access.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -639,6 +645,10 @@ export async function loadGatewayDeviceAuthorizationMigrationSql(): Promise<stri
 
 export async function loadDeviceManagementObservationsMigrationSql(): Promise<string> {
   return readFile(DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_URL, "utf8");
+}
+
+export async function loadDeviceRepositoryAccessMigrationSql(): Promise<string> {
+  return readFile(DEVICE_REPOSITORY_ACCESS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -980,6 +990,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_NAME,
       sql: await loadDeviceManagementObservationsMigrationSql(),
+    },
+    {
+      name: DEVICE_REPOSITORY_ACCESS_MIGRATION_NAME,
+      sql: await loadDeviceRepositoryAccessMigrationSql(),
     },
   ];
 }

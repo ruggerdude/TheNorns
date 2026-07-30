@@ -383,60 +383,14 @@ describe.sequential("owner device management and project execution targets", () 
     });
   });
 
-  it("returns only grant-scoped privacy-reduced targets to active project users", async () => {
-    await database.exec("UPDATE agent_runs SET state='completed' WHERE id='run-1'");
-    await database.query(
-      `INSERT INTO agent_runs (
-         id,project_id,repository_binding_id,initiated_by_user_id,state
-       ) VALUES ('private-run','project-2','target-other',$1,'running')`,
-      [outsider.id],
-    );
-    await database.exec(`
-      INSERT INTO commands (
-        command_id,run_id,runner_id,runner_generation,status,created_at
-      ) VALUES (
-        'private-command','private-run','device-1',1,'executing',
-        '2026-07-29T12:45:00.000Z'
-      );
-    `);
-
-    for (const identity of [projectOwner, projectMember]) {
+  it("keeps project execution targets behind the independent Phase 4 gate", async () => {
+    for (const identity of [projectOwner, projectMember, owner, outsider, adminOnly]) {
       const response = await server.app.inject({
         method: "GET",
         url: "/api/projects/project-1/execution-targets",
         headers: { authorization: `Bearer ${identity.token}` },
       });
-      expect(response.statusCode, identity.id).toBe(200);
-      expect(response.json()).toEqual({
-        execution_targets: [
-          {
-            project_id: "project-1",
-            execution_target_id: "target-1",
-            name: "Studio Mac",
-            location_label: "Studio",
-            os_family: "macos",
-            status: {
-              availability: "online",
-              compatibility: "ready",
-              workload: "idle",
-              access: "shared",
-            },
-            last_seen_at: "2026-07-29T12:00:00.000Z",
-          },
-        ],
-      });
-      expect(JSON.stringify(response.json())).not.toMatch(
-        /owner_user_id|fingerprint|credential|protocol|version|capabilities|grant|activity|repository/,
-      );
-    }
-
-    for (const identity of [owner, outsider, adminOnly]) {
-      const forbidden = await server.app.inject({
-        method: "GET",
-        url: "/api/projects/project-1/execution-targets",
-        headers: { authorization: `Bearer ${identity.token}` },
-      });
-      expect(forbidden.statusCode, identity.id).toBe(404);
+      expect(response.statusCode, identity.id).toBe(404);
     }
   });
 
@@ -474,6 +428,6 @@ describe.sequential("owner device management and project execution targets", () 
       url: "/api/projects/project-1/execution-targets",
       headers: { authorization: `Bearer ${projectMember.token}` },
     });
-    expect(targetAfterRevocation.json()).toEqual({ execution_targets: [] });
+    expect(targetAfterRevocation.statusCode).toBe(404);
   });
 });

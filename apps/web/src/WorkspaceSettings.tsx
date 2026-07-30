@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Button, Field, Select, Spinner, TextArea } from "./ui";
 import {
@@ -10,6 +10,12 @@ import {
   saveGlobalUpdatePreferences,
   saveProjectUpdatePreferences,
 } from "./workspacePreferences";
+
+const ExecutionTargetSettings = lazy(() =>
+  import("./ExecutionTargetSettings").then(({ ExecutionTargetSettings }) => ({
+    default: ExecutionTargetSettings,
+  })),
+);
 
 interface ProjectRulesDto {
   filename: string;
@@ -202,6 +208,10 @@ export function WorkspaceSettings({
 
   return (
     <div className="workspace-settings-grid" data-testid="workspace-settings">
+      <Suspense fallback={<Spinner label="Loading execution target settings…" />}>
+        <ExecutionTargetSettings projectId={projectId} onUnauthorized={onUnauthorized} />
+      </Suspense>
+
       <section className="card workspace-settings-card" aria-labelledby="updates-heading">
         <div className="section-head">
           <div>

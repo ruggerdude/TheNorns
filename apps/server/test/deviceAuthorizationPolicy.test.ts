@@ -57,6 +57,11 @@ describe.sequential("action-specific device authorization policy", () => {
     );
     await database.exec(migration);
     await database.exec(`
+      ALTER TABLE device_repository_registrations
+        ADD COLUMN default_branch TEXT,
+        ADD COLUMN approved_credential_id TEXT,
+        ADD COLUMN approved_generation BIGINT;
+
       INSERT INTO users (id, role, status) VALUES
         ('device-owner', 'member', 'active'),
         ('project-owner', 'member', 'active'),
@@ -106,15 +111,18 @@ describe.sequential("action-specific device authorization policy", () => {
 
       INSERT INTO device_repository_registrations (
         id, device_id, workspace_id, repository_id,
-        repository_display_name, state, approved_by_user_id, approved_at
+        repository_display_name, state, approved_by_user_id, approved_at,
+        default_branch, approved_credential_id, approved_generation
       ) VALUES
         (
           'registration-1', 'device-1', 'workspace-1', 'repository-1',
-          'Repository 1', 'active', 'device-owner', now()
+          'Repository 1', 'active', 'device-owner', now(),
+          'main', 'credential-1', 1
         ),
         (
           'registration-2', 'device-1', 'workspace-2', 'repository-2',
-          'Repository 2', 'active', 'device-owner', now()
+          'Repository 2', 'active', 'device-owner', now(),
+          'main', 'credential-1', 1
         );
 
       INSERT INTO project_device_repository_grants (
@@ -284,7 +292,7 @@ describe.sequential("action-specific device authorization policy", () => {
       policy.canAcceptProjectTarget({
         actor_user_id: "project-owner",
         project_id: "project-1",
-        execution_target_id: "binding-1",
+        execution_target_id: "grant-1",
       }),
     ).resolves.toMatchObject({ action: "canAcceptProjectTarget", allowed: true });
 
@@ -293,11 +301,11 @@ describe.sequential("action-specific device authorization policy", () => {
         policy.canAcceptProjectTarget({
           actor_user_id,
           project_id: "project-1",
-          execution_target_id: "binding-1",
+          execution_target_id: "grant-1",
         }),
       ).resolves.toMatchObject({ action: "canAcceptProjectTarget", allowed: false });
     }
-    for (const execution_target_id of ["grant-1", "binding-mismatch", "binding-revoked-grant"]) {
+    for (const execution_target_id of ["binding-1", "binding-mismatch", "grant-revoked"]) {
       await expect(
         policy.canAcceptProjectTarget({
           actor_user_id: "project-owner",
@@ -407,7 +415,7 @@ describe.sequential("action-specific device authorization policy", () => {
       policy.canAcceptProjectTarget({
         actor_user_id: "admin-only",
         project_id: "project-1",
-        execution_target_id: "binding-1",
+        execution_target_id: "grant-1",
       }),
       policy.canDispatch({
         actor_user_id: "admin-only",

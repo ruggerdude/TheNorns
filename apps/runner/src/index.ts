@@ -51,7 +51,22 @@ export {
   type DeviceWssIdentity,
   type DeviceWssProofInput,
 } from "./deviceWssAuth.js";
-export { WorkspaceRegistry } from "./workspaceRegistry.js";
+export {
+  WorkspaceRegistry,
+  type LocalRepositoryApproval,
+} from "./workspaceRegistry.js";
+export {
+  LOCAL_REPOSITORY_ACCESS_FILENAME,
+  LocalRepositoryAccessController,
+  SignedDeviceRepositoryRegistrationClient,
+  type CloudRepositoryIdentity,
+  type DeviceRepositoryRegistration,
+  type DeviceRepositoryRegistrationClient,
+  type LocalRepositoryAccessView,
+  type LocalRepositoryRemovalResult,
+  type LocalRepositorySyncState,
+  type RepositoryAccessHistory,
+} from "./repositoryAccess.js";
 export {
   DEFAULT_VERIFICATION_POLICY_REF,
   REPOSITORY_VERIFICATION_MANIFEST,
@@ -67,8 +82,15 @@ export {
   type GitPublisherOptions,
   type PublicationOutcome,
   type PublicationResult,
+  type RunnerPublicationInput,
   type RunnerPublisher,
 } from "./publication.js";
+export {
+  DeviceBackedGitPublisher,
+  SignedDevicePublicationPermitClient,
+  type DevicePublicationPermitAuthorizer,
+  type DevicePublicationScopeResolver,
+} from "./publicationPermit.js";
 export type {
   CodingRuntime,
   RuntimeCapabilities,

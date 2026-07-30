@@ -808,9 +808,9 @@ additive device migrations:
 2. From the Railway operations service built from that exact commit, run
    `node apps/server/dist/applyMigrations.js` with the privileged migration
    `DATABASE_URL`.
-3. Verify the `0053` through `0056` ledger checksums and the new relations,
-   columns, constraints, triggers, and `norns_app` privileges before promoting
-   the application deployment.
+3. Verify the `0053` through current-release migration ledger checksums
+   (currently `0058`) and the new relations, columns, constraints, triggers,
+   and `norns_app` privileges before promoting the application deployment.
 4. Allow the automatic application deployment to start or retry, verify it is
    running the pushed commit, and then check `/health`.
 
