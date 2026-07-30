@@ -434,9 +434,9 @@ async function openProject(page: Page): Promise<void> {
 }
 
 async function returnToProjectFromGlobalSidebar(page: Page): Promise<void> {
-  const portfolioMenu = page.locator(".portfolio-switcher");
-  await portfolioMenu.locator('summary[aria-label="Portfolio and active projects"]').click();
-  await portfolioMenu.getByRole("button", { name: project.name }).click();
+  const portfolioNavigation = page.getByRole("navigation", { name: "Portfolio navigation" });
+  await portfolioNavigation.getByRole("button", { name: "Show active projects" }).click();
+  await portfolioNavigation.getByRole("button", { name: project.name }).click();
   await expect(page.getByRole("navigation", { name: "Workspace sections" })).toBeVisible();
 }
 
@@ -643,6 +643,7 @@ test("administrator edits global NORN.md without losing the current workspace", 
   await page.getByRole("button", { name: "Admin", exact: true }).click();
   const adminPanel = page.getByTestId("admin-panel");
   await expect(adminPanel).toBeVisible();
+  await adminPanel.getByRole("tab", { name: "Rules", exact: true }).click();
   const editor = adminPanel.getByRole("textbox", { name: "Global NORN.md" });
   await editor.fill("# Global rules\n\n- Report blockers every five minutes.");
   await adminPanel.getByRole("button", { name: "Save global rules" }).click();

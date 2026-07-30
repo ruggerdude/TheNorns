@@ -177,6 +177,7 @@ describe("UI-2 (rewritten for P1c): a rejected approve must not discard staffing
 
     const user = userEvent.setup();
     render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Show active projects" }));
     await user.click(
       await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
     );

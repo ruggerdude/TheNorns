@@ -86,6 +86,7 @@ export function AuthenticatedHeaderActions({
   portfolioNavigation?: {
     projects?: ProjectSummary[] | null;
     activeProjectId?: string | null;
+    onNewProject: () => void;
     onOpenPortfolio: () => void;
     onOpenProject: (project: ProjectSummary) => void;
     onUnauthorized: () => void;
@@ -176,6 +177,10 @@ export function AuthenticatedHeaderActions({
             <PortfolioMenu
               projects={portfolioNavigation.projects}
               activeProjectId={portfolioNavigation.activeProjectId}
+              onNewProject={() => {
+                closeMobileNavigation();
+                portfolioNavigation.onNewProject();
+              }}
               onOpenPortfolio={() => {
                 closeMobileNavigation();
                 portfolioNavigation.onOpenPortfolio();

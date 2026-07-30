@@ -802,6 +802,7 @@ function ProjectGraph({
   user,
   onOpenAccount,
   onOpenAdmin,
+  onOpenNewProject,
   onOpenUsage,
   initialWorkRoute,
   initialConversationId,
@@ -817,6 +818,7 @@ function ProjectGraph({
   user: CurrentUser | null;
   onOpenAccount: () => void;
   onOpenAdmin: () => void;
+  onOpenNewProject: () => void;
   onOpenUsage: () => void;
   initialWorkRoute?: boolean;
   initialConversationId?: string | null;
@@ -1761,6 +1763,7 @@ function ProjectGraph({
           <Brand onHome={onBack} />
           <PortfolioMenu
             activeProjectId={project.id}
+            onNewProject={onOpenNewProject}
             onOpenPortfolio={onBack}
             onOpenProject={onOpenProject}
             onUnauthorized={() => onLogout("Session expired. Sign in again.")}
@@ -1807,6 +1810,10 @@ function ProjectGraph({
           <div className="workspace-mobile-portfolio-switcher">
             <PortfolioMenu
               activeProjectId={project.id}
+              onNewProject={() => {
+                setMobileWorkspaceNavOpen(false);
+                onOpenNewProject();
+              }}
               onOpenPortfolio={() => {
                 setMobileWorkspaceNavOpen(false);
                 onBack();
@@ -2827,6 +2834,7 @@ function GlobalPageShell({
   page,
   user,
   activeProject,
+  onOpenNewProject,
   onOpenPortfolio,
   onOpenProject,
   onOpenUsage,
@@ -2838,6 +2846,7 @@ function GlobalPageShell({
   page: GlobalPage;
   user: CurrentUser;
   activeProject: ProjectSummary | null;
+  onOpenNewProject: () => void;
   onOpenPortfolio: () => void;
   onOpenProject: (project: ProjectSummary) => void;
   onOpenUsage: () => void;
@@ -2853,6 +2862,7 @@ function GlobalPageShell({
           <Brand onHome={onOpenPortfolio} />
           <PortfolioMenu
             activeProjectId={activeProject?.id ?? null}
+            onNewProject={onOpenNewProject}
             onOpenPortfolio={onOpenPortfolio}
             onOpenProject={onOpenProject}
             onUnauthorized={onSignOut}
@@ -2867,6 +2877,7 @@ function GlobalPageShell({
           onSignOut={onSignOut}
           portfolioNavigation={{
             activeProjectId: activeProject?.id ?? null,
+            onNewProject: onOpenNewProject,
             onOpenPortfolio,
             onOpenProject,
             onUnauthorized: onSignOut,
@@ -2906,6 +2917,7 @@ export function App(): React.ReactElement {
   );
   const [showAdmin, setShowAdmin] = useState(false);
   const [showUsage, setShowUsage] = useState(false);
+  const [newProjectRequested, setNewProjectRequested] = useState(false);
 
   useEffect(() => {
     // An invite link always wins, regardless of bootstrap state — no need to
@@ -3017,6 +3029,7 @@ export function App(): React.ReactElement {
     setShowAccount(false);
     setShowAdmin(false);
     setShowUsage(false);
+    setNewProjectRequested(false);
   }, []);
 
   const openProject = useCallback((project: ProjectSummary) => {
@@ -3026,6 +3039,7 @@ export function App(): React.ReactElement {
         : [...current, project],
     );
     setActiveProject(project);
+    setNewProjectRequested(false);
     setWorkConversationRoute(null);
     setRoutedProjectId(project.id);
     window.history.pushState(null, "", `/projects/${encodeURIComponent(project.id)}`);
@@ -3094,15 +3108,20 @@ export function App(): React.ReactElement {
     setShowUsage(false);
   }, []);
 
-  const openPortfolio = useCallback(() => {
+  const navigateToPortfolio = useCallback((newProject: boolean) => {
     setShowAccount(false);
     setShowAdmin(false);
     setShowUsage(false);
     setActiveProject(null);
+    setNewProjectRequested(newProject);
     setWorkConversationRoute(null);
     setRoutedProjectId(null);
     window.history.pushState(null, "", "/");
   }, []);
+
+  const openPortfolio = useCallback(() => navigateToPortfolio(false), [navigateToPortfolio]);
+  const openNewProject = useCallback(() => navigateToPortfolio(true), [navigateToPortfolio]);
+  const handleNewProjectRequest = useCallback(() => setNewProjectRequested(false), []);
 
   const openProjectFromGlobalNavigation = useCallback(
     (project: ProjectSummary) => {
@@ -3155,6 +3174,7 @@ export function App(): React.ReactElement {
         page="device-authorization"
         user={user}
         activeProject={activeProject}
+        onOpenNewProject={openNewProject}
         onOpenPortfolio={openPortfolio}
         onOpenProject={openProjectFromGlobalNavigation}
         onOpenUsage={openUsage}
@@ -3178,6 +3198,7 @@ export function App(): React.ReactElement {
         page={globalPage}
         user={user}
         activeProject={activeProject}
+        onOpenNewProject={openNewProject}
         onOpenPortfolio={openPortfolio}
         onOpenProject={openProjectFromGlobalNavigation}
         onOpenUsage={openUsage}
@@ -3232,6 +3253,8 @@ export function App(): React.ReactElement {
       onOpenAccount={openAccount}
       onOpenAdmin={openAdmin}
       onOpenUsage={openUsage}
+      newProjectRequested={newProjectRequested}
+      onNewProjectRequestHandled={handleNewProjectRequest}
     />
   ) : (
     <ProjectGraph
@@ -3243,6 +3266,7 @@ export function App(): React.ReactElement {
       user={user}
       onOpenAccount={openAccount}
       onOpenAdmin={openAdmin}
+      onOpenNewProject={openNewProject}
       onOpenUsage={openUsage}
       initialWorkRoute={workConversationRoute?.projectId === activeProject.id}
       initialConversationId={

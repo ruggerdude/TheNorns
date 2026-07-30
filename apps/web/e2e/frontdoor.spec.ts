@@ -504,7 +504,17 @@ async function clickUntilVisible(trigger: Locator, result: Locator) {
 
 async function openExistingProjectWizard(page: Page) {
   const existing = page.getByRole("button", { name: /^existing/i });
-  await clickUntilVisible(page.getByRole("button", { name: /new project/i }), existing);
+  const newProject = page.getByRole("button", { name: "New project", exact: true });
+  if (await newProject.isVisible()) {
+    await clickUntilVisible(newProject, existing);
+  } else {
+    await page.getByRole("button", { name: "Open navigation menu" }).click();
+    const navigation = page.getByRole("navigation", { name: "Main navigation" });
+    await clickUntilVisible(
+      navigation.getByRole("button", { name: "New project", exact: true }),
+      existing,
+    );
+  }
   await clickUntilVisible(
     existing,
     page.getByRole("group", { name: /where is the existing code/i }),
@@ -700,16 +710,29 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
     (projectContextBox?.y ?? 0) + (projectContextBox?.height ?? 0) + 8,
   );
 
-  const portfolioButtonBox = await page
-    .locator('.workspace-nav-start summary[aria-label="Portfolio and active projects"]')
+  const workspacePortfolioNavigation = page
+    .locator(".workspace-nav-start")
+    .getByRole("navigation", { name: "Portfolio navigation" });
+  const newProjectButtonBox = await workspacePortfolioNavigation
+    .getByRole("button", { name: "New project", exact: true })
+    .boundingBox();
+  const portfolioButtonBox = await workspacePortfolioNavigation
+    .getByRole("button", { name: "Portfolio", exact: true })
+    .boundingBox();
+  const portfolioControlBox = await workspacePortfolioNavigation
+    .locator(".portfolio-switcher")
     .boundingBox();
   const usageButtonBox = await page
     .getByRole("button", { name: "Usage", exact: true })
     .boundingBox();
   expect(portfolioButtonBox?.x).toBe(16);
+  expect(newProjectButtonBox?.x).toBe(16);
+  expect(newProjectButtonBox?.y ?? Number.POSITIVE_INFINITY).toBeLessThan(
+    portfolioButtonBox?.y ?? 0,
+  );
   expect(usageButtonBox?.x).toBe(16);
-  expect(portfolioButtonBox?.width ?? 0).toBeGreaterThanOrEqual(214);
-  expect(usageButtonBox?.width).toBe(portfolioButtonBox?.width);
+  expect(portfolioControlBox?.width ?? 0).toBeGreaterThanOrEqual(214);
+  expect(usageButtonBox?.width).toBe(portfolioControlBox?.width);
 
   const workTab = workspaceNavigation.getByRole("button", { name: /work$/i });
   await workTab.click();
@@ -909,8 +932,7 @@ test("Project archiving lives only in project Settings", async ({ page }) => {
   await expect(dangerZone.getByRole("button", { name: "Archive project" })).toBeVisible();
 
   await page.getByRole("button", { name: "Menu", exact: true }).click();
-  await workspaceNavigation.locator('summary[aria-label="Portfolio and active projects"]').click();
-  await workspaceNavigation.getByRole("button", { name: "Portfolio overview" }).click();
+  await workspaceNavigation.getByRole("button", { name: "Portfolio", exact: true }).click();
   await expect(page.getByRole("heading", { name: "All projects" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Archive project" })).toHaveCount(0);
 });
@@ -955,7 +977,7 @@ test("Usage, Settings, and Admin use the regular application sidebar", async ({ 
   );
   await expect(globalRail).toBeVisible();
 
-  await page.locator('summary[aria-label="Portfolio and active projects"]').click();
+  await page.getByRole("button", { name: "Show active projects" }).click();
   await page.getByRole("button", { name: "front-door-app" }).click();
   await expect(page.getByRole("navigation", { name: "Workspace sections" })).toBeVisible();
 

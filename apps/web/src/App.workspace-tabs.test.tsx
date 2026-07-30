@@ -14,6 +14,13 @@ import { fullyAllocatedGraph, projectAlpha } from "./test/fixtures";
 import { MockFetch } from "./test/mockFetch";
 import { preloadConversationWorkspaceForTest } from "./test/preloadConversationWorkspace";
 
+async function openProjectFromPortfolio(): Promise<void> {
+  await userEvent.click(await screen.findByRole("button", { name: "Show active projects" }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
+  );
+}
+
 describe("FRONT DOOR P1d: workspace tab bar", () => {
   let mock: MockFetch;
 
@@ -77,9 +84,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     mock.install();
 
     render(<App />);
-    await userEvent.click(
-      await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
-    );
+    await openProjectFromPortfolio();
 
     // Overview is the default tab, and it's the one already marked "on".
     expect(await screen.findByRole("button", { name: "Overview" })).toHaveClass("on");
@@ -93,6 +98,19 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     // The graph canvas is NOT the dominant panel anymore — it isn't even
     // mounted until the Graph tab is selected.
     expect(screen.queryByTestId("graph-canvas")).not.toBeInTheDocument();
+
+    const workspacePortfolioNavigation = document.querySelector(
+      ".workspace-nav-start .portfolio-navigation",
+    );
+    if (!(workspacePortfolioNavigation instanceof HTMLElement)) {
+      throw new Error("Workspace Portfolio navigation not found");
+    }
+    await userEvent.click(
+      within(workspacePortfolioNavigation).getByRole("button", { name: "Portfolio" }),
+    );
+    expect(await screen.findByRole("heading", { name: "All projects" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "New project" }));
+    expect(await screen.findByRole("main", { name: "New project" })).toBeInTheDocument();
   });
 
   it("opens project usage in the shared sidebar and returns to the same workspace", async () => {
@@ -134,9 +152,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     const user = userEvent.setup();
     render(<App />);
-    await user.click(
-      await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
-    );
+    await openProjectFromPortfolio();
     await user.click(screen.getByRole("button", { name: "Usage" }));
 
     // DESIGN R2: the per-scope H1 ("Project usage") was removed; the hub
@@ -151,9 +167,14 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     expect(screen.queryByRole("navigation", { name: "Open projects" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
 
-    const portfolioMenu = document.querySelector(".portfolio-switcher");
-    if (!(portfolioMenu instanceof HTMLElement)) throw new Error("Portfolio menu not found");
-    await user.click(within(portfolioMenu).getByRole("button", { name: projectAlpha.name }));
+    const portfolioNavigation = document.querySelector(".portfolio-navigation");
+    if (!(portfolioNavigation instanceof HTMLElement)) {
+      throw new Error("Portfolio navigation not found");
+    }
+    await user.click(
+      within(portfolioNavigation).getByRole("button", { name: "Show active projects" }),
+    );
+    await user.click(within(portfolioNavigation).getByRole("button", { name: projectAlpha.name }));
     const workspaceNav = await screen.findByRole("navigation", { name: "Workspace sections" });
     expect(workspaceNav).toBeVisible();
     expect(within(workspaceNav).getByRole("button", { name: "Overview" })).toHaveClass("on");
@@ -173,9 +194,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     const user = userEvent.setup();
     render(<App />);
-    await user.click(
-      await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
-    );
+    await openProjectFromPortfolio();
 
     expect(screen.queryByTestId("graph-canvas")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Graph" }));
@@ -213,9 +232,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     const user = userEvent.setup();
     render(<App />);
-    await user.click(
-      await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
-    );
+    await openProjectFromPortfolio();
 
     const pointer = await screen.findByTestId("overview-no-plan-pointer");
     expect(pointer).toHaveTextContent(/no work planned yet/i);
@@ -373,6 +390,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     const user = userEvent.setup();
     render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Show active projects" }));
     await user.click(await screen.findByRole("button", { name: new RegExp(project.name, "i") }));
 
     expect(await screen.findByRole("heading", { name: "Coding stopped" })).toBeVisible();
@@ -398,9 +416,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     const user = userEvent.setup();
     render(<App />);
-    await user.click(
-      await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
-    );
+    await openProjectFromPortfolio();
     await user.click(screen.getByRole("button", { name: "Debates" }));
 
     expect(await screen.findByRole("heading", { name: "Debates" })).toBeVisible();
@@ -445,9 +461,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     const user = userEvent.setup();
     render(<App />);
-    await user.click(
-      await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
-    );
+    await openProjectFromPortfolio();
     const nav = screen.getByRole("navigation", { name: "Workspace sections" });
     await user.click(within(nav).getByRole("button", { name: "Settings" }));
     const settings = await screen.findByTestId("workspace-settings");

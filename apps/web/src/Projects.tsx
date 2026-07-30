@@ -427,6 +427,8 @@ export function Projects({
   onOpenAccount,
   onOpenAdmin,
   onOpenUsage,
+  newProjectRequested = false,
+  onNewProjectRequestHandled,
 }: {
   onOpenProject: (p: ProjectSummary) => void;
   openProjects: ProjectSummary[];
@@ -436,10 +438,12 @@ export function Projects({
   onOpenAccount: (tab?: SettingsTab) => void;
   onOpenAdmin: () => void;
   onOpenUsage?: () => void;
+  newProjectRequested?: boolean;
+  onNewProjectRequestHandled?: () => void;
 }): React.ReactElement {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState(false);
+  const [dialog, setDialog] = useState(newProjectRequested);
   // DESIGN P1 bug fix: the New Project view is a full page swapped in-place,
   // so the document keeps whatever scroll offset the dashboard had (and the
   // objective textarea's old autoFocus used to yank it further down). Land at
@@ -1189,6 +1193,20 @@ export function Projects({
     wizardObjective,
   ]);
 
+  const openNewProject = useCallback(() => {
+    setIdempotencyKey(globalThis.crypto.randomUUID());
+    setSourceError(null);
+    setLocalSourcesError(null);
+    setSubmissionError(null);
+    setDialog(true);
+  }, []);
+
+  useEffect(() => {
+    if (!newProjectRequested) return;
+    openNewProject();
+    onNewProjectRequestHandled?.();
+  }, [newProjectRequested, onNewProjectRequestHandled, openNewProject]);
+
   const closeWizard = useCallback(() => {
     setDialog(false);
     setWizardStep("form");
@@ -1308,6 +1326,7 @@ export function Projects({
           />
           <PortfolioMenu
             projects={projects}
+            onNewProject={openNewProject}
             onOpenPortfolio={() => {
               window.history.pushState(null, "", "/");
               window.scrollTo(0, 0);
@@ -1325,6 +1344,7 @@ export function Projects({
             onSignOut={onSignOut}
             portfolioNavigation={{
               projects,
+              onNewProject: openNewProject,
               onOpenPortfolio: () => {
                 window.history.pushState(null, "", "/");
                 window.scrollTo(0, 0);
@@ -1338,9 +1358,8 @@ export function Projects({
       <main className="page-container project-dashboard" hidden={dialog}>
         {error ? <Alert testId="projects-error">{error}</Alert> : null}
         {/* DESIGN R2: one true page title — largest text on the page — with a
-            thin gold accent rule, and the primary "New project" action moved
-            to the top of the page, centered. Inline styles are stopgaps until
-            the shared-CSS requests in P2-SHARED-REQUESTS.md land. */}
+            thin gold accent rule. Project creation now lives in the shared
+            application rail, where it remains available from every page. */}
         <header className="page-header portfolio-page-header">
           <div>
             <h1>Portfolio</h1>
@@ -1357,23 +1376,6 @@ export function Projects({
             />
           </div>
         </header>
-        <div
-          className="portfolio-primary-action"
-          style={{ display: "flex", justifyContent: "center", margin: "0 0 var(--space-5)" }}
-        >
-          <Button
-            variant="primary"
-            onClick={() => {
-              setIdempotencyKey(globalThis.crypto.randomUUID());
-              setSourceError(null);
-              setLocalSourcesError(null);
-              setSubmissionError(null);
-              setDialog(true);
-            }}
-          >
-            + New project
-          </Button>
-        </div>
         <section className="focus-panel portfolio-pulse-panel" aria-label="Portfolio summary">
           <div className="portfolio-summary-head">
             <div>

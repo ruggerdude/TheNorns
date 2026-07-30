@@ -184,14 +184,19 @@ function workspaceMocks(project: ProjectSummary = projectAlpha): MockFetch {
 async function openPhaseTab(): Promise<UserEvent> {
   const user = userEvent.setup();
   render(<App />);
-  await user.click(
+  await openProjectFromPortfolio();
+  await user.click(await screen.findByRole("button", { name: "Work" }));
+  await screen.findByTestId("workspace-tab-work");
+  return user;
+}
+
+async function openProjectFromPortfolio(): Promise<void> {
+  await userEvent.click(await screen.findByRole("button", { name: "Show active projects" }));
+  await userEvent.click(
     await screen.findByRole("button", {
       name: new RegExp(`^${projectAlpha.name}$`, "i"),
     }),
   );
-  await user.click(await screen.findByRole("button", { name: "Work" }));
-  await screen.findByTestId("workspace-tab-work");
-  return user;
 }
 
 function postCalls(mock: MockFetch, urlSuffix: string): RecordedCall[] {
@@ -467,11 +472,7 @@ describe("PHASE TAB (P2)", () => {
     mock.install();
 
     const firstOpen = render(<App />);
-    await userEvent.click(
-      await screen.findByRole("button", {
-        name: new RegExp(`^${projectAlpha.name}$`, "i"),
-      }),
-    );
+    await openProjectFromPortfolio();
     expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
 
@@ -483,11 +484,7 @@ describe("PHASE TAB (P2)", () => {
     mock.install();
 
     render(<App />);
-    await userEvent.click(
-      await screen.findByRole("button", {
-        name: new RegExp(`^${projectAlpha.name}$`, "i"),
-      }),
-    );
+    await openProjectFromPortfolio();
     expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
@@ -504,11 +501,7 @@ describe("PHASE TAB (P2)", () => {
     mock.install();
 
     const firstOpen = render(<App />);
-    await userEvent.click(
-      await screen.findByRole("button", {
-        name: new RegExp(`^${projectAlpha.name}$`, "i"),
-      }),
-    );
+    await openProjectFromPortfolio();
     expect(await screen.findByTestId("phase-decision-panel")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
 
@@ -520,11 +513,7 @@ describe("PHASE TAB (P2)", () => {
     mock.install();
 
     render(<App />);
-    await userEvent.click(
-      await screen.findByRole("button", {
-        name: new RegExp(`^${projectAlpha.name}$`, "i"),
-      }),
-    );
+    await openProjectFromPortfolio();
     expect(await screen.findByTestId("phase-decision-panel")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
@@ -537,11 +526,7 @@ describe("PHASE TAB (P2)", () => {
     mock.install();
 
     render(<App />);
-    await userEvent.click(
-      await screen.findByRole("button", {
-        name: new RegExp(`^${projectAlpha.name}$`, "i"),
-      }),
-    );
+    await openProjectFromPortfolio();
     expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
@@ -578,11 +563,7 @@ describe("PHASE TAB (P2)", () => {
     mock.install();
 
     render(<App />);
-    await userEvent.click(
-      await screen.findByRole("button", {
-        name: new RegExp(`^${projectAlpha.name}$`, "i"),
-      }),
-    );
+    await openProjectFromPortfolio();
 
     expect(await screen.findByTestId("phase-retry-execution")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
@@ -629,11 +610,7 @@ describe("PHASE TAB (P2)", () => {
     mock.install();
 
     render(<App />);
-    await userEvent.click(
-      await screen.findByRole("button", {
-        name: new RegExp(`^${projectAlpha.name}$`, "i"),
-      }),
-    );
+    await openProjectFromPortfolio();
 
     expect(await screen.findByRole("heading", { name: "Coding needs a restart" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
@@ -988,11 +965,7 @@ describe("PHASE TAB (P2)", () => {
     mock.install();
 
     render(<App />);
-    await userEvent.click(
-      await screen.findByRole("button", {
-        name: new RegExp(`^${projectAlpha.name}$`, "i"),
-      }),
-    );
+    await openProjectFromPortfolio();
     await userEvent.click(await screen.findByTestId("phase-approve"));
     await userEvent.click(await screen.findByTestId("phase-retry-execution"));
 

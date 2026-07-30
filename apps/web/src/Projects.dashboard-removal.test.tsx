@@ -48,7 +48,7 @@ describe("project dashboard entry", () => {
     );
   }
 
-  it("starts with a Portfolio page title and New project centered at the top of the page", async () => {
+  it("starts with a Portfolio page title and New project in the application rail", async () => {
     setup();
     await screen.findByRole("link", { name: "Enter Alpha" });
 
@@ -62,19 +62,20 @@ describe("project dashboard entry", () => {
     expect(
       screen.queryByText("Phase-by-phase progress, ownership, and next action."),
     ).not.toBeInTheDocument();
-    // The create action sits at the top of the page rather than inside a
-    // duplicate quick-access panel.
-    const createButton = screen.getByRole("button", { name: "+ New project" });
+    // The create action is available from the shared rail instead of taking
+    // up space in the Portfolio content.
+    const createButton = screen.getByRole("button", { name: "New project" });
     expect(createButton.closest("section")).toBeNull();
-    expect(createButton.closest("header")).toBeNull();
-    expect(createButton.closest(".portfolio-primary-action")).not.toBeNull();
+    expect(createButton.closest(".topbar")).not.toBeNull();
+    expect(createButton.closest(".portfolio-navigation")).not.toBeNull();
+    expect(screen.queryByText("+ New project")).not.toBeInTheDocument();
   });
 
   it("opens project setup as a dedicated page and returns to the dashboard", async () => {
     setup();
     await screen.findByRole("link", { name: "Enter Alpha" });
 
-    await userEvent.click(screen.getByRole("button", { name: "+ New project" }));
+    await userEvent.click(screen.getByRole("button", { name: "New project" }));
 
     expect(screen.getByRole("main", { name: "New project" })).toBeInTheDocument();
     // DESIGN R2: no in-page "Project setup" heading — the topbar location

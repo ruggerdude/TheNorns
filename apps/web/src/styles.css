@@ -6543,7 +6543,7 @@ h4 {
 .workspace-mobile-global-actions > button,
 .settings-nav button,
 .conversation-sidebar :is(h2, button),
-.portfolio-switcher {
+.portfolio-navigation {
   font-family: "Plus Jakarta Sans", system-ui, sans-serif;
   font-weight: 700;
   letter-spacing: -0.01em;
@@ -6557,37 +6557,84 @@ h4 {
   font-size: var(--text-md);
 }
 
-.portfolio-switcher {
+.portfolio-navigation {
   position: relative;
+  display: grid;
   width: 100%;
+  gap: 0.35rem;
 }
 
-.portfolio-switcher > summary {
+.portfolio-new-project,
+.portfolio-overview-link,
+.portfolio-project-toggle {
   display: flex;
-  min-height: 48px;
+  min-height: 44px;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.55rem 0.65rem;
-  border: 1px solid transparent;
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  color: var(--ink);
-  font-size: 1.18rem;
-  list-style: none;
+  font: inherit;
   cursor: pointer;
 }
 
-.portfolio-switcher > summary::-webkit-details-marker {
-  display: none;
+.portfolio-new-project {
+  justify-content: flex-start;
+  gap: 0.65rem;
+  padding: 0.55rem 0.75rem;
+  border-color: color-mix(in srgb, var(--brand-900) 78%, white);
+  color: #fff;
+  background: linear-gradient(135deg, var(--brand-900), var(--brand-600));
+  box-shadow: 0 10px 28px rgba(0, 22, 137, 0.2);
 }
 
-.portfolio-switcher > summary:hover,
-.portfolio-switcher[open] > summary {
-  border-color: var(--line);
+.portfolio-new-project:hover {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--brand-900) 88%, white),
+    color-mix(in srgb, var(--brand-600) 88%, white)
+  );
+}
+
+.portfolio-new-project > span:first-child {
+  font-size: 1.2rem;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.portfolio-switcher {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+}
+
+.portfolio-overview-link {
+  justify-content: flex-start;
+  padding: 0.55rem 0.65rem;
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  color: var(--ink);
+  background: transparent;
+  font-size: 1.18rem;
+  text-align: left;
+}
+
+.portfolio-project-toggle {
+  justify-content: center;
+  padding: 0;
+  border-left: 0;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--ink);
+  background: transparent;
+}
+
+.portfolio-overview-link:hover,
+.portfolio-project-toggle:hover,
+.portfolio-switcher.is-open > .portfolio-project-toggle {
   background: color-mix(in srgb, var(--brand-600) 9%, var(--surface));
 }
 
-.portfolio-switcher[open] > summary > span:last-child {
+.portfolio-project-toggle > span {
+  transition: transform 0.14s ease;
+}
+
+.portfolio-switcher.is-open > .portfolio-project-toggle > span {
   transform: rotate(180deg);
 }
 
@@ -6601,7 +6648,6 @@ h4 {
   background: color-mix(in srgb, var(--surface) 96%, transparent);
 }
 
-.portfolio-overview-link,
 .portfolio-project-menu-list > button {
   display: flex;
   width: 100%;
@@ -6618,12 +6664,6 @@ h4 {
   text-align: left;
 }
 
-.portfolio-overview-link {
-  justify-content: space-between;
-  color: var(--brand-ink);
-}
-
-.portfolio-overview-link:hover,
 .portfolio-project-menu-list > button:hover,
 .portfolio-project-menu-list > button.is-active {
   border-color: var(--line);
@@ -6825,7 +6865,7 @@ h4 {
 }
 
 @media (max-width: 900px) {
-  .workspace-nav-start > .portfolio-switcher {
+  .workspace-nav-start > .portfolio-navigation {
     display: none;
   }
 
@@ -6868,7 +6908,7 @@ h4 {
 }
 
 @media (max-width: 760px) {
-  .app-shell > .topbar .topbar-main > .portfolio-switcher {
+  .app-shell > .topbar .topbar-main > .portfolio-navigation {
     display: none;
   }
 

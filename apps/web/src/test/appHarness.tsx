@@ -20,6 +20,7 @@ export function seedAuth(token = "test-token"): void {
 export async function renderAppAndOpenProject(projectName: string): Promise<{ user: UserEvent }> {
   const user = userEvent.setup();
   render(<App />);
+  await user.click(await screen.findByRole("button", { name: "Show active projects" }));
   const row = await screen.findByRole("button", { name: new RegExp(projectName, "i") });
   await user.click(row);
   return { user };

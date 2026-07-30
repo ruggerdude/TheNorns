@@ -158,6 +158,7 @@ describe("FRONT DOOR P1: planning run -> phase -> strategy review", () => {
     setup();
     const user = userEvent.setup();
 
+    await user.click(await screen.findByRole("button", { name: "Show active projects" }));
     await user.click(
       await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
     );
@@ -207,6 +208,7 @@ describe("FRONT DOOR P1: planning run -> phase -> strategy review", () => {
     });
     const user = userEvent.setup();
 
+    await user.click(await screen.findByRole("button", { name: "Show active projects" }));
     await user.click(
       await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
     );

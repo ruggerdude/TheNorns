@@ -125,6 +125,7 @@ describe("UI-3 (rewritten for P1c): plan metadata reaches the human, via the dur
 
     const user = userEvent.setup();
     render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Show active projects" }));
     await user.click(
       await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
     );

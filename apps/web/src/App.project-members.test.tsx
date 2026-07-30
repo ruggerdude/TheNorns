@@ -55,6 +55,7 @@ describe("project members workspace flow", () => {
     mock.install();
 
     render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Show active projects" }));
     await user.click(
       await screen.findByRole("button", { name: new RegExp(projectAlpha.name, "i") }),
     );
