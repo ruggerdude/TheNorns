@@ -322,22 +322,28 @@ const legacyRunnerHttpAuthEnabled = legacyRunnerHttpAuthFlag !== "false";
 
 if (databaseUrl) {
   try {
+    console.log("startup checkpoint: initializing PostgreSQL persistence");
     const { Pool } = await import("pg");
     const pool = new Pool(postgresPoolConfig(databaseUrl));
     databasePool = pool;
     await assertRestrictedRuntimeDatabase(pool, process.env);
+    console.log("startup checkpoint: restricted database role verified");
     await assertCurrentRuntimeSchema(pool);
+    console.log("startup checkpoint: runtime schema verified");
     persistenceLease = await Phase2ApplicationPersistenceLease.acquire(pool);
+    console.log("startup checkpoint: persistence lease acquired");
     const persistence = new PgPersistence({
       query: (sql, params) => pool.query(sql, params as unknown[]),
     });
     await persistence.init();
+    console.log("startup checkpoint: relay persistence initialized");
     const identityRoute = await loadDurableIdentityRoute({
       query: async <TRow = Record<string, unknown>>(sql: string, params?: unknown[]) => {
         const result = await pool.query(sql, params);
         return { rows: result.rows as TRow[] };
       },
     });
+    console.log("startup checkpoint: identity route loaded");
     const runtimeTransactions = new NodePgTransactionRunner(pool, {
       mode: "runtime",
       role: "norns_app",
@@ -791,6 +797,7 @@ if (databaseUrl) {
     // Run once before serving traffic so terminal residue from an older
     // process converges on restart. buildServer owns the single recurring
     // recovery timer and clears it with the rest of the server lifecycle.
+    console.log("startup checkpoint: running recovery scan");
     await runPhase4Recovery();
     console.log(
       `postgres: relay ${relaySnap ? "restored" : "fresh"}, projects ${projectsSnap ? "restored" : "fresh"}, identity ${identityRuntime.mode} ${usersPersistenceState}`,
