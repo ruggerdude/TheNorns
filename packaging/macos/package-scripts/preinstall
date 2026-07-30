@@ -74,9 +74,18 @@ done <"$RESTART_RECORDS"
 while IFS="$TAB" read -r USER_ID USER_HOME SERVICE_LABEL EXTRA
 do
   [ -n "$USER_ID" ] || continue
-  if /bin/launchctl print "gui/$USER_ID/$SERVICE_LABEL" >/dev/null 2>&1; then
-    printf 'Norns Local Agent service gui/%s/%s did not stop before upgrade.\n' \
-      "$USER_ID" "$SERVICE_LABEL" >&2
-    exit 1
-  fi
+  ATTEMPT=0
+  while /bin/launchctl print "gui/$USER_ID/$SERVICE_LABEL" >/dev/null 2>&1
+  do
+    ATTEMPT=$((ATTEMPT + 1))
+    if [ "$ATTEMPT" -ge 20 ]; then
+      printf 'Norns Local Agent service gui/%s/%s did not stop before upgrade.\n' \
+        "$USER_ID" "$SERVICE_LABEL" >&2
+      exit 1
+    fi
+    # launchd can retain a disappearing job briefly after bootout returns.
+    # Give the exact known service time to leave the per-user domain rather
+    # than turning a successful stop into a failed package installation.
+    /bin/sleep 1
+  done
 done <"$RESTART_RECORDS"
