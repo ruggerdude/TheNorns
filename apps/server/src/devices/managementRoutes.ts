@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 
+import type { LocalAgentDownloads } from "../runners/helperOnboarding.js";
 import { DeviceManagementError, type DeviceManagementService } from "./managementService.js";
 
 const DeviceParams = z
@@ -33,6 +34,7 @@ export type DeviceManagementRouteService = Pick<
 
 export interface DeviceManagementRouteOptions {
   service: DeviceManagementRouteService;
+  localAgentDownloads: LocalAgentDownloads;
   requireUser(
     request: FastifyRequest,
     reply: FastifyReply,
@@ -75,6 +77,7 @@ export async function registerDeviceManagementRoutes(
     if (!user) return;
     return handle(reply, async () => ({
       devices: await options.service.listOwnedDevices(user.id),
+      downloads: options.localAgentDownloads,
     }));
   });
 

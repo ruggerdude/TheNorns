@@ -41,7 +41,7 @@ describe("BraidMark", () => {
 });
 
 describe("Brand lockup", () => {
-  it("topbar variant renders the 64×26 braid beside the uncial wordmark", () => {
+  it("topbar variant renders the 64×26 braid beside the readable wordmark", () => {
     const { container, getByText } = render(<Brand />);
     const lockup = container.querySelector(".brand");
     expect(lockup).not.toBeNull();

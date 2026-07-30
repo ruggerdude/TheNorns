@@ -17,6 +17,8 @@ APP="$PKG_ROOT/Applications/Norns Local Agent.app"
 CONTENTS="$APP/Contents"
 RESOURCES="$CONTENTS/Resources"
 MACOS="$CONTENTS/MacOS"
+ICON_SOURCE="$WORKSPACE/apps/web/public/favicon.svg"
+ICONSET="$STAGE/NornsLocalAgent.iconset"
 OUTPUT="$STAGE/installer/Norns-Local-Agent-macOS.pkg"
 PACKAGE_SCRIPTS="$STAGE/package-scripts"
 NODE_VERSION="24.18.0"
@@ -33,10 +35,28 @@ TARBALL="$RUNNER_PACK/$TARBALL_NAME"
 }
 
 rm -rf "$STAGE"
-mkdir -p "$MACOS" "$RESOURCES/runtime" "$RESOURCES/app" "$STAGE/installer" "$PACKAGE_SCRIPTS"
+mkdir -p \
+  "$MACOS" \
+  "$RESOURCES/runtime" \
+  "$RESOURCES/app" \
+  "$STAGE/installer" \
+  "$PACKAGE_SCRIPTS" \
+  "$ICONSET"
 cp "$WORKSPACE/packaging/macos/package-scripts/preinstall" "$PACKAGE_SCRIPTS/preinstall"
 cp "$WORKSPACE/packaging/macos/package-scripts/postinstall" "$PACKAGE_SCRIPTS/postinstall"
 chmod 755 "$PACKAGE_SCRIPTS/preinstall" "$PACKAGE_SCRIPTS/postinstall"
+
+sips -z 16 16 -s format png "$ICON_SOURCE" --out "$ICONSET/icon_16x16.png" >/dev/null
+sips -z 32 32 -s format png "$ICON_SOURCE" --out "$ICONSET/icon_16x16@2x.png" >/dev/null
+sips -z 32 32 -s format png "$ICON_SOURCE" --out "$ICONSET/icon_32x32.png" >/dev/null
+sips -z 64 64 -s format png "$ICON_SOURCE" --out "$ICONSET/icon_32x32@2x.png" >/dev/null
+sips -z 128 128 -s format png "$ICON_SOURCE" --out "$ICONSET/icon_128x128.png" >/dev/null
+sips -z 256 256 -s format png "$ICON_SOURCE" --out "$ICONSET/icon_128x128@2x.png" >/dev/null
+sips -z 256 256 -s format png "$ICON_SOURCE" --out "$ICONSET/icon_256x256.png" >/dev/null
+sips -z 512 512 -s format png "$ICON_SOURCE" --out "$ICONSET/icon_256x256@2x.png" >/dev/null
+sips -z 512 512 -s format png "$ICON_SOURCE" --out "$ICONSET/icon_512x512.png" >/dev/null
+sips -z 1024 1024 -s format png "$ICON_SOURCE" --out "$ICONSET/icon_512x512@2x.png" >/dev/null
+iconutil -c icns "$ICONSET" -o "$RESOURCES/NornsLocalAgent.icns"
 
 for ARCH in arm64 x64; do
   APP_PAYLOAD="$RESOURCES/app/$ARCH"

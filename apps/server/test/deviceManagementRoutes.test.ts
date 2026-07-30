@@ -307,6 +307,11 @@ describe.sequential("owner device management and project execution targets", () 
     expect(response.statusCode).toBe(200);
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(response.json()).toEqual({
+      downloads: {
+        macos: null,
+        macos_release: null,
+        windows: null,
+      },
       devices: [
         expect.objectContaining({
           device_id: "device-1",
@@ -357,7 +362,14 @@ describe.sequential("owner device management and project execution targets", () 
       url: "/api/devices",
       headers: { authorization: `Bearer ${adminOnly.token}` },
     });
-    expect(adminList.json()).toEqual({ devices: [] });
+    expect(adminList.json()).toEqual({
+      devices: [],
+      downloads: {
+        macos: null,
+        macos_release: null,
+        windows: null,
+      },
+    });
   });
 
   it("lets only the owner rename the name and optional location label", async () => {

@@ -103,7 +103,16 @@ describe("Computers", () => {
   it("keeps cards minimal and opens full details with native keyboard controls", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(jsonResponse({ devices: [device()] }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          devices: [device()],
+          downloads: {
+            macos: "https://downloads.example.com/Norns-Local-Agent-macOS.pkg",
+            windows: "https://downloads.example.com/Norns-Local-Agent-Setup.exe",
+            macos_release: "notarized",
+          },
+        }),
+      )
       .mockResolvedValueOnce(jsonResponse(device()))
       .mockResolvedValueOnce(jsonResponse({ error: "not_found" }, 404));
     const user = userEvent.setup();
@@ -111,6 +120,14 @@ describe("Computers", () => {
     render(<Computers embedded onUnauthorized={vi.fn()} />);
 
     const card = await screen.findByRole("button", { name: "View details for Office Mac mini" });
+    expect(screen.getByRole("link", { name: "Download for macOS" })).toHaveAttribute(
+      "href",
+      "https://downloads.example.com/Norns-Local-Agent-macOS.pkg",
+    );
+    expect(screen.getByRole("link", { name: "Download for Windows" })).toHaveAttribute(
+      "href",
+      "https://downloads.example.com/Norns-Local-Agent-Setup.exe",
+    );
     expect(card).toHaveTextContent("Office");
     expect(card).toHaveTextContent("macOS 15.5");
     expect(card).toHaveTextContent("online");

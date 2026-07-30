@@ -1777,6 +1777,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   if (options.deviceManagement) {
     await registerDeviceManagementRoutes(app, {
       service: options.deviceManagement.service,
+      localAgentDownloads,
       requireUser: requireSessionUser,
     });
   }

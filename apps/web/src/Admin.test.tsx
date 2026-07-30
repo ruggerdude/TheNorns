@@ -41,6 +41,12 @@ describe("Admin panel", () => {
     mock.install();
     render(<Admin onClose={vi.fn()} onUnauthorized={vi.fn()} />);
 
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Users",
+      "Rules",
+      "Archive",
+    ]);
+    expect(screen.getByRole("tab", { name: "Users" })).toHaveAttribute("aria-selected", "true");
     const list = await screen.findByTestId("user-list");
     expect(list).toHaveTextContent("admin@x.com");
     expect(list).toHaveTextContent("member@x.com");
@@ -64,6 +70,7 @@ describe("Admin panel", () => {
 
     const user = userEvent.setup();
     render(<Admin onClose={vi.fn()} onUnauthorized={vi.fn()} />);
+    await user.click(screen.getByRole("tab", { name: "Rules" }));
     const editor = await screen.findByRole("textbox", { name: "Global NORN.md" });
     await user.type(editor, "# Global rules\n\n- Keep updates concise.");
     await user.click(screen.getByRole("button", { name: "Save global rules" }));
@@ -104,6 +111,7 @@ describe("Admin panel", () => {
     const user = userEvent.setup();
     render(<Admin onClose={vi.fn()} onUnauthorized={vi.fn()} />);
 
+    await user.click(screen.getByRole("tab", { name: "Archive" }));
     const archivedList = await screen.findByTestId("archived-project-list");
     expect(archivedList).toHaveTextContent("Archived project");
     await user.click(screen.getByRole("button", { name: "Unarchive" }));

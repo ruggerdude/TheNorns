@@ -149,7 +149,7 @@ export function BrandMark({ size = 26, className }: { size?: number; className?:
 }
 /**
  * DESIGN R2 — the brand lockup. `topbar` (default): a compact 64×26 braid
- * beside the uncial wordmark at 20px. `hero` (login-scale): the wordmark at
+ * beside the wordmark at 20px. `hero` (login-scale): the wordmark at
  * 40px stacked above a 300×34 braid with a long lead-in.
  */
 export function Brand({

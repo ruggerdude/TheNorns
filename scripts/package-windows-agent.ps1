@@ -49,6 +49,7 @@ Copy-Item -Force (Join-Path $workspace 'packaging\windows\start-agent.vbs') $pay
 Copy-Item -Force (Join-Path $workspace 'packaging\windows\stop-agent.vbs') $payload
 Copy-Item -Force (Join-Path $workspace 'packaging\windows\open-control-center.vbs') $payload
 Copy-Item -Force (Join-Path $workspace 'packaging\windows\open-control-center.ps1') $payload
+Copy-Item -Force (Join-Path $workspace 'packaging\windows\NornsLocalAgent.ico') $payload
 
 $isccCommand = Get-Command iscc.exe -ErrorAction SilentlyContinue
 $isccPath = if ($isccCommand) { $isccCommand.Source } else { $null }

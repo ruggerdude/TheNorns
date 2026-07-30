@@ -17,11 +17,12 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 OutputDir=..\..\dist-agent\windows\installer
 OutputBaseFilename=Norns-Local-Agent-Setup
+SetupIconFile=..\..\packaging\windows\NornsLocalAgent.ico
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=no
-UninstallDisplayIcon={app}\runtime\node.exe
+UninstallDisplayIcon={app}\NornsLocalAgent.ico
 
 [Files]
 Source: "..\..\dist-agent\windows\payload\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -31,7 +32,7 @@ Root: HKCU; Subkey: "Software\Classes\norns-agent"; Flags: deletekey dontcreatek
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Norns Local Agent"; ValueData: """{sys}\wscript.exe"" ""{app}\start-agent.vbs"""; Flags: uninsdeletevalue
 
 [Icons]
-Name: "{group}\Norns Local Agent Control Center"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\open-control-center.vbs"""; WorkingDir: "{app}"
+Name: "{group}\Norns Local Agent Control Center"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\open-control-center.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\NornsLocalAgent.ico"
 
 [Run]
 Filename: "{sys}\wscript.exe"; Parameters: """{app}\open-control-center.vbs"""; Flags: runhidden nowait postinstall

@@ -7,6 +7,16 @@ import "./Computers.css";
 
 type Device = OwnedDeviceProjectionT;
 
+const LocalAgentDownloadsProjection = z
+  .object({
+    windows: z.string().url().nullable(),
+    macos: z.string().url().nullable(),
+    macos_release: z.enum(["notarized", "unsigned_preview"]).nullable(),
+  })
+  .strict();
+
+type LocalAgentDownloads = z.infer<typeof LocalAgentDownloadsProjection>;
+
 const RepositoryAccessProjection = z
   .object({
     device_id: z.string().trim().min(1),
@@ -59,6 +69,14 @@ function unwrapDevices(payload: unknown): Device[] {
       : payload;
   if (!Array.isArray(candidate)) throw new Error("Computer inventory response is invalid.");
   return candidate.map(unwrapDevice);
+}
+
+function unwrapLocalAgentDownloads(payload: unknown): LocalAgentDownloads | null {
+  if (!payload || typeof payload !== "object" || !("downloads" in payload)) return null;
+  const parsed = LocalAgentDownloadsProjection.safeParse(
+    (payload as { downloads: unknown }).downloads,
+  );
+  return parsed.success ? parsed.data : null;
 }
 
 async function deviceRequest(path: string, init?: RequestInit): Promise<unknown> {
@@ -926,6 +944,7 @@ export function Computers({
   embedded?: boolean;
 }): React.ReactElement {
   const [devices, setDevices] = useState<Device[] | null>(null);
+  const [downloads, setDownloads] = useState<LocalAgentDownloads | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<Device | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -946,7 +965,9 @@ export function Computers({
   );
 
   const loadDevices = useCallback(async (): Promise<Device[]> => {
-    const loaded = unwrapDevices(await deviceRequest("/api/devices"));
+    const payload = await deviceRequest("/api/devices");
+    const loaded = unwrapDevices(payload);
+    setDownloads(unwrapLocalAgentDownloads(payload));
     setDevices(loaded);
     return loaded;
   }, []);
@@ -1041,6 +1062,37 @@ export function Computers({
           title="Computers"
           lede="Manage Local Agent installations enrolled under your OS user. Reinstalling without recovering its credential creates a new computer entry."
         />
+
+        <section className="card computers-installer" aria-labelledby="local-agent-installer-title">
+          <div>
+            <div className="eyebrow">Install or update</div>
+            <h2 id="local-agent-installer-title">Norns Local Agent</h2>
+            <p className="muted">
+              Install the agent on each computer you want Norns to use, then authorize it here.
+            </p>
+            {downloads?.macos_release === "unsigned_preview" ? (
+              <small className="computers-installer-warning">
+                The current macOS download is an unsigned preview and will trigger a security
+                warning.
+              </small>
+            ) : null}
+          </div>
+          <div className="computers-installer-actions">
+            {downloads?.macos ? (
+              <a className="btn btn-primary" href={downloads.macos}>
+                Download for macOS
+              </a>
+            ) : null}
+            {downloads?.windows ? (
+              <a className="btn" href={downloads.windows}>
+                Download for Windows
+              </a>
+            ) : null}
+            {!downloads?.macos && !downloads?.windows ? (
+              <span className="muted">Installer downloads have not been published yet.</span>
+            ) : null}
+          </div>
+        </section>
 
         {error ? <Alert testId="computers-error">{error}</Alert> : null}
         <div className="sr-only" aria-live="polite">

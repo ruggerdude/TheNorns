@@ -8,6 +8,8 @@
   <string>Norns Local Agent</string>
   <key>CFBundleExecutable</key>
   <string>NornsLocalAgent</string>
+  <key>CFBundleIconFile</key>
+  <string>NornsLocalAgent.icns</string>
   <key>CFBundleIdentifier</key>
   <string>com.thenorns.local-agent</string>
   <key>CFBundleInfoDictionaryVersion</key>

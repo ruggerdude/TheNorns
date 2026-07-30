@@ -48,6 +48,8 @@ type InviteOutcome =
   | { ok: false; recoverable: true; message: string; url: string }
   | { ok: false; recoverable: false; message: string };
 
+type AdminTab = "users" | "rules" | "archive";
+
 /** Unlike adminRequest, a 502 here (email delivery failed) is not a plain
  *  error — the invited user record was still created, and the response
  *  carries invite_url so the admin can share it manually. */
@@ -84,6 +86,7 @@ export function Admin({
   onUnauthorized: () => void;
   embedded?: boolean;
 }): React.ReactElement {
+  const [activeTab, setActiveTab] = useState<AdminTab>("users");
   const [users, setUsers] = useState<UserSummary[] | null>(null);
   const [globalRules, setGlobalRules] = useState<GlobalRulesDto | null>(null);
   const [globalRulesDraft, setGlobalRulesDraft] = useState("");
@@ -250,13 +253,39 @@ export function Admin({
         <PageHeader
           eyebrow="Workspace controls"
           title="Administration"
-          lede="Manage global agent rules, members, roles, and invitations."
+          lede="Manage members, global agent rules, and archived projects."
         />
         {error ? <Alert testId="admin-error">{error}</Alert> : null}
 
+        <nav className="admin-tabs" role="tablist" aria-label="Administration sections">
+          {(
+            [
+              ["users", "Users"],
+              ["rules", "Rules"],
+              ["archive", "Archive"],
+            ] as const
+          ).map(([tab, label]) => (
+            <button
+              key={tab}
+              id={`admin-tab-${tab}`}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab}
+              aria-controls={`admin-panel-${tab}`}
+              className={activeTab === tab ? "is-active" : ""}
+              onClick={() => setActiveTab(tab)}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
+
         <section
           className="card admin-archived-projects"
-          aria-labelledby="archived-projects-heading"
+          aria-labelledby="admin-tab-archive archived-projects-heading"
+          id="admin-panel-archive"
+          role="tabpanel"
+          hidden={activeTab !== "archive"}
         >
           <div className="section-head">
             <div>
@@ -290,7 +319,13 @@ export function Admin({
           )}
         </section>
 
-        <section className="admin-global-rules" aria-labelledby="global-rules-heading">
+        <section
+          className="admin-global-rules"
+          aria-labelledby="admin-tab-rules global-rules-heading"
+          id="admin-panel-rules"
+          role="tabpanel"
+          hidden={activeTab !== "rules"}
+        >
           <div className="section-head">
             <div>
               <div className="eyebrow">Global agent rules</div>
@@ -335,7 +370,13 @@ export function Admin({
           )}
         </section>
 
-        <div className="admin-layout">
+        <div
+          className="admin-layout"
+          id="admin-panel-users"
+          role="tabpanel"
+          aria-labelledby="admin-tab-users"
+          hidden={activeTab !== "users"}
+        >
           <section className="card">
             <h3>Users</h3>
             {users === null ? (

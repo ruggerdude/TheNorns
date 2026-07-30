@@ -3,6 +3,42 @@
   padding-bottom: 6rem;
 }
 
+.computers-installer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  margin-bottom: clamp(1.25rem, 2.5vw, 2rem);
+  padding: clamp(1rem, 2vw, 1.4rem);
+}
+
+.computers-installer h2,
+.computers-installer p {
+  margin: 0.15rem 0 0;
+}
+
+.computers-installer-warning {
+  display: block;
+  margin-top: 0.55rem;
+  color: var(--warn);
+}
+
+.computers-installer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.computers-installer-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
 .computers-layout {
   display: grid;
   grid-template-columns: minmax(18rem, 0.78fr) minmax(28rem, 1.35fr);
@@ -399,6 +435,15 @@
 }
 
 @media (max-width: 640px) {
+  .computers-installer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .computers-installer-actions {
+    justify-content: flex-start;
+  }
+
   .computer-detail-header,
   .computer-card-head,
   .computer-card-last-seen {
