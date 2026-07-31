@@ -36,7 +36,7 @@ import { RunLog } from "./RunLog";
 import { StartPhaseControl } from "./StartPhaseControl";
 import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
 import { AuthenticatedHeaderActions } from "./UserMenu";
-import { WorkspaceSettings } from "./WorkspaceSettings";
+import { WorkspaceSettings, prefetchProjectRules } from "./WorkspaceSettings";
 import {
   ApiError,
   type AuthSession,
@@ -3037,6 +3037,7 @@ export function App(): React.ReactElement {
   );
 
   const openProject = useCallback((project: ProjectSummary) => {
+    prefetchProjectRules(project.id);
     setOpenProjects((current) =>
       current.some((p) => p.id === project.id)
         ? current.map((p) => (p.id === project.id ? project : p))

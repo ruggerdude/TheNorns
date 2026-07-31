@@ -118,6 +118,10 @@ export class RoutedProjectRepository implements ProjectRepository {
     return this.projectWrite(id).restore(id, actorId);
   }
 
+  destroy(id: string, actorId: string): ReturnType<ProjectRepository["destroy"]> {
+    return this.projectWrite(id).destroy(id, actorId);
+  }
+
   pmSelectionOf(id: string): ReturnType<ProjectRepository["pmSelectionOf"]> {
     return this.projectRead(id).pmSelectionOf(id);
   }

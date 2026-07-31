@@ -24,6 +24,8 @@ interface ProjectRulesDto {
   updated_at: string | null;
 }
 
+const rulesCache = new Map<string, Promise<ProjectRulesDto>>();
+
 async function rulesRequest(
   projectId: string,
   method: "GET" | "PUT",
@@ -44,8 +46,36 @@ async function rulesRequest(
   return body;
 }
 
+/** Call when a project workspace opens so rules are warm by the time Settings is visited. */
+export function prefetchProjectRules(projectId: string): void {
+  if (rulesCache.has(projectId)) return;
+  const promise = rulesRequest(projectId, "GET").catch(() => {
+    rulesCache.delete(projectId);
+    return null as unknown as ProjectRulesDto;
+  });
+  rulesCache.set(projectId, promise);
+}
+
 async function archiveProjectRequest(projectId: string): Promise<void> {
   const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (response.status === 401) throw new UnauthorizedError();
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as {
+      detail?: string;
+      message?: string;
+    };
+    throw new ApiError(
+      body.message ?? body.detail ?? `request failed: ${response.status}`,
+      response.status,
+    );
+  }
+}
+
+async function deleteProjectRequest(projectId: string): Promise<void> {
+  const response = await fetch(`/api/v2/projects/${encodeURIComponent(projectId)}/destroy`, {
     method: "DELETE",
     headers: authHeaders(),
   });
@@ -145,10 +175,14 @@ export function WorkspaceSettings({
   const [preferencesSaved, setPreferencesSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [archivingProject, setArchivingProject] = useState(false);
+  const [deletingProject, setDeletingProject] = useState(false);
 
   useEffect(() => {
     let current = true;
-    void rulesRequest(projectId, "GET")
+    const cached = rulesCache.get(projectId);
+    const promise = cached ?? rulesRequest(projectId, "GET");
+    if (cached) rulesCache.delete(projectId);
+    void promise
       .then((next) => {
         if (!current) return;
         setRules(next);
@@ -203,6 +237,25 @@ export function WorkspaceSettings({
       else setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setArchivingProject(false);
+    }
+  };
+
+  const deleteProject = async () => {
+    const confirmed = window.confirm(
+      `Permanently delete "${projectName}"?\n\nThis cannot be undone. All project data including plans, phases, and history will be permanently removed.`,
+    );
+    if (!confirmed) return;
+
+    setDeletingProject(true);
+    setError(null);
+    try {
+      await deleteProjectRequest(projectId);
+      onProjectArchived(projectId);
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) onUnauthorized();
+      else setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setDeletingProject(false);
     }
   };
 
@@ -303,21 +356,31 @@ export function WorkspaceSettings({
         <div className="section-head">
           <div>
             <div className="eyebrow">Danger zone</div>
-            <h2 id="remove-project-heading">Archive project</h2>
+            <h2 id="remove-project-heading">Remove project</h2>
           </div>
         </div>
         <p className="muted">
-          Remove this project from Portfolio while preserving its GitHub repository and historical
-          records. An admin can unarchive it later. Projects with active work cannot be archived.
+          Archive removes the project from Portfolio while preserving its data. Delete permanently
+          removes all project data and cannot be undone.
         </p>
         <div className="settings-save-row">
-          <span className="muted">This action requires confirmation.</span>
+          <span className="muted">Projects with active work cannot be archived.</span>
           <Button
             variant="danger"
             disabled={archivingProject}
             onClick={() => void archiveProject()}
           >
-            {archivingProject ? "Archiving project…" : "Archive project"}
+            {archivingProject ? "Archiving…" : "Archive project"}
+          </Button>
+        </div>
+        <div className="settings-save-row">
+          <span className="muted">This action is permanent and cannot be undone.</span>
+          <Button
+            variant="danger"
+            disabled={deletingProject}
+            onClick={() => void deleteProject()}
+          >
+            {deletingProject ? "Deleting…" : "Delete project"}
           </Button>
         </div>
       </section>

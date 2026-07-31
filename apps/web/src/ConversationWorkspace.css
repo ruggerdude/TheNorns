@@ -1119,7 +1119,9 @@
 
 .conversation-markdown {
   overflow-wrap: anywhere;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: var(--text-sm);
+  letter-spacing: -0.006em;
 }
 
 .conversation-markdown > :first-child {

@@ -4145,6 +4145,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       }
     });
 
+    app.delete("/api/admin/projects/:id/destroy", async (req, reply) => {
+      const admin = await requireAdmin(req, reply);
+      if (!admin) return;
+      const { id } = req.params as { id: string };
+      try {
+        await projects.destroy(id, admin.id);
+        stores.audit(admin.email, "project.destroyed", id, now());
+        reply.code(204).send();
+      } catch (error) {
+        projectError(reply, error);
+      }
+    });
+
     app.delete("/api/projects/:id", async (req, reply) => {
       const user = await resolveUser(req);
       if (!user) return reply.code(401).send({ error: "unauthorized" });
@@ -4152,6 +4165,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       try {
         await projects.archive(id, user.id);
         stores.audit(user.email, "project.archived", id, now());
+        reply.code(204).send();
+      } catch (error) {
+        projectError(reply, error);
+      }
+    });
+
+    app.delete("/api/v2/projects/:id/destroy", async (req, reply) => {
+      const user = await resolveUser(req);
+      if (!user) return reply.code(401).send({ error: "unauthorized" });
+      const { id } = req.params as { id: string };
+      try {
+        await projects.destroy(id, user.id);
+        stores.audit(user.email, "project.destroyed", id, now());
         reply.code(204).send();
       } catch (error) {
         projectError(reply, error);

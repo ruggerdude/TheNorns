@@ -533,6 +533,54 @@ export function Projects({
   // resume call fails (404 for a brand-new draft, network error, etc.)
   // simply renders without phase lines rather than blocking the dashboard.
   const [resumeById, setResumeById] = useState<Record<string, DashboardResumeSummary>>({});
+  const [archivedProjects, setArchivedProjects] = useState<
+    Array<ProjectSummary & { archived_at: string }> | null
+  >(null);
+  const [showArchived, setShowArchived] = useState(false);
+  const [archiveBusy, setArchiveBusy] = useState<string | null>(null);
+
+  const refreshArchived = useCallback(async () => {
+    try {
+      const list = await request<Array<ProjectSummary & { archived_at: string }>>(
+        "/api/admin/projects/archived",
+      );
+      setArchivedProjects(list);
+    } catch {
+      setArchivedProjects([]);
+    }
+  }, []);
+
+  const restoreProject = async (id: string, name: string) => {
+    if (!window.confirm(`Restore "${name}" to the portfolio?`)) return;
+    setArchiveBusy(id);
+    try {
+      await fetch(`/api/admin/projects/${encodeURIComponent(id)}/restore`, {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      await Promise.all([refresh(), refreshArchived()]);
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) onUnauthorized();
+    } finally {
+      setArchiveBusy(null);
+    }
+  };
+
+  const destroyArchivedProject = async (id: string, name: string) => {
+    if (!window.confirm(`Permanently delete "${name}"? This cannot be undone.`)) return;
+    setArchiveBusy(id);
+    try {
+      await fetch(`/api/admin/projects/${encodeURIComponent(id)}/destroy`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      await refreshArchived();
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) onUnauthorized();
+    } finally {
+      setArchiveBusy(null);
+    }
+  };
 
   const refresh = useCallback(async () => {
     try {
@@ -1652,28 +1700,7 @@ export function Projects({
                 <span>Active work will continue to update here.</span>
               </div>
             )}
-            <div className="portfolio-health" aria-label="Portfolio health">
-              {attention.projects.map((projectHealth) => (
-                <div
-                  className={`portfolio-health-row health-${projectHealth.health}`}
-                  key={projectHealth.id}
-                >
-                  <span className="status-dot" />
-                  <div>
-                    <strong>{projectHealth.name}</strong>
-                    <small>{projectHealth.current_phase ?? "No active phase"}</small>
-                  </div>
-                  <span>
-                    {projectHealth.completed_tasks}/{projectHealth.total_tasks} tasks
-                  </span>
-                  <span>
-                    {projectHealth.active_runs} active run
-                    {projectHealth.active_runs === 1 ? "" : "s"}
-                  </span>
-                  <span>{projectHealth.attention_count} attention</span>
-                </div>
-              ))}
-            </div>
+            {/* Portfolio-health rows merged into project cards below */}
           </section>
         ) : (
           <section className="attention-center" aria-labelledby="attention-heading">
@@ -1685,7 +1712,7 @@ export function Projects({
           </section>
         )}
         <div className="project-toolbar">
-          <h2>All projects</h2>
+          <h2>Projects</h2>
           <span className="project-count">{visible?.length ?? 0} shown</span>
         </div>
         {projects === null ? (
@@ -1702,6 +1729,7 @@ export function Projects({
           <div className="proj-stack" data-testid="project-list">
             {visible?.map((project) => {
               const resume = resumeById[project.id];
+              const health = attention?.projects.find((h) => h.id === project.id);
               const blockedPhase = resume?.phases.find((phase) => phase.blocked);
               const activePhase = resume?.phases.find((phase) => phase.status === "active");
               const projectAttention = actionableAttention.filter(
@@ -1709,9 +1737,6 @@ export function Projects({
               );
               const failedRun = projectAttention.find((item) => item.kind === "failed_run");
               const stalledRun = projectAttention.find((item) => item.kind === "stalled_run");
-              // Color coding (P1 dashboard spec): red = decision waiting/
-              // blocked, green = executing, blue = plan ready (staffed but not
-              // yet running), neutral = draft/no plan.
               const status: "red" | "green" | "blue" | "neutral" =
                 (resume?.decisions_waiting ?? 0) > 0 || blockedPhase || projectAttention.length > 0
                   ? "red"
@@ -1732,6 +1757,9 @@ export function Projects({
                     : status === "blue"
                       ? "Plan ready"
                       : "Draft";
+              const phaseName = health?.current_phase ?? activePhase?.objective_summary ?? null;
+              const tasksDone = health?.completed_tasks ?? 0;
+              const tasksTotal = health?.total_tasks ?? 0;
               return (
                 <article
                   className={`card proj-row s-${status}`}
@@ -1751,14 +1779,12 @@ export function Projects({
                   </a>
                   <div className="pr-main">
                     <div className="pr-head">
-                      <span className="monogram">{project.name.slice(0, 2).toUpperCase()}</span>
+                      <span className="status-dot" />
                       <div className="pr-titles">
                         <h3 className="pr-title" id={`project-title-${project.id}`}>
                           {project.name}
                         </h3>
-                        {!isFillerDescription(project.description) ? (
-                          <div className="desc">{project.description}</div>
-                        ) : null}
+                        {phaseName ? <small className="pr-phase">{phaseName}</small> : null}
                       </div>
                       <Badge
                         tone={
@@ -1773,92 +1799,77 @@ export function Projects({
                       >
                         {statusLabel}
                       </Badge>
-                    </div>
-                    <div className="pr-staffing">
-                      <span className="role-lbl">Coordinator</span>
-                      <span className="chip model-c">
+                      <span className="chip model-c" title="Coordinator">
                         {project.pm_model
                           ? (pmModelOption(project.pm_model)?.label ?? project.pm_model)
                           : `${project.pm_provider} default`}
                       </span>
-                      <span className="role-lbl">Reviewer</span>
-                      <span className="chip model-g">
+                      <span className="chip model-g" title="Reviewer">
                         {pmModelOption(DEFAULT_PM_MODEL[project.reviewer_provider])?.label ??
                           project.reviewer_provider}
                       </span>
                     </div>
-                    {/* O1: prefer the resume payload's own plain-language
-                     *  onboarding summary over re-deriving it client-side;
-                     *  fall back to the legacy source_location display for
-                     *  projects that predate the onboarding endpoint. */}
-                    {resume?.onboardingSummaryLine ? (
-                      <div className="project-source" title={resume.onboardingSummaryLine}>
-                        <span>{projectSourceLabel(project)}</span>
-                        <strong>{resume.onboardingSummaryLine}</strong>
-                      </div>
-                    ) : project.source_location ? (
-                      <div className="project-source" title={project.source_location}>
-                        <span>{projectSourceLabel(project)}</span>
-                        <strong>{project.source_location}</strong>
-                      </div>
-                    ) : null}
                   </div>
-                  <div
-                    className="pr-side project-card-dashboard"
-                    aria-label={`${project.name} dashboard`}
-                  >
-                    {[
-                      {
-                        key: "complete",
-                        label: "Overall complete",
-                        value: resume ? `${resume.overall_percent_complete}%` : "—",
-                        warn: false,
-                      },
-                      {
-                        key: "agents",
-                        label: "Active agents",
-                        value: String(resume?.agents_active ?? 0),
-                        warn: false,
-                      },
-                      {
-                        key: "decisions",
-                        label: "Decisions",
-                        value: resume?.decisions_waiting
-                          ? `${resume.decisions_waiting} waiting`
-                          : "None",
-                        warn: (resume?.decisions_waiting ?? 0) > 0,
-                      },
-                      {
-                        key: "eta",
-                        label: "Blended ETA",
-                        value: formatEtaDate(resume?.blended_eta_at),
-                        warn: false,
-                      },
-                      {
-                        key: "commits",
-                        label: "Total commits",
-                        value: String(resume?.total_commits ?? 0),
-                        warn: false,
-                      },
-                      {
-                        key: "last-commit",
-                        label: "Last commit",
-                        value: resume?.last_commit_sha?.slice(0, 8) ?? "—",
-                        warn: false,
-                        title: resume?.last_commit_sha ?? undefined,
-                      },
-                    ].map((fact) => (
-                      <div className="project-card-stat" key={fact.key} title={fact.title}>
-                        <strong className={fact.warn ? "warn" : ""}>{fact.value}</strong>
-                        <span>{fact.label}</span>
-                      </div>
-                    ))}
+                  <div className="pr-side pr-stats-row" aria-label={`${project.name} stats`}>
+                    <span>
+                      {tasksDone}/{tasksTotal} tasks
+                    </span>
+                    <span>{resume?.agents_active ?? 0} runs</span>
+                    <span>{resume ? `${resume.overall_percent_complete}%` : "—"}</span>
+                    {(resume?.decisions_waiting ?? 0) > 0 ? (
+                      <span className="warn">{resume?.decisions_waiting} decisions</span>
+                    ) : null}
                   </div>
                 </article>
               );
             })}
           </div>
         )}
+        <details
+          className="archived-toggle"
+          onToggle={(event) => {
+            const open = (event.target as HTMLDetailsElement).open;
+            setShowArchived(open);
+            if (open) void refreshArchived();
+          }}
+        >
+          <summary>Archived projects</summary>
+          {showArchived ? (
+            archivedProjects === null ? (
+              <Spinner label="Loading…" />
+            ) : archivedProjects.length === 0 ? (
+              <p className="muted">No archived projects.</p>
+            ) : (
+              <ul className="admin-archived-list">
+                {archivedProjects.map((project) => (
+                  <li key={project.id}>
+                    <div>
+                      <strong>{project.name}</strong>
+                      <small>Archived {new Date(project.archived_at).toLocaleDateString()}</small>
+                    </div>
+                    <div className="archive-actions">
+                      <Button
+                        className="btn-small"
+                        disabled={archiveBusy === project.id}
+                        onClick={() => void restoreProject(project.id, project.name)}
+                      >
+                        {archiveBusy === project.id ? "Restoring…" : "Restore"}
+                      </Button>
+                      <Button
+                        variant="danger"
+                        className="btn-small"
+                        disabled={archiveBusy === project.id}
+                        onClick={() => void destroyArchivedProject(project.id, project.name)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )
+          ) : null}
+        </details>
       </main>
 
       {dialog ? (

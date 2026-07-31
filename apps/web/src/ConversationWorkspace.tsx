@@ -307,23 +307,7 @@ function attachmentIdFromUrl(url: string): string | null {
   return match?.[1] ? decodeURIComponent(match[1]) : null;
 }
 
-const CONVERSATION_ATTACHMENT_ACCEPT = [
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-  "image/gif",
-  "text/plain",
-  "text/markdown",
-  "application/json",
-  "text/csv",
-  "application/pdf",
-  ".txt",
-  ".md",
-  ".markdown",
-  ".json",
-  ".csv",
-  ".pdf",
-].join(",");
+const CONVERSATION_ATTACHMENT_ACCEPT = "*/*";
 
 const ATTACHMENT_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   png: "image/png",
@@ -339,11 +323,11 @@ const ATTACHMENT_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   pdf: "application/pdf",
 };
 
-function resolvedAttachmentMime(file: File): string | null {
+function resolvedAttachmentMime(file: File): string {
   const declared = file.type.trim().toLocaleLowerCase();
   if (declared && declared !== "application/octet-stream") return declared;
   const extension = file.name.split(".").pop()?.toLocaleLowerCase();
-  return extension ? (ATTACHMENT_MIME_BY_EXTENSION[extension] ?? null) : null;
+  return (extension ? ATTACHMENT_MIME_BY_EXTENSION[extension] : null) ?? "application/octet-stream";
 }
 
 function attachmentTypeLabel(mimeType: string): string {
@@ -743,11 +727,6 @@ function createConversationAttachmentAdapter(
     accept: CONVERSATION_ATTACHMENT_ACCEPT,
     async add({ file }): Promise<PendingAttachment> {
       const contentType = resolvedAttachmentMime(file);
-      if (!contentType) {
-        throw new Error(
-          "That file type is not supported. Add an image, PDF, plain text, Markdown, JSON, or CSV file.",
-        );
-      }
       const response = await fetch(`/api/v2/projects/${projectId}/attachments`, {
         method: "POST",
         credentials: "include",

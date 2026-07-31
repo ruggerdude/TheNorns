@@ -103,6 +103,10 @@ export class ShadowProjectRepository implements ProjectRepository {
     return this.options.legacy.restore(id, actorId);
   }
 
+  destroy(id: string, actorId: string): ReturnType<ProjectRepository["destroy"]> {
+    return this.options.legacy.destroy(id, actorId);
+  }
+
   pmSelectionOf(id: string): Promise<{ provider: ProviderName; model: PmModelT | null }> {
     return this.read(
       { type: "project", key: id },

@@ -250,6 +250,13 @@ export class ProjectStore {
     record.archivedAt = null;
   }
 
+  /** Permanently remove a project record. */
+  destroy(id: string): void {
+    const record = this.projects.get(id);
+    if (!record) throw new ProjectNotFoundError(id);
+    this.projects.delete(id);
+  }
+
   /** The live GraphSession for a project — throws if it hasn't been planned yet. */
   session(id: string): GraphSession {
     const record = this.record(id);
