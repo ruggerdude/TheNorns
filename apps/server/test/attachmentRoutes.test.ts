@@ -178,10 +178,10 @@ describe.sequential("attachment HTTP API (FRONT DOOR P4)", () => {
     });
   });
 
-  it("rejects a disallowed media type with 415", async () => {
+  it("coerces an unrecognized media type to application/octet-stream", async () => {
     const res = await post(base(), { mime: "image/svg+xml", base64: pngBase64() });
-    expect(res.statusCode).toBe(415);
-    expect(res.json()).toMatchObject({ error: "unsupported_media_type" });
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toMatchObject({ mime: "application/octet-stream" });
   });
 
   it("rejects bytes whose format contradicts the declared mime with 400", async () => {
