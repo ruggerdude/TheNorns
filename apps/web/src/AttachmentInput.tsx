@@ -233,7 +233,7 @@ export function AttachmentInput({
       const unsupported = files.filter(
         (file) => !isAcceptedImage(file) && !(variant === "composer" && isAcceptedTextFile(file)),
       );
-      if (unsupported.length > 0) {
+      if (unsupported.length > 0 && variant !== "composer") {
         report(
           "That file type is not supported yet. Add an image or a text, code, Markdown, JSON, or CSV file.",
         );

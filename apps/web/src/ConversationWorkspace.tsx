@@ -3119,11 +3119,8 @@ function ConversationComposer({
   const hasAttachments = useComposer((state) => state.attachments.length > 0);
   useEffect(() => {
     const stopListeningForErrors = composer.unstable_on("attachmentAddError", ({ message }) => {
-      setAttachmentError(
-        message.includes("is not accepted")
-          ? "That file type is not supported. Add an image, PDF, plain text, Markdown, JSON, or CSV file."
-          : message,
-      );
+      if (message.includes("is not accepted")) return;
+      setAttachmentError(message);
     });
     const stopListeningForAdds = composer.unstable_on("attachmentAdd", () =>
       setAttachmentError(null),

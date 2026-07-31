@@ -7,7 +7,8 @@ export type AttachmentFileMime =
   | "text/markdown"
   | "application/json"
   | "text/csv"
-  | "application/pdf";
+  | "application/pdf"
+  | "application/octet-stream";
 
 export type AttachmentMime = AttachmentImageMime | AttachmentFileMime;
 
@@ -26,6 +27,7 @@ export const ALLOWED_FILE_MIMES: readonly AttachmentFileMime[] = [
   "application/json",
   "text/csv",
   "application/pdf",
+  "application/octet-stream",
 ];
 
 export const FILE_EXTRACTION_CAPS = {
@@ -56,6 +58,7 @@ export function isImageAttachmentMime(mime: string): mime is AttachmentImageMime
 
 export function maxBytesForMime(mime: AttachmentMime, maxImageBytes: number): number {
   if (isAllowedImageMime(mime)) return maxImageBytes;
+  if (mime === "application/octet-stream") return FILE_EXTRACTION_CAPS.maxPdfBytes;
   return mime === "application/pdf"
     ? FILE_EXTRACTION_CAPS.maxPdfBytes
     : FILE_EXTRACTION_CAPS.maxTextBytes;
@@ -80,6 +83,16 @@ export async function prepareAttachment(
     };
   }
 
+  if (declaredMime === "application/octet-stream") {
+    return {
+      mime: declaredMime,
+      width: null,
+      height: null,
+      extractedText: null,
+      extractedTextSha256: null,
+      extractionTruncated: false,
+    };
+  }
   const extracted =
     declaredMime === "application/pdf"
       ? await extractPdfText(bytes)

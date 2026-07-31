@@ -1,5 +1,4 @@
 import { useEffect, useId, useState } from "react";
-import { BraidMark } from "./BraidMark";
 import type { ProjectSummary } from "./Projects";
 import { UnauthorizedError, authHeaders } from "./auth";
 
@@ -52,17 +51,6 @@ export function PortfolioMenu({
   return (
     <nav className="portfolio-navigation" aria-label="Portfolio navigation">
       <button type="button" className="portfolio-new-project" onClick={() => choose(onNewProject)}>
-        <BraidMark
-          width={120}
-          height={40}
-          lead={8}
-          period={28}
-          strokeWidth={3.5}
-          strand1="rgba(255,255,255,0.18)"
-          strand2="rgba(255,200,60,0.22)"
-          strand3="rgba(255,255,255,0.10)"
-          className="new-project-weave"
-        />
         <span>New project</span>
       </button>
       <div className={`portfolio-switcher${projectListOpen ? " is-open" : ""}`}>
