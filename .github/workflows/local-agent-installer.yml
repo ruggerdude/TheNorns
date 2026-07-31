@@ -44,15 +44,11 @@ jobs:
           SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
           SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
           SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
-          PUBLISH_RELEASE: ${{ inputs.publish_release }}
         run: |
           $installer = 'dist-agent\windows\installer\Norns-Local-Agent-Setup.exe'
           if (-not $env:SIGNING_CERTIFICATE_BASE64) {
-            if ($env:PUBLISH_RELEASE -eq 'true') {
-              throw 'Publishing requires WINDOWS_CODESIGN_PFX_BASE64 and WINDOWS_CODESIGN_PFX_PASSWORD.'
-            }
             "signed=false" >> $env:GITHUB_OUTPUT
-            Write-Host 'No signing identity configured; retaining this build as a CI artifact only.'
+            Write-Host 'No Windows signing identity configured; retaining this build as a CI artifact only.'
             exit 0
           }
           $certificate = Join-Path $env:RUNNER_TEMP 'norns-codesign.pfx'
@@ -123,7 +119,6 @@ jobs:
     needs: [windows, macos]
     if: >-
       inputs.publish_release &&
-      needs.windows.outputs.signed == 'true' &&
       needs.macos.outputs.notarized == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -138,17 +133,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ inputs.version }}
+          WINDOWS_SIGNED: ${{ needs.windows.outputs.signed }}
         run: |
           tag="agent-v${VERSION}"
           windows_asset="release-assets/Norns-Local-Agent-Setup.exe"
           macos_asset="release-assets/Norns-Local-Agent-macOS.pkg"
-          test -f "$windows_asset"
           test -f "$macos_asset"
+          assets=("$macos_asset")
+          release_note="Signed and notarized universal macOS beta of Norns Local Agent."
+          if [ "$WINDOWS_SIGNED" = "true" ]; then
+            test -f "$windows_asset"
+            assets+=("$windows_asset")
+            release_note="Signed Windows and signed, notarized universal macOS beta of Norns Local Agent."
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
             printf 'Refusing to overwrite immutable Local Agent release %s\n' "$tag" >&2
             exit 1
           fi
-          gh release create "$tag" "$windows_asset" "$macos_asset" \
+          gh release create "$tag" "${assets[@]}" \
             --prerelease \
             --title "Norns Local Agent ${VERSION}" \
-            --notes "Signed Windows and signed, notarized universal macOS beta of Norns Local Agent. Updates are installed manually with a newer signed package."
+            --notes "${release_note} Updates are installed manually with a newer signed package."

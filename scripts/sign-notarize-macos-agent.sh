@@ -12,6 +12,8 @@ STAGE="$WORKSPACE/dist-agent/macos"
 PKG_ROOT="$STAGE/pkg-root"
 APP="$PKG_ROOT/Applications/Norns Local Agent.app"
 PKG="$STAGE/installer/Norns-Local-Agent-macOS.pkg"
+PACKAGE_SCRIPTS="$STAGE/package-scripts"
+COMPONENT_PLIST="$WORKSPACE/packaging/macos/component.plist"
 ENTITLEMENTS="$WORKSPACE/packaging/macos/node-entitlements.plist"
 PUBLISH_RELEASE="${PUBLISH_RELEASE:-false}"
 
@@ -43,6 +45,8 @@ fi
 
 [ -d "$APP" ] || { printf '%s\n' "macOS app bundle is missing." >&2; exit 1; }
 [ -f "$PKG" ] || { printf '%s\n' "macOS installer package is missing." >&2; exit 1; }
+[ -d "$PACKAGE_SCRIPTS" ] || { printf '%s\n' "macOS package scripts are missing." >&2; exit 1; }
+[ -f "$COMPONENT_PLIST" ] || { printf '%s\n' "macOS component plist is missing." >&2; exit 1; }
 
 KEYCHAIN="$RUNNER_TEMP/norns-signing.keychain-db"
 KEYCHAIN_PASSWORD=$(uuidgen)
@@ -93,6 +97,8 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 rm -f "$PKG"
 COPYFILE_DISABLE=1 pkgbuild \
   --root "$PKG_ROOT" \
+  --scripts "$PACKAGE_SCRIPTS" \
+  --component-plist "$COMPONENT_PLIST" \
   --identifier "com.thenorns.local-agent.pkg" \
   --version "$BUNDLE_VERSION" \
   --install-location / \

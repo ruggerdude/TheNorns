@@ -30,11 +30,13 @@ describe("desktop local-agent packaging", () => {
     expect(launcher).toContain("request_id");
   });
 
-  it("never publishes an unsigned installer as a release", () => {
+  it("publishes only signed platform installers and requires notarized macOS", () => {
     const workflow = read(".github/workflows/local-agent-installer.yml");
-    expect(workflow).toContain("Publishing requires WINDOWS_CODESIGN_PFX_BASE64");
-    expect(workflow).toContain("needs.windows.outputs.signed == 'true'");
+    expect(workflow).toContain('"signed=false" >> $env:GITHUB_OUTPUT');
     expect(workflow).toContain("needs.macos.outputs.notarized == 'true'");
+    expect(workflow).toContain('if [ "$WINDOWS_SIGNED" = "true" ]');
+    expect(workflow).toContain('assets=("$macos_asset")');
+    expect(workflow).toContain('assets+=("$windows_asset")');
     expect(workflow).toContain("actions/upload-artifact@v4");
   });
 
@@ -68,6 +70,8 @@ describe("desktop local-agent packaging", () => {
     expect(signing).toContain("APPLICATION_IDENTITY");
     expect(signing).toContain("INSTALLER_IDENTITY");
     expect(signing).toContain("codesign --verify --deep --strict");
+    expect(signing).toContain('--scripts "$PACKAGE_SCRIPTS"');
+    expect(signing).toContain('--component-plist "$COMPONENT_PLIST"');
     expect(signing).toContain("notarytool submit");
     expect(signing).toContain("stapler staple");
     expect(signing).toContain("notarized=true");
