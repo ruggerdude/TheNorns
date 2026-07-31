@@ -103,6 +103,7 @@ COPYFILE_DISABLE=1 pkgbuild \
   --version "$BUNDLE_VERSION" \
   --install-location / \
   --sign "$INSTALLER_IDENTITY" \
+  --keychain "$KEYCHAIN" \
   "$PKG"
 pkgutil --check-signature "$PKG"
 

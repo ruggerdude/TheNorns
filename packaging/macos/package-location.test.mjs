@@ -21,6 +21,7 @@ assert.match(component, /<key>BundleOverwriteAction<\/key>\s*<string>upgrade<\/s
 assert.match(packager, /--component-plist "\$COMPONENT_PLIST"/);
 assert.match(signer, /--scripts "\$PACKAGE_SCRIPTS"/);
 assert.match(signer, /--component-plist "\$COMPONENT_PLIST"/);
+assert.match(signer, /--keychain "\$KEYCHAIN"/);
 assert.match(launcher, /<key>NORNS_ENABLE_DEVICE_CONTROL<\/key><string>true<\/string>/);
 assert.match(launcher, /NORNS_ENABLE_DEVICE_CONTROL="true" \\\n\s*NORNS_LOCAL_AGENT_VERSION=/);
 
