@@ -2790,8 +2790,6 @@ function confirmationKeyFor(action: V2ConversationActionT, memory: Map<string, s
   }
 }
 
-const PLANNING_WORKFLOW_STEPS = ["Chat", "Plan", "QC", "Execute"] as const;
-
 function isPlanAdoptionIntent(value: string): boolean {
   const normalized = value
     .trim()
@@ -3141,69 +3139,6 @@ function ConversationComposer({
   );
 }
 
-function PlanningWorkflowBar({
-  detail,
-  onOpenConversation,
-}: {
-  detail: ConversationDetail;
-  onOpenConversation: (conversationId: string) => void;
-}): React.ReactElement {
-  const context = useContext(ConversationActionContext);
-  if (!context) return <></>;
-
-  const actions = [...context.actions.values()];
-  const proposedAction = (actionType: V2ConversationActionT["action_type"]) =>
-    actions.find((action) => action.action_type === actionType && action.status === "proposed") ??
-    null;
-  const saveAction = proposedAction("save_plan_candidate");
-  const activeReview = detail.plan_reviews.find(
-    (review) => review.status === "queued" || review.status === "running",
-  );
-  const hasSavedPlan = detail.plan_versions.length > 0;
-  const approved =
-    detail.conversation.kind === "execution_pm" ||
-    detail.plan_versions.some((version) => version.status === "approved") ||
-    [...context.effects.values()].some((effect) => effect.kind === "plan_approved");
-  const hasReview = detail.plan_reviews.length > 0;
-  const currentStep = approved
-    ? 3
-    : hasReview || activeReview
-      ? 2
-      : hasSavedPlan || saveAction
-        ? 1
-        : 0;
-  const executionTarget =
-    detail.handoff?.target_conversation_id ??
-    [...context.effects.values()]
-      .map((effect) => executionConversationId(effect))
-      .find((conversationId) => conversationId !== null) ??
-    null;
-  const currentStepLabel = PLANNING_WORKFLOW_STEPS[currentStep];
-
-  return (
-    <section className="conversation-workflow" aria-label="Planning workflow">
-      <div className="conversation-workflow-stage">
-        <span>Stage</span>
-        <strong aria-current="step">{currentStepLabel}</strong>
-        <small>
-          {activeReview
-            ? `QC ${activeReview.status.replaceAll("_", " ")}`
-            : `${currentStep + 1} of ${PLANNING_WORKFLOW_STEPS.length}`}
-        </small>
-      </div>
-      {executionTarget && detail.conversation.kind !== "execution_pm" ? (
-        <Button
-          className="btn-small conversation-workflow-action"
-          aria-label="Open execution"
-          onClick={() => onOpenConversation(executionTarget)}
-        >
-          Open execution
-        </Button>
-      ) : null}
-    </section>
-  );
-}
-
 function ConversationThread({
   header,
   detail,
@@ -3219,6 +3154,7 @@ function ConversationThread({
     modelControl: ReactNode,
     executionTargetLabel: string | null,
     toolControl?: ReactNode,
+    primaryAction?: ReactNode,
   ) => ReactNode;
   detail: ConversationDetail;
   initialMessage?: string | null;
@@ -4218,6 +4154,13 @@ function ConversationThread({
   const isPlanning = detail.conversation.kind === "planning";
   const isExecution = detail.conversation.kind === "execution_pm";
   const isReadOnly = detail.conversation.status !== "active";
+  const linkedExecutionConversationId = isPlanning
+    ? (detail.handoff?.target_conversation_id ??
+      [...actionContext.effects.values()]
+        .map((effect) => executionConversationId(effect))
+        .find((conversationId) => conversationId !== null) ??
+      null)
+    : null;
   const latestPlan = [...detail.plan_versions]
     .filter((version) =>
       ["candidate", "in_qc", "changes_requested", "approved"].includes(version.status),
@@ -4362,12 +4305,16 @@ function ConversationThread({
                     onPrepare={(parameters) => proposeExecutionAction("create_mockup", parameters)}
                   />
                 ) : null,
+                linkedExecutionConversationId ? (
+                  <Button
+                    className="btn-small"
+                    aria-label="Open execution"
+                    onClick={() => onOpenConversation(linkedExecutionConversationId)}
+                  >
+                    Open execution
+                  </Button>
+                ) : null,
               )}
-              {isPlanning || isExecution ? (
-                <div className="conversation-thread-tools" aria-label="Conversation tools">
-                  <PlanningWorkflowBar detail={detail} onOpenConversation={onOpenConversation} />
-                </div>
-              ) : null}
             </div>
             {detail.branch_lineage ? (
               <aside
@@ -5592,6 +5539,7 @@ export function ConversationWorkspace({
     modelControl?: ReactNode,
     executionTargetLabel: string | null = null,
     toolControl?: ReactNode,
+    primaryAction?: ReactNode,
   ) => (
     <header className="conversation-header">
       <Button
@@ -5607,14 +5555,9 @@ export function ConversationWorkspace({
         <span aria-hidden="true">☰</span>
       </Button>
       <div className="conversation-header-identity">
-        <span className={executionTargetLabel ? "conversation-header-target" : undefined}>
-          {executionTargetLabel ??
-            (showNew
-              ? "New chat"
-              : detail
-                ? conversationKindLabel(detail.conversation.kind)
-                : "Chat")}
-        </span>
+        {executionTargetLabel ? (
+          <span className="conversation-header-target">{executionTargetLabel}</span>
+        ) : null}
         <h2>
           {showNew
             ? "Start new work"
@@ -5625,6 +5568,7 @@ export function ConversationWorkspace({
       </div>
       {!showNew && detail ? (
         <div className="conversation-header-actions">
+          {primaryAction}
           <div className="conversation-header-menu">
             <Button
               className="btn-small"

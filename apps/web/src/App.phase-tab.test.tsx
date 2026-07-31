@@ -461,7 +461,7 @@ describe("PHASE TAB (P2)", () => {
     expect(screen.getByTestId("phase-execution-team")).toHaveTextContent("High effort");
   });
 
-  it("opens an adopted project's in-flight plan directly and restores it from the durable latest run after refresh", async () => {
+  it("opens an adopted project's in-flight plan directly and prepares it without overriding Overview on return", async () => {
     setToken("present");
     mock = workspaceMocks({
       ...projectAlpha,
@@ -485,11 +485,13 @@ describe("PHASE TAB (P2)", () => {
 
     render(<App />);
     await openProjectFromPortfolio();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on"));
+    expect(screen.queryByTestId("phase-run-progress")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Work" }));
     expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
 
-  it("opens a new project's approval decision directly and restores that same decision after refresh", async () => {
+  it("opens a new project's approval decision directly and prepares it without overriding Overview on return", async () => {
     setToken("present");
     mock = workspaceMocks({
       ...projectAlpha,
@@ -514,11 +516,13 @@ describe("PHASE TAB (P2)", () => {
 
     render(<App />);
     await openProjectFromPortfolio();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on"));
+    expect(screen.queryByTestId("phase-decision-panel")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Work" }));
     expect(await screen.findByTestId("phase-decision-panel")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
 
-  it("restores a new project's active planning run from the durable latest-run endpoint", async () => {
+  it("prepares a new project's active planning run without overriding Overview", async () => {
     setToken("present");
     mock = workspaceMocks({ ...projectAlpha, onboarding_scenario: "new_repo" });
     mock.get(`${runsUrl}/latest`, { body: { planning_run: makeRun() } });
@@ -527,8 +531,10 @@ describe("PHASE TAB (P2)", () => {
 
     render(<App />);
     await openProjectFromPortfolio();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on"));
+    expect(screen.queryByTestId("phase-run-progress")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Work" }));
     expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
 
   it("restores an approved new project whose coding kickoff still needs recovery", async () => {
@@ -565,8 +571,10 @@ describe("PHASE TAB (P2)", () => {
     render(<App />);
     await openProjectFromPortfolio();
 
+    await waitFor(() => expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on"));
+    expect(screen.queryByTestId("phase-retry-execution")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Work" }));
     expect(await screen.findByTestId("phase-retry-execution")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
 
   it("restores a quick kickoff refusal and does not mistake another active phase for its progress", async () => {
@@ -612,8 +620,9 @@ describe("PHASE TAB (P2)", () => {
     render(<App />);
     await openProjectFromPortfolio();
 
+    await waitFor(() => expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on"));
+    await userEvent.click(screen.getByRole("button", { name: "Work" }));
     expect(await screen.findByRole("heading", { name: "Coding needs a restart" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
     expect(screen.getByTestId("phase-execution-kickoff-note")).toHaveTextContent(
       "quick change is recorded, but coding did not start",
     );

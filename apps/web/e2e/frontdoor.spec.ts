@@ -810,10 +810,7 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await expect(planHandoff.getByRole("button", { name: "Create plan & start" })).toBeVisible();
   await planHandoff.getByRole("button", { name: "Cancel" }).click();
   await expect(planHandoff).toHaveCount(0);
-  const planningWorkflow = page.getByRole("region", { name: "Planning workflow" });
-  await expect(planningWorkflow).toBeVisible();
-  await expect(planningWorkflow.locator('[aria-current="step"]')).toHaveText("Chat");
-  await expect(planningWorkflow.getByRole("button", { name: "Create plan" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Planning workflow" })).toHaveCount(0);
   const conversationSidebar = page.getByRole("complementary", {
     name: "Project conversations",
   });
@@ -825,7 +822,6 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   const conversationBox = await page.locator(".conversation-workspace").boundingBox();
   const conversationMainBox = await page.locator(".conversation-main").boundingBox();
   const conversationChromeBox = await page.locator(".conversation-thread-chrome").boundingBox();
-  const conversationToolsBox = await page.locator(".conversation-thread-tools").boundingBox();
   const transcriptBox = await page.locator(".conversation-thread-viewport").boundingBox();
   const composerShellBox = await page.locator(".conversation-composer").boundingBox();
   expect(conversationBox?.height ?? 0).toBeGreaterThan(1020);
@@ -833,12 +829,9 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   expect(conversationMainBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThan(
     (conversationBox?.width ?? 0) - 260,
   );
-  expect(conversationChromeBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(80);
-  expect(conversationToolsBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(56);
-  expect(conversationToolsBox?.y ?? 0).toBeGreaterThanOrEqual(conversationChromeBox?.y ?? 0);
-  expect((conversationToolsBox?.y ?? 0) + (conversationToolsBox?.height ?? 0)).toBeLessThanOrEqual(
-    (conversationChromeBox?.y ?? 0) + (conversationChromeBox?.height ?? 0) + 1,
-  );
+  expect(conversationChromeBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(64);
+  await expect(conversationHeader.getByText("Planning", { exact: true })).toHaveCount(0);
+  await expect(conversationHeader.getByText("Stage", { exact: true })).toHaveCount(0);
   expect(transcriptBox?.height ?? 0).toBeGreaterThan(740);
   expect(composerShellBox?.width ?? 0).toBeGreaterThan(700);
   expect(composerShellBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(820);
@@ -869,6 +862,35 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   expect(compactHeaderBox?.width).toBe(820);
   expect(compactHeaderBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(160);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(820);
+});
+
+test("Re-entering a project opens Overview instead of preserving Work", async ({ page }) => {
+  await prepare(page, "github", { conversationWorkspace: true });
+  await page.goto("/");
+  await selectExistingGitHubRepository(page);
+  await page.getByRole("button", { name: /adopt project/i }).click();
+
+  const workspaceNavigation = page.getByRole("navigation", { name: "Workspace sections" });
+  await workspaceNavigation.getByRole("button", { name: "Work", exact: true }).click();
+  await expect(
+    workspaceNavigation.getByRole("button", { name: "Work", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+
+  const portfolioNavigation = page
+    .locator(".workspace-nav-start")
+    .getByRole("navigation", { name: "Portfolio navigation" });
+  await portfolioNavigation.getByRole("button", { name: "Portfolio", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Portfolio", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Show active projects" }).click();
+  await page.getByRole("button", { name: "front-door-app", exact: true }).click();
+
+  const restoredWorkspaceNavigation = page.getByRole("navigation", {
+    name: "Workspace sections",
+  });
+  await expect(
+    restoredWorkspaceNavigation.getByRole("button", { name: "Overview", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+  expect(new URL(page.url()).pathname).toBe("/projects/project-github");
 });
 
 test("Mobile workspace opens navigation as a drawer and keeps chat usable", async ({ page }) => {

@@ -614,6 +614,9 @@ describe("conversation workspace", () => {
     expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Revise" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
+    const conversationHeader = document.querySelector(".conversation-thread-chrome");
+    expect(conversationHeader?.querySelector(".conversation-header-identity > span")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Planning workflow" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Chat options" }));
     expect(screen.getByRole("combobox", { name: "Conversation model" })).toHaveValue(
       "claude-sonnet-5",
@@ -1648,8 +1651,7 @@ describe("conversation workspace", () => {
     expect(
       screen.getByRole("button", { name: "Confirm action: Approve and begin" }),
     ).toBeInTheDocument();
-    const workflow = screen.getByRole("region", { name: "Planning workflow" });
-    expect(workflow.querySelector('[aria-current="step"]')).toHaveTextContent("QC");
+    expect(screen.queryByRole("region", { name: "Planning workflow" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve and start" })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Change direction" })).toBeEnabled();
   });
@@ -1820,8 +1822,6 @@ describe("conversation workspace", () => {
       />,
     );
 
-    const workflow = await screen.findByRole("region", { name: "Planning workflow" });
-    expect(workflow.querySelector('[aria-current="step"]')).toHaveTextContent("Chat");
     await user.type(
       await screen.findByRole("textbox", { name: "Message the project PM" }),
       "Use this as the plan.{enter}",
@@ -1834,13 +1834,6 @@ describe("conversation workspace", () => {
 
     expect(await screen.findByText("I drafted a structured plan proposal.")).toBeInTheDocument();
     expect(screen.getByText("Proposed Plan Contract")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(
-        screen
-          .getByRole("region", { name: "Planning workflow" })
-          .querySelector('[aria-current="step"]'),
-      ).toHaveTextContent("Plan"),
-    );
     expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
     expect(proposalBodies).toHaveLength(1);
     expect(proposalBodies[0]?.idempotency_key).toEqual(expect.any(String));
@@ -2191,7 +2184,7 @@ describe("conversation workspace", () => {
       } else if (skipsQc) {
         await waitFor(() => expect(approved).toBe(true));
       } else {
-        expect(await screen.findByText("QC queued")).toBeInTheDocument();
+        expect(screen.queryByRole("region", { name: "Planning workflow" })).not.toBeInTheDocument();
       }
       expect(proposalBodies).toEqual([
         {
@@ -2597,7 +2590,6 @@ describe("conversation workspace", () => {
         "QC is queued. Findings and PM dispositions will appear here after the review settles.",
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText("QC queued", { exact: true })).toBeInTheDocument();
     expect(detailCalls).toBe(1);
 
     await act(async () => {
@@ -2703,8 +2695,7 @@ describe("conversation workspace", () => {
       "href",
       `/projects/${projectId}/work/execution-conversation-pending`,
     );
-    const workflow = screen.getByRole("region", { name: "Planning workflow" });
-    expect(workflow.querySelector('[aria-current="step"]')).toHaveTextContent("Execute");
+    expect(screen.queryByRole("region", { name: "Planning workflow" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open execution" })).toBeInTheDocument();
 
     await act(async () => {
@@ -3659,7 +3650,11 @@ describe("conversation workspace", () => {
       />,
     );
 
-    expect(await screen.findByText("Running on · Office Mac mini")).toBeVisible();
+    const executionTargetLabel = await screen.findByText("Running on · Office Mac mini");
+    expect(executionTargetLabel).toBeVisible();
+    expect(document.querySelector(".conversation-header-identity")).toContainElement(
+      executionTargetLabel,
+    );
     await user.click(screen.getByRole("button", { name: "Chat options" }));
     const agents = await screen.findByRole("button", { name: "Agents 1" });
     expect(screen.queryByRole("complementary", { name: "Agent activity" })).not.toBeInTheDocument();

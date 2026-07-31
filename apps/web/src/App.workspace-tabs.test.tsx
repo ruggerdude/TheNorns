@@ -10,7 +10,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { App } from "./App";
 import { setToken } from "./auth";
-import { fullyAllocatedGraph, projectAlpha } from "./test/fixtures";
+import { fullyAllocatedGraph, projectAlpha, projectBeta } from "./test/fixtures";
 import { MockFetch } from "./test/mockFetch";
 import { preloadConversationWorkspaceForTest } from "./test/preloadConversationWorkspace";
 
@@ -111,6 +111,61 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     expect(await screen.findByRole("heading", { name: "All projects" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "New project" }));
     expect(await screen.findByRole("main", { name: "New project" })).toBeInTheDocument();
+  });
+
+  it("resets each project to Overview when switching directly between projects", async () => {
+    setToken("present");
+    mock = new MockFetch();
+    mock.get("/api/projects", { body: [projectAlpha, projectBeta] });
+    for (const project of [projectAlpha, projectBeta]) {
+      mock.get(`/api/projects/${project.id}/graph`, { body: fullyAllocatedGraph });
+      mock.get(`/api/v2/projects/${project.id}/resume`, { status: 404, body: {} });
+    }
+    mock.get("/api/v2/attention", { status: 404, body: {} });
+    mock.install();
+
+    const user = userEvent.setup();
+    render(<App />);
+    await openProjectFromPortfolio();
+    await user.click(screen.getByRole("button", { name: "Work" }));
+    expect(await screen.findByRole("button", { name: "Work" })).toHaveClass("on");
+
+    const portfolioNavigation = document.querySelector(
+      ".workspace-nav-start .portfolio-navigation",
+    );
+    if (!(portfolioNavigation instanceof HTMLElement)) {
+      throw new Error("Workspace Portfolio navigation not found");
+    }
+    await user.click(
+      within(portfolioNavigation).getByRole("button", { name: "Show active projects" }),
+    );
+    await user.click(
+      within(portfolioNavigation).getByRole("button", { name: new RegExp(projectBeta.name, "i") }),
+    );
+
+    expect(await screen.findByRole("heading", { name: projectBeta.name })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on");
+    expect(window.location.pathname).toBe(`/projects/${projectBeta.id}`);
+
+    await user.click(screen.getByRole("button", { name: "Work" }));
+    const betaPortfolioNavigation = document.querySelector(
+      ".workspace-nav-start .portfolio-navigation",
+    );
+    if (!(betaPortfolioNavigation instanceof HTMLElement)) {
+      throw new Error("Billing workspace Portfolio navigation not found");
+    }
+    await user.click(
+      within(betaPortfolioNavigation).getByRole("button", { name: "Show active projects" }),
+    );
+    await user.click(
+      within(betaPortfolioNavigation).getByRole("button", {
+        name: new RegExp(projectAlpha.name, "i"),
+      }),
+    );
+
+    expect(await screen.findByRole("heading", { name: projectAlpha.name })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on");
+    expect(window.location.pathname).toBe(`/projects/${projectAlpha.id}`);
   });
 
   it("opens project usage in the shared sidebar and returns to the same workspace", async () => {

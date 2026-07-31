@@ -76,6 +76,7 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
   });
 
   test("clears a stale session marker and returns to sign-in when the cookie is gone", async () => {
+    window.history.replaceState({}, "", "/projects/test-2/work/conversation-1");
     mock.get("/api/auth/me", { status: 401, body: { error: "unauthorized" } });
     mock.get("/api/auth/status", { body: { needs_bootstrap: false } });
     mock.install();
@@ -87,6 +88,7 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     ).toBeInTheDocument();
     expect(screen.getByText(/session expired\. sign in again/i)).toBeInTheDocument();
     expect(getToken()).toBeNull();
+    expect(window.location.pathname).toBe("/");
   });
 
   test("shows Settings and Usage, but keeps Computers inside the admin-only menu", async () => {

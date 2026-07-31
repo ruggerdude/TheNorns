@@ -1045,9 +1045,10 @@ function ProjectGraph({
     previousInitialWorkRoute.current = initialWorkRoute;
   }, [initialConversationId, initialWorkRoute]);
 
-  // New and adopted projects hand us a transient run id so the first open is
-  // immediate. A refresh loses that hint, so recover a still-running,
-  // awaiting-approval, or failed-kickoff journey from durable server state.
+  // New and adopted projects hand us a transient run id so their first open
+  // can go directly to Work. Later project entries recover the same durable
+  // run state without changing the user's selected tab; a clean project URL
+  // always opens on Overview.
   useEffect(() => {
     let cancelled = false;
     if (isCanonicalPlanningJourney && project.focus_planning_run_id) {
@@ -1088,7 +1089,6 @@ function ProjectGraph({
         ].includes(planning_run.status);
         if (planningNeedsAttention) {
           setPhaseJourneyRunId(planning_run.id);
-          setWorkspaceTab("work");
           return;
         }
         if (planning_run.status !== "approved") return;
@@ -1098,7 +1098,6 @@ function ProjectGraph({
         // phase rows, where an unrelated active phase could mask it.
         if (planning_run.mode === "quick" && planning_run.execution?.started !== true) {
           setPhaseJourneyRunId(planning_run.id);
-          setWorkspaceTab("work");
           return;
         }
 
@@ -1116,7 +1115,6 @@ function ProjectGraph({
           );
         if (needsKickoffRecovery) {
           setPhaseJourneyRunId(planning_run.id);
-          setWorkspaceTab("work");
         }
       })
       .catch((err) => {
@@ -2918,6 +2916,15 @@ export function App(): React.ReactElement {
   const [showAdmin, setShowAdmin] = useState(false);
   const [showUsage, setShowUsage] = useState(false);
   const [newProjectRequested, setNewProjectRequested] = useState(false);
+  const resetProjectNavigation = useCallback(() => {
+    setActiveProject(null);
+    setWorkConversationRoute(null);
+    setRoutedProjectId(null);
+    setNewProjectRequested(false);
+    if (window.location.pathname !== "/") {
+      window.history.replaceState(null, "", "/");
+    }
+  }, []);
 
   useEffect(() => {
     // An invite link always wins, regardless of bootstrap state — no need to
@@ -2943,6 +2950,7 @@ export function App(): React.ReactElement {
         clearToken();
         setTok(null);
         setUser(null);
+        resetProjectNavigation();
         setAuthError(
           error instanceof UnauthorizedError
             ? "Session expired. Sign in again."
@@ -2952,7 +2960,7 @@ export function App(): React.ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [resetProjectNavigation, token]);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -3018,19 +3026,21 @@ export function App(): React.ReactElement {
     setTok("present");
   }, []);
 
-  const logout = useCallback((message: string) => {
-    void requestLogout();
-    clearToken();
-    setTok(null);
-    setUser(null);
-    setAuthError(message);
-    setActiveProject(null);
-    setOpenProjects([]);
-    setShowAccount(false);
-    setShowAdmin(false);
-    setShowUsage(false);
-    setNewProjectRequested(false);
-  }, []);
+  const logout = useCallback(
+    (message: string) => {
+      void requestLogout();
+      clearToken();
+      setTok(null);
+      setUser(null);
+      setAuthError(message);
+      resetProjectNavigation();
+      setOpenProjects([]);
+      setShowAccount(false);
+      setShowAdmin(false);
+      setShowUsage(false);
+    },
+    [resetProjectNavigation],
+  );
 
   const openProject = useCallback((project: ProjectSummary) => {
     setOpenProjects((current) =>
@@ -3258,6 +3268,7 @@ export function App(): React.ReactElement {
     />
   ) : (
     <ProjectGraph
+      key={activeProject.id}
       project={activeProject}
       onBack={openPortfolio}
       onOpenProject={openProject}
