@@ -983,8 +983,15 @@
 }
 
 @keyframes plan-pulse {
-  0%, 100% { opacity: 0.3; transform: scale(0.85); }
-  50% { opacity: 1; transform: scale(1.1); }
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
 }
 
 .conversation-thread-chrome .conversation-header-actions {
@@ -2214,18 +2221,6 @@
   background: color-mix(in srgb, var(--warn) 4%, var(--surface));
 }
 
-.conversation-qc-activity[data-expanded="true"] {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
-}
-
-.conversation-thread:has(.conversation-qc-activity[data-expanded="true"]) > .conversation-thread-root,
-.conversation-thread:has(.conversation-qc-activity[data-expanded="true"]) > .conversation-context-receipt,
-.conversation-thread:has(.conversation-qc-activity[data-expanded="true"]) > .conversation-live-telemetry {
-  display: none;
-}
 
 .conversation-qc-activity-summary {
   display: grid;
@@ -2286,24 +2281,6 @@
 
 .conversation-qc-attempt > .conversation-qc-card {
   margin-top: 0;
-}
-
-.conversation-qc-plan-under-review {
-  padding: 0.75rem;
-  border: 1px solid color-mix(in srgb, var(--info) 38%, var(--line));
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--info) 6%, var(--surface));
-}
-
-.conversation-qc-plan-under-review > summary {
-  color: var(--info);
-  font-size: var(--text-sm);
-  font-weight: 800;
-  cursor: pointer;
-}
-
-.conversation-qc-plan-under-review > .conversation-plan-card {
-  margin-top: 0.75rem;
 }
 
 .conversation-qc-final-plan {

@@ -6,7 +6,6 @@ import type {
 } from "@norns/contracts";
 import { useState } from "react";
 import { artifactContentPath } from "./ArtifactImage";
-import { ConversationPlanCard } from "./ConversationPlanCard";
 import { Badge, Button, TextArea } from "./ui";
 
 const SEVERITIES = [
@@ -384,13 +383,6 @@ export function ConversationQcCard({
         <output className="conversation-qc-failure">
           QC stopped by a human · {review.cancellation_reason}
         </output>
-      ) : null}
-
-      {planVersion ? (
-        <details className="conversation-qc-plan-under-review" open>
-          <summary>Plan under review · Version {planVersion.version}</summary>
-          <ConversationPlanCard version={planVersion} />
-        </details>
       ) : null}
 
       {!waived ? (
