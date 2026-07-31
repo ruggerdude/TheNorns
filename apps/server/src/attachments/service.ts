@@ -578,6 +578,7 @@ function normalizeFilename(filename: string | undefined, mime: AttachmentMime): 
     "application/json": "json",
     "text/csv": "csv",
     "application/pdf": "pdf",
+    "application/octet-stream": "bin",
   };
   const normalized = Array.from((filename ?? "").normalize("NFC"), (character) =>
     isUnsafeFilenameCharacter(character) ? "_" : character,
