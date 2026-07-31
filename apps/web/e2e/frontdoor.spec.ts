@@ -615,12 +615,18 @@ test("New project creates from a name and lands in the workspace", async ({ page
   await page.goto("/");
   await page.getByRole("button", { name: /new project/i }).click();
 
-  // DESIGN R2: no in-page "Project setup" heading — the topbar location
-  // "New project" is the title — and the standard wide container replaces
-  // the narrow one.
+  // DESIGN R2: setup replaces only the main content. The application rail
+  // and its Portfolio/New project navigation remain stable.
   await expect(page.getByRole("heading", { name: "Project setup" })).toHaveCount(0);
-  await expect(page.locator(".full-page-header")).toBeVisible();
-  await expect(page.locator(".full-page-header")).toContainText("New project");
+  await expect(page.locator(".full-page-header")).toHaveCount(0);
+  const portfolioNavigation = page.getByRole("navigation", { name: "Portfolio navigation" });
+  await expect(portfolioNavigation).toBeVisible();
+  await expect(
+    portfolioNavigation.getByRole("button", { name: "New project", exact: true }),
+  ).toBeVisible();
+  await expect(
+    portfolioNavigation.getByRole("button", { name: "Portfolio", exact: true }),
+  ).toBeVisible();
   await expect(page.getByText("Guided setup")).toHaveCount(0);
   const setupPage = await page.getByRole("main", { name: "New project" }).boundingBox();
   const setupWidth = setupPage?.width ?? 0;
