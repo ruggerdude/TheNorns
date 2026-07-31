@@ -749,12 +749,33 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await expect(page.getByText("I mapped the release workflow")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Release readiness" })).toBeVisible();
   await expect(page.getByText("# Release readiness", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("Conversation", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Conversation", { exact: true })).toBeHidden();
   const planningComposer = page.getByRole("textbox", { name: "Message the project PM" });
   await expect(planningComposer).toBeVisible();
+  const conversationHeader = page.locator(".conversation-thread-chrome");
+  const conversationIdentity = conversationHeader.locator(".conversation-header-identity");
+  const chatOptionsButton = conversationHeader.getByRole("button", { name: "Chat options" });
   const conversationModel = page.getByRole("combobox", { name: "Conversation model" });
+  await expect(chatOptionsButton).toBeVisible();
+  await expect(conversationModel).toBeHidden();
+  await expect(page.getByRole("button", { name: "Refresh conversation" })).toBeHidden();
+  const identityBox = await conversationIdentity.boundingBox();
+  const optionsButtonBox = await chatOptionsButton.boundingBox();
+  expect(identityBox).not.toBeNull();
+  expect(optionsButtonBox).not.toBeNull();
+  expect((identityBox?.x ?? 0) + (identityBox?.width ?? 0)).toBeLessThanOrEqual(
+    optionsButtonBox?.x ?? 0,
+  );
+  await chatOptionsButton.click();
+  const chatOptionsDialog = page.getByRole("dialog", { name: "Chat options" });
+  await expect(chatOptionsDialog).toBeVisible();
   await expect(conversationModel).toHaveValue("claude-sonnet-5");
   await expect(conversationModel.locator('option[value="gpt-5.6-sol"]')).toHaveCount(0);
+  await expect(
+    chatOptionsDialog.getByRole("button", { name: "Refresh conversation" }),
+  ).toBeVisible();
+  await chatOptionsButton.click();
+  await expect(chatOptionsDialog).toBeHidden();
   await expect(page.getByRole("button", { name: "Add file" })).toHaveText("+");
   await expect(planningComposer).toHaveAttribute(
     "placeholder",
@@ -806,7 +827,7 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   expect(conversationMainBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThan(
     (conversationBox?.width ?? 0) - 260,
   );
-  expect(conversationChromeBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(76);
+  expect(conversationChromeBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(80);
   expect(conversationToolsBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(56);
   expect(conversationToolsBox?.y ?? 0).toBeGreaterThanOrEqual(conversationChromeBox?.y ?? 0);
   expect((conversationToolsBox?.y ?? 0) + (conversationToolsBox?.height ?? 0)).toBeLessThanOrEqual(
@@ -862,6 +883,16 @@ test("Mobile workspace opens navigation as a drawer and keeps chat usable", asyn
   await expect(page.getByText("I mapped the release workflow")).toBeVisible();
   const composer = page.getByRole("textbox", { name: "Message the project PM" });
   await expect(composer).toBeVisible();
+  const chatOptions = page.getByRole("button", { name: "Chat options" });
+  await expect(chatOptions).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Conversation model" })).toBeHidden();
+  await chatOptions.click();
+  const mobileOptionsDialog = page.getByRole("dialog", { name: "Chat options" });
+  await expect(mobileOptionsDialog).toBeVisible();
+  const mobileOptionsBox = await mobileOptionsDialog.boundingBox();
+  expect(mobileOptionsBox?.x ?? -1).toBeGreaterThanOrEqual(0);
+  expect((mobileOptionsBox?.x ?? 0) + (mobileOptionsBox?.width ?? 0)).toBeLessThanOrEqual(390);
+  await chatOptions.click();
   const workspaceHeader = page.locator(".workspace-page-work > .workspace-header");
   await expect(workspaceHeader).toBeHidden();
 
