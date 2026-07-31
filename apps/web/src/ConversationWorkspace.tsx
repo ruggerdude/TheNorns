@@ -3143,11 +3143,9 @@ function ConversationComposer({
 
 function PlanningWorkflowBar({
   detail,
-  proposalBusy,
   onOpenConversation,
 }: {
   detail: ConversationDetail;
-  proposalBusy: boolean;
   onOpenConversation: (conversationId: string) => void;
 }): React.ReactElement {
   const context = useContext(ConversationActionContext);
@@ -3158,8 +3156,6 @@ function PlanningWorkflowBar({
     actions.find((action) => action.action_type === actionType && action.status === "proposed") ??
     null;
   const saveAction = proposedAction("save_plan_candidate");
-  const qcAction = proposedAction("send_plan_to_qc");
-  const approveAction = proposedAction("approve_plan");
   const activeReview = detail.plan_reviews.find(
     (review) => review.status === "queued" || review.status === "running",
   );
@@ -3182,84 +3178,28 @@ function PlanningWorkflowBar({
       .map((effect) => executionConversationId(effect))
       .find((conversationId) => conversationId !== null) ??
     null;
-  const busy = context.busyActionId !== null || proposalBusy;
-
-  let action: ReactNode;
-  if (executionTarget && detail.conversation.kind !== "execution_pm") {
-    action = (
-      <Button
-        className="btn-small conversation-workflow-action"
-        variant="primary"
-        aria-label="Open execution"
-        onClick={() => onOpenConversation(executionTarget)}
-      >
-        Open execution
-      </Button>
-    );
-  } else if (detail.conversation.kind === "execution_pm") {
-    action = <Badge tone="success">Execution active</Badge>;
-  } else if (detail.conversation.status !== "active") {
-    action = <Badge>Planning closed</Badge>;
-  } else if (saveAction) {
-    action = (
-      <Button
-        className="btn-small conversation-workflow-action"
-        variant="primary"
-        aria-label="Save plan"
-        disabled={busy}
-        onClick={() => void context.confirm(saveAction)}
-      >
-        {context.busyActionId === saveAction.id ? "Saving…" : "Save plan"}
-      </Button>
-    );
-  } else if (approveAction) {
-    action = (
-      <Button
-        className="btn-small conversation-workflow-action"
-        variant="primary"
-        aria-label="Approve and start"
-        disabled={busy}
-        onClick={() => void context.confirm(approveAction)}
-      >
-        {context.busyActionId === approveAction.id ? "Starting…" : "Approve & start"}
-      </Button>
-    );
-  } else if (qcAction) {
-    action = (
-      <Button
-        className="btn-small conversation-workflow-action"
-        variant="primary"
-        aria-label="Send to QC"
-        disabled={busy}
-        onClick={() => void context.confirm(qcAction)}
-      >
-        {context.busyActionId === qcAction.id ? "Sending…" : "Send to QC"}
-      </Button>
-    );
-  } else if (activeReview) {
-    action = <Badge tone="info">QC {activeReview.status.replaceAll("_", " ")}</Badge>;
-  } else {
-    action = null;
-  }
+  const currentStepLabel = PLANNING_WORKFLOW_STEPS[currentStep];
 
   return (
     <section className="conversation-workflow" aria-label="Planning workflow">
-      <ol aria-label="Chat to execution progress">
-        {PLANNING_WORKFLOW_STEPS.map((step, index) => {
-          const state =
-            index < currentStep ? "complete" : index === currentStep ? "current" : "next";
-          return (
-            <li
-              className={`is-${state}`}
-              aria-current={state === "current" ? "step" : undefined}
-              key={step}
-            >
-              {step}
-            </li>
-          );
-        })}
-      </ol>
-      {action ? <div className="conversation-workflow-next">{action}</div> : null}
+      <div className="conversation-workflow-stage">
+        <span>Stage</span>
+        <strong aria-current="step">{currentStepLabel}</strong>
+        <small>
+          {activeReview
+            ? `QC ${activeReview.status.replaceAll("_", " ")}`
+            : `${currentStep + 1} of ${PLANNING_WORKFLOW_STEPS.length}`}
+        </small>
+      </div>
+      {executionTarget && detail.conversation.kind !== "execution_pm" ? (
+        <Button
+          className="btn-small conversation-workflow-action"
+          aria-label="Open execution"
+          onClick={() => onOpenConversation(executionTarget)}
+        >
+          Open execution
+        </Button>
+      ) : null}
     </section>
   );
 }
@@ -3275,7 +3215,11 @@ function ConversationThread({
   onRefresh,
   onUnauthorized,
 }: {
-  header: (modelControl: ReactNode, executionTargetLabel: string | null) => ReactNode;
+  header: (
+    modelControl: ReactNode,
+    executionTargetLabel: string | null,
+    toolControl?: ReactNode,
+  ) => ReactNode;
   detail: ConversationDetail;
   initialMessage?: string | null;
   onInitialMessageStarted?: () => void;
@@ -4405,29 +4349,23 @@ function ConversationThread({
                   ) : null}
                 </>,
                 executionTargetHeaderLabel(executionProjection),
+                !isReadOnly && (!isPlanning || latestPlan !== undefined) ? (
+                  <MockupRequestComposer
+                    taskOptions={taskOptions}
+                    planningPlanVersionId={isPlanning ? (latestPlan?.id ?? null) : null}
+                    artifactOptions={artifactOptions}
+                    busy={executionProposalBusy}
+                    error={executionProposalError}
+                    disabledReason={
+                      lockedExecutionRequest ? "Retry the locked exact request first." : null
+                    }
+                    onPrepare={(parameters) => proposeExecutionAction("create_mockup", parameters)}
+                  />
+                ) : null,
               )}
               {isPlanning || isExecution ? (
                 <div className="conversation-thread-tools" aria-label="Conversation tools">
-                  <PlanningWorkflowBar
-                    detail={detail}
-                    proposalBusy={proposalBusy || detail.active_attempt !== null}
-                    onOpenConversation={onOpenConversation}
-                  />
-                  {!isReadOnly && (!isPlanning || latestPlan !== undefined) ? (
-                    <MockupRequestComposer
-                      taskOptions={taskOptions}
-                      planningPlanVersionId={isPlanning ? (latestPlan?.id ?? null) : null}
-                      artifactOptions={artifactOptions}
-                      busy={executionProposalBusy}
-                      error={executionProposalError}
-                      disabledReason={
-                        lockedExecutionRequest ? "Retry the locked exact request first." : null
-                      }
-                      onPrepare={(parameters) =>
-                        proposeExecutionAction("create_mockup", parameters)
-                      }
-                    />
-                  ) : null}
+                  <PlanningWorkflowBar detail={detail} onOpenConversation={onOpenConversation} />
                 </div>
               ) : null}
             </div>
@@ -4874,7 +4812,13 @@ export function ConversationWorkspace({
         setConversationListOpen(false);
       }
     };
-    const closeMenu = () => {
+    const closeMenu = (event: MouseEvent) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest(".conversation-header-menu") !== null
+      ) {
+        return;
+      }
       setConversationMenu(null);
       setHeaderMenuOpen(false);
     };
@@ -5647,6 +5591,7 @@ export function ConversationWorkspace({
   const conversationHeader = (
     modelControl?: ReactNode,
     executionTargetLabel: string | null = null,
+    toolControl?: ReactNode,
   ) => (
     <header className="conversation-header">
       <Button
@@ -5680,23 +5625,12 @@ export function ConversationWorkspace({
       </div>
       {!showNew && detail ? (
         <div className="conversation-header-actions">
-          {modelControl}
-          <Badge tone={detail.conversation.status === "active" ? "success" : "default"}>
-            {detail.conversation.status}
-          </Badge>
-          <Button
-            className="btn-small conversation-refresh-button"
-            disabled={loadingDetail}
-            onClick={refresh}
-            aria-label="Refresh conversation"
-          >
-            {loadingDetail ? "Refreshing…" : "Refresh"}
-          </Button>
           <div className="conversation-header-menu">
             <Button
               className="btn-small"
               variant="ghost"
-              aria-label="More chat actions"
+              aria-label="Chat options"
+              aria-haspopup="dialog"
               aria-expanded={headerMenuOpen}
               onClick={(event) => {
                 event.stopPropagation();
@@ -5705,18 +5639,71 @@ export function ConversationWorkspace({
             >
               <span aria-hidden="true">•••</span>
             </Button>
-            {headerMenuOpen ? (
-              <div className="conversation-header-menu-popover" role="menu">
+            <dialog
+              className="conversation-header-menu-popover"
+              aria-label="Chat options"
+              open={headerMenuOpen}
+            >
+              <div className="conversation-header-menu-status">
+                <span>Conversation</span>
+                <Badge tone={detail.conversation.status === "active" ? "success" : "default"}>
+                  {detail.conversation.status.replaceAll("_", " ")}
+                </Badge>
+              </div>
+              {modelControl ? (
+                <div
+                  className="conversation-header-menu-section"
+                  onClick={(event) => {
+                    if (
+                      event.target instanceof Element &&
+                      event.target.closest(".conversation-agents-button") !== null
+                    ) {
+                      setHeaderMenuOpen(false);
+                    }
+                  }}
+                  onKeyUp={(event) => {
+                    if (
+                      (event.key === "Enter" || event.key === " ") &&
+                      event.target instanceof Element &&
+                      event.target.closest(".conversation-agents-button") !== null
+                    ) {
+                      setHeaderMenuOpen(false);
+                    }
+                  }}
+                >
+                  <span>Model and agents</span>
+                  {modelControl}
+                </div>
+              ) : null}
+              {toolControl ? (
+                <div className="conversation-header-menu-section">
+                  <span>Tools</span>
+                  {toolControl}
+                </div>
+              ) : null}
+              <div className="conversation-header-menu-actions">
                 <button
                   type="button"
-                  role="menuitem"
+                  disabled={loadingDetail}
+                  onClick={() => {
+                    setHeaderMenuOpen(false);
+                    void refresh();
+                  }}
+                >
+                  {loadingDetail ? "Refreshing…" : "Refresh conversation"}
+                </button>
+                <button
+                  type="button"
                   disabled={!lastResponseText}
-                  onClick={() => void copyLastResponse()}
+                  onClick={() => {
+                    setHeaderMenuOpen(false);
+                    void copyLastResponse();
+                  }}
                 >
                   {lastResponseCopied ? "Copied" : "Copy last response"}
                 </button>
               </div>
-            ) : null}
+            </dialog>
           </div>
         </div>
       ) : null}

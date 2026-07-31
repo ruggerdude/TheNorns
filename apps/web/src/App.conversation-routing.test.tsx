@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   App,
@@ -158,9 +159,11 @@ describe("conversation deep links", () => {
     );
     mock.install();
 
+    const user = userEvent.setup();
     render(<App />);
 
-    expect(await screen.findByRole("combobox", { name: "Conversation model" })).toHaveValue(
+    await user.click(await screen.findByRole("button", { name: "Chat options" }));
+    expect(screen.getByRole("combobox", { name: "Conversation model" })).toHaveValue(
       "claude-sonnet-5",
     );
     expect(window.location.pathname).toBe(deepPath);

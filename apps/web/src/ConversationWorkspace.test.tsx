@@ -614,6 +614,7 @@ describe("conversation workspace", () => {
     expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Revise" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Chat options" }));
     expect(screen.getByRole("combobox", { name: "Conversation model" })).toHaveValue(
       "claude-sonnet-5",
     );
@@ -637,8 +638,7 @@ describe("conversation workspace", () => {
     expect(screen.getByRole("button", { name: "Add file" })).toHaveTextContent("+");
     expect(screen.getByRole("button", { name: "Send message" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Stop response" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "More chat actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Copy last response" }));
+    await user.click(screen.getByRole("button", { name: "Copy last response" }));
     expect(clipboardWrite).toHaveBeenCalledWith(
       "I found **one risk**.\n\n```ts\nconst durable = true;\n```",
     );
@@ -667,6 +667,7 @@ describe("conversation workspace", () => {
       }),
     ).toHaveLength(workspaceReadsBeforeParentRerender);
     expect(screen.getByText("Please inspect the API.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Chat options" }));
     expect(screen.getByRole("combobox", { name: "Conversation model" })).toHaveValue(
       "claude-sonnet-5",
     );
@@ -1365,6 +1366,7 @@ describe("conversation workspace", () => {
       />,
     );
 
+    await user.click(await screen.findByRole("button", { name: "Chat options" }));
     const modelSelect = (await screen.findByRole("combobox", {
       name: "Conversation model",
     })) as HTMLSelectElement;
@@ -1648,7 +1650,7 @@ describe("conversation workspace", () => {
     ).toBeInTheDocument();
     const workflow = screen.getByRole("region", { name: "Planning workflow" });
     expect(workflow.querySelector('[aria-current="step"]')).toHaveTextContent("QC");
-    expect(screen.getByRole("button", { name: "Approve and start" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve and start" })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Change direction" })).toBeEnabled();
   });
 
@@ -1844,7 +1846,7 @@ describe("conversation workspace", () => {
     expect(proposalBodies[0]?.idempotency_key).toEqual(expect.any(String));
 
     expect(screen.getByRole("button", { name: "Confirm action: Send to QC" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Send to QC" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send to QC" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Confirm action: Reject plan" })).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Confirm action: Request changes" }),
@@ -2185,7 +2187,7 @@ describe("conversation workspace", () => {
       expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
       expect(await screen.findByText("UI preview", { exact: true })).toBeInTheDocument();
       if (trigger === "typed command") {
-        expect(screen.getByRole("button", { name: "Send to QC" })).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Send to QC" })).not.toBeInTheDocument();
       } else if (skipsQc) {
         await waitFor(() => expect(approved).toBe(true));
       } else {
@@ -2413,6 +2415,7 @@ describe("conversation workspace", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("plan hash is stale");
     expect(screen.getByRole("textbox", { name: "Change direction" })).toHaveValue(direction);
 
+    await user.click(screen.getByRole("button", { name: "Chat options" }));
     await user.click(screen.getByRole("button", { name: "Refresh conversation" }));
     await waitFor(() => expect(detailCalls).toBe(2));
     expect(screen.getByRole("textbox", { name: "Change direction" })).toHaveValue(direction);
@@ -3656,8 +3659,9 @@ describe("conversation workspace", () => {
       />,
     );
 
-    const agents = await screen.findByRole("button", { name: "Agents 1" });
     expect(await screen.findByText("Running on · Office Mac mini")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Chat options" }));
+    const agents = await screen.findByRole("button", { name: "Agents 1" });
     expect(screen.queryByRole("complementary", { name: "Agent activity" })).not.toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "Agent task to stop" })).not.toBeInTheDocument();
     expect(
@@ -3933,6 +3937,7 @@ describe("conversation workspace", () => {
       "Compacted summary v1",
     );
     expect(screen.queryByTestId("conversation-total-usage")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Chat options" }));
     expect(screen.getByRole("combobox", { name: "Conversation model" })).toHaveValue("gpt-5.6-sol");
   });
 
@@ -4583,6 +4588,7 @@ describe("conversation workspace", () => {
     expect(screen.getAllByTestId(`human-wait-${baseWait.id}`)).toHaveLength(1);
     expect(screen.getByTestId("execution-action-composer")).toBeInTheDocument();
 
+    await user.click(screen.getByRole("button", { name: "Chat options" }));
     await user.click(screen.getByRole("button", { name: "Refresh conversation" }));
 
     expect(await screen.findByTestId(`human-wait-update-${baseWait.id}`)).toHaveTextContent(
@@ -4817,6 +4823,7 @@ describe("conversation workspace", () => {
     expect(await screen.findByText("Exact request locked")).toBeInTheDocument();
     expect(window.sessionStorage.getItem(storageKey)).toBe(JSON.stringify(exactRequest));
 
+    await user.click(screen.getByRole("button", { name: "Chat options" }));
     await user.click(screen.getByRole("button", { name: "Refresh conversation" }));
 
     expect(await screen.findByText("Prepare execution action")).toBeInTheDocument();
@@ -4945,6 +4952,7 @@ describe("conversation workspace", () => {
       expect(window.sessionStorage.getItem(storageKey)).toBe(JSON.stringify(exactRequest)),
     );
 
+    await user.click(screen.getByRole("button", { name: "Chat options" }));
     await user.click(screen.getByRole("button", { name: "Refresh conversation" }));
 
     await waitFor(() => expect(window.sessionStorage.getItem(storageKey)).toBeNull());
