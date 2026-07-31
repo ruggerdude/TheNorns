@@ -640,15 +640,14 @@ test("administrator edits global NORN.md without losing the current workspace", 
     "Settings",
   ]);
 
-  await page.getByRole("button", { name: "Admin", exact: true }).click();
-  const adminPanel = page.getByTestId("admin-panel");
-  await expect(adminPanel).toBeVisible();
-  await adminPanel.getByRole("tab", { name: "Rules", exact: true }).click();
-  const editor = adminPanel.getByRole("textbox", { name: "Global NORN.md" });
+  await page.getByRole("button", { name: "Settings", exact: true }).nth(1).click();
+  const settingsNav = page.getByRole("navigation", { name: "Settings sections" });
+  await settingsNav.getByRole("button", { name: "Rules", exact: true }).click();
+  const editor = page.getByRole("textbox", { name: "Global NORN.md" });
   await editor.fill("# Global rules\n\n- Report blockers every five minutes.");
-  await adminPanel.getByRole("button", { name: "Save global rules" }).click();
+  await page.getByRole("button", { name: "Save global rules" }).click();
 
-  await expect(adminPanel.getByText("v1")).toBeVisible();
+  await expect(page.getByText("v1")).toBeVisible();
   await expect(editor).toHaveValue("# Global rules\n\n- Report blockers every five minutes.");
   expect(observed.globalRuleMutations).toEqual([
     { content: "# Global rules\n\n- Report blockers every five minutes." },

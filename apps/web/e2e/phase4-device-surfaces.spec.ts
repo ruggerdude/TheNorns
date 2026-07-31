@@ -194,8 +194,11 @@ test("Computers repository access stays usable on narrow and forced-color layout
   await page.setViewportSize({ width: 1440, height: 900 });
   await prepare(page);
   await page.goto("/");
-  await page.getByRole("button", { name: "Admin", exact: true }).click();
-  await page.getByRole("tab", { name: "Computers", exact: true }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+  await page
+    .getByRole("navigation", { name: "Settings sections" })
+    .getByRole("button", { name: "Computers", exact: true })
+    .click();
   await page.getByRole("button", { name: "View details for Office Mac mini" }).click();
 
   const access = page.getByRole("region", { name: "Repository access" });
