@@ -1150,3 +1150,18 @@ decision and is deliberately untouched.
 - [ ] 🟡 DES-R2-FLAKY — two pre-existing e2e failures reproduce on base
   de367e5 (unrelated to R2): frontdoor "centered responsive shell" work-tab
   background assertion, and phase6 mockup approval (intermittent).
+
+## Repo tooling (2026-07-31)
+
+- [x] REPO-SKILL-1 — remove root `CLAUDE.md` agent instructions and add the
+  `/full-scope-pm` project skill (`.claude/skills/full-scope-pm/SKILL.md`).
+  Opened and completed in the same push. The skill's delivery clause was
+  reworded to stand alone rather than cite the deleted `CLAUDE.md`.
+- [ ] 🟡 REPO-SKILL-2 — the hard-won agent conventions that only lived in
+  `CLAUDE.md` are now unrecorded: migration numbering left UNASSIGNED,
+  `GRANT ... TO norns_app` on every new table, wiring optional services into
+  `buildServer(...)` in `apps/server/src/main.ts`, running `tsc --noEmit`
+  separately from `tsconfig.build.json`, and committing incrementally because
+  background agents die with the host app. Each of these caused a production
+  incident at least once. Decide whether to re-home them (a skill, `docs/`, or
+  `README.md`) or accept the loss deliberately.
