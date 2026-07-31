@@ -71,13 +71,20 @@ describe("project dashboard entry", () => {
     expect(screen.queryByText("+ New project")).not.toBeInTheDocument();
   });
 
-  it("opens project setup as a dedicated page and returns to the dashboard", async () => {
+  it("keeps the application navigation while project setup replaces the main content", async () => {
     setup();
     await screen.findByRole("link", { name: "Enter Alpha" });
+    const portfolioNavigation = screen.getByRole("navigation", {
+      name: "Portfolio navigation",
+    });
 
     await userEvent.click(screen.getByRole("button", { name: "New project" }));
 
     expect(screen.getByRole("main", { name: "New project" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Portfolio navigation" })).toBe(
+      portfolioNavigation,
+    );
+    expect(portfolioNavigation.closest(".topbar")).not.toBeNull();
     // DESIGN R2: no in-page "Project setup" heading — the topbar location
     // "New project" is the page title.
     expect(screen.queryByRole("heading", { name: "Project setup" })).not.toBeInTheDocument();
@@ -85,8 +92,9 @@ describe("project dashboard entry", () => {
     expect(screen.queryByText("Let's set the brief")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Quick access" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Enter Alpha" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "← Dashboard" })).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "← Dashboard" }));
+    await userEvent.click(screen.getByRole("button", { name: "Portfolio" }));
     expect(await screen.findByRole("heading", { name: "All projects" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Quick access" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Enter Alpha" })).toBeInTheDocument();

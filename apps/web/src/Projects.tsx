@@ -1231,6 +1231,12 @@ export function Projects({
     setIdempotencyKey(globalThis.crypto.randomUUID());
   }, []);
 
+  const openPortfolio = useCallback(() => {
+    closeWizard();
+    window.history.pushState(null, "", "/");
+    window.scrollTo(0, 0);
+  }, [closeWizard]);
+
   const visible = projects;
   const activeAgents =
     attention?.counts.active_runs ??
@@ -1315,22 +1321,14 @@ export function Projects({
       );
 
   return (
-    <div className={dialog ? "full-page-view project-setup-view" : "app-shell"}>
-      <header className="topbar" hidden={dialog}>
+    <div className={`app-shell${dialog ? " project-setup-view" : ""}`}>
+      <header className="topbar">
         <div className="topbar-main">
-          <Brand
-            onHome={() => {
-              window.history.pushState(null, "", "/");
-              window.scrollTo(0, 0);
-            }}
-          />
+          <Brand onHome={openPortfolio} />
           <PortfolioMenu
             projects={projects}
             onNewProject={openNewProject}
-            onOpenPortfolio={() => {
-              window.history.pushState(null, "", "/");
-              window.scrollTo(0, 0);
-            }}
+            onOpenPortfolio={openPortfolio}
             onOpenProject={onOpenProject}
             onUnauthorized={onUnauthorized}
           />
@@ -1345,10 +1343,7 @@ export function Projects({
             portfolioNavigation={{
               projects,
               onNewProject: openNewProject,
-              onOpenPortfolio: () => {
-                window.history.pushState(null, "", "/");
-                window.scrollTo(0, 0);
-              },
+              onOpenPortfolio: openPortfolio,
               onOpenProject,
               onUnauthorized,
             }}
@@ -1785,21 +1780,6 @@ export function Projects({
 
       {dialog ? (
         <>
-          {/* DESIGN P1 bug fix: the header sits OUTSIDE the width-constrained
-              main so the canonical sticky .full-page-header spans the full
-              viewport like every other screen's top strip. */}
-          <header className="full-page-header">
-            <div className="full-page-header-title">
-              <Brand onHome={closeWizard} />
-              <span>New project</span>
-            </div>
-            <Button variant="ghost" className="btn-small" onClick={closeWizard}>
-              ← Dashboard
-            </Button>
-          </header>
-          {/* DESIGN R2: no in-page "Project setup" heading (the topbar
-              location "New project" is the title) and the standard wide
-              container instead of the narrow one. */}
           <main className="page-container wizard-page" aria-label="New project">
             <section className="wizard-shell">
               {wizardStep === "adopting" && draftProject ? (
