@@ -1728,14 +1728,17 @@ describe("conversation workspace", () => {
       />,
     );
 
-    expect(
-      await screen.findByRole("button", { name: /Reviewer feedback was saved/i }),
-    ).toHaveAttribute("aria-expanded", "true");
+    const qcToggle = await screen.findByRole("button", { name: /QC activity/i });
+    expect(qcToggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("The retry boundary is not explicit.")).toBeInTheDocument();
     expect(
       screen.getByText(/planning agent did not produce an acceptable revision/i),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Final reviewed plan output/)).not.toBeInTheDocument();
+    // Collapsing the QC activity reveals the summary with the saved feedback message.
+    await userEvent.click(qcToggle);
+    expect(qcToggle).toHaveAttribute("aria-expanded", "false");
+    expect(qcToggle).toHaveTextContent(/Reviewer feedback was saved/i);
   });
 
   it("generates, saves, and hydrates a plan from the composer intent", async () => {
@@ -2667,11 +2670,7 @@ describe("conversation workspace", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(
-      screen.getByText(
-        "QC is queued. Findings and PM dispositions will appear here after the review settles.",
-      ),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Round 2 of 3 · waiting to start")).toBeInTheDocument();
     expect(detailCalls).toBe(1);
 
     await act(async () => {
@@ -2684,6 +2683,66 @@ describe("conversation workspace", () => {
       await vi.advanceTimersByTimeAsync(5_000);
     });
     expect(detailCalls).toBe(2);
+  });
+
+  it("offers retry after a failure that already produced a PM revision", async () => {
+    // The server proposes retry/skip/reject against the originally reviewed
+    // version, so a review carrying a mid-review revision must still match them.
+    const version = planVersion({ status: "candidate" });
+    const failed = planReview({
+      status: "failed",
+      failure_code: "invalid_response",
+      findings: [],
+      dispositions: [],
+      revised_plan_version_id: "plan-version-2",
+      completed_at: null,
+    });
+    const retry = planAction({
+      id: "action-qc-retry",
+      action_type: "send_plan_to_qc",
+      payload: {
+        parameters: {
+          plan_version_id: "plan-version-1",
+          content_hash: "a".repeat(64),
+          review: { mode: "qc", reviewer: { provider: "openai", model: "gpt-5.6" }, rounds: 3 },
+        },
+      },
+    });
+    const history = [
+      message({
+        id: "message-plan",
+        role: "assistant",
+        sequence: 1,
+        parts: [{ type: "plan", plan_version_id: version.id }],
+      }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse(history, null, null, {
+            planVersions: [version],
+            actions: [retry],
+            reviews: [failed],
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Retry QC with retained guidance" }),
+    ).toBeInTheDocument();
   });
 
   it("polls a pending approved-plan kickoff until its durable outcome settles", async () => {

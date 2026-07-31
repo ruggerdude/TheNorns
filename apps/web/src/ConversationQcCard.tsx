@@ -46,6 +46,20 @@ function failureLabel(code: string | null): string {
   }
 }
 
+// What the review is doing right now, derived from the newest recorded event.
+function livePhase(review: V2ConversationPlanReviewT): string {
+  const round = Math.min(review.rounds_completed + 1, review.max_rounds);
+  const position = `Round ${round} of ${review.max_rounds}`;
+  const last = review.chat_messages.at(-1) ?? null;
+  if (review.status === "queued" || !last) return `${position} · waiting to start`;
+  const who = last.channel === "reviewer" ? "QC reviewer" : "planning manager";
+  if (last.kind === "error") return `${position} · the ${who} request failed`;
+  if (last.kind === "repair_reminder")
+    return `${position} · asked the ${who} to correct its format`;
+  if (last.kind === "instruction") return `${position} · waiting for the ${who}`;
+  return `${position} · ${who} responded`;
+}
+
 function Finding({
   finding,
   review,
@@ -292,98 +306,158 @@ export function ConversationQcCard({
       data-testid="conversation-qc-card"
       aria-labelledby={titleId}
     >
-      <header>
-        <div>
-          <div className="eyebrow">
-            {waived
-              ? "QC skipped by human choice"
-              : `Cross-provider QC · Attempt ${review.attempt_number}`}
-          </div>
-          <h3 id={titleId}>
-            Plan {planVersion ? `version ${planVersion.version}` : review.plan_version_id}
-          </h3>
-        </div>
-        <Badge tone={statusTone(review.status)}>{review.status.replaceAll("_", " ")}</Badge>
-      </header>
-
-      <dl className="conversation-qc-summary">
-        <div>
-          <dt>Progress</dt>
-          <dd>
-            {review.rounds_completed} / {review.max_rounds} rounds
-          </dd>
-        </div>
-        <div>
-          <dt>Exact reviewed hash</dt>
-          <dd>
-            <code title={review.plan_content_hash}>{review.plan_content_hash.slice(0, 10)}</code>
-          </dd>
-        </div>
-        {["converged", "cap_reached"].includes(review.status) ? (
+      <div className="conversation-qc-pinned">
+        <header>
           <div>
-            <dt>Final result hash</dt>
-            <dd>
-              <code title={review.result_plan_content_hash}>
-                {review.result_plan_content_hash.slice(0, 10)}
-              </code>
-            </dd>
+            <div className="eyebrow">
+              {waived
+                ? "QC skipped by human choice"
+                : `Cross-provider QC · Attempt ${review.attempt_number}`}
+            </div>
+            <h3 id={titleId}>
+              Plan {planVersion ? `version ${planVersion.version}` : review.plan_version_id}
+            </h3>
           </div>
-        ) : null}
-        <div>
-          <dt>PM</dt>
-          <dd>
-            {review.pm_provider} · {review.pm_model}
-          </dd>
-        </div>
-        {!waived ? (
-          <div>
-            <dt>Reviewer</dt>
-            <dd>
-              {review.reviewer_provider} · {review.reviewer_model}
-            </dd>
-          </div>
-        ) : null}
-        <div>
-          <dt>Context receipt</dt>
-          <dd>
-            <code title={review.context_manifest.context_hash}>
-              {review.context_manifest.context_hash.slice(0, 10)}
-            </code>
-          </dd>
-        </div>
-      </dl>
+          <Badge tone={statusTone(review.status)}>{review.status.replaceAll("_", " ")}</Badge>
+        </header>
 
-      {!terminal ? (
-        <>
-          <output className="conversation-qc-progress" aria-live="polite">
-            <span>
-              QC is {review.status}. Findings and PM dispositions will appear here after the review
-              settles.
-            </span>
-            <span>{percent}%</span>
+        {!terminal ? (
+          <>
+            <output className="conversation-qc-progress" aria-live="polite">
+              <span>{livePhase(review)}</span>
+              <span>{percent}%</span>
+            </output>
+            <div className="conversation-qc-progress-track" aria-hidden="true">
+              <span style={{ width: `${percent}%` }} />
+            </div>
+          </>
+        ) : null}
+        {review.status === "failed" ? (
+          <output className="conversation-qc-failure" role="alert">
+            <strong>QC failed because {failureLabel(review.failure_code)}.</strong>
+            {failedAfterReviewer ? (
+              <span>
+                The reviewer feedback below was saved, but the planning agent did not produce an
+                acceptable revision.
+              </span>
+            ) : null}
+            <span>The unchanged plan remains a candidate and can be sent to QC again.</span>
           </output>
-          <div className="conversation-qc-progress-track" aria-hidden="true">
-            <span style={{ width: `${percent}%` }} />
-          </div>
-        </>
-      ) : null}
-      {review.status === "failed" ? (
-        <output className="conversation-qc-failure" role="alert">
-          <strong>QC failed because {failureLabel(review.failure_code)}.</strong>
-          {failedAfterReviewer ? (
-            <span>
-              The reviewer feedback below was saved, but the planning agent did not produce an
-              acceptable revision.
-            </span>
-          ) : null}
-          <span>The unchanged plan remains a candidate and can be sent to QC again.</span>
-        </output>
-      ) : null}
-      {review.status === "cancelled" ? (
-        <output className="conversation-qc-failure">
-          QC stopped by a human · {review.cancellation_reason}
-        </output>
-      ) : null}
+        ) : null}
+        {review.status === "cancelled" ? (
+          <output className="conversation-qc-failure">
+            QC stopped by a human · {review.cancellation_reason}
+          </output>
+        ) : null}
+
+        {!terminal && onCancel ? (
+          <section className="conversation-qc-controls">
+            {stopping ? (
+              <>
+                <label htmlFor={`${titleId}-stop-reason`}>Why are you stopping QC?</label>
+                <TextArea
+                  id={`${titleId}-stop-reason`}
+                  value={reason}
+                  maxLength={500}
+                  disabled={busy}
+                  onChange={(event) => setReason(event.target.value)}
+                />
+                <div>
+                  <Button disabled={busy} onClick={() => setStopping(false)}>
+                    Keep QC running
+                  </Button>
+                  <Button
+                    variant="danger"
+                    disabled={busy || !reason.trim()}
+                    onClick={() => void onCancel(review, reason.trim())}
+                  >
+                    {busy ? "Stopping…" : "Confirm stop QC"}
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <Button variant="danger" disabled={busy} onClick={() => setStopping(true)}>
+                Stop QC
+              </Button>
+            )}
+          </section>
+        ) : null}
+
+        {terminal && onConfirmAction ? (
+          <section className="conversation-qc-decision" aria-label="Human plan decision">
+            <div>
+              {actions.approve && ["converged", "cap_reached"].includes(review.status) ? (
+                <Button
+                  variant="primary"
+                  disabled={busy}
+                  onClick={() => {
+                    if (actions.approve) void onConfirmAction(actions.approve);
+                  }}
+                >
+                  Approve plan &amp; start
+                </Button>
+              ) : null}
+              {actions.repeat ? (
+                <Button
+                  disabled={busy}
+                  onClick={() => {
+                    if (actions.repeat) void onConfirmAction(actions.repeat);
+                  }}
+                >
+                  {review.status === "failed"
+                    ? "Retry QC with retained guidance"
+                    : "Run more QC rounds"}
+                </Button>
+              ) : null}
+              {review.status === "failed" && onContinueWithoutQc ? (
+                confirmingSkip ? (
+                  <div className="conversation-qc-skip-confirmation" role="alert">
+                    <p>
+                      This records QC as explicitly waived. The retained chats and Markdown files
+                      remain visible in the audit history.
+                    </p>
+                    <Button disabled={busy} onClick={() => setConfirmingSkip(false)}>
+                      Keep QC required
+                    </Button>
+                    <Button
+                      variant="primary"
+                      disabled={busy}
+                      onClick={() => void onContinueWithoutQc(review)}
+                    >
+                      {busy ? "Recording choice…" : "Confirm continue without QC"}
+                    </Button>
+                  </div>
+                ) : (
+                  <Button disabled={busy} onClick={() => setConfirmingSkip(true)}>
+                    Continue without QC
+                  </Button>
+                )
+              ) : null}
+              {review.status === "failed" && onReturnToPlanning ? (
+                <Button disabled={busy} onClick={onReturnToPlanning}>
+                  Return to planning chat
+                </Button>
+              ) : null}
+              {actions.reject ? (
+                <Button
+                  variant="danger"
+                  disabled={busy}
+                  onClick={() => {
+                    if (actions.reject) void onConfirmAction(actions.reject);
+                  }}
+                >
+                  Stop this plan
+                </Button>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
+        {error ? (
+          <output className="conversation-action-error" role="alert">
+            {error}
+          </output>
+        ) : null}
+      </div>
 
       {!waived ? (
         <>
@@ -530,126 +604,55 @@ export function ConversationQcCard({
         </p>
       ) : null}
 
-      {!terminal && onCancel ? (
-        <section className="conversation-qc-controls">
-          {stopping ? (
-            <>
-              <label htmlFor={`${titleId}-stop-reason`}>Why are you stopping QC?</label>
-              <TextArea
-                id={`${titleId}-stop-reason`}
-                value={reason}
-                maxLength={500}
-                disabled={busy}
-                onChange={(event) => setReason(event.target.value)}
-              />
-              <div>
-                <Button disabled={busy} onClick={() => setStopping(false)}>
-                  Keep QC running
-                </Button>
-                <Button
-                  variant="danger"
-                  disabled={busy || !reason.trim()}
-                  onClick={() => void onCancel(review, reason.trim())}
-                >
-                  {busy ? "Stopping…" : "Confirm stop QC"}
-                </Button>
-              </div>
-            </>
-          ) : (
-            <Button variant="danger" disabled={busy} onClick={() => setStopping(true)}>
-              Stop QC
-            </Button>
-          )}
-        </section>
-      ) : null}
-      {!terminal && error ? (
-        <output className="conversation-action-error" role="alert">
-          {error}
-        </output>
-      ) : null}
-
-      {terminal && onConfirmAction ? (
-        <section className="conversation-qc-decision" aria-label="Human plan decision">
+      <details className="conversation-qc-receipt">
+        <summary>Review receipt · models, hashes, and context</summary>
+        <dl className="conversation-qc-summary">
           <div>
-            <h4>What happens next?</h4>
-            <p>
-              {review.status === "failed"
-                ? "Automated QC is stopped. Review or take over either chat, then choose explicitly."
-                : "Review the transcript and final staffing before choosing."}
-            </p>
+            <dt>Progress</dt>
+            <dd>
+              {review.rounds_completed} / {review.max_rounds} rounds
+            </dd>
           </div>
           <div>
-            {actions.approve && ["converged", "cap_reached"].includes(review.status) ? (
-              <Button
-                variant="primary"
-                disabled={busy}
-                onClick={() => {
-                  if (actions.approve) void onConfirmAction(actions.approve);
-                }}
-              >
-                Approve plan & start
-              </Button>
-            ) : null}
-            {actions.repeat ? (
-              <Button
-                disabled={busy}
-                onClick={() => {
-                  if (actions.repeat) void onConfirmAction(actions.repeat);
-                }}
-              >
-                {review.status === "failed"
-                  ? "Retry QC with retained guidance"
-                  : "Run more QC rounds"}
-              </Button>
-            ) : null}
-            {review.status === "failed" && onContinueWithoutQc ? (
-              confirmingSkip ? (
-                <div className="conversation-qc-skip-confirmation" role="alert">
-                  <p>
-                    This records QC as explicitly waived. The retained chats and Markdown files
-                    remain visible in the audit history.
-                  </p>
-                  <Button disabled={busy} onClick={() => setConfirmingSkip(false)}>
-                    Keep QC required
-                  </Button>
-                  <Button
-                    variant="primary"
-                    disabled={busy}
-                    onClick={() => void onContinueWithoutQc(review)}
-                  >
-                    {busy ? "Recording choice…" : "Confirm continue without QC"}
-                  </Button>
-                </div>
-              ) : (
-                <Button disabled={busy} onClick={() => setConfirmingSkip(true)}>
-                  Continue without QC
-                </Button>
-              )
-            ) : null}
-            {review.status === "failed" && onReturnToPlanning ? (
-              <Button disabled={busy} onClick={onReturnToPlanning}>
-                Return to planning chat
-              </Button>
-            ) : null}
-            {actions.reject ? (
-              <Button
-                variant="danger"
-                disabled={busy}
-                onClick={() => {
-                  if (actions.reject) void onConfirmAction(actions.reject);
-                }}
-              >
-                Stop this plan
-              </Button>
-            ) : null}
+            <dt>Exact reviewed hash</dt>
+            <dd>
+              <code title={review.plan_content_hash}>{review.plan_content_hash.slice(0, 10)}</code>
+            </dd>
           </div>
-          {error ? (
-            <output className="conversation-action-error" role="alert">
-              {error}
-            </output>
+          {["converged", "cap_reached"].includes(review.status) ? (
+            <div>
+              <dt>Final result hash</dt>
+              <dd>
+                <code title={review.result_plan_content_hash}>
+                  {review.result_plan_content_hash.slice(0, 10)}
+                </code>
+              </dd>
+            </div>
           ) : null}
-        </section>
-      ) : null}
+          <div>
+            <dt>PM</dt>
+            <dd>
+              {review.pm_provider} · {review.pm_model}
+            </dd>
+          </div>
+          {!waived ? (
+            <div>
+              <dt>Reviewer</dt>
+              <dd>
+                {review.reviewer_provider} · {review.reviewer_model}
+              </dd>
+            </div>
+          ) : null}
+          <div>
+            <dt>Context receipt</dt>
+            <dd>
+              <code title={review.context_manifest.context_hash}>
+                {review.context_manifest.context_hash.slice(0, 10)}
+              </code>
+            </dd>
+          </div>
+        </dl>
+      </details>
     </article>
   );
 }

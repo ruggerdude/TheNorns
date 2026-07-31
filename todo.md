@@ -195,7 +195,7 @@
   progress.log entry for why.
 
 ## In Progress
-- [x] QC-VIEW — ✅ **QC activity full-page view**: QC panel now takes over the main content area instead of scrolling inside the chat. Fixes flickering (polling no longer remounts the entire thread component). Shows plan content under review. Hides chat/thread when QC is expanded; toggle to return.
+- [x] QC-VIEW — ✅ **QC review page restructure**: pinned (sticky) status header carrying live phase text ("Round 2 of 3 · waiting for the QC reviewer"), progress bar, and every decision control (Stop / Approve / Retry / Skip / Reject) — previously buried below three redundant timelines, which is why the state was unreadable and retry looked missing. **Root-cause bug fixed**: retry/skip/reject follow-ups are proposed by the server against `review.plan_version_id`, but the client matched on `revised_plan_version_id ?? plan_version_id`, so any failure after a mid-review PM revision silently rendered *no* recovery buttons at all. Now matches either id; regression test added and confirmed to fail without the fix. Review receipt (models/hashes/context) demoted to a collapsed section. Polling no longer remounts the thread (no flicker). 357 web tests green, tsc + biome clean.
 - [x] DES-R2-ONBOARD — ✅ **Onboarding 500 fix + "Approve plan" label** (opened and closed in the
   same push): production `POST /api/v2/projects/onboarding` 500 traced to 0018 granting only
   SELECT, INSERT on `project_onboarding_repository_intents` while the service locks rows with

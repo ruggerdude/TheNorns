@@ -2221,6 +2221,14 @@
   background: color-mix(in srgb, var(--warn) 4%, var(--surface));
 }
 
+/* Expanded QC scrolls itself so the pinned header stays put and the
+   conversation below keeps its own space. */
+.conversation-qc-activity[data-expanded="true"] {
+  min-height: 0;
+  max-height: 65vh;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
 
 .conversation-qc-activity-summary {
   display: grid;
@@ -2299,6 +2307,52 @@
 
 .conversation-qc-final-plan > .conversation-plan-card {
   margin-top: 0.75rem;
+}
+
+.conversation-qc-pinned {
+  position: sticky;
+  z-index: 3;
+  top: 0;
+  display: grid;
+  gap: 0.6rem;
+  margin: -0.75rem -0.75rem 0;
+  padding: 0.75rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--warn) 30%, var(--line));
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: color-mix(in srgb, var(--warn) 8%, var(--surface));
+  backdrop-filter: blur(6px);
+}
+
+.conversation-qc-pinned > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.conversation-qc-pinned .conversation-qc-decision > div,
+.conversation-qc-pinned .conversation-qc-controls > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.conversation-qc-receipt {
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.conversation-qc-receipt > summary {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.conversation-qc-receipt > .conversation-qc-summary {
+  margin-top: 0.6rem;
 }
 
 .conversation-qc-progress {

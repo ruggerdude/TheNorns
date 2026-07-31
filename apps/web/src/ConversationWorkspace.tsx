@@ -1822,9 +1822,7 @@ function ConversationQcActivity({
         </span>
         <span>
           <strong>QC activity · Attempt {latest.attempt_number}</strong>
-          <small>
-            {expanded ? "Click to show conversation" : qcActivitySummary(latest)}
-          </small>
+          <small>{expanded ? "Click to show conversation" : qcActivitySummary(latest)}</small>
         </span>
         <Badge tone={qcActivityTone(latest.status)}>{latest.status.replaceAll("_", " ")}</Badge>
       </button>
@@ -1843,11 +1841,20 @@ function ConversationQcActivity({
                   action.payload.parameters.plan_review_id === review.id &&
                   action.payload.parameters.plan_version_id === targetPlanId,
               ) ?? null;
+            // Retry/skip/reject follow-ups are proposed against the originally reviewed
+            // version, so they must match either it or a PM revision produced mid-review.
+            const reviewPlanIds = new Set(
+              [review.plan_version_id, review.revised_plan_version_id].filter(
+                (id): id is string => id !== null,
+              ),
+            );
+            const targetsReview = (action: V2ConversationActionT): boolean =>
+              reviewPlanIds.has(action.payload.parameters.plan_version_id as string);
             const repeat =
               proposed.find(
                 (action) =>
                   action.action_type === "send_plan_to_qc" &&
-                  action.payload.parameters.plan_version_id === targetPlanId &&
+                  targetsReview(action) &&
                   (action.payload.parameters.review as { mode?: string } | undefined)?.mode !==
                     "skip_qc",
               ) ?? null;
@@ -1855,15 +1862,13 @@ function ConversationQcActivity({
               proposed.find(
                 (action) =>
                   action.action_type === "send_plan_to_qc" &&
-                  action.payload.parameters.plan_version_id === targetPlanId &&
+                  targetsReview(action) &&
                   (action.payload.parameters.review as { mode?: string } | undefined)?.mode ===
                     "skip_qc",
               ) ?? null;
             const reject =
               proposed.find(
-                (action) =>
-                  action.action_type === "reject_plan" &&
-                  action.payload.parameters.plan_version_id === targetPlanId,
+                (action) => action.action_type === "reject_plan" && targetsReview(action),
               ) ?? null;
             const successful = ["converged", "cap_reached"].includes(review.status);
             return (
