@@ -998,13 +998,13 @@
 .conversation-welcome,
 .conversation-message:not(.is-system),
 .conversation-composer-footer {
-  width: min(100%, 68rem);
-  margin-inline: auto;
+  width: 100%;
+  max-width: 68rem;
 }
 
 .conversation-message.is-system {
-  width: min(100%, 68.75rem);
-  margin-inline: auto;
+  width: 100%;
+  max-width: 68.75rem;
 }
 
 .conversation-message:has(
@@ -1015,7 +1015,7 @@
         .conversation-mockup-comparison
       )
   ) {
-  width: min(100%, 68.75rem);
+  width: 100%;
   max-width: 68.75rem;
 }
 
