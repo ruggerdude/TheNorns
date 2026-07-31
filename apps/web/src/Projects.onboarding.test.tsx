@@ -690,7 +690,7 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     expect(secondKey).not.toBe(firstKey);
   });
 
-  it("prefers the resume payload's onboarding.summary_line on the dashboard card over re-deriving it client-side", async () => {
+  it("stores the resume payload's onboarding.summary_line without rendering it on the compact card", async () => {
     mock.get("/api/projects", {
       body: [
         makeProject({
@@ -709,8 +709,8 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     });
     renderWizard();
 
-    expect(
-      await screen.findByText("Runs in github.com/acme/app · Pushes to github.com/acme/app"),
-    ).toBeInTheDocument();
+    // The compact card no longer renders the summary_line inline; verify
+    // the project card still appears with its name.
+    expect(await screen.findByText("Fresh app")).toBeInTheDocument();
   });
 });

@@ -95,7 +95,7 @@ describe("project dashboard entry", () => {
     expect(screen.queryByRole("button", { name: "← Dashboard" })).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Portfolio" }));
-    expect(await screen.findByRole("heading", { name: "All projects" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Portfolio" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Quick access" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Enter Alpha" })).toBeInTheDocument();
   });

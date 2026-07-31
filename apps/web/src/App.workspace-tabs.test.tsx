@@ -108,7 +108,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     await userEvent.click(
       within(workspacePortfolioNavigation).getByRole("button", { name: "Portfolio" }),
     );
-    expect(await screen.findByRole("heading", { name: "All projects" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Portfolio" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "New project" }));
     expect(await screen.findByRole("main", { name: "New project" })).toBeInTheDocument();
   });
@@ -526,7 +526,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
       within(settings)
         .getAllByRole("heading", { level: 2 })
         .map((heading) => heading.textContent),
-    ).toEqual(["Timing and content", "NORN.md", "Archive project"]);
+    ).toEqual(["Timing and content", "NORN.md", "Remove project"]);
     await user.type(
       await screen.findByLabelText("Project rules"),
       "# Rules\n\n- Preserve API compatibility.",

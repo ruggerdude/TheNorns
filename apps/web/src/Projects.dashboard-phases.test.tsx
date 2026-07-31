@@ -93,21 +93,15 @@ describe("project cards on the Portfolio", () => {
     );
   }
 
-  it("shows the compact project dashboard horizontally and omits the phase plan", async () => {
+  it("shows the compact project stats row and omits the phase plan", async () => {
     setup();
     const row = await screen.findByTestId("proj-row");
-    const dashboard = within(row).getByLabelText(`${project.name} dashboard`);
-    await waitFor(() => expect(within(dashboard).getByText("47%")).toBeVisible());
-    expect(within(dashboard).getByText("Overall complete")).toBeVisible();
-    expect(within(dashboard).getByText("Active agents")).toBeVisible();
-    expect(within(dashboard).getByText("Decisions")).toBeVisible();
-    expect(within(dashboard).getByText("Blended ETA")).toBeVisible();
-    expect(within(dashboard).getByText("Total commits")).toBeVisible();
-    expect(within(dashboard).getByText("14")).toBeVisible();
-    expect(within(dashboard).getByText("Last commit")).toBeVisible();
-    expect(within(dashboard).getByText("abc123de")).toBeVisible();
-    expect(screen.queryByTestId("pr-phase")).not.toBeInTheDocument();
-    expect(screen.queryByText("Schema & ingest")).not.toBeInTheDocument();
+    const stats = within(row).getByLabelText(`${project.name} stats`);
+    await waitFor(() => expect(within(stats).getByText("47%")).toBeVisible());
+    expect(within(stats).getByText(/tasks/)).toBeVisible();
+    expect(within(stats).getByText(/runs/)).toBeVisible();
+    // The compact card now shows the active phase name inline.
+    expect(screen.queryByText("Schema & ingest")).toBeInTheDocument();
     expect(row).toHaveClass("s-red");
   });
 

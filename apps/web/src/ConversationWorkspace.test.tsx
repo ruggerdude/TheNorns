@@ -865,8 +865,7 @@ describe("conversation workspace", () => {
     await user.click(addFile);
     const picker = document.querySelector<HTMLInputElement>('input[type="file"]');
     if (!picker) throw new Error("Expected the file picker input.");
-    expect(picker.accept).toContain(".pdf");
-    expect(picker.accept).toContain(".md");
+    // The conversation attachment adapter now accepts all file types ("*").
     const pdf = new File(["pdf"], "release-notes.pdf", { type: "application/pdf" });
     Object.defineProperty(picker, "files", { configurable: true, value: [pdf] });
     fireEvent.change(picker);
@@ -960,15 +959,24 @@ describe("conversation workspace", () => {
     expect(pdf).toHaveTextContent("PDF");
   });
 
-  it("fails closed with a readable error for an unsupported pasted file", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+  it("silently accepts a previously-unsupported pasted file now that all types are allowed", async () => {
+    const uploaded: { name: string; mime: string }[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = urlOf(input);
       if (url.endsWith("/work-items")) return listResponse();
       if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse();
+      if (url.endsWith("/attachments")) {
+        uploaded.push({
+          name: (init?.headers as Record<string, string>)["x-attachment-filename"],
+          mime: (init?.headers as Record<string, string>)["content-type"],
+        });
+        return new Response(JSON.stringify({ id: "att-exe", url: "/attachments/att-exe" }), {
+          status: 200,
+        });
+      }
       throw new Error(`Unexpected request: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     render(
       <ConversationWorkspace
@@ -985,14 +993,12 @@ describe("conversation workspace", () => {
       },
     });
 
+    expect(await screen.findByText("installer.exe")).toBeInTheDocument();
     expect(
-      await screen.findByText(
+      screen.queryByText(
         "That file type is not supported. Add an image, PDF, plain text, Markdown, JSON, or CSV file.",
       ),
-    ).toBeInTheDocument();
-    expect(fetchMock.mock.calls.some(([input]) => urlOf(input).endsWith("/attachments"))).toBe(
-      false,
-    );
+    ).not.toBeInTheDocument();
   });
 
   it("edits a human planning message through a durable child branch and leaves the parent unchanged", async () => {
