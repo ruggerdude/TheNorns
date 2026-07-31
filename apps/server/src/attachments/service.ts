@@ -211,16 +211,10 @@ export class AttachmentService {
    * returns the existing immutable live row and is not re-charged.
    */
   async create(projectId: string, input: CreateAttachmentInput): Promise<AttachmentDto> {
-    const mime = normalizeMime(input.mime);
-    if (!isAllowedAttachmentMime(mime)) {
-      throw new AttachmentValidationError(
-        "unsupported_media_type",
-        `unsupported media type "${input.mime}"; allowed: ${[
-          ...ALLOWED_IMAGE_MIMES,
-          ...ALLOWED_FILE_MIMES,
-        ].join(", ")}`,
-      );
-    }
+    const rawMime = normalizeMime(input.mime);
+    const mime: AttachmentMime = isAllowedAttachmentMime(rawMime)
+      ? rawMime
+      : "application/octet-stream";
     const bytes = input.content
       ? Buffer.from(input.content)
       : input.base64
