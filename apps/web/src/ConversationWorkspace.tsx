@@ -307,7 +307,7 @@ function attachmentIdFromUrl(url: string): string | null {
   return match?.[1] ? decodeURIComponent(match[1]) : null;
 }
 
-const CONVERSATION_ATTACHMENT_ACCEPT = "*/*";
+const CONVERSATION_ATTACHMENT_ACCEPT = "*";
 
 const ATTACHMENT_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   png: "image/png",
