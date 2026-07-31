@@ -104,7 +104,8 @@ rm -f "$STAGE/NornsLocalAgent-arm64" "$STAGE/NornsLocalAgent-x64"
 
 sed "s/__VERSION__/$BUNDLE_VERSION/g" \
   "$WORKSPACE/packaging/macos/Info.plist.in" >"$CONTENTS/Info.plist"
-cp "$WORKSPACE/packaging/macos/agent.sh" "$RESOURCES/agent.sh"
+sed "s/__VERSION__/$BUNDLE_VERSION/g" \
+  "$WORKSPACE/packaging/macos/agent.sh" >"$RESOURCES/agent.sh"
 chmod 755 "$MACOS/NornsLocalAgent" "$RESOURCES/agent.sh"
 plutil -lint "$CONTENTS/Info.plist" >/dev/null
 plutil -lint "$COMPONENT_PLIST" >/dev/null

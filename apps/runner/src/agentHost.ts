@@ -56,7 +56,7 @@ const SECURITY_HEADERS = {
   "x-frame-options": "DENY",
 } as const;
 
-const AGENT_HOST_VERSION = "0.1.0";
+const AGENT_HOST_VERSION = process.env.NORNS_LOCAL_AGENT_VERSION ?? "0.1.0";
 const EMERGENCY_STOP_CONFIRMATION = "STOP ALL NORNS WORK";
 const MANUAL_UPDATE_GUIDANCE =
   "Install a newer signed Norns Local Agent package manually. Automatic updates are not enabled.";
@@ -98,22 +98,19 @@ const CONTROL_CENTER_HTML = `<!doctype html>
       <h2 id="home-heading">Home</h2>
       <p class="device-name" id="device-name">This computer</p>
       <p id="location" class="muted">No location label</p>
+      <p id="connection-copy" class="connection-copy">Connect this Mac to the same Norns account you use on the website.</p>
       <dl>
-        <dt>Enrollment</dt><dd id="enrollment">Checking…</dd>
-        <dt>Authorization code</dt><dd><code id="authorization-code">Not requested</code></dd>
-        <dt>Approval page</dt><dd><a id="verification-uri" rel="noreferrer noopener" target="_blank" hidden>Open approval page</a><span id="verification-unavailable">Not requested</span></dd>
+        <dt>Account connection</dt><dd id="enrollment">Checking…</dd>
         <dt>Availability</dt><dd id="availability">Checking…</dd>
         <dt>Compatibility</dt><dd id="compatibility">Checking…</dd>
         <dt>Workload</dt><dd id="workload">Checking…</dd>
-        <dt>Daemon</dt><dd id="daemon">Checking…</dd>
         <dt>Start at login</dt><dd id="start-at-login">Checking…</dd>
         <dt>Agent version</dt><dd id="agent-version">Checking…</dd>
       </dl>
       <p id="recent-activity" class="muted">No recent local Norns activity.</p>
       <div class="actions">
-        <button id="prepare" type="button">Start enrollment</button>
-        <button id="start" type="button">Start daemon</button>
-        <button id="stop" type="button">Stop daemon</button>
+        <button id="prepare" type="button">Connect this Mac</button>
+        <a id="verification-uri" class="button-link" rel="noreferrer noopener" target="_blank" hidden>Continue in browser</a>
       </div>
       <section class="emergency-control" aria-labelledby="emergency-heading">
         <h3 id="emergency-heading">Emergency stop</h3>
@@ -153,6 +150,7 @@ const CONTROL_CENTER_HTML = `<!doctype html>
       <h2 id="diagnostics-heading">Diagnostics</h2>
       <dl>
         <dt>Server connectivity</dt><dd id="connectivity">Checking…</dd>
+        <dt>Work service</dt><dd id="daemon">Checking…</dd>
         <dt>Protocol</dt><dd id="protocol-version">Checking…</dd>
         <dt>Capabilities</dt><dd id="capabilities">Checking…</dd>
         <dt>Git</dt><dd id="git-version">Not detected</dd>
@@ -179,6 +177,7 @@ header{padding-top:2rem}nav{display:flex;gap:.5rem;margin-block:1.25rem}
 main{padding:1.5rem;border:1px solid GrayText;border-radius:1rem;margin-bottom:2rem}
 .eyebrow{font-weight:700;letter-spacing:.08em;text-transform:uppercase}
 .device-name{font-size:1.25rem;font-weight:700}.muted{color:GrayText}
+.connection-copy{max-width:40rem;font-size:1.05rem}
 dl{display:grid;grid-template-columns:minmax(9rem,max-content) 1fr;gap:.65rem 1rem}
 dt{font-weight:700}.actions{display:flex;flex-wrap:wrap;gap:.75rem;margin-top:1.5rem}
 button,.button-link{font:inherit;padding:.65rem .9rem;border:1px solid ButtonText;background:ButtonFace;color:ButtonText;border-radius:.4rem}
@@ -203,6 +202,22 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
   const text = (selector, value) => {
     document.querySelector(selector).textContent = value == null || value === "" ? "Not available" : String(value);
   };
+  const enrollmentLabels = {
+    not_enrolled: "Not connected",
+    credential_prepared: "Ready to connect",
+    pending: "Waiting for approval",
+    approved_pending_redemption: "Finishing connection",
+    active: "Connected",
+    denied: "Approval declined",
+    expired: "Approval expired",
+  };
+
+  function approvalUrl(enrollmentStatus) {
+    if (!enrollmentStatus.verification_uri || !enrollmentStatus.user_code) return null;
+    const url = new URL(enrollmentStatus.verification_uri);
+    url.hash = new URLSearchParams({ code: enrollmentStatus.user_code }).toString();
+    return url.toString();
+  }
 
   async function request(path, options = {}) {
     const headers = { "content-type": "application/json", ...(options.headers || {}) };
@@ -218,19 +233,25 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
   }
 
   function render(status) {
-    enrollment.textContent = status.enrollment_state;
-    text("#authorization-code", status.enrollment.user_code || "Not requested");
+    enrollment.textContent = enrollmentLabels[status.enrollment_state] || status.enrollment_state;
     const verificationLink = document.querySelector("#verification-uri");
-    const verificationUnavailable = document.querySelector("#verification-unavailable");
-    if (status.enrollment.verification_uri) {
-      verificationLink.href = status.enrollment.verification_uri;
+    const completeApprovalUrl = approvalUrl(status.enrollment);
+    if (completeApprovalUrl) {
+      verificationLink.href = completeApprovalUrl;
       verificationLink.hidden = false;
-      verificationUnavailable.hidden = true;
     } else {
       verificationLink.removeAttribute("href");
       verificationLink.hidden = true;
-      verificationUnavailable.hidden = false;
     }
+    const connectButton = document.querySelector("#prepare");
+    connectButton.hidden = status.enrollment_state === "active";
+    connectButton.textContent =
+      status.enrollment_state === "pending" ||
+      status.enrollment_state === "approved_pending_redemption"
+        ? "Open approval page"
+        : status.enrollment_state === "denied" || status.enrollment_state === "expired"
+          ? "Try connecting again"
+          : "Connect this Mac";
     daemon.textContent = status.daemon_state;
     text("#device-name", status.home.device_name);
     text("#location", status.home.location_label || "No location label");
@@ -265,7 +286,20 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
     text("#git-version", status.diagnostics.git_version || "Not detected");
     text("#runtimes", status.diagnostics.runtimes.join(", ") || "Not detected");
     text("#update-guidance", status.diagnostics.manual_update_guidance);
-    message.textContent = "This page is served only by the Local Agent on loopback.";
+    const connectionCopy = document.querySelector("#connection-copy");
+    if (status.enrollment_state === "active") {
+      connectionCopy.textContent = "This Mac is connected to your Norns account.";
+      message.textContent = "Connected. You can return to The Norns.";
+    } else if (
+      status.enrollment_state === "pending" ||
+      status.enrollment_state === "approved_pending_redemption"
+    ) {
+      connectionCopy.textContent = "Approve this Mac in the Norns browser page to finish connecting.";
+      message.textContent = "Waiting for approval in your browser.";
+    } else {
+      connectionCopy.textContent = "Connect this Mac to the same Norns account you use on the website.";
+      message.textContent = "The Local Agent is ready to connect.";
+    }
   }
 
   function renderRepositories(result) {
@@ -364,24 +398,36 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
 
   document.querySelector("#prepare").addEventListener("click", async () => {
     const button = document.querySelector("#prepare");
+    const approvalWindow = window.open("about:blank", "norns-device-approval");
+    if (approvalWindow) {
+      approvalWindow.document.title = "Connecting Norns Local Agent";
+      approvalWindow.document.body.textContent = "Opening The Norns…";
+    }
     button.disabled = true;
     try {
-      await request("/api/enrollment/start", { method: "POST", body: "{}" });
+      const result = await request("/api/enrollment/start", { method: "POST", body: "{}" });
+      const target = approvalUrl({
+        verification_uri: result.verification_uri,
+        user_code: result.user_code,
+      });
+      if (target && approvalWindow) {
+        approvalWindow.opener = null;
+        approvalWindow.location.replace(target);
+      } else if (target) {
+        window.open(target, "_blank", "noopener,noreferrer");
+      } else if (approvalWindow) {
+        approvalWindow.close();
+      }
       await refresh();
-      message.textContent = "Enter the authorization code on the code-free approval page.";
+      message.textContent = target
+        ? "Approve this Mac in the Norns page that just opened."
+        : "This Mac is already connected.";
     } catch (error) {
+      if (approvalWindow) approvalWindow.close();
       message.textContent = error.message;
     } finally {
       button.disabled = false;
     }
-  });
-  document.querySelector("#start").addEventListener("click", async () => {
-    await request("/api/daemon/start", { method: "POST", body: "{}" });
-    await refresh();
-  });
-  document.querySelector("#stop").addEventListener("click", async () => {
-    await request("/api/daemon/stop", { method: "POST", body: "{}" });
-    await refresh();
   });
   document.querySelector("#restart").addEventListener("click", async () => {
     await request("/api/daemon/restart", { method: "POST", body: "{}" });

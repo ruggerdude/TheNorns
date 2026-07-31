@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CurrentUser } from "./auth";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Badge, Button, Field, Input } from "./ui";
@@ -69,11 +69,17 @@ export function DeviceAuthorizationApproval({
   user: CurrentUser;
   onUnauthorized: () => void;
 }): React.ReactElement {
-  const [userCode, setUserCode] = useState("");
+  const initialCode = normalizeUserCode(
+    typeof window === "undefined"
+      ? ""
+      : (new URLSearchParams(window.location.hash.slice(1)).get("code") ?? ""),
+  );
+  const [userCode, setUserCode] = useState(initialCode);
   const [request, setRequest] = useState<DeviceAuthorizationSummary | null>(null);
   const [outcome, setOutcome] = useState<ApprovalOutcome | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const automaticLookupStarted = useRef(false);
 
   const run = async (operation: () => Promise<void>): Promise<void> => {
     setBusy(true);
@@ -91,9 +97,9 @@ export function DeviceAuthorizationApproval({
     }
   };
 
-  const lookup = (): Promise<void> =>
+  const lookup = (candidate = userCode): Promise<void> =>
     run(async () => {
-      const normalized = normalizeUserCode(userCode);
+      const normalized = normalizeUserCode(candidate);
       if (normalized.length !== 8) {
         setError("Enter the complete code shown by the Local Agent.");
         return;
@@ -105,6 +111,17 @@ export function DeviceAuthorizationApproval({
       setRequest(found);
       setOutcome(null);
     });
+
+  useEffect(() => {
+    if (initialCode.length !== 8 || automaticLookupStarted.current) return;
+    automaticLookupStarted.current = true;
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}`,
+    );
+    void lookup(initialCode);
+  }, []);
 
   const decide = (decision: "approve" | "deny"): Promise<void> =>
     run(async () => {

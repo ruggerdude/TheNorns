@@ -61,18 +61,7 @@ function parseRecord(
   raw: string,
   secretStore: DeviceCredentialSecretStore,
 ): PendingDeviceCredentialRecord {
-  const parsed = JSON.parse(raw) as Partial<PendingDeviceCredentialRecord>;
-  if (
-    parsed.version !== 2 ||
-    parsed.algorithm !== "Ed25519" ||
-    typeof parsed.public_key_pem !== "string" ||
-    typeof parsed.secret_reference !== "string" ||
-    !/^[A-Za-z0-9_-]{32,128}$/.test(parsed.secret_reference) ||
-    typeof parsed.created_at !== "string"
-  ) {
-    throw new Error("pending device credential is malformed");
-  }
-
+  const parsed = parseMetadata(raw);
   const protectedPrivateKey = secretStore.read(parsed.secret_reference);
   if (!protectedPrivateKey) {
     throw new Error("pending device credential secret is unavailable");
@@ -96,9 +85,27 @@ function parseRecord(
   }
 
   return {
+    ...parsed,
+    public_key_pem: expected,
+  };
+}
+
+function parseMetadata(raw: string): PendingDeviceCredentialRecord {
+  const parsed = JSON.parse(raw) as Partial<PendingDeviceCredentialRecord>;
+  if (
+    parsed.version !== 2 ||
+    parsed.algorithm !== "Ed25519" ||
+    typeof parsed.public_key_pem !== "string" ||
+    typeof parsed.secret_reference !== "string" ||
+    !/^[A-Za-z0-9_-]{32,128}$/.test(parsed.secret_reference) ||
+    typeof parsed.created_at !== "string"
+  ) {
+    throw new Error("pending device credential is malformed");
+  }
+  return {
     version: 2,
     algorithm: "Ed25519",
-    public_key_pem: expected,
+    public_key_pem: parsed.public_key_pem,
     secret_reference: parsed.secret_reference,
     created_at: parsed.created_at,
   };
@@ -128,6 +135,19 @@ export class PendingDeviceCredentialStore {
 
   exists(): boolean {
     return existsSync(this.path);
+  }
+
+  protectedSecretAvailable(): boolean {
+    if (!this.exists()) return false;
+    const record = parseMetadata(readFileSync(this.path, "utf8"));
+    return Boolean(this.secretStore.read(record.secret_reference));
+  }
+
+  reset(): void {
+    if (!this.exists()) return;
+    const record = parseMetadata(readFileSync(this.path, "utf8"));
+    this.secretStore.delete(record.secret_reference);
+    unlinkSync(this.path);
   }
 
   read(): PendingDeviceCredentialSummary | null {

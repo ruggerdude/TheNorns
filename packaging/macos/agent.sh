@@ -6,6 +6,7 @@ RESOURCE_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
 DATA_DIR="$HOME/.norns/runner-1"
 LOG_DIR="$HOME/.norns/logs"
 SERVICE="$HOME/Library/LaunchAgents/com.thenorns.local-agent.plist"
+AGENT_VERSION="__VERSION__"
 
 case "$(uname -m)" in
   arm64) ARCH="arm64" ;;
@@ -55,6 +56,7 @@ install_launch_agent() {
     printf '%s\n' '<key>EnvironmentVariables</key><dict>'
     printf '%s\n' '<key>NORNS_SERVER</key><string>https://thenorns.up.railway.app</string>'
     printf '%s\n' '<key>NORNS_ENABLE_DEVICE_ENROLLMENT</key><string>true</string>'
+    printf '<key>NORNS_LOCAL_AGENT_VERSION</key><string>%s</string>\n' "$AGENT_VERSION"
     printf '%s\n' '</dict>'
     printf '<key>StandardOutPath</key><string>%s/runner.log</string>\n' "$LOG_DIR"
     printf '<key>StandardErrorPath</key><string>%s/runner.err.log</string>\n' "$LOG_DIR"
@@ -83,6 +85,15 @@ case "$ACTION" in
       "$0" install
       exit 0
     fi
+    INSTALLED_SERVICE_VERSION=$(
+      /usr/libexec/PlistBuddy \
+        -c 'Print :EnvironmentVariables:NORNS_LOCAL_AGENT_VERSION' \
+        "$SERVICE" 2>/dev/null || true
+    )
+    if [ "$INSTALLED_SERVICE_VERSION" != "$AGENT_VERSION" ]; then
+      "$0" install
+      exit 0
+    fi
     if launchctl print "gui/$(id -u)/com.thenorns.local-agent" 2>/dev/null |
       grep -q 'state = running'
     then
@@ -94,6 +105,7 @@ case "$ACTION" in
   start)
     NORNS_SERVER="https://thenorns.up.railway.app" \
       NORNS_ENABLE_DEVICE_ENROLLMENT="true" \
+      NORNS_LOCAL_AGENT_VERSION="$AGENT_VERSION" \
       exec "$NODE" "$CLI" agent-start --data "$DATA_DIR"
     ;;
   *)

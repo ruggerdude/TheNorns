@@ -172,6 +172,8 @@ test("AgentHost serves only a hardened, bundled loopback UI", async () => {
     assert.match(html, /role="tablist"/);
     assert.match(html, /role="tab"/);
     assert.match(html, /role="tabpanel"/);
+    assert.match(html, /Connect this Mac/);
+    assert.doesNotMatch(html, /Authorization code/);
     assert.match(html, /Download redacted support bundle/);
     assert.doesNotMatch(html, /hostname|raw local path/i);
 
@@ -182,6 +184,8 @@ test("AgentHost serves only a hardened, bundled loopback UI", async () => {
     assert.equal(javascript.status, 200);
     const javascriptBody = await javascript.text();
     assert.match(javascriptBody, /\/api\/enrollment\/start/);
+    assert.match(javascriptBody, /new URLSearchParams\(\{ code:/);
+    assert.match(javascriptBody, /norns-device-approval/);
     assert.match(javascriptBody, /\/api\/daemon\/restart/);
     assert.match(javascriptBody, /\/api\/repositories\/choose/);
     assert.match(javascriptBody, /\/api\/repositories\/remove/);

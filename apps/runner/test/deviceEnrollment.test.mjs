@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createPublicKey, verify } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -34,6 +34,53 @@ function transcript({ authorizationRequestId, deviceCode, fingerprint }) {
     .map(([name, value]) => `${name}:${Buffer.byteLength(value, "utf8")}:${value}\n`)
     .join("")}`;
 }
+
+test("startup repairs credentials created empty by the previous macOS Keychain adapter", () => {
+  const dataDir = temporaryDataDir();
+  const secrets = new InMemoryDeviceCredentialSecretStore();
+  const credential = new PendingDeviceCredentialStore(dataDir, secrets);
+  const enrollmentCodeReference = "D".repeat(32);
+
+  try {
+    credential.prepare();
+    const credentialRecord = JSON.parse(
+      readFileSync(join(dataDir, PENDING_DEVICE_CREDENTIAL_FILENAME), "utf8"),
+    );
+    secrets.delete(credentialRecord.secret_reference);
+    secrets.writeOnce(credentialRecord.secret_reference, "");
+    secrets.writeOnce(enrollmentCodeReference, "");
+    writeFileSync(
+      join(dataDir, DEVICE_ENROLLMENT_STATE_FILENAME),
+      JSON.stringify({
+        version: 1,
+        state: "pending",
+        authorization_request_id: "deviceauth-empty-keychain",
+        device_code_reference: enrollmentCodeReference,
+        user_code: "ABCD-EFGH",
+        verification_uri: "https://norns.example/device-authorization",
+        expires_at: "2026-07-30T12:10:00.000Z",
+        poll_interval_seconds: 5,
+        network_backoff_seconds: 0,
+        next_poll_at: "2026-07-30T12:00:05.000Z",
+      }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+
+    const coordinator = new DeviceEnrollmentCoordinator({
+      serverUrl: "https://norns.example",
+      dataDir,
+      credentialStore: credential,
+      secretStore: secrets,
+    });
+
+    assert.equal(coordinator.status.state, "not_enrolled");
+    assert.equal(credential.exists(), false);
+    assert.equal(existsSync(join(dataDir, DEVICE_ENROLLMENT_STATE_FILENAME)), false);
+    assert.equal(secrets.size, 0);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
 
 test("enrollment persists the key first and redeems idempotently after response loss", async () => {
   const dataDir = temporaryDataDir();

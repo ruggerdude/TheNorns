@@ -52,5 +52,7 @@ assert.doesNotMatch(powershellBody, /native_launch_secret/);
 const openCase = agentShell.match(/ {2}open\)([\s\S]*?) {2}start\)/)?.[1] ?? "";
 assert.ok(openCase, "macOS app must have a non-destructive open action");
 assert.doesNotMatch(openCase, /stop_old_agents|kickstart -k/);
+assert.match(agentShell, /NORNS_LOCAL_AGENT_VERSION/);
+assert.match(agentShell, /INSTALLED_SERVICE_VERSION/);
 
 console.log("native launcher mutual-HMAC and stale-discovery fixtures: OK");

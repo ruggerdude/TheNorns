@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   DevelopmentFileDeviceCredentialSecretStore,
   InMemoryDeviceCredentialSecretStore,
+  MacOsKeychainDeviceCredentialSecretStore,
   createInstalledDeviceCredentialSecretStore,
 } from "../dist/deviceCredentialSecretStore.js";
 import {
@@ -53,6 +54,58 @@ test("pending credential is durably protected before enrollment can use its publ
     const reloaded = new PendingDeviceCredentialStore(dataDir, secrets);
     assert.deepEqual(reloaded.read(), prepared);
     assert.deepEqual(reloaded.prepare(), prepared);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("macOS Keychain writes the protected value through interactive stdin, never argv", () => {
+  const calls = [];
+  const run = (command, args, options) => {
+    calls.push({ command, args, options });
+    return {
+      pid: 1,
+      output: [],
+      stdout: "",
+      stderr: "",
+      status: args[0] === "find-generic-password" ? 44 : 0,
+      signal: null,
+      error: undefined,
+    };
+  };
+  const store = new MacOsKeychainDeviceCredentialSecretStore(run);
+  const reference = "A".repeat(32);
+  const secret = "cHJvdGVjdGVkLWRldmljZS1rZXk=";
+
+  store.writeOnce(reference, secret);
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].args, ["-i"]);
+  assert.equal(calls[1].options.input.includes(secret), true);
+  assert.equal(calls[1].args.includes(secret), false);
+  assert.throws(
+    () => store.writeOnce("B".repeat(32), "unsafe\ncommand"),
+    /secret encoding is invalid/,
+  );
+});
+
+test("pending credential can discard an unavailable protected secret before retrying setup", () => {
+  const dataDir = temporaryDataDir();
+  const secrets = new InMemoryDeviceCredentialSecretStore();
+  const store = new PendingDeviceCredentialStore(dataDir, secrets);
+
+  try {
+    store.prepare();
+    const record = JSON.parse(
+      readFileSync(join(dataDir, PENDING_DEVICE_CREDENTIAL_FILENAME), "utf8"),
+    );
+    secrets.delete(record.secret_reference);
+    secrets.writeOnce(record.secret_reference, "");
+
+    assert.equal(store.protectedSecretAvailable(), false);
+    store.reset();
+    assert.equal(store.exists(), false);
+    assert.equal(secrets.size, 0);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

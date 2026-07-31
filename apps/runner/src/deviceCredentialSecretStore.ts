@@ -132,9 +132,11 @@ function commandFailure(command: string, result: ReturnType<typeof spawnSync>): 
 export class MacOsKeychainDeviceCredentialSecretStore implements DeviceCredentialSecretStore {
   readonly protection = "macos-keychain" as const;
 
+  constructor(private readonly run: typeof spawnSync = spawnSync) {}
+
   read(reference: string): string | null {
     validReference(reference);
-    const result = spawnSync(
+    const result = this.run(
       "/usr/bin/security",
       ["find-generic-password", "-a", reference, "-s", MACOS_KEYCHAIN_SERVICE, "-w"],
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 },
@@ -149,22 +151,33 @@ export class MacOsKeychainDeviceCredentialSecretStore implements DeviceCredentia
     if (this.read(reference) !== null) {
       throw new Error("device credential secret already exists");
     }
-    // `-w` is deliberately last and has no argument: security(1) reads the
-    // value from stdin, so private key material never enters argv.
-    const result = spawnSync(
+    if (
+      secret.length === 0 ||
+      secret.length > 64 * 1024 ||
+      !/^[A-Za-z0-9+/_=-]+$/.test(secret)
+    ) {
+      throw new Error("macOS Keychain secret encoding is invalid");
+    }
+    // `security add-generic-password -w` does not read a missing password
+    // argument from stdin; it silently creates an empty item. Interactive
+    // mode accepts the full command through stdin, keeping the protected
+    // value out of this process's argv while preserving the real value.
+    const input = [
+      "add-generic-password",
+      "-a",
+      reference,
+      "-s",
+      MACOS_KEYCHAIN_SERVICE,
+      "-l",
+      '"Norns Local Agent device credential"',
+      "-w",
+      secret,
+    ].join(" ");
+    const result = this.run(
       "/usr/bin/security",
-      [
-        "add-generic-password",
-        "-a",
-        reference,
-        "-s",
-        MACOS_KEYCHAIN_SERVICE,
-        "-l",
-        "Norns Local Agent device credential",
-        "-w",
-      ],
+      ["-i"],
       {
-        input: `${secret}\n`,
+        input: `${input}\n`,
         encoding: "utf8",
         stdio: ["pipe", "ignore", "ignore"],
         maxBuffer: 64 * 1024,
@@ -175,7 +188,7 @@ export class MacOsKeychainDeviceCredentialSecretStore implements DeviceCredentia
 
   delete(reference: string): void {
     validReference(reference);
-    const result = spawnSync(
+    const result = this.run(
       "/usr/bin/security",
       ["delete-generic-password", "-a", reference, "-s", MACOS_KEYCHAIN_SERVICE],
       { encoding: "utf8", stdio: "ignore" },

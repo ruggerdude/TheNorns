@@ -20,6 +20,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 describe("DeviceAuthorizationApproval", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    window.history.replaceState(null, "", "/");
   });
 
   it("submits the human code only in a POST body and approves the exact request", async () => {
@@ -76,6 +77,34 @@ describe("DeviceAuthorizationApproval", () => {
 
     await screen.findByText(/too many attempts/i);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the code handed off in the URL fragment without asking the user to retype it", async () => {
+    window.history.replaceState(null, "", "/?device_authorization=true#code=ABCD-EFGH");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        authorization_request_id: "authorization-handoff",
+        authorization_context: "context-handoff",
+        proposed_name: "David’s MacBook Pro",
+        os_family: "macos",
+        architecture: "arm64",
+        public_key_fingerprint: "b".repeat(64),
+        expires_at: "2026-07-30T23:00:00.000Z",
+      }),
+    );
+
+    render(<DeviceAuthorizationApproval user={user} onUnauthorized={vi.fn()} />);
+
+    await screen.findByText("David’s MacBook Pro");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/device-authorizations/lookup",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ user_code: "ABCDEFGH" }),
+      }),
+    );
+    expect(window.location.hash).toBe("");
+    expect(window.location.search).toBe("?device_authorization=true");
   });
 
   it("returns an expired session to the app", async () => {

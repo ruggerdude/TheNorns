@@ -382,9 +382,33 @@ export class DeviceEnrollmentCoordinator {
     if (!Number.isSafeInteger(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
       throw new Error("device enrollment request timeout must be a positive integer");
     }
-    const existing = this.readRecord();
+    const activeIdentity = this.activeIdentityStore.read();
+    let existing = this.readRecord();
     if (
-      this.activeIdentityStore.read() &&
+      !activeIdentity &&
+      this.options.credentialStore.exists() &&
+      !this.options.credentialStore.protectedSecretAvailable()
+    ) {
+      if (existing) this.options.secretStore.delete(existing.device_code_reference);
+      this.options.credentialStore.reset();
+      this.clearRecord();
+      existing = null;
+    }
+    if (
+      !activeIdentity &&
+      existing &&
+      (existing.state === "creating" || isLiveEnrollmentRecord(existing))
+    ) {
+      const deviceCode = this.options.secretStore.read(existing.device_code_reference);
+      if (!deviceCode || !validDeviceCode(deviceCode)) {
+        this.options.secretStore.delete(existing.device_code_reference);
+        this.options.credentialStore.reset();
+        this.clearRecord();
+        existing = null;
+      }
+    }
+    if (
+      activeIdentity &&
       existing &&
       (existing.state === "creating" || isLiveEnrollmentRecord(existing))
     ) {
@@ -747,6 +771,14 @@ export class DeviceEnrollmentCoordinator {
     ensurePrivateDirectory(this.options.dataDir);
     chmodSync(this.path, 0o600);
     return parseEnrollmentRecord(readFileSync(this.path, "utf8"));
+  }
+
+  private clearRecord(): void {
+    try {
+      unlinkSync(this.path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   }
 
   private persist(record: EnrollmentRecord): void {
