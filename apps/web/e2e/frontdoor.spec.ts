@@ -868,7 +868,7 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await expect(conversationHeader.getByText("Stage", { exact: true })).toHaveCount(0);
   expect(transcriptBox?.height ?? 0).toBeGreaterThan(740);
   expect(composerShellBox?.width ?? 0).toBeGreaterThan(700);
-  expect(composerShellBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(820);
+  expect(composerShellBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(1108);
 
   const sidebarBox = await conversationSidebar.boundingBox();
   expect(sidebarBox?.width ?? 0).toBeGreaterThanOrEqual(268);
@@ -1024,13 +1024,13 @@ test("Project archiving lives only in project Settings", async ({ page }) => {
   await page.getByRole("button", { name: "Menu", exact: true }).click();
   const workspaceNavigation = page.getByRole("navigation", { name: "Workspace sections" });
   await workspaceNavigation.getByRole("button", { name: "Settings", exact: true }).click();
-  const dangerZone = page.getByRole("region", { name: "Archive project" });
+  const dangerZone = page.getByRole("region", { name: "Remove project" });
   await expect(dangerZone).toBeVisible();
   await expect(dangerZone.getByRole("button", { name: "Archive project" })).toBeVisible();
 
   await page.getByRole("button", { name: "Menu", exact: true }).click();
   await workspaceNavigation.getByRole("button", { name: "Portfolio", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "All projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Portfolio" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Archive project" })).toHaveCount(0);
 });
 

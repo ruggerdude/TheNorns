@@ -422,7 +422,7 @@ async function prepare(
 }
 
 async function openPortfolioUsage(page: Page): Promise<void> {
-  await expect(page.getByRole("heading", { name: "All projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Portfolio" })).toBeVisible();
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(page.getByTestId("usage-intelligence")).toBeVisible();
 }
@@ -668,7 +668,7 @@ test("an unauthorized usage response returns the user to session-expired sign in
   await prepare(page, "member", { expireFirstUsageRequest: true });
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "All projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Portfolio" })).toBeVisible();
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(page.getByText("Session expired. Sign in again.")).toBeVisible();
   await expect(page.getByText("Welcome back")).toBeVisible();
