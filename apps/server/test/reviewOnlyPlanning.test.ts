@@ -1,7 +1,10 @@
 import { AdapterError, DEFAULT_MODEL_REGISTRY, FakeAdapter, makeUsageEvent } from "@norns/adapters";
 import { V2WorkPlanContract } from "@norns/contracts";
 import { describe, expect, it, vi } from "vitest";
-import { runReviewOnlyPlanning } from "../src/planning/reviewOnlySession.js";
+import {
+  type ReviewOnlyChatEvent,
+  runReviewOnlyPlanning,
+} from "../src/planning/reviewOnlySession.js";
 
 function envelope(objective = "Ship the planning conversation") {
   return V2WorkPlanContract.parse({
@@ -184,12 +187,14 @@ describe("review-only conversational planning", () => {
         {
           metadata: {
             usage: failedUsage,
+            response_text: '{"responses":[],"plan":{"plan":{"objective":"partial"}}}',
             request_dispatched: true,
           },
         },
       ),
     );
     const progress: number[] = [];
+    const chat: ReviewOnlyChatEvent[] = [];
 
     const result = await runReviewOnlyPlanning({
       pm,
@@ -203,19 +208,36 @@ describe("review-only conversational planning", () => {
       onProgress: (rounds) => {
         progress.push(rounds.length);
       },
+      onChatEvent: (event) => {
+        chat.push(event);
+      },
     });
 
     expect(completion).toHaveBeenCalledTimes(2);
     expect(pm.requests[0]?.telemetryRequestId).toBe("review-only-repair:revision:1:repair:1");
     expect(pm.requests[0]?.telemetryRetryGroupId).toBe("review-only-repair:revision:1");
     expect(pm.requests[0]?.telemetryRetryAttempt).toBe(1);
-    expect(pm.requests[0]?.prompt).toContain("previous response could not be accepted");
+    expect(pm.requests[0]?.prompt).toContain("previous QC response was preserved");
     expect(pm.requests[0]?.prompt).toContain("modules.0.execution");
     expect(progress).toEqual([1, 1]);
     expect(result.final_plan).toEqual(revised);
     expect(result.review_rounds[0]?.responses).toHaveLength(1);
     expect(result.usage).toHaveLength(3);
     expect(result.usage[1]).toEqual(failedUsage);
+    expect(chat.map((event) => `${event.channel}:${event.kind}:${event.attempt}`)).toEqual([
+      "reviewer:instruction:1",
+      "reviewer:response:1",
+      "pm:instruction:1",
+      "pm:response:1",
+      "pm:repair_reminder:2",
+      "pm:response:2",
+    ]);
+    expect(chat[3]).toMatchObject({
+      error_code: "invalid_response",
+      artifact_valid: false,
+    });
+    expect(chat[5]?.artifact_markdown).toContain("# Planning manager revision · Round 1");
+    expect(result.final_plan_markdown).toContain("# Final reviewed plan");
   });
 
   it("rejects a revision that omits a must-fix disposition", async () => {

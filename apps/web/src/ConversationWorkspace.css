@@ -2301,6 +2301,179 @@
   transition: width 180ms ease;
 }
 
+.conversation-qc-detailed-status,
+.conversation-qc-chats,
+.conversation-qc-final-artifact {
+  display: grid;
+  gap: 0.7rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--line);
+}
+
+.conversation-qc-detailed-status > div,
+.conversation-qc-chats > div:first-child,
+.conversation-qc-final-artifact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.conversation-qc-detailed-status > ol {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conversation-qc-detailed-status > ol > li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.6rem;
+}
+
+.conversation-qc-detailed-status > ol > li > span {
+  width: 0.65rem;
+  height: 0.65rem;
+  margin-top: 0.25rem;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--info);
+  box-shadow: 0 0 0 1px var(--info);
+}
+
+.conversation-qc-detailed-status > ol > li.is-error > span {
+  background: var(--danger);
+  box-shadow: 0 0 0 1px var(--danger);
+}
+
+.conversation-qc-detailed-status li > div {
+  display: grid;
+  gap: 0.08rem;
+}
+
+.conversation-qc-detailed-status small,
+.conversation-qc-chats p {
+  color: var(--ink-muted);
+}
+
+.conversation-qc-chat {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.conversation-qc-chat > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  padding: 0.75rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.conversation-qc-chat-body {
+  display: grid;
+  gap: 0.8rem;
+  padding: 0 0.75rem 0.75rem;
+}
+
+.conversation-qc-chat-body > ol {
+  display: grid;
+  max-height: 34rem;
+  gap: 0.65rem;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.conversation-qc-chat-body > ol > li {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.7rem;
+  border-left: 4px solid var(--info);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--info) 6%, var(--surface));
+}
+
+.conversation-qc-chat-body > ol > li.is-human {
+  border-left-color: var(--success);
+  background: color-mix(in srgb, var(--success) 7%, var(--surface));
+}
+
+.conversation-qc-chat-body > ol > li.is-workflow {
+  border-left-color: var(--ink-muted);
+  background: color-mix(in srgb, var(--ink-muted) 5%, var(--surface));
+}
+
+.conversation-qc-chat-body li > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.conversation-qc-chat-body pre {
+  max-height: 18rem;
+  margin: 0;
+  padding: 0.65rem;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--ink) 5%, var(--surface));
+  font: inherit;
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+}
+
+.conversation-qc-artifacts,
+.conversation-qc-takeover {
+  display: grid;
+  gap: 0.55rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--line);
+}
+
+.conversation-qc-artifacts ul {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conversation-qc-artifacts li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.conversation-qc-takeover textarea {
+  min-height: 6rem;
+}
+
+.conversation-qc-skip-confirmation {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  padding: 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warn) 7%, var(--surface));
+}
+
+.conversation-qc-skip-confirmation p {
+  flex: 1 1 20rem;
+}
+
 .conversation-qc-transcript,
 .conversation-qc-controls,
 .conversation-qc-decision {

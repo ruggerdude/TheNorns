@@ -2084,6 +2084,42 @@ export const V2ConversationPlanReviewRound = z
   .strict();
 export type V2ConversationPlanReviewRoundT = z.infer<typeof V2ConversationPlanReviewRound>;
 
+export const V2ConversationPlanReviewChatMessage = z
+  .object({
+    id: V2EntityId,
+    request_id: V2EntityId,
+    channel: z.enum(["reviewer", "pm"]),
+    round: z.number().int().positive(),
+    attempt: z.number().int().positive(),
+    speaker: z.enum(["workflow", "human", "reviewer", "pm"]),
+    kind: z.enum(["instruction", "response", "repair_reminder", "error"]),
+    content: V2NonEmptyString,
+    error_code: V2NonEmptyString.nullable(),
+    created_at: V2IsoDateTime,
+  })
+  .strict();
+export type V2ConversationPlanReviewChatMessageT = z.infer<
+  typeof V2ConversationPlanReviewChatMessage
+>;
+
+export const V2ConversationPlanReviewMarkdownArtifact = z
+  .object({
+    artifact_id: V2EntityId,
+    channel: z.enum(["reviewer", "pm", "workflow"]),
+    round: z.number().int().positive(),
+    attempt: z.number().int().positive(),
+    source: z.enum(["automatic", "manual", "workflow"]),
+    filename: V2NonEmptyString,
+    content_hash: V2Sha256Hex,
+    byte_size: z.number().int().positive(),
+    valid: z.boolean(),
+    created_at: V2IsoDateTime,
+  })
+  .strict();
+export type V2ConversationPlanReviewMarkdownArtifactT = z.infer<
+  typeof V2ConversationPlanReviewMarkdownArtifact
+>;
+
 export const V2ConversationPlanReview = z
   .object({
     schema_version: schemaVersion,
@@ -2106,6 +2142,8 @@ export const V2ConversationPlanReview = z
     rounds_completed: nonNegativeInteger,
     max_rounds: z.number().int().min(1).max(5),
     round_exchanges: z.array(V2ConversationPlanReviewRound),
+    chat_messages: z.array(V2ConversationPlanReviewChatMessage).default([]),
+    markdown_artifacts: z.array(V2ConversationPlanReviewMarkdownArtifact).default([]),
     plan_content_hash: V2Sha256Hex,
     result_plan_content_hash: V2Sha256Hex,
     context_manifest: V2ConversationPlanReviewContextManifest,

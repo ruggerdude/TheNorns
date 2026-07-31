@@ -100,7 +100,8 @@ export class FakeAdapter implements LlmAdapter {
       images: request.images,
     });
     // canned data must satisfy the real contracts schema — keeps fakes honest
-    return { value: schema.parse(this.next()), usage: this.usage(request) };
+    const raw = this.next();
+    return { value: schema.parse(raw), usage: this.usage(request), text: JSON.stringify(raw) };
   }
 
   async streamConversation(

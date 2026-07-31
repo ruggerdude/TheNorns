@@ -6358,6 +6358,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           },
           runReviewNow: (runId) => executeReviewNow(runId),
           cancelReviewNow: (runId) => cancelReviewNow(runId),
+          createReviewAdapter: (provider, model) => buildPlanningAdapter(provider, model),
+          ...(options.recordUsage ? { recordUsage: options.recordUsage } : {}),
           ...(options.planningRuns.executionKickoff
             ? { executionKickoff: options.planningRuns.executionKickoff }
             : {}),
@@ -6385,6 +6387,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               markReviewOnlyStarted: (reviewId: string) =>
                 reviewWorkflow.markReviewOnlyStarted(reviewId),
               recordReviewOnlyProgress: (input) => reviewWorkflow.recordReviewOnlyProgress(input),
+              recordReviewOnlyChatEvent: (input) => reviewWorkflow.recordReviewOnlyChatEvent(input),
               completeReviewOnly: (input: {
                 reviewId: string;
                 planningRunId: string;

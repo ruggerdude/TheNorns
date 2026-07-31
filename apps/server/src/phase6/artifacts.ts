@@ -65,7 +65,7 @@ export interface StoredPhase6Artifact {
 }
 
 export interface Phase6ArtifactContent {
-  media_type: "image/png" | "application/json";
+  media_type: "image/png" | "application/json" | "text/markdown";
   content_hash: string;
   byte_size: number;
   bytes: Buffer;
@@ -412,7 +412,7 @@ export class Phase6ArtifactService {
   async content(projectId: string, artifactIdValue: string): Promise<Phase6ArtifactContent> {
     return this.transactions.transaction(async (tx) => {
       const result = await tx.query<{
-        media_type: StoredPhase6Artifact["media_type"];
+        media_type: Phase6ArtifactContent["media_type"];
         content_hash: string;
         byte_size: number | string;
         content: Buffer | Uint8Array;
@@ -439,7 +439,16 @@ export class Phase6ArtifactService {
           `artifact "${artifactIdValue}" failed its stored integrity check`,
         );
       }
-      dimensions(row.media_type, bytes, undefined);
+      if (row.media_type === "text/markdown") {
+        if (bytes.length === 0 || !Buffer.from(bytes.toString("utf8"), "utf8").equals(bytes)) {
+          throw new Phase6ArtifactError(
+            "invalid_content",
+            `artifact "${artifactIdValue}" is not valid non-empty UTF-8 Markdown`,
+          );
+        }
+      } else {
+        dimensions(row.media_type, bytes, undefined);
+      }
       return {
         media_type: row.media_type,
         content_hash: hash,

@@ -26,6 +26,8 @@ function review(overrides: Partial<V2ConversationPlanReviewT> = {}): V2Conversat
     rounds_completed: 1,
     max_rounds: 3,
     round_exchanges: [],
+    chat_messages: [],
+    markdown_artifacts: [],
     plan_content_hash: "a".repeat(64),
     result_plan_content_hash: "a".repeat(64),
     context_manifest: {
@@ -145,7 +147,7 @@ describe("conversation QC card", () => {
     );
 
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "an agent response did not match the required QC output contract",
+      "an agent could not produce a complete applicable QC result after the reminder",
     );
     expect(screen.getByRole("alert")).toHaveTextContent("reviewer feedback below was saved");
     expect(screen.getByText("The response contract is incomplete.")).toBeInTheDocument();
@@ -220,5 +222,111 @@ describe("conversation QC card", () => {
         "The plan needs a different architecture.",
       ),
     );
+  });
+
+  it("shows detailed status, opens each raw QC chat, and supports guided takeover or waiver", async () => {
+    const onContinueChat = vi.fn().mockResolvedValue(undefined);
+    const onContinueWithoutQc = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ConversationQcCard
+        planVersion={null}
+        review={review({
+          status: "failed",
+          findings: [],
+          dispositions: [],
+          revised_plan_version_id: null,
+          result_plan_content_hash: "a".repeat(64),
+          failure_code: "invalid_response",
+          chat_messages: [
+            {
+              id: "chat-reviewer-instruction",
+              request_id: "request-reviewer-1",
+              channel: "reviewer",
+              round: 1,
+              attempt: 1,
+              speaker: "workflow",
+              kind: "instruction",
+              content: "Review the immutable plan.",
+              error_code: null,
+              created_at: now,
+            },
+            {
+              id: "chat-reviewer-response",
+              request_id: "request-reviewer-1",
+              channel: "reviewer",
+              round: 1,
+              attempt: 1,
+              speaker: "reviewer",
+              kind: "response",
+              content: "# Review\n\nOne concern remains.",
+              error_code: null,
+              created_at: now,
+            },
+            {
+              id: "chat-pm-error",
+              request_id: "request-pm-2",
+              channel: "pm",
+              round: 1,
+              attempt: 2,
+              speaker: "pm",
+              kind: "error",
+              content: "The second response was empty.",
+              error_code: "invalid_response",
+              created_at: now,
+            },
+          ],
+          markdown_artifacts: [
+            {
+              artifact_id: "artifact-reviewer-1",
+              channel: "reviewer",
+              round: 1,
+              attempt: 1,
+              source: "automatic",
+              filename: "qc-attempt-1-reviewer.md",
+              content_hash: "e".repeat(64),
+              byte_size: 42,
+              valid: true,
+              created_at: now,
+            },
+          ],
+        })}
+        onContinueChat={onContinueChat}
+        onContinueWithoutQc={onContinueWithoutQc}
+        onConfirmAction={vi.fn()}
+      />,
+    );
+
+    const status = screen.getByRole("region", { name: "Detailed QC status" });
+    expect(within(status).getByText(/Response received and Markdown saved/)).toBeInTheDocument();
+    expect(within(status).getByText(/Request failed · invalid_response/)).toBeInTheDocument();
+
+    const reviewerChat = screen.getByText("QC reviewer chat").closest("details");
+    expect(reviewerChat).not.toBeNull();
+    fireEvent.click(within(reviewerChat as HTMLElement).getByText("QC reviewer chat"));
+    expect(
+      within(reviewerChat as HTMLElement).getByText("Review the immutable plan."),
+    ).toBeInTheDocument();
+    expect(
+      within(reviewerChat as HTMLElement).getByRole("link", {
+        name: "qc-attempt-1-reviewer.md",
+      }),
+    ).toHaveAttribute("href", "/api/v2/projects/project-1/artifacts/artifact-reviewer-1/content");
+    fireEvent.change(within(reviewerChat as HTMLElement).getByLabelText("Your guidance"), {
+      target: { value: "Focus on the incomplete acceptance test." },
+    });
+    fireEvent.click(
+      within(reviewerChat as HTMLElement).getByRole("button", { name: "Send to reviewer" }),
+    );
+    await waitFor(() =>
+      expect(onContinueChat).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "review-1" }),
+        "reviewer",
+        "Focus on the incomplete acceptance test.",
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue without QC" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm continue without QC" }));
+    expect(onContinueWithoutQc).toHaveBeenCalledWith(expect.objectContaining({ id: "review-1" }));
   });
 });

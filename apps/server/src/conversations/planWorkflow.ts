@@ -1,5 +1,7 @@
-import { AdapterError, type ProviderName } from "@norns/adapters";
+import { createHash } from "node:crypto";
+import { AdapterError, type LlmAdapter, type ProviderName } from "@norns/adapters";
 import {
+  type UsageEventT,
   V2ConfirmConversationActionInput,
   type V2ConfirmConversationActionInputT,
   type V2ConfirmConversationPlanActionResponseT,
@@ -12,6 +14,7 @@ import {
   V2ConversationPlanReview,
   type V2ConversationPlanReviewDispositionT,
   type V2ConversationPlanReviewFindingT,
+  type V2ConversationPlanReviewMarkdownArtifactT,
   type V2ConversationPlanReviewT,
   type V2PlanHandoffPreferenceT,
   V2ProposeConversationActionInput,
@@ -26,7 +29,11 @@ import {
 import { newId } from "../ids.js";
 import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
-import type { ReviewOnlyPlanningResult, ReviewOnlyRound } from "../planning/reviewOnlySession.js";
+import type {
+  ReviewOnlyChatEvent,
+  ReviewOnlyPlanningResult,
+  ReviewOnlyRound,
+} from "../planning/reviewOnlySession.js";
 import type {
   ApprovedPlanExecutionKickoff,
   ApprovedStaffingEntryDto,
@@ -84,6 +91,8 @@ export interface ConversationPlanWorkflowOptions {
   ): Promise<ConversationPlanReviewModels>;
   runReviewNow(runId: string): Promise<unknown>;
   cancelReviewNow?(runId: string): boolean;
+  createReviewAdapter?(provider: ProviderName, model: string): LlmAdapter;
+  recordUsage?(events: UsageEventT[]): void;
   executionKickoff?: ApprovedPlanExecutionKickoff;
   approvalTransitionCheckpoint?: (
     checkpoint:
@@ -179,6 +188,8 @@ interface ReviewRow {
   rounds_completed: number | string;
   max_rounds: number | string;
   round_exchanges: unknown;
+  chat_messages: unknown;
+  markdown_artifacts: unknown;
   seed_plan: unknown;
   plan_content_hash: string;
   result_plan_content_hash: string;
@@ -248,7 +259,7 @@ const reviewColumns = `schema_version, id, project_id, work_item_id, conversatio
   revised_plan_version_id,
   (SELECT round FROM planning_runs WHERE id=planning_run_id) AS rounds_completed,
   (SELECT max_rounds FROM planning_runs WHERE id=planning_run_id) AS max_rounds,
-  round_exchanges, started_at, completed_at,
+  round_exchanges, chat_messages, markdown_artifacts, started_at, completed_at,
   CASE
     WHEN failure_code='adaptererror' THEN coalesce((
       SELECT usage.error_code
@@ -347,6 +358,8 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
     rounds_completed: Number(row.rounds_completed),
     max_rounds: Number(row.max_rounds),
     round_exchanges: json(row.round_exchanges),
+    chat_messages: json(row.chat_messages),
+    markdown_artifacts: json(row.markdown_artifacts),
     plan_content_hash: row.plan_content_hash,
     result_plan_content_hash: row.result_plan_content_hash,
     context_manifest: { entries: manifest.entries, context_hash: row.context_hash },
@@ -655,6 +668,24 @@ export class ConversationPlanWorkflowService {
     });
   }
 
+  async recordReviewOnlyChatEvent(input: {
+    reviewId: string;
+    planningRunId: string;
+    event: ReviewOnlyChatEvent;
+  }): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      const review = (
+        await tx.query<ReviewRow>(
+          `SELECT ${reviewColumns} FROM conversation_plan_reviews
+            WHERE id=$1 AND planning_run_id=$2 FOR UPDATE`,
+          [input.reviewId, input.planningRunId],
+        )
+      ).rows[0];
+      if (!review || review.status !== "running") return;
+      await this.appendReviewChatEvent(tx, review, input.event, "automatic");
+    });
+  }
+
   async cancelReview(
     userId: string,
     scope: { projectId: string; workItemId: string; conversationId: string },
@@ -750,6 +781,257 @@ export class ConversationPlanWorkflowService {
     return toReview(cancelled.review);
   }
 
+  async continueReviewChat(
+    userId: string,
+    scope: { projectId: string; workItemId: string; conversationId: string },
+    reviewId: string,
+    channel: "reviewer" | "pm",
+    humanMessage: string,
+  ): Promise<V2ConversationPlanReviewT> {
+    const prepared = await this.transactions.transaction(async (tx) => {
+      await this.assertAccess(tx, scope.projectId, userId);
+      await this.assertConversation(
+        tx,
+        scope.projectId,
+        scope.workItemId,
+        scope.conversationId,
+        false,
+      );
+      const review = (
+        await tx.query<ReviewRow>(
+          `SELECT ${reviewColumns} FROM conversation_plan_reviews
+            WHERE id=$1 AND project_id=$2 AND work_item_id=$3 AND conversation_id=$4
+            FOR UPDATE`,
+          [reviewId, scope.projectId, scope.workItemId, scope.conversationId],
+        )
+      ).rows[0];
+      if (!review) {
+        throw new ConversationPlanWorkflowError(
+          "review_not_found",
+          `plan review "${reviewId}" was not found`,
+          404,
+        );
+      }
+      if (review.status !== "failed" || review.review_mode === "waived") {
+        throw new ConversationPlanWorkflowError(
+          "invalid_plan_state",
+          "manual QC chat is available only after an automated QC failure",
+        );
+      }
+      const existingMessages = json<V2ConversationPlanReviewT["chat_messages"]>(
+        review.chat_messages,
+      );
+      const round = Math.max(
+        1,
+        ...existingMessages.map((message) => message.round),
+        ...json<V2ConversationPlanReviewT["round_exchanges"]>(review.round_exchanges).map(
+          (exchange) => exchange.round,
+        ),
+      );
+      const attempt =
+        existingMessages.filter(
+          (message) => message.channel === channel && message.speaker === "human",
+        ).length + 1;
+      const requestId = `${review.usage_request_group_id}:manual:${channel}:${attempt}`;
+      await this.appendReviewChatEvent(
+        tx,
+        review,
+        {
+          request_id: requestId,
+          channel,
+          round,
+          attempt,
+          speaker: "human",
+          kind: "instruction",
+          content: humanMessage,
+          error_code: null,
+        },
+        "manual",
+      );
+      return { review, existingMessages, round, attempt, requestId };
+    });
+
+    const factory = this.options.createReviewAdapter;
+    if (!factory) {
+      throw new ConversationPlanWorkflowError(
+        "invalid_plan_state",
+        "manual QC chat is not configured on this deployment",
+      );
+    }
+    const provider =
+      channel === "reviewer" ? prepared.review.reviewer_provider : prepared.review.pm_provider;
+    const model =
+      channel === "reviewer" ? prepared.review.reviewer_model : prepared.review.pm_model;
+    const adapter = factory(provider, model);
+    const transcript = prepared.existingMessages
+      .map(
+        (message) =>
+          `[${message.channel} · ${message.speaker} · ${message.kind}]\n${message.content}`,
+      )
+      .join("\n\n");
+    const prompt = [
+      `You are continuing the ${channel === "reviewer" ? "independent QC reviewer" : "planning manager"} chat after automated QC stopped.`,
+      "The human has temporarily taken over this QC conversation.",
+      "Reply with a complete, self-contained Markdown document. Plain text is valid Markdown. Do not rely on hidden context and do not return a JSON-only application envelope. The server saves your reply verbatim as an immutable .md artifact.",
+      `EXISTING QC CHAT:\n${transcript || "No earlier raw chat was retained."}`,
+      `IMMUTABLE PLAN CANDIDATE:\n${JSON.stringify(json(prepared.review.seed_plan))}`,
+      `FROZEN QC CONTEXT:\n${JSON.stringify(json(prepared.review.context_receipt))}`,
+      `HUMAN GUIDANCE:\n${humanMessage}`,
+    ].join("\n\n");
+    try {
+      const result = await adapter.complete({
+        system:
+          "Be candid, concrete, and complete. Your entire reply is a durable Markdown QC artifact visible to the human.",
+        prompt,
+        projectId: prepared.review.project_id,
+        initiatedByUserId: userId,
+        telemetryRequestId: prepared.requestId,
+        telemetryRetryGroupId: prepared.requestId,
+        telemetryRetryAttempt: 0,
+      });
+      this.options.recordUsage?.([result.usage]);
+      await this.transactions.transaction(async (tx) => {
+        const current = (
+          await tx.query<ReviewRow>(
+            `SELECT ${reviewColumns} FROM conversation_plan_reviews WHERE id=$1 FOR UPDATE`,
+            [reviewId],
+          )
+        ).rows[0];
+        if (!current || current.status !== "failed") return;
+        await this.appendReviewChatEvent(
+          tx,
+          current,
+          {
+            request_id: prepared.requestId,
+            channel,
+            round: prepared.round,
+            attempt: prepared.attempt,
+            speaker: channel,
+            kind: "response",
+            content: result.text.trim() || "The agent returned an empty response.",
+            error_code: result.text.trim() ? null : "empty_response",
+            ...(result.text.trim() ? { artifact_markdown: result.text, artifact_valid: true } : {}),
+          },
+          "manual",
+        );
+      });
+    } catch (error) {
+      if (error instanceof AdapterError && error.metadata?.usage) {
+        this.options.recordUsage?.([error.metadata.usage]);
+      }
+      await this.transactions.transaction(async (tx) => {
+        const current = (
+          await tx.query<ReviewRow>(
+            `SELECT ${reviewColumns} FROM conversation_plan_reviews WHERE id=$1 FOR UPDATE`,
+            [reviewId],
+          )
+        ).rows[0];
+        if (!current || current.status !== "failed") return;
+        await this.appendReviewChatEvent(
+          tx,
+          current,
+          {
+            request_id: prepared.requestId,
+            channel,
+            round: prepared.round,
+            attempt: prepared.attempt,
+            speaker: channel,
+            kind: "error",
+            content: error instanceof Error ? error.message : String(error),
+            error_code: error instanceof AdapterError ? error.kind : "unknown_error",
+          },
+          "manual",
+        );
+      });
+    }
+    return this.transactions.transaction(async (tx) => {
+      const updated = (
+        await tx.query<ReviewRow>(
+          `SELECT ${reviewColumns} FROM conversation_plan_reviews WHERE id=$1`,
+          [reviewId],
+        )
+      ).rows[0];
+      if (!updated) throw new Error("QC chat review could not be reloaded");
+      return toReview(updated);
+    });
+  }
+
+  async continueWithoutQc(
+    userId: string,
+    scope: { projectId: string; workItemId: string; conversationId: string },
+    reviewId: string,
+    idempotencyKey: string,
+  ): Promise<V2ConfirmConversationPlanActionResponseT> {
+    const actionId = await this.transactions.transaction(async (tx) => {
+      await this.assertAccess(tx, scope.projectId, userId);
+      await this.assertConversation(
+        tx,
+        scope.projectId,
+        scope.workItemId,
+        scope.conversationId,
+        false,
+      );
+      const replay = (
+        await tx.query<{ id: string }>(
+          `SELECT id FROM conversation_actions
+            WHERE conversation_id=$1 AND confirmed_by_user_id=$2
+              AND confirmation_idempotency_key=$3`,
+          [scope.conversationId, userId, idempotencyKey],
+        )
+      ).rows[0];
+      if (replay) return replay.id;
+      const review = (
+        await tx.query<ReviewRow>(
+          `SELECT ${reviewColumns} FROM conversation_plan_reviews
+            WHERE id=$1 AND project_id=$2 AND work_item_id=$3 AND conversation_id=$4
+            FOR UPDATE`,
+          [reviewId, scope.projectId, scope.workItemId, scope.conversationId],
+        )
+      ).rows[0];
+      if (!review) {
+        throw new ConversationPlanWorkflowError(
+          "review_not_found",
+          `plan review "${reviewId}" was not found`,
+          404,
+        );
+      }
+      if (review.status !== "failed") {
+        throw new ConversationPlanWorkflowError(
+          "invalid_plan_state",
+          "QC can be waived from this recovery control only after it fails",
+        );
+      }
+      const proposalIds = await this.appendVisibleMessage(
+        tx,
+        review,
+        userId,
+        "You explicitly chose to continue without QC after reviewing the failed attempt and its retained artifacts.",
+        review.plan_version_id,
+        review.action_id,
+        [
+          {
+            action_type: "send_plan_to_qc",
+            parameters: {
+              plan_version_id: review.plan_version_id,
+              content_hash: review.plan_content_hash,
+              review: { mode: "skip_qc" },
+            },
+          },
+        ],
+      );
+      const proposalId = proposalIds[0];
+      if (!proposalId) throw new Error("QC waiver proposal was not created");
+      return proposalId;
+    });
+    return this.confirm(userId, {
+      project_id: scope.projectId,
+      work_item_id: scope.workItemId,
+      conversation_id: scope.conversationId,
+      action_id: actionId,
+      idempotency_key: idempotencyKey,
+    });
+  }
+
   async completeReviewOnly(input: {
     reviewId: string;
     planningRunId: string;
@@ -828,6 +1110,21 @@ export class ConversationPlanWorkflowService {
           input.totalCostUsd,
           now,
         ],
+      );
+      await this.appendFinalReviewMarkdownArtifact(
+        tx,
+        review,
+        input.result.final_plan_markdown ??
+          [
+            "# Final reviewed plan",
+            "",
+            `**Objective:** ${finalPlan.plan.objective}`,
+            "",
+            "```json",
+            JSON.stringify(finalPlan, null, 2),
+            "```",
+          ].join("\n"),
+        input.result.rounds,
       );
       await tx.query(
         `UPDATE conversation_plan_reviews
@@ -929,7 +1226,7 @@ export class ConversationPlanWorkflowService {
         tx,
         review,
         review.initiated_by_user_id,
-        "QC could not complete. The immutable plan candidate is unchanged and can be sent to QC again.",
+        "QC stopped after its retry could not produce an applicable result. Every response and Markdown artifact produced so far remains available. You can inspect or take over either QC chat, retry with that guidance, explicitly continue without QC, or return to planning.",
         review.plan_version_id,
         review.action_id,
         [
@@ -938,6 +1235,22 @@ export class ConversationPlanWorkflowService {
             parameters: {
               plan_version_id: review.plan_version_id,
               content_hash: review.plan_content_hash,
+              review: {
+                mode: "qc",
+                reviewer: {
+                  provider: review.reviewer_provider,
+                  model: review.reviewer_model,
+                },
+                rounds: Number(review.max_rounds),
+              },
+            },
+          },
+          {
+            action_type: "send_plan_to_qc",
+            parameters: {
+              plan_version_id: review.plan_version_id,
+              content_hash: review.plan_content_hash,
+              review: { mode: "skip_qc" },
             },
           },
           {
@@ -2418,6 +2731,135 @@ export class ConversationPlanWorkflowService {
     return { findings, dispositions };
   }
 
+  private async appendReviewChatEvent(
+    tx: V2SqlExecutor,
+    review: ReviewRow,
+    event: ReviewOnlyChatEvent | (Omit<ReviewOnlyChatEvent, "speaker"> & { speaker: "human" }),
+    source: "automatic" | "manual",
+  ): Promise<void> {
+    const now = this.now().toISOString();
+    const message = {
+      id: this.makeId("qc_chat_message"),
+      request_id: event.request_id,
+      channel: event.channel,
+      round: event.round,
+      attempt: event.attempt,
+      speaker: event.speaker,
+      kind: event.kind,
+      content: event.content.trim() || "(empty response)",
+      error_code: event.error_code,
+      created_at: now,
+    };
+    let artifact: V2ConversationPlanReviewMarkdownArtifactT | null = null;
+    if (event.artifact_markdown?.trim()) {
+      const content = event.artifact_markdown.trim();
+      const bytes = Buffer.from(content, "utf8");
+      const contentHash = createHash("sha256").update(bytes).digest("hex");
+      const artifactId = this.makeId("artifact");
+      const filename = [
+        `qc-attempt-${Number(review.attempt_number)}`,
+        `round-${event.round}`,
+        event.channel,
+        source,
+        event.artifact_valid === false ? "partial" : "response",
+        `${event.attempt}.md`,
+      ].join("-");
+      await tx.query(
+        `INSERT INTO artifacts (
+           id,project_id,kind,label,media_type,storage_ref,content_hash,byte_size,
+           provenance_actor_type,provenance_actor_id,redaction_status
+         ) VALUES ($1,$2,'qc_review_markdown',$3,'text/markdown',$4,$5,$6,$7,$8,'not_required')`,
+        [
+          artifactId,
+          review.project_id,
+          filename,
+          `db://artifact/${artifactId}`,
+          contentHash,
+          bytes.byteLength,
+          source === "manual" ? "human_guided_agent" : "agent",
+          event.channel === "reviewer" ? review.reviewer_model : review.pm_model,
+        ],
+      );
+      await tx.query(
+        `INSERT INTO artifact_blobs (artifact_id,project_id,content,content_hash,byte_size)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [artifactId, review.project_id, bytes, contentHash, bytes.byteLength],
+      );
+      artifact = {
+        artifact_id: artifactId,
+        channel: event.channel,
+        round: event.round,
+        attempt: event.attempt,
+        source,
+        filename,
+        content_hash: contentHash,
+        byte_size: bytes.byteLength,
+        valid: event.artifact_valid !== false,
+        created_at: now,
+      };
+    }
+    await tx.query(
+      `UPDATE conversation_plan_reviews
+          SET chat_messages=chat_messages || $2::jsonb,
+              markdown_artifacts=markdown_artifacts || $3::jsonb,
+              updated_at=$4
+        WHERE id=$1`,
+      [review.id, JSON.stringify([message]), JSON.stringify(artifact ? [artifact] : []), now],
+    );
+  }
+
+  private async appendFinalReviewMarkdownArtifact(
+    tx: V2SqlExecutor,
+    review: ReviewRow,
+    markdown: string,
+    round: number,
+  ): Promise<void> {
+    const content = markdown.trim();
+    const bytes = Buffer.from(content, "utf8");
+    const contentHash = createHash("sha256").update(bytes).digest("hex");
+    const artifactId = this.makeId("artifact");
+    const filename = `qc-attempt-${Number(review.attempt_number)}-final-plan.md`;
+    const now = this.now().toISOString();
+    await tx.query(
+      `INSERT INTO artifacts (
+         id,project_id,kind,label,media_type,storage_ref,content_hash,byte_size,
+         provenance_actor_type,provenance_actor_id,redaction_status
+       ) VALUES ($1,$2,'qc_final_plan_markdown',$3,'text/markdown',$4,$5,$6,
+                 'workflow','conversation-plan-workflow','not_required')`,
+      [
+        artifactId,
+        review.project_id,
+        filename,
+        `db://artifact/${artifactId}`,
+        contentHash,
+        bytes.byteLength,
+      ],
+    );
+    await tx.query(
+      `INSERT INTO artifact_blobs (artifact_id,project_id,content,content_hash,byte_size)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [artifactId, review.project_id, bytes, contentHash, bytes.byteLength],
+    );
+    const artifact: V2ConversationPlanReviewMarkdownArtifactT = {
+      artifact_id: artifactId,
+      channel: "workflow",
+      round,
+      attempt: 1,
+      source: "workflow",
+      filename,
+      content_hash: contentHash,
+      byte_size: bytes.byteLength,
+      valid: true,
+      created_at: now,
+    };
+    await tx.query(
+      `UPDATE conversation_plan_reviews
+          SET markdown_artifacts=markdown_artifacts || $2::jsonb, updated_at=$3
+        WHERE id=$1 AND status='running'`,
+      [review.id, JSON.stringify([artifact]), now],
+    );
+  }
+
   private reviewRoundExchanges(
     review: ReviewRow,
     rounds: readonly ReviewOnlyRound[],
@@ -2490,6 +2932,7 @@ export class ConversationPlanWorkflowService {
       approved_knowledge: [],
       decision_ledger: [],
       referenced_artifacts: [],
+      manual_qc_guidance: [],
     };
     const global = (
       await tx.query<{ content: string; version: number }>(
@@ -2614,6 +3057,57 @@ export class ConversationPlanWorkflowService {
           ref: attachment.id,
           content_hash: attachment.sha256,
         });
+      }
+    }
+    const priorReview = (
+      await tx.query<{ id: string; markdown_artifacts: unknown }>(
+        `SELECT id, markdown_artifacts
+           FROM conversation_plan_reviews
+          WHERE plan_version_id=$1 AND status='failed'
+          ORDER BY attempt_number DESC
+          LIMIT 1`,
+        [planVersionId],
+      )
+    ).rows[0];
+    if (priorReview) {
+      const manualArtifacts = json<V2ConversationPlanReviewT["markdown_artifacts"]>(
+        priorReview.markdown_artifacts,
+      ).filter((artifact) => artifact.source === "manual" && artifact.valid);
+      for (const reference of manualArtifacts) {
+        const artifact = (
+          await tx.query<{
+            id: string;
+            content_hash: string;
+            media_type: string;
+            storage_ref: string;
+            content: string;
+          }>(
+            `SELECT artifact.id, artifact.content_hash, artifact.media_type,
+                    artifact.storage_ref, convert_from(blob.content,'UTF8') AS content
+               FROM artifacts artifact
+               JOIN artifact_blobs blob
+                 ON blob.artifact_id=artifact.id AND blob.project_id=artifact.project_id
+              WHERE artifact.project_id=$1 AND artifact.id=$2
+                AND artifact.content_hash=$3 AND artifact.media_type='text/markdown'`,
+            [action.project_id, reference.artifact_id, reference.content_hash],
+          )
+        ).rows[0];
+        if (!artifact) continue;
+        receipt.manual_qc_guidance?.push({
+          prior_review_id: priorReview.id,
+          artifact_id: artifact.id,
+          channel: reference.channel,
+          filename: reference.filename,
+          content_hash: artifact.content_hash,
+          content: artifact.content,
+        });
+        if (!entries.some((entry) => entry.ref === artifact.id)) {
+          entries.push({
+            kind: "artifact",
+            ref: artifact.id,
+            content_hash: artifact.content_hash,
+          });
+        }
       }
     }
     const hash = canonicalSha256({ receipt, entries });
@@ -2888,7 +3382,7 @@ export class ConversationPlanWorkflowService {
     planVersionId: string,
     actionId: string,
     followUps: readonly FollowUpActionProposal[] = [],
-  ): Promise<void> {
+  ): Promise<string[]> {
     const sequence = (
       await tx.query<{ sequence: number | string }>(
         `UPDATE work_conversations
@@ -2973,6 +3467,7 @@ export class ConversationPlanWorkflowService {
         ],
       );
     }
+    return proposed.map((proposal) => proposal.id);
   }
 
   private candidateFollowUps(

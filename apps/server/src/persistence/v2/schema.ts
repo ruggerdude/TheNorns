@@ -5034,6 +5034,8 @@ export const conversationPlanReviews = pgTable(
     findings: jsonb("findings").notNull().default([]),
     dispositions: jsonb("dispositions").notNull().default([]),
     roundExchanges: jsonb("round_exchanges").notNull().default([]),
+    chatMessages: jsonb("chat_messages").notNull().default([]),
+    markdownArtifacts: jsonb("markdown_artifacts").notNull().default([]),
     revisedPlan: jsonb("revised_plan"),
     revisedPlanContentHash: text("revised_plan_content_hash"),
     revisedPlanVersionId: text("revised_plan_version_id"),
@@ -5136,6 +5138,8 @@ export const conversationPlanReviews = pgTable(
         AND jsonb_typeof(${table.findings}) = 'array'
         AND jsonb_typeof(${table.dispositions}) = 'array'
         AND jsonb_typeof(${table.roundExchanges}) = 'array'
+        AND jsonb_typeof(${table.chatMessages}) = 'array'
+        AND jsonb_typeof(${table.markdownArtifacts}) = 'array'
         AND ${table.planContentHash} ~ '^[a-f0-9]{64}$'
         AND ${table.resultPlanContentHash} ~ '^[a-f0-9]{64}$'
         AND ${table.contextHash} ~ '^[a-f0-9]{64}$'`,

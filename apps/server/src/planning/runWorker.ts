@@ -19,6 +19,7 @@ import type { ReviewFindingT, UsageEventT } from "@norns/contracts";
 import type { V2WorkPlanContractT } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
+  type ReviewOnlyChatEvent,
   type ReviewOnlyPlanningResult,
   type ReviewOnlyRound,
   runReviewOnlyPlanning,
@@ -116,6 +117,11 @@ export interface PlanningRunWorkerOptions {
     reviewId: string;
     planningRunId: string;
     rounds: readonly ReviewOnlyRound[];
+  }) => Promise<void>;
+  recordReviewOnlyChatEvent?: (input: {
+    reviewId: string;
+    planningRunId: string;
+    event: ReviewOnlyChatEvent;
   }) => Promise<void>;
   completeReviewOnly?: (input: {
     reviewId: string;
@@ -657,6 +663,16 @@ export class PlanningRunWorker {
                   reviewId: seed.reviewId,
                   planningRunId: claim.id,
                   rounds,
+                }),
+            }
+          : {}),
+        ...(this.options.recordReviewOnlyChatEvent
+          ? {
+              onChatEvent: (event: ReviewOnlyChatEvent) =>
+                this.options.recordReviewOnlyChatEvent?.({
+                  reviewId: seed.reviewId,
+                  planningRunId: claim.id,
+                  event,
                 }),
             }
           : {}),

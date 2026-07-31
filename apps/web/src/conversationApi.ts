@@ -336,6 +336,43 @@ export function cancelConversationPlanReview(
   );
 }
 
+export function continueConversationPlanReviewChat(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  reviewId: string,
+  channel: "reviewer" | "pm",
+  message: string,
+): Promise<{ review: V2ConversationPlanReviewT }> {
+  return requestJson(
+    `${messageEndpoint(projectId, workItemId, conversationId)}/plan-reviews/${encodeURIComponent(
+      reviewId,
+    )}/chat`,
+    {
+      method: "POST",
+      body: JSON.stringify({ channel, message }),
+    },
+  );
+}
+
+export function continueConversationWithoutQc(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  reviewId: string,
+  idempotencyKey: string,
+): Promise<V2ConfirmConversationActionResponseT> {
+  return requestJson(
+    `${messageEndpoint(projectId, workItemId, conversationId)}/plan-reviews/${encodeURIComponent(
+      reviewId,
+    )}/continue-without-qc`,
+    {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    },
+  );
+}
+
 export function proposeExecutionConversationAction(
   projectId: string,
   workItemId: string,

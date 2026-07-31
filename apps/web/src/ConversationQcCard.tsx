@@ -5,6 +5,7 @@ import type {
   V2WorkPlanVersionT,
 } from "@norns/contracts";
 import { useState } from "react";
+import { artifactContentPath } from "./ArtifactImage";
 import { Badge, Button, TextArea } from "./ui";
 
 const SEVERITIES = [
@@ -25,7 +26,7 @@ function statusTone(
 function failureLabel(code: string | null): string {
   switch (code) {
     case "invalid_response":
-      return "an agent response did not match the required QC output contract";
+      return "an agent could not produce a complete applicable QC result after the reminder";
     case "auth":
       return "the provider rejected its credentials";
     case "rate_limit":
@@ -78,6 +79,164 @@ function Finding({
   );
 }
 
+function QcDetailedStatus({ review }: { review: V2ConversationPlanReviewT }): React.ReactElement {
+  const events = review.chat_messages;
+  return (
+    <section className="conversation-qc-detailed-status" aria-label="Detailed QC status">
+      <div>
+        <h4>Detailed status</h4>
+        <Badge tone={review.status === "failed" ? "danger" : "info"}>{events.length} events</Badge>
+      </div>
+      {events.length > 0 ? (
+        <ol aria-live="polite">
+          {events.map((event) => (
+            <li key={event.id} className={event.error_code ? "is-error" : undefined}>
+              <span aria-hidden="true" />
+              <div>
+                <strong>
+                  Round {event.round} ·{" "}
+                  {event.channel === "reviewer" ? "Reviewer" : "Planning manager"}
+                  {event.attempt > 1 ? ` · Attempt ${event.attempt}` : ""}
+                </strong>
+                <small>
+                  {event.kind === "instruction"
+                    ? event.speaker === "human"
+                      ? "Human guidance sent"
+                      : "Request sent"
+                    : event.kind === "repair_reminder"
+                      ? "Formatting reminder sent"
+                      : event.kind === "error"
+                        ? `Request failed${event.error_code ? ` · ${event.error_code}` : ""}`
+                        : event.error_code
+                          ? `Response preserved but not applicable · ${event.error_code}`
+                          : "Response received and Markdown saved"}
+                  {" · "}
+                  {new Date(event.created_at).toLocaleString()}
+                </small>
+              </div>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p>
+          {review.round_exchanges.length > 0
+            ? "This historical attempt retained its round results, but raw event-level status was not recorded yet."
+            : "Waiting for the first QC request to be recorded."}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function QcChatPanel({
+  review,
+  channel,
+  busy,
+  onContinue,
+}: {
+  review: V2ConversationPlanReviewT;
+  channel: "reviewer" | "pm";
+  busy: boolean;
+  onContinue?: (
+    review: V2ConversationPlanReviewT,
+    channel: "reviewer" | "pm",
+    message: string,
+  ) => Promise<void>;
+}): React.ReactElement {
+  const [draft, setDraft] = useState("");
+  const messages = review.chat_messages.filter((message) => message.channel === channel);
+  const artifacts = review.markdown_artifacts.filter((artifact) => artifact.channel === channel);
+  const label = channel === "reviewer" ? "QC reviewer chat" : "Planning manager chat";
+  return (
+    <details className={`conversation-qc-chat is-${channel}`}>
+      <summary>
+        <span>{label}</span>
+        <Badge tone={channel === "reviewer" ? "warn" : "info"}>{messages.length} messages</Badge>
+      </summary>
+      <div className="conversation-qc-chat-body">
+        {messages.length > 0 ? (
+          <ol>
+            {messages.map((message) => (
+              <li key={message.id} className={`is-${message.speaker}`}>
+                <header>
+                  <strong>
+                    {message.speaker === "workflow"
+                      ? "QC workflow"
+                      : message.speaker === "human"
+                        ? "You"
+                        : message.speaker === "reviewer"
+                          ? "QC reviewer"
+                          : "Planning manager"}
+                  </strong>
+                  <small>
+                    Round {message.round} · Attempt {message.attempt} ·{" "}
+                    {message.kind.replaceAll("_", " ")}
+                  </small>
+                </header>
+                <pre>{message.content}</pre>
+                {message.error_code ? (
+                  <Badge tone="danger">{message.error_code.replaceAll("_", " ")}</Badge>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p>No raw messages were captured for this chat in this historical attempt.</p>
+        )}
+        {artifacts.length > 0 ? (
+          <section className="conversation-qc-artifacts" aria-label={`${label} Markdown files`}>
+            <h5>Markdown artifacts</h5>
+            <ul>
+              {artifacts.map((artifact) => (
+                <li key={artifact.artifact_id}>
+                  <a
+                    href={artifactContentPath(review.project_id, artifact.artifact_id)}
+                    download={artifact.filename}
+                  >
+                    {artifact.filename}
+                  </a>
+                  <Badge tone={artifact.valid ? "success" : "warn"}>
+                    {artifact.valid ? "applicable" : "partial"}
+                  </Badge>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+        {review.status === "failed" && onContinue ? (
+          <section className="conversation-qc-takeover">
+            <h5>Temporarily take over this chat</h5>
+            <p>
+              Give the agent direct guidance. Its complete reply will be saved verbatim as a new
+              Markdown artifact and supplied as context when you retry QC.
+            </p>
+            <label htmlFor={`qc-chat-${review.id}-${channel}`}>Your guidance</label>
+            <TextArea
+              id={`qc-chat-${review.id}-${channel}`}
+              value={draft}
+              maxLength={4_000}
+              disabled={busy}
+              onChange={(event) => setDraft(event.target.value)}
+            />
+            <Button
+              disabled={busy || !draft.trim()}
+              onClick={() => {
+                const message = draft.trim();
+                if (!message) return;
+                void onContinue(review, channel, message).then(() => setDraft(""));
+              }}
+            >
+              {busy
+                ? "Waiting for agent…"
+                : `Send to ${channel === "reviewer" ? "reviewer" : "planning manager"}`}
+            </Button>
+          </section>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
 export function ConversationQcCard({
   planVersion,
   review,
@@ -85,22 +244,34 @@ export function ConversationQcCard({
   busy = false,
   error = null,
   onCancel,
+  onContinueChat,
+  onContinueWithoutQc,
   onConfirmAction,
+  onReturnToPlanning,
 }: {
   planVersion: V2WorkPlanVersionT | null;
   review: V2ConversationPlanReviewT;
   actions?: {
     approve?: V2ConversationActionT | null;
     repeat?: V2ConversationActionT | null;
+    skip?: V2ConversationActionT | null;
     reject?: V2ConversationActionT | null;
   };
   busy?: boolean;
   error?: string | null;
   onCancel?: (review: V2ConversationPlanReviewT, reason: string) => Promise<void>;
+  onContinueChat?: (
+    review: V2ConversationPlanReviewT,
+    channel: "reviewer" | "pm",
+    message: string,
+  ) => Promise<void>;
+  onContinueWithoutQc?: (review: V2ConversationPlanReviewT) => Promise<void>;
   onConfirmAction?: (action: V2ConversationActionT) => Promise<void>;
+  onReturnToPlanning?: () => void;
 }): React.ReactElement {
   const [stopping, setStopping] = useState(false);
   const [reason, setReason] = useState("Stopped by human review.");
+  const [confirmingSkip, setConfirmingSkip] = useState(false);
   const titleId = `conversation-qc-${review.id}`;
   const terminal = ["converged", "cap_reached", "failed", "cancelled"].includes(review.status);
   const waived = review.review_mode === "waived";
@@ -212,6 +383,41 @@ export function ConversationQcCard({
         <output className="conversation-qc-failure">
           QC stopped by a human · {review.cancellation_reason}
         </output>
+      ) : null}
+
+      {!waived ? (
+        <>
+          <QcDetailedStatus review={review} />
+          <section className="conversation-qc-chats" aria-label="QC agent chats">
+            <div>
+              <h4>QC chats</h4>
+              <p>Open either conversation to inspect every retained instruction and response.</p>
+            </div>
+            <QcChatPanel
+              review={review}
+              channel="reviewer"
+              busy={busy}
+              onContinue={onContinueChat}
+            />
+            <QcChatPanel review={review} channel="pm" busy={busy} onContinue={onContinueChat} />
+          </section>
+          {review.markdown_artifacts.some((artifact) => artifact.channel === "workflow") ? (
+            <section className="conversation-qc-final-artifact">
+              <h4>Final QC output</h4>
+              {review.markdown_artifacts
+                .filter((artifact) => artifact.channel === "workflow")
+                .map((artifact) => (
+                  <a
+                    key={artifact.artifact_id}
+                    href={artifactContentPath(review.project_id, artifact.artifact_id)}
+                    download={artifact.filename}
+                  >
+                    Download {artifact.filename}
+                  </a>
+                ))}
+            </section>
+          ) : null}
+        </>
       ) : null}
 
       {review.round_exchanges.length > 0 ? (
@@ -366,7 +572,11 @@ export function ConversationQcCard({
         <section className="conversation-qc-decision" aria-label="Human plan decision">
           <div>
             <h4>What happens next?</h4>
-            <p>Review the transcript and final staffing before choosing.</p>
+            <p>
+              {review.status === "failed"
+                ? "Automated QC is stopped. Review or take over either chat, then choose explicitly."
+                : "Review the transcript and final staffing before choosing."}
+            </p>
           </div>
           <div>
             {actions.approve && ["converged", "cap_reached"].includes(review.status) ? (
@@ -387,7 +597,38 @@ export function ConversationQcCard({
                   if (actions.repeat) void onConfirmAction(actions.repeat);
                 }}
               >
-                Run more QC rounds
+                {review.status === "failed"
+                  ? "Retry QC with retained guidance"
+                  : "Run more QC rounds"}
+              </Button>
+            ) : null}
+            {review.status === "failed" && onContinueWithoutQc ? (
+              confirmingSkip ? (
+                <div className="conversation-qc-skip-confirmation" role="alert">
+                  <p>
+                    This records QC as explicitly waived. The retained chats and Markdown files
+                    remain visible in the audit history.
+                  </p>
+                  <Button disabled={busy} onClick={() => setConfirmingSkip(false)}>
+                    Keep QC required
+                  </Button>
+                  <Button
+                    variant="primary"
+                    disabled={busy}
+                    onClick={() => void onContinueWithoutQc(review)}
+                  >
+                    {busy ? "Recording choice…" : "Confirm continue without QC"}
+                  </Button>
+                </div>
+              ) : (
+                <Button disabled={busy} onClick={() => setConfirmingSkip(true)}>
+                  Continue without QC
+                </Button>
+              )
+            ) : null}
+            {review.status === "failed" && onReturnToPlanning ? (
+              <Button disabled={busy} onClick={onReturnToPlanning}>
+                Return to planning chat
               </Button>
             ) : null}
             {actions.reject ? (

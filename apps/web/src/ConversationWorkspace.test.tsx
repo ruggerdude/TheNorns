@@ -384,6 +384,8 @@ function planReview(overrides: Partial<V2ConversationPlanReviewT> = {}): V2Conve
     rounds_completed: 1,
     max_rounds: 3,
     round_exchanges: [],
+    chat_messages: [],
+    markdown_artifacts: [],
     plan_content_hash: "a".repeat(64),
     result_plan_content_hash: "a".repeat(64),
     context_manifest: { entries: [], context_hash: "d".repeat(64) },

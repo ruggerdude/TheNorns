@@ -27,6 +27,7 @@ import { canonicalJson, canonicalSha256 } from "../src/persistence/migration/can
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import {
+  Phase6ArtifactService,
   Phase6MockupService,
   Phase6MockupWorker,
   Phase6VisualEvidenceService,
@@ -99,6 +100,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
   let changes: ConversationPlanChangeProposalService;
   let executionConversations: ExecutionConversationService;
   let proposalAdapter: LlmAdapter;
+  let manualReviewAdapter: FakeAdapter;
   let idSequence = 0;
   let dispatches: string[];
   let kickoffInputs: ApprovedPlanExecutionKickoffInput[];
@@ -167,6 +169,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         cancelledReviewRuns.push(runId);
         return true;
       },
+      createReviewAdapter: () => manualReviewAdapter,
       executionKickoff: {
         kickoff: async (input) => {
           kickoffInputs.push(input);
@@ -212,6 +215,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     failKickoffSettlement = false;
     cancelledReviewRuns = [];
     proposalAdapter = new FakeAdapter("anthropic", "claude-sonnet-5");
+    manualReviewAdapter = new FakeAdapter("anthropic", "claude-sonnet-5");
   });
 
   afterAll(async () => {
@@ -2494,7 +2498,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         .filter((action) => action.status === "proposed")
         .map((action) => action.action_type)
         .sort(),
-    ).toEqual(["reject_plan", "send_plan_to_qc"]);
+    ).toEqual(["reject_plan", "send_plan_to_qc", "send_plan_to_qc"]);
     const settled = await pg.query<{
       work_status: string;
       run_status: string;
@@ -2589,6 +2593,138 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       status: "failed",
       failure_code: "invalid_response",
     });
+  });
+
+  it("retains Markdown artifacts, supports PM chat takeover, and carries guidance into retry", async () => {
+    const scope = await workspace("qc-manual-recovery");
+    await proposeAndSave(scope, plan("Recover QC through retained Markdown"), "qc-manual-recovery");
+    const qcAction = await proposedAction(scope, "send_plan_to_qc");
+    const qc = await workflow.confirm(
+      owner.id,
+      confirmation(scope, qcAction.id, "start-qc-manual-recovery"),
+    );
+    if (qc.effect.kind !== "qc_started") throw new Error("expected QC effect");
+    const seed = await workflow.loadReviewOnlySeed(qc.effect.planning_run_id);
+    await workflow.markReviewOnlyStarted(seed.reviewId);
+    await workflow.recordReviewOnlyChatEvent({
+      reviewId: seed.reviewId,
+      planningRunId: qc.effect.planning_run_id,
+      event: {
+        request_id: `${seed.usageRequestGroupId}:review:1`,
+        channel: "reviewer",
+        round: 1,
+        attempt: 1,
+        speaker: "reviewer",
+        kind: "response",
+        content: '{"findings":[{"severity":"must_fix"}]}',
+        error_code: null,
+        artifact_markdown: "# QC reviewer\n\nThe acceptance evidence is incomplete.",
+        artifact_valid: true,
+      },
+    });
+    await workflow.failReviewOnly(
+      qc.effect.planning_run_id,
+      new AdapterError("invalid_response", "the PM revision remained incomplete"),
+    );
+
+    manualReviewAdapter.enqueue(
+      "# Human-guided planning manager response\n\nAdd an explicit acceptance command and retain the full plan.",
+    );
+    const recovered = await workflow.continueReviewChat(
+      owner.id,
+      { projectId, workItemId: scope.workItemId, conversationId: scope.conversationId },
+      seed.reviewId,
+      "pm",
+      "Produce a complete plan and explicitly address the acceptance evidence.",
+    );
+    expect(recovered.chat_messages.map((message) => message.speaker)).toEqual([
+      "reviewer",
+      "human",
+      "pm",
+    ]);
+    expect(recovered.markdown_artifacts).toHaveLength(2);
+    expect(recovered.markdown_artifacts[1]).toMatchObject({
+      channel: "pm",
+      source: "manual",
+      valid: true,
+    });
+    const stored = await pg.query<{ media_type: string; content: string }>(
+      `SELECT artifact.media_type, convert_from(blob.content,'UTF8') AS content
+         FROM artifacts artifact
+         JOIN artifact_blobs blob ON blob.artifact_id=artifact.id
+        WHERE artifact.id=$1`,
+      [recovered.markdown_artifacts[1]?.artifact_id],
+    );
+    expect(stored.rows[0]).toMatchObject({
+      media_type: "text/markdown",
+      content: expect.stringContaining("Human-guided planning manager response"),
+    });
+    const downloaded = await new Phase6ArtifactService(transactions).content(
+      projectId,
+      recovered.markdown_artifacts[1]?.artifact_id ?? "missing-artifact",
+    );
+    expect(downloaded.media_type).toBe("text/markdown");
+    expect(downloaded.bytes.toString("utf8")).toContain("Human-guided planning manager response");
+
+    const detail = await workflow.detail(
+      owner.id,
+      projectId,
+      scope.workItemId,
+      scope.conversationId,
+    );
+    const retry = detail.actions.find(
+      (action) =>
+        action.status === "proposed" &&
+        action.action_type === "send_plan_to_qc" &&
+        (action.payload.parameters.review as { mode?: string } | undefined)?.mode === "qc",
+    );
+    if (!retry) throw new Error("expected retained-guidance QC retry");
+    const retried = await workflow.confirm(
+      owner.id,
+      confirmation(scope, retry.id, "retry-qc-with-manual-guidance"),
+    );
+    if (retried.effect.kind !== "qc_started") throw new Error("expected retried QC effect");
+    const retrySeed = await workflow.loadReviewOnlySeed(retried.effect.planning_run_id);
+    expect(JSON.stringify(retrySeed.frozenContext)).toContain(
+      "Human-guided planning manager response",
+    );
+  });
+
+  it("requires an explicit choice before continuing without failed QC", async () => {
+    const scope = await workspace("qc-explicit-waiver");
+    await proposeAndSave(
+      scope,
+      plan("Allow an explicit post-failure QC waiver"),
+      "qc-explicit-waiver",
+    );
+    const qcAction = await proposedAction(scope, "send_plan_to_qc");
+    const qc = await workflow.confirm(
+      owner.id,
+      confirmation(scope, qcAction.id, "start-qc-explicit-waiver"),
+    );
+    if (qc.effect.kind !== "qc_started") throw new Error("expected QC effect");
+    await workflow.failReviewOnly(
+      qc.effect.planning_run_id,
+      new AdapterError("invalid_response", "QC did not produce a complete result"),
+    );
+
+    const waived = await workflow.continueWithoutQc(
+      owner.id,
+      { projectId, workItemId: scope.workItemId, conversationId: scope.conversationId },
+      qc.effect.plan_review.id,
+      "explicit-post-failure-qc-waiver",
+    );
+    expect(waived.effect).toMatchObject({
+      kind: "qc_started",
+      plan_review: { review_mode: "waived", status: "converged" },
+    });
+    const detail = await workflow.detail(
+      owner.id,
+      projectId,
+      scope.workItemId,
+      scope.conversationId,
+    );
+    expect(detail.plan_reviews.map((review) => review.status)).toEqual(["failed", "converged"]);
   });
 
   it("stops active QC with human attribution while preserving its partial agent transcript", async () => {

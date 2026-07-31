@@ -406,6 +406,12 @@ export const DEVICE_HTTP_OPERATION_PURPOSES_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const QC_MARKDOWN_ARTIFACTS_MIGRATION_NAME = "0062_qc_markdown_artifacts";
+export const QC_MARKDOWN_ARTIFACTS_MIGRATION_URL = new URL(
+  "../../../drizzle/0062_qc_markdown_artifacts.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -680,6 +686,10 @@ export async function loadLegacyRepositoryBindingClaimsMigrationSql(): Promise<s
 
 export async function loadDeviceHttpOperationPurposesMigrationSql(): Promise<string> {
   return readFile(DEVICE_HTTP_OPERATION_PURPOSES_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcMarkdownArtifactsMigrationSql(): Promise<string> {
+  return readFile(QC_MARKDOWN_ARTIFACTS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1037,6 +1047,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: DEVICE_HTTP_OPERATION_PURPOSES_MIGRATION_NAME,
       sql: await loadDeviceHttpOperationPurposesMigrationSql(),
+    },
+    {
+      name: QC_MARKDOWN_ARTIFACTS_MIGRATION_NAME,
+      sql: await loadQcMarkdownArtifactsMigrationSql(),
     },
   ];
 }

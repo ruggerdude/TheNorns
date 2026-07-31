@@ -142,6 +142,8 @@ export interface ProviderCompletionMetadata {
  */
 export interface AdapterFailureMetadata extends ProviderCompletionMetadata {
   usage?: UsageEventT;
+  /** Provider text retained when parsing or contract validation rejects it. */
+  response_text?: string;
   /** True only after the provider has returned a response to this request. */
   request_dispatched?: boolean;
 }
@@ -154,6 +156,8 @@ export interface CompletionResult extends ProviderCompletionMetadata {
 export interface StructuredResult<T> extends ProviderCompletionMetadata {
   value: T;
   usage: UsageEventT;
+  /** Exact provider text, retained for durable transcripts and recovery. */
+  text?: string;
 }
 
 export interface LlmAdapter {

@@ -71,7 +71,7 @@ export class AnthropicAdapter implements LlmAdapter {
     } catch (cause) {
       throw new AdapterError("invalid_response", `${schemaName}: response is not JSON`, {
         cause,
-        metadata: this.failureMetadata(response, request, startedAt),
+        metadata: { ...this.failureMetadata(response, request, startedAt), response_text: text },
       });
     }
     const result = schema.safeParse(parsed);
@@ -79,12 +79,15 @@ export class AnthropicAdapter implements LlmAdapter {
       throw new AdapterError(
         "invalid_response",
         `${schemaName}: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
-        { metadata: this.failureMetadata(response, request, startedAt) },
+        {
+          metadata: { ...this.failureMetadata(response, request, startedAt), response_text: text },
+        },
       );
     }
     return {
       value: result.data,
       usage: this.usageOf(response, request),
+      text,
       ...this.metadataOf(response, startedAt),
     };
   }

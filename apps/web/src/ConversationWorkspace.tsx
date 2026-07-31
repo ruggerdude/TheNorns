@@ -92,6 +92,8 @@ import {
   type WorkItemConversationGroup,
   cancelConversationPlanReview,
   confirmConversationAction,
+  continueConversationPlanReviewChat,
+  continueConversationWithoutQc,
   createConversationFolder,
   createConversationMessageBranch,
   createPlanningWorkItem,
@@ -550,6 +552,12 @@ type ConversationActionContextValue = {
   reviewBusyId: string | null;
   reviewErrors: Map<string, string>;
   cancelReview: (review: V2ConversationPlanReviewT, reason: string) => Promise<void>;
+  continueReviewChat: (
+    review: V2ConversationPlanReviewT,
+    channel: "reviewer" | "pm",
+    message: string,
+  ) => Promise<void>;
+  continueWithoutQc: (review: V2ConversationPlanReviewT) => Promise<void>;
   prepareExecutionAction: (
     actionType: V2CreateExecutionActionProposalInputT["action_type"],
     parameters: Record<string, unknown>,
@@ -1857,7 +1865,17 @@ function ConversationQcActivity({
               proposed.find(
                 (action) =>
                   action.action_type === "send_plan_to_qc" &&
-                  action.payload.parameters.plan_version_id === targetPlanId,
+                  action.payload.parameters.plan_version_id === targetPlanId &&
+                  (action.payload.parameters.review as { mode?: string } | undefined)?.mode !==
+                    "skip_qc",
+              ) ?? null;
+            const skip =
+              proposed.find(
+                (action) =>
+                  action.action_type === "send_plan_to_qc" &&
+                  action.payload.parameters.plan_version_id === targetPlanId &&
+                  (action.payload.parameters.review as { mode?: string } | undefined)?.mode ===
+                    "skip_qc",
               ) ?? null;
             const reject =
               proposed.find(
@@ -1871,7 +1889,7 @@ function ConversationQcActivity({
                 <ConversationQcCard
                   planVersion={targetPlan}
                   review={review}
-                  actions={{ approve, repeat, reject }}
+                  actions={{ approve, repeat, skip, reject }}
                   busy={context.reviewBusyId === review.id || context.busyActionId !== null}
                   error={
                     context.reviewErrors.get(review.id) ??
@@ -1881,7 +1899,16 @@ function ConversationQcActivity({
                     null
                   }
                   onCancel={context.cancelReview}
+                  onContinueChat={context.continueReviewChat}
+                  onContinueWithoutQc={context.continueWithoutQc}
                   onConfirmAction={context.confirm}
+                  onReturnToPlanning={() => {
+                    const composer = document.querySelector<HTMLTextAreaElement>(
+                      '[aria-label="Message the project PM"]',
+                    );
+                    composer?.scrollIntoView({ behavior: "smooth", block: "center" });
+                    composer?.focus();
+                  }}
                 />
                 {successful && targetPlan ? (
                   <ConversationQcFinalPlan planVersion={targetPlan} />
@@ -3316,6 +3343,7 @@ function ConversationThread({
   const planChangeKeys = useRef(new Map<string, string>());
   const executionActionKeys = useRef(new Map<string, string>());
   const waitAnswerKeys = useRef(new Map<string, string>());
+  const reviewRecoveryKeys = useRef(new Map<string, string>());
   const base = conversationPath(
     detail.work_item.project_id,
     detail.work_item.id,
@@ -3903,6 +3931,101 @@ function ConversationThread({
     ],
   );
 
+  const continueReviewChat = useCallback(
+    async (
+      review: V2ConversationPlanReviewT,
+      channel: "reviewer" | "pm",
+      message: string,
+    ): Promise<void> => {
+      if (reviewBusyId !== null) return;
+      setReviewBusyId(review.id);
+      setReviewErrors((current) => {
+        const next = new Map(current);
+        next.delete(review.id);
+        return next;
+      });
+      try {
+        await continueConversationPlanReviewChat(
+          detail.work_item.project_id,
+          detail.work_item.id,
+          detail.conversation.id,
+          review.id,
+          channel,
+          message,
+        );
+        onRefresh();
+      } catch (caught) {
+        if (caught instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
+        setReviewErrors((current) =>
+          new Map(current).set(
+            review.id,
+            caught instanceof Error ? caught.message : String(caught),
+          ),
+        );
+      } finally {
+        setReviewBusyId(null);
+      }
+    },
+    [
+      detail.conversation.id,
+      detail.work_item.id,
+      detail.work_item.project_id,
+      onRefresh,
+      onUnauthorized,
+      reviewBusyId,
+    ],
+  );
+
+  const continueWithoutQc = useCallback(
+    async (review: V2ConversationPlanReviewT): Promise<void> => {
+      if (reviewBusyId !== null) return;
+      const key = durableRequestKey("qc-waiver", review.id, reviewRecoveryKeys.current);
+      setReviewBusyId(review.id);
+      setReviewErrors((current) => {
+        const next = new Map(current);
+        next.delete(review.id);
+        return next;
+      });
+      try {
+        const result = await continueConversationWithoutQc(
+          detail.work_item.project_id,
+          detail.work_item.id,
+          detail.conversation.id,
+          review.id,
+          key,
+        );
+        setActionOverrides((current) => new Map(current).set(result.action.id, result.action));
+        setEffectOverrides((current) => new Map(current).set(result.action.id, result.effect));
+        clearDurableRequestKey("qc-waiver", review.id, reviewRecoveryKeys.current);
+        onRefresh();
+      } catch (caught) {
+        if (caught instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
+        setReviewErrors((current) =>
+          new Map(current).set(
+            review.id,
+            caught instanceof Error ? caught.message : String(caught),
+          ),
+        );
+      } finally {
+        setReviewBusyId(null);
+      }
+    },
+    [
+      detail.conversation.id,
+      detail.work_item.id,
+      detail.work_item.project_id,
+      onRefresh,
+      onUnauthorized,
+      reviewBusyId,
+    ],
+  );
+
   const submitExecutionAction = useCallback(
     async (request: V2CreateExecutionActionProposalInputT): Promise<boolean> => {
       if (executionProposalBusy) return false;
@@ -4199,6 +4322,8 @@ function ConversationThread({
       reviewBusyId,
       reviewErrors,
       cancelReview,
+      continueReviewChat,
+      continueWithoutQc,
       prepareExecutionAction: proposeExecutionAction,
       executionProposalBusy,
       executionProposalError,
@@ -4224,6 +4349,8 @@ function ConversationThread({
     reviewBusyId,
     reviewErrors,
     cancelReview,
+    continueReviewChat,
+    continueWithoutQc,
     prepareHumanWaitAnswer,
     proposePlanChanges,
     proposeExecutionAction,

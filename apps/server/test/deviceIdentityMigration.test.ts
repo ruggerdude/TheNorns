@@ -11,6 +11,7 @@ import {
   GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
   LEGACY_REPOSITORY_BINDING_CLAIMS_MIGRATION_NAME,
   PROJECT_RUN_CANCELLATION_MIGRATION_NAME,
+  QC_MARKDOWN_ARTIFACTS_MIGRATION_NAME,
   currentV2MigrationSources,
   loadDeviceIdentityCoreMigrationSql,
   loadDeviceManagementObservationsMigrationSql,
@@ -43,7 +44,7 @@ describe.sequential("device identity core migration", () => {
 
   it("is registered before the additive Phase 2 device migrations", async () => {
     const sources = await currentV2MigrationSources();
-    expect(sources.slice(-9).map((source) => source.name)).toEqual([
+    expect(sources.slice(-10).map((source) => source.name)).toEqual([
       DEVICE_IDENTITY_CORE_MIGRATION_NAME,
       DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME,
       DEVICE_CANCELLATION_TRACKING_MIGRATION_NAME,
@@ -53,13 +54,15 @@ describe.sequential("device identity core migration", () => {
       PROJECT_RUN_CANCELLATION_MIGRATION_NAME,
       LEGACY_REPOSITORY_BINDING_CLAIMS_MIGRATION_NAME,
       DEVICE_HTTP_OPERATION_PURPOSES_MIGRATION_NAME,
+      QC_MARKDOWN_ARTIFACTS_MIGRATION_NAME,
     ]);
-    expect(sources.at(-9)?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
-    expect(sources.at(-5)?.sql).toContain("ADD COLUMN os_version TEXT");
-    expect(sources.at(-4)?.sql).toContain("CREATE TABLE IF NOT EXISTS device_publication_permits");
-    expect(sources.at(-3)?.sql).toContain("ADD COLUMN idempotency_key TEXT");
-    expect(sources.at(-2)?.sql).toContain("CREATE TABLE legacy_repository_binding_claims");
-    expect(sources.at(-1)?.sql).toContain("norns.runner-http.repository-registration.v1");
+    expect(sources.at(-10)?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
+    expect(sources.at(-6)?.sql).toContain("ADD COLUMN os_version TEXT");
+    expect(sources.at(-5)?.sql).toContain("CREATE TABLE IF NOT EXISTS device_publication_permits");
+    expect(sources.at(-4)?.sql).toContain("ADD COLUMN idempotency_key TEXT");
+    expect(sources.at(-3)?.sql).toContain("CREATE TABLE legacy_repository_binding_claims");
+    expect(sources.at(-2)?.sql).toContain("norns.runner-http.repository-registration.v1");
+    expect(sources.at(-1)?.sql).toContain("ADD COLUMN markdown_artifacts JSONB");
   });
 
   it("creates the five core tables, privacy-safe columns, and runtime grants", async () => {

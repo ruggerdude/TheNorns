@@ -74,6 +74,7 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
       "test_object",
     );
     expect(result.value).toEqual({ name: "mock", count: 3 });
+    expect(result.text).toBe('{"name":"mock","count":3}');
   });
 
   it("enforces an explicit OpenAI output cap through the Responses API", async () => {
@@ -118,6 +119,7 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
         input_tokens: 120,
         output_tokens: 45,
       },
+      response_text: '{"name":"mock","count":3}',
     });
     expect((error as AdapterError).metadata?.latency_ms).toEqual(expect.any(Number));
     expect((error as AdapterError).metadata?.latency_ms).toBeGreaterThanOrEqual(0);

@@ -39,6 +39,19 @@ const CancelReviewBody = z
   })
   .strict();
 
+const ContinueReviewChatBody = z
+  .object({
+    channel: z.enum(["reviewer", "pm"]),
+    message: z.string().trim().min(1).max(4_000),
+  })
+  .strict();
+
+const ContinueWithoutQcBody = z
+  .object({
+    idempotency_key: z.string().min(1),
+  })
+  .strict();
+
 function routeError(reply: FastifyReply, error: unknown): void {
   if (error instanceof z.ZodError) {
     reply.code(400).send({ error: "bad_request", issues: error.issues });
@@ -200,6 +213,54 @@ export function registerConversationPlanRoutes(
         body.reason,
       );
       return reply.send({ review });
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.post(`${base}/plan-reviews/:reviewId/chat`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId, workItemId, conversationId, reviewId } = request.params as {
+      projectId: string;
+      workItemId: string;
+      conversationId: string;
+      reviewId: string;
+    };
+    try {
+      const body = ContinueReviewChatBody.parse(request.body);
+      const review = await options.workflow.continueReviewChat(
+        user.id,
+        { projectId, workItemId, conversationId },
+        reviewId,
+        body.channel,
+        body.message,
+      );
+      return reply.send({ review });
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.post(`${base}/plan-reviews/:reviewId/continue-without-qc`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId, workItemId, conversationId, reviewId } = request.params as {
+      projectId: string;
+      workItemId: string;
+      conversationId: string;
+      reviewId: string;
+    };
+    try {
+      const body = ContinueWithoutQcBody.parse(request.body);
+      return reply.send(
+        await options.workflow.continueWithoutQc(
+          user.id,
+          { projectId, workItemId, conversationId },
+          reviewId,
+          body.idempotency_key,
+        ),
+      );
     } catch (error) {
       routeError(reply, error);
     }
