@@ -11,6 +11,10 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
+import {
+  DeviceRepositoryAccessService,
+  PostgresDeviceRepositoryAccessRepository,
+} from "../src/devices/index.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import {
@@ -133,6 +137,13 @@ describe.sequential("ONBOARDING O6: GitHub-evidenced binding promotion", () => {
     `);
     await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
     await pg.exec(`
+      INSERT INTO users (
+        id, username, display_name, email, name, password_hash,
+        password_hash_scheme, role, status
+      ) VALUES (
+        'admin-1', 'admin@example.test', 'Admin', 'admin@example.test',
+        'Admin', 'hash', 'scrypt-v1', 'admin', 'active'
+      );
       INSERT INTO service_connections (
         id, provider, display_name, owner_type, owner_login,
         external_account_id, installation_id, repository_selection,
@@ -219,6 +230,70 @@ describe.sequential("ONBOARDING O6: GitHub-evidenced binding promotion", () => {
       display_name: "acme/app",
     });
     expect(view.onboarding.summary_line).toBe("Runs in app · Pushes to github.com/acme/app");
+  });
+
+  it("lets an activated onboarding project authorize and select its enrolled computer", async () => {
+    await pg.exec(`
+      INSERT INTO devices (
+        id, owner_user_id, display_name, os_family, architecture, lifecycle,
+        current_generation, agent_version, agent_protocol_version,
+        agent_capabilities, last_seen_at
+      ) VALUES (
+        'device-local', 'admin-1', 'This computer', 'macos', 'arm64', 'active',
+        0, '0.4.0', '1',
+        '["device_control","repository_access","workspace_clone"]'::jsonb, now()
+      );
+      INSERT INTO device_credentials (
+        id, device_id, generation, public_key_spki_der,
+        public_key_fingerprint, state
+      ) VALUES (
+        'credential-local', 'device-local', 1, '\\x01', repeat('a', 64), 'active'
+      );
+    `);
+    const access = new DeviceRepositoryAccessService(
+      new PostgresDeviceRepositoryAccessRepository(transactions),
+      { availability: () => "online" },
+      ["1"],
+    );
+    const registration = await access.registerRepository({
+      device_id: "device-local",
+      credential_id: "credential-local",
+      generation: 1,
+      workspace_id: "workspace-local",
+      repository_id: "repository-local",
+      repository_display_name: "app",
+      default_branch: "main",
+      observed_head: HEAD,
+    });
+    const projectId = await onboardProject("enrolled-computer");
+    await activation.activate({ project_id: projectId, actor_id: "admin-1" });
+
+    const grant = await access.grantRepository({
+      actor_user_id: "admin-1",
+      project_id: projectId,
+      repository_registration_id: registration.registration_id,
+    });
+    const selected = await access.selectProjectExecutionTarget({
+      actor_user_id: "admin-1",
+      project_id: projectId,
+      execution_target_id: grant.grant_id,
+      expected_current_execution_target_id: null,
+    });
+
+    expect(selected.selected_execution_target_id).toBe(grant.grant_id);
+    expect(selected.execution_targets[0]).toMatchObject({
+      name: "This computer",
+      status: { availability: "online", compatibility: "ready", access: "shared" },
+    });
+    const primary = await pg.query<{ binding_type: string }>(
+      `SELECT binding.binding_type
+       FROM projects project
+       JOIN repository_bindings binding
+         ON binding.id = project.primary_repository_binding_id
+       WHERE project.id = $1`,
+      [projectId],
+    );
+    expect(primary.rows[0]?.binding_type).toBe("local_runner");
   });
 
   /**
@@ -362,6 +437,11 @@ describe.sequential("ONBOARDING O6: GitHub-evidenced binding promotion", () => {
     const projectId = await onboardProject();
     await activation.activate({ project_id: projectId, actor_id: "admin-1" });
 
+    const project = await pg.query<{ status: string }>(
+      "SELECT status FROM projects WHERE id = $1",
+      [projectId],
+    );
+    expect(project.rows[0]?.status).toBe("active");
     const bindings = await pg.query<{ role: string; status: string; repository_id: string }>(
       "SELECT role, status, repository_id FROM repository_bindings WHERE project_id = $1 ORDER BY role",
       [projectId],
@@ -402,6 +482,11 @@ describe.sequential("ONBOARDING O6: GitHub-evidenced binding promotion", () => {
     // It never even asked for the head: the probe is a hard gate, not advisory.
     expect(port.evidenceCalls).toBe(0);
     await expect(schedule(projectId)).rejects.toThrow(/verified repository binding/);
+    const project = await pg.query<{ status: string }>(
+      "SELECT status FROM projects WHERE id = $1",
+      [projectId],
+    );
+    expect(project.rows[0]?.status).toBe("initializing");
 
     // ...and it is recorded durably, so the read model tells the same story.
     const view = await resume.open(projectId);

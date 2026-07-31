@@ -299,7 +299,10 @@ export class ProjectActivationService {
         );
       }
       await tx.query(
-        `UPDATE projects SET primary_repository_binding_id = $2, updated_at = now()
+        `UPDATE projects
+         SET primary_repository_binding_id = $2,
+             status = 'active',
+             updated_at = now()
          WHERE id = $1`,
         [projectId, workspaceId],
       );
