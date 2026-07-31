@@ -346,7 +346,7 @@ test("production start and installed agent-start share AgentHost-owned device co
     );
     const page = await fetch(started.bootstrap_url);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /Emergency stop all Norns work/);
+    assert.match(await page.text(), /Stop all Norns work/);
     agentChild.kill("SIGTERM");
     const [agentCode, agentSignal] = await once(agentChild, "exit");
     assert.equal(agentCode, 0);

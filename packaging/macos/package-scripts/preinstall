@@ -4,7 +4,7 @@ set -eu
 STATE_DIR="/var/tmp/com.thenorns.local-agent.pkg-state"
 RESTART_RECORDS="$STATE_DIR/restart-records"
 USER_LIST="$STATE_DIR/local-users"
-KNOWN_LABELS="com.thenorns.local-agent com.thenorns.runner app.thenorns.runner"
+KNOWN_LABELS="com.thenorns.local-agent com.thenorns.local-agent-menubar com.thenorns.runner app.thenorns.runner"
 
 /bin/rm -rf "$STATE_DIR"
 /bin/mkdir -m 700 "$STATE_DIR"

@@ -165,16 +165,19 @@ test("AgentHost serves only a hardened, bundled loopback UI", async () => {
     const html = await page.text();
     assert.match(html, /<script defer src="\/agent-host\.js"><\/script>/);
     assert.doesNotMatch(html, /<script(?! defer src)/);
-    assert.match(html, />Home</);
+    assert.match(html, />This Mac</);
     assert.match(html, />Security</);
     assert.match(html, />Repositories</);
     assert.match(html, />Diagnostics</);
     assert.match(html, /role="tablist"/);
     assert.match(html, /role="tab"/);
     assert.match(html, /role="tabpanel"/);
-    assert.match(html, /Connect this Mac/);
+    assert.match(html, /Sync with The Norns/);
     assert.doesNotMatch(html, /Authorization code/);
-    assert.match(html, /Download redacted support bundle/);
+    assert.doesNotMatch(html, /human code/i);
+    assert.match(html, /class="brand-word">The Norns</);
+    assert.match(html, /Private control center/);
+    assert.match(html, /Download support bundle/);
     assert.doesNotMatch(html, /hostname|raw local path/i);
 
     const queryBootstrap = await fetch(`${started.origin}/?bootstrap=not-accepted`);
@@ -184,7 +187,7 @@ test("AgentHost serves only a hardened, bundled loopback UI", async () => {
     assert.equal(javascript.status, 200);
     const javascriptBody = await javascript.text();
     assert.match(javascriptBody, /\/api\/enrollment\/start/);
-    assert.match(javascriptBody, /new URLSearchParams\(\{ code:/);
+    assert.match(javascriptBody, /new URLSearchParams\(\{ handoff:/);
     assert.match(javascriptBody, /norns-device-approval/);
     assert.match(javascriptBody, /\/api\/daemon\/restart/);
     assert.match(javascriptBody, /\/api\/repositories\/choose/);
@@ -197,6 +200,8 @@ test("AgentHost serves only a hardened, bundled loopback UI", async () => {
     const stylesheetBody = await stylesheet.text();
     assert.match(stylesheetBody, /forced-colors:active/);
     assert.match(stylesheetBody, /box-sizing:border-box/);
+    assert.match(stylesheetBody, /--indigo:#2f49b9/);
+    assert.match(stylesheetBody, /\.app-shell\{display:grid/);
 
     const wrongHost = await requestWithHost(started.origin, `localhost:${started.port}`);
     assert.equal(wrongHost.status, 403);
@@ -866,8 +871,8 @@ test("AgentHost emergency stop is distinct, confirmed, and leaves Control Center
     assert.equal(startDaemon.status, 200);
     const page = await fetch(started.origin);
     const html = await page.text();
-    assert.match(html, /Emergency stop all Norns work/);
-    assert.match(html, /same OS user/);
+    assert.match(html, /Stop all Norns work/);
+    assert.match(html, /same macOS user/);
 
     const stateChangingGet = await fetch(`${started.origin}/api/emergency-stop`, {
       headers: { cookie: session.cookie },

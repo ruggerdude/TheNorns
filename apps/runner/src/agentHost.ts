@@ -81,117 +81,218 @@ const CONTROL_CENTER_HTML = `<!doctype html>
   <link rel="stylesheet" href="/agent-host.css">
   <script defer src="/agent-host.js"></script>
 </head>
-<body>
-  <header>
-    <p class="eyebrow">Norns Local Agent</p>
-    <h1>Control Center</h1>
-    <p id="message" role="status">Opening the local Control Center…</p>
-  </header>
-  <nav aria-label="Control Center sections" role="tablist">
-    <button class="tab" id="tab-home" role="tab" type="button" data-panel="home" aria-controls="home" aria-selected="true" tabindex="0">Home</button>
-    <button class="tab" id="tab-security" role="tab" type="button" data-panel="security" aria-controls="security" aria-selected="false" tabindex="-1">Security</button>
-    <button class="tab" id="tab-repositories" role="tab" type="button" data-panel="repositories" aria-controls="repositories" aria-selected="false" tabindex="-1">Repositories</button>
-    <button class="tab" id="tab-diagnostics" role="tab" type="button" data-panel="diagnostics" aria-controls="diagnostics" aria-selected="false" tabindex="-1">Diagnostics</button>
-  </nav>
-  <main>
-    <section id="home" role="tabpanel" aria-labelledby="tab-home" tabindex="0">
-      <h2 id="home-heading">Home</h2>
-      <p class="device-name" id="device-name">This computer</p>
-      <p id="location" class="muted">No location label</p>
-      <p id="connection-copy" class="connection-copy">Connect this Mac to the same Norns account you use on the website.</p>
-      <dl>
-        <dt>Account connection</dt><dd id="enrollment">Checking…</dd>
-        <dt>Availability</dt><dd id="availability">Checking…</dd>
-        <dt>Compatibility</dt><dd id="compatibility">Checking…</dd>
-        <dt>Workload</dt><dd id="workload">Checking…</dd>
-        <dt>Start at login</dt><dd id="start-at-login">Checking…</dd>
-        <dt>Agent version</dt><dd id="agent-version">Checking…</dd>
-      </dl>
-      <p id="recent-activity" class="muted">No recent local Norns activity.</p>
-      <div class="actions">
-        <button id="prepare" type="button">Connect this Mac</button>
-        <a id="verification-uri" class="button-link" rel="noreferrer noopener" target="_blank" hidden>Continue in browser</a>
+<body data-connection="not_enrolled">
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="braid-mark" aria-hidden="true">
+          <i class="thread thread-one"></i>
+          <i class="thread thread-two"></i>
+          <i class="thread thread-three"></i>
+        </span>
+        <span class="brand-word">The Norns</span>
       </div>
-      <section class="emergency-control" aria-labelledby="emergency-heading">
-        <h3 id="emergency-heading">Emergency stop</h3>
-        <p>Stops every process currently managed by Norns on this OS-user installation, fences publication, and preserves recovery worktrees. The Control Center stays open.</p>
-        <label for="emergency-confirmation">Type <code>STOP ALL NORNS WORK</code> to confirm</label>
-        <input id="emergency-confirmation" type="text" autocomplete="off" spellcheck="false">
-        <button id="emergency-stop" class="danger" type="button">Emergency stop all Norns work</button>
-        <p id="emergency-result" class="muted">No local emergency stop has been requested.</p>
-      </section>
-    </section>
+      <div class="local-label">Local Agent</div>
+      <nav aria-label="Local Agent sections" role="tablist">
+        <button class="tab" id="tab-home" role="tab" type="button" data-panel="home" aria-controls="home" aria-selected="true" tabindex="0">This Mac</button>
+        <button class="tab" id="tab-repositories" role="tab" type="button" data-panel="repositories" aria-controls="repositories" aria-selected="false" tabindex="-1">Repositories</button>
+        <button class="tab" id="tab-security" role="tab" type="button" data-panel="security" aria-controls="security" aria-selected="false" tabindex="-1">Security</button>
+        <button class="tab" id="tab-diagnostics" role="tab" type="button" data-panel="diagnostics" aria-controls="diagnostics" aria-selected="false" tabindex="-1">Diagnostics</button>
+      </nav>
+      <p class="local-note">Private control center<br>for this computer only</p>
+    </aside>
 
-    <section id="security" role="tabpanel" aria-labelledby="tab-security" tabindex="0" hidden>
-      <h2 id="security-heading">Security</h2>
-      <dl>
-        <dt>Enrolled account</dt><dd id="account">Not enrolled</dd>
-        <dt>Device fingerprint</dt><dd><code id="fingerprint">Not prepared</code></dd>
-        <dt>Repository access</dt><dd id="repository-access">No repository access is configured.</dd>
-      </dl>
-      <h3>Authorization notices</h3>
-      <ul id="authorization-notices"><li>None</li></ul>
-      <p class="boundary">This Control Center protects against malicious websites and other OS users. It cannot protect against a compromised process running as this same OS user.</p>
-    </section>
+    <div class="workspace">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">This Mac</p>
+          <h1 id="device-name">This computer</h1>
+          <p id="location" class="muted">No location label</p>
+        </div>
+        <p id="message" class="status-message" role="status">Opening the local control center…</p>
+      </header>
 
-    <section id="repositories" role="tabpanel" aria-labelledby="tab-repositories" tabindex="0" hidden>
-      <h2 id="repositories-heading">Repositories</h2>
-      <p>Choose a Git repository on this computer to give Norns access. Its local path stays in this Control Center.</p>
-      <div class="actions">
-        <button id="choose-repository" type="button">Choose repository</button>
-      </div>
-      <ul id="repository-list" class="repository-list"><li>No repositories approved.</li></ul>
-      <h3>Local access history</h3>
-      <ul id="repository-history"><li>No repository access changes recorded.</li></ul>
-      <p class="muted">Removing access never deletes or changes the repository or its files.</p>
-    </section>
+      <main>
+        <section id="home" role="tabpanel" aria-labelledby="tab-home" tabindex="0">
+          <article class="connection-hero">
+            <div>
+              <div class="connection-state">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span id="enrollment">Checking…</span>
+              </div>
+              <h2>Connect your computer</h2>
+              <p id="connection-copy" class="connection-copy">Sync this Mac with the same Norns account you use on the website.</p>
+            </div>
+            <div class="actions connection-actions">
+              <button id="prepare" class="primary" type="button">Sync with The Norns</button>
+              <a id="verification-uri" class="button-link" rel="noreferrer noopener" target="_blank" hidden>Continue in browser</a>
+              <a id="open-norns" class="button-link subtle" href="https://thenorns.up.railway.app/?settings=connections" rel="noreferrer noopener" target="_blank" hidden>Open The Norns</a>
+            </div>
+          </article>
 
-    <section id="diagnostics" role="tabpanel" aria-labelledby="tab-diagnostics" tabindex="0" hidden>
-      <h2 id="diagnostics-heading">Diagnostics</h2>
-      <dl>
-        <dt>Server connectivity</dt><dd id="connectivity">Checking…</dd>
-        <dt>Work service</dt><dd id="daemon">Checking…</dd>
-        <dt>Protocol</dt><dd id="protocol-version">Checking…</dd>
-        <dt>Capabilities</dt><dd id="capabilities">Checking…</dd>
-        <dt>Git</dt><dd id="git-version">Not detected</dd>
-        <dt>Runtimes</dt><dd id="runtimes">Not detected</dd>
-      </dl>
-      <h3>Updates</h3>
-      <p id="update-guidance"></p>
-      <p class="muted">Uninstalling the package and revoking this computer on the server are separate actions.</p>
-      <div class="actions">
-        <button id="restart" type="button">Restart daemon</button>
-        <a class="button-link" href="/api/diagnostics/support" download="norns-agent-support.json">Download redacted support bundle</a>
-      </div>
-    </section>
-  </main>
+          <div class="summary-grid" aria-label="Local Agent status">
+            <article class="summary-card">
+              <span>Availability</span>
+              <strong id="availability">Checking…</strong>
+            </article>
+            <article class="summary-card">
+              <span>Workload</span>
+              <strong id="workload">Checking…</strong>
+            </article>
+            <article class="summary-card">
+              <span>Starts at login</span>
+              <strong id="start-at-login">Checking…</strong>
+            </article>
+            <article class="summary-card">
+              <span>Version</span>
+              <strong id="agent-version">Checking…</strong>
+            </article>
+          </div>
+
+          <article class="activity-card">
+            <div>
+              <p class="eyebrow">Recent activity</p>
+              <p id="recent-activity">No recent local Norns activity.</p>
+            </div>
+            <span class="compatibility">Compatibility: <strong id="compatibility">Checking…</strong></span>
+          </article>
+        </section>
+
+        <section id="repositories" role="tabpanel" aria-labelledby="tab-repositories" tabindex="0" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Local access</p>
+              <h2 id="repositories-heading">Repositories</h2>
+              <p>Choose only the Git repositories you want Norns to use. Their local paths stay on this Mac.</p>
+            </div>
+            <button id="choose-repository" class="primary" type="button">Add repository</button>
+          </div>
+          <ul id="repository-list" class="repository-list"><li>No repositories approved.</li></ul>
+          <details class="details-card">
+            <summary>Local access history</summary>
+            <ul id="repository-history"><li>No repository access changes recorded.</li></ul>
+          </details>
+          <p class="muted">Removing access never deletes or changes the repository or its files.</p>
+        </section>
+
+        <section id="security" role="tabpanel" aria-labelledby="tab-security" tabindex="0" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Protected connection</p>
+              <h2 id="security-heading">Security</h2>
+              <p>The Local Agent uses a device key stored on this Mac. Secrets are never placed in browser URLs.</p>
+            </div>
+          </div>
+          <dl class="detail-list">
+            <dt>Norns account</dt><dd id="account">Not connected</dd>
+            <dt>Repository access</dt><dd id="repository-access">No repository access is configured.</dd>
+            <dt>Device fingerprint</dt><dd><code id="fingerprint">Not prepared</code></dd>
+          </dl>
+          <details class="details-card">
+            <summary>Authorization notices</summary>
+            <ul id="authorization-notices"><li>None</li></ul>
+          </details>
+          <p class="boundary">This local site accepts requests only from this OS user and this browser session. It cannot protect against another compromised process already running as the same macOS user.</p>
+        </section>
+
+        <section id="diagnostics" role="tabpanel" aria-labelledby="tab-diagnostics" tabindex="0" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Support</p>
+              <h2 id="diagnostics-heading">Diagnostics</h2>
+              <p>Connection and runtime details for troubleshooting.</p>
+            </div>
+          </div>
+          <dl class="detail-list">
+            <dt>Server connectivity</dt><dd id="connectivity">Checking…</dd>
+            <dt>Local work service</dt><dd id="daemon">Checking…</dd>
+            <dt>Protocol</dt><dd id="protocol-version">Checking…</dd>
+            <dt>Capabilities</dt><dd id="capabilities">Checking…</dd>
+            <dt>Git</dt><dd id="git-version">Not detected</dd>
+            <dt>Agent runtimes</dt><dd id="runtimes">Not detected</dd>
+          </dl>
+          <div class="support-actions">
+            <button id="restart" type="button">Restart local service</button>
+            <a class="button-link" href="/api/diagnostics/support" download="norns-agent-support.json">Download support bundle</a>
+          </div>
+          <details class="details-card">
+            <summary>Updates and removal</summary>
+            <p id="update-guidance"></p>
+            <p class="muted">Removing the app and revoking this computer from your Norns account are separate actions.</p>
+          </details>
+          <details class="danger-zone">
+            <summary>Emergency stop</summary>
+            <p>Stops every process currently managed by Norns on this Mac while preserving recovery worktrees.</p>
+            <label for="emergency-confirmation">Type <code>STOP ALL NORNS WORK</code> to confirm</label>
+            <input id="emergency-confirmation" type="text" autocomplete="off" spellcheck="false">
+            <button id="emergency-stop" class="danger" type="button">Stop all Norns work</button>
+            <p id="emergency-result" class="muted">No local emergency stop has been requested.</p>
+          </details>
+        </section>
+      </main>
+    </div>
+  </div>
 </body>
 </html>
 `;
 
-const CONTROL_CENTER_CSS = `:root{color-scheme:light dark;font-family:system-ui,sans-serif}
+const CONTROL_CENTER_CSS = `:root{color-scheme:light;--ink:#0b1535;--muted:#66708a;--line:#d8ddef;--surface:#fff;--raised:#f7f8fc;--canvas:#f1f3fa;--indigo:#2f49b9;--indigo-dark:#172c96;--gold:#f2b400;--success:#14865d;--danger:#be3653;--shadow:0 18px 50px rgba(25,37,82,.09);font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 *,*::before,*::after{box-sizing:border-box}
-body{margin:0;min-height:100vh;background:Canvas;color:CanvasText}
-header,nav,main{width:min(48rem,calc(100% - 2rem));margin-inline:auto}
-header{padding-top:2rem}nav{display:flex;gap:.5rem;margin-block:1.25rem}
-main{padding:1.5rem;border:1px solid GrayText;border-radius:1rem;margin-bottom:2rem}
-.eyebrow{font-weight:700;letter-spacing:.08em;text-transform:uppercase}
-.device-name{font-size:1.25rem;font-weight:700}.muted{color:GrayText}
-.connection-copy{max-width:40rem;font-size:1.05rem}
-dl{display:grid;grid-template-columns:minmax(9rem,max-content) 1fr;gap:.65rem 1rem}
-dt{font-weight:700}.actions{display:flex;flex-wrap:wrap;gap:.75rem;margin-top:1.5rem}
-button,.button-link{font:inherit;padding:.65rem .9rem;border:1px solid ButtonText;background:ButtonFace;color:ButtonText;border-radius:.4rem}
-.button-link{text-decoration:none}button:focus-visible,.button-link:focus-visible{outline:3px solid Highlight;outline-offset:2px}
-.tab[aria-selected="true"]{background:Highlight;color:HighlightText}
-.boundary{padding:1rem;border-left:.3rem solid GrayText}
-.repository-list{display:grid;gap:1rem;padding:0;list-style:none}.repository-list>li{padding:1rem;border:1px solid GrayText;border-radius:.6rem}
-.repository-list p{margin:.25rem 0}.repository-path{overflow-wrap:anywhere}
-.emergency-control{margin-top:1.5rem;padding:1rem;border:2px solid GrayText;border-radius:.6rem}
-.emergency-control label{display:block;font-weight:700}.emergency-control input{display:block;width:min(100%,24rem);font:inherit;margin:.5rem 0;padding:.6rem}
-.danger{border-width:2px}
+body{margin:0;min-height:100vh;background:var(--canvas);color:var(--ink)}
+button,.button-link{font:inherit;font-weight:750;border:1px solid var(--line);border-radius:.65rem;padding:.7rem 1rem;background:var(--surface);color:var(--ink);cursor:pointer;text-decoration:none;transition:transform .15s ease,border-color .15s ease,background .15s ease}
+button:hover,.button-link:hover{border-color:#9aa8df;transform:translateY(-1px)}
+button:focus-visible,.button-link:focus-visible,summary:focus-visible{outline:3px solid rgba(47,73,185,.3);outline-offset:2px}
+button:disabled{cursor:wait;opacity:.65;transform:none}
+.primary{border-color:var(--indigo);background:linear-gradient(135deg,var(--indigo-dark),var(--indigo));color:#fff;box-shadow:0 8px 20px rgba(47,73,185,.2)}
+.subtle{background:transparent}
+.app-shell{display:grid;grid-template-columns:15rem minmax(0,1fr);min-height:100vh}
+.sidebar{display:flex;flex-direction:column;padding:1.4rem 1rem;border-right:1px solid var(--line);background:#f6f7fc}
+.brand{display:flex;align-items:center;gap:.75rem;padding:.2rem .35rem 1.2rem;border-bottom:1px solid var(--line)}
+.brand-word{font:700 1.45rem Georgia,"Times New Roman",serif;letter-spacing:.01em}
+.braid-mark{position:relative;display:inline-block;width:3.1rem;height:1.6rem;overflow:hidden}
+.thread{position:absolute;left:.1rem;width:2.9rem;height:.3rem;border-radius:1rem;transform-origin:center}
+.thread-one{top:.35rem;background:#46506b;transform:rotate(24deg)}
+.thread-two{top:.65rem;background:var(--gold);transform:rotate(-24deg)}
+.thread-three{top:.95rem;background:var(--indigo);transform:rotate(24deg)}
+.local-label{margin:1.4rem .45rem .55rem;color:var(--indigo);font-size:.72rem;font-weight:850;letter-spacing:.13em;text-transform:uppercase}
+nav{display:grid;gap:.4rem}
+.tab{width:100%;border-color:transparent;background:transparent;text-align:left;padding:.78rem .85rem;color:var(--muted);font-size:1rem}
+.tab[aria-selected="true"]{border-color:#aab5e2;background:#e8ebf8;color:var(--ink)}
+.local-note{margin:auto .45rem 0;color:var(--muted);font-size:.75rem;line-height:1.5}
+.workspace{min-width:0}
+.page-header{display:flex;align-items:center;justify-content:space-between;gap:2rem;padding:2.2rem clamp(1.25rem,4vw,4rem) 1.4rem;border-bottom:1px solid var(--line);background:rgba(255,255,255,.72)}
+.eyebrow{margin:0 0 .35rem;color:var(--indigo);font-size:.72rem;font-weight:850;letter-spacing:.13em;text-transform:uppercase}
+h1,h2,h3,p{margin-top:0}h1{margin-bottom:.3rem;font-size:clamp(1.8rem,3vw,2.65rem);letter-spacing:-.04em}h2{font-size:1.45rem;letter-spacing:-.025em}h3{font-size:1.05rem}
+.muted{color:var(--muted)}
+.status-message{max-width:29rem;margin:0;padding:.6rem .8rem;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--muted);font-size:.82rem}
+main{width:min(76rem,100%);padding:2rem clamp(1.25rem,4vw,4rem) 3rem}
+[role="tabpanel"]:focus{outline:none}
+.connection-hero{display:flex;align-items:center;justify-content:space-between;gap:2rem;padding:clamp(1.4rem,3vw,2.3rem);border:1px solid #cbd2ee;border-radius:1.25rem;background:radial-gradient(circle at 90% 10%,rgba(47,73,185,.13),transparent 35%),var(--surface);box-shadow:var(--shadow)}
+.connection-hero h2{margin:.65rem 0 .45rem;font-size:clamp(1.55rem,3vw,2.35rem)}
+.connection-state{display:inline-flex;align-items:center;gap:.5rem;padding:.35rem .65rem;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:.78rem;font-weight:800;text-transform:uppercase;letter-spacing:.06em}
+.status-dot{width:.55rem;height:.55rem;border-radius:50%;background:var(--gold);box-shadow:0 0 0 4px rgba(242,180,0,.12)}
+body[data-connection="active"] .status-dot{background:var(--success);box-shadow:0 0 0 4px rgba(20,134,93,.12)}
+body[data-connection="denied"] .status-dot,body[data-connection="expired"] .status-dot{background:var(--danger);box-shadow:0 0 0 4px rgba(190,54,83,.12)}
+.connection-copy{max-width:42rem;margin:0;color:var(--muted);font-size:1.02rem;line-height:1.55}
+.actions,.support-actions{display:flex;flex-wrap:wrap;gap:.7rem}
+.connection-actions{flex:none;justify-content:flex-end}
+.summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.85rem;margin:1rem 0}
+.summary-card,.activity-card,.details-card,.danger-zone{border:1px solid var(--line);border-radius:1rem;background:var(--surface)}
+.summary-card{display:grid;gap:.45rem;padding:1.1rem}.summary-card span{color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.07em}.summary-card strong{text-transform:capitalize}
+.activity-card{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:1.1rem 1.25rem}.activity-card p{margin-bottom:0}.compatibility{color:var(--muted);font-size:.82rem}
+.section-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:2rem;margin-bottom:1.25rem}.section-heading p:last-child{max-width:44rem;color:var(--muted);line-height:1.5}
+.detail-list{display:grid;grid-template-columns:minmax(10rem,max-content) minmax(0,1fr);gap:0;border:1px solid var(--line);border-radius:1rem;background:var(--surface);overflow:hidden}
+.detail-list dt,.detail-list dd{margin:0;padding:.9rem 1rem;border-bottom:1px solid var(--line)}.detail-list dt{font-weight:750;color:var(--muted)}.detail-list dd{overflow-wrap:anywhere}.detail-list dt:last-of-type,.detail-list dd:last-of-type{border-bottom:0}
+.details-card,.danger-zone{margin-top:1rem;padding:1rem 1.1rem}.details-card summary,.danger-zone summary{cursor:pointer;font-weight:800}.details-card[open] summary,.danger-zone[open] summary{margin-bottom:1rem}
+.boundary{margin-top:1rem;padding:1rem 1.1rem;border-left:.3rem solid var(--indigo);border-radius:.25rem;background:#e9ecf8;color:var(--muted);line-height:1.5}
+.repository-list{display:grid;gap:.85rem;padding:0;list-style:none}.repository-list>li{padding:1rem 1.1rem;border:1px solid var(--line);border-radius:1rem;background:var(--surface)}.repository-list p{margin:.25rem 0}.repository-path{overflow-wrap:anywhere}
+.support-actions{margin:1rem 0}
+.danger-zone{border-color:rgba(190,54,83,.35)}.danger-zone label{display:block;font-weight:750}.danger-zone input{display:block;width:min(100%,28rem);margin:.6rem 0;padding:.7rem;border:1px solid var(--line);border-radius:.6rem;font:inherit}.danger{border-color:var(--danger);color:var(--danger)}
 code{overflow-wrap:anywhere}
-@media(max-width:34rem){dl{grid-template-columns:1fr;gap:.2rem}dd{margin:0 0 .8rem}nav{overflow-x:auto}}
-@media(forced-colors:active){main,.boundary,button,.button-link{forced-color-adjust:auto}.tab[aria-selected="true"]{border-width:3px}}
+@media(max-width:56rem){.app-shell{grid-template-columns:minmax(0,1fr)}.sidebar{position:sticky;top:0;z-index:5;min-width:0;padding:.8rem 1rem;border-right:0;border-bottom:1px solid var(--line);overflow:hidden}.brand{padding-bottom:.7rem}.local-label,.local-note{display:none}nav{display:flex;max-width:100%;overflow-x:auto}.tab{width:auto;white-space:nowrap}.page-header{padding-top:1.4rem}.connection-hero{align-items:flex-start;flex-direction:column}.connection-actions{justify-content:flex-start}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:34rem){.page-header{align-items:flex-start;flex-direction:column;gap:.8rem}.status-message{border-radius:.75rem}.summary-grid{grid-template-columns:1fr}.activity-card,.section-heading{align-items:flex-start;flex-direction:column}.detail-list{grid-template-columns:1fr}.detail-list dt{padding-bottom:.25rem;border-bottom:0}.detail-list dd{padding-top:.25rem}.connection-actions,.connection-actions>*{width:100%;text-align:center}}
+@media(prefers-color-scheme:dark){:root{color-scheme:dark;--ink:#edf0ff;--muted:#a6aec8;--line:#303a5d;--surface:#151b31;--raised:#1a213a;--canvas:#0d1224;--indigo:#8598ef;--indigo-dark:#445cc4;--gold:#eebd3d;--success:#55d6a5;--danger:#f27790;--shadow:0 18px 50px rgba(0,0,0,.24)}.sidebar{background:#11172b}.page-header{background:rgba(17,23,43,.75)}.connection-hero{background:radial-gradient(circle at 90% 10%,rgba(133,152,239,.16),transparent 35%),var(--surface)}.tab[aria-selected="true"],.boundary{background:#222b4d}}
+@media(forced-colors:active){.connection-hero,.summary-card,.activity-card,.detail-list,.details-card,.danger-zone,.boundary,button,.button-link{forced-color-adjust:auto}.tab[aria-selected="true"]{border-width:3px}}
 `;
 
 const CONTROL_CENTER_JAVASCRIPT = `(() => {
@@ -215,7 +316,7 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
   function approvalUrl(enrollmentStatus) {
     if (!enrollmentStatus.verification_uri || !enrollmentStatus.user_code) return null;
     const url = new URL(enrollmentStatus.verification_uri);
-    url.hash = new URLSearchParams({ code: enrollmentStatus.user_code }).toString();
+    url.hash = new URLSearchParams({ handoff: enrollmentStatus.user_code }).toString();
     return url.toString();
   }
 
@@ -233,8 +334,10 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
   }
 
   function render(status) {
+    document.body.dataset.connection = status.enrollment_state;
     enrollment.textContent = enrollmentLabels[status.enrollment_state] || status.enrollment_state;
     const verificationLink = document.querySelector("#verification-uri");
+    const openNornsLink = document.querySelector("#open-norns");
     const completeApprovalUrl = approvalUrl(status.enrollment);
     if (completeApprovalUrl) {
       verificationLink.href = completeApprovalUrl;
@@ -245,20 +348,21 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
     }
     const connectButton = document.querySelector("#prepare");
     connectButton.hidden = status.enrollment_state === "active";
+    openNornsLink.hidden = status.enrollment_state !== "active";
     connectButton.textContent =
       status.enrollment_state === "pending" ||
       status.enrollment_state === "approved_pending_redemption"
-        ? "Open approval page"
+        ? "Open The Norns to finish"
         : status.enrollment_state === "denied" || status.enrollment_state === "expired"
-          ? "Try connecting again"
-          : "Connect this Mac";
+          ? "Try syncing again"
+          : "Sync with The Norns";
     daemon.textContent = status.daemon_state;
     text("#device-name", status.home.device_name);
     text("#location", status.home.location_label || "No location label");
     text("#availability", status.home.availability);
     text("#compatibility", status.home.compatibility);
     text("#workload", status.home.workload);
-    text("#start-at-login", status.home.start_at_login ? "Enabled" : "Not configured");
+    text("#start-at-login", status.home.start_at_login ? "On" : "Off");
     text("#agent-version", status.home.agent_version);
     text("#recent-activity", status.home.recent_activity || "No recent local Norns activity.");
     if (status.home.emergency_stop) {
@@ -269,7 +373,10 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
         result.process_trees_reaped + " process trees exited · " +
         result.unconfirmed + " unconfirmed");
     }
-    text("#account", status.security.enrolled_account || "Not enrolled");
+    text("#account",
+      status.enrollment_state === "active"
+        ? status.security.enrolled_account || "Connected to The Norns"
+        : "Not connected");
     text("#fingerprint", status.security.public_key_fingerprint || "Not prepared");
     text("#repository-access", status.security.repository_access_summary);
     const notices = document.querySelector("#authorization-notices");
@@ -288,17 +395,17 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
     text("#update-guidance", status.diagnostics.manual_update_guidance);
     const connectionCopy = document.querySelector("#connection-copy");
     if (status.enrollment_state === "active") {
-      connectionCopy.textContent = "This Mac is connected to your Norns account.";
-      message.textContent = "Connected. You can return to The Norns.";
+      connectionCopy.textContent = "This Mac is securely synced with your Norns account and ready for approved work.";
+      message.textContent = "Connected to The Norns";
     } else if (
       status.enrollment_state === "pending" ||
       status.enrollment_state === "approved_pending_redemption"
     ) {
-      connectionCopy.textContent = "Approve this Mac in the Norns browser page to finish connecting.";
-      message.textContent = "Waiting for approval in your browser.";
+      connectionCopy.textContent = "Confirm this Mac in the Norns browser page to finish syncing.";
+      message.textContent = "Waiting for confirmation in your browser";
     } else {
-      connectionCopy.textContent = "Connect this Mac to the same Norns account you use on the website.";
-      message.textContent = "The Local Agent is ready to connect.";
+      connectionCopy.textContent = "Sync this Mac with the same Norns account you use on the website.";
+      message.textContent = "Ready to sync";
     }
   }
 
@@ -400,7 +507,7 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
     const button = document.querySelector("#prepare");
     const approvalWindow = window.open("about:blank", "norns-device-approval");
     if (approvalWindow) {
-      approvalWindow.document.title = "Connecting Norns Local Agent";
+      approvalWindow.document.title = "Syncing Norns Local Agent";
       approvalWindow.document.body.textContent = "Opening The Norns…";
     }
     button.disabled = true;
@@ -420,7 +527,7 @@ const CONTROL_CENTER_JAVASCRIPT = `(() => {
       }
       await refresh();
       message.textContent = target
-        ? "Approve this Mac in the Norns page that just opened."
+        ? "Confirm this Mac in the Norns page that just opened."
         : "This Mac is already connected.";
     } catch (error) {
       if (approvalWindow) approvalWindow.close();
@@ -649,7 +756,7 @@ function defaultLocalState(): AgentHostLocalState {
     agent_version: AGENT_HOST_VERSION,
     protocol_version: "Not negotiated",
     capabilities: [],
-    start_at_login: false,
+    start_at_login: process.env.NORNS_LOCAL_AGENT_VERSION !== undefined,
     recent_activity: null,
     repository_access_summary: "No repository access is configured.",
     failed_authorization_notices: [],

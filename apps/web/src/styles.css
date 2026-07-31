@@ -2846,6 +2846,114 @@ button:disabled {
   }
 }
 
+/* Local Agent browser confirmation — the one-time handoff is intentionally
+   invisible. Users confirm a named Mac; they never copy or type a code. */
+.device-authorization-card {
+  width: min(760px, 100%);
+  margin: 1.5rem auto;
+  padding: clamp(1.25rem, 3vw, 2rem);
+}
+
+.device-sync-empty,
+.device-sync-request {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--raised);
+}
+
+.device-sync-empty {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.2rem;
+}
+
+.device-sync-empty h2,
+.device-sync-empty p,
+.device-sync-request h3,
+.device-sync-request p {
+  margin: 0;
+}
+
+.device-sync-empty p,
+.device-sync-request p {
+  margin-top: .35rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.device-sync-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  color: var(--accent);
+  font-family: "DM Mono", monospace;
+  font-size: 1.15rem;
+  font-weight: 800;
+}
+
+.device-sync-request {
+  overflow: hidden;
+}
+
+.device-sync-request-head {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.2rem;
+}
+
+.device-sync-request-head > div:nth-child(2) {
+  min-width: 0;
+  flex: 1;
+}
+
+.device-sync-security {
+  padding: .85rem 1.2rem;
+  border-top: 1px solid var(--line);
+}
+
+.device-sync-security summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: var(--text-xs);
+  font-weight: 750;
+}
+
+.device-sync-security[open] summary {
+  margin-bottom: .8rem;
+}
+
+.device-sync-finish {
+  align-self: flex-start;
+  text-decoration: none;
+}
+
+@media (max-width: 620px) {
+  .device-authorization-card {
+    margin-block: .5rem;
+  }
+
+  .device-sync-empty {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .device-sync-empty > button {
+    grid-column: 1 / -1;
+  }
+
+  .device-sync-request-head {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+}
+
 /* FRONT DOOR P4: objective attachments and the integrated prompt composer.
    The textarea, paste/drop target, previews, and + picker are one control. */
 .attachment-input {

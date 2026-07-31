@@ -17,8 +17,87 @@ private struct NativeLaunchResponse: Decodable {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusItem: NSStatusItem?
+    private var statusMenuItem: NSMenuItem?
+    private var openControlCenterItem: NSMenuItem?
+    private var isOpeningControlCenter = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.activate(ignoringOtherApps: true)
+        configureMenuBar()
+        openControlCenter(nil)
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        openControlCenter(nil)
+        return true
+    }
+
+    private func configureMenuBar() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let button = item.button {
+            let image = NSImage(
+                systemSymbolName: "link.circle.fill",
+                accessibilityDescription: "Norns Local Agent"
+            )
+            image?.isTemplate = true
+            button.image = image
+            if image == nil {
+                button.title = "N"
+            }
+            button.toolTip = "Norns Local Agent"
+        }
+
+        let menu = NSMenu()
+        let titleItem = NSMenuItem(title: "Norns Local Agent", action: nil, keyEquivalent: "")
+        titleItem.isEnabled = false
+        menu.addItem(titleItem)
+
+        let status = NSMenuItem(title: "Starting…", action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        menu.addItem(status)
+        menu.addItem(.separator())
+
+        let openItem = NSMenuItem(
+            title: "Open Local Control Center",
+            action: #selector(openControlCenter(_:)),
+            keyEquivalent: ""
+        )
+        openItem.target = self
+        openItem.isEnabled = false
+        menu.addItem(openItem)
+
+        let websiteItem = NSMenuItem(
+            title: "Open The Norns",
+            action: #selector(openWebsite(_:)),
+            keyEquivalent: ""
+        )
+        websiteItem.target = self
+        menu.addItem(websiteItem)
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(
+            title: "Quit Norns Local Agent",
+            action: #selector(quitLocalAgent(_:)),
+            keyEquivalent: "q"
+        )
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        item.menu = menu
+        statusItem = item
+        statusMenuItem = status
+        openControlCenterItem = openItem
+    }
+
+    @objc private func openControlCenter(_ sender: Any?) {
+        guard !isOpeningControlCenter else { return }
+        isOpeningControlCenter = true
+        statusMenuItem?.title = "Starting local service…"
+        openControlCenterItem?.isEnabled = false
+
         DispatchQueue.global(qos: .userInitiated).async {
             // The shell action is idempotent for the installed version and
             // upgrades an older launch service before opening its Control
@@ -29,32 +108,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 result.status == 0 ? self.waitForControlCenterURL(attempts: 40) : nil
 
             DispatchQueue.main.async {
+                self.isOpeningControlCenter = false
                 if let controlCenter {
+                    self.statusMenuItem?.title = "Local service running"
+                    self.openControlCenterItem?.isEnabled = true
                     NSWorkspace.shared.open(controlCenter)
+                    return
                 }
+                self.statusMenuItem?.title = "Local service unavailable"
+                self.openControlCenterItem?.isEnabled = true
                 self.showAlert(
-                    title: controlCenter != nil
-                        ? "Norns Local Agent is ready"
-                        : "Norns Local Agent could not open",
-                    message: controlCenter != nil
-                        ? "Use the local Control Center to enroll this Mac. Updates are installed manually with a newer signed package."
-                        : (result.message.isEmpty
-                            ? "The local Control Center did not respond. Reinstall the signed Norns Local Agent package and try again."
-                            : result.message)
+                    title: "Norns Local Agent could not open",
+                    message: result.message.isEmpty
+                        ? "The local Control Center did not respond. Reinstall Norns Local Agent and try again."
+                        : result.message
                 )
-                NSApp.terminate(nil)
+            }
+        }
+    }
+
+    @objc private func openWebsite(_ sender: Any?) {
+        if let url = URL(string: "https://thenorns.up.railway.app") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func quitLocalAgent(_ sender: Any?) {
+        statusMenuItem?.title = "Stopping…"
+        openControlCenterItem?.isEnabled = false
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = self.runAgentAction("stop")
+            DispatchQueue.main.async {
+                if result.status == 0 {
+                    NSApp.terminate(nil)
+                    return
+                }
+                self.statusMenuItem?.title = "Local service running"
+                self.openControlCenterItem?.isEnabled = true
+                self.showAlert(
+                    title: "Norns Local Agent could not quit",
+                    message: result.message.isEmpty
+                        ? "The local service could not be stopped."
+                        : result.message
+                )
             }
         }
     }
 
     private func ensureAgentHost() -> (status: Int32, message: String) {
+        return runAgentAction("open")
+    }
+
+    private func runAgentAction(_ action: String) -> (status: Int32, message: String) {
         guard let resourceURL = Bundle.main.resourceURL else {
             return (1, "The installed app is incomplete. Reinstall Norns Local Agent.")
         }
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = [resourceURL.appendingPathComponent("agent.sh").path, "open"]
+        process.arguments = [resourceURL.appendingPathComponent("agent.sh").path, action]
         process.standardOutput = output
         process.standardError = output
         do {
@@ -65,7 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return (process.terminationStatus, String(message.prefix(800)))
         } catch {
-            return (1, "Norns Local Agent could not start. Reinstall it and try again.")
+            return (1, "Norns Local Agent could not complete that action. Reinstall it and try again.")
         }
     }
 

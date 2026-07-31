@@ -6,6 +6,7 @@ RESOURCE_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
 DATA_DIR="$HOME/.norns/runner-1"
 LOG_DIR="$HOME/.norns/logs"
 SERVICE="$HOME/Library/LaunchAgents/com.thenorns.local-agent.plist"
+MENU_SERVICE="$HOME/Library/LaunchAgents/com.thenorns.local-agent-menubar.plist"
 AGENT_VERSION="__VERSION__"
 
 case "$(uname -m)" in
@@ -29,8 +30,39 @@ fi
 
 stop_old_agents() {
   launchctl bootout "gui/$(id -u)/com.thenorns.local-agent" >/dev/null 2>&1 || true
+  launchctl bootout "gui/$(id -u)/com.thenorns.local-agent-menubar" >/dev/null 2>&1 || true
   launchctl bootout "gui/$(id -u)/com.thenorns.runner" >/dev/null 2>&1 || true
   launchctl bootout "gui/$(id -u)/app.thenorns.runner" >/dev/null 2>&1 || true
+}
+
+install_menu_agent() {
+  {
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+    printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    printf '%s\n' '<plist version="1.0"><dict>'
+    printf '%s\n' '<key>Label</key><string>com.thenorns.local-agent-menubar</string>'
+    printf '%s\n' '<key>ProgramArguments</key><array>'
+    printf '%s\n' '<string>/usr/bin/open</string>'
+    printf '%s\n' '<string>-gja</string>'
+    printf '%s\n' '<string>/Applications/Norns Local Agent.app</string>'
+    printf '%s\n' '</array>'
+    printf '%s\n' '<key>RunAtLoad</key><true/>'
+    printf '%s\n' '<key>LimitLoadToSessionType</key><string>Aqua</string>'
+    printf '%s\n' '</dict></plist>'
+  } >"$MENU_SERVICE"
+  chmod 600 "$MENU_SERVICE"
+  plutil -lint "$MENU_SERVICE" >/dev/null
+  launchctl bootstrap "gui/$(id -u)" "$MENU_SERVICE" >/dev/null 2>&1 || true
+}
+
+ensure_menu_agent() {
+  if [ ! -f "$MENU_SERVICE" ]; then
+    install_menu_agent
+    return
+  fi
+  if ! launchctl print "gui/$(id -u)/com.thenorns.local-agent-menubar" >/dev/null 2>&1; then
+    launchctl bootstrap "gui/$(id -u)" "$MENU_SERVICE" >/dev/null 2>&1 || true
+  fi
 }
 
 install_launch_agent() {
@@ -66,6 +98,7 @@ install_launch_agent() {
   plutil -lint "$SERVICE" >/dev/null
   launchctl bootstrap "gui/$(id -u)" "$SERVICE"
   launchctl kickstart -k "gui/$(id -u)/com.thenorns.local-agent"
+  install_menu_agent
 }
 
 case "$ACTION" in
@@ -97,10 +130,12 @@ case "$ACTION" in
     if launchctl print "gui/$(id -u)/com.thenorns.local-agent" 2>/dev/null |
       grep -q 'state = running'
     then
+      ensure_menu_agent
       exit 0
     fi
     launchctl bootstrap "gui/$(id -u)" "$SERVICE" >/dev/null 2>&1 || true
     launchctl kickstart "gui/$(id -u)/com.thenorns.local-agent"
+    ensure_menu_agent
     ;;
   start)
     NORNS_SERVER="https://thenorns.up.railway.app" \
@@ -108,8 +143,11 @@ case "$ACTION" in
       NORNS_LOCAL_AGENT_VERSION="$AGENT_VERSION" \
       exec "$NODE" "$CLI" agent-start --data "$DATA_DIR"
     ;;
+  stop)
+    stop_old_agents
+    ;;
   *)
-    printf '%s\n' "Usage: agent.sh install | open | start" >&2
+    printf '%s\n' "Usage: agent.sh install | open | start | stop" >&2
     exit 2
     ;;
 esac

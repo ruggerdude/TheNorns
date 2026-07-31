@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 
 const preinstall = readFileSync(new URL("./package-scripts/preinstall", import.meta.url), "utf8");
 const postinstall = readFileSync(new URL("./package-scripts/postinstall", import.meta.url), "utf8");
-const labels = ["com.thenorns.local-agent", "com.thenorns.runner", "app.thenorns.runner"];
+const labels = [
+  "com.thenorns.local-agent",
+  "com.thenorns.local-agent-menubar",
+  "com.thenorns.runner",
+  "app.thenorns.runner",
+];
 
 // Two concurrently loaded GUI users must both survive an upgrade. A third
 // user's configured-but-stopped plist must remain stopped.

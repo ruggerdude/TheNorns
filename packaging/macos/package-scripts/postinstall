@@ -34,7 +34,7 @@ do
       ;;
   esac
   case "$SERVICE_LABEL" in
-    com.thenorns.local-agent|com.thenorns.runner|app.thenorns.runner) ;;
+    com.thenorns.local-agent|com.thenorns.local-agent-menubar|com.thenorns.runner|app.thenorns.runner) ;;
     *)
       printf '%s\n' "Norns upgrade restart service label is invalid." >&2
       exit 1

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { CurrentUser } from "./auth";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
-import { Alert, Badge, Button, Field, Input } from "./ui";
+import { Alert, Badge, Button, Spinner } from "./ui";
 
 interface DeviceAuthorizationSummary {
   authorization_request_id: string;
@@ -15,16 +15,11 @@ interface DeviceAuthorizationSummary {
 
 type ApprovalOutcome = "approved_pending_redemption" | "active" | "denied" | "expired";
 
-function normalizeUserCode(value: string): string {
+function normalizeHandoff(value: string): string {
   return value
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "")
     .slice(0, 12);
-}
-
-function formatUserCode(value: string): string {
-  const normalized = normalizeUserCode(value);
-  return normalized.length > 4 ? `${normalized.slice(0, 4)}-${normalized.slice(4)}` : normalized;
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
@@ -73,12 +68,12 @@ async function getJson<T>(path: string): Promise<T> {
 function describeFailure(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.code === "recent_auth_required") {
-      return "For your security, sign in again before approving or denying this computer. This decision was not retried.";
+      return "For your security, sign in again before syncing this computer. The request was not retried.";
     }
-    if (error.status === 404) return "That code is invalid or no longer available.";
-    if (error.status === 429) return "Too many attempts. Wait before trying another code.";
-    if (error.status === 409) return "This request has already been completed or has expired.";
-    return "The authorization request could not be completed.";
+    if (error.status === 404) return "This sync request is invalid or no longer available.";
+    if (error.status === 429) return "Too many sync attempts. Wait a moment and try again.";
+    if (error.status === 409) return "This sync request has already been completed or expired.";
+    return "This computer could not be synced.";
   }
   return "The authorization service is unavailable. Try again shortly.";
 }
@@ -90,12 +85,15 @@ export function DeviceAuthorizationApproval({
   user: CurrentUser;
   onUnauthorized: () => void;
 }): React.ReactElement {
-  const initialCode = normalizeUserCode(
-    typeof window === "undefined"
-      ? ""
-      : (new URLSearchParams(window.location.hash.slice(1)).get("code") ?? ""),
-  );
-  const [userCode, setUserCode] = useState(initialCode);
+  const initialHandoff = useRef(
+    normalizeHandoff(
+      typeof window === "undefined"
+        ? ""
+        : (new URLSearchParams(window.location.hash.slice(1)).get("handoff") ??
+            new URLSearchParams(window.location.hash.slice(1)).get("code") ??
+            ""),
+    ),
+  ).current;
   const [request, setRequest] = useState<DeviceAuthorizationSummary | null>(null);
   const [outcome, setOutcome] = useState<ApprovalOutcome | null>(null);
   const [busy, setBusy] = useState(false);
@@ -118,11 +116,11 @@ export function DeviceAuthorizationApproval({
     }
   };
 
-  const lookup = (candidate = userCode): Promise<void> =>
+  const lookup = (candidate: string): Promise<void> =>
     run(async () => {
-      const normalized = normalizeUserCode(candidate);
+      const normalized = normalizeHandoff(candidate);
       if (normalized.length !== 8) {
-        setError("Enter the complete code shown by the Local Agent.");
+        setError("Start syncing again from the Local Agent on this Mac.");
         return;
       }
       const found = await postJson<DeviceAuthorizationSummary>(
@@ -134,13 +132,13 @@ export function DeviceAuthorizationApproval({
     });
 
   // The fragment is a one-time handoff. Re-running after state changes would
-  // submit the authorization code again.
+  // submit the sync request again.
   // biome-ignore lint/correctness/useExhaustiveDependencies: one-time URL handoff
   useEffect(() => {
-    if (initialCode.length !== 8 || automaticLookupStarted.current) return;
+    if (initialHandoff.length !== 8 || automaticLookupStarted.current) return;
     automaticLookupStarted.current = true;
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
-    void lookup(initialCode);
+    void lookup(initialHandoff);
   }, []);
 
   useEffect(() => {
@@ -187,14 +185,14 @@ export function DeviceAuthorizationApproval({
 
   return (
     <section
-      className="card settings-card form-stack"
+      className="card settings-card form-stack device-authorization-card"
       aria-labelledby="device-authorization-title"
       data-testid="device-authorization-approval"
     >
       <div className="section-head">
         <div>
           <div className="eyebrow">Local Agent</div>
-          <h1 id="device-authorization-title">Authorize a computer</h1>
+          <h1 id="device-authorization-title">Sync this Mac</h1>
         </div>
         <Badge
           tone={
@@ -218,52 +216,60 @@ export function DeviceAuthorizationApproval({
       </div>
 
       <p className="muted">
-        Signed in as <strong>{user.name ?? user.email}</strong> ({user.email}). Enter the human code
-        shown by the Local Agent. Device secrets never belong in this page or its URL.
+        Signed in as <strong>{user.name ?? user.email}</strong> ({user.email}). Confirm that you
+        want this computer connected to your Norns account.
       </p>
 
       {!request ? (
-        <form
-          className="form-stack"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void lookup();
-          }}
-        >
-          <Field label="Human verification code">
-            <Input
-              name="user-code"
-              autoComplete="one-time-code"
-              inputMode="text"
-              value={formatUserCode(userCode)}
-              onChange={(event) => setUserCode(event.target.value)}
-              placeholder="ABCD-EFGH"
-              disabled={busy}
-              required
-            />
-          </Field>
-          <Button type="submit" variant="primary" disabled={busy}>
-            {busy ? "Checking…" : "Continue"}
-          </Button>
-        </form>
+        initialHandoff.length === 8 && busy ? (
+          <Spinner label="Checking this Mac…" />
+        ) : (
+          <div className="device-sync-empty">
+            <div className="device-sync-icon" aria-hidden="true">
+              ↗
+            </div>
+            <div>
+              <h2>Start from the Local Agent</h2>
+              <p>
+                Open the Norns icon in your Mac menu bar, choose{" "}
+                <strong>Open Local Control Center</strong>, then click{" "}
+                <strong>Sync with The Norns</strong>.
+              </p>
+            </div>
+            {initialHandoff.length === 8 ? (
+              <Button type="button" disabled={busy} onClick={() => void lookup(initialHandoff)}>
+                Try again
+              </Button>
+            ) : null}
+          </div>
+        )
       ) : (
         <div className="form-stack">
-          <div className="connection-card is-open">
-            <div className="connection-card-head">
+          <div className="device-sync-request">
+            <div className="device-sync-request-head">
+              <div className="device-sync-icon" aria-hidden="true">
+                ⌘
+              </div>
               <div>
-                <div className="eyebrow">Requested installation</div>
+                <div className="eyebrow">This computer</div>
                 <h3>{request.proposed_name}</h3>
+                <p>
+                  Norns will run only work you approve and use only repositories you explicitly add.
+                </p>
               </div>
               <Badge tone="info">{request.os_family}</Badge>
             </div>
-            <dl className="assignment">
-              <dt>Architecture</dt>
-              <dd>{request.architecture}</dd>
-              <dt>Key fingerprint</dt>
-              <dd className="mono">{request.public_key_fingerprint}</dd>
-              <dt>Expires</dt>
-              <dd>{new Date(request.expires_at).toLocaleString()}</dd>
-            </dl>
+            <details className="device-sync-security">
+              <summary>Security details</summary>
+              <dl className="assignment">
+                <dt>Architecture</dt>
+                <dd>{request.architecture}</dd>
+                <dt>Device fingerprint</dt>
+                <dd className="mono">{request.public_key_fingerprint}</dd>
+                <dt>Request expires</dt>
+                <dd>{new Date(request.expires_at).toLocaleString()}</dd>
+              </dl>
+            </details>
           </div>
 
           {outcome ? (
@@ -277,12 +283,12 @@ export function DeviceAuthorizationApproval({
               }
             >
               {outcome === "active"
-                ? "This Mac is connected. You can close this page and return to The Norns."
+                ? "This Mac is synced with your Norns account and ready to use."
                 : outcome === "approved_pending_redemption"
-                  ? "Approved—finishing the secure connection with the Local Agent…"
+                  ? "Confirmed—finishing the secure connection with your Local Agent…"
                   : outcome === "expired"
-                    ? "This approval expired before the Local Agent finished connecting. Start enrollment again from the Local Agent."
-                    : "Denied. This authorization request cannot be used."}
+                    ? "This request expired before the Local Agent finished syncing. Start again from the Local Agent."
+                    : "This Mac was not synced."}
             </Alert>
           ) : (
             <div className="connection-card-controls">
@@ -292,7 +298,7 @@ export function DeviceAuthorizationApproval({
                 disabled={busy}
                 onClick={() => void decide("approve")}
               >
-                {busy ? "Saving…" : "Approve"}
+                {busy ? "Syncing…" : "Sync this Mac"}
               </Button>
               <Button
                 type="button"
@@ -300,10 +306,15 @@ export function DeviceAuthorizationApproval({
                 disabled={busy}
                 onClick={() => void decide("deny")}
               >
-                Deny
+                Not now
               </Button>
             </div>
           )}
+          {outcome === "active" ? (
+            <a className="btn btn-primary device-sync-finish" href="/?settings=connections">
+              Continue to Connections
+            </a>
+          ) : null}
         </div>
       )}
 
