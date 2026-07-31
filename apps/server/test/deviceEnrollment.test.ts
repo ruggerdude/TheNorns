@@ -34,6 +34,7 @@ function unusedRepository(): DeviceEnrollmentRepository {
     createAuthorization: unused,
     lookupByHumanCode: unused,
     getDecisionCandidate: unused,
+    getOwnedAuthorization: unused,
     approve: unused,
     deny: unused,
     poll: unused,
@@ -401,6 +402,15 @@ describe.sequential("PostgreSQL device enrollment", () => {
     };
     const first = await service.poll(redemption);
     expect(first).toMatchObject({ outcome: "active", generation: 1 });
+    await expect(
+      service.status({
+        authorization_request_id: created.authorization_request_id,
+        owner_user_id: "owner-1",
+      }),
+    ).resolves.toEqual({
+      authorization_request_id: created.authorization_request_id,
+      state: "active",
+    });
 
     // Treat the first success as a lost HTTP response. A same-key retry must
     // return the committed tuple, even though the service generated new
@@ -556,6 +566,21 @@ describe.sequential("PostgreSQL device enrollment", () => {
       authorization_context: lookup.authorization_context,
       owner_user_id: "owner-1",
     });
+    await expect(
+      service.status({
+        authorization_request_id: created.authorization_request_id,
+        owner_user_id: "owner-1",
+      }),
+    ).resolves.toEqual({
+      authorization_request_id: created.authorization_request_id,
+      state: "approved_pending_redemption",
+    });
+    await expect(
+      service.status({
+        authorization_request_id: created.authorization_request_id,
+        owner_user_id: "owner-2",
+      }),
+    ).rejects.toBeInstanceOf(DeviceEnrollmentError);
     await expect(
       service.approve({
         authorization_request_id: created.authorization_request_id,

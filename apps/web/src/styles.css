@@ -429,6 +429,24 @@ button:disabled {
   color: #210c0d;
   font-weight: 800;
 }
+.alert-info {
+  border-color: color-mix(in srgb, var(--info) 34%, var(--line));
+  background: color-mix(in srgb, var(--info) 8%, var(--surface));
+}
+.alert-info::before {
+  content: "…";
+  background: var(--info);
+  color: #fff;
+}
+.alert-success {
+  border-color: color-mix(in srgb, var(--success) 34%, var(--line));
+  background: color-mix(in srgb, var(--success) 8%, var(--surface));
+}
+.alert-success::before {
+  content: "✓";
+  background: var(--success);
+  color: #fff;
+}
 /* POLISH P3 — neutral next-step guidance (see ui.tsx NextStep). Uses theme
    variables only, so no per-theme override block is needed. */
 .next-step {

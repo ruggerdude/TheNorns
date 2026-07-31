@@ -34,6 +34,10 @@ function serviceMock(): DeviceEnrollmentRouteService {
       authorization_request_id: "deviceauth-1",
       state: "approved_pending_redemption" as const,
     })),
+    status: vi.fn(async () => ({
+      authorization_request_id: "deviceauth-1",
+      state: "active" as const,
+    })),
     deny: vi.fn(async () => ({
       authorization_request_id: "deviceauth-1",
       state: "denied" as const,
@@ -187,6 +191,28 @@ describe("device enrollment HTTP routes", () => {
     expect(service.approve).toHaveBeenCalledWith({
       authorization_request_id: "deviceauth-1",
       authorization_context: "context-1",
+      owner_user_id: userId,
+    });
+
+    const unauthorizedStatus = await stack.app.inject({
+      method: "GET",
+      url: "/api/device-authorizations/deviceauth-1/status",
+    });
+    expect(unauthorizedStatus.statusCode).toBe(401);
+
+    const status = await stack.app.inject({
+      method: "GET",
+      url: "/api/device-authorizations/deviceauth-1/status",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.headers["cache-control"]).toBe("no-store");
+    expect(status.json()).toEqual({
+      authorization_request_id: "deviceauth-1",
+      state: "active",
+    });
+    expect(service.status).toHaveBeenCalledWith({
+      authorization_request_id: "deviceauth-1",
       owner_user_id: userId,
     });
 

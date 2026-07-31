@@ -276,6 +276,25 @@ export class PostgresDeviceEnrollmentRepository implements DeviceEnrollmentRepos
     });
   }
 
+  getOwnedAuthorization(input: {
+    authorization_request_id: string;
+    owner_user_id: string;
+    now: string;
+  }): Promise<DeviceAuthorizationRequestRecord | null> {
+    return this.transactions.transaction(async (sql) => {
+      const selected = await sql.query<AuthorizationRequestRow>(
+        `SELECT ${AUTHORIZATION_REQUEST_COLUMNS}
+           FROM device_authorization_requests
+          WHERE id=$1 AND approved_by_user_id=$2
+          FOR UPDATE`,
+        [input.authorization_request_id, input.owner_user_id],
+      );
+      const selectedRow = selected.rows[0];
+      if (!selectedRow) return null;
+      return record(await expireIfDue(sql, selectedRow, input.now));
+    });
+  }
+
   approve(input: {
     authorization_request_id: string;
     human_code_hash: CreateDeviceAuthorizationRecord["human_code_hash"];

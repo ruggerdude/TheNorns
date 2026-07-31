@@ -194,6 +194,30 @@ export class DeviceEnrollmentService {
     };
   }
 
+  async status(input: {
+    authorization_request_id: string;
+    owner_user_id: string;
+  }): Promise<{
+    authorization_request_id: string;
+    state: "approved_pending_redemption" | "active" | "denied" | "expired";
+  }> {
+    if (!input.authorization_request_id.trim() || !input.owner_user_id.trim()) {
+      throw new DeviceEnrollmentError("authorization_not_available");
+    }
+    const found = await this.repository.getOwnedAuthorization({
+      authorization_request_id: input.authorization_request_id,
+      owner_user_id: input.owner_user_id,
+      now: this.now().toISOString(),
+    });
+    if (!found || found.state === "pending") {
+      throw new DeviceEnrollmentError("authorization_not_available");
+    }
+    return {
+      authorization_request_id: found.authorization_request_id,
+      state: found.state,
+    };
+  }
+
   async deny(input: {
     authorization_request_id: string;
     authorization_context: string;

@@ -66,6 +66,11 @@ export interface DeviceEnrollmentRepository {
     authorization_request_id: string;
     now: string;
   }): Promise<DeviceAuthorizationDecisionRecord | null>;
+  getOwnedAuthorization(input: {
+    authorization_request_id: string;
+    owner_user_id: string;
+    now: string;
+  }): Promise<DeviceAuthorizationRequestRecord | null>;
   approve(input: {
     authorization_request_id: string;
     human_code_hash: HashedEnrollmentCode;

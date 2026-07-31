@@ -51,7 +51,7 @@ export interface DeviceEnrollmentRouteUser {
 
 export type DeviceEnrollmentRouteService = Pick<
   DeviceEnrollmentService,
-  "createAuthorization" | "lookup" | "approve" | "deny" | "poll"
+  "createAuthorization" | "lookup" | "approve" | "status" | "deny" | "poll"
 >;
 
 export interface DeviceEnrollmentRouteOptions {
@@ -156,6 +156,24 @@ export async function registerDeviceEnrollmentRoutes(
 
     try {
       return noStore(reply).send(await options.service.lookup(parsed.data));
+    } catch (error) {
+      if (error instanceof DeviceEnrollmentError) return sendEnrollmentError(reply, error);
+      return noStore(reply).code(500).send({ error: "device_enrollment_unavailable" });
+    }
+  });
+
+  app.get("/api/device-authorizations/:authorizationRequestId/status", async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const params = AuthorizationDecisionParams.safeParse(request.params);
+    if (!params.success) return invalidBody(reply);
+    try {
+      return noStore(reply).send(
+        await options.service.status({
+          authorization_request_id: params.data.authorizationRequestId,
+          owner_user_id: user.id,
+        }),
+      );
     } catch (error) {
       if (error instanceof DeviceEnrollmentError) return sendEnrollmentError(reply, error);
       return noStore(reply).code(500).send({ error: "device_enrollment_unavailable" });

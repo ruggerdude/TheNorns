@@ -38,6 +38,7 @@ for (const source of [swift, powershell]) {
 }
 assert.match(swift, /HMAC<SHA256>\.isValidAuthenticationCode/);
 assert.match(swift, /for _ in 0\.\.<attempts/);
+assert.match(swift, /let result = self\.ensureAgentHost\(\)[\s\S]*?self\.waitForControlCenterURL/);
 assert.match(powershell, /FixedTimeEquals/);
 assert.match(powershell, /for \(\$attempt = 0; \$attempt -lt 50/);
 assert.match(powershell, /stale file, dead port, or invalid response proof/);

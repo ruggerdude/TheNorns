@@ -36,9 +36,17 @@ export function TextArea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
 export function Select(props: SelectHTMLAttributes<HTMLSelectElement>) {
   return <select {...props} className={`select ${props.className ?? ""}`} />;
 }
-export function Alert({ children, testId }: { children: ReactNode; testId?: string }) {
+export function Alert({
+  children,
+  testId,
+  tone = "danger",
+}: {
+  children: ReactNode;
+  testId?: string;
+  tone?: "danger" | "info" | "success";
+}) {
   return (
-    <div className="alert" data-testid={testId}>
+    <div className={`alert alert-${tone}`} data-testid={testId}>
       <span className="alert-body">{children}</span>
     </div>
   );

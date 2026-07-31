@@ -37,7 +37,13 @@ describe("DeviceAuthorizationApproval", () => {
           expires_at: "2026-07-29T13:00:00.000Z",
         }),
       )
-      .mockResolvedValueOnce(jsonResponse({ state: "approved_pending_redemption" }));
+      .mockResolvedValueOnce(jsonResponse({ state: "approved_pending_redemption" }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          authorization_request_id: "authorization-1",
+          state: "active",
+        }),
+      );
 
     render(<DeviceAuthorizationApproval user={user} onUnauthorized={vi.fn()} />);
     fireEvent.change(screen.getByLabelText(/human verification code/i), {
@@ -55,12 +61,14 @@ describe("DeviceAuthorizationApproval", () => {
     expect(String(lookup?.[0])).not.toContain("ABCDEFGH");
 
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
-    await screen.findByText(/must redeem this approval with its persisted private key/i);
+    await screen.findByText(/this mac is connected/i);
     expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/device-authorizations/authorization-1/approve");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({ authorization_context: "context-1" }),
     });
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("/api/device-authorizations/authorization-1/status");
+    expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({ method: "GET" });
   });
 
   it("denies without exposing a device code and reports throttling", async () => {

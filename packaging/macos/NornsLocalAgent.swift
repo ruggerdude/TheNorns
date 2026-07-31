@@ -20,18 +20,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.global(qos: .userInitiated).async {
-            var controlCenter = self.waitForControlCenterURL(attempts: 8)
-            var result: (status: Int32, message: String) = (0, "")
-
-            // Opening the app must not restart an AgentHost that may own active
-            // work. Only ensure the per-user service when no live discovery
-            // endpoint can be reached.
-            if controlCenter == nil {
-                result = self.ensureAgentHost()
-                if result.status == 0 {
-                    controlCenter = self.waitForControlCenterURL(attempts: 40)
-                }
-            }
+            // The shell action is idempotent for the installed version and
+            // upgrades an older launch service before opening its Control
+            // Center. Active work is left alone when the versions already
+            // match.
+            let result = self.ensureAgentHost()
+            let controlCenter =
+                result.status == 0 ? self.waitForControlCenterURL(attempts: 40) : nil
 
             DispatchQueue.main.async {
                 if let controlCenter {

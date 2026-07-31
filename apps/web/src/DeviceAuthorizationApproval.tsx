@@ -13,7 +13,7 @@ interface DeviceAuthorizationSummary {
   expires_at: string;
 }
 
-type ApprovalOutcome = "approved_pending_redemption" | "denied";
+type ApprovalOutcome = "approved_pending_redemption" | "active" | "denied" | "expired";
 
 function normalizeUserCode(value: string): string {
   return value
@@ -33,6 +33,27 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     credentials: "include",
     headers: authHeaders(true),
     body: JSON.stringify(body),
+  });
+  const payload = (await response.json().catch(() => ({}))) as T & {
+    error?: string;
+    detail?: string;
+  };
+  if (response.status === 401) throw new UnauthorizedError();
+  if (!response.ok) {
+    throw new ApiError(
+      payload.detail ?? payload.error ?? `request failed: ${response.status}`,
+      response.status,
+      payload.error ?? null,
+    );
+  }
+  return payload;
+}
+
+async function getJson<T>(path: string): Promise<T> {
+  const response = await fetch(path, {
+    method: "GET",
+    credentials: "include",
+    headers: authHeaders(),
   });
   const payload = (await response.json().catch(() => ({}))) as T & {
     error?: string;
@@ -112,16 +133,47 @@ export function DeviceAuthorizationApproval({
       setOutcome(null);
     });
 
+  // The fragment is a one-time handoff. Re-running after state changes would
+  // submit the authorization code again.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: one-time URL handoff
   useEffect(() => {
     if (initialCode.length !== 8 || automaticLookupStarted.current) return;
     automaticLookupStarted.current = true;
-    window.history.replaceState(
-      null,
-      "",
-      `${window.location.pathname}${window.location.search}`,
-    );
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
     void lookup(initialCode);
   }, []);
+
+  useEffect(() => {
+    if (outcome !== "approved_pending_redemption" || !request) return;
+    let cancelled = false;
+    let nextCheck: number | undefined;
+
+    const checkStatus = async (): Promise<void> => {
+      try {
+        const result = await getJson<{ state: ApprovalOutcome }>(
+          `/api/device-authorizations/${encodeURIComponent(request.authorization_request_id)}/status`,
+        );
+        if (cancelled) return;
+        setOutcome(result.state);
+        if (result.state === "approved_pending_redemption") {
+          nextCheck = window.setTimeout(() => void checkStatus(), 1_000);
+        }
+      } catch (caught) {
+        if (cancelled) return;
+        if (caught instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
+        nextCheck = window.setTimeout(() => void checkStatus(), 2_000);
+      }
+    };
+
+    void checkStatus();
+    return () => {
+      cancelled = true;
+      if (nextCheck !== undefined) window.clearTimeout(nextCheck);
+    };
+  }, [outcome, request, onUnauthorized]);
 
   const decide = (decision: "approve" | "deny"): Promise<void> =>
     run(async () => {
@@ -144,12 +196,24 @@ export function DeviceAuthorizationApproval({
           <div className="eyebrow">Local Agent</div>
           <h1 id="device-authorization-title">Authorize a computer</h1>
         </div>
-        <Badge tone={outcome === "approved_pending_redemption" ? "success" : "info"}>
-          {outcome === "approved_pending_redemption"
-            ? "Approved"
-            : outcome === "denied"
-              ? "Denied"
-              : "Verification"}
+        <Badge
+          tone={
+            outcome === "active" || outcome === "approved_pending_redemption"
+              ? "success"
+              : outcome === "denied" || outcome === "expired"
+                ? "danger"
+                : "info"
+          }
+        >
+          {outcome === "active"
+            ? "Connected"
+            : outcome === "approved_pending_redemption"
+              ? "Approved"
+              : outcome === "denied"
+                ? "Denied"
+                : outcome === "expired"
+                  ? "Expired"
+                  : "Verification"}
         </Badge>
       </div>
 
@@ -203,10 +267,22 @@ export function DeviceAuthorizationApproval({
           </div>
 
           {outcome ? (
-            <Alert>
-              {outcome === "approved_pending_redemption"
-                ? "Approved. The Local Agent must redeem this approval with its persisted private key before it becomes active."
-                : "Denied. This authorization request cannot be used."}
+            <Alert
+              tone={
+                outcome === "active"
+                  ? "success"
+                  : outcome === "approved_pending_redemption"
+                    ? "info"
+                    : "danger"
+              }
+            >
+              {outcome === "active"
+                ? "This Mac is connected. You can close this page and return to The Norns."
+                : outcome === "approved_pending_redemption"
+                  ? "Approved—finishing the secure connection with the Local Agent…"
+                  : outcome === "expired"
+                    ? "This approval expired before the Local Agent finished connecting. Start enrollment again from the Local Agent."
+                    : "Denied. This authorization request cannot be used."}
             </Alert>
           ) : (
             <div className="connection-card-controls">
