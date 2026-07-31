@@ -512,9 +512,6 @@ export class AttachmentService {
           continue;
         }
         if (!isImageAttachmentMime(row.mime)) {
-          if (row.extracted_text === null || row.extracted_text_sha256 === null) {
-            unavailableAttachmentIds.push(id);
-          }
           continue;
         }
         if (parts.length >= ATTACHMENT_CAPS.maxImagesPerPlanningRound) {
