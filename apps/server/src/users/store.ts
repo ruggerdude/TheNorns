@@ -62,8 +62,8 @@ export class UserNotFoundError extends Error {
   }
 }
 export class LastActiveAdminError extends Error {
-  constructor() {
-    super("the last active administrator cannot be removed");
+  constructor(action: "removed" | "demoted" = "removed") {
+    super(`the last active administrator cannot be ${action}`);
     this.name = "LastActiveAdminError";
   }
 }
@@ -158,6 +158,23 @@ export class UserStore {
     return [...this.users.values()]
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .map((u) => this.summarize(u));
+  }
+
+  updateRole(id: string, role: UserRole): UserSummary {
+    const record = this.users.get(id);
+    if (!record) throw new UserNotFoundError(id);
+    if (
+      record.role === "admin" &&
+      role === "member" &&
+      record.status === "active" &&
+      [...this.users.values()].filter(
+        (user) => user.role === "admin" && user.status === "active" && user.passwordHash !== null,
+      ).length === 1
+    ) {
+      throw new LastActiveAdminError("demoted");
+    }
+    record.role = role;
+    return this.summarize(record);
   }
 
   remove(id: string): void {

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { Admin } from "./Admin";
@@ -30,10 +30,6 @@ describe("Admin panel", () => {
 
   beforeEach(() => {
     mock = new MockFetch();
-    mock.get("/api/admin/projects/archived", { body: [] });
-    mock.get("/api/v2/admin/rules", {
-      body: { filename: "NORN.md", content: "", version: 0, updated_at: null },
-    });
   });
 
   test("loads and lists the current roster", async () => {
@@ -41,112 +37,57 @@ describe("Admin panel", () => {
     mock.install();
     render(<Admin onClose={vi.fn()} onUnauthorized={vi.fn()} />);
 
-    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
-      "Users",
-      "Computers",
-      "Rules",
-      "Archive",
-    ]);
-    expect(screen.getByRole("tab", { name: "Users" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(screen.queryByText("Computers")).not.toBeInTheDocument();
+    expect(screen.queryByText("Archived projects")).not.toBeInTheDocument();
+    expect(screen.queryByText("Global agent rules")).not.toBeInTheDocument();
     const list = await screen.findByTestId("user-list");
     expect(list).toHaveTextContent("admin@x.com");
     expect(list).toHaveTextContent("member@x.com");
   });
 
-  test("opens computer management inside Administration", async () => {
-    mock.get("/api/admin/users", { body: makeRoster() });
-    mock.get("/api/devices", {
-      body: {
-        devices: [],
-        downloads: {
-          macos: "https://downloads.example.com/Norns-Local-Agent-macOS.pkg",
-          windows: null,
-          macos_release: "notarized",
-        },
-      },
-    });
-    mock.install();
-
-    const user = userEvent.setup();
-    render(<Admin onClose={vi.fn()} onUnauthorized={vi.fn()} />);
-    await user.click(screen.getByRole("tab", { name: "Computers" }));
-
-    expect(await screen.findByTestId("computers-page")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Download for macOS" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Computers" })).toHaveAttribute("aria-selected", "true");
-  });
-
-  test("loads and saves the global NORN.md", async () => {
-    mock.get("/api/admin/users", { body: makeRoster() });
-    mock.put("/api/v2/admin/rules", (_url, init) => {
-      const body = JSON.parse(init?.body as string);
-      expect(body).toEqual({ content: "# Global rules\n\n- Keep updates concise." });
-      return {
-        body: {
-          filename: "NORN.md",
-          content: body.content,
-          version: 1,
-          updated_at: "2026-07-26T01:00:00.000Z",
-        },
-      };
-    });
-    mock.install();
-
-    const user = userEvent.setup();
-    render(<Admin onClose={vi.fn()} onUnauthorized={vi.fn()} />);
-    await user.click(screen.getByRole("tab", { name: "Rules" }));
-    const editor = await screen.findByRole("textbox", { name: "Global NORN.md" });
-    await user.type(editor, "# Global rules\n\n- Keep updates concise.");
-    await user.click(screen.getByRole("button", { name: "Save global rules" }));
-
-    expect(await screen.findByText("v1")).toBeVisible();
-    expect(editor).toHaveValue("# Global rules\n\n- Keep updates concise.");
-  });
-
-  test("unarchives a project and removes it from the archived list", async () => {
+  test("promotes and demotes existing users without removing them", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    let restored = false;
-    mock.get("/api/admin/users", { body: makeRoster() });
-    mock.get("/api/admin/projects/archived", () => ({
-      body: restored
-        ? []
-        : [
-            {
-              id: "project-archived",
-              name: "Archived project",
-              description: "Return this project to Portfolio",
-              status: "archived",
-              pm_provider: "openai",
-              pm_model: "gpt-5.6-sol",
-              reviewer_provider: "anthropic",
-              source_type: "github",
-              source_location: "github.com/example/archived",
-              plan_objective: null,
-              archived_at: "2026-07-28T12:00:00.000Z",
-            },
-          ],
-    }));
-    mock.post("/api/admin/projects/project-archived/restore", () => {
-      restored = true;
-      return { body: { ok: true } };
+    const roster = makeRoster();
+    mock.get("/api/admin/users", { body: roster });
+    mock.patch("/api/admin/users/u2/role", (_url, init) => {
+      const body = JSON.parse(init?.body as string);
+      expect(body).toEqual({ role: "admin" });
+      const member = roster[1];
+      if (!member) throw new Error("member fixture is missing");
+      member.role = "admin";
+      return { body: member };
+    });
+    mock.patch("/api/admin/users/u1/role", (_url, init) => {
+      const body = JSON.parse(init?.body as string);
+      expect(body).toEqual({ role: "member" });
+      const admin = roster[0];
+      if (!admin) throw new Error("admin fixture is missing");
+      admin.role = "member";
+      return { body: admin };
     });
     mock.install();
 
+    const onCurrentUserRoleChanged = vi.fn();
     const user = userEvent.setup();
-    render(<Admin onClose={vi.fn()} onUnauthorized={vi.fn()} />);
+    render(
+      <Admin
+        currentUserId="u1"
+        onCurrentUserRoleChanged={onCurrentUserRoleChanged}
+        onClose={vi.fn()}
+        onUnauthorized={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("user-list");
 
-    await user.click(screen.getByRole("tab", { name: "Archive" }));
-    const archivedList = await screen.findByTestId("archived-project-list");
-    expect(archivedList).toHaveTextContent("Archived project");
-    await user.click(screen.getByRole("button", { name: "Unarchive" }));
+    await user.click(screen.getByRole("button", { name: "Make admin" }));
+    expect(await screen.findAllByRole("button", { name: "Remove admin" })).toHaveLength(2);
 
-    expect(await screen.findByText("No archived projects.")).toBeVisible();
-    expect(
-      mock.calls.find(
-        (call) =>
-          call.method === "POST" && call.url === "/api/admin/projects/project-archived/restore",
-      ),
-    ).toBeDefined();
+    const removeAdminButton = screen.getAllByRole("button", { name: "Remove admin" })[0];
+    if (!removeAdminButton) throw new Error("remove-admin control is missing");
+    await user.click(removeAdminButton);
+    await waitFor(() => expect(onCurrentUserRoleChanged).toHaveBeenCalledWith("member"));
+    expect(screen.getByTestId("user-list")).toHaveTextContent("admin@x.com");
   });
 
   test("adding a user posts the form and refreshes the roster", async () => {
@@ -225,9 +166,9 @@ describe("Admin panel", () => {
     render(<Admin onClose={vi.fn()} onUnauthorized={vi.fn()} />);
     await screen.findByTestId("user-list");
 
-    const removeButtons = screen.getAllByRole("button", { name: /remove/i });
-    const memberRemoveButton = removeButtons[1];
-    if (!memberRemoveButton) throw new Error("member remove button not found");
+    const memberRow = screen.getByText("member@x.com").closest(".user-row") as HTMLElement | null;
+    if (!memberRow) throw new Error("member row not found");
+    const memberRemoveButton = within(memberRow).getByRole("button", { name: "Remove" });
     await user.click(memberRemoveButton);
 
     expect(confirmSpy).toHaveBeenCalled();

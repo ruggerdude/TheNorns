@@ -510,6 +510,43 @@ describe.sequential("Phase 2 relational identity service", () => {
     await expect(harness.service.hasActiveAdmin()).resolves.toBe(true);
   });
 
+  it("changes roles while preserving an active administrator", async () => {
+    const harness = await setup();
+    databases.push(harness.pg);
+    const first = await harness.service.createActive({
+      email: "first-admin@example.com",
+      password: "password",
+      role: "admin",
+    });
+    const member = await harness.service.createActive({
+      email: "member@example.com",
+      password: "password",
+      role: "member",
+    });
+
+    await expect(harness.service.updateRole(first.id, "member")).rejects.toBeInstanceOf(
+      LastActiveAdminError,
+    );
+    await expect(harness.service.updateRole(member.id, "admin")).resolves.toMatchObject({
+      id: member.id,
+      role: "admin",
+    });
+    await expect(harness.service.updateRole(first.id, "member")).resolves.toMatchObject({
+      id: first.id,
+      role: "member",
+    });
+
+    const roles = await harness.pg.query<{ id: string; role: string }>(
+      "SELECT id, role FROM users WHERE id IN ($1, $2) ORDER BY id",
+      [first.id, member.id],
+    );
+    expect(roles.rows).toEqual([
+      { id: first.id, role: "member" },
+      { id: member.id, role: "admin" },
+    ]);
+    await expect(harness.service.hasActiveAdmin()).resolves.toBe(true);
+  });
+
   it("retires a key only after atomically revoking every reusable credential", async () => {
     const harness = await setup();
     databases.push(harness.pg);

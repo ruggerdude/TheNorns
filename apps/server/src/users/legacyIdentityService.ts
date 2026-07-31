@@ -6,7 +6,7 @@ import type {
   IdentityUserSummary,
 } from "./identityService.js";
 import { IdentityAlreadyBootstrappedError } from "./identityService.js";
-import type { UserRecord, UserStore, UserSummary } from "./store.js";
+import type { UserRecord, UserRole, UserStore, UserSummary } from "./store.js";
 
 function summary(user: UserSummary): IdentityUserSummary {
   return user;
@@ -82,6 +82,10 @@ export class LegacyIdentityService implements IdentityService {
 
   async acceptInvite(inviteToken: string, password: string): Promise<IdentityUserSummary> {
     return summary(this.store.acceptInvite(inviteToken, password));
+  }
+
+  async updateRole(id: string, role: UserRole): Promise<IdentityUserSummary> {
+    return summary(this.store.updateRole(id, role));
   }
 
   async disable(id: string): Promise<void> {

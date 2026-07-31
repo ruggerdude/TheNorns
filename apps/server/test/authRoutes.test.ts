@@ -27,7 +27,7 @@ interface InjectedResponse {
 
 async function inject(
   s: NornsServer,
-  method: "GET" | "POST" | "DELETE",
+  method: "GET" | "POST" | "PATCH" | "DELETE",
   url: string,
   body?: unknown,
   token?: string,
@@ -678,6 +678,54 @@ describe("admin user management — requires the admin role", () => {
     expect(forbidden.statusCode).toBe(403);
   });
 
+  it("PATCH /api/admin/users/:id/role promotes and demotes an existing user", async () => {
+    const { s, adminToken, memberToken } = await startAsMember();
+    const created = await inject(
+      s,
+      "POST",
+      "/api/admin/users",
+      { email: "role-change@x.com", password: "password123", role: "member" },
+      adminToken,
+    );
+    const user = created.json() as { id: string };
+    const login = await inject(s, "POST", "/api/auth/login", {
+      email: "role-change@x.com",
+      password: "password123",
+    });
+    const promotedToken = (login.json() as { token: string }).token;
+
+    expect(
+      (await inject(s, "PATCH", `/api/admin/users/${user.id}/role`, { role: "admin" }, memberToken))
+        .statusCode,
+    ).toBe(403);
+
+    const promoted = await inject(
+      s,
+      "PATCH",
+      `/api/admin/users/${user.id}/role`,
+      { role: "admin" },
+      adminToken,
+    );
+    expect(promoted.statusCode).toBe(200);
+    expect(promoted.json()).toMatchObject({ id: user.id, role: "admin" });
+    expect((await inject(s, "GET", "/api/admin/users", undefined, promotedToken)).statusCode).toBe(
+      200,
+    );
+
+    const demoted = await inject(
+      s,
+      "PATCH",
+      `/api/admin/users/${user.id}/role`,
+      { role: "member" },
+      adminToken,
+    );
+    expect(demoted.statusCode).toBe(200);
+    expect(demoted.json()).toMatchObject({ id: user.id, role: "member" });
+    expect((await inject(s, "GET", "/api/admin/users", undefined, promotedToken)).statusCode).toBe(
+      403,
+    );
+  });
+
   it("POST /api/admin/users/invite still creates the invited user even when email sending fails", async () => {
     // RESEND_API_KEY is not set in the test environment, so sendEmail always
     // throws EmailNotConfiguredError — the route must surface that clearly
@@ -758,6 +806,32 @@ describe("admin user management — requires the admin role", () => {
     expect(response.json()).toEqual({
       error: "last_active_admin",
       message: "the last active administrator cannot be removed",
+    });
+    expect(users.hasActiveAdmin).toBe(true);
+  });
+
+  it("refuses to demote the last active administrator", async () => {
+    const users = new UserStore();
+    const admin = users.createActive({
+      email: "admin@x.com",
+      password: "admin-password",
+      role: "admin",
+    });
+    const adminToken = users.login("admin@x.com", "admin-password").token;
+    const s = await start({ users });
+
+    const response = await inject(
+      s,
+      "PATCH",
+      `/api/admin/users/${admin.id}/role`,
+      { role: "member" },
+      adminToken,
+    );
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({
+      error: "last_active_admin",
+      message: "the last active administrator cannot be demoted",
     });
     expect(users.hasActiveAdmin).toBe(true);
   });

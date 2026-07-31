@@ -73,6 +73,7 @@ export interface IdentityService {
     input: CreateIdentityInviteInput,
   ): Promise<{ summary: IdentityUserSummary; inviteToken: string }>;
   acceptInvite(inviteToken: string, password: string): Promise<IdentityUserSummary>;
+  updateRole(id: string, role: UserRole): Promise<IdentityUserSummary>;
   disable(id: string): Promise<void>;
   remove(id: string): Promise<void>;
   /** Phase 7 capabilities are optional only for the legacy compatibility adapter. */

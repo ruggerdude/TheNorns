@@ -1,0 +1,18 @@
+.user-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+@media (max-width: 640px) {
+  .user-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .user-row-actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+}

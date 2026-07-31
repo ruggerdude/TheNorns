@@ -1160,7 +1160,7 @@ export function Computers({
 
   if (embedded) {
     return (
-      <div className="computers-page admin-computers-page" data-testid="computers-page">
+      <div className="computers-page embedded-computers-page" data-testid="computers-page">
         {content}
       </div>
     );

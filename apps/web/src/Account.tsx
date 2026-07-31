@@ -1,7 +1,12 @@
 import { OwnedDeviceProjection, type OwnedDeviceProjectionT } from "@norns/contracts";
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useState } from "react";
+import { ArchivedProjectsSettings, GlobalRulesSettings } from "./WorkspaceManagementSettings";
 import { type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Badge, Brand, Button, Field, Input, PageHeader, Select, Spinner } from "./ui";
+
+const Computers = lazy(() =>
+  import("./Computers").then(({ Computers }) => ({ default: Computers })),
+);
 
 interface SessionSummary {
   id: string;
@@ -52,7 +57,13 @@ interface LocalRepositoryRegistration {
 
 type ConnectionPanel = "github" | "local-agent" | "ai";
 
-export type SettingsTab = "profile" | "connections" | "security";
+export type SettingsTab =
+  | "profile"
+  | "connections"
+  | "computers"
+  | "rules"
+  | "archive"
+  | "security";
 
 function githubCallbackError(code: string | null): string | null {
   switch (code) {
@@ -399,6 +410,34 @@ export function Account({
           >
             Connections
           </button>
+          <button
+            type="button"
+            aria-current={tab === "computers" ? "page" : undefined}
+            className={tab === "computers" ? "is-active" : ""}
+            onClick={() => setTab("computers")}
+          >
+            Computers
+          </button>
+          {user.role === "admin" ? (
+            <button
+              type="button"
+              aria-current={tab === "rules" ? "page" : undefined}
+              className={tab === "rules" ? "is-active" : ""}
+              onClick={() => setTab("rules")}
+            >
+              Rules
+            </button>
+          ) : null}
+          {user.role === "admin" ? (
+            <button
+              type="button"
+              aria-current={tab === "archive" ? "page" : undefined}
+              className={tab === "archive" ? "is-active" : ""}
+              onClick={() => setTab("archive")}
+            >
+              Archive
+            </button>
+          ) : null}
           <button
             type="button"
             aria-current={tab === "security" ? "page" : undefined}
@@ -891,6 +930,20 @@ export function Account({
                 ) : null}
               </article>
             </div>
+          ) : null}
+
+          {tab === "computers" ? (
+            <Suspense fallback={<Spinner label="Loading computers…" />}>
+              <Computers embedded onUnauthorized={onUnauthorized} />
+            </Suspense>
+          ) : null}
+
+          {tab === "rules" && user.role === "admin" ? (
+            <GlobalRulesSettings onUnauthorized={onUnauthorized} />
+          ) : null}
+
+          {tab === "archive" && user.role === "admin" ? (
+            <ArchivedProjectsSettings onUnauthorized={onUnauthorized} />
           ) : null}
 
           {tab === "security" ? (

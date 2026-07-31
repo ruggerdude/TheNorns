@@ -393,7 +393,7 @@ import { IdentityAlreadyBootstrappedError } from "./users/identityService.js";
 import { LegacyIdentityService } from "./users/legacyIdentityService.js";
 import { LoginAttemptThrottle } from "./users/loginThrottle.js";
 import { detectPasswordHashScheme } from "./users/passwords.js";
-import { LastActiveAdminError, type UserStore } from "./users/store.js";
+import { LastActiveAdminError, UserNotFoundError, type UserStore } from "./users/store.js";
 
 const DEFAULT_COMMAND_TTL_MS = 5 * 60 * 1000;
 const PAIRING_TTL_MS = 10 * 60 * 1000;
@@ -2362,6 +2362,36 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     }
     stores.audit(admin.email, "admin.user_invited", created.summary.id, now());
     reply.code(201).send({ user: created.summary });
+  });
+
+  const UpdateUserRoleBody = z
+    .object({
+      role: z.enum(["admin", "member"]),
+    })
+    .strict();
+
+  app.patch("/api/admin/users/:id/role", async (req, reply) => {
+    const admin = await requireAdmin(req, reply);
+    if (!admin) return;
+    const body = UpdateUserRoleBody.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: "bad_request" });
+    const { id } = req.params as { id: string };
+    try {
+      const updated = await identityService.updateRole(id, body.data.role);
+      stores.audit(admin.email, "admin.user_role_updated", id, now());
+      reply.send(updated);
+    } catch (error) {
+      if (error instanceof LastActiveAdminError) {
+        return reply.code(409).send({
+          error: "last_active_admin",
+          message: error.message,
+        });
+      }
+      if (error instanceof UserNotFoundError) {
+        return reply.code(404).send({ error: "not_found" });
+      }
+      throw error;
+    }
   });
 
   app.delete("/api/admin/users/:id", async (req, reply) => {

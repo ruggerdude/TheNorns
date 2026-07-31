@@ -106,16 +106,32 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     expect(mock.calls.some((call) => /^\/api\/projects\/[^/]+$/.test(call.url))).toBe(false);
   });
 
-  test("shows Settings and Usage, but keeps Computers inside the admin-only menu", async () => {
+  test("shows Computers in Settings for members while keeping Admin hidden", async () => {
     mock.get("/api/auth/me", {
       body: { id: "u1", email: "member@x.com", name: null, role: "member", status: "active" },
     });
+    mock.get("/api/auth/sessions", { body: { sessions: [] } });
+    mock.get("/api/integrations/github/status", {
+      body: {
+        configured: false,
+        setup_available: false,
+        configuration_source: null,
+        refresh_error: null,
+        user_authorization: { connected: false, login: null },
+        connections: [],
+      },
+    });
+    mock.get("/api/devices", { body: { devices: [] } });
     mock.install();
+    const user = userEvent.setup();
     render(<App />);
 
-    expect(await screen.findByRole("button", { name: /settings/i })).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: /settings/i }));
+    await screen.findByTestId("account-panel");
     expect(screen.getByRole("button", { name: /^usage$/i })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^computers$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^computers$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^rules$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^archive$/i })).not.toBeInTheDocument();
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: /^admin$/i })).not.toBeInTheDocument(),
     );
@@ -126,6 +142,17 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
       body: { id: "u1", email: "admin@x.com", name: null, role: "admin", status: "active" },
     });
     mock.get("/api/admin/users", { body: [] });
+    mock.get("/api/auth/sessions", { body: { sessions: [] } });
+    mock.get("/api/integrations/github/status", {
+      body: {
+        configured: false,
+        setup_available: false,
+        configuration_source: null,
+        refresh_error: null,
+        user_authorization: { connected: false, login: null },
+        connections: [],
+      },
+    });
     mock.get("/api/devices", { body: { devices: [] } });
     mock.install();
     const user = userEvent.setup();
@@ -152,9 +179,9 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     expect(screen.getByRole("button", { name: "Usage" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("tab", { name: "Computers" }));
-    expect(await screen.findByTestId("computers-page")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Computers" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Global agent rules")).not.toBeInTheDocument();
+    expect(screen.queryByText("Archived projects")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Settings" }));
     expect(await screen.findByTestId("account-panel")).toHaveClass("embedded-page-view");
@@ -163,6 +190,12 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
       "page",
     );
     expect(screen.queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Computers" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Rules" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Archive" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Computers" }));
+    expect(await screen.findByTestId("computers-page")).toBeInTheDocument();
   });
 
   test("opens user settings and sign out actions from the username menu", async () => {

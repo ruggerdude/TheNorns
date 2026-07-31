@@ -1,47 +1,40 @@
 import { useCallback, useEffect, useState } from "react";
-import { Computers } from "./Computers";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
-import { Alert, Badge, Brand, Button, Field, Input, PageHeader, Select, TextArea } from "./ui";
+import { Alert, Badge, Brand, Button, Field, Input, PageHeader, Select } from "./ui";
+import "./Admin.css";
 
 interface UserSummary {
   id: string;
   email: string;
   name: string | null;
   role: "admin" | "member";
-  status: "active" | "invited";
+  status: "active" | "invited" | "disabled";
   created_at: string;
 }
 
-interface GlobalRulesDto {
-  filename: "NORN.md";
-  content: string;
-  version: number;
-  updated_at: string | null;
-}
-
-interface ArchivedProjectSummary {
-  id: string;
-  name: string;
-  description: string;
-  archived_at: string;
-}
-
 async function adminRequest<T>(
-  method: "GET" | "POST" | "PUT" | "DELETE",
+  method: "GET" | "POST" | "PATCH" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const res = await fetch(path, {
+  const response = await fetch(path, {
     method,
+    credentials: "include",
     headers: authHeaders(body !== undefined),
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
-  if (res.status === 401) throw new UnauthorizedError();
-  const json = (await res.json()) as T & { error?: string; message?: string };
-  if (!res.ok) {
-    throw new ApiError(json.message ?? json.error ?? `request failed: ${res.status}`, res.status);
+  if (response.status === 401) throw new UnauthorizedError();
+  const payload = (await response.json().catch(() => ({}))) as T & {
+    error?: string;
+    message?: string;
+  };
+  if (!response.ok) {
+    throw new ApiError(
+      payload.message ?? payload.error ?? `request failed: ${response.status}`,
+      response.status,
+    );
   }
-  return json;
+  return payload;
 }
 
 type InviteOutcome =
@@ -49,52 +42,53 @@ type InviteOutcome =
   | { ok: false; recoverable: true; message: string; url: string }
   | { ok: false; recoverable: false; message: string };
 
-type AdminTab = "users" | "computers" | "rules" | "archive";
-
-/** Unlike adminRequest, a 502 here (email delivery failed) is not a plain
- *  error — the invited user record was still created, and the response
- *  carries invite_url so the admin can share it manually. */
+/** A 502 means the invited user exists but email delivery failed, so the
+ * response still carries a link the administrator can share manually. */
 async function inviteRequest(body: unknown): Promise<InviteOutcome> {
-  const res = await fetch("/api/admin/users/invite", {
+  const response = await fetch("/api/admin/users/invite", {
     method: "POST",
+    credentials: "include",
     headers: authHeaders(true),
     body: JSON.stringify(body),
   });
-  if (res.status === 401) throw new UnauthorizedError();
-  const json = (await res.json()) as { error?: string; message?: string; invite_url?: string };
-  if (res.status === 201) return { ok: true };
-  if (res.status === 502) {
+  if (response.status === 401) throw new UnauthorizedError();
+  const payload = (await response.json().catch(() => ({}))) as {
+    error?: string;
+    message?: string;
+    invite_url?: string;
+  };
+  if (response.status === 201) return { ok: true };
+  if (response.status === 502) {
     return {
       ok: false,
       recoverable: true,
-      message: json.message ?? "The invite email failed to send.",
-      url: json.invite_url ?? "",
+      message: payload.message ?? "The invite email failed to send.",
+      url: payload.invite_url ?? "",
     };
   }
   return {
     ok: false,
     recoverable: false,
-    message: json.message ?? json.error ?? `request failed: ${res.status}`,
+    message: payload.message ?? payload.error ?? `request failed: ${response.status}`,
   };
 }
 
 export function Admin({
   onClose,
   onUnauthorized,
+  currentUserId,
+  onCurrentUserRoleChanged,
   embedded = false,
 }: {
   onClose: () => void;
   onUnauthorized: () => void;
+  currentUserId?: string;
+  onCurrentUserRoleChanged?: (role: "admin" | "member") => void;
   embedded?: boolean;
 }): React.ReactElement {
-  const [activeTab, setActiveTab] = useState<AdminTab>("users");
   const [users, setUsers] = useState<UserSummary[] | null>(null);
-  const [globalRules, setGlobalRules] = useState<GlobalRulesDto | null>(null);
-  const [globalRulesDraft, setGlobalRulesDraft] = useState("");
-  const [globalRulesSaving, setGlobalRulesSaving] = useState(false);
-  const [archivedProjects, setArchivedProjects] = useState<ArchivedProjectSummary[] | null>(null);
-  const [restoringProjectId, setRestoringProjectId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [roleBusyUserId, setRoleBusyUserId] = useState<string | null>(null);
 
   const [addEmail, setAddEmail] = useState("");
   const [addName, setAddName] = useState("");
@@ -109,27 +103,19 @@ export function Admin({
   const [inviteNotice, setInviteNotice] = useState<{ message: string; url: string } | null>(null);
 
   const fail = useCallback(
-    (e: unknown) => {
-      if (e instanceof UnauthorizedError) onUnauthorized();
-      else setError(e instanceof Error ? e.message : String(e));
+    (caught: unknown) => {
+      if (caught instanceof UnauthorizedError) onUnauthorized();
+      else setError(caught instanceof Error ? caught.message : String(caught));
     },
     [onUnauthorized],
   );
 
   const refresh = useCallback(async () => {
+    setError(null);
     try {
-      setError(null);
-      const [nextUsers, nextRules, nextArchivedProjects] = await Promise.all([
-        adminRequest<UserSummary[]>("GET", "/api/admin/users"),
-        adminRequest<GlobalRulesDto>("GET", "/api/v2/admin/rules"),
-        adminRequest<ArchivedProjectSummary[]>("GET", "/api/admin/projects/archived"),
-      ]);
-      setUsers(nextUsers);
-      setGlobalRules(nextRules);
-      setGlobalRulesDraft(nextRules.content);
-      setArchivedProjects(nextArchivedProjects);
-    } catch (e) {
-      fail(e);
+      setUsers(await adminRequest<UserSummary[]>("GET", "/api/admin/users"));
+    } catch (caught) {
+      fail(caught);
     }
   }, [fail]);
 
@@ -152,8 +138,8 @@ export function Admin({
       setAddPassword("");
       setAddRole("member");
       await refresh();
-    } catch (e) {
-      fail(e);
+    } catch (caught) {
+      fail(caught);
     } finally {
       setAdding(false);
     }
@@ -178,60 +164,54 @@ export function Admin({
       setInviteName("");
       setInviteRole("member");
       await refresh();
-    } catch (e) {
-      fail(e);
+    } catch (caught) {
+      fail(caught);
     } finally {
       setInviting(false);
     }
   }, [inviteEmail, inviteName, inviteRole, fail, refresh]);
 
+  const changeRole = useCallback(
+    async (user: UserSummary) => {
+      const nextRole = user.role === "admin" ? "member" : "admin";
+      const confirmed = window.confirm(
+        nextRole === "admin"
+          ? `Make ${user.email} an administrator?`
+          : `Remove administrator access from ${user.email}?`,
+      );
+      if (!confirmed) return;
+
+      setRoleBusyUserId(user.id);
+      setError(null);
+      try {
+        const updated = await adminRequest<UserSummary>(
+          "PATCH",
+          `/api/admin/users/${encodeURIComponent(user.id)}/role`,
+          { role: nextRole },
+        );
+        setUsers(
+          (current) =>
+            current?.map((candidate) => (candidate.id === updated.id ? updated : candidate)) ??
+            null,
+        );
+        if (updated.id === currentUserId) onCurrentUserRoleChanged?.(updated.role);
+      } catch (caught) {
+        fail(caught);
+      } finally {
+        setRoleBusyUserId(null);
+      }
+    },
+    [currentUserId, fail, onCurrentUserRoleChanged],
+  );
+
   const removeUser = useCallback(
     async (id: string, email: string) => {
       if (!window.confirm(`Remove ${email}? This immediately ends any active session.`)) return;
       try {
-        await adminRequest("DELETE", `/api/admin/users/${id}`);
+        await adminRequest("DELETE", `/api/admin/users/${encodeURIComponent(id)}`);
         await refresh();
-      } catch (e) {
-        fail(e);
-      }
-    },
-    [fail, refresh],
-  );
-
-  const saveGlobalRules = useCallback(async () => {
-    setGlobalRulesSaving(true);
-    setError(null);
-    try {
-      const next = await adminRequest<GlobalRulesDto>("PUT", "/api/v2/admin/rules", {
-        content: globalRulesDraft,
-      });
-      setGlobalRules(next);
-      setGlobalRulesDraft(next.content);
-    } catch (e) {
-      fail(e);
-    } finally {
-      setGlobalRulesSaving(false);
-    }
-  }, [fail, globalRulesDraft]);
-
-  const restoreProject = useCallback(
-    async (project: ArchivedProjectSummary) => {
-      if (
-        !window.confirm(
-          `Unarchive "${project.name}"?\n\nIt will return to Portfolio and the active project menu.`,
-        )
-      ) {
-        return;
-      }
-      setRestoringProjectId(project.id);
-      setError(null);
-      try {
-        await adminRequest("POST", `/api/admin/projects/${encodeURIComponent(project.id)}/restore`);
-        await refresh();
-      } catch (e) {
-        fail(e);
-      } finally {
-        setRestoringProjectId(null);
+      } catch (caught) {
+        fail(caught);
       }
     },
     [fail, refresh],
@@ -252,167 +232,53 @@ export function Admin({
       ) : null}
       <main className="page-container admin-page">
         <PageHeader
-          eyebrow="Workspace controls"
-          title="Administration"
-          lede="Manage members, computers, global agent rules, and archived projects."
+          eyebrow="Administrator access"
+          title="Users"
+          lede="Add people, invite members, and control who can administer the workspace."
         />
         {error ? <Alert testId="admin-error">{error}</Alert> : null}
 
-        <nav className="admin-tabs" role="tablist" aria-label="Administration sections">
-          {(
-            [
-              ["users", "Users"],
-              ["computers", "Computers"],
-              ["rules", "Rules"],
-              ["archive", "Archive"],
-            ] as const
-          ).map(([tab, label]) => (
-            <button
-              key={tab}
-              id={`admin-tab-${tab}`}
-              type="button"
-              role="tab"
-              aria-selected={activeTab === tab}
-              aria-controls={`admin-panel-${tab}`}
-              className={activeTab === tab ? "is-active" : ""}
-              onClick={() => setActiveTab(tab)}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
-
-        <div
-          id="admin-panel-computers"
-          role="tabpanel"
-          aria-labelledby="admin-tab-computers"
-          hidden={activeTab !== "computers"}
-        >
-          {activeTab === "computers" ? (
-            <Computers embedded onUnauthorized={onUnauthorized} />
-          ) : null}
-        </div>
-
-        <section
-          className="card admin-archived-projects"
-          aria-labelledby="admin-tab-archive archived-projects-heading"
-          id="admin-panel-archive"
-          role="tabpanel"
-          hidden={activeTab !== "archive"}
-        >
-          <div className="section-head">
-            <div>
-              <div className="eyebrow">Project recovery</div>
-              <h2 id="archived-projects-heading">Archived projects</h2>
-            </div>
-            <Badge tone="info">{archivedProjects?.length ?? 0}</Badge>
-          </div>
-          {archivedProjects === null ? (
-            <p className="muted">Loading archived projects…</p>
-          ) : archivedProjects.length === 0 ? (
-            <p className="muted">No archived projects.</p>
-          ) : (
-            <ul className="admin-archived-list" data-testid="archived-project-list">
-              {archivedProjects.map((project) => (
-                <li key={project.id}>
-                  <div>
-                    <strong>{project.name}</strong>
-                    <small>Archived {new Date(project.archived_at).toLocaleDateString()}</small>
-                  </div>
-                  <Button
-                    className="btn-small"
-                    disabled={restoringProjectId === project.id}
-                    onClick={() => void restoreProject(project)}
-                  >
-                    {restoringProjectId === project.id ? "Unarchiving…" : "Unarchive"}
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
-        <section
-          className="admin-global-rules"
-          aria-labelledby="admin-tab-rules global-rules-heading"
-          id="admin-panel-rules"
-          role="tabpanel"
-          hidden={activeTab !== "rules"}
-        >
-          <div className="section-head">
-            <div>
-              <div className="eyebrow">Global agent rules</div>
-              <h3 id="global-rules-heading">{globalRules?.filename ?? "NORN.md"}</h3>
-            </div>
-            {globalRules?.version ? (
-              <span className="mono muted">v{globalRules.version}</span>
-            ) : null}
-          </div>
-          <p className="muted">
-            These instructions are included in every project briefing. A project’s own NORN.md can
-            add more specific rules.
-          </p>
-          {globalRules ? (
-            <>
-              <TextArea
-                className="global-rules-editor"
-                aria-label="Global NORN.md"
-                value={globalRulesDraft}
-                placeholder="# Global rules&#10;&#10;- Share a concise progress update every five minutes."
-                onChange={(event) => setGlobalRulesDraft(event.target.value)}
-              />
-              <div className="settings-save-row">
-                <span className="muted">
-                  {globalRules.updated_at
-                    ? `Last saved ${new Date(globalRules.updated_at).toLocaleString()}`
-                    : "No global rules yet"}
-                </span>
-                <Button
-                  variant="primary"
-                  disabled={
-                    globalRulesSaving || globalRulesDraft.trim() === globalRules.content.trim()
-                  }
-                  onClick={() => void saveGlobalRules()}
-                >
-                  {globalRulesSaving ? "Saving…" : "Save global rules"}
-                </Button>
-              </div>
-            </>
-          ) : (
-            <p className="muted">Loading global rules…</p>
-          )}
-        </section>
-
-        <div
-          className="admin-layout"
-          id="admin-panel-users"
-          role="tabpanel"
-          aria-labelledby="admin-tab-users"
-          hidden={activeTab !== "users"}
-        >
+        <div className="admin-layout">
           <section className="card">
             <h3>Users</h3>
             {users === null ? (
               <p className="muted">Loading…</p>
             ) : (
               <ul className="user-list" data-testid="user-list">
-                {users.map((u) => (
-                  <li key={u.id} className="user-row">
+                {users.map((user) => (
+                  <li key={user.id} className="user-row">
                     <div>
-                      <strong>{u.email}</strong>
-                      {u.name ? <span className="muted"> · {u.name}</span> : null}
+                      <strong>{user.email}</strong>
+                      {user.name ? <span className="muted"> · {user.name}</span> : null}
                       <div className="meta">
-                        <Badge tone={u.role === "admin" ? "info" : "default"}>{u.role}</Badge>{" "}
-                        <Badge tone={u.status === "active" ? "success" : "warn"}>{u.status}</Badge>
+                        <Badge tone={user.role === "admin" ? "info" : "default"}>{user.role}</Badge>{" "}
+                        <Badge tone={user.status === "active" ? "success" : "warn"}>
+                          {user.status}
+                        </Badge>
                       </div>
                     </div>
-                    <Button
-                      variant="danger"
-                      className="btn-small"
-                      onClick={() => void removeUser(u.id, u.email)}
-                    >
-                      Remove
-                    </Button>
+                    <div className="user-row-actions">
+                      {user.status !== "disabled" ? (
+                        <Button
+                          className="btn-small"
+                          disabled={roleBusyUserId === user.id}
+                          onClick={() => void changeRole(user)}
+                        >
+                          {roleBusyUserId === user.id
+                            ? "Saving…"
+                            : user.role === "admin"
+                              ? "Remove admin"
+                              : "Make admin"}
+                        </Button>
+                      ) : null}
+                      <Button
+                        variant="danger"
+                        className="btn-small"
+                        onClick={() => void removeUser(user.id, user.email)}
+                      >
+                        Remove
+                      </Button>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -425,18 +291,18 @@ export function Admin({
               <Input
                 type="email"
                 value={addEmail}
-                onChange={(e) => setAddEmail(e.target.value)}
+                onChange={(event) => setAddEmail(event.target.value)}
                 placeholder="teammate@example.com"
               />
             </Field>
             <Field label="Name (optional)">
-              <Input value={addName} onChange={(e) => setAddName(e.target.value)} />
+              <Input value={addName} onChange={(event) => setAddName(event.target.value)} />
             </Field>
             <Field label="Password">
               <Input
                 type="password"
                 value={addPassword}
-                onChange={(e) => setAddPassword(e.target.value)}
+                onChange={(event) => setAddPassword(event.target.value)}
                 placeholder="At least 8 characters"
                 autoComplete="new-password"
               />
@@ -444,7 +310,7 @@ export function Admin({
             <Field label="Role">
               <Select
                 value={addRole}
-                onChange={(e) => setAddRole(e.target.value as "admin" | "member")}
+                onChange={(event) => setAddRole(event.target.value as "admin" | "member")}
               >
                 <option value="member">Member</option>
                 <option value="admin">Admin</option>
@@ -466,17 +332,17 @@ export function Admin({
               <Input
                 type="email"
                 value={inviteEmail}
-                onChange={(e) => setInviteEmail(e.target.value)}
+                onChange={(event) => setInviteEmail(event.target.value)}
                 placeholder="teammate@example.com"
               />
             </Field>
             <Field label="Name (optional)">
-              <Input value={inviteName} onChange={(e) => setInviteName(e.target.value)} />
+              <Input value={inviteName} onChange={(event) => setInviteName(event.target.value)} />
             </Field>
             <Field label="Role">
               <Select
                 value={inviteRole}
-                onChange={(e) => setInviteRole(e.target.value as "admin" | "member")}
+                onChange={(event) => setInviteRole(event.target.value as "admin" | "member")}
               >
                 <option value="member">Member</option>
                 <option value="admin">Admin</option>

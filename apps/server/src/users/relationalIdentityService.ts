@@ -817,6 +817,46 @@ export class RelationalIdentityService implements IdentityService {
     return result.user;
   }
 
+  async updateRole(id: string, role: UserRole): Promise<IdentityUserSummary> {
+    const now = this.clock().toISOString();
+    return this.transactions.transaction(async (sql) => {
+      const activeAdmins = await sql.query<{ id: string }>(
+        `SELECT id
+         FROM users
+         WHERE role = 'admin' AND status = 'active' AND password_hash IS NOT NULL
+         ORDER BY id
+         FOR UPDATE`,
+      );
+      const userResult = await sql.query<UserRow>(
+        `SELECT id, email, name, role, status, password_hash,
+                password_hash_scheme, created_at
+         FROM users
+         WHERE id = $1
+         FOR UPDATE`,
+        [id],
+      );
+      const user = userResult.rows[0];
+      if (!user) throw new UserNotFoundError(id);
+      if (
+        user.role === "admin" &&
+        role === "member" &&
+        user.status === "active" &&
+        activeAdmins.rows.length <= 1
+      ) {
+        throw new LastActiveAdminError("demoted");
+      }
+      if (user.role === role) return summary(user);
+
+      await sql.query(
+        `UPDATE users
+         SET role = $2, updated_at = $3
+         WHERE id = $1`,
+        [id, role, now],
+      );
+      return summary({ ...user, role });
+    });
+  }
+
   async disable(id: string): Promise<void> {
     const now = this.clock().toISOString();
     await this.transactions.transaction(async (sql) => {

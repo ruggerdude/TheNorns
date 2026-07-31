@@ -3100,6 +3100,11 @@ export function App(): React.ReactElement {
     setShowAdmin(true);
   }, []);
 
+  const handleCurrentUserRoleChanged = useCallback((role: "admin" | "member") => {
+    setUser((current) => (current ? { ...current, role } : current));
+    if (role !== "admin") setShowAdmin(false);
+  }, []);
+
   const openUsage = useCallback(() => {
     setShowAccount(false);
     setShowAdmin(false);
@@ -3228,6 +3233,8 @@ export function App(): React.ReactElement {
               embedded
               onClose={closeGlobalPage}
               onUnauthorized={() => logout("Session expired. Sign in again.")}
+              currentUserId={user.id}
+              onCurrentUserRoleChanged={handleCurrentUserRoleChanged}
             />
           </Suspense>
         ) : (
