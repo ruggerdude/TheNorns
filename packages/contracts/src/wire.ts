@@ -202,6 +202,10 @@ export const RunnerWorkspaceResponse = z
       .optional(),
     entries: z.array(RunnerWorkspaceEntry).optional(),
     repository: RunnerWorkspaceRepository.optional(),
+    // Enrolled devices register approved repositories with the relay before
+    // returning a clone response. This opaque id lets onboarding grant the
+    // exact working copy without exposing its filesystem path.
+    repository_registration_id: opaqueId.optional(),
     repositories: z.array(RunnerWorkspaceRepository).max(200).optional(),
     inspection: RepositoryInspection.optional(),
   })
@@ -222,6 +226,17 @@ export const RunnerWorkspaceResponse = z
       return;
     }
     if (value.status !== "ok") return;
+    if (
+      value.repository_registration_id !== undefined &&
+      value.operation !== "choose" &&
+      value.operation !== "clone"
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["repository_registration_id"],
+        message: "repository registration is valid only for a selected repository",
+      });
+    }
     const correctPayload =
       (value.operation === "list" && value.workspaces !== undefined) ||
       (value.operation === "catalog" && value.repositories !== undefined) ||

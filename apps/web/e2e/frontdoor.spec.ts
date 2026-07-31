@@ -209,6 +209,49 @@ async function prepare(
         legacy_local_creation_available: true,
       });
     }
+    if (path === "/api/devices") {
+      return fulfill(route, {
+        devices: [
+          {
+            device_id: "device-e2e",
+            owner_user_id: "admin-1",
+            name: "Front Door Mac",
+            location_label: "Test desk",
+            os_family: "macos",
+            os_version: "15.5",
+            lifecycle: "active",
+            status: {
+              availability: "online",
+              compatibility: "ready",
+              workload: "idle",
+              access: "owned",
+            },
+            last_seen_at: "2026-07-30T14:30:00.000Z",
+            active_credential: {
+              device_id: "device-e2e",
+              credential_id: "credential-e2e",
+              generation: 1,
+              public_key_fingerprint: "a".repeat(64),
+              state: "active",
+              activated_at: "2026-07-29T12:00:00.000Z",
+            },
+            agent: {
+              version: "0.4.0",
+              protocol_version: "1",
+              capabilities: [
+                "device_control",
+                "repository_access",
+                "workspace_picker",
+                "workspace_repository_inventory",
+                "workspace_clone",
+              ],
+            },
+            repository_grants: [],
+            activity: { active_run_count: 0, queued_command_count: 0 },
+          },
+        ],
+      });
+    }
     if (path === "/api/runners/helper/repositories") {
       return fulfill(route, {
         state: "connected",
@@ -521,10 +564,7 @@ async function openExistingProjectWizard(page: Page) {
       existing,
     );
   }
-  await clickUntilVisible(
-    existing,
-    page.getByRole("group", { name: /where is the existing code/i }),
-  );
+  await existing.click();
   return existing;
 }
 
@@ -545,50 +585,34 @@ test("GitHub front door creates and immediately enters the project", async ({ pa
   await expectWorkspaceNavigation(page);
 });
 
-test("Local front door uses the helper selection and opens a nonblank workspace", async ({
-  page,
-}) => {
-  await prepare(page, "local");
-  await page.goto("/");
-  await openExistingProjectWizard(page);
-  await page.getByRole("button", { name: /^approved local git repository/i }).click();
-  await page.getByRole("button", { name: /local-front-door/i }).click();
-  await page.getByRole("button", { name: /adopt project/i }).click();
-  await expect(page.getByText("local-front-door", { exact: true }).first()).toBeVisible();
-  await expect(page.getByText(/loading graph/i)).toHaveCount(0);
-  await expectWorkspaceNavigation(page);
-});
-
 // DESIGN R2: the wizard is name-first and never starts a planning run —
 // planning begins in the conversation after creation, so this journey ends at
 // the opened workspace.
-test("New work can use an approved local Git repository and open the workspace", async ({
+test("New work can create a GitHub repository and folder on an enrolled computer", async ({
   page,
 }) => {
-  const observed = await prepare(page, "local");
+  const observed = await prepare(page, "new");
   await page.goto("/");
   await page.getByRole("button", { name: /new project/i }).click();
   await page.getByTestId("project-name").fill("Local release readiness dashboard");
-  await page.getByRole("button", { name: /^approved local git repository/i }).click();
+  await page.getByRole("button", { name: /^this computer/i }).click();
+  await expect(page.getByTestId("project-computer")).toHaveValue("device-e2e");
   await expect(page.getByTestId("setup-confirmation")).toContainText(
-    "will not create a folder or initialize Git",
-  );
-  await page.getByRole("button", { name: /local-front-door/i }).click();
-  await expect(page.getByTestId("derived-project-summary")).toContainText(
-    "New Norns project in local-front-door",
+    "ask Front Door Mac where to create its local working folder",
   );
   await page.getByRole("button", { name: /create project/i }).click();
 
   await expectWorkspaceNavigation(page);
-  expect(observed.onboardingRequests).toEqual([]);
-  expect(observed.localProjectRequests).toEqual([
+  expect(observed.onboardingRequests).toEqual([
     expect.objectContaining({
       name: "Local release readiness dashboard",
       description: "",
-      selection_token: "selection:e2e",
+      scenario: "new_repo",
+      local_working_copy: true,
+      computer_id: "device-e2e",
     }),
   ]);
-  expect(observed.planningRequests).toEqual([]);
+  expect(observed.localProjectRequests).toEqual([]);
 });
 
 test("Directed adoption reaches one approval and starts the first coding task", async ({
@@ -602,6 +626,10 @@ test("Directed adoption reaches one approval and starts the first coding task", 
     .fill("Improve the deployment workflow and implement it");
   await page.getByRole("button", { name: /adopt project/i }).click();
 
+  await page
+    .getByRole("navigation", { name: "Workspace sections" })
+    .getByRole("button", { name: /work$/i })
+    .click();
   await expect(page.getByTestId("phase-decision-panel")).toBeVisible();
   await page.getByRole("button", { name: /approve & start coding/i }).click();
   await expect(page.getByTestId("phase-execution-kickoff-note")).toContainText(

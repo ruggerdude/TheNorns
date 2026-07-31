@@ -1429,6 +1429,9 @@ button:disabled {
   grid-template-columns: 1fr 1fr;
   gap: .6rem;
 }
+.source-options.source-options-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
 .source-options button {
   display: grid;
   gap: .25rem;
@@ -3561,6 +3564,9 @@ button:disabled {
   }
   .project-setup-view .source-options button {
     min-height: 0;
+  }
+  .source-options.source-options-three {
+    grid-template-columns: 1fr;
   }
 }
 

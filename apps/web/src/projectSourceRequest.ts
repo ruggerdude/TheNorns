@@ -143,11 +143,15 @@ export function parseGitHubRepoRef(text: string): { owner: string; name: string 
  */
 export function describeSetup(
   repositoryFullName: string | null,
-  executionLocation: "github_actions" | "local" = "github_actions",
+  executionLocation: "github_actions" | "this_computer" | "remote_computer" = "github_actions",
+  computerName?: string,
 ): string {
   if (!repositoryFullName) return "Choose or create a GitHub repository to continue.";
-  if (executionLocation === "local") {
-    return `Norns will create ${repositoryFullName} on GitHub, ask where to create its working folder on this computer, and run approved work locally. Git pushes use the credentials configured on this computer.`;
+  if (executionLocation === "this_computer") {
+    return `Norns will create ${repositoryFullName} on GitHub, then ask ${computerName ?? "this computer"} where to create its local working folder. Folder paths stay on that computer.`;
+  }
+  if (executionLocation === "remote_computer") {
+    return `Norns will create ${repositoryFullName} on GitHub, then ask ${computerName ?? "the selected remote computer"} where to create its working folder. Folder paths stay on that computer.`;
   }
   return `Work happens in a GitHub Actions job inside ${repositoryFullName}. Changes arrive as commits and pull requests in that repository — to get the files on your own machine, clone or pull as usual.`;
 }

@@ -47,6 +47,7 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
   let pg: PGlite;
   let server: NornsServer;
   let daemon: RunnerDaemon;
+  let deviceDaemon: RunnerDaemon;
   let url: string;
   let token: string;
   let parent: string;
@@ -109,6 +110,91 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
     const ingestion = new RepositoryIngestionService(transactions);
     const phases = new PhaseWorkflowService(transactions);
     const strategies = new StrategyWorkflowService(transactions);
+    const deviceProjection = {
+      device_id: "device-local",
+      owner_user_id: "admin-1",
+      name: "Test Mac",
+      location_label: "Test desk",
+      os_family: "macos" as const,
+      os_version: "15.5",
+      lifecycle: "active" as const,
+      status: {
+        availability: "online" as const,
+        compatibility: "ready" as const,
+        workload: "idle" as const,
+        access: "owned" as const,
+      },
+      last_seen_at: "2026-07-30T12:00:00.000Z",
+      active_credential: {
+        device_id: "device-local",
+        credential_id: "credential-local",
+        generation: 1,
+        public_key_fingerprint: "a".repeat(64),
+        state: "active" as const,
+        activated_at: "2026-07-30T12:00:00.000Z",
+      },
+      agent: {
+        version: "0.4.0",
+        protocol_version: "1",
+        capabilities: [
+          "device_control",
+          "repository_access",
+          "workspace_picker",
+          "workspace_repository_inventory",
+          "workspace_clone",
+        ],
+      },
+      repository_grants: [],
+      activity: { active_run_count: 0, queued_command_count: 0 },
+    };
+    const deviceRepositoryService = {
+      grantRepository: vi.fn(async ({ project_id }: { project_id: string }) => ({
+        grant_id: "grant-local",
+        project_id,
+        repository_registration_id: "registration-local",
+        state: "active" as const,
+      })),
+      selectProjectExecutionTarget: vi.fn(async ({ project_id }: { project_id: string }) => {
+        await sourceBindings.createLocal(
+          {
+            project_id,
+            runner_id: "device-local",
+            workspace_id: "workspace-device",
+            repository_id: "repository-device",
+            repository_display_name: "fresh-app",
+            default_branch: "main",
+            observed_head: HEAD,
+            verification_policy_ref: "verification",
+            created_by: { actor_type: "human", actor_id: "admin-1" },
+          },
+          { makePrimary: true },
+        );
+        return {
+          schema_version: 1 as const,
+          project_id,
+          viewer_role: "owner" as const,
+          selected_execution_target_id: "grant-local",
+          work_active: false,
+          legacy_claim_required: false,
+          execution_targets: [
+            {
+              project_id,
+              execution_target_id: "grant-local",
+              name: "Test Mac",
+              location_label: "Test desk",
+              os_family: "macos" as const,
+              status: {
+                availability: "online" as const,
+                compatibility: "ready" as const,
+                workload: "idle" as const,
+                access: "shared" as const,
+              },
+              last_seen_at: "2026-07-30T12:00:00.000Z",
+            },
+          ],
+        };
+      }),
+    };
     server = await buildServer({
       stores: new RelayStores(),
       users,
@@ -118,6 +204,30 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
       legacyPairingRoutes: { enabled: true },
       legacyHelperRoutes: { enabled: true },
       legacyLocalRunnerAuth: { enabled: true },
+      deviceManagement: {
+        service: {
+          listOwnedDevices: async () => [deviceProjection],
+          getOwnedDevice: async () => deviceProjection,
+          renameOwnedDevice: async () => deviceProjection,
+          revokeOwnedDevice: async () => deviceProjection,
+        },
+      },
+      deviceWssAuthentication: {
+        supportedProtocolVersions: ["1"],
+        authenticate: async (request) => ({
+          device_id: request.device_id,
+          owner_user_id: "admin-1",
+          credential_id: request.credential_id,
+          generation: request.generation,
+          protocol_version: request.protocol_version,
+        }),
+        verifyCancellationEvidence: async () => false,
+      },
+      deviceRepositoryAccess: {
+        service: deviceRepositoryService as never,
+        publicationPermits: {} as never,
+        runnerAuthentication: {} as never,
+      },
       phase3: {
         sourceBindings,
         ingestion,
@@ -167,10 +277,41 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
     await daemon.pair(pairing.code);
     daemon.connect();
     await waitFor(() => server.connectedRunners().includes("runner-local"), "local helper");
+
+    const deviceDataDir = mkdtempSync(join(tmpdir(), "norns-github-device-helper-"));
+    deviceDaemon = new RunnerDaemon({
+      serverUrl: url,
+      runnerId: "unused-device-runner",
+      dataDir: deviceDataDir,
+      workspaces: new WorkspaceRegistry(
+        deviceDataDir,
+        async () => parent,
+        async ({ cloneUrl, target, token: cloneToken }) => {
+          cloneTokenSeen = cloneToken;
+          execFileSync("git", ["clone", "--", source, target]);
+          execFileSync("git", ["-C", target, "remote", "set-url", "origin", cloneUrl]);
+        },
+      ),
+      registerWorkspace: async () => ({ registration_id: "registration-local" }),
+      heartbeatMs: 250,
+      reconnectDelayMs: 50,
+      deviceControl: {
+        identity: {
+          device_id: "device-local",
+          credential_id: "credential-local",
+          generation: 1,
+        },
+        sign: () => "test-signature",
+        capabilities: deviceProjection.agent.capabilities,
+      },
+    });
+    deviceDaemon.start();
+    await waitFor(() => server.connectedRunners().includes("device-local"), "enrolled computer");
   }, 30_000);
 
   afterEach(async () => {
     daemon?.stop();
+    deviceDaemon?.stop();
     await server?.app.close();
     if (pg && !pg.closed) await pg.close();
   });
@@ -230,5 +371,37 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
       [body.project_id],
     );
     expect(remote.rows).toEqual([{ binding_type: "github", role: "remote" }]);
+  });
+
+  it("targets the exact enrolled computer without using a global helper lookup", async () => {
+    const response = await fetch(`${url}/api/v2/projects/onboarding`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        scenario: "new_repo",
+        name: "Fresh app",
+        description: "",
+        pm_provider: "anthropic",
+        pm_model: "claude-sonnet-5",
+        connection_id: "github:42",
+        idempotency_key: "github-device-working-copy",
+        repository_name: "fresh-app",
+        private: true,
+        local_working_copy: true,
+        computer_id: "device-local",
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      execution_location: "local",
+      workspace: { kind: "local_runner", display_name: "fresh-app" },
+      local_working_copy: { status: "ready" },
+    });
+    expect(existsSync(join(parent, "fresh-app", ".git"))).toBe(true);
+    expect(cloneTokenSeen).toBe("one-use-clone-token");
   });
 });

@@ -2,6 +2,8 @@ import {
   type CodexReasoningEffortT,
   DEFAULT_CODEX_REASONING_EFFORT,
   DEFAULT_PM_MODEL,
+  OwnedDeviceProjection,
+  type OwnedDeviceProjectionT,
   PM_MODEL_OPTIONS,
   type PmModelT,
   pmModelOption,
@@ -456,9 +458,9 @@ export function Projects({
   // Connections; Existing work can adopt either source.
   const [startingPoint, setStartingPoint] = useState<"new" | "existing">("new");
   const [sourceKind, setSourceKind] = useState<"github" | "local">("github");
-  const [executionLocation, setExecutionLocation] = useState<"github_actions" | "local">(
-    "github_actions",
-  );
+  const [executionLocation, setExecutionLocation] = useState<
+    "github_actions" | "this_computer" | "remote_computer"
+  >("github_actions");
   const scenario: ProjectOnboardingScenario =
     startingPoint === "new" ? "new_repo" : "existing_repo";
   const [name, setName] = useState("");
@@ -488,6 +490,9 @@ export function Projects({
   const [localExecutionCapabilities, setLocalExecutionCapabilities] = useState(
     DISABLED_LOCAL_EXECUTION_CAPABILITIES,
   );
+  const [computers, setComputers] = useState<OwnedDeviceProjectionT[] | null>(null);
+  const [computersError, setComputersError] = useState<string | null>(null);
+  const [selectedComputerId, setSelectedComputerId] = useState("");
   const [creating, setCreating] = useState(false);
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
   const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
@@ -670,10 +675,15 @@ export function Projects({
         setLocalExecutionCapabilities(capabilities);
         if (!capabilities.legacy_local_creation_available) {
           setSourceKind("github");
-          setExecutionLocation("github_actions");
           setLocalSelection(null);
           setLocalSources(null);
           setLocalSourcesError(null);
+        }
+        if (!capabilities.computers_available || !capabilities.repository_grants_available) {
+          setExecutionLocation("github_actions");
+          setComputers(null);
+          setComputersError(null);
+          setSelectedComputerId("");
         }
       })
       .catch((error: unknown) => {
@@ -746,8 +756,7 @@ export function Projects({
     enabled:
       dialog &&
       localExecutionCapabilities.legacy_local_creation_available &&
-      (sourceKind === "local" ||
-        (startingPoint === "new" && sourceKind === "github" && executionLocation === "local")),
+      sourceKind === "local",
     intervalMs: 4_000,
     maxBackoffMs: 60_000,
     resourceKey: "local-sources",
@@ -767,6 +776,47 @@ export function Projects({
     onError: (pollError) => {
       if (pollError instanceof UnauthorizedError) onUnauthorized();
       else setLocalSourcesError(pollError.message);
+    },
+  });
+
+  useSingleFlightPolling({
+    enabled:
+      dialog &&
+      startingPoint === "new" &&
+      sourceKind === "github" &&
+      executionLocation !== "github_actions" &&
+      localExecutionCapabilities.computers_available,
+    intervalMs: 4_000,
+    maxBackoffMs: 60_000,
+    resourceKey: "project-computers",
+    load: async () => {
+      const payload = await request<{ devices: unknown }>("/api/devices");
+      return OwnedDeviceProjection.array().parse(payload.devices);
+    },
+    onSuccess: (availableComputers) => {
+      setComputersError(null);
+      setComputers(availableComputers);
+      setSelectedComputerId((current) => {
+        if (availableComputers.some((computer) => computer.device_id === current)) return current;
+        return (
+          availableComputers.find(
+            (computer) =>
+              computer.lifecycle === "active" &&
+              computer.status.availability === "online" &&
+              computer.agent?.capabilities.includes("workspace_picker") &&
+              computer.agent.capabilities.includes("workspace_repository_inventory") &&
+              computer.agent?.capabilities.includes("workspace_clone"),
+          )?.device_id ??
+          availableComputers.find((computer) => computer.lifecycle === "active")?.device_id ??
+          ""
+        );
+      });
+    },
+    onError: (pollError) => {
+      if (pollError instanceof UnauthorizedError) onUnauthorized();
+      else {
+        setComputersError("Norns couldn't check your computers. Open Computers and try again.");
+      }
     },
   });
 
@@ -1038,14 +1088,20 @@ export function Projects({
         return;
       }
       const repository = repositories.find((candidate) => candidate.id === selectedRepositoryId);
+      const computerExecution = executionLocation !== "github_actions";
       if (
         scenario === "new_repo" &&
-        executionLocation === "local" &&
-        !localExecutionCapabilities.legacy_local_creation_available
+        computerExecution &&
+        (!localExecutionCapabilities.computers_available ||
+          !localExecutionCapabilities.repository_grants_available)
       ) {
         setSourceError(
-          "Creating a local working copy is disabled. Choose GitHub Actions for this project.",
+          "Computer working copies are not enabled. Choose GitHub Actions for this project.",
         );
+        return;
+      }
+      if (scenario === "new_repo" && computerExecution && !selectedComputerId) {
+        setSourceError("Choose an online computer for the new working folder.");
         return;
       }
       if (scenario === "new_repo" && !selectedConnectionId) {
@@ -1090,7 +1146,12 @@ export function Projects({
         pm_provider: pmProvider,
         pm_model: pmModel,
         idempotency_key: idempotencyKey,
-        ...(scenario === "new_repo" ? { local_working_copy: executionLocation === "local" } : {}),
+        ...(scenario === "new_repo"
+          ? {
+              local_working_copy: computerExecution,
+              ...(computerExecution ? { computer_id: selectedComputerId } : {}),
+            }
+          : {}),
         ...onboardingFields,
       });
       // The onboarding response is a lean summary (project_id, scenario,
@@ -1139,6 +1200,9 @@ export function Projects({
     startingPoint,
     sourceKind,
     executionLocation,
+    selectedComputerId,
+    localExecutionCapabilities.computers_available,
+    localExecutionCapabilities.repository_grants_available,
     localExecutionCapabilities.legacy_local_creation_available,
     localSelection,
     selectedConnectionId,
@@ -1173,7 +1237,11 @@ export function Projects({
     const project = draftProject;
     setOnboardingBlockers([]);
     setWizardStep("form");
-    if (startingPoint === "new" && sourceKind === "github" && executionLocation === "local") {
+    if (
+      startingPoint === "new" &&
+      sourceKind === "github" &&
+      executionLocation !== "github_actions"
+    ) {
       void create();
       return;
     }
@@ -1283,6 +1351,20 @@ export function Projects({
   const githubConnected = connectedGitHub.length > 0;
   const isLocalSource = sourceKind === "local";
   const legacyLocalCreationAvailable = localExecutionCapabilities.legacy_local_creation_available;
+  const computerCreationAvailable =
+    localExecutionCapabilities.computers_available &&
+    localExecutionCapabilities.repository_grants_available;
+  const selectedComputer = computers?.find((computer) => computer.device_id === selectedComputerId);
+  const readyComputers =
+    computers?.filter(
+      (computer) =>
+        computer.lifecycle === "active" &&
+        computer.status.availability === "online" &&
+        computer.agent?.capabilities.includes("workspace_picker") &&
+        computer.agent.capabilities.includes("workspace_repository_inventory") &&
+        computer.agent.capabilities.includes("workspace_clone"),
+    ) ?? [];
+  const computerExecution = executionLocation !== "github_actions";
   const sourceReady = isLocalSource
     ? legacyLocalCreationAvailable && Boolean(localSelection)
     : scenario === "existing_repo"
@@ -1291,10 +1373,10 @@ export function Projects({
   const localCloneReady =
     isLocalSource ||
     startingPoint !== "new" ||
-    executionLocation !== "local" ||
-    (legacyLocalCreationAvailable &&
-      localSources?.state === "connected" &&
-      localSources.workspace_clone_ready);
+    !computerExecution ||
+    (computerCreationAvailable &&
+      selectedComputer !== undefined &&
+      readyComputers.some((computer) => computer.device_id === selectedComputer.device_id));
   const canCreate =
     !creating &&
     (isLocalSource || githubConnected) &&
@@ -1318,6 +1400,7 @@ export function Projects({
     : describeSetup(
         confirmationRepositoryFullName,
         startingPoint === "new" ? executionLocation : "github_actions",
+        selectedComputer?.name,
       );
 
   return (
@@ -1859,92 +1942,51 @@ export function Projects({
                     </Field>
                   ) : null}
                   <fieldset className="source-picker">
-                    <legend>Project type</legend>
+                    <legend>Working location</legend>
                     <div className="source-options">
                       <button
                         type="button"
-                        className={startingPoint === "new" ? "is-selected" : ""}
+                        className={
+                          sourceKind === "github" && startingPoint === "new" ? "is-selected" : ""
+                        }
                         onClick={() => {
                           setStartingPoint("new");
-                          setSelectedRepositoryId("");
-                          setSourceError(null);
-                          setLocalSourcesError(null);
-                          setSubmissionError(null);
-                        }}
-                      >
-                        <strong>New</strong>
-                        <span>
-                          Create a GitHub repository or use an approved local Git repository.
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        className={startingPoint === "existing" ? "is-selected" : ""}
-                        onClick={() => {
-                          setStartingPoint("existing");
-                          setExecutionLocation("github_actions");
-                          setRepositoryName("");
-                          setSourceError(null);
-                          setLocalSourcesError(null);
-                          setSubmissionError(null);
-                        }}
-                      >
-                        <strong>Existing</strong>
-                        <span>
-                          {legacyLocalCreationAvailable
-                            ? "Choose an existing GitHub or approved local Git repository."
-                            : "Choose an existing GitHub repository."}
-                        </span>
-                      </button>
-                    </div>
-                  </fieldset>
-
-                  <fieldset className="source-picker">
-                    <legend>
-                      {startingPoint === "new" ? "Working location" : "Where is the existing code?"}
-                    </legend>
-                    <div className="source-options">
-                      <button
-                        type="button"
-                        className={sourceKind === "github" ? "is-selected" : ""}
-                        onClick={() => {
                           setSourceKind("github");
-                          if (startingPoint === "existing") {
-                            setExecutionLocation("github_actions");
-                          }
+                          setSelectedRepositoryId("");
                           setLocalSelection(null);
                           setSourceError(null);
                           setLocalSourcesError(null);
                           setSubmissionError(null);
                         }}
                       >
-                        <strong>GitHub repository</strong>
+                        <strong>New GitHub</strong>
                         <span>
-                          {startingPoint === "new"
-                            ? "Create a repository in a connected account or organization."
-                            : "Select from a connected account or organization."}
+                          Create a new repository in a connected GitHub account or organization.
                         </span>
                       </button>
-                      {legacyLocalCreationAvailable ? (
-                        <button
-                          type="button"
-                          className={sourceKind === "local" ? "is-selected" : ""}
-                          onClick={() => {
-                            setSourceKind("local");
-                            setExecutionLocation("github_actions");
-                            setSelectedRepositoryId("");
-                            setSourceError(null);
-                            setLocalSourcesError(null);
-                            setSubmissionError(null);
-                          }}
-                        >
-                          <strong>Approved local Git repository</strong>
-                          <span>
-                            Use a repository already initialized and approved in Connections. Norns
-                            does not create the folder.
-                          </span>
-                        </button>
-                      ) : null}
+                      <button
+                        type="button"
+                        className={
+                          sourceKind === "github" && startingPoint === "existing"
+                            ? "is-selected"
+                            : ""
+                        }
+                        onClick={() => {
+                          setStartingPoint("existing");
+                          setSourceKind("github");
+                          setExecutionLocation("github_actions");
+                          setRepositoryName("");
+                          setLocalSelection(null);
+                          setSourceError(null);
+                          setLocalSourcesError(null);
+                          setSubmissionError(null);
+                        }}
+                      >
+                        <strong>Existing GitHub</strong>
+                        <span>
+                          Select a repository from a connected GitHub account or organization.
+                        </span>
+                      </button>
                     </div>
                   </fieldset>
 
@@ -2152,27 +2194,41 @@ export function Projects({
                     </div>
                   )}
 
-                  {!isLocalSource &&
-                  startingPoint === "new" &&
-                  githubConnected &&
-                  legacyLocalCreationAvailable ? (
+                  {!isLocalSource && startingPoint === "new" && githubConnected ? (
                     <fieldset className="source-picker" data-testid="execution-location-picker">
                       <legend>Project location</legend>
-                      <div className="source-options">
+                      <div className="source-options source-options-three">
                         <button
                           type="button"
-                          className={executionLocation === "local" ? "is-selected" : ""}
+                          className={executionLocation === "this_computer" ? "is-selected" : ""}
+                          disabled={!computerCreationAvailable}
                           onClick={() => {
-                            setExecutionLocation("local");
+                            setExecutionLocation("this_computer");
                             setSourceError(null);
-                            setLocalSourcesError(null);
+                            setComputersError(null);
                             setSubmissionError(null);
                           }}
                         >
-                          <strong>This computer + GitHub</strong>
+                          <strong>This computer</strong>
                           <span>
-                            Create the GitHub repository, choose a parent folder, and clone a local
-                            working copy for the helper.
+                            Choose a parent folder here and clone the new GitHub repository.
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className={executionLocation === "remote_computer" ? "is-selected" : ""}
+                          disabled={!computerCreationAvailable}
+                          onClick={() => {
+                            setExecutionLocation("remote_computer");
+                            setSourceError(null);
+                            setComputersError(null);
+                            setSubmissionError(null);
+                          }}
+                        >
+                          <strong>Remote computer</strong>
+                          <span>
+                            Ask an online enrolled computer to choose a folder and clone the
+                            repository there.
                           </span>
                         </button>
                         <button
@@ -2181,7 +2237,7 @@ export function Projects({
                           onClick={() => {
                             setExecutionLocation("github_actions");
                             setSourceError(null);
-                            setLocalSourcesError(null);
+                            setComputersError(null);
                             setSubmissionError(null);
                           }}
                         >
@@ -2189,48 +2245,58 @@ export function Projects({
                           <span>Run approved work in an ephemeral GitHub-hosted runner.</span>
                         </button>
                       </div>
-                      {executionLocation === "local" ? (
-                        localSourcesError ? (
-                          <Alert testId="local-source-error">{localSourcesError}</Alert>
-                        ) : localSources === null ? (
-                          <Spinner label="Checking Norns Local Agent…" />
-                        ) : localSources.state !== "connected" ? (
+                      {computerExecution ? (
+                        computersError ? (
+                          <Alert testId="computer-source-error">{computersError}</Alert>
+                        ) : computers === null ? (
+                          <Spinner label="Checking your computers…" />
+                        ) : readyComputers.length === 0 ? (
                           <div className="connection-required">
                             <div>
-                              <strong>Norns Local Agent required</strong>
-                              <p>{localSources.message}</p>
-                            </div>
-                            <Button
-                              type="button"
-                              variant="primary"
-                              className="btn-small"
-                              onClick={() => onOpenAccount("connections")}
-                            >
-                              Open Connections
-                            </Button>
-                          </div>
-                        ) : !localSources.workspace_clone_ready ? (
-                          <div className="connection-required">
-                            <div>
-                              <strong>Update Norns Local Agent</strong>
+                              <strong>Online Local Agent required</strong>
                               <p>
-                                Update the agent in Connections to enable secure GitHub cloning.
+                                Open or update the Local Agent on a computer connected to your
+                                account, then leave it running while you create the project.
                               </p>
                             </div>
                             <Button
                               type="button"
                               variant="primary"
                               className="btn-small"
-                              onClick={() => onOpenAccount("connections")}
+                              onClick={onOpenAdmin}
                             >
-                              Open Connections
+                              Open Computers
                             </Button>
                           </div>
                         ) : (
-                          <p className="field-help">
-                            The system folder chooser opens after GitHub creates the repository. The
-                            selected path stays on this computer.
-                          </p>
+                          <div className="form-stack computer-project-picker">
+                            <Field
+                              label={
+                                executionLocation === "this_computer"
+                                  ? "Computer you are using"
+                                  : "Remote computer"
+                              }
+                            >
+                              <Select
+                                data-testid="project-computer"
+                                value={selectedComputerId}
+                                onChange={(event) => setSelectedComputerId(event.target.value)}
+                              >
+                                {readyComputers.map((computer) => (
+                                  <option key={computer.device_id} value={computer.device_id}>
+                                    {computer.name}
+                                    {computer.location_label ? ` · ${computer.location_label}` : ""}
+                                  </option>
+                                ))}
+                              </Select>
+                            </Field>
+                            <p className="field-help">
+                              {executionLocation === "this_computer"
+                                ? "Choose this Mac from the list. Its system folder chooser opens after GitHub creates the repository."
+                                : "The folder chooser opens on the selected computer after GitHub creates the repository."}{" "}
+                              Folder paths never leave that computer.
+                            </p>
+                          </div>
                         )
                       ) : null}
                     </fieldset>
@@ -2423,7 +2489,7 @@ export function Projects({
                     {creating
                       ? startingPoint === "new" &&
                         sourceKind === "github" &&
-                        executionLocation === "local"
+                        executionLocation !== "github_actions"
                         ? "Creating GitHub repository and local folder…"
                         : scenario === "new_repo"
                           ? "Creating repository and project…"

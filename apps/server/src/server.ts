@@ -38,6 +38,7 @@ import {
   LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
   LocalExecutionCapabilitiesProjection,
   OpenAiPmModel,
+  type OwnedDeviceProjectionT,
   PROTOCOL_VERSION,
   PlanContract,
   ReconcileRequest,
@@ -4340,6 +4341,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             .regex(/^[A-Za-z0-9._-]+$/, "repository name must be a valid GitHub repository name"),
           private: z.boolean().default(true),
           local_working_copy: z.boolean().default(false),
+          computer_id: z.string().trim().min(1).max(512).optional(),
         }),
         z.object({
           ...OnboardingFields,
@@ -4391,10 +4393,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 runner_id: string;
                 generation: number;
                 socket: WsLike;
+                device_backed: boolean;
               }
             | undefined;
           if (scenario.data.scenario === "new_repo" && scenario.data.local_working_copy) {
-            if (!requireLegacyHelperRoutes(reply)) return;
             if (!github || !options.phase3) {
               console.error(
                 "project onboarding refused: local_working_copy_unavailable (503) — GitHub integration or local execution services not configured",
@@ -4405,39 +4407,92 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                   "GitHub + this computer requires the GitHub integration and local execution services.",
               });
             }
-            const status = helperStatus(helperRunnerSnapshots());
-            const runnerId = status.runner_id;
-            const runner = runnerId ? stores.runner(runnerId) : undefined;
-            const reconciled = runnerId ? reconciledRunners.get(runnerId) : undefined;
-            if (
-              status.state !== "connected" ||
-              !runnerId ||
-              !runner ||
-              !reconciled ||
-              !reconciled.workspacePicker ||
-              !reconciled.workspaceRepositoryInventory ||
-              !reconciled.workspaceClone ||
-              reconciled.socket !== runnerSockets.get(runnerId) ||
-              reconciled.generation !== runner.generation
-            ) {
-              const refusal =
-                status.state === "connected" ? "runner_upgrade_required" : "runner_unavailable";
-              console.error(
-                `project onboarding refused: ${refusal} (409) — local helper not ready for a working copy`,
-              );
-              return reply.code(409).send({
-                error: refusal,
-                message:
-                  status.state === "connected"
-                    ? "Update the local helper before creating a GitHub working copy."
-                    : "The local helper must be connected before creating a working copy on this computer.",
-              });
+            if (scenario.data.computer_id) {
+              if (!options.deviceManagement || !options.deviceRepositoryAccess) {
+                return reply.code(503).send({
+                  error: "computer_working_copy_unavailable",
+                  message:
+                    "Computer working copies are not enabled on this Norns installation. Choose GitHub Actions.",
+                });
+              }
+              let computer: OwnedDeviceProjectionT;
+              try {
+                computer = await options.deviceManagement.service.getOwnedDevice(
+                  user.id,
+                  scenario.data.computer_id,
+                );
+              } catch {
+                return reply.code(404).send({
+                  error: "computer_not_found",
+                  message: "That computer is no longer connected to your account.",
+                });
+              }
+              const runnerId = computer.device_id;
+              const reconciled = reconciledRunners.get(runnerId);
+              if (
+                computer.lifecycle !== "active" ||
+                computer.status.availability !== "online" ||
+                !reconciled ||
+                !reconciled.workspacePicker ||
+                !reconciled.workspaceRepositoryInventory ||
+                !reconciled.workspaceClone ||
+                reconciled.socket !== runnerSockets.get(runnerId) ||
+                reconciled.generation !== computer.active_credential?.generation
+              ) {
+                const updateRequired =
+                  computer.status.availability === "online" &&
+                  computer.agent !== null &&
+                  !computer.agent.capabilities.includes("workspace_clone");
+                return reply.code(409).send({
+                  error: updateRequired ? "computer_upgrade_required" : "computer_unavailable",
+                  message: updateRequired
+                    ? "Update the Norns Local Agent on that computer before creating a working copy."
+                    : "That computer must be online with the Norns Local Agent open before creating a working copy.",
+                });
+              }
+              localRunner = {
+                runner_id: runnerId,
+                generation: reconciled.generation,
+                socket: reconciled.socket,
+                device_backed: true,
+              };
+            } else {
+              if (!requireLegacyHelperRoutes(reply)) return;
+              const status = helperStatus(helperRunnerSnapshots());
+              const runnerId = status.runner_id;
+              const runner = runnerId ? stores.runner(runnerId) : undefined;
+              const reconciled = runnerId ? reconciledRunners.get(runnerId) : undefined;
+              if (
+                status.state !== "connected" ||
+                !runnerId ||
+                !runner ||
+                !reconciled ||
+                !reconciled.workspacePicker ||
+                !reconciled.workspaceRepositoryInventory ||
+                !reconciled.workspaceClone ||
+                reconciled.socket !== runnerSockets.get(runnerId) ||
+                reconciled.generation !== runner.generation
+              ) {
+                const refusal =
+                  status.state === "connected" ? "runner_upgrade_required" : "runner_unavailable";
+                console.error(
+                  `project onboarding refused: ${refusal} (409) — local helper not ready for a working copy`,
+                );
+                return reply.code(409).send({
+                  error: refusal,
+                  message:
+                    status.state === "connected"
+                      ? "Update the local helper before creating a GitHub working copy."
+                      : "The local helper must be connected before creating a working copy on this computer.",
+                });
+              }
+              localRunner = {
+                runner_id: runnerId,
+                generation: runner.generation,
+                socket: reconciled.socket,
+                device_backed: false,
+              };
             }
-            localRunner = {
-              runner_id: runnerId,
-              generation: runner.generation,
-              socket: reconciled.socket,
-            };
           }
           const result =
             scenario.data.scenario === "new_repo"
@@ -4594,20 +4649,62 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 project_id: result.project_id,
               });
             }
-            const binding = await options.phase3.sourceBindings.createLocal(
-              {
+            let workspaceBinding: {
+              id: string;
+              status: string;
+              verified: boolean;
+            };
+            if (localRunner.device_backed) {
+              if (!clone.repository_registration_id || !options.deviceRepositoryAccess) {
+                return reply.code(409).send({
+                  error: "computer_repository_registration_failed",
+                  message:
+                    "The repository was cloned, but this computer could not register the working copy. Open the Local Control Center and try again.",
+                  project_id: result.project_id,
+                });
+              }
+              const grant = await options.deviceRepositoryAccess.service.grantRepository({
+                actor_user_id: user.id,
                 project_id: result.project_id,
-                runner_id: localRunner.runner_id,
-                workspace_id: clone.repository.workspace_id,
-                repository_id: clone.repository.repository_id,
-                repository_display_name: clone.repository.repository_display_name,
-                default_branch: clone.repository.default_branch,
-                observed_head: clone.repository.observed_head,
-                verification_policy_ref: "verification",
-                created_by: { actor_type: "human", actor_id: user.id },
-              },
-              { makePrimary: true },
-            );
+                repository_registration_id: clone.repository_registration_id,
+              });
+              const targets =
+                await options.deviceRepositoryAccess.service.selectProjectExecutionTarget({
+                  actor_user_id: user.id,
+                  project_id: result.project_id,
+                  execution_target_id: grant.grant_id,
+                  expected_current_execution_target_id: null,
+                });
+              const selectedTarget = targets.execution_targets.find(
+                (target) => target.execution_target_id === grant.grant_id,
+              );
+              workspaceBinding = {
+                id: grant.grant_id,
+                status:
+                  selectedTarget?.status.availability === "online" ? "connected" : "disconnected",
+                verified: selectedTarget?.status.compatibility === "ready",
+              };
+            } else {
+              const binding = await options.phase3.sourceBindings.createLocal(
+                {
+                  project_id: result.project_id,
+                  runner_id: localRunner.runner_id,
+                  workspace_id: clone.repository.workspace_id,
+                  repository_id: clone.repository.repository_id,
+                  repository_display_name: clone.repository.repository_display_name,
+                  default_branch: clone.repository.default_branch,
+                  observed_head: clone.repository.observed_head,
+                  verification_policy_ref: "verification",
+                  created_by: { actor_type: "human", actor_id: user.id },
+                },
+                { makePrimary: true },
+              );
+              workspaceBinding = {
+                id: binding.id,
+                status: binding.status,
+                verified: binding.status === "connected",
+              };
+            }
             stores.audit(
               user.email,
               "project.local_working_copy.created",
@@ -4617,13 +4714,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             return reply.code(result.replayed ? 200 : 201).send({
               ...responsePayload,
               workspace: {
-                id: binding.id,
+                id: workspaceBinding.id,
                 tier: "binding",
                 role: "workspace",
                 kind: "local_runner",
                 display_name: clone.repository.repository_display_name,
-                status: binding.status,
-                verified: binding.status === "connected",
+                status: workspaceBinding.status,
+                verified: workspaceBinding.verified,
                 default_branch: clone.repository.default_branch,
                 installation_ready: null,
                 workflow_installed: false,
@@ -7702,6 +7799,26 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
         authedDevice = authenticated;
         authenticationState = "authenticated_device";
+        const advertisedDeviceCapabilities = new Set(frame.capabilities ?? []);
+        if (
+          advertisedDeviceCapabilities.has("workspace_picker") &&
+          advertisedDeviceCapabilities.has("workspace_repository_inventory")
+        ) {
+          const priorSocket = runnerSockets.get(authenticated.device_id);
+          if (priorSocket && priorSocket !== socket) {
+            workspaceBroker.disconnect(authenticated.device_id);
+            reconciledRunners.delete(authenticated.device_id);
+            priorSocket.close(1008, "superseded device connection");
+          }
+          runnerSockets.set(authenticated.device_id, socket);
+          reconciledRunners.set(authenticated.device_id, {
+            socket,
+            generation: authenticated.generation,
+            workspacePicker: true,
+            workspaceRepositoryInventory: true,
+            workspaceClone: advertisedDeviceCapabilities.has("workspace_clone"),
+          });
+        }
         stores.audit(`device:${authenticated.device_id}`, "device.wss_authenticated", "", now());
         sendFrame(socket, {
           type: "device_auth_ok",
@@ -7750,6 +7867,21 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       }
 
       if (authenticationState === "authenticated_device") {
+        if (
+          frame.type === "workspace_response" &&
+          authedDevice &&
+          frame.generation === authedDevice.generation
+        ) {
+          const reconciled = reconciledRunners.get(authedDevice.device_id);
+          if (
+            runnerSockets.get(authedDevice.device_id) === socket &&
+            reconciled?.socket === socket &&
+            reconciled.generation === frame.generation
+          ) {
+            workspaceBroker.receive(authedDevice.device_id, frame.generation, frame.response);
+          }
+          return;
+        }
         if (
           frame.type === "device_cancellation_evidence" &&
           authedDevice &&
@@ -7882,9 +8014,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             reconciledRunners.set(deviceIdentity.device_id, {
               socket,
               generation: deviceIdentity.generation,
-              workspacePicker: false,
-              workspaceRepositoryInventory: false,
-              workspaceClone: false,
+              workspacePicker: body.capabilities.includes("workspace_picker"),
+              workspaceRepositoryInventory: body.capabilities.includes(
+                "workspace_repository_inventory",
+              ),
+              workspaceClone: body.capabilities.includes("workspace_clone"),
             });
             const recentlyExecuted = new Set(body.recently_executed_command_ids);
             sendFrame(socket, {
@@ -8223,6 +8357,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         if (runnerSockets.get(authedDevice.device_id) === socket) {
           runnerSockets.delete(authedDevice.device_id);
           reconciledRunners.delete(authedDevice.device_id);
+          workspaceBroker.disconnect(authedDevice.device_id);
         }
         disconnectDeviceControl?.();
         disconnectDeviceControl = null;

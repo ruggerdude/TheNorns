@@ -3,6 +3,7 @@ import {
   DEVICE_WSS_PROTOCOL_VERSION,
   type ReconcileResponseT,
   type RunnerFrameT,
+  type RunnerWorkspaceRequestT,
   type ServerFrameT,
   parseServerFrame,
 } from "@norns/contracts";
@@ -38,6 +39,10 @@ export interface DeviceControlConnectionOptions {
   ): Promise<DeviceCancellationStopResult>;
   stopAll(runId: string, reason: string): Promise<DeviceCancellationStopResult>;
   fence(reason: string): void;
+  /** Folder selection and cloning remain available without enabling code execution. */
+  workspace?: {
+    request(request: RunnerWorkspaceRequestT, generation: number): void;
+  };
   /**
    * Independent, default-off device execution transport. Cancellation remains
    * authenticated and connected when this is absent.
@@ -153,6 +158,12 @@ export class DeviceControlConnection {
     return true;
   }
 
+  sendWorkspaceFrame(frame: Extract<RunnerFrameT, { type: "workspace_response" }>): boolean {
+    if (!this.options.workspace || !this.connected || !this.socket) return false;
+    this.socket.send(JSON.stringify(frame));
+    return true;
+  }
+
   private connect(): void {
     if (this.stopped || this.fenced || this.socket !== null) return;
     const socket = new WebSocket(`${this.options.serverUrl.replace(/^http/, "ws")}/ws/runner`);
@@ -236,6 +247,18 @@ export class DeviceControlConnection {
         }
         this.journal.markServerAcknowledged(frame.run_id, frame.evidence_state);
         this.flushEvidence();
+        return;
+      }
+      case "workspace_request": {
+        if (
+          !this.authenticated ||
+          !this.options.workspace ||
+          frame.generation !== this.options.identity.generation
+        ) {
+          this.fenceAndClose("workspace request identity changed");
+          return;
+        }
+        this.options.workspace.request(frame.request, frame.generation);
         return;
       }
       case "fenced":

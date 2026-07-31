@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +11,7 @@ import {
   InMemoryDeviceCredentialSecretStore,
   PendingDeviceCredentialStore,
   RunnerDaemon,
+  WorkspaceRegistry,
 } from "../dist/index.js";
 
 function temporaryDataDir() {
@@ -125,7 +127,12 @@ test("device execution reconciles and replays durable events without enabling le
     const firstReconcile = connections[0].frames.find(
       (frame) => frame.type === "reconcile_request",
     );
-    assert.deepEqual(firstReconcile.body.capabilities, ["knowledge_transport"]);
+    assert.deepEqual(firstReconcile.body.capabilities, [
+      "workspace_picker",
+      "workspace_repository_inventory",
+      "workspace_clone",
+      "knowledge_transport",
+    ]);
     assert.equal(firstReconcile.body.runner_id, identity.device_id);
     assert.equal(
       connections[0].frames.some((frame) => frame.type === "auth"),
@@ -231,6 +238,109 @@ test("cancellation-only device control sends no execution reconciliation", async
       frames.some((frame) => frame.type === "auth"),
       false,
     );
+    assert.equal(
+      frames.some((frame) => frame.type === "reconcile_request"),
+      false,
+    );
+  } finally {
+    daemon.stop();
+    for (const client of relay.clients) client.terminate();
+    await new Promise((resolve) => relay.close(resolve));
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("an enrolled device can choose and register a workspace without enabling execution", async () => {
+  const dataDir = temporaryDataDir();
+  const repositoryPath = join(dataDir, "source");
+  mkdirSync(repositoryPath);
+  execFileSync("git", ["-C", repositoryPath, "init", "-b", "main"]);
+  execFileSync("git", ["-C", repositoryPath, "config", "user.email", "test@norns.invalid"]);
+  execFileSync("git", ["-C", repositoryPath, "config", "user.name", "Norns Test"]);
+  writeFileSync(join(repositoryPath, "README.md"), "workspace\n");
+  execFileSync("git", ["-C", repositoryPath, "add", "README.md"]);
+  execFileSync("git", ["-C", repositoryPath, "commit", "-m", "initial"]);
+
+  const credential = new PendingDeviceCredentialStore(
+    dataDir,
+    new InMemoryDeviceCredentialSecretStore(),
+  );
+  credential.prepare();
+  const identity = {
+    device_id: "device-workspace-1",
+    credential_id: "credential-workspace-1",
+    generation: 4,
+  };
+  const relay = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  await once(relay, "listening");
+  const address = relay.address();
+  assert.ok(address && typeof address !== "string");
+  const frames = [];
+  relay.on("connection", (socket) => {
+    socket.send(
+      JSON.stringify({
+        type: "challenge",
+        nonce: "legacy-unused",
+        device_auth: {
+          challenge: "device-workspace",
+          supported_protocol_versions: [DEVICE_WSS_PROTOCOL_VERSION],
+        },
+      }),
+    );
+    socket.on("message", (raw) => {
+      const frame = JSON.parse(String(raw));
+      frames.push(frame);
+      if (frame.type === "device_auth") {
+        socket.send(
+          JSON.stringify({
+            type: "device_auth_ok",
+            device_id: frame.device_id,
+            generation: frame.generation,
+            protocol_version: frame.protocol_version,
+          }),
+        );
+        socket.send(
+          JSON.stringify({
+            type: "workspace_request",
+            generation: identity.generation,
+            request: {
+              request_id: "workspace-request-1",
+              operation: "choose",
+            },
+          }),
+        );
+      }
+    });
+  });
+  const daemon = new RunnerDaemon({
+    serverUrl: `http://127.0.0.1:${address.port}`,
+    runnerId: "runner-unused",
+    dataDir,
+    workspaces: new WorkspaceRegistry(dataDir, async () => repositoryPath),
+    registerWorkspace: async () => ({ registration_id: "registration-workspace-1" }),
+    deviceControl: {
+      identity,
+      sign: (payload) => credential.sign(payload),
+      capabilities: [
+        "device_control",
+        "repository_access",
+        "workspace_picker",
+        "workspace_repository_inventory",
+        "workspace_clone",
+      ],
+    },
+  });
+
+  try {
+    daemon.start();
+    await waitFor(
+      () => frames.some((frame) => frame.type === "workspace_response"),
+      "device workspace response",
+    );
+    const response = frames.find((frame) => frame.type === "workspace_response");
+    assert.equal(response.generation, identity.generation);
+    assert.equal(response.response.status, "ok");
+    assert.equal(response.response.repository_registration_id, "registration-workspace-1");
     assert.equal(
       frames.some((frame) => frame.type === "reconcile_request"),
       false,

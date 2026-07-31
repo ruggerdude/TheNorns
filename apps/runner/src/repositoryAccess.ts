@@ -424,6 +424,34 @@ export class LocalRepositoryAccessController {
   private async chooseRepository(): Promise<LocalRepositoryAccessView | null> {
     const repository = await this.workspaces.chooseLocalRepository();
     if (!repository) return null;
+    return this.approveRepository(repository);
+  }
+
+  /**
+   * Approve a repository created through the authenticated workspace channel.
+   * This uses the same local/cloud registration boundary as the Control
+   * Center's manual picker without asking for the freshly cloned folder twice.
+   */
+  approve(repository: CloudRepositoryIdentity): Promise<LocalRepositoryAccessView> {
+    return this.withMutation(() => {
+      const local = this.workspaces
+        .listLocalRepositoryApprovals()
+        .find(
+          (candidate) =>
+            candidate.workspace_id === repository.workspace_id &&
+            candidate.repository_id === repository.repository_id &&
+            candidate.repository_display_name === repository.repository_display_name &&
+            candidate.default_branch === repository.default_branch &&
+            candidate.observed_head === repository.observed_head,
+        );
+      if (!local) throw new Error("workspace repository is no longer approved");
+      return this.approveRepository(local);
+    });
+  }
+
+  private async approveRepository(
+    repository: LocalRepositoryApproval,
+  ): Promise<LocalRepositoryAccessView> {
     this.reload();
     const identity = cloudIdentity(repository);
     const existing = this.state.records.find(

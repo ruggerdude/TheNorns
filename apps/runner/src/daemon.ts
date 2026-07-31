@@ -13,6 +13,7 @@ import {
   PROTOCOL_VERSION,
   type ReconcileResponseT,
   type RunnerInferenceResponseT,
+  type RunnerWorkspaceRepositoryT,
   type RunnerWorkspaceRequestT,
   TERMINAL_COMMAND_STATES,
   type V2DispatchCommandT,
@@ -54,6 +55,10 @@ export interface DaemonOptions {
   ) => Promise<void>;
   /** Optional runner-local folder registry.  Paths never enter relay frames. */
   workspaces?: WorkspaceRegistry;
+  /** Register a freshly selected repository under the active device identity. */
+  registerWorkspace?: (
+    repository: RunnerWorkspaceRepositoryT,
+  ) => Promise<{ registration_id: string | null }>;
   /**
    * ONBOARDING O4 — fires once when a `launch_run` command reaches a terminal
    * state. Additive: laptop runners simply do not supply it and behave exactly
@@ -85,12 +90,22 @@ export class RunnerDaemon {
   private readonly opts: Required<
     Omit<
       DaemonOptions,
-      "executeV2" | "collectVisualEvidence" | "workspaces" | "onRunSettled" | "deviceControl"
+      | "executeV2"
+      | "collectVisualEvidence"
+      | "workspaces"
+      | "registerWorkspace"
+      | "onRunSettled"
+      | "deviceControl"
     >
   > &
     Pick<
       DaemonOptions,
-      "executeV2" | "collectVisualEvidence" | "workspaces" | "onRunSettled" | "deviceControl"
+      | "executeV2"
+      | "collectVisualEvidence"
+      | "workspaces"
+      | "registerWorkspace"
+      | "onRunSettled"
+      | "deviceControl"
     >;
   /** ONBOARDING O4: launch_run commands awaiting a terminal ack. */
   private readonly launchCommands = new Set<string>();
@@ -138,14 +153,13 @@ export class RunnerDaemon {
       ...options,
     };
     this.liveRuns = new LiveRunRegistry(this.opts.liveRunConfirmationTimeoutMs);
-    this.deviceStateFile =
-      this.opts.deviceControl?.execution === true
-        ? new RunnerStateFile(join(this.opts.dataDir, "device-execution"), {
-            runner_id: this.opts.deviceControl.identity.device_id,
-            private_key_pem: "",
-            generation: this.opts.deviceControl.identity.generation,
-          })
-        : null;
+    this.deviceStateFile = this.opts.deviceControl
+      ? new RunnerStateFile(join(this.opts.dataDir, "device-execution"), {
+          runner_id: this.opts.deviceControl.identity.device_id,
+          private_key_pem: "",
+          generation: this.opts.deviceControl.identity.generation,
+        })
+      : null;
     if (
       this.deviceStateFile &&
       this.opts.deviceControl &&
@@ -209,6 +223,14 @@ export class RunnerDaemon {
           },
           stopAll: (runId, reason) => this.stopAllManagedForEvidence(runId, reason),
           fence: (reason) => this.fenceInstallation(reason),
+          ...(this.opts.workspaces
+            ? {
+                workspace: {
+                  request: (request: RunnerWorkspaceRequestT, generation: number) =>
+                    this.handleWorkspaceRequest(request, generation),
+                },
+              }
+            : {}),
           ...(this.opts.deviceControl.execution === true
             ? {
                 execution: {
@@ -560,7 +582,12 @@ export class RunnerDaemon {
     | "knowledge_transport"
   > {
     return this.deviceExecutionEnabled
-      ? ["knowledge_transport"]
+      ? [
+          "workspace_picker",
+          "workspace_repository_inventory",
+          "workspace_clone",
+          "knowledge_transport",
+        ]
       : [
           "workspace_picker",
           "workspace_repository_inventory",
@@ -638,28 +665,57 @@ export class RunnerDaemon {
   }
 
   private handleWorkspaceRequest(request: RunnerWorkspaceRequestT, generation: number): void {
-    const state = this.requireState();
+    const state =
+      this.deviceStateFile?.state.generation === generation
+        ? this.deviceStateFile
+        : this.requireState();
     const unavailable = () =>
-      this.sendTransportFrame({
-        type: "workspace_response" as const,
-        generation: state.state.generation,
-        response: {
-          request_id: request.request_id,
-          operation: request.operation,
-          status: "unavailable" as const,
-        },
+      this.sendWorkspaceResponse(state.state.generation, {
+        request_id: request.request_id,
+        operation: request.operation,
+        status: "unavailable" as const,
       });
     if (generation !== state.state.generation || !this.opts.workspaces) {
       unavailable();
       return;
     }
-    void this.opts.workspaces.handleAsync(request).then((response) => {
-      this.sendTransportFrame({
-        type: "workspace_response",
-        generation: state.state.generation,
-        response,
-      });
+    void this.opts.workspaces.handleAsync(request).then(async (response) => {
+      if (
+        response.status === "ok" &&
+        response.repository &&
+        (request.operation === "choose" || request.operation === "clone") &&
+        this.opts.registerWorkspace
+      ) {
+        let registration: { registration_id: string | null };
+        try {
+          registration = await this.opts.registerWorkspace(response.repository);
+        } catch {
+          registration = { registration_id: null };
+        }
+        if (!registration.registration_id) {
+          this.sendWorkspaceResponse(state.state.generation, {
+            request_id: request.request_id,
+            operation: request.operation,
+            status: "unavailable",
+          });
+          return;
+        }
+        this.sendWorkspaceResponse(state.state.generation, {
+          ...response,
+          repository_registration_id: registration.registration_id,
+        });
+        return;
+      }
+      this.sendWorkspaceResponse(state.state.generation, response);
     });
+  }
+
+  private sendWorkspaceResponse(
+    generation: number,
+    response: Parameters<DeviceControlConnection["sendWorkspaceFrame"]>[0]["response"],
+  ): boolean {
+    const frame = { type: "workspace_response" as const, generation, response };
+    return this.deviceControl?.sendWorkspaceFrame(frame) ?? this.sendLegacyFrame(frame);
   }
 
   private sendTransportFrame(

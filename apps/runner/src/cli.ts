@@ -315,6 +315,7 @@ function createPersistentRunner(input: {
   legacyLocalCompatibilityEnabled?: boolean;
   credentialStore?: PendingDeviceCredentialStore;
   workspaces?: WorkspaceRegistry;
+  repositoryAccess?: LocalRepositoryAccessController;
 }): RunnerDaemon {
   if (input.deviceExecutionEnabled === true && !input.deviceControlEnabled) {
     throw new Error("device execution requires authenticated device control");
@@ -327,6 +328,9 @@ function createPersistentRunner(input: {
   const deviceCapabilities = [
     "device_control",
     "repository_access",
+    "workspace_picker",
+    "workspace_repository_inventory",
+    "workspace_clone",
     ...(input.deviceExecutionEnabled === true ? ["device_execution"] : []),
   ];
   const execution: {
@@ -345,6 +349,14 @@ function createPersistentRunner(input: {
     runnerId: input.runnerId,
     dataDir: input.dataDir,
     workspaces,
+    ...(input.repositoryAccess
+      ? {
+          registerWorkspace: async (repository) => {
+            const approved = await input.repositoryAccess?.approve(repository);
+            return { registration_id: approved?.registration_id ?? null };
+          },
+        }
+      : {}),
     ...(device
       ? {
           deviceControl: {
@@ -542,6 +554,7 @@ async function main(): Promise<void> {
         legacyLocalCompatibilityEnabled,
         credentialStore,
         workspaces,
+        repositoryAccess,
       });
       return managedDaemon;
     };
@@ -554,6 +567,9 @@ async function main(): Promise<void> {
         capabilities: [
           "device_control",
           "repository_access",
+          "workspace_picker",
+          "workspace_repository_inventory",
+          "workspace_clone",
           ...(deviceExecutionEnabled ? ["device_execution"] : []),
         ],
       }),
