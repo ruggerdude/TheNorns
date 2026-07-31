@@ -412,6 +412,12 @@ export const QC_MARKDOWN_ARTIFACTS_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const BINARY_ATTACHMENTS_MIGRATION_NAME = "0063_binary_attachments";
+export const BINARY_ATTACHMENTS_MIGRATION_URL = new URL(
+  "../../../drizzle/0063_binary_attachments.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -690,6 +696,10 @@ export async function loadDeviceHttpOperationPurposesMigrationSql(): Promise<str
 
 export async function loadQcMarkdownArtifactsMigrationSql(): Promise<string> {
   return readFile(QC_MARKDOWN_ARTIFACTS_MIGRATION_URL, "utf8");
+}
+
+export async function loadBinaryAttachmentsMigrationSql(): Promise<string> {
+  return readFile(BINARY_ATTACHMENTS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1051,6 +1061,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: QC_MARKDOWN_ARTIFACTS_MIGRATION_NAME,
       sql: await loadQcMarkdownArtifactsMigrationSql(),
+    },
+    {
+      name: BINARY_ATTACHMENTS_MIGRATION_NAME,
+      sql: await loadBinaryAttachmentsMigrationSql(),
     },
   ];
 }
