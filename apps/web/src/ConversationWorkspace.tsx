@@ -336,7 +336,8 @@ function attachmentTypeLabel(mimeType: string): string {
   if (mimeType === "application/json") return "JSON";
   if (mimeType === "text/markdown") return "Markdown";
   if (mimeType === "text/csv") return "CSV";
-  return "Text file";
+  if (mimeType.startsWith("text/")) return "Text file";
+  return "File";
 }
 
 function toSubmissionParts(message: NornsUIMessage): V2WorkMessagePartT[] {
