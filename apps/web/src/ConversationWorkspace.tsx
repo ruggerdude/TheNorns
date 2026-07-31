@@ -1764,60 +1764,152 @@ function StaffingReviewControl({
 }
 
 function PlanPreview({ data }: DataMessagePartProps<PlanData>): React.ReactElement {
-  const context = useContext(ConversationActionContext);
   if (!data.version) return <ReferenceCard data={data} />;
   return (
     <>
       <ConversationPlanCard version={data.version} />
-      {data.reviews.map((review: V2ConversationPlanReviewT) => {
-        const targetPlanId = review.revised_plan_version_id ?? review.plan_version_id;
-        const proposed = context
-          ? [...context.actions.values()].filter((action) => action.status === "proposed")
-          : [];
-        const approve =
-          proposed.find(
-            (action) =>
-              action.action_type === "approve_plan" &&
-              action.payload.parameters.plan_review_id === review.id &&
-              action.payload.parameters.plan_version_id === targetPlanId,
-          ) ?? null;
-        const repeat =
-          proposed.find(
-            (action) =>
-              action.action_type === "send_plan_to_qc" &&
-              action.payload.parameters.plan_version_id === targetPlanId,
-          ) ?? null;
-        const reject =
-          proposed.find(
-            (action) =>
-              action.action_type === "reject_plan" &&
-              action.payload.parameters.plan_version_id === targetPlanId,
-          ) ?? null;
-        return (
-          <ConversationQcCard
-            key={review.id}
-            planVersion={data.version}
-            review={review}
-            actions={{ approve, repeat, reject }}
-            busy={
-              context?.reviewBusyId === review.id ||
-              (context?.busyActionId !== null && context?.busyActionId !== undefined)
-            }
-            error={
-              context?.reviewErrors.get(review.id) ??
-              (approve ? context?.errors.get(approve.id) : null) ??
-              (repeat ? context?.errors.get(repeat.id) : null) ??
-              (reject ? context?.errors.get(reject.id) : null) ??
-              null
-            }
-            onCancel={context?.cancelReview}
-            onConfirmAction={context?.confirm}
-          />
-        );
-      })}
       <StaffingReviewControl version={data.version} reviews={data.reviews} />
       <PlanChangeControl version={data.version} reviews={data.reviews} />
     </>
+  );
+}
+
+function qcActivitySummary(review: V2ConversationPlanReviewT): string {
+  const exchange = review.round_exchanges.at(-1) ?? null;
+  if (
+    review.status === "failed" &&
+    exchange !== null &&
+    exchange.reviewer.findings.length > 0 &&
+    exchange.pm === null
+  ) {
+    return "Reviewer feedback was saved; the planning agent revision failed.";
+  }
+  if (review.status === "failed") return "QC failed before a final reviewed plan was produced.";
+  if (review.status === "cancelled") return "QC was stopped by a human.";
+  if (review.status === "converged")
+    return "QC converged and the final reviewed plan is available.";
+  if (review.status === "cap_reached")
+    return "QC reached its round limit; the final reviewed plan is available.";
+  return `QC is ${review.status}; completed exchanges appear here as they are recorded.`;
+}
+
+function qcActivityTone(
+  status: V2ConversationPlanReviewT["status"],
+): "default" | "success" | "warn" | "danger" | "info" {
+  if (status === "converged") return "success";
+  if (status === "failed" || status === "cancelled") return "danger";
+  if (status === "cap_reached") return "warn";
+  return "info";
+}
+
+function ConversationQcActivity({
+  reviews,
+  planVersions,
+}: {
+  reviews: V2ConversationPlanReviewT[];
+  planVersions: V2WorkPlanVersionT[];
+}): React.ReactElement | null {
+  const context = useContext(ConversationActionContext);
+  const ordered = [...reviews].sort(
+    (left, right) =>
+      Date.parse(right.created_at) - Date.parse(left.created_at) ||
+      right.attempt_number - left.attempt_number,
+  );
+  const latest = ordered[0] ?? null;
+  const [expanded, setExpanded] = useState(latest !== null);
+  if (!context || !latest) return null;
+  const proposed = [...context.actions.values()].filter((action) => action.status === "proposed");
+
+  return (
+    <section className="conversation-qc-activity" aria-label="QC activity">
+      <button
+        type="button"
+        className="conversation-qc-activity-summary"
+        aria-expanded={expanded}
+        aria-controls="conversation-qc-activity-attempts"
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <span className="conversation-qc-activity-chevron" aria-hidden="true">
+          {expanded ? "−" : "+"}
+        </span>
+        <span>
+          <strong>QC activity · Attempt {latest.attempt_number}</strong>
+          <small>{qcActivitySummary(latest)}</small>
+        </span>
+        <Badge tone={qcActivityTone(latest.status)}>{latest.status.replaceAll("_", " ")}</Badge>
+      </button>
+      {expanded ? (
+        <div id="conversation-qc-activity-attempts" className="conversation-qc-attempts">
+          {ordered.map((review) => {
+            const targetPlanId = review.revised_plan_version_id ?? review.plan_version_id;
+            const targetPlan =
+              planVersions.find((version) => version.id === targetPlanId) ??
+              planVersions.find((version) => version.id === review.plan_version_id) ??
+              null;
+            const approve =
+              proposed.find(
+                (action) =>
+                  action.action_type === "approve_plan" &&
+                  action.payload.parameters.plan_review_id === review.id &&
+                  action.payload.parameters.plan_version_id === targetPlanId,
+              ) ?? null;
+            const repeat =
+              proposed.find(
+                (action) =>
+                  action.action_type === "send_plan_to_qc" &&
+                  action.payload.parameters.plan_version_id === targetPlanId,
+              ) ?? null;
+            const reject =
+              proposed.find(
+                (action) =>
+                  action.action_type === "reject_plan" &&
+                  action.payload.parameters.plan_version_id === targetPlanId,
+              ) ?? null;
+            const successful = ["converged", "cap_reached"].includes(review.status);
+            return (
+              <div className="conversation-qc-attempt" key={review.id}>
+                <ConversationQcCard
+                  planVersion={targetPlan}
+                  review={review}
+                  actions={{ approve, repeat, reject }}
+                  busy={context.reviewBusyId === review.id || context.busyActionId !== null}
+                  error={
+                    context.reviewErrors.get(review.id) ??
+                    (approve ? context.errors.get(approve.id) : null) ??
+                    (repeat ? context.errors.get(repeat.id) : null) ??
+                    (reject ? context.errors.get(reject.id) : null) ??
+                    null
+                  }
+                  onCancel={context.cancelReview}
+                  onConfirmAction={context.confirm}
+                />
+                {successful && targetPlan ? (
+                  <ConversationQcFinalPlan planVersion={targetPlan} />
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function ConversationQcFinalPlan({
+  planVersion,
+}: {
+  planVersion: V2WorkPlanVersionT;
+}): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  return (
+    <details
+      className="conversation-qc-final-plan"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>Final reviewed plan output · Version {planVersion.version}</summary>
+      {open ? <ConversationPlanCard version={planVersion} /> : null}
+    </details>
   );
 }
 
@@ -4519,6 +4611,12 @@ function ConversationThread({
                   onUnauthorized={onUnauthorized}
                 />
               </section>
+            ) : null}
+            {isPlanning ? (
+              <ConversationQcActivity
+                reviews={detail.plan_reviews}
+                planVersions={detail.plan_versions}
+              />
             ) : null}
             <ThreadPrimitive.Root className="conversation-thread-root">
               <ThreadPrimitive.Viewport

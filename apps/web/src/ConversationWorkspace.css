@@ -1870,6 +1870,11 @@
   background: color-mix(in srgb, var(--danger) 7%, transparent);
 }
 
+.conversation-qc-failure {
+  display: grid;
+  gap: 0.2rem;
+}
+
 .conversation-action-effect a {
   color: var(--info);
   font-weight: 700;
@@ -2185,6 +2190,94 @@
   width: min(72rem, 100%);
   border-color: color-mix(in srgb, var(--warn) 38%, var(--line));
   background: color-mix(in srgb, var(--warn) 4%, var(--surface));
+}
+
+.conversation-qc-activity {
+  display: grid;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--warn) 4%, var(--surface));
+}
+
+.conversation-qc-activity-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  gap: 0.7rem;
+  padding: 0.72rem 1rem;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.conversation-qc-activity-summary:hover {
+  background: color-mix(in srgb, var(--warn) 7%, transparent);
+}
+
+.conversation-qc-activity-summary > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.conversation-qc-activity-summary small {
+  overflow: hidden;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-qc-activity-chevron {
+  display: grid;
+  width: 1.4rem;
+  height: 1.4rem;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line));
+  border-radius: 50%;
+  color: var(--warn);
+  font-weight: 800;
+}
+
+.conversation-qc-attempts {
+  display: grid;
+  max-height: min(64vh, 48rem);
+  gap: 1rem;
+  padding: 0 1rem 1rem;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.conversation-qc-attempt {
+  display: grid;
+  width: min(72rem, 100%);
+  gap: 0.7rem;
+  margin-inline: auto;
+}
+
+.conversation-qc-attempt > .conversation-qc-card {
+  margin-top: 0;
+}
+
+.conversation-qc-final-plan {
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--success) 38%, var(--line));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--success) 6%, var(--surface));
+}
+
+.conversation-qc-final-plan > summary {
+  color: var(--success);
+  font-size: var(--text-sm);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.conversation-qc-final-plan > .conversation-plan-card {
+  margin-top: 0.75rem;
 }
 
 .conversation-qc-progress {

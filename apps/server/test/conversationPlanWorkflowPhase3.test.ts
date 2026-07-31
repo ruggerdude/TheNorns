@@ -1,5 +1,5 @@
 import { PGlite } from "@electric-sql/pglite";
-import { FakeAdapter, type LlmAdapter } from "@norns/adapters";
+import { AdapterError, FakeAdapter, type LlmAdapter } from "@norns/adapters";
 import {
   type V2ConversationActionT,
   V2SavePlanCandidateParameters,
@@ -2558,6 +2558,37 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       failure_code: "orphaned",
     });
     expect(orphan.rows[0]?.settled_at).not.toBeNull();
+  });
+
+  it("records the provider failure kind instead of the adapter class name", async () => {
+    const scope = await workspace("typed-qc-failure");
+    await proposeAndSave(scope, plan("Keep typed QC failures actionable"), "typed-qc-failure");
+    const qcAction = await proposedAction(scope, "send_plan_to_qc");
+    const qc = await workflow.confirm(
+      owner.id,
+      confirmation(scope, qcAction.id, "send-plan-to-invalid-qc"),
+    );
+    if (qc.effect.kind !== "qc_started") throw new Error("expected QC effect");
+
+    await workflow.failReviewOnly(
+      qc.effect.planning_run_id,
+      new AdapterError("invalid_response", "plan_revision did not match its schema"),
+    );
+    const detail = await workflow.detail(
+      owner.id,
+      projectId,
+      scope.workItemId,
+      scope.conversationId,
+    );
+
+    expect(detail.plan_reviews[0]).toMatchObject({
+      status: "failed",
+      failure_code: "invalid_response",
+    });
+    expect(detail.actions.find((action) => action.id === qcAction.id)).toMatchObject({
+      status: "failed",
+      failure_code: "invalid_response",
+    });
   });
 
   it("stops active QC with human attribution while preserving its partial agent transcript", async () => {

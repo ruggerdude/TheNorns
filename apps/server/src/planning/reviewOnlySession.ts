@@ -1,4 +1,9 @@
-import type { LlmAdapter } from "@norns/adapters";
+import {
+  AdapterError,
+  type CompletionRequest,
+  type LlmAdapter,
+  type StructuredResult,
+} from "@norns/adapters";
 import {
   FindingResponse,
   type FindingResponseT,
@@ -84,6 +89,50 @@ function revisionPrompt(plan: V2WorkPlanContractT, findings: readonly ReviewFind
   ].join("\n\n");
 }
 
+async function completeStructuredWithRepair<T>(
+  adapter: LlmAdapter,
+  request: CompletionRequest,
+  schema: z.ZodType<T>,
+  schemaName: string,
+  telemetryRequestId: string,
+  onFailedUsage: (usage: UsageEventT) => void,
+): Promise<StructuredResult<T>> {
+  const maxAttempts = 2;
+  let prompt = request.prompt;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      return await adapter.completeStructured(
+        {
+          ...request,
+          prompt,
+          telemetryRequestId:
+            attempt === 0 ? telemetryRequestId : `${telemetryRequestId}:repair:${attempt}`,
+          telemetryRetryGroupId: telemetryRequestId,
+          telemetryRetryAttempt: attempt,
+        },
+        schema,
+        schemaName,
+      );
+    } catch (error) {
+      if (
+        !(error instanceof AdapterError) ||
+        error.kind !== "invalid_response" ||
+        attempt === maxAttempts - 1
+      ) {
+        throw error;
+      }
+      if (error.metadata?.usage) onFailedUsage(error.metadata.usage);
+      prompt = [
+        request.prompt,
+        "Your previous response could not be accepted by the strict output contract.",
+        `Validation failure: ${error.message}`,
+        "Return a fresh, complete JSON object. Correct the validation failure, include every required field, preserve the full plan envelope, and do not add prose or Markdown.",
+      ].join("\n\n");
+    }
+  }
+  throw new Error("unreachable: structured completion attempts always return or throw");
+}
+
 /**
  * The additive review-only mode for durable planning runs. It never calls the
  * draft prompt: the reviewer is the first provider to receive the exact saved
@@ -111,18 +160,19 @@ export async function runReviewOnlyPlanning(
 
   for (let round = 1; round <= options.maxRounds; round += 1) {
     const reviewedPlan = plan;
-    const review = await options.reviewer.completeStructured(
+    const reviewRequestId = `${options.telemetryGroupId}:review:${round}`;
+    const review = await completeStructuredWithRepair(
+      options.reviewer,
       {
         system: reviewerPrompt,
         prompt: reviewOnlyPrompt(reviewedPlan),
         ...meter,
-        telemetryRequestId: `${options.telemetryGroupId}:review:${round}`,
-        telemetryRetryGroupId: `${options.telemetryGroupId}:review:${round}`,
-        telemetryRetryAttempt: 0,
         ...(options.signal ? { signal: options.signal } : {}),
       },
       ReviewFindings,
       "review_findings",
+      reviewRequestId,
+      (failedUsage) => usage.push(failedUsage),
     );
     usage.push(review.usage);
     const findings = [...review.value.findings];
@@ -147,18 +197,19 @@ export async function runReviewOnlyPlanning(
       };
     }
 
-    const revision = await options.pm.completeStructured(
+    const revisionRequestId = `${options.telemetryGroupId}:revision:${round}`;
+    const revision = await completeStructuredWithRepair(
+      options.pm,
       {
         system: revisionSystem,
         prompt: revisionPrompt(reviewedPlan, findings),
         ...meter,
-        telemetryRequestId: `${options.telemetryGroupId}:revision:${round}`,
-        telemetryRetryGroupId: `${options.telemetryGroupId}:revision:${round}`,
-        telemetryRetryAttempt: 0,
         ...(options.signal ? { signal: options.signal } : {}),
       },
       ReviewOnlyRevision,
       "plan_revision",
+      revisionRequestId,
+      (failedUsage) => usage.push(failedUsage),
     );
     usage.push(revision.usage);
     const answered = new Set<number>();

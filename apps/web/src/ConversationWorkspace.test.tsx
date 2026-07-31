@@ -1648,12 +1648,86 @@ describe("conversation workspace", () => {
     expect(screen.getByText("Deliver conversation-first planning")).toBeInTheDocument();
     expect(screen.getByText("Make cancellation verification explicit.")).toBeInTheDocument();
     expect(screen.getByText("Added the requested telemetry assertion.")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Confirm action: Approve and begin" }),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Final reviewed plan output · Version 1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve plan & start" })).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Planning workflow" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve and start" })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Change direction" })).toBeEnabled();
+  });
+
+  it("keeps failed QC feedback visible even when the original plan message is not on screen", async () => {
+    const version = planVersion({ status: "candidate" });
+    const failedReview = planReview({
+      status: "failed",
+      findings: [],
+      dispositions: [],
+      round_exchanges: [
+        {
+          round: 1,
+          reviewed_plan_content_hash: version.content_hash,
+          reviewer: {
+            provider: "openai",
+            model: "gpt-5.6",
+            findings: [
+              {
+                severity: "must_fix",
+                module_id: "core-api",
+                finding: "The retry boundary is not explicit.",
+                recommendation: "Add one bounded structured-output repair attempt.",
+              },
+            ],
+          },
+          pm: null,
+        },
+      ],
+      revised_plan_version_id: null,
+      failure_code: "invalid_response",
+    });
+    const history = [
+      message({
+        id: "message-after-qc",
+        role: "system",
+        sequence: 3,
+        parts: [
+          {
+            type: "text",
+            format: "markdown",
+            text: "QC could not complete. The candidate is unchanged.",
+          },
+        ],
+      }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse(history, null, null, {
+            planVersions: [version],
+            reviews: [failedReview],
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: /Reviewer feedback was saved/i }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("The retry boundary is not explicit.")).toBeInTheDocument();
+    expect(
+      screen.getByText(/planning agent did not produce an acceptable revision/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Final reviewed plan output/)).not.toBeInTheDocument();
   });
 
   it("generates, saves, and hydrates a plan from the composer intent", async () => {

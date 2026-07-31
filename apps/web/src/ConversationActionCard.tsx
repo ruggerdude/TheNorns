@@ -203,9 +203,11 @@ function deliveryModeNotice(event: V2ConversationActionDeliveryEventT): {
 function DeliveryStatus({
   action,
   events,
+  failureCode = action.failure_code,
 }: {
   action: V2ConversationActionT;
   events: V2ConversationActionDeliveryEventT[];
+  failureCode?: string | null;
 }): React.ReactElement {
   const activeIndex = DELIVERY_STEPS.findIndex((step) => step.status === action.status);
   const latestEvent = [...events].sort((left, right) => left.sequence - right.sequence).at(-1);
@@ -243,7 +245,7 @@ function DeliveryStatus({
       </ol>
       {action.status === "failed" ? (
         <output className="conversation-action-outcome is-failed" aria-live="polite">
-          Delivery failed · {action.failure_code}
+          Delivery failed · {failureCode}
         </output>
       ) : null}
       {action.status === "rejected" ? (
@@ -535,6 +537,12 @@ export function ConversationActionCard({
   const recoverable =
     effect === null &&
     ["confirmed", "recorded", "sent", "agent_acknowledged"].includes(action.status);
+  const failureCode =
+    action.failure_code === "adaptererror" &&
+    effect?.kind === "qc_started" &&
+    effect.plan_review.failure_code
+      ? effect.plan_review.failure_code
+      : action.failure_code;
   const titleId = `conversation-action-${action.id}`;
 
   return (
@@ -605,7 +613,7 @@ export function ConversationActionCard({
       ) : null}
       {executionAction ? <ExecutionActionDetails action={action} /> : null}
 
-      <DeliveryStatus action={action} events={deliveryEvents} />
+      <DeliveryStatus action={action} events={deliveryEvents} failureCode={failureCode} />
       {effect ? <EffectNotice effect={effect} projectId={action.project_id} /> : null}
       {error ? (
         <output className="conversation-action-error" role="alert">

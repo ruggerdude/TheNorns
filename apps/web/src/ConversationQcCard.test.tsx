@@ -83,7 +83,7 @@ describe("conversation QC card", () => {
     const card = screen.getByRole("article", { name: "Plan plan-version-1" });
     expect(within(card).getByText("anthropic · claude-sonnet-5")).toBeInTheDocument();
     expect(within(card).getByText("openai · gpt-5.6")).toBeInTheDocument();
-    expect(within(card).getByTitle("a".repeat(64))).toHaveTextContent("aaaaaaaaaa");
+    expect(within(card).getAllByTitle("a".repeat(64))).toHaveLength(2);
     expect(within(card).getByText("The retry budget is unbounded.")).toBeInTheDocument();
     expect(within(card).getByText("Set an explicit attempt ceiling.")).toBeInTheDocument();
     expect(within(card).getByText("The PM added a bounded retry requirement.")).toBeInTheDocument();
@@ -109,6 +109,47 @@ describe("conversation QC card", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "The unchanged plan remains a candidate and can be sent to QC again.",
     );
+  });
+
+  it("explains a partial failure while retaining the completed reviewer exchange", () => {
+    render(
+      <ConversationQcCard
+        planVersion={null}
+        review={review({
+          status: "failed",
+          findings: [],
+          dispositions: [],
+          revised_plan_version_id: null,
+          failure_code: "invalid_response",
+          round_exchanges: [
+            {
+              round: 1,
+              reviewed_plan_content_hash: "a".repeat(64),
+              reviewer: {
+                provider: "openai",
+                model: "gpt-5.6-sol",
+                findings: [
+                  {
+                    severity: "must_fix",
+                    module_id: "core-api",
+                    finding: "The response contract is incomplete.",
+                    recommendation: "Return the complete strict plan envelope.",
+                  },
+                ],
+              },
+              pm: null,
+            },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "an agent response did not match the required QC output contract",
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("reviewer feedback below was saved");
+    expect(screen.getByText("The response contract is incomplete.")).toBeInTheDocument();
+    expect(screen.getByText("Waiting for the planning agent to respond.")).toBeInTheDocument();
   });
 
   it("shows each agent's round separately and lets the human stop active QC", async () => {

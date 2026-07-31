@@ -1,6 +1,6 @@
-import { FakeAdapter } from "@norns/adapters";
+import { AdapterError, DEFAULT_MODEL_REGISTRY, FakeAdapter, makeUsageEvent } from "@norns/adapters";
 import { V2WorkPlanContract } from "@norns/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runReviewOnlyPlanning } from "../src/planning/reviewOnlySession.js";
 
 function envelope(objective = "Ship the planning conversation") {
@@ -141,6 +141,81 @@ describe("review-only conversational planning", () => {
     ]);
     expect(pm.requests[0]?.prompt).toContain(JSON.stringify(seed));
     expect(pm.requests[0]?.telemetryRequestId).toBe("review-only-cap:revision:1");
+  });
+
+  it("repairs one invalid structured PM revision without discarding reviewer progress", async () => {
+    const seed = envelope();
+    const revised = envelope("Ship the repaired reviewed planning conversation");
+    const pm = new FakeAdapter("anthropic");
+    const reviewer = new FakeAdapter("openai");
+    reviewer.enqueue({
+      findings: [
+        {
+          severity: "must_fix",
+          module_id: "contracts",
+          finding: "Clarify the objective.",
+          recommendation: "Use the reviewed objective.",
+        },
+      ],
+    });
+    pm.enqueue({
+      responses: [
+        {
+          finding_index: 0,
+          disposition: "accept",
+          rationale: "The repaired response now satisfies the strict plan contract.",
+        },
+      ],
+      plan: revised,
+    });
+    const completion = vi.spyOn(pm, "completeStructured");
+    const failedUsage = makeUsageEvent(
+      pm.model,
+      DEFAULT_MODEL_REGISTRY,
+      { projectId: "project-review-only" },
+      500,
+      250,
+      "provider_api",
+    );
+    completion.mockRejectedValueOnce(
+      new AdapterError(
+        "invalid_response",
+        "plan_revision: plan.plan.modules.0.execution: Required",
+        {
+          metadata: {
+            usage: failedUsage,
+            request_dispatched: true,
+          },
+        },
+      ),
+    );
+    const progress: number[] = [];
+
+    const result = await runReviewOnlyPlanning({
+      pm,
+      reviewer,
+      projectId: "project-review-only",
+      initiatedByUserId: "user-review-only",
+      seedPlan: seed,
+      frozenContext: { binding_rules: [] },
+      telemetryGroupId: "review-only-repair",
+      maxRounds: 1,
+      onProgress: (rounds) => {
+        progress.push(rounds.length);
+      },
+    });
+
+    expect(completion).toHaveBeenCalledTimes(2);
+    expect(pm.requests[0]?.telemetryRequestId).toBe("review-only-repair:revision:1:repair:1");
+    expect(pm.requests[0]?.telemetryRetryGroupId).toBe("review-only-repair:revision:1");
+    expect(pm.requests[0]?.telemetryRetryAttempt).toBe(1);
+    expect(pm.requests[0]?.prompt).toContain("previous response could not be accepted");
+    expect(pm.requests[0]?.prompt).toContain("modules.0.execution");
+    expect(progress).toEqual([1, 1]);
+    expect(result.final_plan).toEqual(revised);
+    expect(result.review_rounds[0]?.responses).toHaveLength(1);
+    expect(result.usage).toHaveLength(3);
+    expect(result.usage[1]).toEqual(failedUsage);
   });
 
   it("rejects a revision that omits a must-fix disposition", async () => {

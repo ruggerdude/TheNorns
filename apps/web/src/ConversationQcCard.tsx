@@ -22,6 +22,29 @@ function statusTone(
   return "info";
 }
 
+function failureLabel(code: string | null): string {
+  switch (code) {
+    case "invalid_response":
+      return "an agent response did not match the required QC output contract";
+    case "auth":
+      return "the provider rejected its credentials";
+    case "rate_limit":
+      return "the provider rate limit was reached";
+    case "overloaded":
+      return "the provider was overloaded";
+    case "network":
+      return "the provider connection failed";
+    case "server":
+      return "the provider returned a server error";
+    case "cancelled":
+      return "the provider request was cancelled";
+    case "adaptererror":
+      return "a provider response failed before detailed error categories were recorded";
+    default:
+      return code ? code.replaceAll("_", " ") : "the review could not complete";
+  }
+}
+
 function Finding({
   finding,
   review,
@@ -85,6 +108,12 @@ export function ConversationQcCard({
     100,
     Math.round((review.rounds_completed / Math.max(1, review.max_rounds)) * 100),
   );
+  const lastExchange = review.round_exchanges.at(-1) ?? null;
+  const failedAfterReviewer =
+    review.status === "failed" &&
+    lastExchange !== null &&
+    lastExchange.reviewer.findings.length > 0 &&
+    lastExchange.pm === null;
 
   return (
     <article
@@ -119,6 +148,16 @@ export function ConversationQcCard({
             <code title={review.plan_content_hash}>{review.plan_content_hash.slice(0, 10)}</code>
           </dd>
         </div>
+        {["converged", "cap_reached"].includes(review.status) ? (
+          <div>
+            <dt>Final result hash</dt>
+            <dd>
+              <code title={review.result_plan_content_hash}>
+                {review.result_plan_content_hash.slice(0, 10)}
+              </code>
+            </dd>
+          </div>
+        ) : null}
         <div>
           <dt>PM</dt>
           <dd>
@@ -159,8 +198,14 @@ export function ConversationQcCard({
       ) : null}
       {review.status === "failed" ? (
         <output className="conversation-qc-failure" role="alert">
-          QC failed · {review.failure_code}. The unchanged plan remains a candidate and can be sent
-          to QC again.
+          <strong>QC failed because {failureLabel(review.failure_code)}.</strong>
+          {failedAfterReviewer ? (
+            <span>
+              The reviewer feedback below was saved, but the planning agent did not produce an
+              acceptable revision.
+            </span>
+          ) : null}
+          <span>The unchanged plan remains a candidate and can be sent to QC again.</span>
         </output>
       ) : null}
       {review.status === "cancelled" ? (

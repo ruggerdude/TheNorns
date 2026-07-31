@@ -1,4 +1,4 @@
-import type { ProviderName } from "@norns/adapters";
+import { AdapterError, type ProviderName } from "@norns/adapters";
 import {
   V2ConfirmConversationActionInput,
   type V2ConfirmConversationActionInputT,
@@ -248,7 +248,20 @@ const reviewColumns = `schema_version, id, project_id, work_item_id, conversatio
   revised_plan_version_id,
   (SELECT round FROM planning_runs WHERE id=planning_run_id) AS rounds_completed,
   (SELECT max_rounds FROM planning_runs WHERE id=planning_run_id) AS max_rounds,
-  round_exchanges, started_at, completed_at, failure_code,
+  round_exchanges, started_at, completed_at,
+  CASE
+    WHEN failure_code='adaptererror' THEN coalesce((
+      SELECT usage.error_code
+        FROM ai_usage_events usage
+       WHERE left(usage.request_id, length(usage_request_group_id) + 1)
+             = usage_request_group_id || ':'
+         AND usage.event_type='request_failed'
+         AND usage.error_code IS NOT NULL
+       ORDER BY usage.occurred_at DESC, usage.sequence DESC
+       LIMIT 1
+    ), failure_code)
+    ELSE failure_code
+  END AS failure_code,
   cancelled_by_user_id, cancellation_reason, created_at, updated_at`;
 const effectColumns = `schema_version, id, project_id, work_item_id, conversation_id,
   action_id, effect_kind, plan_version_id, plan_review_id, planning_run_id,
@@ -390,6 +403,7 @@ function diffValues(previous: unknown, next: unknown, path = ""): PlanDiff {
 }
 
 function errorCode(error: unknown): string {
+  if (error instanceof AdapterError) return error.kind;
   const explicit =
     error !== null && typeof error === "object" && "code" in error && typeof error.code === "string"
       ? error.code
