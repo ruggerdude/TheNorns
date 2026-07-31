@@ -58,6 +58,8 @@ function signedRequest(
     credential_id: string;
     generation: number;
     protocol_version: string;
+    agent_version: string;
+    capabilities: string[];
   }> = {},
 ) {
   const request = {
@@ -177,6 +179,37 @@ describe("device WSS authentication service", () => {
       generation: GENERATION,
       protocol_version: "1",
     });
+  });
+
+  it("records signed agent compatibility observations after authentication", async () => {
+    const { keys, repository } = fixture();
+    const observations: unknown[] = [];
+    repository.recordObservation = async (input) => {
+      observations.push(input);
+    };
+    const service = new DeviceWssAuthenticationService(repository, {
+      now: () => new Date("2026-07-30T20:00:00.000Z"),
+    });
+
+    await expect(
+      service.authenticate(
+        signedRequest(keys.privateKey, "server-challenge", {
+          agent_version: "0.3.1",
+          capabilities: ["device_control", "repository_access"],
+        }),
+      ),
+    ).resolves.toMatchObject({ device_id: DEVICE_ID });
+    expect(observations).toEqual([
+      {
+        device_id: DEVICE_ID,
+        credential_id: CREDENTIAL_ID,
+        generation: GENERATION,
+        agent_version: "0.3.1",
+        protocol_version: "1",
+        capabilities: ["device_control", "repository_access"],
+        observed_at: "2026-07-30T20:00:00.000Z",
+      },
+    ]);
   });
 
   it("rejects a signature created for a different purpose", async () => {

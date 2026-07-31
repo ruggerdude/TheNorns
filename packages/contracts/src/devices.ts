@@ -1288,9 +1288,25 @@ export const SignedDeviceWssAuthenticationTranscript = z
     credential_id: V2EntityId,
     generation: DeviceGeneration,
     protocol_version: V2NonEmptyString,
+    agent_version: z.string().trim().min(1).max(100).optional(),
+    capabilities: z.array(z.string().trim().min(1).max(100)).max(64).optional(),
     challenge: V2NonEmptyString,
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.agent_version === undefined) !== (value.capabilities === undefined)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "agent version and capabilities must be reported together",
+      });
+    }
+    if (value.capabilities && new Set(value.capabilities).size !== value.capabilities.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "agent capabilities must be unique",
+      });
+    }
+  });
 export type SignedDeviceWssAuthenticationTranscriptT = z.infer<
   typeof SignedDeviceWssAuthenticationTranscript
 >;
@@ -1310,6 +1326,12 @@ export function canonicalDeviceWssAuthenticationTranscript(
     credential_id: transcript.credential_id,
     generation: transcript.generation,
     protocol_version: transcript.protocol_version,
+    ...(transcript.agent_version !== undefined
+      ? {
+          agent_version: transcript.agent_version,
+          capabilities: transcript.capabilities,
+        }
+      : {}),
     challenge: transcript.challenge,
   });
 }

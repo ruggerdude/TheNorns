@@ -69,6 +69,8 @@ export interface DaemonOptions {
   deviceControl?: {
     identity: DeviceWssIdentity;
     sign(canonicalTranscript: string): string;
+    agentVersion?: string;
+    capabilities?: readonly string[];
     /** Independent dispatch kill switch; cancellation does not imply this. */
     execution?: boolean;
     /** Explicit deprecated local runner transport; never implied by control. */
@@ -173,6 +175,12 @@ export class RunnerDaemon {
           serverUrl: this.opts.serverUrl,
           dataDir: this.opts.dataDir,
           identity: this.opts.deviceControl.identity,
+          ...(this.opts.deviceControl.agentVersion !== undefined
+            ? { agentVersion: this.opts.deviceControl.agentVersion }
+            : {}),
+          ...(this.opts.deviceControl.capabilities !== undefined
+            ? { capabilities: this.opts.deviceControl.capabilities }
+            : {}),
           sign: this.opts.deviceControl.sign,
           ...(this.opts.deviceControl.reconnect !== undefined
             ? { reconnect: this.opts.deviceControl.reconnect }

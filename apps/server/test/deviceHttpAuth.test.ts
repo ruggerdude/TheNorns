@@ -3,6 +3,10 @@ import { PGlite } from "@electric-sql/pglite";
 import {
   DEVICE_CONTEXT_RETRIEVAL_HTTP_SIGNATURE_PURPOSE,
   DEVICE_GATEWAY_CREDENTIAL_MINT_HTTP_SIGNATURE_PURPOSE,
+  DEVICE_PUBLICATION_PERMIT_CONSUME_HTTP_SIGNATURE_PURPOSE,
+  DEVICE_PUBLICATION_PERMIT_ISSUE_HTTP_SIGNATURE_PURPOSE,
+  DEVICE_REPOSITORY_REGISTRATION_HTTP_SIGNATURE_PURPOSE,
+  DEVICE_REPOSITORY_REGISTRATION_REVOCATION_HTTP_SIGNATURE_PURPOSE,
 } from "@norns/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -77,7 +81,11 @@ describe.sequential("device HTTP signed transcript", () => {
   function signedRequest(input: {
     purpose?:
       | typeof DEVICE_CONTEXT_RETRIEVAL_HTTP_SIGNATURE_PURPOSE
-      | typeof DEVICE_GATEWAY_CREDENTIAL_MINT_HTTP_SIGNATURE_PURPOSE;
+      | typeof DEVICE_GATEWAY_CREDENTIAL_MINT_HTTP_SIGNATURE_PURPOSE
+      | typeof DEVICE_REPOSITORY_REGISTRATION_HTTP_SIGNATURE_PURPOSE
+      | typeof DEVICE_REPOSITORY_REGISTRATION_REVOCATION_HTTP_SIGNATURE_PURPOSE
+      | typeof DEVICE_PUBLICATION_PERMIT_ISSUE_HTTP_SIGNATURE_PURPOSE
+      | typeof DEVICE_PUBLICATION_PERMIT_CONSUME_HTTP_SIGNATURE_PURPOSE;
     url?: URL;
     body?: string;
     method?: string;
@@ -144,6 +152,26 @@ describe.sequential("device HTTP signed transcript", () => {
       credential_id: CREDENTIAL_ID,
     });
     expect(Number(stored.rows[0]?.generation)).toBe(1);
+  });
+
+  it.each([
+    DEVICE_REPOSITORY_REGISTRATION_HTTP_SIGNATURE_PURPOSE,
+    DEVICE_REPOSITORY_REGISTRATION_REVOCATION_HTTP_SIGNATURE_PURPOSE,
+    DEVICE_PUBLICATION_PERMIT_ISSUE_HTTP_SIGNATURE_PURPOSE,
+    DEVICE_PUBLICATION_PERMIT_CONSUME_HTTP_SIGNATURE_PURPOSE,
+  ])("persists the newer signed Local Agent purpose %s", async (purpose) => {
+    const request = signedRequest({
+      purpose,
+      method: "POST",
+      body: "{}",
+      requestId: `request-${purpose.split(".").at(-2)}`,
+    });
+    await expect(authenticator.authenticate(request)).resolves.toMatchObject({ ok: true });
+    const stored = await pg.query<{ purpose: string }>(
+      "SELECT purpose FROM device_http_request_replays WHERE request_id=$1",
+      [request.headers["x-norns-request-id"]],
+    );
+    expect(stored.rows[0]?.purpose).toBe(purpose);
   });
 
   it("binds the method, canonical query, exact body digest, and current generation", async () => {

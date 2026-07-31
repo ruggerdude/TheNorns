@@ -22,7 +22,9 @@ describe("workspace connections settings", () => {
   });
 
   function accountMock(): MockFetch {
-    return new MockFetch();
+    const next = new MockFetch();
+    next.get("/api/devices", { body: { devices: [] } });
+    return next;
   }
 
   it("shows GitHub identity and reusable workspace installations", async () => {
@@ -259,7 +261,7 @@ describe("workspace connections settings", () => {
     );
     expect(call?.body).toBeUndefined();
     expect(call?.headers["content-type"]).toBeUndefined();
-    expect(await screen.findByText("Not connected")).toBeInTheDocument();
+    expect((await screen.findAllByText("Not connected")).length).toBeGreaterThan(0);
     expect(screen.queryByText(/Bad credentials/i)).not.toBeInTheDocument();
   });
 
@@ -293,7 +295,7 @@ describe("workspace connections settings", () => {
     expect(screen.getByText(/Connect GitHub with guided setup/i)).toBeInTheDocument();
   });
 
-  it("does not expose legacy helper pairing secrets or global repository selection", async () => {
+  it("shows the account-synced Local Agent without exposing legacy pairing secrets", async () => {
     mock = accountMock();
     mock.get("/api/auth/sessions", { body: { sessions: [] } });
     mock.get("/api/integrations/github/status", {
@@ -312,8 +314,8 @@ describe("workspace connections settings", () => {
     );
 
     expect(await screen.findByText("Not configured")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /manage agent/i })).not.toBeInTheDocument();
-    expect(screen.queryByText(/norns local agent/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /manage agent/i })).toBeInTheDocument();
+    expect(screen.getByText(/norns local agent/i)).toBeInTheDocument();
     expect(
       mock.calls.some(
         (call) =>
@@ -330,6 +332,85 @@ describe("workspace connections settings", () => {
     expect(container).not.toHaveTextContent("runner-1");
     expect(container).not.toHaveTextContent("a1b2c3d4");
     expect(screen.getByRole("button", { name: "Set up GitHub" })).toBeInTheDocument();
+  });
+
+  it("shows enrolled computers and their approved local folders", async () => {
+    mock = accountMock();
+    mock.get("/api/auth/sessions", { body: { sessions: [] } });
+    mock.get("/api/integrations/github/status", {
+      body: {
+        configured: false,
+        setup_available: true,
+        configuration_source: null,
+        user_authorization: { connected: false, login: null },
+        connections: [],
+      },
+    });
+    mock.get("/api/devices", {
+      body: {
+        devices: [
+          {
+            device_id: "device-1",
+            owner_user_id: "u1",
+            name: "Studio Mac",
+            location_label: null,
+            os_family: "macos",
+            os_version: null,
+            lifecycle: "active",
+            status: {
+              availability: "online",
+              workload: "idle",
+              compatibility: "ready",
+              access: "owned",
+            },
+            active_credential: {
+              device_id: "device-1",
+              credential_id: "credential-1",
+              generation: 1,
+              public_key_fingerprint: "a".repeat(64),
+              state: "active",
+              activated_at: "2026-07-30T19:00:00.000Z",
+            },
+            agent: {
+              version: "0.3.1",
+              protocol_version: "1",
+              capabilities: ["device_control", "repository_access"],
+            },
+            repository_grants: [],
+            activity: {
+              active_run_count: 0,
+              queued_command_count: 0,
+            },
+            last_seen_at: "2026-07-30T20:00:00.000Z",
+          },
+        ],
+      },
+    });
+    mock.get("/api/devices/device-1/repository-access", {
+      body: {
+        device_id: "device-1",
+        registrations: [
+          {
+            registration_id: "registration-1",
+            repository_id: "repository-1",
+            repository_display_name: "Guitar Tabs",
+            default_branch: "main",
+            state: "active",
+            grants: [],
+          },
+        ],
+        eligible_projects: [],
+      },
+    });
+    mock.install();
+
+    render(<Account user={admin} initialTab="connections" onClose={vi.fn()} onSignOut={vi.fn()} />);
+
+    expect(await screen.findByText("1 ready")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Manage agent" }));
+    expect(screen.getByText("Studio Mac")).toBeInTheDocument();
+    expect(screen.getByText(/Guitar Tabs/)).toBeInTheDocument();
+    expect(screen.getByText(/1 approved folder is synced/i)).toBeInTheDocument();
   });
 
   it("shows provider readiness and the exact missing deployment variables", async () => {

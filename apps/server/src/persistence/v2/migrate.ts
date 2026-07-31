@@ -400,6 +400,12 @@ export const LEGACY_REPOSITORY_BINDING_CLAIMS_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const DEVICE_HTTP_OPERATION_PURPOSES_MIGRATION_NAME = "0061_device_http_operation_purposes";
+export const DEVICE_HTTP_OPERATION_PURPOSES_MIGRATION_URL = new URL(
+  "../../../drizzle/0061_device_http_operation_purposes.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -670,6 +676,10 @@ export async function loadProjectRunCancellationMigrationSql(): Promise<string> 
 
 export async function loadLegacyRepositoryBindingClaimsMigrationSql(): Promise<string> {
   return readFile(LEGACY_REPOSITORY_BINDING_CLAIMS_MIGRATION_URL, "utf8");
+}
+
+export async function loadDeviceHttpOperationPurposesMigrationSql(): Promise<string> {
+  return readFile(DEVICE_HTTP_OPERATION_PURPOSES_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1023,6 +1033,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: LEGACY_REPOSITORY_BINDING_CLAIMS_MIGRATION_NAME,
       sql: await loadLegacyRepositoryBindingClaimsMigrationSql(),
+    },
+    {
+      name: DEVICE_HTTP_OPERATION_PURPOSES_MIGRATION_NAME,
+      sql: await loadDeviceHttpOperationPurposesMigrationSql(),
     },
   ];
 }

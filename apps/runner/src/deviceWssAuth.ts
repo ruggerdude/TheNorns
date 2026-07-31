@@ -17,6 +17,8 @@ export interface DeviceWssIdentity {
 export interface DeviceWssProofInput extends DeviceWssIdentity {
   challenge: string;
   protocol_version?: string;
+  agent_version?: string;
+  capabilities?: readonly string[];
   sign: (canonicalTranscript: string) => string;
 }
 
@@ -36,6 +38,12 @@ export function createDeviceWssAuthenticationFrame(
     credential_id: input.credential_id,
     generation: input.generation,
     protocol_version: protocolVersion,
+    ...(input.agent_version !== undefined
+      ? {
+          agent_version: input.agent_version,
+          capabilities: [...(input.capabilities ?? [])],
+        }
+      : {}),
     challenge: input.challenge,
   });
   return {
@@ -44,6 +52,12 @@ export function createDeviceWssAuthenticationFrame(
     credential_id: input.credential_id,
     generation: input.generation,
     protocol_version: protocolVersion,
+    ...(input.agent_version !== undefined
+      ? {
+          agent_version: input.agent_version,
+          capabilities: [...(input.capabilities ?? [])],
+        }
+      : {}),
     transcript_signature: input.sign(transcript),
   };
 }

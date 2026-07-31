@@ -6,6 +6,7 @@ const packager = readFileSync(
   new URL("../../scripts/package-macos-agent.sh", import.meta.url),
   "utf8",
 );
+const launcher = readFileSync(new URL("./agent.sh", import.meta.url), "utf8");
 
 assert.match(
   component,
@@ -14,5 +15,7 @@ assert.match(
 assert.match(component, /<key>BundleIsRelocatable<\/key>\s*<false\/>/);
 assert.match(component, /<key>BundleOverwriteAction<\/key>\s*<string>upgrade<\/string>/);
 assert.match(packager, /--component-plist "\$COMPONENT_PLIST"/);
+assert.match(launcher, /<key>NORNS_ENABLE_DEVICE_CONTROL<\/key><string>true<\/string>/);
+assert.match(launcher, /NORNS_ENABLE_DEVICE_CONTROL="true" \\\n\s*NORNS_LOCAL_AGENT_VERSION=/);
 
 console.log("macOS Local Agent package has a fixed /Applications destination: OK");

@@ -743,11 +743,21 @@ test("AgentHost reports separate local status dimensions and restarts the daemon
   const lifecycle = {
     starts: 0,
     stops: 0,
+    connected: false,
     start() {
       this.starts += 1;
+      this.connected = true;
     },
     stop() {
       this.stops += 1;
+      this.connected = false;
+    },
+    status() {
+      return {
+        connected: this.connected,
+        protocol_version: "device-wss/1",
+        capabilities: ["context", "visual-evidence"],
+      };
     },
   };
   const credentialStore = new PendingDeviceCredentialStore(

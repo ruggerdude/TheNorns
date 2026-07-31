@@ -248,9 +248,25 @@ export const DeviceRunnerAuthenticationFrame = z
     credential_id: opaqueId,
     generation: deviceGeneration,
     protocol_version: nonEmpty,
+    agent_version: z.string().trim().min(1).max(100).optional(),
+    capabilities: z.array(z.string().trim().min(1).max(100)).max(64).optional(),
     transcript_signature: nonEmpty,
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.agent_version === undefined) !== (value.capabilities === undefined)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "agent version and capabilities must be reported together",
+      });
+    }
+    if (value.capabilities && new Set(value.capabilities).size !== value.capabilities.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "agent capabilities must be unique",
+      });
+    }
+  });
 export type DeviceRunnerAuthenticationFrameT = z.infer<typeof DeviceRunnerAuthenticationFrame>;
 
 export const DeviceCancellationEvidenceFrame = z

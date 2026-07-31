@@ -661,6 +661,13 @@ export interface AgentDaemonLifecycle {
   start(): void | Promise<void>;
   stop(): void | Promise<void>;
   emergencyStop?(): Promise<AgentEmergencyStopResult>;
+  status?(): AgentDaemonRuntimeStatus;
+}
+
+export interface AgentDaemonRuntimeStatus {
+  connected: boolean;
+  protocol_version: string;
+  capabilities: readonly string[];
 }
 
 export interface AgentEmergencyStopResult {
@@ -1615,16 +1622,18 @@ export class AgentHost {
     };
     this.enrollmentState = enrollment.state;
     const repositoryCount = this.repositoryAccess.count();
+    const daemonStatus = this.options.daemon.status?.();
+    const daemonConnected = this.daemonState === "running" && daemonStatus?.connected === true;
     const availability: AgentAvailabilityState =
-      this.daemonState === "running"
-        ? this.localState.availability === "offline"
-          ? "connecting"
-          : this.localState.availability
-        : "offline";
-    const connectivity =
-      this.daemonState === "running" && this.localState.connectivity === "disconnected"
+      this.daemonState !== "running" ? "offline" : daemonConnected ? "online" : "connecting";
+    const connectivity = daemonConnected
+      ? "connected"
+      : this.daemonState === "running"
         ? "connecting"
-        : this.localState.connectivity;
+        : "disconnected";
+    const compatibility: AgentCompatibilityState = daemonConnected
+      ? "ready"
+      : this.localState.compatibility;
     return {
       enrollment_state: this.enrollmentState,
       enrollment: {
@@ -1639,7 +1648,7 @@ export class AgentHost {
         device_name: this.localState.device_name,
         location_label: this.localState.location_label,
         availability,
-        compatibility: this.localState.compatibility,
+        compatibility,
         workload: this.localState.workload,
         start_at_login: this.localState.start_at_login,
         agent_version: this.localState.agent_version,
@@ -1659,8 +1668,8 @@ export class AgentHost {
       },
       diagnostics: {
         connectivity,
-        protocol_version: this.localState.protocol_version,
-        capabilities: [...this.localState.capabilities],
+        protocol_version: daemonStatus?.protocol_version ?? this.localState.protocol_version,
+        capabilities: [...(daemonStatus?.capabilities ?? this.localState.capabilities)],
         git_version: this.localState.git_version,
         runtimes: [...this.localState.runtimes],
         manual_update_guidance: MANUAL_UPDATE_GUIDANCE,

@@ -1,3 +1,4 @@
+import { OwnedDeviceProjection, type OwnedDeviceProjectionT } from "@norns/contracts";
 import { useCallback, useEffect, useState } from "react";
 import { type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Badge, Brand, Button, Field, Input, PageHeader, Select, Spinner } from "./ui";
@@ -42,7 +43,14 @@ interface AiIntegrationStatus {
   }>;
 }
 
-type ConnectionPanel = "github" | "ai";
+interface LocalRepositoryRegistration {
+  registration_id: string;
+  repository_display_name: string;
+  default_branch: string;
+  state: "active" | "revoked";
+}
+
+type ConnectionPanel = "github" | "local-agent" | "ai";
 
 export type SettingsTab = "profile" | "connections" | "security";
 
@@ -122,6 +130,10 @@ export function Account({
     githubCallback ? "github" : null,
   );
   const [aiStatus, setAiStatus] = useState<AiIntegrationStatus | null>(null);
+  const [localAgentDevices, setLocalAgentDevices] = useState<OwnedDeviceProjectionT[] | null>(null);
+  const [localAgentRepositories, setLocalAgentRepositories] = useState<
+    Record<string, LocalRepositoryRegistration[]>
+  >({});
   const [githubOwnerType, setGitHubOwnerType] = useState<"personal" | "organization">("personal");
   const [githubOrganization, setGitHubOrganization] = useState("");
 
@@ -162,8 +174,32 @@ export function Account({
     }
   }, [onUnauthorized]);
 
+  const loadLocalAgent = useCallback(async (): Promise<void> => {
+    try {
+      const payload = await integrationRequest<{ devices: unknown[] }>("/api/devices");
+      const devices = payload.devices.map((device) => OwnedDeviceProjection.parse(device));
+      const repositoryEntries = await Promise.all(
+        devices.map(async (device) => {
+          const access = await integrationRequest<{
+            registrations: LocalRepositoryRegistration[];
+          }>(`/api/devices/${encodeURIComponent(device.device_id)}/repository-access`);
+          return [
+            device.device_id,
+            access.registrations.filter((registration) => registration.state === "active"),
+          ] as const;
+        }),
+      );
+      setLocalAgentDevices(devices);
+      setLocalAgentRepositories(Object.fromEntries(repositoryEntries));
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setConnectionError(error instanceof Error ? error.message : String(error));
+    }
+  }, [onUnauthorized]);
+
   useEffect(() => loadSessions(), [loadSessions]);
   useEffect(() => void loadGitHub(), [loadGitHub]);
+  useEffect(() => void loadLocalAgent(), [loadLocalAgent]);
 
   const revoke = async (sessionId: string): Promise<void> => {
     const response = await fetch(`/api/auth/sessions/${encodeURIComponent(sessionId)}`, {
@@ -212,6 +248,15 @@ export function Account({
   const connectedGitHubAccounts =
     github?.connections.filter((connection) => connection.status === "connected") ?? [];
   const githubReady = connectedGitHubAccounts.length > 0;
+  const readyLocalAgentDevices =
+    localAgentDevices?.filter(
+      (device) =>
+        device.status.availability === "online" && device.status.compatibility === "ready",
+    ) ?? [];
+  const localRepositoryCount = Object.values(localAgentRepositories).reduce(
+    (count, repositories) => count + repositories.length,
+    0,
+  );
 
   const disconnect = async (connection: GitHubConnection): Promise<void> => {
     setConnectionBusy(connection.id);
@@ -409,6 +454,110 @@ export function Account({
                   the identity or delete the saved identity below.
                 </Alert>
               ) : null}
+              <article
+                className={`connection-card ${openConnection === "local-agent" ? "is-open" : ""}`}
+              >
+                <div className="connection-card-head">
+                  <div className="connection-brand">
+                    <span className="connection-icon" aria-hidden="true">
+                      ⌂
+                    </span>
+                    <div>
+                      <h4>Norns Local Agent</h4>
+                      <p>Approved Git project folders on your computers</p>
+                    </div>
+                  </div>
+                  <div className="connection-card-controls">
+                    <Badge
+                      tone={
+                        readyLocalAgentDevices.length > 0
+                          ? "success"
+                          : localAgentDevices?.length
+                            ? "warn"
+                            : "default"
+                      }
+                    >
+                      {localAgentDevices === null
+                        ? "Loading"
+                        : readyLocalAgentDevices.length > 0
+                          ? `${readyLocalAgentDevices.length} ready`
+                          : localAgentDevices.length > 0
+                            ? "Connection needs attention"
+                            : "Not connected"}
+                    </Badge>
+                    <Button
+                      variant="ghost"
+                      className="btn-small"
+                      aria-expanded={openConnection === "local-agent"}
+                      aria-controls="local-agent-connection-details"
+                      onClick={() => void toggleConnection("local-agent")}
+                    >
+                      {openConnection === "local-agent" ? "Hide" : "Manage agent"}
+                    </Button>
+                  </div>
+                </div>
+                {openConnection === "local-agent" ? (
+                  <div className="connection-details" id="local-agent-connection-details">
+                    {localAgentDevices?.length ? (
+                      <div className="connection-list">
+                        {localAgentDevices.map((device) => {
+                          const repositories = localAgentRepositories[device.device_id] ?? [];
+                          return (
+                            <div className="connection-row" key={device.device_id}>
+                              <div>
+                                <strong>{device.name}</strong>
+                                <span>
+                                  {device.status.availability} · {device.status.compatibility} ·{" "}
+                                  {repositories.length} approved{" "}
+                                  {repositories.length === 1 ? "folder" : "folders"}
+                                </span>
+                                {repositories.map((repository) => (
+                                  <span key={repository.registration_id}>
+                                    {repository.repository_display_name} ·{" "}
+                                    {repository.default_branch}
+                                  </span>
+                                ))}
+                              </div>
+                              <Badge
+                                tone={
+                                  device.status.availability === "online" &&
+                                  device.status.compatibility === "ready"
+                                    ? "success"
+                                    : "warn"
+                                }
+                              >
+                                {device.status.availability}
+                              </Badge>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="muted">
+                        Install and sync the Norns Local Agent to approve folders on this computer.
+                      </p>
+                    )}
+                    <div className="connection-actions">
+                      <Button
+                        variant="ghost"
+                        className="btn-small"
+                        disabled={connectionBusy !== null}
+                        onClick={() => void loadLocalAgent()}
+                      >
+                        Refresh computers
+                      </Button>
+                    </div>
+                    {localAgentDevices?.length ? (
+                      <p className="muted">
+                        Add or remove folders from the Local Agent’s Repositories tab.{" "}
+                        {localRepositoryCount} approved{" "}
+                        {localRepositoryCount === 1 ? "folder is" : "folders are"} synced to this
+                        account.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </article>
               {github === null ? (
                 <Spinner label="Loading GitHub connection…" />
               ) : (

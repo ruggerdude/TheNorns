@@ -28,6 +28,15 @@ export interface DeviceWssAuthenticationRepository {
     credentialId: string,
     assess: (candidate: DeviceWssAuthenticationCandidate | null) => Promise<T> | T,
   ): Promise<T>;
+  recordObservation?(input: {
+    device_id: string;
+    credential_id: string;
+    generation: number;
+    agent_version: string;
+    protocol_version: string;
+    capabilities: readonly string[];
+    observed_at: string;
+  }): Promise<void>;
 }
 
 export interface DeviceWssAuthenticationRequest {
@@ -35,6 +44,8 @@ export interface DeviceWssAuthenticationRequest {
   credential_id: string;
   generation: number;
   protocol_version: string;
+  agent_version?: string;
+  capabilities?: readonly string[];
   challenge: string;
   transcript_signature: string;
 }
@@ -123,6 +134,46 @@ export class PostgresDeviceWssAuthenticationRepository
       );
     });
   }
+
+  recordObservation(input: {
+    device_id: string;
+    credential_id: string;
+    generation: number;
+    agent_version: string;
+    protocol_version: string;
+    capabilities: readonly string[];
+    observed_at: string;
+  }): Promise<void> {
+    return this.transactions.transaction(async (sql) => {
+      await sql.query(
+        `UPDATE devices device
+            SET agent_version=$4,
+                agent_protocol_version=$5,
+                agent_capabilities=$6::jsonb,
+                last_seen_at=GREATEST(COALESCE(last_seen_at,$7),$7)
+          WHERE device.id=$1
+            AND device.lifecycle='active'
+            AND device.current_generation=$3
+            AND EXISTS (
+              SELECT 1
+                FROM device_credentials credential
+               WHERE credential.device_id=device.id
+                 AND credential.id=$2
+                 AND credential.generation=$3
+                 AND credential.state='active'
+            )`,
+        [
+          input.device_id,
+          input.credential_id,
+          input.generation,
+          input.agent_version,
+          input.protocol_version,
+          JSON.stringify(input.capabilities),
+          input.observed_at,
+        ],
+      );
+    });
+  }
 }
 
 export class DeviceWssAuthenticationService implements DeviceWssAuthenticator {
@@ -131,7 +182,7 @@ export class DeviceWssAuthenticationService implements DeviceWssAuthenticator {
 
   constructor(
     private readonly repository: DeviceWssAuthenticationRepository,
-    options: { supportedProtocolVersions?: readonly string[] } = {},
+    options: { supportedProtocolVersions?: readonly string[]; now?: () => Date } = {},
   ) {
     const versions = options.supportedProtocolVersions ?? [DEVICE_WSS_PROTOCOL_VERSION];
     if (versions.length === 0 || versions.some((version) => !version.trim())) {
@@ -139,7 +190,10 @@ export class DeviceWssAuthenticationService implements DeviceWssAuthenticator {
     }
     this.supportedProtocolVersions = Object.freeze([...new Set(versions)]);
     this.supportedProtocolVersionSet = new Set(this.supportedProtocolVersions);
+    this.now = options.now ?? (() => new Date());
   }
+
+  private readonly now: () => Date;
 
   async authenticate(
     request: DeviceWssAuthenticationRequest,
@@ -147,7 +201,7 @@ export class DeviceWssAuthenticationService implements DeviceWssAuthenticator {
     if (!this.supportedProtocolVersionSet.has(request.protocol_version)) return null;
     if (!Number.isSafeInteger(request.generation) || request.generation <= 0) return null;
 
-    return this.repository.withLockedCandidate(
+    const authenticated = await this.repository.withLockedCandidate(
       request.device_id,
       request.credential_id,
       (candidate) => {
@@ -166,6 +220,12 @@ export class DeviceWssAuthenticationService implements DeviceWssAuthenticator {
           credential_id: request.credential_id,
           generation: request.generation,
           protocol_version: request.protocol_version,
+          ...(request.agent_version !== undefined
+            ? {
+                agent_version: request.agent_version,
+                capabilities: [...(request.capabilities ?? [])],
+              }
+            : {}),
           challenge: request.challenge,
         });
         try {
@@ -208,6 +268,23 @@ export class DeviceWssAuthenticationService implements DeviceWssAuthenticator {
         };
       },
     );
+    if (
+      authenticated &&
+      request.agent_version !== undefined &&
+      request.capabilities !== undefined &&
+      this.repository.recordObservation
+    ) {
+      await this.repository.recordObservation({
+        device_id: authenticated.device_id,
+        credential_id: authenticated.credential_id,
+        generation: authenticated.generation,
+        agent_version: request.agent_version,
+        protocol_version: authenticated.protocol_version,
+        capabilities: [...request.capabilities],
+        observed_at: this.now().toISOString(),
+      });
+    }
+    return authenticated;
   }
 
   verifyCancellationEvidence(frame: DeviceCancellationEvidenceFrameT): Promise<boolean> {

@@ -324,6 +324,11 @@ function createPersistentRunner(input: {
     input.deviceControlEnabled,
     input.credentialStore,
   );
+  const deviceCapabilities = [
+    "device_control",
+    "repository_access",
+    ...(input.deviceExecutionEnabled === true ? ["device_execution"] : []),
+  ];
   const execution: {
     executor?: V2RunnerExecutor;
     repositories?: ApprovedRepositoryRegistry;
@@ -344,6 +349,8 @@ function createPersistentRunner(input: {
       ? {
           deviceControl: {
             ...device.wss,
+            agentVersion: process.env.NORNS_LOCAL_AGENT_VERSION ?? "development",
+            capabilities: deviceCapabilities,
             execution: input.deviceExecutionEnabled === true,
             legacyLocalCompatibility: input.legacyLocalCompatibilityEnabled === true,
           },
@@ -541,6 +548,15 @@ async function main(): Promise<void> {
     const agentDaemon: AgentDaemonLifecycle = {
       start: () => requireManagedDaemon().start(),
       stop: () => managedDaemon?.stop(),
+      status: () => ({
+        connected: managedDaemon?.deviceControlConnected ?? false,
+        protocol_version: "1",
+        capabilities: [
+          "device_control",
+          "repository_access",
+          ...(deviceExecutionEnabled ? ["device_execution"] : []),
+        ],
+      }),
       emergencyStop: async () =>
         managedDaemon
           ? managedDaemon.emergencyStop()

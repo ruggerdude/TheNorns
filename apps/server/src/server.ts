@@ -7675,6 +7675,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             credential_id: frame.credential_id,
             generation: frame.generation,
             protocol_version: frame.protocol_version,
+            ...(frame.agent_version !== undefined
+              ? {
+                  agent_version: frame.agent_version,
+                  capabilities: frame.capabilities ?? [],
+                }
+              : {}),
             challenge: deviceChallenge,
             transcript_signature: frame.transcript_signature,
           });

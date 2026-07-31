@@ -13,6 +13,7 @@ export {
   type AgentAvailabilityState,
   type AgentCompatibilityState,
   type AgentDaemonLifecycle,
+  type AgentDaemonRuntimeStatus,
   type AgentDaemonState,
   type AgentEnrollmentState,
   type AgentEmergencyStopResult,

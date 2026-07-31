@@ -28,6 +28,8 @@ export interface DeviceControlConnectionOptions {
   serverUrl: string;
   dataDir: string;
   identity: DeviceWssIdentity;
+  agentVersion?: string;
+  capabilities?: readonly string[];
   sign(canonicalTranscript: string): string;
   stopRun(
     runId: string,
@@ -197,6 +199,8 @@ export class DeviceControlConnection {
               ...this.options.identity,
               challenge: frame.device_auth.challenge,
               protocol_version: DEVICE_WSS_PROTOCOL_VERSION,
+              agent_version: this.options.agentVersion ?? "development",
+              capabilities: [...(this.options.capabilities ?? ["device_control"])],
               sign: this.options.sign,
             }),
           ),

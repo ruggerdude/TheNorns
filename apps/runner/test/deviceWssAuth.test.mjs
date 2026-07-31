@@ -30,17 +30,23 @@ test("device WSS proof signs the canonical domain-separated transcript", () => {
       credential_id: "credential-1",
       generation: 4,
       challenge: "server-issued-challenge",
+      agent_version: "0.3.1",
+      capabilities: ["device_control", "repository_access"],
       sign: (payload) => credential.sign(payload),
     });
 
     assert.equal(frame.type, "device_auth");
     assert.equal(frame.protocol_version, "1");
+    assert.equal(frame.agent_version, "0.3.1");
+    assert.deepEqual(frame.capabilities, ["device_control", "repository_access"]);
     const transcript = canonicalDeviceWssAuthenticationTranscript({
       purpose: DEVICE_WSS_AUTH_SIGNATURE_PURPOSE,
       device_id: frame.device_id,
       credential_id: frame.credential_id,
       generation: frame.generation,
       protocol_version: frame.protocol_version,
+      agent_version: frame.agent_version,
+      capabilities: frame.capabilities,
       challenge: "server-issued-challenge",
     });
     assert.equal(
