@@ -967,8 +967,8 @@ describe("conversation workspace", () => {
       if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse();
       if (url.endsWith("/attachments")) {
         uploaded.push({
-          name: (init?.headers as Record<string, string>)["x-attachment-filename"],
-          mime: (init?.headers as Record<string, string>)["content-type"],
+          name: (init?.headers as Record<string, string>)?.["x-attachment-filename"] ?? "",
+          mime: (init?.headers as Record<string, string>)?.["content-type"] ?? "",
         });
         return new Response(JSON.stringify({ id: "att-exe", url: "/attachments/att-exe" }), {
           status: 200,
