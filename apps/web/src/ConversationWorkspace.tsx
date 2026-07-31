@@ -4637,6 +4637,12 @@ function ConversationThread({
                 ) : null}
               </section>
             ) : null}
+            {proposalBusy ? (
+              <output className="conversation-active-run" data-testid="conversation-plan-busy">
+                <span className="conversation-plan-busy-indicator" />
+                <span>Building your plan — analyzing conversation and generating proposal…</span>
+              </output>
+            ) : null}
             {proposalError ? (
               <div className="conversation-thread-alert">
                 <Alert testId="conversation-plan-proposal-error">{proposalError}</Alert>

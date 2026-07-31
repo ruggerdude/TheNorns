@@ -973,6 +973,20 @@
   font-size: var(--text-sm);
 }
 
+.conversation-plan-busy-indicator {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: plan-pulse 1.2s ease-in-out infinite;
+  flex: none;
+}
+
+@keyframes plan-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
 .conversation-thread-chrome .conversation-header-actions {
   grid-column: 3;
   grid-row: 1;
