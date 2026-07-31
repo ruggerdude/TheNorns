@@ -1809,7 +1809,7 @@ function ConversationQcActivity({
   const proposed = [...context.actions.values()].filter((action) => action.status === "proposed");
 
   return (
-    <section className="conversation-qc-activity" aria-label="QC activity">
+    <section className="conversation-qc-activity" aria-label="QC activity" data-expanded={expanded}>
       <button
         type="button"
         className="conversation-qc-activity-summary"
@@ -1822,7 +1822,9 @@ function ConversationQcActivity({
         </span>
         <span>
           <strong>QC activity · Attempt {latest.attempt_number}</strong>
-          <small>{qcActivitySummary(latest)}</small>
+          <small>
+            {expanded ? "Click to show conversation" : qcActivitySummary(latest)}
+          </small>
         </span>
         <Badge tone={qcActivityTone(latest.status)}>{latest.status.replaceAll("_", " ")}</Badge>
       </button>
@@ -3244,6 +3246,7 @@ function ConversationThread({
   onOpenConversation,
   onConversationModelChanged,
   onRefresh,
+  onRefreshSoft,
   onUnauthorized,
 }: {
   header: (
@@ -3259,6 +3262,7 @@ function ConversationThread({
   onOpenConversation: (conversationId: string) => void;
   onConversationModelChanged: (conversation: V2WorkConversationT) => void;
   onRefresh: () => void;
+  onRefreshSoft: () => void;
   onUnauthorized: () => void;
 }): React.ReactElement {
   const [streamError, setStreamError] = useState<string | null>(null);
@@ -3616,9 +3620,9 @@ function ConversationThread({
 
   useEffect(() => {
     if (!awaitingBackgroundSettlement) return;
-    const timer = window.setTimeout(onRefresh, 2_500);
+    const timer = window.setTimeout(onRefreshSoft, 2_500);
     return () => window.clearTimeout(timer);
-  }, [awaitingBackgroundSettlement, onRefresh]);
+  }, [awaitingBackgroundSettlement, onRefreshSoft]);
 
   const generatePlanProposal = useCallback(
     async (intentMessage?: string, saveWhenReady = false, handoff?: V2PlanHandoffPreferenceT) => {
@@ -5395,6 +5399,10 @@ export function ConversationWorkspace({
     void Promise.all([loadDetail(true), loadGroups(), loadNavigation()]);
   }, [loadDetail, loadGroups, loadNavigation]);
 
+  const refreshSoft = useCallback(() => {
+    void loadDetail(false);
+  }, [loadDetail]);
+
   const sidebarFamilies = useMemo<SidebarConversationFamily[]>(() => {
     if (!groups) return [];
     const groupsById = new Map(groups.map((group) => [group.work_item.id, group]));
@@ -6228,6 +6236,7 @@ export function ConversationWorkspace({
                 );
               }}
               onRefresh={refresh}
+              onRefreshSoft={refreshSoft}
               onUnauthorized={handleUnauthorized}
             />
           </>

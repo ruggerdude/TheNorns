@@ -2214,6 +2214,19 @@
   background: color-mix(in srgb, var(--warn) 4%, var(--surface));
 }
 
+.conversation-qc-activity[data-expanded="true"] {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.conversation-thread:has(.conversation-qc-activity[data-expanded="true"]) > .conversation-thread-root,
+.conversation-thread:has(.conversation-qc-activity[data-expanded="true"]) > .conversation-context-receipt,
+.conversation-thread:has(.conversation-qc-activity[data-expanded="true"]) > .conversation-live-telemetry {
+  display: none;
+}
+
 .conversation-qc-activity-summary {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -2260,11 +2273,8 @@
 
 .conversation-qc-attempts {
   display: grid;
-  max-height: min(64vh, 48rem);
   gap: 1rem;
   padding: 0 1rem 1rem;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
 }
 
 .conversation-qc-attempt {
@@ -2276,6 +2286,24 @@
 
 .conversation-qc-attempt > .conversation-qc-card {
   margin-top: 0;
+}
+
+.conversation-qc-plan-under-review {
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--info) 38%, var(--line));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--info) 6%, var(--surface));
+}
+
+.conversation-qc-plan-under-review > summary {
+  color: var(--info);
+  font-size: var(--text-sm);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.conversation-qc-plan-under-review > .conversation-plan-card {
+  margin-top: 0.75rem;
 }
 
 .conversation-qc-final-plan {
