@@ -22,6 +22,12 @@ assert.match(packager, /--component-plist "\$COMPONENT_PLIST"/);
 assert.match(signer, /--scripts "\$PACKAGE_SCRIPTS"/);
 assert.match(signer, /--component-plist "\$COMPONENT_PLIST"/);
 assert.match(signer, /--keychain "\$KEYCHAIN"/);
+assert.match(signer, /security find-identity -v "\$KEYCHAIN"/);
+assert.equal(
+  signer.match(/-T \/usr\/bin\/codesign -T \/usr\/bin\/pkgbuild -T \/usr\/bin\/productsign/g)
+    ?.length,
+  2,
+);
 assert.match(launcher, /<key>NORNS_ENABLE_DEVICE_CONTROL<\/key><string>true<\/string>/);
 assert.match(launcher, /NORNS_ENABLE_DEVICE_CONTROL="true" \\\n\s*NORNS_LOCAL_AGENT_VERSION=/);
 

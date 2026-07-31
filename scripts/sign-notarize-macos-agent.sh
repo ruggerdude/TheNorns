@@ -67,13 +67,26 @@ printf '%s' "$NOTARY_KEY_BASE64" | base64 -D >"$NOTARY_KEY"
 security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 security set-keychain-settings -lut 21600 "$KEYCHAIN"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+# The application and installer certificates may share one private key. The
+# first import owns that key's ACL, so grant every signing tool access on both
+# imports instead of relying on the duplicate-key import to update it.
 security import "$APPLICATION_P12" -k "$KEYCHAIN" -P "$CERTIFICATE_PASSWORD" \
-  -T /usr/bin/codesign
+  -T /usr/bin/codesign -T /usr/bin/pkgbuild -T /usr/bin/productsign
 security import "$INSTALLER_P12" -k "$KEYCHAIN" -P "$CERTIFICATE_PASSWORD" \
-  -T /usr/bin/pkgbuild -T /usr/bin/productsign
+  -T /usr/bin/codesign -T /usr/bin/pkgbuild -T /usr/bin/productsign
 security set-key-partition-list -S apple-tool:,apple: -s \
   -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 security list-keychains -d user -s "$KEYCHAIN"
+
+IDENTITIES=$(security find-identity -v "$KEYCHAIN")
+printf '%s\n' "$IDENTITIES"
+for identity in "$APPLICATION_IDENTITY" "$INSTALLER_IDENTITY"; do
+  if ! printf '%s\n' "$IDENTITIES" | grep -Fq "$identity"; then
+    printf 'Signing identity is not usable in the CI keychain: %s\n' \
+      "$identity" >&2
+    exit 1
+  fi
+done
 
 chmod -R u+w "$APP"
 xattr -cr "$APP"
