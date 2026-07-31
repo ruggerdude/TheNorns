@@ -91,6 +91,21 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     expect(window.location.pathname).toBe("/");
   });
 
+  test("lands on Portfolio when the authenticated site opens at the root URL", async () => {
+    mock.get("/api/auth/me", {
+      body: { id: "u1", email: "member@x.com", name: null, role: "member", status: "active" },
+    });
+    mock.install();
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: /^Portfolio$/ }),
+    ).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/");
+    expect(mock.calls.some((call) => /^\/api\/projects\/[^/]+$/.test(call.url))).toBe(false);
+  });
+
   test("shows Settings and Usage, but keeps Computers inside the admin-only menu", async () => {
     mock.get("/api/auth/me", {
       body: { id: "u1", email: "member@x.com", name: null, role: "member", status: "active" },

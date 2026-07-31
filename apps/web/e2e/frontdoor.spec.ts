@@ -49,6 +49,7 @@ function project(id: string, source: "github" | "local") {
     source_location:
       source === "github" ? "https://github.com/octocat/front-door-app.git" : "local-front-door",
     onboarding_scenario: source === "github" ? "existing_repo" : null,
+    focus_planning_run_id: null as string | null,
   };
 }
 
@@ -106,7 +107,11 @@ async function fulfill(route: Route, payload: unknown, status = 200) {
 async function prepare(
   page: Page,
   mode: "github" | "local" | "new",
-  options: { githubInitiallyInstalled?: boolean; conversationWorkspace?: boolean } = {},
+  options: {
+    githubInitiallyInstalled?: boolean;
+    conversationWorkspace?: boolean;
+    focusedPlanningRun?: boolean;
+  } = {},
 ) {
   let projects: ReturnType<typeof project>[] = [];
   let planningCreated = false;
@@ -268,6 +273,7 @@ async function prepare(
           name: body.name,
           description: body.description,
           onboarding_scenario: body.scenario,
+          focus_planning_run_id: options.focusedPlanningRun ? "planning-adoption" : null,
         },
       ];
       return fulfill(
@@ -864,13 +870,17 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(820);
 });
 
-test("Re-entering a project opens Overview instead of preserving Work", async ({ page }) => {
-  await prepare(page, "github", { conversationWorkspace: true });
+test("A project with focused work still opens on Overview from Portfolio", async ({ page }) => {
+  await prepare(page, "github", { conversationWorkspace: true, focusedPlanningRun: true });
   await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Portfolio", exact: true })).toBeVisible();
   await selectExistingGitHubRepository(page);
   await page.getByRole("button", { name: /adopt project/i }).click();
 
   const workspaceNavigation = page.getByRole("navigation", { name: "Workspace sections" });
+  await expect(
+    workspaceNavigation.getByRole("button", { name: "Overview", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
   await workspaceNavigation.getByRole("button", { name: "Work", exact: true }).click();
   await expect(
     workspaceNavigation.getByRole("button", { name: "Work", exact: true }),

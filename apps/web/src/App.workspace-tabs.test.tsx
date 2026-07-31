@@ -448,6 +448,8 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     await user.click(await screen.findByRole("button", { name: "Show active projects" }));
     await user.click(await screen.findByRole("button", { name: new RegExp(project.name, "i") }));
 
+    expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on");
+    await user.click(screen.getByRole("button", { name: "Work" }));
     expect(await screen.findByRole("heading", { name: "Coding stopped" })).toBeVisible();
     expect(screen.getByTestId("phase-new-work")).toBeVisible();
 

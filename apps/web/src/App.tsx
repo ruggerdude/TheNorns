@@ -866,11 +866,7 @@ function ProjectGraph({
   // exact same JSX/logic that existed already, just grouped under a tab.
   type WorkspaceTab = "overview" | "work" | "graph" | "members" | "debates" | "settings";
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>(
-    initialWorkRoute ||
-      initialConversationId ||
-      (isCanonicalPlanningJourney && project.focus_planning_run_id)
-      ? "work"
-      : "overview",
+    initialWorkRoute || initialConversationId ? "work" : "overview",
   );
   const [mobileWorkspaceNavOpen, setMobileWorkspaceNavOpen] = useState(false);
   const previousInitialWorkRoute = useRef(initialWorkRoute);
@@ -1045,15 +1041,13 @@ function ProjectGraph({
     previousInitialWorkRoute.current = initialWorkRoute;
   }, [initialConversationId, initialWorkRoute]);
 
-  // New and adopted projects hand us a transient run id so their first open
-  // can go directly to Work. Later project entries recover the same durable
-  // run state without changing the user's selected tab; a clean project URL
-  // always opens on Overview.
+  // A project can carry a focused planning run for recovery or attention.
+  // Prepare that run for Work, but never let saved server state override the
+  // normal project landing page. Only an explicit /work route selects Work.
   useEffect(() => {
     let cancelled = false;
     if (isCanonicalPlanningJourney && project.focus_planning_run_id) {
       setPhaseJourneyRunId(project.focus_planning_run_id);
-      setWorkspaceTab("work");
       void getJson<PhasePlanningRunDto>(
         `/api/v2/projects/${project.id}/planning-runs/${project.focus_planning_run_id}`,
       )

@@ -461,7 +461,7 @@ describe("PHASE TAB (P2)", () => {
     expect(screen.getByTestId("phase-execution-team")).toHaveTextContent("High effort");
   });
 
-  it("opens an adopted project's in-flight plan directly and prepares it without overriding Overview on return", async () => {
+  it("prepares an adopted project's focused plan without overriding Overview", async () => {
     setToken("present");
     mock = workspaceMocks({
       ...projectAlpha,
@@ -473,8 +473,10 @@ describe("PHASE TAB (P2)", () => {
 
     const firstOpen = render(<App />);
     await openProjectFromPortfolio();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on"));
+    expect(screen.queryByTestId("phase-run-progress")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Work" }));
     expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
 
     firstOpen.unmount();
     mock.restore();
@@ -491,7 +493,7 @@ describe("PHASE TAB (P2)", () => {
     expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
   });
 
-  it("opens a new project's approval decision directly and prepares it without overriding Overview on return", async () => {
+  it("prepares a new project's focused approval decision without overriding Overview", async () => {
     setToken("present");
     mock = workspaceMocks({
       ...projectAlpha,
@@ -504,8 +506,10 @@ describe("PHASE TAB (P2)", () => {
 
     const firstOpen = render(<App />);
     await openProjectFromPortfolio();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on"));
+    expect(screen.queryByTestId("phase-decision-panel")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Work" }));
     expect(await screen.findByTestId("phase-decision-panel")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
 
     firstOpen.unmount();
     mock.restore();
@@ -975,6 +979,8 @@ describe("PHASE TAB (P2)", () => {
 
     render(<App />);
     await openProjectFromPortfolio();
+    expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on");
+    await userEvent.click(screen.getByRole("button", { name: "Work" }));
     await userEvent.click(await screen.findByTestId("phase-approve"));
     await userEvent.click(await screen.findByTestId("phase-retry-execution"));
 
