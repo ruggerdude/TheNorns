@@ -557,7 +557,7 @@ export class RelationalProjectReadRepository implements ProjectRepository {
   async destroy(id: string, _actorId: string): Promise<void> {
     await this.transactions.transaction(async (sql) => {
       const result = await sql.query<{ id: string }>(
-        `DELETE FROM projects WHERE id = $1 RETURNING id`,
+        "DELETE FROM projects WHERE id = $1 RETURNING id",
         [id],
       );
       if (result.rows.length === 0) throw new ProjectNotFoundError(id);

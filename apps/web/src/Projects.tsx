@@ -533,9 +533,9 @@ export function Projects({
   // resume call fails (404 for a brand-new draft, network error, etc.)
   // simply renders without phase lines rather than blocking the dashboard.
   const [resumeById, setResumeById] = useState<Record<string, DashboardResumeSummary>>({});
-  const [archivedProjects, setArchivedProjects] = useState<
-    Array<ProjectSummary & { archived_at: string }> | null
-  >(null);
+  const [archivedProjects, setArchivedProjects] = useState<Array<
+    ProjectSummary & { archived_at: string }
+  > | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [archiveBusy, setArchiveBusy] = useState<string | null>(null);
 

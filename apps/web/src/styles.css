@@ -6736,7 +6736,6 @@ h4 {
   );
 }
 
-
 .portfolio-switcher {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 44px;
@@ -7006,7 +7005,6 @@ h4 {
   .app-shell > .topbar .topbar-main > .portfolio-navigation {
     display: none;
   }
-
 }
 
 @media (max-width: 520px) {

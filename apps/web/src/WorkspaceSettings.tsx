@@ -375,11 +375,7 @@ export function WorkspaceSettings({
         </div>
         <div className="settings-save-row">
           <span className="muted">This action is permanent and cannot be undone.</span>
-          <Button
-            variant="danger"
-            disabled={deletingProject}
-            onClick={() => void deleteProject()}
-          >
+          <Button variant="danger" disabled={deletingProject} onClick={() => void deleteProject()}>
             {deletingProject ? "Deleting…" : "Delete project"}
           </Button>
         </div>

@@ -151,11 +151,7 @@ export class MacOsKeychainDeviceCredentialSecretStore implements DeviceCredentia
     if (this.read(reference) !== null) {
       throw new Error("device credential secret already exists");
     }
-    if (
-      secret.length === 0 ||
-      secret.length > 64 * 1024 ||
-      !/^[A-Za-z0-9+/_=-]+$/.test(secret)
-    ) {
+    if (secret.length === 0 || secret.length > 64 * 1024 || !/^[A-Za-z0-9+/_=-]+$/.test(secret)) {
       throw new Error("macOS Keychain secret encoding is invalid");
     }
     // `security add-generic-password -w` does not read a missing password
@@ -173,16 +169,12 @@ export class MacOsKeychainDeviceCredentialSecretStore implements DeviceCredentia
       "-w",
       secret,
     ].join(" ");
-    const result = this.run(
-      "/usr/bin/security",
-      ["-i"],
-      {
-        input: `${input}\n`,
-        encoding: "utf8",
-        stdio: ["pipe", "ignore", "ignore"],
-        maxBuffer: 64 * 1024,
-      },
-    );
+    const result = this.run("/usr/bin/security", ["-i"], {
+      input: `${input}\n`,
+      encoding: "utf8",
+      stdio: ["pipe", "ignore", "ignore"],
+      maxBuffer: 64 * 1024,
+    });
     if (result.status !== 0) throw commandFailure("macOS Keychain write", result);
   }
 

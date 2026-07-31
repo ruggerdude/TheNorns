@@ -727,7 +727,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   });
   await app.register(websocket);
   app.addContentTypeParser(
-    [...ALLOWED_IMAGE_MIMES, "text/markdown", "text/csv", "application/pdf", "application/octet-stream"],
+    [
+      ...ALLOWED_IMAGE_MIMES,
+      "text/markdown",
+      "text/csv",
+      "application/pdf",
+      "application/octet-stream",
+    ],
     { parseAs: "buffer", bodyLimit: ATTACHMENT_CAPS.maxBytesPerAttachment },
     (_request, body, done) => done(null, body),
   );
