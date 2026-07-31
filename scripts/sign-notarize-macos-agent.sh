@@ -48,14 +48,16 @@ fi
 [ -d "$PACKAGE_SCRIPTS" ] || { printf '%s\n' "macOS package scripts are missing." >&2; exit 1; }
 [ -f "$COMPONENT_PLIST" ] || { printf '%s\n' "macOS component plist is missing." >&2; exit 1; }
 
-KEYCHAIN="$RUNNER_TEMP/norns-signing.keychain-db"
+APPLICATION_KEYCHAIN="$RUNNER_TEMP/norns-application-signing.keychain-db"
+INSTALLER_KEYCHAIN="$RUNNER_TEMP/norns-installer-signing.keychain-db"
 KEYCHAIN_PASSWORD=$(uuidgen)
 APPLICATION_P12="$RUNNER_TEMP/norns-application.p12"
 INSTALLER_P12="$RUNNER_TEMP/norns-installer.p12"
 NOTARY_KEY="$RUNNER_TEMP/AuthKey_${NOTARY_KEY_ID}.p8"
 
 cleanup() {
-  security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true
+  security delete-keychain "$APPLICATION_KEYCHAIN" >/dev/null 2>&1 || true
+  security delete-keychain "$INSTALLER_KEYCHAIN" >/dev/null 2>&1 || true
   rm -f "$APPLICATION_P12" "$INSTALLER_P12" "$NOTARY_KEY"
 }
 trap cleanup EXIT
@@ -64,29 +66,38 @@ printf '%s' "$APPLICATION_CERTIFICATE_BASE64" | base64 -D >"$APPLICATION_P12"
 printf '%s' "$INSTALLER_CERTIFICATE_BASE64" | base64 -D >"$INSTALLER_P12"
 printf '%s' "$NOTARY_KEY_BASE64" | base64 -D >"$NOTARY_KEY"
 
-security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-security set-keychain-settings -lut 21600 "$KEYCHAIN"
-security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-# The application and installer certificates may share one private key. The
-# first import owns that key's ACL, so grant every signing tool access on both
-# imports instead of relying on the duplicate-key import to update it.
-security import "$APPLICATION_P12" -k "$KEYCHAIN" -P "$CERTIFICATE_PASSWORD" \
-  -T /usr/bin/codesign -T /usr/bin/pkgbuild -T /usr/bin/productsign
-security import "$INSTALLER_P12" -k "$KEYCHAIN" -P "$CERTIFICATE_PASSWORD" \
-  -T /usr/bin/codesign -T /usr/bin/pkgbuild -T /usr/bin/productsign
-security set-key-partition-list -S apple-tool:,apple: -s \
-  -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-security list-keychains -d user -s "$KEYCHAIN"
-
-IDENTITIES=$(security find-identity -v "$KEYCHAIN")
-printf '%s\n' "$IDENTITIES"
-for identity in "$APPLICATION_IDENTITY" "$INSTALLER_IDENTITY"; do
-  if ! printf '%s\n' "$IDENTITIES" | grep -Fq "$identity"; then
-    printf 'Signing identity is not usable in the CI keychain: %s\n' \
-      "$identity" >&2
-    exit 1
-  fi
+security create-keychain -p "$KEYCHAIN_PASSWORD" "$APPLICATION_KEYCHAIN"
+security create-keychain -p "$KEYCHAIN_PASSWORD" "$INSTALLER_KEYCHAIN"
+for keychain in "$APPLICATION_KEYCHAIN" "$INSTALLER_KEYCHAIN"; do
+  security set-keychain-settings -lut 21600 "$keychain"
+  security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
 done
+# These certificates share one private key, so keep them in separate keychains
+# to prevent the second import from collapsing into the first identity.
+security import "$APPLICATION_P12" -k "$APPLICATION_KEYCHAIN" \
+  -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+security import "$INSTALLER_P12" -k "$INSTALLER_KEYCHAIN" \
+  -P "$CERTIFICATE_PASSWORD" -T /usr/bin/pkgbuild -T /usr/bin/productsign
+security set-key-partition-list -S apple-tool:,apple: -s \
+  -k "$KEYCHAIN_PASSWORD" "$APPLICATION_KEYCHAIN"
+security set-key-partition-list -S apple-tool:,apple: -s \
+  -k "$KEYCHAIN_PASSWORD" "$INSTALLER_KEYCHAIN"
+security list-keychains -d user -s \
+  "$APPLICATION_KEYCHAIN" "$INSTALLER_KEYCHAIN"
+
+APPLICATION_IDENTITIES=$(security find-identity -v "$APPLICATION_KEYCHAIN")
+INSTALLER_IDENTITIES=$(security find-identity -v "$INSTALLER_KEYCHAIN")
+printf '%s\n%s\n' "$APPLICATION_IDENTITIES" "$INSTALLER_IDENTITIES"
+if ! printf '%s\n' "$APPLICATION_IDENTITIES" | grep -Fq "$APPLICATION_IDENTITY"; then
+  printf 'Application identity is not usable in its CI keychain: %s\n' \
+    "$APPLICATION_IDENTITY" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$INSTALLER_IDENTITIES" | grep -Fq "$INSTALLER_IDENTITY"; then
+  printf 'Installer identity is not usable in its CI keychain: %s\n' \
+    "$INSTALLER_IDENTITY" >&2
+  exit 1
+fi
 
 chmod -R u+w "$APP"
 xattr -cr "$APP"
@@ -116,7 +127,7 @@ COPYFILE_DISABLE=1 pkgbuild \
   --version "$BUNDLE_VERSION" \
   --install-location / \
   --sign "$INSTALLER_IDENTITY" \
-  --keychain "$KEYCHAIN" \
+  --keychain "$INSTALLER_KEYCHAIN" \
   "$PKG"
 pkgutil --check-signature "$PKG"
 
