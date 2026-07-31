@@ -3018,6 +3018,12 @@ export function App(): React.ReactElement {
     setUser(session.user);
     setAuthError(null);
     setTok("present");
+    setActiveProject(null);
+    setRoutedProjectId(null);
+    setWorkConversationRoute(null);
+    if (window.location.pathname !== "/") {
+      window.history.replaceState(null, "", "/");
+    }
   }, []);
 
   const logout = useCallback(

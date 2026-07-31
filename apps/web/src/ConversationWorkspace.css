@@ -998,7 +998,7 @@
 .conversation-welcome,
 .conversation-message:not(.is-system),
 .conversation-composer-footer {
-  width: min(100%, 50rem);
+  width: min(100%, 68rem);
   margin-inline: auto;
 }
 
