@@ -5261,6 +5261,78 @@ describe("conversation workspace", () => {
     expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
   });
 
+  it("shows the QC tab on a project that runs QC even before its first review", async () => {
+    // QC-PAUSE-POINTS.md "Surfaces": visibility keys on whether QC RUNS, not on
+    // whether this conversation has been reviewed yet. Keying off
+    // plan_reviews.length hid the tab on every plan not yet sent to review.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith("/planning-reviewer")) {
+          return Response.json({
+            provider: "anthropic",
+            model: null,
+            mode: "automatic",
+            qc_mode: "automatic",
+            allow_unadjudicated_rebuttals: false,
+            default_max_rounds: 3,
+          });
+        }
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse([], null, null, { reviews: [] });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByRole("button", { name: "QC" })).toBeInTheDocument();
+  });
+
+  it("hides the QC tab when the project has review turned off (zero rounds)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith("/planning-reviewer")) {
+          return Response.json({
+            provider: "anthropic",
+            model: null,
+            mode: "automatic",
+            qc_mode: "automatic",
+            allow_unadjudicated_rebuttals: false,
+            default_max_rounds: 0,
+          });
+        }
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse([], null, null, { reviews: [] });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await screen.findByRole("button", { name: "Plan" });
+    expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
+  });
+
   it("shows a needs-you badge on the QC tab and a status strip on the Plan tab while a review is parked", async () => {
     const review = planReview({
       status: "awaiting_human",

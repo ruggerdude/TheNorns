@@ -115,3 +115,4 @@
 2026-08-01T00:00Z | QCP-R5 | planWorkflow review mutations share loadReviewForUpdate/reloadReview instead of five copies of the same transaction plumbing
 2026-08-01T00:00Z | QCP-R6 | Six web review-action callbacks collapsed into runReviewAction; reviewCapBlocked folded into the error map; NoteEditor extracted
 2026-08-01T00:00Z | QCP-R12 | assertCurrentRuntimeSchema now covers the QC pause-point columns so a stale database fails at startup naming applyMigrations.js, instead of mid-session on a missing column; DEPLOY.md documents the migration step
+2026-08-01T00:00Z | QCP-R13 | QC tab keyed off project default_max_rounds instead of plan_reviews.length, so a project that runs QC shows the tab before its first review; GET planning-reviewer now returns default_max_rounds

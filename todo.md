@@ -1243,6 +1243,15 @@ decision and is deliberately untouched.
 
 ## QC PAUSE POINTS — review follow-ups (2026-08-01, from /simplify)
 
+- [x] ✅ QCP-R13 QC tab was gated on `plan_reviews.length > 0`, so a project
+  that runs QC showed only two tabs until its first review existed — the tab
+  was invisible on exactly the plans an operator would want to send to QC.
+  QCP-4B had flagged this with a `ponytail:` comment (no project signal was
+  plumbed to the client) and the PM passed it through. Now keyed off the
+  project's `default_max_rounds > 0`, which `GET .../planning-reviewer` newly
+  returns; an existing review still wins so a project that later turns QC off
+  can read its old reviews. Verified the test fails without the fix.
+
 - [x] ✅ QCP-R12 Runtime schema posture check did not cover 0064-0068, so a
   database with every earlier migration booted fine and then failed
   mid-session with `column "origin" does not exist` on the first plan read.

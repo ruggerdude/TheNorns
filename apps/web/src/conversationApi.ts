@@ -397,6 +397,10 @@ export interface PlanningReviewerSettings {
   mode: "explicit" | "automatic";
   qc_mode: QcModeT;
   allow_unadjudicated_rebuttals: boolean;
+  /** Zero means review is off for this project. This — not whether a given
+   *  conversation already has reviews — is what decides whether QC surfaces
+   *  are shown at all. */
+  default_max_rounds: number;
 }
 
 /** The project-layer QC defaults (QC-PAUSE-POINTS.md "Settings: three

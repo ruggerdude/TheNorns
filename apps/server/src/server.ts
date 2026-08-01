@@ -7056,10 +7056,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         if (!(await requireSession(req, reply))) return;
         const { id } = req.params as { id: string };
         try {
-          const [pmSelection, persisted, qcModeSettings] = await Promise.all([
+          const [pmSelection, persisted, qcModeSettings, defaultMaxRounds] = await Promise.all([
             projects.pmSelectionOf(id),
             planningRunService.reviewerSelectionOf(id),
             planningRunService.qcModeSettingsOf(id),
+            planningRunService.defaultMaxRoundsOf(id),
           ]);
           reply.send({
             ...(persisted
@@ -7071,6 +7072,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 }),
             qc_mode: qcModeSettings.qcMode,
             allow_unadjudicated_rebuttals: qcModeSettings.allowUnadjudicatedRebuttals,
+            default_max_rounds: defaultMaxRounds,
           });
         } catch (error) {
           projectError(reply, error);

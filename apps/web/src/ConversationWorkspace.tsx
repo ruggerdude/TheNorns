@@ -102,6 +102,7 @@ import {
   createConversationMessageBranch,
   createPlanningWorkItem,
   deleteConversationFolder,
+  fetchPlanningReviewerSettings,
   generateConversationPlanChangeProposal,
   generateConversationPlanProposal,
   getConversation,
@@ -3339,6 +3340,10 @@ function ConversationThread({
 }): React.ReactElement {
   const [workTab, setWorkTab] = useState<"plan" | "qc" | "implementation">("plan");
   const [planComposerDraft, setPlanComposerDraft] = useState<string | null>(null);
+  // Whether this PROJECT runs QC at all (default_max_rounds > 0), which is what
+  // decides the QC tab's existence — not whether this conversation happens to
+  // have a review yet. null until the settings load; see qcRuns below.
+  const [projectRunsQc, setProjectRunsQc] = useState<boolean | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
@@ -3427,6 +3432,23 @@ function ConversationThread({
     [],
   );
   const executionProjectionRefreshMarker = `${detail.conversation.updated_at}:${detail.work_item.updated_at}`;
+
+  useEffect(() => {
+    let current = true;
+    void fetchPlanningReviewerSettings(detail.work_item.project_id)
+      .then((settings) => {
+        if (current) setProjectRunsQc(settings.default_max_rounds > 0);
+      })
+      .catch((caught) => {
+        if (!current) return;
+        if (caught instanceof UnauthorizedError) onUnauthorized();
+        // Any other failure leaves projectRunsQc null, so the tab falls back to
+        // "this conversation has reviews" rather than disappearing on a blip.
+      });
+    return () => {
+      current = false;
+    };
+  }, [detail.work_item.project_id, onUnauthorized]);
 
   useEffect(() => {
     let current = true;
@@ -4491,12 +4513,12 @@ function ConversationThread({
   const isPlanning = detail.conversation.kind === "planning";
   const isExecution = detail.conversation.kind === "execution_pm";
   const isReadOnly = detail.conversation.status !== "active";
-  // ponytail: "does this project run QC" has no dedicated field on ConversationDetail
-  // yet, so the only honest client-side signal is "has this conversation ever had a
-  // review." A project that runs QC but hasn't sent anything to review yet will show
-  // two tabs until its first review exists. Revisit once a project setting is plumbed
-  // through.
-  const hasQc = isPlanning && detail.plan_reviews.length > 0;
+  // QC-PAUSE-POINTS.md "Surfaces": tab visibility keys on whether QC RUNS, not
+  // on whether it gates and not on whether this conversation has been reviewed
+  // yet. `default_max_rounds === 0` means review is off for the project.
+  // An existing review always wins: a project that switched QC off afterwards
+  // must still be able to read the reviews it already produced.
+  const hasQc = isPlanning && (detail.plan_reviews.length > 0 || projectRunsQc === true);
   const qcNeedsHuman = detail.plan_reviews.some((review) => review.status === "awaiting_human");
   const activeQcReview =
     [...detail.plan_reviews]

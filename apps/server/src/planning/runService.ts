@@ -558,6 +558,15 @@ export class PlanningRunService {
    * never touched planning settings at all), this is `automatic` /
    * `false` — the shipped default that changes no existing behavior.
    */
+  /**
+   * The project's default review round count. Zero means QC is off for this
+   * project — surfaces key "does this project run QC at all" off this, not
+   * off whether a given conversation happens to have reviews yet.
+   */
+  async defaultMaxRoundsOf(projectId: string): Promise<number> {
+    return this.transactions.transaction((tx) => this.defaultMaxRoundsFor(tx, projectId));
+  }
+
   async qcModeSettingsOf(projectId: string): Promise<QcModeSettings> {
     return this.transactions.transaction(async (tx) => {
       const result = await tx.query<{
