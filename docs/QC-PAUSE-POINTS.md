@@ -28,9 +28,9 @@ loop already reaches:
   findings before the PM has responded to them. Optional.
 - **Gate B — after the PM disposition pass.** The inspection point. The human
   sees dispositions and the resulting plan diff. Optional.
-- **Gate C — unresolved must-fix rebuttal.** The adjudication point. The
-  reviewer filed a must-fix finding, the PM rejected it, and the plan did not
-  change. **Not optional** — see "Adjudication" below.
+- **Gate C — unresolved must-fix objection.** The adjudication point. The PM
+  either rebutted a must-fix finding, or accepted it without changing the plan
+  region it targets. **Not optional** — see "Adjudication" below.
 
 A gate parks the review durably, releases the worker lease, and waits. Resume
 re-claims and continues from persisted state. Gating for A and B is a
@@ -54,7 +54,7 @@ flowchart TD
     gateA -->|"continue"| pm
 
     pm["PM DISPOSITION pass<br/>accept / rebut each finding → revised plan"]
-    pm --> rebut{"must_fix finding rebutted<br/>and plan unchanged?"}
+    pm --> rebut{"must_fix rebutted, or accepted<br/>with its target module unchanged?"}
 
     rebut -->|yes| gateC["GATE C — ADJUDICATION<br/><b>fires in every mode</b><br/><i>two agents disagree on fact or concept;<br/>only a human can settle it</i>"]
     gateC -->|"rule for reviewer → PM must revise"| pm
@@ -92,7 +92,7 @@ Inside any gate:
 title: "Inside a QC pause gate"
 ---
 flowchart TD
-    hit["Checkpoint reached<br/><i>onProgress in reviewOnlySession.ts</i>"] --> adj{"unresolved must_fix<br/>rebuttal?"}
+    hit["Checkpoint reached<br/><i>onProgress in reviewOnlySession.ts</i>"] --> adj{"must_fix rebutted, or accepted<br/>with target module unchanged?"}
 
     adj -->|"yes — Gate C"| park
     adj -->|no| mode{"qc_mode"}
@@ -186,8 +186,8 @@ versions sitting in the same list as the operator's own revisions. Requirements:
 
 ## Adjudication: unresolved must-fix rebuttals
 
-**A must-fix finding the PM rebuts without changing the plan stops the review in
-every mode, including `automatic`.**
+**A must-fix finding the PM rebuts — or accepts without changing the plan —
+stops the review in every mode, including `automatic`.**
 
 The rationale is empirical rather than theoretical. Reviewer/PM disagreement is
 common, and it is usually *factual* — one side did not read the code, or read it
@@ -203,6 +203,70 @@ not a cadence preference. `automatic` means "no cadence gates," not "no
 correctness gates." An explicit project-level `allow_unadjudicated_rebuttals`
 escape hatch exists for fully hands-off operation; it defaults false and should
 be documented as discouraged.
+
+### Trigger definition
+
+Gate C fires on either of two conditions against a `must_fix` finding.
+
+**1. Declared rebuttal.** The PM's disposition is `rebut`. This is a self-report
+already present in the contract, so it needs no structural comparison. It is the
+honest disagreement case, and it is what the gate exists for.
+
+**2. Hollow acceptance.** The PM's disposition is `accept`, but the plan region
+the finding targets is unchanged. Without this condition, a PM that accepts a
+finding in words and changes nothing passes silently, while a PM that disagrees
+openly is stopped — exactly backwards. A must-fix that produced no change is
+materially the same outcome as a rebuttal regardless of what it was called; the
+adjudication card wording differs ("PM accepted but the plan is unchanged") but
+the stop is the same.
+
+**"Unchanged" is scoped to the finding's target, not the whole plan.** A
+whole-plan content-hash comparison is defeated by any unrelated edit in the same
+pass. Findings carry `module_id`; compare the canonical hash of that module's
+subtree before and after the revision. For plan-level findings (`module_id`
+null), fall back to whole-plan canonical comparison. Reuse `canonicalSha256`, so
+ordering and whitespace normalization behave identically to existing plan
+hashing.
+
+**Findings batch into one stop.** A single PM pass can produce several
+rebuttals; Gate C presents all qualifying findings in one gate card with a
+ruling per finding, not one stop per finding.
+
+**`should_fix` does not trigger Gate C on its own.** Severity is the reviewer's
+own judgment about what blocks, and a mandatory stop that fires on every review
+stops being read — the same failure mode as gating every step. Instead:
+
+- rebutted `should_fix` findings are **aggregated on the approval card** ("3
+  should-fix findings rebutted across 2 rounds", expandable), surfacing the
+  pattern at the point a decision is already being made;
+- a `should_fix` finding that is rebutted and then **raised again in a later
+  round escalates to Gate C**, on the recurrence principle below.
+
+### Repeat disputes across attempts
+
+**A prior ruling is never injected into a later reviewer's context.** A second
+attempt is worth running only because the new reviewer reaches the plan
+independently; telling it how the last dispute was settled buys consistency at
+the cost of the independence that justified the attempt.
+
+**The same dispute is adjudicated again, from scratch.** The second pass may
+carry different or better information, and the human may rule differently.
+
+**Recurrence is itself evidence, and is surfaced to the human.** That a finding
+has been raised twice — by different reviewers, across attempts, or by the same
+reviewer across rounds — is a signal about the plan, independent of either
+ruling's merits. Requirements:
+
+- the adjudication card shows prior occurrences of the finding and how each was
+  ruled, including rulings from earlier attempts;
+- repeat disputes rank above first-time disputes in the attention model;
+- the approval card summarizes contested themes — findings raised more than once
+  across the work item's reviews — so a persistently disputed area is visible at
+  the decision point rather than buried in round transcripts.
+
+Matching repeats is heuristic, not exact: findings are free text with an
+`index` scoped to a round. Match on target module plus semantic similarity, and
+present matches as "possibly the same objection" rather than asserting identity.
 
 ### The adjudication card
 
@@ -476,7 +540,9 @@ than letting it look like a ruling was recorded.
 adjudication block on dispositions with rule-for-reviewer / rule-for-PM /
 supply-the-missing-fact; cap-raise-by-one when a ruling needs a revision pass it
 does not have rounds for; human-steering provenance on the review and approval
-card.
+card; repeat-finding matching, prior-ruling history on the adjudication card,
+`should_fix` recurrence escalation, and the contested-themes summary at
+approval.
 
 **Phase 3 — control and surfaces.** `qc_mode` across the three layers; compound
 exits (*continue and stop asking*, *hold at next checkpoint*); mid-flight
@@ -488,32 +554,52 @@ before the full settings surface exists.
 
 ## Resolved
 
-Three questions were open in the first draft and are now decided in the body
-above:
+Six questions have been raised and decided across drafts; all are specified in
+the body above.
 
 1. **Interim plan versions are retained**, with an `origin` marker, collapsed by
    default in version history, and never offered as a default target for
    approval, execution, or diff.
 2. **A question at a gate resets the TTL nudge.**
-3. **An unresolved must-fix rebuttal is a mandatory stop in every mode** — Gate
+3. **An unresolved must-fix objection is a mandatory stop in every mode** — Gate
    C — because reviewer/PM disagreement is usually factual (one side did not
    read or did not understand the code) and neither agent can resolve it from a
    frozen context receipt. Where the dispute is instead conceptual, it is a
    decision rather than a review finding. Both need a human adjudicator.
+4. **Prior rulings are never injected into a later reviewer's context.** The
+   dispute is adjudicated again from scratch, possibly on better information and
+   possibly to a different outcome. Independence is what makes a second attempt
+   worth running.
+5. **The Gate C trigger is a declared rebuttal or a hollow acceptance**, with
+   "unchanged" scoped to the finding's target module rather than the whole plan.
+   Self-reported disagreement and silent non-compliance are the same outcome and
+   must be treated the same; scoping defeats cosmetic-edit evasion.
+6. **`should_fix` does not trigger Gate C on its own** — it aggregates on the
+   approval card — **but escalates to Gate C on recurrence.** A mandatory stop
+   keeps its meaning only by being rare, while a repeated objection is evidence
+   regardless of the severity label attached to it.
+
+Points 4 and 6 share a principle worth stating plainly, because it should govern
+cases not yet enumerated: **recurrence is evidence, and it belongs to the human,
+not to the agents.** Repetition is never resolved by telling an agent what was
+decided last time; it is resolved by showing the human that the question keeps
+coming back.
 
 ## Open questions
 
-- **Repeat rebuttals across attempts.** If a finding is rebutted, adjudicated in
-  the PM's favor, and the same finding is raised again in a later *attempt* with
-  a different reviewer, should the earlier ruling be surfaced, or should the new
-  reviewer be told about it? Surfacing it to the human is clearly right;
-  injecting it into the reviewer's context weakens the independence that makes a
-  second attempt worth running.
-- **Threshold for "plan unchanged."** Gate C keys on a must-fix rebuttal where
-  the plan did not change. A PM that rebuts a finding but makes an unrelated
-  cosmetic edit in the same pass would evade a naive content-hash test. Decide
-  whether the trigger is hash equality or per-module comparison against the
-  finding's target.
-- **Should `should_fix` rebuttals ever adjudicate?** Currently only `must_fix`
-  triggers Gate C. A pattern of rebutted `should_fix` findings may be worth
-  surfacing in aggregate at the approval card rather than as its own stop.
+- **Match confidence for repeat findings.** Findings are free text with a
+  round-scoped index, so "the same objection raised twice" is a similarity
+  judgment. Decide the matching approach (target module plus semantic
+  comparison) and how confidently the UI should assert a match — "possibly the
+  same objection" is the safe default, but a too-loose matcher makes the
+  recurrence signal noise and a too-strict one makes it silent.
+- **Hollow-acceptance false positives.** A must-fix finding whose correct
+  remedy genuinely requires no plan change (e.g. "confirm X is out of scope")
+  will stop the review under trigger 2. The cost is one human click, which is
+  acceptable, but if it proves common the PM should be able to declare "no plan
+  change required" as an explicit disposition variant rather than being caught
+  by the structural test.
+- **Should `allow_unadjudicated_rebuttals` also disable hollow-acceptance
+  stops?** They are the same gate but not the same risk: an escape hatch chosen
+  to avoid refereeing disagreements may not be intended to also disable
+  detection of silent non-compliance.
