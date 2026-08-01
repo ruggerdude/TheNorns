@@ -21,16 +21,21 @@ supported way to intervene between the reviewer's output and the PM's response.
 
 ## Design summary
 
-Two optional gates per round, both at checkpoints the loop already reaches:
+Two optional gates per round, plus one mandatory gate, all at checkpoints the
+loop already reaches:
 
 - **Gate A — after the reviewer pass.** The intervention point. The human sees
-  findings before the PM has responded to them.
+  findings before the PM has responded to them. Optional.
 - **Gate B — after the PM disposition pass.** The inspection point. The human
-  sees dispositions and the resulting plan diff.
+  sees dispositions and the resulting plan diff. Optional.
+- **Gate C — unresolved must-fix rebuttal.** The adjudication point. The
+  reviewer filed a must-fix finding, the PM rejected it, and the plan did not
+  change. **Not optional** — see "Adjudication" below.
 
 A gate parks the review durably, releases the worker lease, and waits. Resume
-re-claims and continues from persisted state. Gating is a per-project default,
-overridable at kickoff and editable mid-flight.
+re-claims and continues from persisted state. Gating for A and B is a
+per-project default, overridable at kickoff and editable mid-flight; Gate C
+fires in every mode.
 
 ```mermaid
 ---
@@ -49,7 +54,15 @@ flowchart TD
     gateA -->|"continue"| pm
 
     pm["PM DISPOSITION pass<br/>accept / rebut each finding → revised plan"]
-    pm --> cap{"round ==<br/>max_rounds?"}
+    pm --> rebut{"must_fix finding rebutted<br/>and plan unchanged?"}
+
+    rebut -->|yes| gateC["GATE C — ADJUDICATION<br/><b>fires in every mode</b><br/><i>two agents disagree on fact or concept;<br/>only a human can settle it</i>"]
+    gateC -->|"rule for reviewer → PM must revise"| pm
+    gateC -->|"rule for PM → rebuttal stands"| cap
+    gateC -->|"stop"| out
+
+    rebut -->|no| cap
+    cap{"round ==<br/>max_rounds?"}
     cap -->|yes| capped(["cap_reached"])
 
     cap -->|no| gateB["GATE B — after revision<br/><i>inspection point: read the<br/>v-n → v-n+1 diff</i>"]
@@ -72,14 +85,17 @@ flowchart TD
     approve -->|"Reject"| cancelled
 ```
 
-Inside either gate:
+Inside any gate:
 
 ```mermaid
 ---
 title: "Inside a QC pause gate"
 ---
 flowchart TD
-    hit["Checkpoint reached<br/><i>onProgress in reviewOnlySession.ts</i>"] --> mode{"qc_mode"}
+    hit["Checkpoint reached<br/><i>onProgress in reviewOnlySession.ts</i>"] --> adj{"unresolved must_fix<br/>rebuttal?"}
+
+    adj -->|"yes — Gate C"| park
+    adj -->|no| mode{"qc_mode"}
 
     mode -->|"automatic"| skip
     mode -->|"gated_each_round — Gate B only"| skip
@@ -88,7 +104,7 @@ flowchart TD
 
     skip(["continue straight through<br/>no human involved"])
 
-    park["PARK<br/>• materialize interim plan version<br/>• status = awaiting_human<br/>• checkpoint = after_review / after_revision<br/>• RELEASE LEASE — no worker held"]
+    park["PARK<br/>• materialize interim plan version<br/>• status = awaiting_human<br/>• checkpoint = after_review / after_revision / adjudication<br/>• RELEASE LEASE — no worker held"]
     park --> inbox["surfaces in attention read model<br/>+ TTL nudge if unread"]
     inbox --> card{{"HUMAN reads the gate card:<br/>findings · dispositions · plan diff · spend"}}
 
@@ -153,8 +169,75 @@ round's plan body.
 alternative — stashing plan JSON on the planning run row — is lighter but yields
 no diff surface. Reading what changed between v(n) and v(n+1) is most of the
 value of stopping at Gate B, and plan versions already provide that comparison.
-Interim versions must be marked as QC-interim so they do not present as
-human-authored plan revisions in version history.
+
+**Decision: interim versions are retained, flagged, and de-emphasized.** They
+are the round-by-round record of how a plan evolved under review, which is worth
+keeping. But a three-round review would otherwise leave four machine-authored
+versions sitting in the same list as the operator's own revisions. Requirements:
+
+- an explicit `origin` marker distinguishing QC-interim versions from
+  human-authored ones,
+- version history collapses them by default behind a single expandable entry
+  per review ("4 QC rounds"),
+- they are never offered as the target of approval, execution, or diff-against
+  by default; the review's result version is,
+- they are addressable when explicitly requested, so a gate card can diff
+  v(n) → v(n+1) directly.
+
+## Adjudication: unresolved must-fix rebuttals
+
+**A must-fix finding the PM rebuts without changing the plan stops the review in
+every mode, including `automatic`.**
+
+The rationale is empirical rather than theoretical. Reviewer/PM disagreement is
+common, and it is usually *factual* — one side did not read the code, or read it
+and misunderstood it. Both agents work from the same frozen context receipt with
+no repository access and no transcript, so neither can resolve a factual dispute
+by going and looking. Left alone, the loop proceeds with the disagreement
+unsettled, and whichever agent spoke last effectively wins. The other case —
+a genuine difference over concept or implementation approach — is not something
+a further round resolves either; it is a decision.
+
+Both cases are precisely the judgment a human is for, so this is a requirement,
+not a cadence preference. `automatic` means "no cadence gates," not "no
+correctness gates." An explicit project-level `allow_unadjudicated_rebuttals`
+escape hatch exists for fully hands-off operation; it defaults false and should
+be documented as discouraged.
+
+### The adjudication card
+
+The disagreement is usually factual, so the card's job is to expose the facts
+each side had, not merely to present two opinions:
+
+1. The finding, verbatim, with its severity and the plan module it targets.
+2. The PM's rebuttal and rationale, verbatim.
+3. **The context manifest** — what was actually in the frozen receipt both
+   agents read. When one side "didn't review the code," the manifest is where
+   that shows up, and it converts an argument into a checkable question.
+4. Whether this finding was also raised in an earlier round, and how it was
+   dispositioned then. A repeat rebuttal is a different situation from a first
+   one.
+
+### Outcomes
+
+Beyond the standard exits, adjudication adds a **ruling**:
+
+- **Rule for the reviewer** — the finding stands. The PM gets a revision pass
+  and must address it; it cannot be rebutted again. If the review is at its
+  round cap, offer to raise the cap by one so the ruling can be carried out
+  rather than expiring into `cap_reached`.
+- **Rule for the PM** — the rebuttal stands. The finding is closed as
+  human-dismissed and does not re-block later rounds.
+- **Supply the missing fact** — the common resolution when one side lacked
+  context. The human adds the fact and returns it to whichever agent needs it,
+  which is the "continue with a note" path with an adjudication attached.
+
+A ruling is a human-authored disposition and must be recorded as one rather than
+attributed to an agent. Extend the disposition record with an adjudication block
+(`decided_by_user_id`, `ruling`, `rationale`, `decided_at`); do not synthesize an
+agent disposition on the human's behalf. Existing invariants require every
+must-fix finding to carry an attributable disposition at terminal — a human
+ruling satisfies that requirement and should be visibly distinct in the record.
 
 ## Contract changes
 
@@ -162,18 +245,22 @@ In `packages/contracts/src/v2/conversation.ts`:
 
 1. **`V2ConversationPlanReviewStatus`** gains `awaiting_human`.
 2. **`V2ConversationPlanReview`** gains `paused_checkpoint`
-   (`after_review` | `after_revision` | null), `paused_at_round`, and a
-   settings-provenance record (below).
-3. **Timing invariant.** `awaiting_human` is non-terminal: `started_at` set,
+   (`after_review` | `after_revision` | `adjudication` | null),
+   `paused_at_round`, and a settings-provenance record (below).
+3. **`V2ConversationPlanReviewDisposition`** gains an optional adjudication
+   block (`decided_by_user_id`, `ruling`, `rationale`, `decided_at`) for human
+   rulings. A finding closed by ruling satisfies the must-fix disposition
+   requirement at terminal and is distinguishable from an agent disposition.
+4. **Timing invariant.** `awaiting_human` is non-terminal: `started_at` set,
    `completed_at` null. Add the branch to the `validTiming` check.
-4. **Evidence-visibility invariant — the one that requires care.** The current
+5. **Evidence-visibility invariant — the one that requires care.** The current
    rule forbids `queued | running | failed | cancelled` reviews from exposing
    findings, dispositions, or revision evidence. A paused review *must* expose
    findings; that is the point of pausing. `awaiting_human` therefore joins the
    evidence-visible set while remaining non-terminal. The must-fix disposition
    completeness rule stays terminal-only — a review parked at Gate A has
    findings with no dispositions yet, and that is correct.
-5. **`revised_plan_version_id` coupling.** The rule tying a changed
+6. **`revised_plan_version_id` coupling.** The rule tying a changed
    `result_plan_content_hash` to a materialized revision must accommodate
    interim versions at Gate B without implying terminal success.
 
@@ -262,17 +349,23 @@ Stored alongside existing QC settings in `planning_reviewer_settings`
 
 **`qc_mode`** values:
 
-| Value | Gate A | Gate B |
-| --- | --- | --- |
-| `automatic` | — | — |
-| `gated_each_round` | — | stop |
-| `gated_each_step` | stop | stop |
-| `gated_when_contested` | stop | — |
+| Value | Gate A | Gate B | Gate C |
+| --- | --- | --- | --- |
+| `automatic` | — | — | **stop** |
+| `gated_each_round` | — | stop | **stop** |
+| `gated_each_step` | stop | stop | **stop** |
+| `gated_when_contested` | stop | — | **stop** |
+
+Gate C is not a column the mode controls; it is shown to make explicit that no
+mode skips it. The only way to disable it is the project-level
+`allow_unadjudicated_rebuttals` escape hatch, which defaults false.
 
 `gated_when_contested` is the recommended working default once gating is
 adopted: it stops only where intervention is cheapest and skips inspection-only
 stops. The project default ships as `automatic` so no in-flight or existing
-behavior changes.
+behavior changes — but note that adopting these gates means even `automatic`
+reviews can now stop, at Gate C. That is intended, and it is the one behavior
+change existing projects will notice.
 
 **Where it is set:**
 
@@ -340,6 +433,10 @@ by retyping.
    different facts, and only the diff distinguishes them.
 4. Four exits, plus a note field and a question field.
 
+At Gate C the card is the adjudication card described above: the disputed
+finding, the rebuttal, the context manifest both agents read, and the ruling
+controls in place of a plain Continue.
+
 Per-round markdown artifacts are already written, so export of a gate card is
 close to free.
 
@@ -351,16 +448,35 @@ signaling, and an unattended park stalls the work item indefinitely. Wire
 (`apps/server/src/.../phase5Attention`) and add a TTL nudge. This is not polish;
 gating without it introduces a silent-stall failure mode.
 
+**A question at a gate resets the TTL.** Asking the reviewer why it filed a
+finding is engagement, not avoidance; nudging someone who is actively
+deliberating is the fastest way to make the nudge worthless. Only elapsed time
+with no interaction of any kind escalates.
+
+**Gate C outranks Gate A and B in the attention model.** An optional cadence
+stop is a convenience; an unadjudicated disagreement is blocked work with two
+agents that cannot resolve it. Rank and label them differently.
+
 ## Build order
 
-**Phase 1 — the mechanism.** `awaiting_human` status and contract changes; Gate
-B only; interim plan version materialization; park/resume through the worker;
-gate card with Continue / Accept now / Cancel; attention wiring and TTL. Smallest
-contract surface that delivers the core behavior.
+**Phase 1 — the mechanism.** `awaiting_human` status and contract changes; Gates
+B and C; interim plan version materialization with the `origin` marker and
+collapsed version history; park/resume through the worker; gate card with
+Continue / Accept now / Cancel; attention wiring and TTL.
 
-**Phase 2 — steering.** Gate A; widen `continueReviewChat` to `awaiting_human`;
-question / redirect / coach as distinct interactions; human-steering provenance
-on the review and approval card.
+Gate C ships here because it is a requirement rather than a preference, but its
+*ruling* outcomes depend on Phase 2's steering machinery. Interim behavior: Gate
+C stops and presents the disagreement with the standard three exits, so a human
+can read it and choose to proceed, accept the plan as-is, or cancel — they just
+cannot yet record a binding ruling. State this limitation in the card rather
+than letting it look like a ruling was recorded.
+
+**Phase 2 — steering and rulings.** Gate A; widen `continueReviewChat` to
+`awaiting_human`; question / redirect / coach as distinct interactions; the
+adjudication block on dispositions with rule-for-reviewer / rule-for-PM /
+supply-the-missing-fact; cap-raise-by-one when a ruling needs a revision pass it
+does not have rounds for; human-steering provenance on the review and approval
+card.
 
 **Phase 3 — control and surfaces.** `qc_mode` across the three layers; compound
 exits (*continue and stop asking*, *hold at next checkpoint*); mid-flight
@@ -370,13 +486,34 @@ Phases 1 and 3 are independently shippable: Phase 3's tab work carries value
 with QC still automatic, and Phase 1 is usable with gating enabled per run
 before the full settings surface exists.
 
+## Resolved
+
+Three questions were open in the first draft and are now decided in the body
+above:
+
+1. **Interim plan versions are retained**, with an `origin` marker, collapsed by
+   default in version history, and never offered as a default target for
+   approval, execution, or diff.
+2. **A question at a gate resets the TTL nudge.**
+3. **An unresolved must-fix rebuttal is a mandatory stop in every mode** — Gate
+   C — because reviewer/PM disagreement is usually factual (one side did not
+   read or did not understand the code) and neither agent can resolve it from a
+   frozen context receipt. Where the dispute is instead conceptual, it is a
+   decision rather than a review finding. Both need a human adjudicator.
+
 ## Open questions
 
-- Should interim plan versions be garbage-collected when a review terminates, or
-  retained as the round-by-round record? Retention is more useful and costs
-  version-history noise.
-- Does a question at a gate reset the TTL nudge? Probably yes — engagement
-  without a decision is still engagement.
-- Should `gated_when_contested` also stop at Gate B when the PM *rebuts* rather
-  than accepts a must-fix finding? A rebuttal is the case where the plan does not
-  change and the disagreement stands, which is arguably worth a human look.
+- **Repeat rebuttals across attempts.** If a finding is rebutted, adjudicated in
+  the PM's favor, and the same finding is raised again in a later *attempt* with
+  a different reviewer, should the earlier ruling be surfaced, or should the new
+  reviewer be told about it? Surfacing it to the human is clearly right;
+  injecting it into the reviewer's context weakens the independence that makes a
+  second attempt worth running.
+- **Threshold for "plan unchanged."** Gate C keys on a must-fix rebuttal where
+  the plan did not change. A PM that rebuts a finding but makes an unrelated
+  cosmetic edit in the same pass would evade a naive content-hash test. Decide
+  whether the trigger is hash equality or per-module comparison against the
+  finding's target.
+- **Should `should_fix` rebuttals ever adjudicate?** Currently only `must_fix`
+  triggers Gate C. A pattern of rebutted `should_fix` findings may be worth
+  surfacing in aggregate at the approval card rather than as its own stop.
