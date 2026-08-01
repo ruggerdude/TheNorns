@@ -1232,55 +1232,26 @@ decision and is deliberately untouched.
   `send_plan_to_qc`'s active-review conflict check excluded `awaiting_human`
   for `skip_qc` confirms only — it was matching the very review being accepted
   and throwing `qc_in_progress`.
-- [ ] 🟡 QCP-7 Web surfaces QCP-4A could not build (not its files), all in
-  ConversationWorkspace.tsx / ConversationQcCard.tsx — fold into QCP-3B:
-  (a) kickoff `qc_mode` control on send-to-QC, pre-filled from
-  `GET /api/v2/projects/:id/planning-reviewer` (now returns `qc_mode` +
-  `allow_unadjudicated_rebuttals`); (b) mid-flight qc_mode editing from the QC
-  tab and gate card; (c) effective-value + source display
-  ("project default" / "set for this work item" / "changed at round 2 by X")
-  driven off `qc_mode_source`.
-
-## QC PAUSE POINTS — review follow-ups (2026-08-01, from /simplify)
-
-- [x] ✅ QCP-R13 QC tab was gated on `plan_reviews.length > 0`, so a project
-  that runs QC showed only two tabs until its first review existed — the tab
-  was invisible on exactly the plans an operator would want to send to QC.
-  QCP-4B had flagged this with a `ponytail:` comment (no project signal was
-  plumbed to the client) and the PM passed it through. Now keyed off the
-  project's `default_max_rounds > 0`, which `GET .../planning-reviewer` newly
-  returns; an existing review still wins so a project that later turns QC off
-  can read its old reviews. Verified the test fails without the fix.
-
-- [x] ✅ QCP-R12 Runtime schema posture check did not cover 0064-0068, so a
-  database with every earlier migration booted fine and then failed
-  mid-session with `column "origin" does not exist` on the first plan read.
-  The mechanism already existed (`assertCurrentRuntimeSchema`, proven from
-  relations rather than the migration ledger because the app role cannot read
-  the ledger) — the QC program simply never extended it. Now checks the six
-  pause columns, `work_plan_versions.origin`, and the three adjudication
-  columns, and the failure names the fix. DEPLOY.md documents the operator
-  step, which it had never mentioned at all.
-
-- [x] ✅ QCP-R1 `qc_mode` was retyped in 5 places (contracts, runService,
-  reviewOnlySession, Projects.tsx, conversationApi.ts). All now derive from
-  `V2QcMode`/`V2QcModeT`. Also `PatchReviewBody` and
-  `patchConversationPlanReview` were re-spelling the union inline.
-- [x] ✅ QCP-R2 Stale JSDoc on `confirm`'s `qcMode` still described the
-  follow-up-PATCH race that QCP-8 removed.
-- [x] ✅ QCP-R3 Missing partial index on `conversation_plan_reviews(status)
-  WHERE status='awaiting_human'`. `portfolio()` polls ~every 10s per open
-  project and seq-scans the table; also CROSS JOIN LATERALs the JSONB
-  chat_messages array per row. Migration 0069.
-- [x] ✅ QCP-R4 Forced-accept override rewrites the PM's own disposition and
-  rationale, persisting them as if the PM said it — the inverse of the design
-  doc's "do not synthesize an agent disposition on the human's behalf".
-  Enforcement stays; only the recording changes.
-- [x] ✅ QCP-R5 Five review methods in planWorkflow.ts repeat ~25-30 lines of
-  identical load-for-update / guard / reload plumbing.
-- [x] ✅ QCP-R6 Six web review-action callbacks repeat the same busy/error
-  state machine across ~300 lines; `reviewCapBlocked` is a third parallel
-  per-review container; note editor duplicated between gate and adjudication.
+- [x] ✅ QCP-7 Kickoff qc_mode control, mid-flight cadence editing, and
+  effective-value/source display — all three built by QCP-3B (verified present
+  in ConversationActionCard.tsx and ConversationQcCard.tsx 2026-08-01).
+- [ ] 🔴 QCP-10 No live end-to-end exercise of a real gate. Every test uses
+  FakeAdapter; no real reviewer/PM disagreement has ever tripped Gate C, and no
+  review has actually parked and resumed across a worker lease in production.
+  This is the single largest unknown in the program.
+- [ ] 🔴 QCP-11 Playwright e2e never run for this program — every agent was
+  told to skip it. The three-tab restructure of ConversationWorkspace.tsx
+  (+739 lines) is exactly the class of change e2e catches and vitest does not.
+  6 specs exist in apps/web/e2e/.
+- [ ] 🟡 QCP-12 No post-creation project settings surface for QC. `qc_mode`
+  and `default_max_rounds` are only settable in the New Project wizard;
+  `default_max_rounds` is absent from the PATCH .../planning-reviewer schema
+  entirely, so "turn QC off for this project" is unreachable after creation.
+- [ ] 🟡 QCP-13 applyMigrations.js documents itself as runnable from "the
+  Railway service shell", but the app service only ever holds the RESTRICTED
+  runtime role, which cannot run DDL (42501). The working path on this
+  deployment is the Postgres container's local socket as the owner. The doc
+  comment and DEPLOY.md both describe a path that cannot work here.
 - [ ] 🟡 QCP-R7 Attention TTL rescans the whole JSONB `chat_messages` array on
   every poll. A `last_human_message_at` column maintained in
   `appendReviewChatEvent` would make it a column read. Deferred — the index
