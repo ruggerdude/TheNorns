@@ -5,6 +5,7 @@ import { NodePgTransactionRunner } from "../src/persistence/v2/database.js";
 import {
   BINARY_ATTACHMENTS_MIGRATION_NAME,
   CONVERSATION_MESSAGE_BRANCHES_MIGRATION_NAME,
+  GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME,
   type V2MigrationDatabase,
   runCurrentV2Migrations,
 } from "../src/persistence/v2/migrate.js";
