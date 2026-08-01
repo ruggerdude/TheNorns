@@ -1243,6 +1243,16 @@ decision and is deliberately untouched.
 
 ## QC PAUSE POINTS — review follow-ups (2026-08-01, from /simplify)
 
+- [x] ✅ QCP-R12 Runtime schema posture check did not cover 0064-0068, so a
+  database with every earlier migration booted fine and then failed
+  mid-session with `column "origin" does not exist` on the first plan read.
+  The mechanism already existed (`assertCurrentRuntimeSchema`, proven from
+  relations rather than the migration ledger because the app role cannot read
+  the ledger) — the QC program simply never extended it. Now checks the six
+  pause columns, `work_plan_versions.origin`, and the three adjudication
+  columns, and the failure names the fix. DEPLOY.md documents the operator
+  step, which it had never mentioned at all.
+
 - [x] ✅ QCP-R1 `qc_mode` was retyped in 5 places (contracts, runService,
   reviewOnlySession, Projects.tsx, conversationApi.ts). All now derive from
   `V2QcMode`/`V2QcModeT`. Also `PatchReviewBody` and

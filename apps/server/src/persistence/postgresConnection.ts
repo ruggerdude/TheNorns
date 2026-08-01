@@ -130,6 +130,9 @@ interface RuntimeSchemaPosture {
   device_agent_capabilities: boolean;
   device_last_seen_at: boolean;
   device_publication_permits: string | null;
+  qc_pause_points_columns: boolean;
+  work_plan_version_origin: boolean;
+  qc_adjudication_columns: boolean;
 }
 
 /**
@@ -321,7 +324,39 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                  AND column_name='last_seen_at'
             ) AS device_last_seen_at,
             to_regclass('public.device_publication_permits')::text
-              AS device_publication_permits`,
+              AS device_publication_permits,
+            (
+              SELECT count(*) = 6
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='conversation_plan_reviews'
+                 AND column_name IN (
+                   'paused_checkpoint',
+                   'paused_at_round',
+                   'qc_mode',
+                   'qc_mode_source',
+                   'allow_unadjudicated_rebuttals',
+                   'human_steered_rounds'
+                 )
+            ) AS qc_pause_points_columns,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='work_plan_versions'
+                 AND column_name='origin'
+            ) AS work_plan_version_origin,
+            (
+              SELECT count(*) = 3
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='conversation_plan_reviews'
+                 AND column_name IN (
+                   'adjudications',
+                   'forced_accept_module_ids',
+                   'adjudication_idempotency_key'
+                 )
+            ) AS qc_adjudication_columns`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -381,11 +416,19 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.device_agent_capabilities ? ["devices.agent_capabilities"] : []),
     ...(!posture?.device_last_seen_at ? ["devices.last_seen_at"] : []),
     ...(!posture?.device_publication_permits ? ["device_publication_permits"] : []),
+    // QC pause points (0064-0068). Every conversation detail read selects
+    // work_plan_versions.origin, so a database missing these fails at the
+    // first plan request rather than at startup unless it is checked here.
+    ...(!posture?.qc_pause_points_columns ? ["conversation_plan_reviews QC pause columns"] : []),
+    ...(!posture?.work_plan_version_origin ? ["work_plan_versions.origin"] : []),
+    ...(!posture?.qc_adjudication_columns
+      ? ["conversation_plan_reviews adjudication columns"]
+      : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(
       "runtime_schema_outdated",
-      `database migrations are required before startup; missing: ${missing.join(", ")}`,
+      `database migrations are required before startup; missing: ${missing.join(", ")}. Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).`,
     );
   }
 }

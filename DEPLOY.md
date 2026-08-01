@@ -73,6 +73,34 @@ engine. A hard crash can lose at most ~1s of the very latest events —
 acceptable at single-operator scale; a normalized Drizzle schema (ADR-001) is
 the scale follow-on when you need it.
 
+### Applying schema migrations
+
+**The server does not apply migrations on boot, by design** — a process that
+silently mutates schema every time it starts is how a bad migration reaches
+production unannounced. Applying them is a deliberate operator step:
+
+```bash
+pnpm --filter @norns/server build
+DATABASE_URL='<connection string>' node apps/server/dist/applyMigrations.js
+```
+
+It prints `APPLIED` / `already applied` per migration and exits. Each
+migration commits atomically with its tracking row, already-applied ones are
+checksum-verified and skipped, and a changed checksum aborts rather than
+re-running — so a repeat run is safe.
+
+Run this **before** starting a build that expects new columns. If you forget,
+the server refuses to start rather than serving requests until something
+happens to touch the missing column: `assertCurrentRuntimeSchema`
+(`apps/server/src/persistence/postgresConnection.ts`) proves the exact
+relations and columns the build needs and fails with
+`runtime_schema_outdated`, naming what is missing and this command.
+
+That check is proven from relations rather than the migration ledger because
+the ordinary application role deliberately cannot read the ledger. **Any
+change that adds a column a runtime path reads must extend it** — otherwise
+the schema gap surfaces mid-session as a bare `column "x" does not exist`.
+
 ## Tier 3 — run work via your local runner
 
 The runner runs on **your machine**, not Railway. It's built and verified.

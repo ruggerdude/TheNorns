@@ -140,12 +140,43 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_agent_capabilities: true,
             device_last_seen_at: true,
             device_publication_permits: "device_publication_permits",
+            qc_pause_points_columns: true,
+            work_plan_version_origin: true,
+            qc_adjudication_columns: true,
           },
         ],
       }),
     };
 
     await expect(assertCurrentRuntimeSchema(compatible as never)).resolves.toBeUndefined();
+  });
+
+  it("refuses to start when the QC pause-point migrations have not been applied", async () => {
+    // Regression: 0064-0068 shipped without extending this posture check, so a
+    // database that had every earlier migration still booted and then failed
+    // mid-session with `column "origin" does not exist` on the first plan read.
+    const missingQcPausePoints = {
+      query: async () => ({
+        rows: [
+          {
+            qc_pause_points_columns: false,
+            work_plan_version_origin: false,
+            qc_adjudication_columns: false,
+          },
+        ],
+      }),
+    };
+
+    await expect(assertCurrentRuntimeSchema(missingQcPausePoints as never)).rejects.toMatchObject({
+      code: "runtime_schema_outdated",
+    });
+    await expect(assertCurrentRuntimeSchema(missingQcPausePoints as never)).rejects.toThrow(
+      /work_plan_versions\.origin/,
+    );
+    // The message must name the fix, not just the symptom.
+    await expect(assertCurrentRuntimeSchema(missingQcPausePoints as never)).rejects.toThrow(
+      /applyMigrations\.js/,
+    );
   });
 
   it("fails closed with the exact missing runtime schema surfaces", async () => {
@@ -226,7 +257,10 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "device_run_cancellations.idempotency_key, device_revocations, " +
         "gateway_credentials.authentication_subject, gateway_credentials.device_credential_id, " +
         "devices.os_version, devices.agent_version, devices.agent_protocol_version, " +
-        "devices.agent_capabilities, devices.last_seen_at, device_publication_permits",
+        "devices.agent_capabilities, devices.last_seen_at, device_publication_permits, " +
+        "conversation_plan_reviews QC pause columns, work_plan_versions.origin, " +
+        "conversation_plan_reviews adjudication columns. " +
+        "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
     });
   });
 
@@ -295,7 +329,10 @@ describe("PostgreSQL runtime schema compatibility", () => {
           "conversation_execution_handoff_v1, conversation_human_steering_v1, " +
           "conversation_mockups_dashboard_v1, conversation_inference_reservations, " +
           "conversation_plan_reviews.review_mode, conversation_organization_v1, " +
-          "conversation_message_branches_v1",
+          "conversation_message_branches_v1, " +
+          "conversation_plan_reviews QC pause columns, work_plan_versions.origin, " +
+          "conversation_plan_reviews adjudication columns. " +
+          "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
       },
     );
   });
@@ -368,7 +405,10 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "device_run_cancellations.idempotency_key, device_revocations, " +
         "gateway_credentials.authentication_subject, gateway_credentials.device_credential_id, " +
         "devices.os_version, devices.agent_version, devices.agent_protocol_version, " +
-        "devices.agent_capabilities, devices.last_seen_at, device_publication_permits",
+        "devices.agent_capabilities, devices.last_seen_at, device_publication_permits, " +
+        "conversation_plan_reviews QC pause columns, work_plan_versions.origin, " +
+        "conversation_plan_reviews adjudication columns. " +
+        "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
     });
   });
 });
