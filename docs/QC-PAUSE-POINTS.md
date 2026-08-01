@@ -200,9 +200,16 @@ a further round resolves either; it is a decision.
 
 Both cases are precisely the judgment a human is for, so this is a requirement,
 not a cadence preference. `automatic` means "no cadence gates," not "no
-correctness gates." An explicit project-level `allow_unadjudicated_rebuttals`
-escape hatch exists for fully hands-off operation; it defaults false and should
-be documented as discouraged.
+correctness gates."
+
+**The escape hatch is one flag with a narrow meaning.**
+`allow_unadjudicated_rebuttals` (default false, documented as discouraged)
+suppresses stops for *declared rebuttals only*. Hollow acceptance always stops
+and cannot be switched off. Choosing not to referee open disagreements is a
+legitimate operating preference; choosing not to detect a must-fix finding that
+was accepted and then ignored is not the same decision, and one flag should not
+silently make both. Keeping the flag's scope narrow is what keeps the two
+concerns separate without introducing a second setting.
 
 ### Trigger definition
 
@@ -239,8 +246,9 @@ stops being read — the same failure mode as gating every step. Instead:
 - rebutted `should_fix` findings are **aggregated on the approval card** ("3
   should-fix findings rebutted across 2 rounds", expandable), surfacing the
   pattern at the point a decision is already being made;
-- a `should_fix` finding that is rebutted and then **raised again in a later
-  round escalates to Gate C**, on the recurrence principle below.
+- a rebutted `should_fix` finding **escalates to Gate C** when a later round
+  files another `should_fix` finding against the same `module_id`, using the
+  same dumb match rule described below.
 
 ### Repeat disputes across attempts
 
@@ -264,9 +272,16 @@ ruling's merits. Requirements:
   across the work item's reviews — so a persistently disputed area is visible at
   the decision point rather than buried in round transcripts.
 
-Matching repeats is heuristic, not exact: findings are free text with an
-`index` scoped to a round. Match on target module plus semantic similarity, and
-present matches as "possibly the same objection" rather than asserting identity.
+**Matching stays dumb on purpose.** Recurrence is detected as *another must-fix
+finding against the same `module_id`* — no semantic comparison, no similarity
+scoring, no confidence threshold. Findings with a null `module_id` are not
+matched at all.
+
+The rule is imprecise in both directions and that is acceptable: the human is
+already reading both findings side by side and can see in two sentences whether
+it is the same objection. A false match costs a glance; a missed one costs
+nothing that the finding itself does not already surface. Anything cleverer
+would be machinery built to serve a problem that has not appeared in practice.
 
 ### The adjudication card
 
@@ -421,8 +436,9 @@ Stored alongside existing QC settings in `planning_reviewer_settings`
 | `gated_when_contested` | stop | — | **stop** |
 
 Gate C is not a column the mode controls; it is shown to make explicit that no
-mode skips it. The only way to disable it is the project-level
-`allow_unadjudicated_rebuttals` escape hatch, which defaults false.
+mode skips it. The only way to soften it is the project-level
+`allow_unadjudicated_rebuttals` escape hatch (default false), which suppresses
+declared-rebuttal stops only — hollow-acceptance stops always fire.
 
 `gated_when_contested` is the recommended working default once gating is
 adopted: it stops only where intervention is cheapest and skips inspection-only
@@ -540,8 +556,8 @@ than letting it look like a ruling was recorded.
 adjudication block on dispositions with rule-for-reviewer / rule-for-PM /
 supply-the-missing-fact; cap-raise-by-one when a ruling needs a revision pass it
 does not have rounds for; human-steering provenance on the review and approval
-card; repeat-finding matching, prior-ruling history on the adjudication card,
-`should_fix` recurrence escalation, and the contested-themes summary at
+card; same-module recurrence matching, prior-ruling history on the adjudication
+card, `should_fix` recurrence escalation, and the contested-themes summary at
 approval.
 
 **Phase 3 — control and surfaces.** `qc_mode` across the three layers; compound
@@ -578,6 +594,13 @@ the body above.
    approval card — **but escalates to Gate C on recurrence.** A mandatory stop
    keeps its meaning only by being rare, while a repeated objection is evidence
    regardless of the severity label attached to it.
+7. **Recurrence matching is same-module only.** No semantic comparison or
+   confidence scoring: hundreds of QC rounds in practice have not produced the
+   ambiguity that machinery would solve, and the human reading both findings
+   resolves it faster than a matcher could.
+8. **`allow_unadjudicated_rebuttals` suppresses declared-rebuttal stops only.**
+   Hollow-acceptance stops always fire. One flag, narrow scope — the two
+   concerns stay separate without a second setting.
 
 Points 4 and 6 share a principle worth stating plainly, because it should govern
 cases not yet enumerated: **recurrence is evidence, and it belongs to the human,
@@ -587,19 +610,14 @@ coming back.
 
 ## Open questions
 
-- **Match confidence for repeat findings.** Findings are free text with a
-  round-scoped index, so "the same objection raised twice" is a similarity
-  judgment. Decide the matching approach (target module plus semantic
-  comparison) and how confidently the UI should assert a match — "possibly the
-  same objection" is the safe default, but a too-loose matcher makes the
-  recurrence signal noise and a too-strict one makes it silent.
-- **Hollow-acceptance false positives.** A must-fix finding whose correct
-  remedy genuinely requires no plan change (e.g. "confirm X is out of scope")
-  will stop the review under trigger 2. The cost is one human click, which is
-  acceptable, but if it proves common the PM should be able to declare "no plan
-  change required" as an explicit disposition variant rather than being caught
-  by the structural test.
-- **Should `allow_unadjudicated_rebuttals` also disable hollow-acceptance
-  stops?** They are the same gate but not the same risk: an escape hatch chosen
-  to avoid refereeing disagreements may not be intended to also disable
-  detection of silent non-compliance.
+None blocking. Two things to watch once this is running, neither worth building
+for in advance:
+
+- **Hollow-acceptance false positives.** A must-fix finding whose correct remedy
+  genuinely requires no plan change ("confirm X is out of scope") will stop the
+  review. One click is a fair price for catching silent non-compliance. If it
+  turns out to be common, add a "no plan change required" disposition variant
+  then — not now.
+- **Recurrence noise.** Same-module matching may group objections that are not
+  really the same. The card shows both findings, so the human resolves it by
+  reading. Revisit only if the signal proves useless in practice.
