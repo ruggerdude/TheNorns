@@ -3,7 +3,130 @@ import { V2AuditEvent, V2DomainEvent, V2ProjectMemoryEntry } from "@norns/contra
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
-import { AttentionService, requiresHumanIntervention } from "../src/projects/attentionService.js";
+import {
+  AttentionService,
+  QC_GATE_NUDGE_TTL_MS,
+  requiresHumanIntervention,
+} from "../src/projects/attentionService.js";
+
+/**
+ * QCP-2A fixture: the full FK/trigger chain a `conversation_plan_reviews` row
+ * demands (work_items -> work_conversations -> work_messages ->
+ * conversation_actions -> work_plan_versions -> planning_runs), inserted
+ * directly at `status='awaiting_human'` so the review row is created in one
+ * shot rather than replayed through queued -> running -> awaiting_human
+ * (the lifecycle-guard trigger only fires on UPDATE, so a same-shape INSERT
+ * is the simplest valid path to a parked row).
+ */
+async function seedPausedReview(
+  pg: PGlite,
+  opts: {
+    suffix: string;
+    pausedCheckpoint: "after_review" | "after_revision" | "adjudication";
+    pausedAtRound: number;
+    updatedAt: string;
+    chatMessages?: unknown[];
+    phaseId?: string | null;
+  },
+): Promise<string> {
+  const s = opts.suffix;
+  const planHash = "1".repeat(64);
+  const contextHash = "2".repeat(64);
+  const payloadHash = "3".repeat(64);
+  const fingerprint = "4".repeat(64);
+  const planJson = JSON.stringify({ objective: `Paused review ${s}`, tasks: [] });
+  const contextManifest = JSON.stringify({ entries: [], context_hash: contextHash });
+  const payload = JSON.stringify({
+    parameters: { plan_version_id: `plan-version-${s}`, content_hash: planHash },
+  });
+
+  await pg.query(
+    `INSERT INTO work_items (id, project_id, created_by_user_id, title, objective, phase_id)
+     VALUES ($1,'project-1','user-1',$2,$2,$3)`,
+    [`work-item-${s}`, `Paused review ${s}`, opts.phaseId ?? null],
+  );
+  await pg.query(
+    `INSERT INTO work_conversations (id, project_id, work_item_id, created_by_user_id, kind, provider, model)
+     VALUES ($1,'project-1',$2,'user-1','planning','anthropic','claude')`,
+    [`conversation-${s}`, `work-item-${s}`],
+  );
+  await pg.query(
+    `INSERT INTO work_messages (
+       id, project_id, work_item_id, conversation_id, initiated_by_user_id,
+       actor_type, actor_id, role, sequence, parts, client_message_id, request_fingerprint
+     ) VALUES ($1,'project-1',$2,$3,'user-1','human','user-1','user',1,$4::jsonb,$5,$6)`,
+    [
+      `message-${s}`,
+      `work-item-${s}`,
+      `conversation-${s}`,
+      JSON.stringify([{ type: "text", text: "Send this plan to QC." }]),
+      `client-${s}`,
+      fingerprint,
+    ],
+  );
+  await pg.query(
+    `INSERT INTO conversation_actions (
+       id, project_id, work_item_id, conversation_id, initiated_by_user_id,
+       actor_type, actor_id, source_message_id, action_type, payload, payload_hash,
+       status, confirmed_by_user_id, confirmation_idempotency_key,
+       confirmation_request_fingerprint, confirmed_at
+     ) VALUES ($1,'project-1',$2,$3,'user-1','human','user-1',$4,'send_plan_to_qc',$5::jsonb,$6,
+               'confirmed','user-1',$7,$8,now())`,
+    [
+      `action-${s}`,
+      `work-item-${s}`,
+      `conversation-${s}`,
+      `message-${s}`,
+      payload,
+      payloadHash,
+      `idempotency-${s}`,
+      fingerprint,
+    ],
+  );
+  await pg.query(
+    `INSERT INTO work_plan_versions (
+       id, project_id, work_item_id, conversation_id, created_by_user_id,
+       version, status, plan, content_hash
+     ) VALUES ($1,'project-1',$2,$3,'user-1',1,'in_qc',$4::jsonb,$5)`,
+    [`plan-version-${s}`, `work-item-${s}`, `conversation-${s}`, planJson, planHash],
+  );
+  await pg.query(
+    `INSERT INTO planning_runs (
+       id, project_id, status, round, max_rounds, objective, transcript,
+       result, total_cost_usd, error, attachment_ids, worker_providers, mode,
+       requested_by, initiated_by_user_id, pm_provider, pm_model, agent_provider, agent_model
+     ) VALUES ($1,'project-1','queued',0,3,$2,'[]'::jsonb,NULL,0,NULL,'[]'::jsonb,
+               'both','review_only','user-1','user-1','anthropic','claude','openai','gpt-4')`,
+    [`planning-run-${s}`, `Paused review ${s}`],
+  );
+  await pg.query(
+    `INSERT INTO conversation_plan_reviews (
+       id, project_id, work_item_id, conversation_id, action_id, plan_version_id,
+       planning_run_id, initiated_by_user_id, attempt_number, pm_provider, pm_model,
+       reviewer_provider, reviewer_model, usage_request_group_id, seed_plan, status,
+       plan_content_hash, result_plan_content_hash, context_receipt, context_manifest,
+       context_hash, paused_checkpoint, paused_at_round, chat_messages, started_at, updated_at
+     ) VALUES ($1,'project-1',$2,$3,$4,$5,$6,'user-1',1,'anthropic','claude','openai','gpt-4',$1,
+               $7::jsonb,'awaiting_human',$8,$8,'{}'::jsonb,$9::jsonb,$10,$11,$12,$13::jsonb,$14,$14)`,
+    [
+      `review-${s}`,
+      `work-item-${s}`,
+      `conversation-${s}`,
+      `action-${s}`,
+      `plan-version-${s}`,
+      `planning-run-${s}`,
+      planJson,
+      planHash,
+      contextManifest,
+      contextHash,
+      opts.pausedCheckpoint,
+      opts.pausedAtRound,
+      JSON.stringify(opts.chatMessages ?? []),
+      opts.updatedAt,
+    ],
+  );
+  return `review-${s}`;
+}
 
 describe.sequential("Phase 5 attention projections", () => {
   let pg: PGlite;
@@ -615,5 +738,92 @@ describe.sequential("Phase 5 attention projections", () => {
       events: 0,
       keys: 0,
     });
+  });
+
+  it("surfaces a paused adjudication gate as a decision that outranks a same-project cadence gate", async () => {
+    const now = new Date("2026-07-28T12:00:00.000Z");
+    await seedPausedReview(pg, {
+      suffix: "adjudication",
+      pausedCheckpoint: "adjudication",
+      pausedAtRound: 2,
+      updatedAt: now.toISOString(),
+      phaseId: "phase-1",
+    });
+    await seedPausedReview(pg, {
+      suffix: "cadence",
+      pausedCheckpoint: "after_revision",
+      pausedAtRound: 1,
+      updatedAt: now.toISOString(),
+    });
+
+    const portfolio = await attention.portfolio("user-1", { now });
+    const adjudication = portfolio.items.find((item) => item.source_id === "review-adjudication");
+    const cadence = portfolio.items.find((item) => item.source_id === "review-cadence");
+    expect(adjudication).toMatchObject({
+      source_type: "conversation_plan_review",
+      kind: "decision",
+      severity: "high",
+      phase_id: "phase-1",
+      task_id: null,
+    });
+    expect(cadence).toMatchObject({
+      source_type: "conversation_plan_review",
+      kind: "approval",
+      severity: "normal",
+      phase_id: null,
+    });
+    // Gate C (adjudication) must outrank Gate A/B (cadence) in the sorted feed.
+    const adjudicationRank = portfolio.items.findIndex(
+      (item) => item.source_id === "review-adjudication",
+    );
+    const cadenceRank = portfolio.items.findIndex((item) => item.source_id === "review-cadence");
+    expect(adjudicationRank).toBeLessThan(cadenceRank);
+  });
+
+  it("escalates severity once a paused gate has sat unread past the TTL", async () => {
+    const now = new Date("2026-07-28T12:00:00.000Z");
+    const stalePark = new Date(now.getTime() - QC_GATE_NUDGE_TTL_MS - 60 * 60 * 1000).toISOString();
+    await seedPausedReview(pg, {
+      suffix: "stale",
+      pausedCheckpoint: "after_review",
+      pausedAtRound: 1,
+      updatedAt: stalePark,
+    });
+
+    const portfolio = await attention.portfolio("user-1", { now });
+    const item = portfolio.items.find((candidate) => candidate.source_id === "review-stale");
+    expect(item).toMatchObject({ kind: "approval", severity: "high" });
+    expect(item?.summary).toMatch(/waiting/i);
+  });
+
+  it("does not escalate a stale-parked gate that received a recent human chat message", async () => {
+    const now = new Date("2026-07-28T12:00:00.000Z");
+    const stalePark = new Date(now.getTime() - QC_GATE_NUDGE_TTL_MS - 60 * 60 * 1000).toISOString();
+    const recentHumanMessage = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+    await seedPausedReview(pg, {
+      suffix: "answered",
+      pausedCheckpoint: "after_review",
+      pausedAtRound: 1,
+      updatedAt: stalePark,
+      chatMessages: [
+        {
+          id: "chat-1",
+          request_id: "request-1",
+          channel: "reviewer",
+          round: 1,
+          attempt: 1,
+          speaker: "human",
+          kind: "instruction",
+          content: "Why is this a must-fix?",
+          error_code: null,
+          created_at: recentHumanMessage,
+        },
+      ],
+    });
+
+    const portfolio = await attention.portfolio("user-1", { now });
+    const item = portfolio.items.find((candidate) => candidate.source_id === "review-answered");
+    expect(item).toMatchObject({ kind: "approval", severity: "normal" });
+    expect(item?.summary).not.toMatch(/waiting/i);
   });
 });

@@ -25,6 +25,7 @@ import type {
   V2HumanWaitContinuationT,
   V2HumanWaitT,
   V2PlanHandoffPreferenceT,
+  V2QcModeT,
   V2WorkConversationT,
   V2WorkItemOrganizationT,
   V2WorkItemT,
@@ -308,12 +309,16 @@ export function confirmConversationAction(
   conversationId: string,
   actionId: string,
   idempotencyKey: string,
+  qcMode?: QcModeT,
 ): Promise<V2ConfirmConversationActionResponseT> {
   return requestJson(
     `${messageEndpoint(projectId, workItemId, conversationId)}/actions/${encodeURIComponent(actionId)}/confirm`,
     {
       method: "POST",
-      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+      body: JSON.stringify({
+        idempotency_key: idempotencyKey,
+        ...(qcMode ? { qc_mode: qcMode } : {}),
+      }),
     },
   );
 }
@@ -351,6 +356,110 @@ export function continueConversationPlanReviewChat(
     {
       method: "POST",
       body: JSON.stringify({ channel, message }),
+    },
+  );
+}
+
+export function resumeConversationPlanReview(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  reviewId: string,
+  input: {
+    exit: "continue" | "note";
+    note?: { channel: "reviewer" | "pm"; message: string };
+    idempotency_key?: string;
+    /** Compound exit "Continue, and stop asking" — sets qc_mode=automatic
+     *  for the rest of this run and continues. */
+    stopAsking?: boolean;
+  },
+): Promise<{ review: V2ConversationPlanReviewT }> {
+  const { stopAsking, ...rest } = input;
+  return requestJson(
+    `${messageEndpoint(projectId, workItemId, conversationId)}/plan-reviews/${encodeURIComponent(
+      reviewId,
+    )}/resume`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        ...rest,
+        ...(stopAsking !== undefined ? { stop_asking: stopAsking } : {}),
+      }),
+    },
+  );
+}
+
+export type QcModeT = V2QcModeT;
+
+export interface PlanningReviewerSettings {
+  provider: "anthropic" | "openai";
+  model: string | null;
+  mode: "explicit" | "automatic";
+  qc_mode: QcModeT;
+  allow_unadjudicated_rebuttals: boolean;
+}
+
+/** The project-layer QC defaults (QC-PAUSE-POINTS.md "Settings: three
+ *  layers") — read at kickoff to pre-fill the send-to-QC control. */
+export function fetchPlanningReviewerSettings(
+  projectId: string,
+): Promise<PlanningReviewerSettings> {
+  return requestJson(`/api/v2/projects/${encodeURIComponent(projectId)}/planning-reviewer`);
+}
+
+/** Gate C ruling (QC-PAUSE-POINTS.md "Outcomes") — one ruling per finding,
+ *  batched in a single submit. `raiseMaxRounds` answers the
+ *  `round_cap_requires_raise` error rather than being sent speculatively. */
+export function adjudicateConversationPlanReview(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  reviewId: string,
+  input: {
+    rulings: Record<string, { ruling: "reviewer" | "pm" | "supplied_fact"; rationale: string }>;
+    note?: { channel: "reviewer" | "pm"; message: string };
+    raiseMaxRounds?: boolean;
+    idempotencyKey?: string;
+  },
+): Promise<{ review: V2ConversationPlanReviewT }> {
+  return requestJson(
+    `${messageEndpoint(projectId, workItemId, conversationId)}/plan-reviews/${encodeURIComponent(
+      reviewId,
+    )}/adjudicate`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        rulings: input.rulings,
+        ...(input.note ? { note: input.note } : {}),
+        ...(input.raiseMaxRounds !== undefined ? { raise_max_rounds: input.raiseMaxRounds } : {}),
+        ...(input.idempotencyKey ? { idempotency_key: input.idempotencyKey } : {}),
+      }),
+    },
+  );
+}
+
+/** Mid-flight cadence edit (QC-PAUSE-POINTS.md "Mutability mid-flight") —
+ *  qc_mode freely, max_rounds raise-only. Reviewer identity has no field. */
+export function patchConversationPlanReview(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  reviewId: string,
+  input: {
+    qcMode?: QcModeT;
+    maxRounds?: number;
+  },
+): Promise<{ review: V2ConversationPlanReviewT }> {
+  return requestJson(
+    `${messageEndpoint(projectId, workItemId, conversationId)}/plan-reviews/${encodeURIComponent(
+      reviewId,
+    )}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        ...(input.qcMode ? { qc_mode: input.qcMode } : {}),
+        ...(input.maxRounds !== undefined ? { max_rounds: input.maxRounds } : {}),
+      }),
     },
   );
 }

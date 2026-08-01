@@ -19,8 +19,11 @@ import type { ReviewFindingT, UsageEventT } from "@norns/contracts";
 import type { V2WorkPlanContractT } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
+  type QcMode,
   type ReviewOnlyChatEvent,
+  type ReviewOnlyPlanningPausedResult,
   type ReviewOnlyPlanningResult,
+  type ReviewOnlyResumeState,
   type ReviewOnlyRound,
   runReviewOnlyPlanning,
 } from "./reviewOnlySession.js";
@@ -111,6 +114,12 @@ export interface PlanningRunWorkerOptions {
     initiatedByUserId: string;
     seedPlan: V2WorkPlanContractT;
     frozenContext: unknown;
+    qcMode: QcMode;
+    allowUnadjudicatedRebuttals: boolean;
+    /** Set when this run is a resumed park; rebuilt from the review's own
+     *  persisted state (pinned reviewer/PM identity, interim plan, rehydrated
+     *  round exchanges) — never re-derived from current project settings. */
+    resume?: ReviewOnlyResumeState;
   }>;
   markReviewOnlyStarted?: (reviewId: string) => Promise<void>;
   recordReviewOnlyProgress?: (input: {
@@ -128,6 +137,13 @@ export interface PlanningRunWorkerOptions {
     planningRunId: string;
     result: ReviewOnlyPlanningResult;
     totalCostUsd: number;
+  }) => Promise<void>;
+  /** A gate parked the review durably — distinct from complete/fail. See
+   *  "Durability: a gate parks, it does not wait" (QC-PAUSE-POINTS.md). */
+  pauseReviewOnly?: (input: {
+    reviewId: string;
+    planningRunId: string;
+    result: ReviewOnlyPlanningPausedResult;
   }) => Promise<void>;
   failReviewOnly?: (planningRunId: string, error: unknown) => Promise<void>;
 }
@@ -329,6 +345,11 @@ export class PlanningRunWorker {
          RETURNING id`,
         [this.now().toISOString()],
       );
+      // A parked review-only run holds no lease and is not abandoned — it is
+      // deliberately sitting at 'awaiting_human', outside this filter, and
+      // must not be swept up and force-failed here (QC-PAUSE-POINTS.md,
+      // "A parked review holds no lease, so lease-expiry recovery must not
+      // treat awaiting_human runs as abandoned").
       const reviewOnly = await tx.query<{ id: string }>(
         `SELECT id
            FROM planning_runs
@@ -640,6 +661,7 @@ export class PlanningRunWorker {
         !this.options.loadReviewOnlySeed ||
         !this.options.markReviewOnlyStarted ||
         !this.options.completeReviewOnly ||
+        !this.options.pauseReviewOnly ||
         !this.options.failReviewOnly
       ) {
         throw new Error("review-only planning workflow is not configured");
@@ -656,6 +678,9 @@ export class PlanningRunWorker {
         telemetryGroupId: seed.usageRequestGroupId,
         maxRounds: claim.max_rounds,
         signal: controller.signal,
+        qcMode: seed.qcMode,
+        allowUnadjudicatedRebuttals: seed.allowUnadjudicatedRebuttals,
+        ...(seed.resume ? { resume: seed.resume } : {}),
         ...(this.options.recordReviewOnlyProgress
           ? {
               onProgress: (rounds: readonly ReviewOnlyRound[]) =>
@@ -678,6 +703,18 @@ export class PlanningRunWorker {
           : {}),
       });
       this.options.recordUsage?.(result.usage);
+      if (result.status === "paused") {
+        // A gate parked the review — this is neither a completion nor a
+        // failure. No await on a human here: pauseReviewOnly persists state
+        // and releases the lease, then this method returns and the worker
+        // exits, exactly like the completed/failed paths below.
+        await this.options.pauseReviewOnly({
+          reviewId: seed.reviewId,
+          planningRunId: claim.id,
+          result,
+        });
+        return;
+      }
       const totalCostUsd = result.usage.reduce(
         (total, usage) => total + usage.estimated_cost_usd,
         0,

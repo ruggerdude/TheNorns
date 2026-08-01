@@ -18,6 +18,7 @@ function planVersion(): V2WorkPlanVersionT {
     created_by_user_id: "user-1",
     version: 2,
     status: "changes_requested",
+    origin: "human",
     plan: {
       plan: makePlan({
         objective: "Ship a dependable notification experience",

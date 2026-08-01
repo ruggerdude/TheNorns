@@ -4,7 +4,7 @@
 // preference — the loop itself is untouched execution logic; see
 // ./runWorker.ts for the part that actually drives runPlanning().
 import type { ProviderName } from "@norns/adapters";
-import type { CodexReasoningEffortT } from "@norns/contracts";
+import { type CodexReasoningEffortT, V2QcMode, type V2QcModeT } from "@norns/contracts";
 import { newId } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import type { PersistedReviewerSelection } from "./reviewerSelection.js";
@@ -28,6 +28,20 @@ export type PlanningRunStatus =
 /** PHASE TAB P1: which implementation providers allocation staffing may use. */
 export type WorkerProviderSelection = "anthropic" | "openai" | "both";
 export type PlanningRunMode = "planned" | "quick" | "review_only";
+
+/**
+ * QCP-4A: the project-layer QC cadence default. Mirrors the CHECK constraint
+ * on planning_reviewer_settings.qc_mode (drizzle/0064_qc_pause_points.sql).
+ * A review pins its own qc_mode at kickoff (conversation_plan_reviews); this
+ * is only the project default consulted at that pin.
+ */
+export const QC_MODES = V2QcMode.options;
+export type QcMode = V2QcModeT;
+
+export interface QcModeSettings {
+  qcMode: QcMode;
+  allowUnadjudicatedRebuttals: boolean;
+}
 
 export interface PlanningParticipantSelection {
   provider: ProviderName;
@@ -535,6 +549,62 @@ export class PlanningRunService {
                reviewer_model = EXCLUDED.reviewer_model,
                updated_at = now()`,
         [projectId, selection?.provider ?? null, selection?.model ?? null],
+      );
+    });
+  }
+
+  /**
+   * QCP-4A: the project's QC cadence default. Absent a row (or a project that
+   * never touched planning settings at all), this is `automatic` /
+   * `false` — the shipped default that changes no existing behavior.
+   */
+  async qcModeSettingsOf(projectId: string): Promise<QcModeSettings> {
+    return this.transactions.transaction(async (tx) => {
+      const result = await tx.query<{
+        qc_mode: QcMode;
+        allow_unadjudicated_rebuttals: boolean;
+      }>(
+        "SELECT qc_mode, allow_unadjudicated_rebuttals FROM planning_reviewer_settings WHERE project_id = $1",
+        [projectId],
+      );
+      const row = result.rows[0];
+      return {
+        qcMode: row?.qc_mode ?? "automatic",
+        allowUnadjudicatedRebuttals: row?.allow_unadjudicated_rebuttals ?? false,
+      };
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // QCP-4A: write path for the project-layer qc_mode default and its
+  // allow_unadjudicated_rebuttals escape hatch. Each field is independently
+  // optional — omitting one leaves it untouched (COALESCE against the
+  // existing row on conflict, against the column's own DB default on first
+  // insert) so a caller can change just one setting without first reading
+  // the other back. This never reaches into runs already in flight: a review
+  // pins its own qc_mode at kickoff (conversation_plan_reviews.qc_mode) and
+  // never re-reads this table.
+  // ---------------------------------------------------------------------
+  async setQcModeSettings(
+    projectId: string,
+    settings: { qcMode?: QcMode | undefined; allowUnadjudicatedRebuttals?: boolean | undefined },
+  ): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      const project = await tx.query<{ id: string }>("SELECT id FROM projects WHERE id = $1", [
+        projectId,
+      ]);
+      if (!project.rows[0]) {
+        throw new PlanningRunConflictError("project_not_found", `unknown project "${projectId}"`);
+      }
+      await tx.query(
+        `INSERT INTO planning_reviewer_settings (project_id, qc_mode, allow_unadjudicated_rebuttals)
+         VALUES ($1, COALESCE($2, 'automatic'), COALESCE($3, false))
+         ON CONFLICT (project_id) DO UPDATE
+           SET qc_mode = COALESCE($2, planning_reviewer_settings.qc_mode),
+               allow_unadjudicated_rebuttals =
+                 COALESCE($3, planning_reviewer_settings.allow_unadjudicated_rebuttals),
+               updated_at = now()`,
+        [projectId, settings.qcMode ?? null, settings.allowUnadjudicatedRebuttals ?? null],
       );
     });
   }

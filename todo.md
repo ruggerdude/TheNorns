@@ -1166,3 +1166,119 @@ decision and is deliberately untouched.
   background agents die with the host app. Each of these caused a production
   incident at least once. Decide whether to re-home them (a skill, `docs/`, or
   `README.md`) or accept the loss deliberately.
+
+## QC PAUSE POINTS program (dispatched 2026-07-31, plan: QC-PAUSE-POINTS.md)
+
+- [x] ✅ QCP-0 Contracts + schema: `awaiting_human` status, `paused_checkpoint`/
+  `paused_at_round`/steering provenance, disposition adjudication block,
+  `V2WorkPlanVersion.origin`, invariant updates, migration 0064.
+- [x] ✅ QCP-1A reviewOnlySession: `paused` result, Gate B checkpoint, Gate C
+  trigger (declared rebuttal + hollow acceptance, module-scoped hash), resume.
+- [x] ✅ QCP-1B Park/resume through the worker: materialize interim plan
+  version, release lease, resume action, orphan recovery skips `awaiting_human`.
+- [x] ✅ QCP-2A Attention: `awaiting_human` items, Gate C ranking, TTL nudge.
+- [x] ✅ QCP-2B Gate card UI: four distinct exits (Continue / Continue with a
+  note / Accept now / Cancel) via `resumeConversationPlanReview`, Gate B
+  interim-version diff reuse, Gate C no-ruling-yet notice, qc_interim excluded
+  from default plan-version targets.
+- [x] ✅ QCP-3A Steering + rulings (server): verified Gate A end-to-end +
+  round-trip test; widened `continueReviewChat` to `awaiting_human` (question
+  never advances the run) + human-steered-round provenance; adjudication
+  route (`POST .../plan-reviews/:reviewId/adjudicate`, migration 0067:
+  `adjudications`/`forced_accept_module_ids`/`adjudication_idempotency_key`)
+  with rule-for-reviewer (blocks re-rebuttal via same-module force-accept),
+  rule-for-pm, supply-the-missing-fact, and cap-raise-by-one; mid-flight
+  `PATCH .../plan-reviews/:reviewId` (qc_mode freely, max_rounds raise-only-
+  above-completed, reviewer identity has no field at all) + resume's
+  "continue and stop asking" compound exit; `should_fix` same-module
+  recurrence escalation in `qcGates.ts`; recurrence exposed on the finding
+  read model (`recurs_of_finding_ids`, within-review only).
+  RECONCILED 2026-07-31 (PM): QCP-3A flagged a possible duplicate with QCP-4A
+  and speculated QCP-4A was in an unmerged worktree. That was wrong — it
+  searched for a commit, but nothing in this program is committed yet; all of
+  it is uncommitted working tree. QCP-4A's work is verified present
+  (`qcModeSettingsOf`/`setQcModeSettings`/`QC_MODES` in runService.ts,
+  `qc-mode` + `allow-unadjudicated-rebuttals` testids in Projects.tsx,
+  `qc_mode` in the planning-reviewer routes, planningReviewerRoute.test.ts).
+  No duplication: QCP-4A owns the PROJECT-level settings layer, QCP-3A owns
+  the PER-REVIEW mutability PATCH and resume exits. Disjoint.
+- [x] ✅ QCP-3B Adjudication card, approval-card aggregation, + the three
+  qc_mode web surfaces QCP-4A could not own (kickoff, mid-flight, effective
+  value/source).
+- [x] ✅ QCP-4A `qc_mode` settings layer only: runService + planning-reviewer
+  routes + project wizard. (Mid-flight mutability and compound exits were
+  re-scoped to QCP-3A mid-program and are done there — per-review PATCH and
+  resume `stopAsking`. No overlap; wording reconciled 2026-07-31.)
+- [x] ✅ QCP-4B Three-tab Work layout, needs-you badge, QC status strip.
+- [x] ✅ QCP-8 Make the kickoff `qc_mode` pin atomic. QCP-3B had to apply it as
+  a follow-up PATCH after review creation because `V2SendPlanToQcParameters`
+  has no `qc_mode` field; if the worker reaches its first checkpoint before the
+  PATCH lands, that checkpoint sees the project default and a requested Gate A
+  silently does not fire. Kickoff is the layer the plan says most decisions are
+  made at, so best-effort is not good enough.
+- [ ] 🟡 QCP-9 `qc_mode_source: "in_run"` carries no round or user, so surfaces
+  can show "changed mid-review at round N" but not "by <user>". Needs a
+  provenance field on the review. Found by QCP-3B.
+- [x] ✅ QCP-5 CI review sweep.
+- [x] ✅ QCP-6 Accept-now on a Gate A park. Root cause: `continueWithoutQc`
+  falls back to the seed plan version, still `in_qc`, so
+  `boundLatestPlan(..., "candidate")` throws `invalid_plan_state` (NOT
+  `plan_not_reviewed` — that ternary keys on the expected status). Fix needed
+  three parts, all verified load-bearing: (1) migration 0068 widens trigger
+  `norns_guard_work_plan_version_update`'s `in_qc -> candidate` exception to
+  `awaiting_human` AND `paused_checkpoint = 'after_review'` (Gate A only —
+  deliberately not bare `awaiting_human`, since at Gate B a revision exists);
+  (2) `continueWithoutQc` reverts the seed's status in that case; (3)
+  `send_plan_to_qc`'s active-review conflict check excluded `awaiting_human`
+  for `skip_qc` confirms only — it was matching the very review being accepted
+  and throwing `qc_in_progress`.
+- [ ] 🟡 QCP-7 Web surfaces QCP-4A could not build (not its files), all in
+  ConversationWorkspace.tsx / ConversationQcCard.tsx — fold into QCP-3B:
+  (a) kickoff `qc_mode` control on send-to-QC, pre-filled from
+  `GET /api/v2/projects/:id/planning-reviewer` (now returns `qc_mode` +
+  `allow_unadjudicated_rebuttals`); (b) mid-flight qc_mode editing from the QC
+  tab and gate card; (c) effective-value + source display
+  ("project default" / "set for this work item" / "changed at round 2 by X")
+  driven off `qc_mode_source`.
+
+## QC PAUSE POINTS — review follow-ups (2026-08-01, from /simplify)
+
+- [x] ✅ QCP-R1 `qc_mode` was retyped in 5 places (contracts, runService,
+  reviewOnlySession, Projects.tsx, conversationApi.ts). All now derive from
+  `V2QcMode`/`V2QcModeT`. Also `PatchReviewBody` and
+  `patchConversationPlanReview` were re-spelling the union inline.
+- [x] ✅ QCP-R2 Stale JSDoc on `confirm`'s `qcMode` still described the
+  follow-up-PATCH race that QCP-8 removed.
+- [x] ✅ QCP-R3 Missing partial index on `conversation_plan_reviews(status)
+  WHERE status='awaiting_human'`. `portfolio()` polls ~every 10s per open
+  project and seq-scans the table; also CROSS JOIN LATERALs the JSONB
+  chat_messages array per row. Migration 0069.
+- [x] ✅ QCP-R4 Forced-accept override rewrites the PM's own disposition and
+  rationale, persisting them as if the PM said it — the inverse of the design
+  doc's "do not synthesize an agent disposition on the human's behalf".
+  Enforcement stays; only the recording changes.
+- [x] ✅ QCP-R5 Five review methods in planWorkflow.ts repeat ~25-30 lines of
+  identical load-for-update / guard / reload plumbing.
+- [x] ✅ QCP-R6 Six web review-action callbacks repeat the same busy/error
+  state machine across ~300 lines; `reviewCapBlocked` is a third parallel
+  per-review container; note editor duplicated between gate and adjudication.
+- [ ] 🟡 QCP-R7 Attention TTL rescans the whole JSONB `chat_messages` array on
+  every poll. A `last_human_message_at` column maintained in
+  `appendReviewChatEvent` would make it a column read. Deferred — the index
+  (QCP-R3) addresses the larger cost first.
+- [ ] 🟡 QCP-R8 Migration 0066 drops and rebuilds
+  `conversation_plan_reviews_one_active_per_version` non-concurrently inside
+  the runner's per-migration transaction, holding ACCESS EXCLUSIVE for the
+  build. Fine now; a deploy-time stall once the table is large.
+- [ ] 🟡 QCP-R9 `boundLatestPlan` hardcodes a `candidate` expectation for
+  `send_plan_to_qc`, which is why Gate A accept-now needed both a status
+  revert and the 0068 trigger exception. Letting `skip_qc` accept an `in_qc`
+  seed directly would remove both special cases — including gate-topology
+  knowledge currently living in DDL. Supersedes a written migration, so it is
+  a deliberate design call, not a cleanup.
+- [ ] 🟡 QCP-R10 Contract `superRefine` invariants and the DB guards express
+  the same rules twice (intentional defence-in-depth, currently in lockstep).
+  Nothing enforces they stay in sync — worth one parity test.
+- [ ] 🟡 QCP-R11 Three idempotency-replay implementations (resume,
+  adjudication, confirmation) hand-roll the same check-and-store branch
+  against different columns.

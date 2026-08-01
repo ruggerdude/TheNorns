@@ -964,6 +964,65 @@
   white-space: nowrap;
 }
 
+/* Plan / QC / Implementation sub-tabs. Same hand-rolled button pattern as
+   App.tsx's workspace-tabs (plain button + .on + aria-current), styled locally
+   rather than reused verbatim since App.tsx's version is sticky-positioned for
+   the page-level nav, which this in-panel strip is not. */
+.conversation-work-tabs {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-2) 20%, transparent);
+}
+
+.conversation-work-tabs button {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.conversation-work-tabs button:hover {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+
+.conversation-work-tabs button.on {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: var(--brand-wash, color-mix(in srgb, var(--accent) 10%, transparent));
+}
+
+/* Mitigation: while a review is queued, running, or parked, the Plan tab
+   always shows its position — not only once it's waiting on a human. */
+.conversation-qc-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0.7rem 1rem 0;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warn) 8%, var(--surface));
+  color: var(--ink);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-align: left;
+}
+
+.conversation-qc-strip:hover {
+  background: color-mix(in srgb, var(--warn) 14%, var(--surface));
+}
+
 .conversation-active-run {
   gap: 1rem;
   padding: 0.55rem 1rem;
@@ -2337,6 +2396,108 @@
   gap: 0.5rem;
 }
 
+/* QCP-2B — the gate card (awaiting_human). Continue / Continue-with-a-note /
+   Accept now / Cancel are deliberately four visually distinct controls: the
+   plan calls out that "stop" at round 2 of 3 almost always means Accept now,
+   not Cancel, so the two must never share a look. */
+.conversation-qc-gate {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--line));
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.conversation-qc-gate-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.conversation-qc-gate-header > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.conversation-qc-gate-header strong {
+  font-size: var(--text-sm);
+}
+
+.conversation-qc-gate-header span {
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+}
+
+.conversation-qc-gate-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.conversation-qc-gate-spend {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+}
+
+.conversation-qc-gate-adjudication {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+  font-size: var(--text-sm);
+}
+
+.conversation-qc-gate-adjudication p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.conversation-qc-gate-diff h4 {
+  margin: 0 0 0.35rem;
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+}
+
+.conversation-qc-gate-exits {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Accept now: neither the primary "advance" action nor the danger "discard"
+   action — its own success-toned control so it reads as "keep the plan." */
+.conversation-qc-gate-accept {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 35%, var(--line));
+  background: color-mix(in srgb, var(--success) 9%, var(--surface));
+}
+
+.conversation-qc-gate-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--text-sm);
+}
+
+.conversation-qc-gate-note {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
 .conversation-qc-receipt {
   padding: 0.6rem 0.75rem;
   border: 1px solid var(--line);
@@ -2701,6 +2862,10 @@
 .conversation-qc-clear {
   color: var(--ink-muted);
   font-size: var(--text-sm);
+}
+
+.conversation-qc-discuss-button {
+  justify-self: start;
 }
 
 .conversation-turn-meta,

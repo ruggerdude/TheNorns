@@ -6,6 +6,7 @@ import {
   type OwnedDeviceProjectionT,
   PM_MODEL_OPTIONS,
   type PmModelT,
+  type V2QcModeT,
   pmModelOption,
   providerForPmModel,
 } from "@norns/contracts";
@@ -65,6 +66,35 @@ export interface ProjectSummary {
    * planning run, so losing this browser-only hint on refresh is harmless. */
   entry_flow?: "adoption" | "new" | null;
 }
+
+// QCP-4A: the project-layer QC cadence default. Derived from the contract
+// enum so the server CHECK (drizzle/0064_qc_pause_points.sql), the wire, and
+// this picker cannot drift apart when a mode is added.
+export type QcModeT = V2QcModeT;
+
+/** One line each — a mode picker nobody understands is worse than no picker. */
+export const QC_MODE_OPTIONS: ReadonlyArray<{ value: QcModeT; label: string; help: string }> = [
+  {
+    value: "automatic",
+    label: "Automatic",
+    help: "QC runs to completion as a record; only an unresolved must-fix disagreement pauses it.",
+  },
+  {
+    value: "gated_when_contested",
+    label: "Gated when contested (recommended)",
+    help: "Pauses after each reviewer pass so you can redirect before the plan is revised.",
+  },
+  {
+    value: "gated_each_round",
+    label: "Gated each round",
+    help: "Pauses after each revision so you can inspect what changed before the next round.",
+  },
+  {
+    value: "gated_each_step",
+    label: "Gated each step",
+    help: "Pauses after every reviewer pass and every revision — the most cautious cadence.",
+  },
+];
 
 export interface DerivedProjectIdentity {
   projectName: string;
@@ -502,6 +532,12 @@ export function Projects({
   // (the server's automatic opposite-provider default); any other value is
   // "provider:model" as offered by MODEL_CHOICES below.
   const [reviewerSelection, setReviewerSelection] = useState("auto");
+  // QCP-4A: the project-layer QC cadence default. Ships as "automatic" so no
+  // existing project's behavior changes; the picker only ever sets this
+  // project's default, not any review already in flight (those pin their own
+  // qc_mode at kickoff).
+  const [qcMode, setQcMode] = useState<QcModeT>("automatic");
+  const [allowUnadjudicatedRebuttals, setAllowUnadjudicatedRebuttals] = useState(false);
   // DESIGN R2 semantic change: the wizard's single submit creates the
   // repository/project and opens it — planning now begins in the conversation
   // after creation, so there is no wizard planning kickoff or attachment
@@ -1055,15 +1091,24 @@ export function Projects({
           await requestVerb(`/api/v2/projects/${projectId}/planning-reviewer`, "PATCH", {
             provider: reviewerProviderChoice,
             model: modelParts.join(":"),
+            qc_mode: qcMode,
+            allow_unadjudicated_rebuttals: allowUnadjudicatedRebuttals,
           });
         } else {
           await requestVerb(`/api/v2/projects/${projectId}/planning-reviewer`, "DELETE");
+          // QCP-4A: the QC cadence default is independent of the reviewer
+          // override, so it still needs its own write when the reviewer
+          // stays automatic (DELETE only clears the provider/model pair).
+          await requestVerb(`/api/v2/projects/${projectId}/planning-reviewer`, "PATCH", {
+            qc_mode: qcMode,
+            allow_unadjudicated_rebuttals: allowUnadjudicatedRebuttals,
+          });
         }
       } catch {
         // Best-effort: planning safely falls back to the account default.
       }
     },
-    [reviewerSelection],
+    [reviewerSelection, qcMode, allowUnadjudicatedRebuttals],
   );
 
   /** DESIGN R2: a new project opens straight into the workspace after
@@ -1344,6 +1389,8 @@ export function Projects({
     setAdoptionError(null);
     setReviewerSelection("auto");
     setRoundsCount(3);
+    setQcMode("automatic");
+    setAllowUnadjudicatedRebuttals(false);
     setIdempotencyKey(globalThis.crypto.randomUUID());
   }, []);
 
@@ -2474,6 +2521,43 @@ export function Projects({
                               rounds.
                             </div>
                           )}
+                          {roundsCount > 0 ? (
+                            <>
+                              <Field label="QC pause mode">
+                                <Select
+                                  data-testid="qc-mode"
+                                  value={qcMode}
+                                  onChange={(event) => setQcMode(event.target.value as QcModeT)}
+                                >
+                                  {QC_MODE_OPTIONS.map((option) => (
+                                    <option key={option.value} value={option.value}>
+                                      {option.label}
+                                    </option>
+                                  ))}
+                                </Select>
+                                <span className="field-help">
+                                  {QC_MODE_OPTIONS.find((option) => option.value === qcMode)?.help}{" "}
+                                  This is the project default — it does not change reviews already
+                                  running, and can be overridden per work item at kickoff.
+                                </span>
+                              </Field>
+                              <label className="debate-toggle">
+                                <input
+                                  type="checkbox"
+                                  data-testid="allow-unadjudicated-rebuttals"
+                                  checked={allowUnadjudicatedRebuttals}
+                                  onChange={(event) =>
+                                    setAllowUnadjudicatedRebuttals(event.target.checked)
+                                  }
+                                />
+                                Allow unadjudicated rebuttals (discouraged)
+                              </label>
+                              <span className="field-help">
+                                Suppresses the pause for a declared rebuttal only — a
+                                hollow-acceptance pause always fires regardless of this setting.
+                              </span>
+                            </>
+                          ) : null}
                         </div>
                       </details>
                     </>

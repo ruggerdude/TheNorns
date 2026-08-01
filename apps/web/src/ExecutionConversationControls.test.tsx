@@ -311,7 +311,9 @@ describe("Phase 5 execution conversation controls", () => {
       />,
     );
     await user.click(screen.getByRole("button", { name: "Confirm action: Submit exact answer" }));
-    expect(onConfirm).toHaveBeenCalledWith(proposed);
+    // Not a send_plan_to_qc action, so no kickoff qc_mode control renders and
+    // no override is passed.
+    expect(onConfirm).toHaveBeenCalledWith(proposed, undefined);
   });
 
   it("locks an uncertain human-wait answer to the exact persisted draft for retry", async () => {

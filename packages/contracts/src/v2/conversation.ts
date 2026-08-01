@@ -1901,6 +1901,10 @@ export const V2WorkPlanVersion = z
     created_by_user_id: V2EntityId,
     version: z.number().int().positive(),
     status: V2WorkPlanVersionStatus,
+    // Distinguishes human-authored versions from QC's own materializations:
+    // an interim round snapshot (parked at a gate) vs. a review's terminal
+    // result. Defaults to "human" for every version created outside QC.
+    origin: z.enum(["human", "qc_interim", "qc_result"]).default("human"),
     plan: V2WorkPlanContract,
     content_hash: V2Sha256Hex,
     created_by_action_id: V2EntityId.nullable(),
@@ -1979,10 +1983,19 @@ const planVersionReferenceParameters = {
   content_hash: V2Sha256Hex,
 };
 
+export const V2QcMode = z.enum([
+  "automatic",
+  "gated_each_round",
+  "gated_each_step",
+  "gated_when_contested",
+]);
+export type V2QcModeT = z.infer<typeof V2QcMode>;
+
 export const V2SendPlanToQcParameters = z
   .object({
     ...planVersionReferenceParameters,
     review: V2PlanReviewPreference.optional(),
+    qc_mode: V2QcMode.optional(),
   })
   .strict();
 export type V2SendPlanToQcParametersT = z.infer<typeof V2SendPlanToQcParameters>;
@@ -2014,6 +2027,7 @@ export type V2RejectPlanParametersT = z.infer<typeof V2RejectPlanParameters>;
 export const V2ConversationPlanReviewStatus = z.enum([
   "queued",
   "running",
+  "awaiting_human",
   "converged",
   "cap_reached",
   "failed",
@@ -2044,9 +2058,26 @@ export const V2ConversationPlanReviewFinding = z
     module_id: V2EntityId.nullable(),
     finding: V2NonEmptyString,
     recommendation: V2NonEmptyString,
+    // Recurrence (QC-PAUSE-POINTS.md "Repeat disputes across attempts"):
+    // earlier finding_ids against the same module_id, oldest-first. Optional
+    // (rather than defaulted) so existing literals of this type stay valid —
+    // recurrence is evidence for surfaces to render, not a required field.
+    recurs_of_finding_ids: z.array(V2EntityId).optional(),
   })
   .strict();
 export type V2ConversationPlanReviewFindingT = z.infer<typeof V2ConversationPlanReviewFinding>;
+
+export const V2ConversationPlanReviewDispositionAdjudication = z
+  .object({
+    decided_by_user_id: z.string().min(1),
+    ruling: z.enum(["reviewer", "pm", "supplied_fact"]),
+    rationale: z.string().min(1),
+    decided_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type V2ConversationPlanReviewDispositionAdjudicationT = z.infer<
+  typeof V2ConversationPlanReviewDispositionAdjudication
+>;
 
 export const V2ConversationPlanReviewDisposition = z
   .object({
@@ -2054,6 +2085,11 @@ export const V2ConversationPlanReviewDisposition = z
     finding_index: nonNegativeInteger,
     disposition: z.enum(["accept", "rebut"]),
     rationale: V2NonEmptyString,
+    // A human ruling on this disposition (adjudication at Gate C). Recorded on
+    // the existing agent disposition rather than synthesizing a new one on the
+    // human's behalf; a must-fix finding whose disposition carries a ruling
+    // satisfies the must-fix-disposition-completeness invariant below.
+    adjudication: V2ConversationPlanReviewDispositionAdjudication.nullable(),
   })
   .strict();
 export type V2ConversationPlanReviewDispositionT = z.infer<
@@ -2139,6 +2175,14 @@ export const V2ConversationPlanReview = z
     review_mode: z.enum(["qc", "waived"]).optional(),
     usage_request_group_id: V2EntityId,
     status: V2ConversationPlanReviewStatus,
+    // Cadence settings, pinned at kickoff and mutable mid-flight only per the
+    // QC pause-points rules (qc_mode freely; the escape hatch is project-wide).
+    qc_mode: V2QcMode.default("automatic"),
+    qc_mode_source: z.enum(["project_default", "work_item", "in_run"]),
+    allow_unadjudicated_rebuttals: z.boolean(),
+    // Rounds at which a human message entered the live review (provenance for
+    // the "human-steered" disclosure on the approval card).
+    human_steered_rounds: z.array(z.number().int().positive()).default([]),
     rounds_completed: nonNegativeInteger,
     max_rounds: z.number().int().min(1).max(5),
     round_exchanges: z.array(V2ConversationPlanReviewRound),
@@ -2150,6 +2194,10 @@ export const V2ConversationPlanReview = z
     findings: z.array(V2ConversationPlanReviewFinding),
     dispositions: z.array(V2ConversationPlanReviewDisposition),
     revised_plan_version_id: V2EntityId.nullable(),
+    // Set only while status === "awaiting_human"; identifies which gate parked
+    // the review and the round it parked at.
+    paused_checkpoint: z.enum(["after_review", "after_revision", "adjudication"]).nullable(),
+    paused_at_round: z.number().int().positive().nullable(),
     started_at: nullableDate,
     completed_at: nullableDate,
     failure_code: V2NonEmptyString.nullable(),
@@ -2171,6 +2219,9 @@ export const V2ConversationPlanReview = z
     const validTiming =
       (review.status === "queued" && review.started_at === null && review.completed_at === null) ||
       (review.status === "running" && review.started_at !== null && review.completed_at === null) ||
+      (review.status === "awaiting_human" &&
+        review.started_at !== null &&
+        review.completed_at === null) ||
       (review.status === "failed" && review.completed_at !== null) ||
       (review.status === "cancelled" && review.completed_at !== null) ||
       (["converged", "cap_reached"].includes(review.status) &&
@@ -2181,6 +2232,28 @@ export const V2ConversationPlanReview = z
         code: z.ZodIssueCode.custom,
         path: ["started_at"],
         message: "plan review timing must match its lifecycle state",
+      });
+    }
+    const paused = review.status === "awaiting_human";
+    if (paused !== (review.paused_checkpoint !== null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["paused_checkpoint"],
+        message: "a paused checkpoint is set if and only if the review is awaiting_human",
+      });
+    }
+    if (paused !== (review.paused_at_round !== null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["paused_at_round"],
+        message: "a paused round is set if and only if the review is awaiting_human",
+      });
+    }
+    if (paused && review.paused_at_round !== null && review.paused_at_round > review.max_rounds) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["paused_at_round"],
+        message: "a review cannot be parked at a round beyond its round cap",
       });
     }
     if ((review.status === "failed") !== (review.failure_code !== null)) {
@@ -2296,6 +2369,11 @@ export const V2ConversationPlanReview = z
         });
       }
     }
+    // Terminal-only on purpose: a review parked at Gate A (awaiting_human)
+    // has findings with no dispositions yet, and that is correct — the human
+    // hasn't seen them yet, let alone the PM. A must-fix finding whose
+    // disposition carries an `adjudication` ruling already satisfies this
+    // rule, since it only checks that a disposition is attached.
     if (["converged", "cap_reached"].includes(review.status)) {
       const undisposedMustFix = review.findings.filter(
         (finding) => finding.severity === "must_fix" && !dispositionIds.has(finding.id),
@@ -2326,6 +2404,9 @@ export const V2ConversationPlanReview = z
         message: "a changed QC result must identify its materialized revision version",
       });
     }
+    // Deliberately excludes "awaiting_human": a review parked at Gate B may
+    // carry an interim revision (materialized so the gate card can diff
+    // v(n) -> v(n+1)) without implying terminal success.
     if (
       ["queued", "running", "failed", "cancelled"].includes(review.status) &&
       (hasRevision || review.result_plan_content_hash !== review.plan_content_hash)
@@ -2336,6 +2417,8 @@ export const V2ConversationPlanReview = z
         message: "non-terminal-success reviews cannot expose revision evidence",
       });
     }
+    // Deliberately excludes "awaiting_human": a paused review must expose its
+    // findings and dispositions so far — that's the point of pausing.
     if (
       ["queued", "running", "failed", "cancelled"].includes(review.status) &&
       (review.findings.length > 0 || review.dispositions.length > 0)
@@ -2938,6 +3021,11 @@ export const V2ConfirmConversationActionInput = z
     conversation_id: V2EntityId,
     action_id: V2EntityId,
     idempotency_key: V2EntityId,
+    /** Only meaningful when confirming a proposed `send_plan_to_qc` action:
+     * pins the cadence chosen on the kickoff control atomically with the
+     * confirmation, instead of a racy follow-up PATCH after the review
+     * already exists. Ignored for every other action type. */
+    qc_mode: V2QcMode.optional(),
   })
   .strict();
 export type V2ConfirmConversationActionInputT = z.infer<typeof V2ConfirmConversationActionInput>;

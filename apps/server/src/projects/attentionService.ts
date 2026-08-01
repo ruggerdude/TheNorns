@@ -66,6 +66,18 @@ function fingerprint(value: unknown): string {
 const severityRank = { critical: 0, high: 1, normal: 2, low: 3 } as const;
 
 /**
+ * QCP-2A — a paused QC gate that has sat unread escalates one severity step
+ * (normal -> high, high -> critical) so a silent stall does not sit invisible
+ * forever. "Unread" is elapsed wall-clock time since the more recent of (a)
+ * the review row's own `updated_at` (there is no `paused_at` column, so this
+ * doubles as "when it parked" per the spec's documented fallback) and (b) the
+ * latest human-authored chat message on the review — "any interaction of any
+ * kind" resets the clock, per QC-PAUSE-POINTS.md. A single module constant,
+ * no settings surface: YAGNI until proven otherwise.
+ */
+export const QC_GATE_NUDGE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Milestones are activity/history, not intervention. Every other currently
  * defined attention kind represents an approval, decision, exception, or
  * blocked execution condition and remains actionable regardless of severity.
@@ -443,8 +455,97 @@ export class AttentionService {
                                 'closed_at',phase.closed_at)
            FROM phases phase JOIN projects p ON p.id=phase.project_id
            WHERE phase.status='completed' AND phase.closed_at >= $1::timestamptz - interval '7 days'
+           UNION ALL
+           -- QCP-2A: a conversation_plan_reviews row parked awaiting_human at
+           -- one of the three QC gates (Gate A/after_review, Gate B/
+           -- after_revision, Gate C/adjudication). Gate C is the mandatory
+           -- adjudication stop and outranks the two cadence gates (kind
+           -- 'decision', severity 'high' vs 'approval'/'normal'), per
+           -- QC-PAUSE-POINTS.md ("Gate C outranks Gate A and B"). gate.elapsed_ms
+           -- is the TTL nudge: elapsed time since the more recent of the
+           -- review's own updated_at and its latest human chat message,
+           -- compared against QC_GATE_NUDGE_TTL_MS, escalates severity one
+           -- step and says so in the copy.
+           SELECT p.id, p.name, wi.phase_id, NULL::text,
+             'conversation_plan_review'::text AS source_type, review.id AS source_id,
+             CASE review.paused_checkpoint
+               WHEN 'adjudication' THEN 'qc_gate_adjudication'
+               WHEN 'after_review' THEN 'qc_gate_after_review'
+               ELSE 'qc_gate_after_revision'
+             END AS condition_class,
+             CASE WHEN review.paused_checkpoint='adjudication' THEN 'decision' ELSE 'approval' END
+               AS kind,
+             CASE
+               WHEN review.paused_checkpoint='adjudication' AND gate.elapsed_ms > $2::numeric
+                 THEN 'critical'
+               WHEN review.paused_checkpoint='adjudication' THEN 'high'
+               WHEN gate.elapsed_ms > $2::numeric THEN 'high'
+               ELSE 'normal'
+             END AS severity,
+             CASE review.paused_checkpoint
+               WHEN 'adjudication' THEN 'QC adjudication required'
+               WHEN 'after_review' THEN 'QC review awaiting your input'
+               ELSE 'QC revision awaiting your review'
+             END AS title,
+             (CASE review.paused_checkpoint
+                WHEN 'adjudication' THEN
+                  'The reviewer and PM could not resolve a must-fix finding at round '
+                    || review.paused_at_round::text || '; the review is parked until you rule.'
+                WHEN 'after_review' THEN
+                  'Round ' || review.paused_at_round::text
+                    || ' findings are ready for you before the PM responds.'
+                ELSE
+                  'Round ' || review.paused_at_round::text
+                    || '''s revision is ready for your review before the next round begins.'
+              END)
+               || CASE WHEN gate.elapsed_ms > $2::numeric
+                    THEN ' Waiting ' || floor(gate.elapsed_ms / 86400000)::text
+                           || ' day(s) with no response.'
+                    ELSE ''
+                  END AS summary,
+             CASE review.paused_checkpoint
+               WHEN 'adjudication' THEN
+                 'Two agents disagree on a must-fix finding and neither can settle it from the frozen context receipt they both read.'
+               WHEN 'after_review' THEN
+                 'The reviewer filed findings and the loop is paused so you can redirect before the PM spends a revision pass.'
+               ELSE
+                 'The PM disposed of the reviewer''s findings and revised the plan; the loop is paused for your inspection.'
+             END AS explanation,
+             CASE review.paused_checkpoint
+               WHEN 'adjudication' THEN
+                 'Open the QC tab, read the disputed finding and rebuttal, and rule for the reviewer or the PM.'
+               WHEN 'after_review' THEN
+                 'Open the QC tab and continue, or leave a note for the reviewer or PM before it proceeds.'
+               ELSE
+                 'Open the QC tab, read the plan diff, and continue or accept the plan as-is.'
+             END AS recommendation,
+             jsonb_build_array('Continuing advances the loop one step',
+                                'Cancelling discards this review') AS tradeoffs,
+             NULL::jsonb AS decision,
+             'The plan review cannot proceed until a human responds at this gate.' AS impact,
+             'Continuing, noting, accepting, or cancelling resumes or ends the paused review.'
+               AS resumes,
+             review.updated_at AS occurred_at,
+             jsonb_build_object('status', review.status, 'paused_checkpoint', review.paused_checkpoint,
+                                 'paused_at_round', review.paused_at_round,
+                                 'chat_message_count', jsonb_array_length(review.chat_messages))
+               AS material
+           FROM conversation_plan_reviews review
+           JOIN projects p ON p.id=review.project_id
+           JOIN work_items wi ON wi.project_id=review.project_id AND wi.id=review.work_item_id
+           CROSS JOIN LATERAL (
+             SELECT EXTRACT(EPOCH FROM (
+               $1::timestamptz - GREATEST(
+                 review.updated_at,
+                 (SELECT max((msg->>'created_at')::timestamptz)
+                    FROM jsonb_array_elements(review.chat_messages) msg
+                   WHERE msg->>'speaker'='human')
+               )
+             )) * 1000 AS elapsed_ms
+           ) gate
+           WHERE review.status='awaiting_human'
          ) attention_sources`,
-        [now.toISOString()],
+        [now.toISOString(), QC_GATE_NUDGE_TTL_MS],
       );
       const states = await sql.query<StateRow>(
         `SELECT item_key, condition_fingerprint, disposition, snoozed_until

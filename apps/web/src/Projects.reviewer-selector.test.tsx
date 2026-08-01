@@ -127,9 +127,51 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
     ).toBeUndefined();
   });
 
-  it("DELETEs (clears) the reviewer override when left on Automatic", async () => {
+  it("QCP-4A: renders the QC mode control and submits the selected mode plus the rebuttals toggle", async () => {
+    setup();
+    mock.patch("/api/v2/projects/project-created/planning-reviewer", { status: 204 });
+    mock.install();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.type(screen.getByTestId("project-name"), "Quill approvals pipeline");
+    expect(screen.getByTestId("qc-mode")).toHaveValue("automatic");
+    await user.selectOptions(screen.getByTestId("qc-mode"), "gated_when_contested");
+    await user.click(screen.getByTestId("allow-unadjudicated-rebuttals"));
+    // An explicit reviewer choice keeps this on the single-PATCH path; the
+    // Automatic/DELETE path is covered separately below.
+    await user.selectOptions(screen.getByTestId("reviewer-model"), "openai:gpt-5.6-sol");
+    await user.type(
+      await screen.findByTestId("github-new-repository-name"),
+      "quill-approvals-pipeline",
+    );
+    await user.click(screen.getByRole("button", { name: /create project/i }));
+
+    await waitFor(() =>
+      expect(
+        mock.calls.find(
+          (call) =>
+            call.method === "PATCH" &&
+            call.url === "/api/v2/projects/project-created/planning-reviewer",
+        ),
+      ).toMatchObject({
+        body: {
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          qc_mode: "gated_when_contested",
+          allow_unadjudicated_rebuttals: true,
+        },
+      }),
+    );
+  });
+
+  it("DELETEs (clears) the reviewer override when left on Automatic, and still PATCHes the QC cadence default", async () => {
     setup();
     mock.del("/api/v2/projects/project-created/planning-reviewer", { status: 204 });
+    // QCP-4A: qc_mode/allow_unadjudicated_rebuttals are independent of the
+    // reviewer override, so leaving the reviewer on Automatic (a DELETE)
+    // still needs its own PATCH to carry the (default) QC cadence settings.
+    mock.patch("/api/v2/projects/project-created/planning-reviewer", { status: 204 });
     mock.install();
     const user = userEvent.setup();
 
@@ -157,7 +199,9 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
           call.method === "PATCH" &&
           call.url === "/api/v2/projects/project-created/planning-reviewer",
       ),
-    ).toBeUndefined();
+    ).toMatchObject({
+      body: { qc_mode: "automatic", allow_unadjudicated_rebuttals: false },
+    });
   });
 
   it("still opens the workspace even if the reviewer-preference call fails (best-effort, not a blocker)", async () => {

@@ -29,9 +29,13 @@ import {
 import { newId } from "../ids.js";
 import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
+import { findRecurringFindingIds } from "../planning/qcGates.js";
 import type {
   ReviewOnlyChatEvent,
+  ReviewOnlyPlanningPausedResult,
   ReviewOnlyPlanningResult,
+  ReviewOnlyPlanningTerminalResult,
+  ReviewOnlyResumeState,
   ReviewOnlyRound,
 } from "../planning/reviewOnlySession.js";
 import type {
@@ -64,7 +68,8 @@ export type ConversationPlanWorkflowErrorCode =
   | "qc_in_progress"
   | "proposal_in_progress"
   | "proposal_failed"
-  | "invalid_plan_state";
+  | "invalid_plan_state"
+  | "round_cap_requires_raise";
 
 export class ConversationPlanWorkflowError extends Error {
   constructor(
@@ -82,6 +87,11 @@ export interface ConversationPlanReviewModels {
   reviewer: { provider: ProviderName; model: string };
 }
 
+interface ResolvedQcMode {
+  qcMode: V2ConversationPlanReviewT["qc_mode"];
+  qcModeSource: "work_item" | "project_default";
+}
+
 export interface ConversationPlanWorkflowOptions {
   newId?: (prefix: string) => string;
   now?: () => Date;
@@ -89,6 +99,7 @@ export interface ConversationPlanWorkflowOptions {
     projectId: string,
     pm: { provider: ProviderName; model: string },
   ): Promise<ConversationPlanReviewModels>;
+  qcModeSettingsOf?(projectId: string): Promise<{ qcMode: V2ConversationPlanReviewT["qc_mode"] }>;
   runReviewNow(runId: string): Promise<unknown>;
   cancelReviewNow?(runId: string): boolean;
   createReviewAdapter?(provider: ProviderName, model: string): LlmAdapter;
@@ -163,6 +174,7 @@ interface PlanRow {
   diff_from_previous: unknown;
   approved_by_user_id: string | null;
   approved_at: Date | string | null;
+  origin: V2WorkPlanVersionT["origin"];
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -201,6 +213,16 @@ interface ReviewRow {
   revised_plan: unknown | null;
   revised_plan_content_hash: string | null;
   revised_plan_version_id: string | null;
+  paused_checkpoint: V2ConversationPlanReviewT["paused_checkpoint"];
+  paused_at_round: number | string | null;
+  resume_idempotency_key: string | null;
+  qc_mode: V2ConversationPlanReviewT["qc_mode"];
+  qc_mode_source: V2ConversationPlanReviewT["qc_mode_source"];
+  allow_unadjudicated_rebuttals: boolean;
+  human_steered_rounds: unknown;
+  adjudications: unknown;
+  forced_accept_module_ids: unknown;
+  adjudication_idempotency_key: string | null;
   started_at: Date | string | null;
   completed_at: Date | string | null;
   failure_code: string | null;
@@ -208,6 +230,23 @@ interface ReviewRow {
   cancellation_reason: string | null;
   created_at: Date | string;
   updated_at: Date | string;
+}
+
+/**
+ * A human ruling recorded at Gate C (QC-PAUSE-POINTS.md "Adjudication").
+ * Persisted independently of `dispositions` — which markReviewOnlyStarted
+ * resets to empty on every resume and flattenReviewEvidence rebuilds
+ * wholesale from the loop's round data — so a ruling survives the round it
+ * was made in and gets re-attached to the matching disposition (by
+ * finding_id) the next time evidence is flattened.
+ */
+interface AdjudicationRecord {
+  finding_id: string;
+  module_id: string | null;
+  ruling: "reviewer" | "pm" | "supplied_fact";
+  rationale: string;
+  decided_by_user_id: string;
+  decided_at: string;
 }
 
 interface EffectRow {
@@ -249,14 +288,16 @@ const actionColumns = `schema_version, id, project_id, work_item_id, conversatio
 const planColumns = `schema_version, id, project_id, work_item_id, conversation_id,
   created_by_user_id, version, status, plan, content_hash, created_by_action_id,
   supersedes_plan_version_id, diff_from_previous, approved_by_user_id, approved_at,
-  created_at, updated_at`;
+  origin, created_at, updated_at`;
 const reviewColumns = `schema_version, id, project_id, work_item_id, conversation_id,
   action_id, plan_version_id, planning_run_id, initiated_by_user_id, attempt_number,
   pm_provider, pm_model, reviewer_provider, reviewer_model, review_mode, status, seed_plan,
   usage_request_group_id,
   plan_content_hash, result_plan_content_hash, context_receipt, context_manifest,
   context_hash, findings, dispositions, revised_plan, revised_plan_content_hash,
-  revised_plan_version_id,
+  revised_plan_version_id, paused_checkpoint, paused_at_round, resume_idempotency_key,
+  qc_mode, qc_mode_source, allow_unadjudicated_rebuttals, human_steered_rounds,
+  adjudications, forced_accept_module_ids, adjudication_idempotency_key,
   (SELECT round FROM planning_runs WHERE id=planning_run_id) AS rounds_completed,
   (SELECT max_rounds FROM planning_runs WHERE id=planning_run_id) AS max_rounds,
   round_exchanges, chat_messages, markdown_artifacts, started_at, completed_at,
@@ -355,6 +396,10 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
     review_mode: row.review_mode,
     usage_request_group_id: row.usage_request_group_id,
     status: row.status,
+    qc_mode: row.qc_mode,
+    qc_mode_source: row.qc_mode_source,
+    allow_unadjudicated_rebuttals: row.allow_unadjudicated_rebuttals,
+    human_steered_rounds: json(row.human_steered_rounds),
     rounds_completed: Number(row.rounds_completed),
     max_rounds: Number(row.max_rounds),
     round_exchanges: json(row.round_exchanges),
@@ -366,6 +411,8 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
     findings: json(row.findings),
     dispositions: json(row.dispositions),
     revised_plan_version_id: row.revised_plan_version_id,
+    paused_checkpoint: row.paused_checkpoint,
+    paused_at_round: row.paused_at_round === null ? null : Number(row.paused_at_round),
     started_at: nullableIso(row.started_at),
     completed_at: nullableIso(row.completed_at),
     failure_code: row.failure_code,
@@ -505,6 +552,7 @@ export class ConversationPlanWorkflowService {
       return this.lockAction(tx, input, false);
     });
     let models: ConversationPlanReviewModels | null = null;
+    let resolvedQcMode: ResolvedQcMode | null = null;
     if (preview.action_type === "send_plan_to_qc") {
       const parameters = V2SendPlanToQcParameters.parse(preview.payload.parameters);
       const conversation = await this.transactions.transaction((tx) =>
@@ -525,11 +573,25 @@ export class ConversationPlanWorkflowService {
           parameters.review?.mode === "qc"
             ? { pm, reviewer: parameters.review.reviewer }
             : await this.options.resolveReviewModels(input.project_id, pm);
+        // The kickoff control (QC-PAUSE-POINTS.md "Settings: three layers")
+        // pins its choice through this confirm-time input rather than the
+        // proposed action's own (AI-authored, earlier-fixed) parameters, so
+        // that pin lands atomically with review creation instead of racing
+        // a follow-up PATCH against the worker's first checkpoint.
+        const explicitQcMode = input.qc_mode ?? parameters.qc_mode;
+        resolvedQcMode =
+          explicitQcMode !== undefined
+            ? { qcMode: explicitQcMode, qcModeSource: "work_item" }
+            : {
+                qcMode:
+                  (await this.options.qcModeSettingsOf?.(input.project_id))?.qcMode ?? "automatic",
+                qcModeSource: "project_default",
+              };
       }
     }
 
     const applied = await this.transactions.transaction((tx) =>
-      this.confirmInTransaction(tx, userId, input, models),
+      this.confirmInTransaction(tx, userId, input, models, resolvedQcMode),
     );
     if (applied.dispatchRunId) {
       void this.options.runReviewNow(applied.dispatchRunId).catch(() => undefined);
@@ -552,22 +614,63 @@ export class ConversationPlanWorkflowService {
     initiatedByUserId: string;
     seedPlan: V2WorkPlanContractT;
     frozenContext: unknown;
+    qcMode: V2ConversationPlanReviewT["qc_mode"];
+    allowUnadjudicatedRebuttals: boolean;
+    resume?: ReviewOnlyResumeState;
   }> {
     return this.transactions.transaction(async (tx) => {
       const row = (
         await tx.query<ReviewRow>(
           `SELECT ${reviewColumns} FROM conversation_plan_reviews
-            WHERE planning_run_id=$1`,
+            WHERE planning_run_id=$1 FOR UPDATE`,
           [planningRunId],
         )
       ).rows[0];
       if (!row) throw new Error(`review-only run "${planningRunId}" has no frozen seed`);
+      const seedPlan = V2WorkPlanContract.parse(json(row.seed_plan));
+      // Called before markReviewOnlyStarted (see executeReviewOnly), so a
+      // resumed run still has its paused fields intact here — read them
+      // directly rather than re-deriving anything.
+      let resume: ReviewOnlyResumeState | undefined;
+      if (
+        row.status === "awaiting_human" &&
+        row.paused_checkpoint &&
+        row.paused_at_round !== null
+      ) {
+        const plan = row.revised_plan_version_id
+          ? (await this.planById(tx, row.revised_plan_version_id, false)).plan
+          : seedPlan;
+        const exchanges = json<V2ConversationPlanReviewT["round_exchanges"]>(row.round_exchanges);
+        resume = {
+          fromRound: Number(row.paused_at_round),
+          checkpoint: row.paused_checkpoint,
+          plan,
+          // Only the resumed round's `reviewed_plan` is ever read by the loop
+          // (the "after_review" skip-reviewer path); every other round's body
+          // is a placeholder — see reviewRoundExchanges for why that's safe.
+          rounds: exchanges.map((exchange) => ({
+            round: exchange.round,
+            reviewed_plan: plan,
+            findings: exchange.reviewer.findings,
+            responses: exchange.pm ? exchange.pm.dispositions : null,
+            revised_plan_content_hash: exchange.pm ? exchange.pm.revised_plan_content_hash : null,
+          })),
+          // Accumulates for the life of the review (see AdjudicationRecord);
+          // carried into every resume regardless of which checkpoint parked
+          // it, since a later Gate B/C pause must still enforce an earlier
+          // "rule for reviewer" ruling.
+          forcedAcceptModuleIds: json<string[]>(row.forced_accept_module_ids),
+        };
+      }
       return {
         reviewId: row.id,
         usageRequestGroupId: row.usage_request_group_id,
         initiatedByUserId: row.initiated_by_user_id,
-        seedPlan: V2WorkPlanContract.parse(json(row.seed_plan)),
+        seedPlan,
         frozenContext: json(row.context_receipt),
+        qcMode: row.qc_mode,
+        allowUnadjudicatedRebuttals: row.allow_unadjudicated_rebuttals,
+        ...(resume ? { resume } : {}),
       };
     });
   }
@@ -582,13 +685,27 @@ export class ConversationPlanWorkflowService {
       ).rows[0];
       if (!review) throw new Error(`unknown conversation plan review "${reviewId}"`);
       if (review.status === "running") return;
-      if (review.status !== "queued") {
+      if (!["queued", "awaiting_human"].includes(review.status)) {
         throw new Error(`plan review "${reviewId}" cannot start from ${review.status}`);
       }
+      // Resume re-enters running directly from awaiting_human (no
+      // intermediate "queued" state on the review row itself — only the
+      // underlying planning_runs row was re-queued). Clearing the paused
+      // checkpoint/round here, in the same update, satisfies the paused
+      // biconditional the moment the row leaves awaiting_human. The parked
+      // findings/dispositions/interim-revision evidence is cleared too —
+      // 'running' carries none, same as a fresh run, until completeReviewOnly
+      // repopulates it wholesale from every round (including the resumed
+      // ones) at the next terminal or pause.
       await tx.query(
         `UPDATE conversation_plan_reviews
-            SET status='running', started_at=$2, updated_at=$2
-          WHERE id=$1 AND status='queued'`,
+            SET status='running', started_at=coalesce(started_at, $2),
+                paused_checkpoint=NULL, paused_at_round=NULL,
+                findings='[]'::jsonb, dispositions='[]'::jsonb,
+                revised_plan=NULL, revised_plan_content_hash=NULL, revised_plan_version_id=NULL,
+                result_plan_content_hash=plan_content_hash,
+                updated_at=$2
+          WHERE id=$1 AND status IN ('queued', 'awaiting_human')`,
         [reviewId, this.now().toISOString()],
       );
       const action = await this.actionById(tx, review.action_id, true);
@@ -701,23 +818,9 @@ export class ConversationPlanWorkflowService {
         scope.conversationId,
         false,
       );
-      const review = (
-        await tx.query<ReviewRow>(
-          `SELECT ${reviewColumns} FROM conversation_plan_reviews
-            WHERE id=$1 AND project_id=$2 AND work_item_id=$3 AND conversation_id=$4
-            FOR UPDATE`,
-          [reviewId, scope.projectId, scope.workItemId, scope.conversationId],
-        )
-      ).rows[0];
-      if (!review) {
-        throw new ConversationPlanWorkflowError(
-          "review_not_found",
-          `plan review "${reviewId}" was not found`,
-          404,
-        );
-      }
+      const review = await this.loadReviewForUpdate(tx, scope, reviewId);
       if (review.status === "cancelled") return { review, changed: false };
-      if (!["queued", "running"].includes(review.status)) {
+      if (!["queued", "running", "awaiting_human"].includes(review.status)) {
         throw new ConversationPlanWorkflowError(
           "invalid_plan_state",
           `QC cannot be stopped after it is ${review.status}`,
@@ -728,14 +831,24 @@ export class ConversationPlanWorkflowService {
         `UPDATE planning_runs
             SET status='cancelled', error=NULL, lease_token=NULL, leased_until=NULL, updated_at=$2
           WHERE id=$1 AND mode='review_only'
-            AND status IN ('queued','drafting','reviewing','revising')`,
+            AND status IN ('queued','drafting','reviewing','revising','awaiting_human')`,
         [review.planning_run_id, now],
       );
+      // A parked review may carry exposed findings/dispositions and an
+      // interim revision (that is the point of pausing); cancelling discards
+      // the review entirely, so evidence resets the same way a queued/running
+      // cancellation already carries none (the DB's nonterminal-evidence and
+      // revision-shape checks require this for a 'cancelled' row regardless
+      // of where it cancelled from).
       await tx.query(
         `UPDATE conversation_plan_reviews
             SET status='cancelled', completed_at=$2, cancelled_by_user_id=$3,
-                cancellation_reason=$4, updated_at=$2
-          WHERE id=$1 AND status IN ('queued','running')`,
+                cancellation_reason=$4, updated_at=$2,
+                paused_checkpoint=NULL, paused_at_round=NULL,
+                findings='[]'::jsonb, dispositions='[]'::jsonb,
+                revised_plan=NULL, revised_plan_content_hash=NULL, revised_plan_version_id=NULL,
+                result_plan_content_hash=plan_content_hash
+          WHERE id=$1 AND status IN ('queued','running','awaiting_human')`,
         [review.id, now, userId, reason],
       );
       const action = await this.actionById(tx, review.action_id, true);
@@ -768,17 +881,354 @@ export class ConversationPlanWorkflowService {
         review.action_id,
         this.candidateFollowUps(plan),
       );
-      const updated = (
-        await tx.query<ReviewRow>(
-          `SELECT ${reviewColumns} FROM conversation_plan_reviews WHERE id=$1`,
-          [review.id],
-        )
-      ).rows[0];
-      if (!updated) throw new Error("cancelled review could not be reloaded");
+      const updated = await this.reloadReview(tx, review.id);
       return { review: updated, changed: true };
     });
     if (cancelled.changed) this.options.cancelReviewNow?.(cancelled.review.planning_run_id);
     return toReview(cancelled.review);
+  }
+
+  /**
+   * Two of the four gate exits (Continue, Continue with a note) — see
+   * "Gate exits" in QC-PAUSE-POINTS.md. Re-enqueues a parked review; the
+   * worker re-claims it and rebuilds resume state from persisted fields
+   * (loadReviewOnlySeed), including the pinned reviewer/PM identity already
+   * on the review row — this method never re-resolves them.
+   */
+  async resumeReview(
+    userId: string,
+    scope: { projectId: string; workItemId: string; conversationId: string },
+    reviewId: string,
+    input: {
+      exit: "continue" | "note";
+      note?: { channel: "reviewer" | "pm"; message: string };
+      idempotencyKey?: string;
+      /** Compound exit "Continue, and stop asking" (QC-PAUSE-POINTS.md "Gate
+       * exits"): sets qc_mode to automatic for the rest of this run, then
+       * continues. qc_mode is freely mutable mid-flight, so this is just the
+       * qc_mode write folded into the same resume transaction. */
+      stopAsking?: boolean;
+    },
+  ): Promise<V2ConversationPlanReviewT> {
+    const outcome = await this.transactions.transaction(async (tx) => {
+      await this.assertAccess(tx, scope.projectId, userId);
+      await this.assertConversation(
+        tx,
+        scope.projectId,
+        scope.workItemId,
+        scope.conversationId,
+        false,
+      );
+      const review = await this.loadReviewForUpdate(tx, scope, reviewId);
+      // Idempotent replay: the same key returns the current state without
+      // re-enqueuing, regardless of how far the review has progressed since.
+      if (input.idempotencyKey && review.resume_idempotency_key === input.idempotencyKey) {
+        return { review, resumed: false };
+      }
+      if (review.status !== "awaiting_human") {
+        throw new ConversationPlanWorkflowError(
+          "invalid_plan_state",
+          `review "${reviewId}" is not awaiting human input`,
+        );
+      }
+      const now = this.now().toISOString();
+      if (input.exit === "note" && input.note) {
+        // Recorded as a chat message while the review stays awaiting_human
+        // (always allowed — see the DB guard's 'failed' recovery-chat
+        // carve-out for the equivalent, unconditional pattern). Not yet
+        // threaded into the next model pass: the steering machinery that
+        // wires a gate note into the reviewer/PM prompt is a later phase
+        // (see the ponytail note on ReviewOnlyResumeState.note).
+        await this.appendReviewChatEvent(
+          tx,
+          review,
+          {
+            request_id: `${review.usage_request_group_id}:resume-note:${review.paused_at_round}`,
+            channel: input.note.channel,
+            round: Number(review.paused_at_round),
+            attempt: 1,
+            speaker: "human",
+            kind: "instruction",
+            content: input.note.message,
+            error_code: null,
+          },
+          "manual",
+        );
+      }
+      if (input.stopAsking) {
+        await tx.query(
+          `UPDATE conversation_plan_reviews
+              SET qc_mode='automatic', qc_mode_source='in_run', updated_at=$2
+            WHERE id=$1`,
+          [review.id, now],
+        );
+      }
+      if (input.idempotencyKey) {
+        await tx.query(
+          `UPDATE conversation_plan_reviews SET resume_idempotency_key=$2, updated_at=$3
+            WHERE id=$1`,
+          [review.id, input.idempotencyKey, now],
+        );
+      }
+      // Only planning_runs moves back to queued here; the review row stays
+      // awaiting_human until the worker actually re-claims it and calls
+      // markReviewOnlyStarted (mirrors how a fresh run's review row only
+      // becomes 'running' once execution truly begins, not at enqueue time).
+      await tx.query(
+        `UPDATE planning_runs
+            SET status='queued', error=NULL, lease_token=NULL, leased_until=NULL, updated_at=$2
+          WHERE id=$1 AND mode='review_only'`,
+        [review.planning_run_id, now],
+      );
+      const updated = await this.reloadReview(tx, reviewId);
+      return { review: updated, resumed: true };
+    });
+    if (outcome.resumed) {
+      void this.options.runReviewNow(outcome.review.planning_run_id).catch(() => undefined);
+    }
+    return toReview(outcome.review);
+  }
+
+  /**
+   * The three Gate C ruling outcomes (QC-PAUSE-POINTS.md "Adjudication:
+   * unresolved must-fix rebuttals" > "Outcomes"). A ruling is a
+   * human-authored disposition: it is recorded in `adjudications` (never
+   * synthesized as an agent disposition) and re-attached to the matching
+   * disposition by flattenReviewEvidence the next time evidence is rebuilt.
+   *
+   * All three rulings resolve the same way operationally — they release the
+   * pending adjudication and let the review advance to its next ordinary
+   * round, exactly like `resumeReview`'s "continue" exit. "Rule for the
+   * reviewer" additionally records the finding's module_id in
+   * forced_accept_module_ids so reviewOnlySession can enforce "cannot be
+   * rebutted again" if the same module recurs in a later round (see the
+   * ponytail insertion point in reviewOnlySession.ts).
+   */
+  async adjudicateReview(
+    userId: string,
+    scope: { projectId: string; workItemId: string; conversationId: string },
+    reviewId: string,
+    input: {
+      rulings: Record<string, { ruling: "reviewer" | "pm" | "supplied_fact"; rationale: string }>;
+      note?: { channel: "reviewer" | "pm"; message: string };
+      /** Consent to the cap-raise-by-one offer (QC-PAUSE-POINTS.md
+       * "Outcomes"): required when a "reviewer" ruling lands at the round
+       * cap, since carrying it out needs one more round than is available. */
+      raiseMaxRounds?: boolean;
+      idempotencyKey?: string;
+    },
+  ): Promise<V2ConversationPlanReviewT> {
+    const outcome = await this.transactions.transaction(async (tx) => {
+      await this.assertAccess(tx, scope.projectId, userId);
+      await this.assertConversation(
+        tx,
+        scope.projectId,
+        scope.workItemId,
+        scope.conversationId,
+        false,
+      );
+      const review = await this.loadReviewForUpdate(tx, scope, reviewId);
+      // Idempotent replay, same pattern as resumeReview: the same key returns
+      // the current state without re-applying rulings or re-enqueuing.
+      if (input.idempotencyKey && review.adjudication_idempotency_key === input.idempotencyKey) {
+        return { review, applied: false };
+      }
+      if (review.status !== "awaiting_human" || review.paused_checkpoint !== "adjudication") {
+        throw new ConversationPlanWorkflowError(
+          "invalid_plan_state",
+          `review "${reviewId}" has no adjudication pending`,
+        );
+      }
+      const entries = Object.entries(input.rulings);
+      if (entries.length === 0) {
+        throw new ConversationPlanWorkflowError(
+          "invalid_plan_state",
+          "adjudication requires at least one ruling",
+        );
+      }
+      const findings = json<V2ConversationPlanReviewFindingT[]>(review.findings);
+      const findingById = new Map(findings.map((finding) => [finding.id, finding]));
+      const alreadyRuled = new Set(
+        json<AdjudicationRecord[]>(review.adjudications).map((record) => record.finding_id),
+      );
+      for (const [findingId, ruling] of entries) {
+        const finding = findingById.get(findingId);
+        // ponytail: eligibility is "a must_fix/should_fix finding on this
+        // review that hasn't been ruled yet", not a recomputed Gate C check
+        // (that needs the paused round's pre-revision plan body, which isn't
+        // durably retained — see "Persistence gap" in the plan). The gate
+        // card only ever offers genuine Gate C candidates, so this is a
+        // defensive check against a malformed request, not the source of
+        // truth for which findings are contested.
+        if (!finding || finding.severity === "suggestion") {
+          throw new ConversationPlanWorkflowError(
+            "invalid_plan_state",
+            `finding "${findingId}" is not eligible for adjudication`,
+          );
+        }
+        if (alreadyRuled.has(findingId)) {
+          throw new ConversationPlanWorkflowError(
+            "invalid_plan_state",
+            `finding "${findingId}" was already adjudicated`,
+          );
+        }
+        if (!ruling.rationale.trim()) {
+          throw new ConversationPlanWorkflowError(
+            "invalid_plan_state",
+            `ruling for finding "${findingId}" requires a rationale`,
+          );
+        }
+      }
+      const hasReviewerRuling = entries.some(([, ruling]) => ruling.ruling === "reviewer");
+      const maxRounds = Number(review.max_rounds);
+      const roundsCompleted = Number(review.rounds_completed);
+      const atCap = roundsCompleted >= maxRounds;
+      if (hasReviewerRuling && atCap) {
+        if (!input.raiseMaxRounds) {
+          throw new ConversationPlanWorkflowError(
+            "round_cap_requires_raise",
+            `review "${reviewId}" is at its round cap (${maxRounds}); raise max_rounds by one to carry out this ruling`,
+          );
+        }
+        if (maxRounds >= 5) {
+          throw new ConversationPlanWorkflowError(
+            "invalid_plan_state",
+            "the QC round cap is already at its maximum of 5 and cannot be raised further",
+          );
+        }
+      }
+      const now = this.now().toISOString();
+      const newAdjudications: AdjudicationRecord[] = entries.map(([findingId, ruling]) => ({
+        finding_id: findingId,
+        module_id: findingById.get(findingId)?.module_id ?? null,
+        ruling: ruling.ruling,
+        rationale: ruling.rationale,
+        decided_by_user_id: userId,
+        decided_at: now,
+      }));
+      const forcedAcceptModuleIds = new Set(json<string[]>(review.forced_accept_module_ids));
+      for (const record of newAdjudications) {
+        if (record.ruling === "reviewer" && record.module_id !== null) {
+          forcedAcceptModuleIds.add(record.module_id);
+        }
+      }
+      if (hasReviewerRuling && atCap) {
+        await tx.query(
+          "UPDATE planning_runs SET max_rounds=max_rounds+1, updated_at=$2 WHERE id=$1",
+          [review.planning_run_id, now],
+        );
+      }
+      await tx.query(
+        `UPDATE conversation_plan_reviews
+            SET adjudications = adjudications || $2::jsonb,
+                forced_accept_module_ids = $3::jsonb,
+                adjudication_idempotency_key = coalesce($4, adjudication_idempotency_key),
+                updated_at = $5
+          WHERE id=$1`,
+        [
+          review.id,
+          JSON.stringify(newAdjudications),
+          JSON.stringify([...forcedAcceptModuleIds]),
+          input.idempotencyKey ?? null,
+          now,
+        ],
+      );
+      if (input.note) {
+        // "Supply the missing fact" (QC-PAUSE-POINTS.md "Outcomes") — the
+        // "continue with a note" path with an adjudication attached. No
+        // reload needed: the UPDATE above only touches
+        // adjudications/forced_accept_module_ids/adjudication_idempotency_key/
+        // updated_at, none of which appendReviewChatEvent reads from `review`.
+        await this.appendReviewChatEvent(
+          tx,
+          review,
+          {
+            request_id: `${review.usage_request_group_id}:adjudicate:${review.paused_at_round}`,
+            channel: input.note.channel,
+            round: Number(review.paused_at_round),
+            attempt: 1,
+            speaker: "human",
+            kind: "instruction",
+            content: input.note.message,
+            error_code: null,
+          },
+          "manual",
+        );
+      }
+      await tx.query(
+        `UPDATE planning_runs
+            SET status='queued', error=NULL, lease_token=NULL, leased_until=NULL, updated_at=$2
+          WHERE id=$1 AND mode='review_only'`,
+        [review.planning_run_id, now],
+      );
+      const updated = await this.reloadReview(tx, reviewId);
+      return { review: updated, applied: true };
+    });
+    if (outcome.applied) {
+      void this.options.runReviewNow(outcome.review.planning_run_id).catch(() => undefined);
+    }
+    return toReview(outcome.review);
+  }
+
+  /**
+   * Mid-flight mutability (QC-PAUSE-POINTS.md "Mutability mid-flight"):
+   * cadence is freely mutable, identity is not. `qc_mode` can change on a
+   * running OR parked review — checkpoints re-read it every time they're
+   * reached, which is what makes "hold at the next checkpoint" (set
+   * qc_mode to gated_each_step while running) cost nothing beyond this same
+   * write. `max_rounds` may only be lowered above what's already completed.
+   * Reviewer/PM identity isn't part of this input at all — the schema simply
+   * has no field for it, so attempting to change it is a validation error at
+   * the route, not a runtime guard here (see PatchReviewBody's `.strict()`).
+   */
+  async patchReview(
+    userId: string,
+    scope: { projectId: string; workItemId: string; conversationId: string },
+    reviewId: string,
+    patch: { qcMode?: V2ConversationPlanReviewT["qc_mode"]; maxRounds?: number },
+  ): Promise<V2ConversationPlanReviewT> {
+    const updated = await this.transactions.transaction(async (tx) => {
+      await this.assertAccess(tx, scope.projectId, userId);
+      await this.assertConversation(
+        tx,
+        scope.projectId,
+        scope.workItemId,
+        scope.conversationId,
+        false,
+      );
+      const review = await this.loadReviewForUpdate(tx, scope, reviewId);
+      if (["converged", "cap_reached", "failed", "cancelled"].includes(review.status)) {
+        throw new ConversationPlanWorkflowError(
+          "invalid_plan_state",
+          `QC settings cannot change after the review is ${review.status}`,
+        );
+      }
+      const now = this.now().toISOString();
+      if (patch.qcMode) {
+        await tx.query(
+          `UPDATE conversation_plan_reviews
+              SET qc_mode=$2, qc_mode_source='in_run', updated_at=$3
+            WHERE id=$1`,
+          [review.id, patch.qcMode, now],
+        );
+      }
+      if (patch.maxRounds !== undefined) {
+        const roundsCompleted = Number(review.rounds_completed);
+        if (patch.maxRounds <= roundsCompleted) {
+          throw new ConversationPlanWorkflowError(
+            "invalid_plan_state",
+            `max_rounds can only be lowered above the ${roundsCompleted} round(s) already completed; use "accept now" to stop early`,
+          );
+        }
+        await tx.query("UPDATE planning_runs SET max_rounds=$2, updated_at=$3 WHERE id=$1", [
+          review.planning_run_id,
+          patch.maxRounds,
+          now,
+        ]);
+      }
+      return this.reloadReview(tx, reviewId);
+    });
+    return toReview(updated);
   }
 
   async continueReviewChat(
@@ -797,25 +1247,19 @@ export class ConversationPlanWorkflowService {
         scope.conversationId,
         false,
       );
-      const review = (
-        await tx.query<ReviewRow>(
-          `SELECT ${reviewColumns} FROM conversation_plan_reviews
-            WHERE id=$1 AND project_id=$2 AND work_item_id=$3 AND conversation_id=$4
-            FOR UPDATE`,
-          [reviewId, scope.projectId, scope.workItemId, scope.conversationId],
-        )
-      ).rows[0];
-      if (!review) {
-        throw new ConversationPlanWorkflowError(
-          "review_not_found",
-          `plan review "${reviewId}" was not found`,
-          404,
-        );
-      }
-      if (review.status !== "failed" || review.review_mode === "waived") {
+      const review = await this.loadReviewForUpdate(tx, scope, reviewId);
+      // Widened for QCP-3A ("Human chat at a gate"): a "question" at a live
+      // gate is answered in place and must NOT advance the run — this method
+      // never touches planning_runs/review status, so simply widening the
+      // gate keeps that guarantee for free. Only the resume/adjudicate routes
+      // advance a parked review.
+      if (
+        !["failed", "awaiting_human"].includes(review.status) ||
+        review.review_mode === "waived"
+      ) {
         throw new ConversationPlanWorkflowError(
           "invalid_plan_state",
-          "manual QC chat is available only after an automated QC failure",
+          "manual QC chat is available only after an automated QC failure or while paused at a gate",
         );
       }
       const existingMessages = json<V2ConversationPlanReviewT["chat_messages"]>(
@@ -897,7 +1341,7 @@ export class ConversationPlanWorkflowService {
             [reviewId],
           )
         ).rows[0];
-        if (!current || current.status !== "failed") return;
+        if (!current || !["failed", "awaiting_human"].includes(current.status)) return;
         await this.appendReviewChatEvent(
           tx,
           current,
@@ -926,7 +1370,7 @@ export class ConversationPlanWorkflowService {
             [reviewId],
           )
         ).rows[0];
-        if (!current || current.status !== "failed") return;
+        if (!current || !["failed", "awaiting_human"].includes(current.status)) return;
         await this.appendReviewChatEvent(
           tx,
           current,
@@ -944,16 +1388,9 @@ export class ConversationPlanWorkflowService {
         );
       });
     }
-    return this.transactions.transaction(async (tx) => {
-      const updated = (
-        await tx.query<ReviewRow>(
-          `SELECT ${reviewColumns} FROM conversation_plan_reviews WHERE id=$1`,
-          [reviewId],
-        )
-      ).rows[0];
-      if (!updated) throw new Error("QC chat review could not be reloaded");
-      return toReview(updated);
-    });
+    return this.transactions.transaction(async (tx) =>
+      toReview(await this.reloadReview(tx, reviewId)),
+    );
   }
 
   async continueWithoutQc(
@@ -995,25 +1432,47 @@ export class ConversationPlanWorkflowService {
           404,
         );
       }
-      if (review.status !== "failed") {
+      if (!["failed", "awaiting_human"].includes(review.status)) {
         throw new ConversationPlanWorkflowError(
           "invalid_plan_state",
-          "QC can be waived from this recovery control only after it fails",
+          "QC can be waived from this recovery control only after it fails or pauses",
+        );
+      }
+      // "Accept now" on a paused review keeps whatever plan is current at the
+      // pause point — the interim revision if the PM already revised it, the
+      // original seed otherwise — never silently reverting to the seed out
+      // from under a revision the human hasn't seen discarded.
+      const targetVersionId = review.revised_plan_version_id ?? review.plan_version_id;
+      const targetContentHash = review.result_plan_content_hash;
+      // Gate A ("after_review") parks before the PM ever revises, so there is
+      // no revised_plan_version_id and the target above falls back to the
+      // seed version — whose status pauseReviewOnly left at 'in_qc' (only
+      // completeReviewOnly/cancelReview/failReviewOnly revert it). The
+      // downstream skip_qc handler requires 'candidate', so revert it here.
+      // The DB trigger (0068) only allows this in_qc -> candidate transition
+      // while the latest linked review is parked at exactly this checkpoint.
+      if (review.status === "awaiting_human" && review.paused_checkpoint === "after_review") {
+        await tx.query(
+          `UPDATE work_plan_versions SET status='candidate', updated_at=$2
+            WHERE id=$1 AND status='in_qc'`,
+          [targetVersionId, this.now().toISOString()],
         );
       }
       const proposalIds = await this.appendVisibleMessage(
         tx,
         review,
         userId,
-        "You explicitly chose to continue without QC after reviewing the failed attempt and its retained artifacts.",
-        review.plan_version_id,
+        review.status === "awaiting_human"
+          ? "You explicitly accepted the current plan and skipped the remainder of QC."
+          : "You explicitly chose to continue without QC after reviewing the failed attempt and its retained artifacts.",
+        targetVersionId,
         review.action_id,
         [
           {
             action_type: "send_plan_to_qc",
             parameters: {
-              plan_version_id: review.plan_version_id,
-              content_hash: review.plan_content_hash,
+              plan_version_id: targetVersionId,
+              content_hash: targetContentHash,
               review: { mode: "skip_qc" },
             },
           },
@@ -1032,12 +1491,126 @@ export class ConversationPlanWorkflowService {
     });
   }
 
+  /**
+   * A gate parks the review durably rather than waiting on a human in-process
+   * (QC-PAUSE-POINTS.md, "Durability: a gate parks, it does not wait"). This
+   * is a distinct terminal-esque path from completeReviewOnly/failReviewOnly:
+   * a paused review is neither converged/cap_reached nor failed.
+   */
+  async pauseReviewOnly(input: {
+    reviewId: string;
+    planningRunId: string;
+    result: ReviewOnlyPlanningPausedResult;
+  }): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      const review = (
+        await tx.query<ReviewRow>(
+          `SELECT ${reviewColumns} FROM conversation_plan_reviews
+            WHERE id=$1 AND planning_run_id=$2 FOR UPDATE`,
+          [input.reviewId, input.planningRunId],
+        )
+      ).rows[0];
+      if (!review) throw new Error("review-only pause scope mismatch");
+      // Only a running review can park; anything else (already parked,
+      // cancelled out from under the run, or otherwise terminal) means this
+      // paused result is stale and must not override real state.
+      if (review.status !== "running") return;
+
+      const pausedPlan = V2WorkPlanContract.parse(input.result.plan);
+      const pausedHash = canonicalSha256(pausedPlan);
+      // Not review.revised_plan_version_id: markReviewOnlyStarted clears that
+      // column on every resume (a running review carries no revision
+      // evidence), so after a second park within the same review it would
+      // point back at the seed and collide on version numbers with the
+      // first interim. The work item's actual latest version is this
+      // review's own chain for as long as it holds the active review.
+      const priorVersion =
+        (await this.latestPlan(tx, review.project_id, review.work_item_id, true)) ??
+        (await this.planById(tx, review.plan_version_id, true));
+
+      let revisedPlanVersionId = review.revised_plan_version_id;
+      let resultHash = review.result_plan_content_hash;
+      if (pausedHash !== priorVersion.content_hash) {
+        if (pausedHash === review.plan_content_hash) {
+          // The plan is back to exactly its seed content (e.g. the PM's
+          // revision this round net out to nothing new) — no revision to
+          // materialize or reference.
+          revisedPlanVersionId = null;
+          resultHash = review.plan_content_hash;
+        } else {
+          // Materialize the current plan so resume has a durable body to
+          // read back (round exchanges only ever persisted content hashes —
+          // see "Persistence gap" in the plan). Chains from whichever
+          // version was materialized last for this review, not always the
+          // seed, so a multi-park review's interim versions get distinct,
+          // non-colliding version numbers.
+          const interim = await this.insertPlanVersion(
+            tx,
+            review.project_id,
+            review.work_item_id,
+            review.conversation_id,
+            review.initiated_by_user_id,
+            review.action_id,
+            pausedPlan,
+            priorVersion,
+            "qc_interim",
+          );
+          revisedPlanVersionId = interim.id;
+          resultHash = pausedHash;
+        }
+      }
+
+      const now = this.now().toISOString();
+      const flattened = this.flattenReviewEvidence(review, input.result.rounds);
+      await tx.query(
+        `UPDATE conversation_plan_reviews
+            SET status='awaiting_human',
+                paused_checkpoint=$2, paused_at_round=$3,
+                revised_plan=$4::jsonb, revised_plan_content_hash=$5, revised_plan_version_id=$6,
+                result_plan_content_hash=$7,
+                findings=$8::jsonb, dispositions=$9::jsonb,
+                round_exchanges=$10::jsonb,
+                updated_at=$11
+          WHERE id=$1 AND status='running'`,
+        [
+          review.id,
+          input.result.paused_checkpoint,
+          input.result.paused_at_round,
+          revisedPlanVersionId ? JSON.stringify(pausedPlan) : null,
+          revisedPlanVersionId ? resultHash : null,
+          revisedPlanVersionId,
+          resultHash,
+          JSON.stringify(flattened.findings),
+          JSON.stringify(flattened.dispositions),
+          JSON.stringify(this.reviewRoundExchanges(review, input.result.rounds)),
+          now,
+        ],
+      );
+      // Release the lease and clear the claim so the next tick() cannot pick
+      // this run back up — a parked review holds no lease. 'awaiting_human'
+      // sits outside reconcileOrphans()'s orphan-sweep filter
+      // ('drafting'|'reviewing'|'revising'), so no further exclusion is
+      // needed there.
+      await tx.query(
+        `UPDATE planning_runs
+            SET status='awaiting_human', error=NULL,
+                lease_token=NULL, leased_until=NULL, updated_at=$2
+          WHERE id=$1 AND mode='review_only'`,
+        [input.planningRunId, now],
+      );
+    });
+  }
+
   async completeReviewOnly(input: {
     reviewId: string;
     planningRunId: string;
     result: ReviewOnlyPlanningResult;
     totalCostUsd: number;
   }): Promise<void> {
+    if (input.result.status === "paused") {
+      throw new Error("completeReviewOnly does not handle a paused review-only result");
+    }
+    const result: ReviewOnlyPlanningTerminalResult = input.result;
     await this.transactions.transaction(async (tx) => {
       const review = (
         await tx.query<ReviewRow>(
@@ -1060,11 +1633,21 @@ export class ConversationPlanWorkflowService {
         review.conversation_id,
         true,
       );
-      const flattened = this.flattenReviewEvidence(review.id, input.result);
-      const finalPlan = V2WorkPlanContract.parse(input.result.final_plan);
+      const flattened = this.flattenReviewEvidence(review, result.review_rounds);
+      const finalPlan = V2WorkPlanContract.parse(result.final_plan);
       const finalHash = canonicalSha256(finalPlan);
       const changed = finalHash !== seedVersion.content_hash;
       const action = await this.actionById(tx, review.action_id, true);
+      // A round that parked (Gate B/C) before this final round already
+      // materialized an interim "qc_interim" version for this review; the
+      // qc_result version must chain from that (not always from the seed) or
+      // its version number collides with the interim's. Not
+      // review.revised_plan_version_id — markReviewOnlyStarted clears it on
+      // every resume, so after any park it no longer reflects this review's
+      // actual latest materialized version (see the same note in
+      // pauseReviewOnly).
+      const chainFrom =
+        (await this.latestPlan(tx, review.project_id, review.work_item_id, true)) ?? seedVersion;
       let revisedPlan: V2WorkPlanVersionT | null = null;
       if (changed) {
         await tx.query(
@@ -1080,7 +1663,8 @@ export class ConversationPlanWorkflowService {
           review.initiated_by_user_id,
           review.action_id,
           finalPlan,
-          seedVersion,
+          chainFrom,
+          "qc_result",
         );
         await tx.query(
           `UPDATE work_plan_versions SET status='superseded', updated_at=$2
@@ -1104,8 +1688,8 @@ export class ConversationPlanWorkflowService {
           WHERE id=$1 AND mode='review_only'`,
         [
           input.planningRunId,
-          input.result.status,
-          input.result.rounds,
+          result.status,
+          result.rounds,
           JSON.stringify(resultDto),
           input.totalCostUsd,
           now,
@@ -1114,7 +1698,7 @@ export class ConversationPlanWorkflowService {
       await this.appendFinalReviewMarkdownArtifact(
         tx,
         review,
-        input.result.final_plan_markdown ??
+        result.final_plan_markdown ??
           [
             "# Final reviewed plan",
             "",
@@ -1124,7 +1708,7 @@ export class ConversationPlanWorkflowService {
             JSON.stringify(finalPlan, null, 2),
             "```",
           ].join("\n"),
-        input.result.rounds,
+        result.rounds,
       );
       await tx.query(
         `UPDATE conversation_plan_reviews
@@ -1138,7 +1722,7 @@ export class ConversationPlanWorkflowService {
           WHERE id=$1 AND status='running'`,
         [
           review.id,
-          input.result.status,
+          result.status,
           JSON.stringify(flattened.findings),
           JSON.stringify(flattened.dispositions),
           finalHash,
@@ -1146,7 +1730,7 @@ export class ConversationPlanWorkflowService {
           revisedPlan?.content_hash ?? null,
           revisedPlan?.id ?? null,
           JSON.stringify(
-            this.reviewRoundExchanges(review, input.result.review_rounds, input.result.final_plan),
+            this.reviewRoundExchanges(review, result.review_rounds, result.final_plan),
           ),
           now,
         ],
@@ -1168,7 +1752,7 @@ export class ConversationPlanWorkflowService {
         review.initiated_by_user_id,
         revisedPlan
           ? `QC completed with a reviewed revision. Plan v${revisedPlan.version} is the exact immutable QC result and is ready for approval review.`
-          : `QC ${input.result.status === "converged" ? "converged" : "reached its round cap"} on Plan v${seedVersion.version}. Findings and PM dispositions are available for approval review.`,
+          : `QC ${result.status === "converged" ? "converged" : "reached its round cap"} on Plan v${seedVersion.version}. Findings and PM dispositions are available for approval review.`,
         revisedPlan?.id ?? seedVersion.id,
         review.action_id,
         this.reviewFollowUps(revisedPlan ?? seedVersion, review),
@@ -1193,13 +1777,22 @@ export class ConversationPlanWorkflowService {
         `UPDATE planning_runs
             SET status='failed', error=$2, lease_token=NULL, leased_until=NULL, updated_at=$3
           WHERE id=$1 AND mode='review_only'
-            AND status IN ('queued','drafting','reviewing','revising')`,
+            AND status IN ('queued','drafting','reviewing','revising','awaiting_human')`,
         [planningRunId, code, now],
       );
+      // A parked review that failed to even re-claim (e.g. adapter/model
+      // resolution threw between resume's re-queue and markReviewOnlyStarted)
+      // still carries exposed findings/dispositions and possibly an interim
+      // revision — clear that evidence in the same update a failed review
+      // must carry none, mirroring how cancel-while-parked resets it.
       await tx.query(
         `UPDATE conversation_plan_reviews
-            SET status='failed', failure_code=$2, completed_at=$3, updated_at=$3
-          WHERE id=$1 AND status IN ('queued','running')`,
+            SET status='failed', failure_code=$2, completed_at=$3, updated_at=$3,
+                paused_checkpoint=NULL, paused_at_round=NULL,
+                findings='[]'::jsonb, dispositions='[]'::jsonb,
+                revised_plan=NULL, revised_plan_content_hash=NULL, revised_plan_version_id=NULL,
+                result_plan_content_hash=plan_content_hash
+          WHERE id=$1 AND status IN ('queued','running','awaiting_human')`,
         [review.id, code, now],
       );
       const action = await this.actionById(tx, review.action_id, true);
@@ -1271,6 +1864,7 @@ export class ConversationPlanWorkflowService {
     userId: string,
     input: V2ConfirmConversationActionInputT,
     models: ConversationPlanReviewModels | null,
+    resolvedQcMode: ResolvedQcMode | null,
   ): Promise<{
     dispatchRunId: string | null;
     kickoffIntentId: string | null;
@@ -1449,11 +2043,19 @@ export class ConversationPlanWorkflowService {
           );
         }
         const version = await this.boundLatestPlan(tx, action, sendParameters, "candidate");
+        // A skip_qc waiver is the explicit resolution of a paused review (see
+        // continueWithoutQc's Gate A revert), so a merely-parked
+        // 'awaiting_human' review on this exact version must not block it —
+        // only a genuinely live queued/running attempt should. Non-waiver
+        // sends still treat a parked review as blocking.
+        const blockingReviewStatuses = skipQc
+          ? ["queued", "running"]
+          : ["queued", "running", "awaiting_human"];
         const active = (
           await tx.query<{ id: string }>(
             `SELECT id FROM conversation_plan_reviews
-              WHERE plan_version_id=$1 AND status IN ('queued','running')`,
-            [version.id],
+              WHERE plan_version_id=$1 AND status = ANY($2::text[])`,
+            [version.id, blockingReviewStatuses],
           )
         ).rows[0];
         if (active) {
@@ -1569,6 +2171,8 @@ export class ConversationPlanWorkflowService {
           return { dispatchRunId: null, kickoffIntentId: null };
         }
         if (!models) throw new Error("QC model pins were not resolved");
+        if (!resolvedQcMode) throw new Error("qc_mode was not resolved");
+        const { qcMode, qcModeSource } = resolvedQcMode;
         const maxRounds =
           reviewPreference?.mode === "qc"
             ? reviewPreference.rounds
@@ -1611,10 +2215,10 @@ export class ConversationPlanWorkflowService {
              pm_provider, pm_model, reviewer_provider, reviewer_model, review_mode,
              usage_request_group_id, seed_plan,
              plan_content_hash, result_plan_content_hash, context_receipt,
-             context_manifest, context_hash
+             context_manifest, context_hash, qc_mode, qc_mode_source
            ) VALUES (
              $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'qc',$14,$15::jsonb,
-             $16,$16,$17::jsonb,$18::jsonb,$19
+             $16,$16,$17::jsonb,$18::jsonb,$19,$20,$21
            )`,
           [
             reviewId,
@@ -1636,6 +2240,8 @@ export class ConversationPlanWorkflowService {
             JSON.stringify(context.receipt),
             JSON.stringify(context.manifest),
             context.hash,
+            qcMode,
+            qcModeSource,
           ],
         );
         await tx.query(
@@ -2540,6 +3146,7 @@ export class ConversationPlanWorkflowService {
     actionId: string,
     envelope: V2WorkPlanContractT,
     prior: V2WorkPlanVersionT | null,
+    origin: V2WorkPlanVersionT["origin"] = "human",
   ): Promise<V2WorkPlanVersionT> {
     const plan = V2WorkPlanContract.parse(envelope);
     const hash = canonicalSha256(plan);
@@ -2549,9 +3156,9 @@ export class ConversationPlanWorkflowService {
         `INSERT INTO work_plan_versions (
            id, project_id, work_item_id, conversation_id, created_by_user_id,
            version, status, plan, content_hash, created_by_action_id,
-           supersedes_plan_version_id, diff_from_previous
+           supersedes_plan_version_id, diff_from_previous, origin
          ) VALUES (
-           $1,$2,$3,$4,$5,$6,'candidate',$7::jsonb,$8,$9,$10,$11::jsonb
+           $1,$2,$3,$4,$5,$6,'candidate',$7::jsonb,$8,$9,$10,$11::jsonb,$12
          ) RETURNING ${planColumns}`,
         [
           id,
@@ -2565,6 +3172,7 @@ export class ConversationPlanWorkflowService {
           actionId,
           prior?.id ?? null,
           prior ? JSON.stringify(diffValues(prior.plan, plan)) : null,
+          origin,
         ],
       )
     ).rows[0];
@@ -2697,20 +3305,41 @@ export class ConversationPlanWorkflowService {
   }
 
   private flattenReviewEvidence(
-    reviewId: string,
-    result: ReviewOnlyPlanningResult,
+    review: Pick<ReviewRow, "id" | "adjudications">,
+    rounds: readonly ReviewOnlyRound[],
   ): {
     findings: V2ConversationPlanReviewFindingT[];
     dispositions: V2ConversationPlanReviewDispositionT[];
   } {
     const findings: V2ConversationPlanReviewFindingT[] = [];
     const dispositions: V2ConversationPlanReviewDispositionT[] = [];
-    for (const round of result.review_rounds) {
+    // Rulings live in their own durable column (see AdjudicationRecord) and
+    // are re-attached here every time evidence is rebuilt, so a ruling made on
+    // a round survives that round's findings/dispositions being wiped and
+    // reflattened on every later resume.
+    const adjudicationRecords = json<AdjudicationRecord[]>(review.adjudications);
+    const adjudicationsByFindingId = new Map(
+      adjudicationRecords.map((record) => [record.finding_id, record]),
+    );
+    // QCP-3A "cannot be rebutted again": a "rule for the reviewer" ruling
+    // stands for the module, not just the one finding it was decided on.
+    // reviewOnlySession.ts deliberately leaves a later round's PM response on
+    // that module untouched (verbatim disposition/rationale) rather than
+    // rewriting it to look like the PM's own acceptance, so every recurrence
+    // is re-attached here by module_id to the same standing ruling. A human
+    // ruling "must be recorded as one rather than attributed to an agent"
+    // (QC-PAUSE-POINTS.md "Outcomes").
+    const forcedAcceptRulingByModule = new Map(
+      adjudicationRecords
+        .filter((record) => record.ruling === "reviewer" && record.module_id !== null)
+        .map((record) => [record.module_id as string, record]),
+    );
+    for (const round of rounds) {
       const roundIndices = new Map<number, V2ConversationPlanReviewFindingT>();
       round.findings.forEach((finding, localIndex) => {
         const index = findings.length;
         const projected = {
-          id: `${reviewId}:finding:${index}`,
+          id: `${review.id}:finding:${index}`,
           index,
           ...finding,
         };
@@ -2720,13 +3349,34 @@ export class ConversationPlanWorkflowService {
       for (const response of round.responses ?? []) {
         const finding = roundIndices.get(response.finding_index);
         if (!finding) throw new Error("review disposition references an unknown finding");
+        const ruling =
+          adjudicationsByFindingId.get(finding.id) ??
+          (finding.module_id !== null
+            ? forcedAcceptRulingByModule.get(finding.module_id)
+            : undefined);
         dispositions.push({
           finding_id: finding.id,
           finding_index: finding.index,
           disposition: response.disposition,
           rationale: response.rationale,
+          adjudication: ruling
+            ? {
+                decided_by_user_id: ruling.decided_by_user_id,
+                ruling: ruling.ruling,
+                rationale: ruling.rationale,
+                decided_at: ruling.decided_at,
+              }
+            : null,
         });
       }
+    }
+    // Recurrence for surfaces (QC-PAUSE-POINTS.md "Repeat disputes across
+    // attempts"): within-review only — see the ponytail note on
+    // findRecurringFindingIds for the cross-attempt gap.
+    const recurrences = findRecurringFindingIds(findings);
+    for (const finding of findings) {
+      const priorFindingIds = recurrences.get(finding.id);
+      if (priorFindingIds) finding.recurs_of_finding_ids = priorFindingIds;
     }
     return { findings, dispositions };
   }
@@ -2798,13 +3448,33 @@ export class ConversationPlanWorkflowService {
         created_at: now,
       };
     }
+    // Provenance (QC-PAUSE-POINTS.md "Human chat at a gate"): a human message
+    // into a *live, parked* review is a deliberate exception to the
+    // reviewer's transcript-free isolation, and the record must say so at
+    // which round(s). Scoped to 'awaiting_human' only — a 'failed' review's
+    // recovery chat isn't a live review, and the DB guard trigger only
+    // permits chat_messages/markdown_artifacts/updated_at to change on a
+    // 'failed' row, so writing this column there would violate it anyway.
+    const humanSteeredRounds =
+      event.speaker === "human" && review.status === "awaiting_human"
+        ? [...new Set([...json<number[]>(review.human_steered_rounds), event.round])].sort(
+            (a, b) => a - b,
+          )
+        : json<number[]>(review.human_steered_rounds);
     await tx.query(
       `UPDATE conversation_plan_reviews
           SET chat_messages=chat_messages || $2::jsonb,
               markdown_artifacts=markdown_artifacts || $3::jsonb,
+              human_steered_rounds=$5::jsonb,
               updated_at=$4
         WHERE id=$1`,
-      [review.id, JSON.stringify([message]), JSON.stringify(artifact ? [artifact] : []), now],
+      [
+        review.id,
+        JSON.stringify([message]),
+        JSON.stringify(artifact ? [artifact] : []),
+        now,
+        JSON.stringify(humanSteeredRounds),
+      ],
     );
   }
 
@@ -2865,28 +3535,45 @@ export class ConversationPlanWorkflowService {
     rounds: readonly ReviewOnlyRound[],
     finalPlan?: V2WorkPlanContractT,
   ) {
-    return rounds.map((round, index) => ({
-      round: round.round,
-      reviewed_plan_content_hash: canonicalSha256(round.reviewed_plan),
-      reviewer: {
-        provider: review.reviewer_provider,
-        model: review.reviewer_model,
-        findings: round.findings,
-      },
-      pm:
-        round.responses === null
-          ? null
-          : {
-              provider: review.pm_provider,
-              model: review.pm_model,
-              dispositions: round.responses,
-              revised_plan_content_hash:
-                round.revised_plan_content_hash ??
-                canonicalSha256(
-                  rounds[index + 1]?.reviewed_plan ?? finalPlan ?? round.reviewed_plan,
-                ),
-            },
-    }));
+    // Resume rehydrates each historical round's `reviewed_plan` from the
+    // review's own already-materialized plan (see loadReviewOnlySeed) rather
+    // than the true historical body — round bodies for already-completed
+    // rounds are never durably retained (only the current round's is, via the
+    // interim plan version). That placeholder is safe for the LOOP (it only
+    // ever reads the body of the round it is actually resuming into), but it
+    // must never be used to recompute a hash for a round that already has a
+    // durably-recorded one — reuse the persisted hash verbatim for any round
+    // already present in the review's current round_exchanges, and only
+    // derive a fresh hash for genuinely new rounds.
+    const persisted = json<V2ConversationPlanReviewT["round_exchanges"]>(review.round_exchanges);
+    const persistedByRound = new Map(persisted.map((exchange) => [exchange.round, exchange]));
+    return rounds.map((round, index) => {
+      const already = persistedByRound.get(round.round);
+      return {
+        round: round.round,
+        reviewed_plan_content_hash:
+          already?.reviewed_plan_content_hash ?? canonicalSha256(round.reviewed_plan),
+        reviewer: {
+          provider: review.reviewer_provider,
+          model: review.reviewer_model,
+          findings: round.findings,
+        },
+        pm:
+          round.responses === null
+            ? null
+            : {
+                provider: review.pm_provider,
+                model: review.pm_model,
+                dispositions: round.responses,
+                revised_plan_content_hash:
+                  already?.pm?.revised_plan_content_hash ??
+                  round.revised_plan_content_hash ??
+                  canonicalSha256(
+                    rounds[index + 1]?.reviewed_plan ?? finalPlan ?? round.reviewed_plan,
+                  ),
+              },
+      };
+    });
   }
 
   private staffingProposal(plan: V2WorkPlanContractT) {
@@ -3330,12 +4017,61 @@ export class ConversationPlanWorkflowService {
     return row;
   }
 
+  /**
+   * Shared entry guard for cancelReview/resumeReview/adjudicateReview/
+   * patchReview/continueReviewChat: every one of them opens its transaction
+   * by locking the review row scoped to project/work_item/conversation and
+   * raising the same "review_not_found" error if it's missing. Callers keep
+   * their own idempotency short-circuit and status guard — those differ per
+   * method and stay inline.
+   */
+  private async loadReviewForUpdate(
+    tx: V2SqlExecutor,
+    scope: { projectId: string; workItemId: string; conversationId: string },
+    reviewId: string,
+  ): Promise<ReviewRow> {
+    const review = (
+      await tx.query<ReviewRow>(
+        `SELECT ${reviewColumns} FROM conversation_plan_reviews
+          WHERE id=$1 AND project_id=$2 AND work_item_id=$3 AND conversation_id=$4
+          FOR UPDATE`,
+        [reviewId, scope.projectId, scope.workItemId, scope.conversationId],
+      )
+    ).rows[0];
+    if (!review) {
+      throw new ConversationPlanWorkflowError(
+        "review_not_found",
+        `plan review "${reviewId}" was not found`,
+        404,
+      );
+    }
+    return review;
+  }
+
+  /**
+   * Shared unlocked reload-by-id after a mutation has committed within the
+   * same transaction. Every call site treats a miss here as an invariant
+   * violation (the row was just locked and updated above), not a
+   * user-facing error, so this throws a plain Error like each inlined
+   * version did.
+   */
+  private async reloadReview(tx: V2SqlExecutor, reviewId: string): Promise<ReviewRow> {
+    const review = (
+      await tx.query<ReviewRow>(
+        `SELECT ${reviewColumns} FROM conversation_plan_reviews WHERE id=$1`,
+        [reviewId],
+      )
+    ).rows[0];
+    if (!review) throw new Error(`review "${reviewId}" could not be reloaded`);
+    return review;
+  }
+
   private async activeReview(tx: V2SqlExecutor, planId: string): Promise<boolean> {
     return Boolean(
       (
         await tx.query<{ id: string }>(
           `SELECT id FROM conversation_plan_reviews
-            WHERE plan_version_id=$1 AND status IN ('queued','running') LIMIT 1`,
+            WHERE plan_version_id=$1 AND status IN ('queued','running','awaiting_human') LIMIT 1`,
           [planId],
         )
       ).rows[0],

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   V2ConversationHandoff,
   V2ConversationPlanActionEffectValue,
+  V2ConversationPlanReview,
   V2ConversationTaskPackage,
   V2ConversationTurnAttempt,
   V2ConversationUsage,
@@ -549,6 +550,67 @@ describe("V2 conversation contracts", () => {
         exact_cost: false,
         usage_status: "unavailable",
         attempt_count: 1,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("parks findings visible only while awaiting_human, coupled to its checkpoint", () => {
+    const pausedReview = {
+      schema_version: 2,
+      id: "review-1",
+      project_id: "project-1",
+      work_item_id: "work-1",
+      conversation_id: "conversation-1",
+      action_id: "action-1",
+      plan_version_id: "plan-1",
+      planning_run_id: "run-1",
+      initiated_by_user_id: "user-1",
+      attempt_number: 1,
+      pm_provider: "anthropic",
+      pm_model: "claude-sonnet-5",
+      reviewer_provider: "openai",
+      reviewer_model: "gpt-5.6-terra",
+      usage_request_group_id: "usage-group-1",
+      status: "awaiting_human",
+      qc_mode: "gated_when_contested",
+      qc_mode_source: "project_default",
+      allow_unadjudicated_rebuttals: false,
+      human_steered_rounds: [],
+      rounds_completed: 0,
+      max_rounds: 3,
+      round_exchanges: [],
+      chat_messages: [],
+      markdown_artifacts: [],
+      plan_content_hash: hash,
+      result_plan_content_hash: hash,
+      context_manifest: { entries: [], context_hash: hash },
+      findings: [
+        {
+          id: "finding-1",
+          index: 0,
+          severity: "must_fix",
+          module_id: null,
+          finding: "The migration drops a constraint it never recreates.",
+          recommendation: "Recreate the constraint after the column swap.",
+        },
+      ],
+      dispositions: [],
+      revised_plan_version_id: null,
+      paused_checkpoint: "after_review",
+      paused_at_round: 1,
+      started_at: at,
+      completed_at: null,
+      failure_code: null,
+      cancelled_by_user_id: null,
+      cancellation_reason: null,
+      created_at: at,
+      updated_at: at,
+    };
+    expect(V2ConversationPlanReview.safeParse(pausedReview).success).toBe(true);
+    expect(
+      V2ConversationPlanReview.safeParse({
+        ...pausedReview,
+        status: "running",
       }).success,
     ).toBe(false);
   });

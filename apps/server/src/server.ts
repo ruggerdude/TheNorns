@@ -269,6 +269,7 @@ import {
   type PlanningRunDecisionInput,
   PlanningRunService,
   type PlanningStaffingProposalDto,
+  QC_MODES,
 } from "./planning/runService.js";
 import { PlanningRunWorker } from "./planning/runWorker.js";
 import { PlanningError, planContentHash, runPlanning } from "./planning/session.js";
@@ -6395,6 +6396,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           },
           runReviewNow: (runId) => executeReviewNow(runId),
           cancelReviewNow: (runId) => cancelReviewNow(runId),
+          qcModeSettingsOf: (projectId) => planningRunService.qcModeSettingsOf(projectId),
           createReviewAdapter: (provider, model) => buildPlanningAdapter(provider, model),
           ...(options.recordUsage ? { recordUsage: options.recordUsage } : {}),
           ...(options.planningRuns.executionKickoff
@@ -6431,6 +6433,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 result: import("./planning/reviewOnlySession.js").ReviewOnlyPlanningResult;
                 totalCostUsd: number;
               }) => reviewWorkflow.completeReviewOnly(input),
+              pauseReviewOnly: (input: {
+                reviewId: string;
+                planningRunId: string;
+                result: import("./planning/reviewOnlySession.js").ReviewOnlyPlanningPausedResult;
+              }) => reviewWorkflow.pauseReviewOnly(input),
               failReviewOnly: (runId: string, error: unknown) =>
                 reviewWorkflow.failReviewOnly(runId, error),
             }
@@ -7024,31 +7031,47 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       // planningReviewerSelection.test.ts). So this route validates only
       // provider enum + non-empty model; an unusable model surfaces as a
       // truthful planning-run failure at run time, same as today.
+      //
+      // QCP-4A: the same body also carries the project-layer QC cadence
+      // default — qc_mode and its allow_unadjudicated_rebuttals escape
+      // hatch. Both are independently optional so a caller can change one
+      // without resupplying the reviewer override (see
+      // PlanningRunService.setQcModeSettings); provider/model stay a
+      // required pair when either is present, matching the pre-existing
+      // "both or neither" behavior.
       // ---------------------------------------------------------------
       const PlanningReviewerBody = z
         .object({
-          provider: z.enum(["anthropic", "openai"]),
-          model: z.string().trim().min(1).max(200),
+          provider: z.enum(["anthropic", "openai"]).optional(),
+          model: z.string().trim().min(1).max(200).optional(),
+          qc_mode: z.enum(QC_MODES).optional(),
+          allow_unadjudicated_rebuttals: z.boolean().optional(),
         })
-        .strict();
+        .strict()
+        .refine((body) => (body.provider === undefined) === (body.model === undefined), {
+          message: "provider and model must be set together",
+        });
 
       app.get("/api/v2/projects/:id/planning-reviewer", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
         const { id } = req.params as { id: string };
         try {
-          const [pmSelection, persisted] = await Promise.all([
+          const [pmSelection, persisted, qcModeSettings] = await Promise.all([
             projects.pmSelectionOf(id),
             planningRunService.reviewerSelectionOf(id),
+            planningRunService.qcModeSettingsOf(id),
           ]);
-          reply.send(
-            persisted
+          reply.send({
+            ...(persisted
               ? { provider: persisted.provider, model: persisted.model, mode: "explicit" as const }
               : {
                   provider: defaultReviewerProviderFor(pmSelection.provider),
                   model: null,
                   mode: "automatic" as const,
-                },
-          );
+                }),
+            qc_mode: qcModeSettings.qcMode,
+            allow_unadjudicated_rebuttals: qcModeSettings.allowUnadjudicatedRebuttals,
+          });
         } catch (error) {
           projectError(reply, error);
         }
@@ -7061,10 +7084,21 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         if (!body.success) return reply.code(400).send({ error: "bad_request" });
         try {
           await projects.pmSelectionOf(id); // project-existence check with the shared 404 mapping
-          await planningRunService.setReviewerSelection(id, {
-            provider: body.data.provider,
-            model: body.data.model,
-          });
+          if (body.data.provider !== undefined && body.data.model !== undefined) {
+            await planningRunService.setReviewerSelection(id, {
+              provider: body.data.provider,
+              model: body.data.model,
+            });
+          }
+          if (
+            body.data.qc_mode !== undefined ||
+            body.data.allow_unadjudicated_rebuttals !== undefined
+          ) {
+            await planningRunService.setQcModeSettings(id, {
+              qcMode: body.data.qc_mode,
+              allowUnadjudicatedRebuttals: body.data.allow_unadjudicated_rebuttals,
+            });
+          }
           reply.code(204).send();
         } catch (error) {
           projectError(reply, error);

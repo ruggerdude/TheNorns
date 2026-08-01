@@ -51,6 +51,36 @@ function List({
   );
 }
 
+/** The added/changed/removed block for a plan version's diff against its
+ *  predecessor. Reused by the QC gate card to show the v(n) -> v(n+1) diff
+ *  produced at Gate B, so there is exactly one diff renderer in the app. */
+export function PlanVersionDiff({
+  version,
+}: {
+  version: V2WorkPlanVersionT;
+}): React.ReactElement | null {
+  if (!version.diff_from_previous) return null;
+  return (
+    <details className="conversation-plan-diff" open>
+      <summary>Changes from version {version.version - 1}</summary>
+      <div>
+        <section>
+          <h4>Added</h4>
+          <List empty="Nothing added." items={version.diff_from_previous.added} />
+        </section>
+        <section>
+          <h4>Changed</h4>
+          <List empty="Nothing changed." items={version.diff_from_previous.changed} />
+        </section>
+        <section>
+          <h4>Removed</h4>
+          <List empty="Nothing removed." items={version.diff_from_previous.removed} />
+        </section>
+      </div>
+    </details>
+  );
+}
+
 export function ConversationPlanCard({
   version,
 }: {
@@ -209,23 +239,7 @@ function PlanCard({
       </div>
 
       {version?.diff_from_previous ? (
-        <details className="conversation-plan-diff" open>
-          <summary>Changes from version {version.version - 1}</summary>
-          <div>
-            <section>
-              <h4>Added</h4>
-              <List empty="Nothing added." items={version.diff_from_previous.added} />
-            </section>
-            <section>
-              <h4>Changed</h4>
-              <List empty="Nothing changed." items={version.diff_from_previous.changed} />
-            </section>
-            <section>
-              <h4>Removed</h4>
-              <List empty="Nothing removed." items={version.diff_from_previous.removed} />
-            </section>
-          </div>
-        </details>
+        <PlanVersionDiff version={version} />
       ) : version ? (
         <p className="conversation-plan-first-version">Initial plan version · no prior diff</p>
       ) : (

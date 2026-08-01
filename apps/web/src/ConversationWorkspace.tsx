@@ -34,10 +34,12 @@ import type {
   V2ConversationNavigationItemT,
   V2ConversationNavigationPageT,
   V2ConversationPlanActionEffectValueT,
+  V2ConversationPlanReviewFindingT,
   V2ConversationPlanReviewT,
   V2ConversationPlanningExcerptReceiptT,
   V2ConversationPmUpdateSettingsT,
   V2ConversationSummaryT,
+  V2ConversationUsageT,
   V2CreateExecutionActionProposalInputT,
   V2CreateHumanWaitAnswerProposalInputT,
   V2HumanWaitT,
@@ -76,7 +78,7 @@ import { ArtifactImage } from "./ArtifactImage";
 import { ConversationActionCard } from "./ConversationActionCard";
 import { ProjectRunStopControl, executionTargetHeaderLabel } from "./ConversationExecutionTarget";
 import { ConversationPlanCard } from "./ConversationPlanCard";
-import { ConversationQcCard } from "./ConversationQcCard";
+import { ConversationQcCard, type Ruling, findGateInterimVersion } from "./ConversationQcCard";
 import {
   ExecutionActionComposer,
   ExecutionActionHistory,
@@ -88,8 +90,10 @@ import {
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import {
   type ConversationDetail,
+  type QcModeT,
   type SubmitConversationMessageBody,
   type WorkItemConversationGroup,
+  adjudicateConversationPlanReview,
   cancelConversationPlanReview,
   confirmConversationAction,
   continueConversationPlanReviewChat,
@@ -107,10 +111,12 @@ import {
   listConversationNavigation,
   listWorkItemConversations,
   messageEndpoint,
+  patchConversationPlanReview,
   proposeExecutionConversationAction,
   proposeHumanWaitAnswer,
   renamePlanningWorkItem,
   resolveConversation,
+  resumeConversationPlanReview,
   retrieveConversationPlanningExcerpt,
   switchConversationModel,
   updateConversationFolder,
@@ -513,6 +519,11 @@ type ConversationResources = {
 
 type ConversationActionEffect = V2ConfirmConversationActionResponseT["effect"];
 
+/** A review action's last failure. `capBlocked` is set when it failed with
+ *  `round_cap_requires_raise` (QC-PAUSE-POINTS.md "Outcomes") — the gate card
+ *  offers to raise the cap instead of just showing the message. */
+type ReviewActionError = { message: string; capBlocked?: boolean };
+
 type ConversationActionContextValue = {
   projectId: string;
   workItemId: string;
@@ -522,7 +533,11 @@ type ConversationActionContextValue = {
   deliveryEvents: V2ConversationActionDeliveryEventT[];
   busyActionId: string | null;
   errors: Map<string, string>;
-  confirm: (action: V2ConversationActionT) => Promise<void>;
+  /** `qcMode` pins the kickoff cadence chosen on a proposed send_plan_to_qc
+   *  action's control (QC-PAUSE-POINTS.md "Settings: three layers"). It rides
+   *  the confirm body straight into the review row, so the pin is atomic with
+   *  review creation. Ignored for every other action type. */
+  confirm: (action: V2ConversationActionT, qcMode?: QcModeT) => Promise<void>;
   prepareHumanWaitAnswer: (
     wait: V2HumanWaitT,
     answer: string,
@@ -535,7 +550,7 @@ type ConversationActionContextValue = {
   planChangeLockedIds: Set<string>;
   proposePlanChanges: (version: V2WorkPlanVersionT, direction: string) => Promise<boolean>;
   reviewBusyId: string | null;
-  reviewErrors: Map<string, string>;
+  reviewErrors: Map<string, ReviewActionError>;
   cancelReview: (review: V2ConversationPlanReviewT, reason: string) => Promise<void>;
   continueReviewChat: (
     review: V2ConversationPlanReviewT,
@@ -543,6 +558,21 @@ type ConversationActionContextValue = {
     message: string,
   ) => Promise<void>;
   continueWithoutQc: (review: V2ConversationPlanReviewT) => Promise<void>;
+  resumeReview: (
+    review: V2ConversationPlanReviewT,
+    exit: "continue" | "note",
+    note?: { channel: "reviewer" | "pm"; message: string },
+    stopAsking?: boolean,
+  ) => Promise<void>;
+  adjudicateReview: (
+    review: V2ConversationPlanReviewT,
+    rulings: Record<string, { ruling: Ruling; rationale: string }>,
+    note: { channel: "reviewer" | "pm"; message: string } | undefined,
+    raiseMaxRounds: boolean,
+  ) => Promise<void>;
+  /** Mid-flight cadence edit and "hold at the next checkpoint" (QC-PAUSE-
+   *  POINTS.md "Settings: three layers") — PATCH .../plan-reviews/:reviewId. */
+  patchReview: (review: V2ConversationPlanReviewT, patch: { qcMode?: QcModeT }) => Promise<void>;
   prepareExecutionAction: (
     actionType: V2CreateExecutionActionProposalInputT["action_type"],
     parameters: Record<string, unknown>,
@@ -1774,6 +1804,7 @@ function qcActivitySummary(review: V2ConversationPlanReviewT): string {
   }
   if (review.status === "failed") return "QC failed before a final reviewed plan was produced.";
   if (review.status === "cancelled") return "QC was stopped by a human.";
+  if (review.status === "awaiting_human") return "QC is paused, waiting for you at the gate.";
   if (review.status === "converged")
     return "QC converged and the final reviewed plan is available.";
   if (review.status === "cap_reached")
@@ -1790,12 +1821,28 @@ function qcActivityTone(
   return "info";
 }
 
+// Plan-tab status strip, visible for the whole time a review is active (queued,
+// running, or parked), not only once it pauses.
+function qcStripLabel(review: V2ConversationPlanReviewT): string {
+  const round = Math.min(review.rounds_completed + 1, review.max_rounds);
+  const position = `QC round ${round} of ${review.max_rounds}`;
+  if (review.status === "awaiting_human") return `${position} · paused, waiting on you`;
+  if (review.status === "queued") return `${position} · queued`;
+  return `${position} · running`;
+}
+
 function ConversationQcActivity({
   reviews,
   planVersions,
+  usage,
+  onDiscussFinding,
+  onSwitchToPlanTab,
 }: {
   reviews: V2ConversationPlanReviewT[];
   planVersions: V2WorkPlanVersionT[];
+  usage?: V2ConversationUsageT | null;
+  onDiscussFinding?: (finding: V2ConversationPlanReviewFindingT) => void;
+  onSwitchToPlanTab?: () => void;
 }): React.ReactElement | null {
   const context = useContext(ConversationActionContext);
   const ordered = [...reviews].sort(
@@ -1876,26 +1923,37 @@ function ConversationQcActivity({
                 <ConversationQcCard
                   planVersion={targetPlan}
                   review={review}
+                  allReviews={reviews}
+                  interimVersion={findGateInterimVersion(review, planVersions)}
+                  usage={usage ?? null}
                   actions={{ approve, repeat, skip, reject }}
                   busy={context.reviewBusyId === review.id || context.busyActionId !== null}
+                  capBlocked={context.reviewErrors.get(review.id)?.capBlocked ?? false}
                   error={
-                    context.reviewErrors.get(review.id) ??
-                    (approve ? context.errors.get(approve.id) : null) ??
-                    (repeat ? context.errors.get(repeat.id) : null) ??
-                    (reject ? context.errors.get(reject.id) : null) ??
+                    context.reviewErrors.get(review.id)?.message ||
+                    (approve ? context.errors.get(approve.id) : null) ||
+                    (repeat ? context.errors.get(repeat.id) : null) ||
+                    (reject ? context.errors.get(reject.id) : null) ||
                     null
                   }
                   onCancel={context.cancelReview}
                   onContinueChat={context.continueReviewChat}
                   onContinueWithoutQc={context.continueWithoutQc}
+                  onResume={context.resumeReview}
+                  onAdjudicate={context.adjudicateReview}
+                  onPatch={context.patchReview}
                   onConfirmAction={context.confirm}
                   onReturnToPlanning={() => {
-                    const composer = document.querySelector<HTMLTextAreaElement>(
-                      '[aria-label="Message the project PM"]',
-                    );
-                    composer?.scrollIntoView({ behavior: "smooth", block: "center" });
-                    composer?.focus();
+                    onSwitchToPlanTab?.();
+                    requestAnimationFrame(() => {
+                      const composer = document.querySelector<HTMLTextAreaElement>(
+                        '[aria-label="Message the project PM"]',
+                      );
+                      composer?.scrollIntoView({ behavior: "smooth", block: "center" });
+                      composer?.focus();
+                    });
                   }}
+                  onDiscussFinding={onDiscussFinding}
                 />
                 {successful && targetPlan ? (
                   <ConversationQcFinalPlan planVersion={targetPlan} />
@@ -3111,6 +3169,8 @@ function ConversationComposer({
   planIntentEnabled,
   planIntentBusy,
   onUseAsPlan,
+  prefillText,
+  onPrefillConsumed,
 }: {
   isExecution: boolean;
   isPlanning: boolean;
@@ -3118,6 +3178,8 @@ function ConversationComposer({
   planIntentEnabled: boolean;
   planIntentBusy: boolean;
   onUseAsPlan: (message: string, handoff?: V2PlanHandoffPreferenceT) => void;
+  prefillText?: string | null;
+  onPrefillConsumed?: () => void;
 }): React.ReactElement {
   const composer = useComposerRuntime();
   const [handoffOpen, setHandoffOpen] = useState(false);
@@ -3125,6 +3187,11 @@ function ConversationComposer({
   const responseRunning = useThread((thread) => thread.isRunning);
   const hasDraft = useComposer((state) => state.text.trim().length > 0);
   const hasAttachments = useComposer((state) => state.attachments.length > 0);
+  useEffect(() => {
+    if (!prefillText) return;
+    composer.setText(prefillText);
+    onPrefillConsumed?.();
+  }, [prefillText, composer, onPrefillConsumed]);
   useEffect(() => {
     const stopListeningForErrors = composer.unstable_on("attachmentAddError", ({ message }) => {
       if (message.includes("is not accepted")) return;
@@ -3270,6 +3337,8 @@ function ConversationThread({
   onRefreshSoft: () => void;
   onUnauthorized: () => void;
 }): React.ReactElement {
+  const [workTab, setWorkTab] = useState<"plan" | "qc" | "implementation">("plan");
+  const [planComposerDraft, setPlanComposerDraft] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
@@ -3284,7 +3353,7 @@ function ConversationThread({
   const [planChangeErrors, setPlanChangeErrors] = useState(() => new Map<string, string>());
   const [planChangeLockedIds, setPlanChangeLockedIds] = useState(() => new Set<string>());
   const [reviewBusyId, setReviewBusyId] = useState<string | null>(null);
-  const [reviewErrors, setReviewErrors] = useState(() => new Map<string, string>());
+  const [reviewErrors, setReviewErrors] = useState(() => new Map<string, ReviewActionError>());
   const [executionProposalBusy, setExecutionProposalBusy] = useState(false);
   const [executionProposalError, setExecutionProposalError] = useState<string | null>(null);
   const [agentsOpen, setAgentsOpen] = useState(false);
@@ -3874,142 +3943,197 @@ function ConversationThread({
     ],
   );
 
-  const cancelReview = useCallback(
-    async (review: V2ConversationPlanReviewT, reason: string): Promise<void> => {
+  // Shared busy/error state machine for every review action below: guard
+  // against a concurrent action on the same review, clear its prior error,
+  // run the (possibly key-bearing) API call, then refresh or record the
+  // failure. `round_cap_requires_raise` (QC-PAUSE-POINTS "Outcomes") is the
+  // one error code with its own UI treatment — the gate offers to raise the
+  // cap instead of just showing the message — so it's handled once here
+  // rather than in each caller.
+  const runReviewAction = useCallback(
+    async <T,>(
+      review: V2ConversationPlanReviewT,
+      apiCall: () => Promise<T>,
+      onSuccess?: (result: T) => void,
+    ): Promise<void> => {
       if (reviewBusyId !== null) return;
       setReviewBusyId(review.id);
+      // Clear the message but keep a capBlocked flag standing through the
+      // retry — the raise-cap offer stays up while the raise request is in
+      // flight, same as before this was one map instead of two containers.
       setReviewErrors((current) => {
         const next = new Map(current);
-        next.delete(review.id);
+        const capBlocked = next.get(review.id)?.capBlocked;
+        if (capBlocked) next.set(review.id, { message: "", capBlocked: true });
+        else next.delete(review.id);
         return next;
       });
       try {
-        await cancelConversationPlanReview(
-          detail.work_item.project_id,
-          detail.work_item.id,
-          detail.conversation.id,
-          review.id,
-          reason,
-        );
+        const result = await apiCall();
+        onSuccess?.(result);
+        setReviewErrors((current) => {
+          if (!current.has(review.id)) return current;
+          const next = new Map(current);
+          next.delete(review.id);
+          return next;
+        });
         onRefresh();
       } catch (caught) {
         if (caught instanceof UnauthorizedError) {
           onUnauthorized();
           return;
         }
+        const capBlocked = caught instanceof ApiError && caught.code === "round_cap_requires_raise";
         setReviewErrors((current) =>
-          new Map(current).set(
-            review.id,
-            caught instanceof Error ? caught.message : String(caught),
-          ),
+          new Map(current).set(review.id, {
+            message: caught instanceof Error ? caught.message : String(caught),
+            ...(capBlocked ? { capBlocked: true } : {}),
+          }),
         );
       } finally {
         setReviewBusyId(null);
       }
     },
-    [
-      detail.conversation.id,
-      detail.work_item.id,
-      detail.work_item.project_id,
-      onRefresh,
-      onUnauthorized,
-      reviewBusyId,
-    ],
+    [onRefresh, onUnauthorized, reviewBusyId],
+  );
+
+  const cancelReview = useCallback(
+    (review: V2ConversationPlanReviewT, reason: string): Promise<void> =>
+      runReviewAction(review, () =>
+        cancelConversationPlanReview(
+          detail.work_item.project_id,
+          detail.work_item.id,
+          detail.conversation.id,
+          review.id,
+          reason,
+        ),
+      ),
+    [detail.conversation.id, detail.work_item.id, detail.work_item.project_id, runReviewAction],
   );
 
   const continueReviewChat = useCallback(
-    async (
+    (
       review: V2ConversationPlanReviewT,
       channel: "reviewer" | "pm",
       message: string,
-    ): Promise<void> => {
-      if (reviewBusyId !== null) return;
-      setReviewBusyId(review.id);
-      setReviewErrors((current) => {
-        const next = new Map(current);
-        next.delete(review.id);
-        return next;
-      });
-      try {
-        await continueConversationPlanReviewChat(
+    ): Promise<void> =>
+      runReviewAction(review, () =>
+        continueConversationPlanReviewChat(
           detail.work_item.project_id,
           detail.work_item.id,
           detail.conversation.id,
           review.id,
           channel,
           message,
-        );
-        onRefresh();
-      } catch (caught) {
-        if (caught instanceof UnauthorizedError) {
-          onUnauthorized();
-          return;
-        }
-        setReviewErrors((current) =>
-          new Map(current).set(
-            review.id,
-            caught instanceof Error ? caught.message : String(caught),
-          ),
-        );
-      } finally {
-        setReviewBusyId(null);
-      }
-    },
-    [
-      detail.conversation.id,
-      detail.work_item.id,
-      detail.work_item.project_id,
-      onRefresh,
-      onUnauthorized,
-      reviewBusyId,
-    ],
+        ),
+      ),
+    [detail.conversation.id, detail.work_item.id, detail.work_item.project_id, runReviewAction],
   );
 
   const continueWithoutQc = useCallback(
-    async (review: V2ConversationPlanReviewT): Promise<void> => {
-      if (reviewBusyId !== null) return;
-      const key = durableRequestKey("qc-waiver", review.id, reviewRecoveryKeys.current);
-      setReviewBusyId(review.id);
-      setReviewErrors((current) => {
-        const next = new Map(current);
-        next.delete(review.id);
-        return next;
-      });
-      try {
-        const result = await continueConversationWithoutQc(
+    (review: V2ConversationPlanReviewT): Promise<void> =>
+      runReviewAction(
+        review,
+        () => {
+          const key = durableRequestKey("qc-waiver", review.id, reviewRecoveryKeys.current);
+          return continueConversationWithoutQc(
+            detail.work_item.project_id,
+            detail.work_item.id,
+            detail.conversation.id,
+            review.id,
+            key,
+          );
+        },
+        (result) => {
+          setActionOverrides((current) => new Map(current).set(result.action.id, result.action));
+          setEffectOverrides((current) => new Map(current).set(result.action.id, result.effect));
+          clearDurableRequestKey("qc-waiver", review.id, reviewRecoveryKeys.current);
+        },
+      ),
+    [detail.conversation.id, detail.work_item.id, detail.work_item.project_id, runReviewAction],
+  );
+
+  // Gate exits "Continue" and "Continue with a note" (QC-PAUSE-POINTS "Gate
+  // exits" table) — both go through the one resume endpoint, distinguished by
+  // `exit`. Idempotency keyed per exit so a retried click reuses the same
+  // key while a distinct note send gets a fresh one.
+  const resumeReview = useCallback(
+    (
+      review: V2ConversationPlanReviewT,
+      exit: "continue" | "note",
+      note?: { channel: "reviewer" | "pm"; message: string },
+      stopAsking?: boolean,
+    ): Promise<void> =>
+      runReviewAction(
+        review,
+        () => {
+          const key = durableRequestKey(`qc-resume-${exit}`, review.id, reviewRecoveryKeys.current);
+          return resumeConversationPlanReview(
+            detail.work_item.project_id,
+            detail.work_item.id,
+            detail.conversation.id,
+            review.id,
+            {
+              exit,
+              ...(note ? { note } : {}),
+              ...(stopAsking ? { stopAsking: true } : {}),
+              idempotency_key: key,
+            },
+          );
+        },
+        () => clearDurableRequestKey(`qc-resume-${exit}`, review.id, reviewRecoveryKeys.current),
+      ),
+    [detail.conversation.id, detail.work_item.id, detail.work_item.project_id, runReviewAction],
+  );
+
+  // Gate C ruling (QC-PAUSE-POINTS "Outcomes") — one ruling per contested
+  // finding, submitted together. `raiseMaxRounds` is only ever true when the
+  // caller is answering a prior `round_cap_requires_raise` failure, never
+  // sent speculatively.
+  const adjudicateReview = useCallback(
+    (
+      review: V2ConversationPlanReviewT,
+      rulings: Record<string, { ruling: Ruling; rationale: string }>,
+      note: { channel: "reviewer" | "pm"; message: string } | undefined,
+      raiseMaxRounds: boolean,
+    ): Promise<void> =>
+      runReviewAction(
+        review,
+        () => {
+          const key = durableRequestKey("qc-adjudicate", review.id, reviewRecoveryKeys.current);
+          return adjudicateConversationPlanReview(
+            detail.work_item.project_id,
+            detail.work_item.id,
+            detail.conversation.id,
+            review.id,
+            {
+              rulings,
+              ...(note ? { note } : {}),
+              ...(raiseMaxRounds ? { raiseMaxRounds: true } : {}),
+              idempotencyKey: key,
+            },
+          );
+        },
+        () => clearDurableRequestKey("qc-adjudicate", review.id, reviewRecoveryKeys.current),
+      ),
+    [detail.conversation.id, detail.work_item.id, detail.work_item.project_id, runReviewAction],
+  );
+
+  // Mid-flight cadence edit and "hold at the next checkpoint" (QC-PAUSE-
+  // POINTS.md "Settings: three layers", "Gate exits"). Both are the one
+  // PATCH — checkpoints re-read qc_mode the next time they're reached.
+  const patchReview = useCallback(
+    (review: V2ConversationPlanReviewT, patch: { qcMode?: QcModeT }): Promise<void> =>
+      runReviewAction(review, () =>
+        patchConversationPlanReview(
           detail.work_item.project_id,
           detail.work_item.id,
           detail.conversation.id,
           review.id,
-          key,
-        );
-        setActionOverrides((current) => new Map(current).set(result.action.id, result.action));
-        setEffectOverrides((current) => new Map(current).set(result.action.id, result.effect));
-        clearDurableRequestKey("qc-waiver", review.id, reviewRecoveryKeys.current);
-        onRefresh();
-      } catch (caught) {
-        if (caught instanceof UnauthorizedError) {
-          onUnauthorized();
-          return;
-        }
-        setReviewErrors((current) =>
-          new Map(current).set(
-            review.id,
-            caught instanceof Error ? caught.message : String(caught),
-          ),
-        );
-      } finally {
-        setReviewBusyId(null);
-      }
-    },
-    [
-      detail.conversation.id,
-      detail.work_item.id,
-      detail.work_item.project_id,
-      onRefresh,
-      onUnauthorized,
-      reviewBusyId,
-    ],
+          patch,
+        ),
+      ),
+    [detail.conversation.id, detail.work_item.id, detail.work_item.project_id, runReviewAction],
   );
 
   const submitExecutionAction = useCallback(
@@ -4202,7 +4326,7 @@ function ConversationThread({
   );
 
   const confirmAction = useCallback(
-    async (action: V2ConversationActionT) => {
+    async (action: V2ConversationActionT, qcMode?: QcModeT) => {
       if (busyActionId !== null) return;
       const idempotencyKey = confirmationKeyFor(action, confirmationKeys.current);
       if (action.action_type === "approve_plan") {
@@ -4228,9 +4352,11 @@ function ConversationThread({
           detail.conversation.id,
           action.id,
           idempotencyKey,
+          qcMode,
         );
         setActionOverrides((current) => new Map(current).set(action.id, result.action));
-        setEffectOverrides((current) => new Map(current).set(action.id, result.effect));
+        const effect = result.effect;
+        setEffectOverrides((current) => new Map(current).set(action.id, effect));
         confirmationKeys.current.delete(action.id);
         try {
           window.sessionStorage.removeItem(confirmationStorageKey(action.id));
@@ -4310,6 +4436,9 @@ function ConversationThread({
       cancelReview,
       continueReviewChat,
       continueWithoutQc,
+      resumeReview,
+      adjudicateReview,
+      patchReview,
       prepareExecutionAction: proposeExecutionAction,
       executionProposalBusy,
       executionProposalError,
@@ -4337,6 +4466,9 @@ function ConversationThread({
     cancelReview,
     continueReviewChat,
     continueWithoutQc,
+    resumeReview,
+    adjudicateReview,
+    patchReview,
     prepareHumanWaitAnswer,
     proposePlanChanges,
     proposeExecutionAction,
@@ -4359,6 +4491,25 @@ function ConversationThread({
   const isPlanning = detail.conversation.kind === "planning";
   const isExecution = detail.conversation.kind === "execution_pm";
   const isReadOnly = detail.conversation.status !== "active";
+  // ponytail: "does this project run QC" has no dedicated field on ConversationDetail
+  // yet, so the only honest client-side signal is "has this conversation ever had a
+  // review." A project that runs QC but hasn't sent anything to review yet will show
+  // two tabs until its first review exists. Revisit once a project setting is plumbed
+  // through.
+  const hasQc = isPlanning && detail.plan_reviews.length > 0;
+  const qcNeedsHuman = detail.plan_reviews.some((review) => review.status === "awaiting_human");
+  const activeQcReview =
+    [...detail.plan_reviews]
+      .filter((review) => ["queued", "running", "awaiting_human"].includes(review.status))
+      .sort(
+        (left, right) =>
+          Date.parse(right.created_at) - Date.parse(left.created_at) ||
+          right.attempt_number - left.attempt_number,
+      )[0] ?? null;
+  const discussFindingInPlan = useCallback((finding: V2ConversationPlanReviewFindingT) => {
+    setPlanComposerDraft(`> ${finding.finding}\n\n`);
+    setWorkTab("plan");
+  }, []);
   const linkedExecutionConversationId = isPlanning
     ? (detail.handoff?.target_conversation_id ??
       [...actionContext.effects.values()]
@@ -4366,9 +4517,13 @@ function ConversationThread({
         .find((conversationId) => conversationId !== null) ??
       null)
     : null;
+  // QCP-2B — QC-interim versions are never offered as a default target (for
+  // execution, approval, or diff); the review's result version is.
   const latestPlan = [...detail.plan_versions]
-    .filter((version) =>
-      ["candidate", "in_qc", "changes_requested", "approved"].includes(version.status),
+    .filter(
+      (version) =>
+        version.origin !== "qc_interim" &&
+        ["candidate", "in_qc", "changes_requested", "approved"].includes(version.status),
     )
     .sort((left, right) => right.version - left.version)[0];
   const taskOptions = Array.from(
@@ -4603,206 +4758,276 @@ function ConversationThread({
                 </aside>
               </>
             ) : null}
-            {isExecution && !isReadOnly ? (
-              <section className="execution-conversation-controls" aria-label="Execution controls">
-                <details>
-                  <summary>Decisions, direction, pause, and artifacts</summary>
-                  <ExecutionActionComposer
-                    actions={[...actionContext.actions.values()]}
-                    planVersions={detail.plan_versions}
-                    busy={executionProposalBusy}
-                    error={executionProposalError}
-                    disabledReason={null}
-                    lockedRequest={lockedExecutionRequest}
-                    onPrepare={proposeExecutionAction}
-                    onRetryLocked={() =>
-                      lockedExecutionRequest
-                        ? submitExecutionAction(lockedExecutionRequest)
-                        : Promise.resolve(false)
-                    }
-                  />
-                </details>
-                <ExecutionActionHistory
-                  actions={[...actionContext.actions.values()].filter(
-                    (action) => !referencedActionIds.has(action.id),
-                  )}
-                  deliveryEvents={detail.action_delivery_events ?? []}
-                  effects={actionContext.effects}
-                  busyActionId={busyActionId}
-                  errors={actionErrors}
-                  onConfirm={confirmAction}
-                />
-                {(pmSettingsOverride ?? detail.pm_update_settings) ? (
-                  <PmUpdateControls
-                    settings={
-                      (pmSettingsOverride ??
-                        detail.pm_update_settings) as V2ConversationPmUpdateSettingsT
-                    }
-                    updates={detail.pm_updates ?? []}
-                    busy={pmSettingsBusy}
-                    error={pmSettingsError}
-                    onSave={savePmSettings}
-                  />
-                ) : null}
-              </section>
-            ) : null}
-            {proposalBusy ? (
-              <output className="conversation-active-run" data-testid="conversation-plan-busy">
-                <span className="conversation-plan-busy-indicator" />
-                <span>Building your plan — analyzing conversation and generating proposal…</span>
-              </output>
-            ) : null}
-            {proposalError ? (
-              <div className="conversation-thread-alert">
-                <Alert testId="conversation-plan-proposal-error">{proposalError}</Alert>
-              </div>
-            ) : null}
-            {detail.active_attempt ? (
-              <output className="conversation-active-run">
-                <span>A PM response is {detail.active_attempt.status.replaceAll("_", " ")}.</span>
-                <Button className="btn-small" onClick={onRefresh}>
-                  Refresh status
-                </Button>
-              </output>
-            ) : null}
-            {!detail.active_attempt && detail.retryable_attempt ? (
-              <output className="conversation-active-run conversation-retryable-run">
-                <span>
-                  The last PM response{" "}
-                  {detail.retryable_attempt.status === "failed"
-                    ? "failed before it completed"
-                    : "was interrupted"}
-                  .
-                </span>
-                <RetryTerminalResponseButton
-                  onError={(message) => setStreamError(message || null)}
-                />
-              </output>
-            ) : null}
-            {streamError ? (
-              <div className="conversation-thread-alert">
-                <Alert testId="conversation-stream-error">{streamError}</Alert>
-              </div>
-            ) : null}
-            {modelError ? (
-              <div className="conversation-thread-alert">
-                <Alert testId="conversation-model-error">{modelError}</Alert>
-              </div>
-            ) : null}
-            {latestAttempt || latestUsage ? (
-              <div className="conversation-live-telemetry" aria-live="polite">
-                {latestAttempt ? (
-                  <output className="conversation-turn-meta">
-                    PM request: {latestAttempt.status.replaceAll("_", " ")}
-                  </output>
-                ) : null}
-                {latestUsage ? (
-                  <output className="conversation-turn-meta" data-testid="conversation-usage">
-                    {latestUsage.input_tokens.toLocaleString()} in ·{" "}
-                    {latestUsage.output_tokens.toLocaleString()} out · $
-                    {latestUsage.cost_usd.toFixed(4)}
-                  </output>
-                ) : null}
-              </div>
-            ) : null}
-            {detail.handoff || detail.latest_summary ? (
-              <section
-                className="conversation-context-receipt"
-                aria-label="Conversation context and usage"
+            <nav className="conversation-work-tabs" aria-label="Work sections">
+              <button
+                type="button"
+                className={workTab === "plan" ? "on" : ""}
+                aria-current={workTab === "plan" ? "page" : undefined}
+                onClick={() => setWorkTab("plan")}
               >
-                {detail.handoff ? (
-                  <HandoffCard
-                    handoff={detail.handoff}
-                    currentConversationId={detail.conversation.id}
-                    onOpenConversation={onOpenConversation}
-                  />
-                ) : null}
-                <div className="conversation-context-indicators">
-                  {detail.latest_summary ? (
-                    <ConversationSummaryIndicator summary={detail.latest_summary} />
-                  ) : null}
-                </div>
-                <PlanningExcerptControl
-                  key={`${detail.conversation.id}:${detail.handoff?.id ?? "no-handoff"}`}
-                  detail={detail}
-                  onOpenConversation={onOpenConversation}
-                  onRefresh={onRefresh}
-                  onUnauthorized={onUnauthorized}
-                />
-              </section>
-            ) : null}
-            {isPlanning ? (
-              <ConversationQcActivity
-                reviews={detail.plan_reviews}
-                planVersions={detail.plan_versions}
-              />
-            ) : null}
-            <ThreadPrimitive.Root className="conversation-thread-root">
-              <ThreadPrimitive.Viewport
-                className="conversation-thread-viewport"
-                turnAnchor="top"
-                scrollToBottomOnThreadSwitch
+                Plan
+              </button>
+              {hasQc ? (
+                <button
+                  type="button"
+                  className={workTab === "qc" ? "on" : ""}
+                  aria-current={workTab === "qc" ? "page" : undefined}
+                  onClick={() => setWorkTab("qc")}
+                >
+                  <span>QC</span>
+                  {qcNeedsHuman ? <Badge tone="warn">Needs you</Badge> : null}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className={workTab === "implementation" ? "on" : ""}
+                aria-current={workTab === "implementation" ? "page" : undefined}
+                onClick={() => setWorkTab("implementation")}
               >
-                <AuiIf condition={(state) => state.thread.messages.length === 0}>
-                  <div className="conversation-welcome" data-testid="conversation-welcome">
-                    <p>
-                      {isExecution
-                        ? "Continue delivery with your PM. Planning context is available from the approved handoff."
-                        : "Ask your PM about the work, constraints, risks, or next steps."}
-                    </p>
-                  </div>
-                </AuiIf>
-                <ThreadPrimitive.Messages>
-                  {({ message }) =>
-                    message.role === "user" ? (
-                      <UserMessage />
-                    ) : message.role === "system" ? (
-                      <SystemMessage />
-                    ) : (
-                      <AssistantMessage />
-                    )
-                  }
-                </ThreadPrimitive.Messages>
-                <ThreadPrimitive.ViewportFooter className="conversation-composer-footer">
-                  <ThreadPrimitive.ScrollToBottom
-                    className="conversation-scroll-button"
-                    aria-label="Scroll to latest message"
+                Implementation
+              </button>
+            </nav>
+            {workTab === "plan" ? (
+              <div
+                className="workspace-tab-panel conversation-work-tab-plan"
+                data-testid="conversation-work-tab-plan"
+              >
+                {hasQc && activeQcReview ? (
+                  <button
+                    type="button"
+                    className="conversation-qc-strip"
+                    onClick={() => setWorkTab("qc")}
                   >
-                    ↓ Latest
-                  </ThreadPrimitive.ScrollToBottom>
-                  {isReadOnly ? (
-                    <output className="conversation-read-only">
-                      <strong>
-                        This {conversationKindLabel(detail.conversation.kind).toLowerCase()}{" "}
-                        conversation is {detail.conversation.status.replaceAll("_", " ")}.
-                      </strong>
-                      <span>
-                        {isPlanning
-                          ? "Its visible history remains readable. Continue work in the linked execution PM conversation."
-                          : "Its visible history remains readable, but it no longer accepts messages."}
-                      </span>
-                    </output>
-                  ) : (
-                    <ConversationComposer
-                      isExecution={isExecution}
-                      isPlanning={isPlanning}
-                      pmProvider={
-                        detail.conversation.provider === "openai" ? "openai" : "anthropic"
-                      }
-                      planIntentEnabled={planIntentEnabled}
-                      planIntentBusy={proposalBusy || busyActionId !== null}
-                      onUseAsPlan={(message, handoff) => {
-                        if (pendingSaveAction) {
-                          void confirmAction(pendingSaveAction);
-                          return;
-                        }
-                        void generatePlanProposal(message, true, handoff);
-                      }}
+                    <span>{qcStripLabel(activeQcReview)}</span>
+                    <span aria-hidden="true">→</span>
+                  </button>
+                ) : null}
+                {proposalBusy ? (
+                  <output className="conversation-active-run" data-testid="conversation-plan-busy">
+                    <span className="conversation-plan-busy-indicator" />
+                    <span>
+                      Building your plan — analyzing conversation and generating proposal…
+                    </span>
+                  </output>
+                ) : null}
+                {proposalError ? (
+                  <div className="conversation-thread-alert">
+                    <Alert testId="conversation-plan-proposal-error">{proposalError}</Alert>
+                  </div>
+                ) : null}
+                {detail.active_attempt ? (
+                  <output className="conversation-active-run">
+                    <span>
+                      A PM response is {detail.active_attempt.status.replaceAll("_", " ")}.
+                    </span>
+                    <Button className="btn-small" onClick={onRefresh}>
+                      Refresh status
+                    </Button>
+                  </output>
+                ) : null}
+                {!detail.active_attempt && detail.retryable_attempt ? (
+                  <output className="conversation-active-run conversation-retryable-run">
+                    <span>
+                      The last PM response{" "}
+                      {detail.retryable_attempt.status === "failed"
+                        ? "failed before it completed"
+                        : "was interrupted"}
+                      .
+                    </span>
+                    <RetryTerminalResponseButton
+                      onError={(message) => setStreamError(message || null)}
                     />
-                  )}
-                </ThreadPrimitive.ViewportFooter>
-              </ThreadPrimitive.Viewport>
-            </ThreadPrimitive.Root>
+                  </output>
+                ) : null}
+                {streamError ? (
+                  <div className="conversation-thread-alert">
+                    <Alert testId="conversation-stream-error">{streamError}</Alert>
+                  </div>
+                ) : null}
+                {modelError ? (
+                  <div className="conversation-thread-alert">
+                    <Alert testId="conversation-model-error">{modelError}</Alert>
+                  </div>
+                ) : null}
+                {latestAttempt || latestUsage ? (
+                  <div className="conversation-live-telemetry" aria-live="polite">
+                    {latestAttempt ? (
+                      <output className="conversation-turn-meta">
+                        PM request: {latestAttempt.status.replaceAll("_", " ")}
+                      </output>
+                    ) : null}
+                    {latestUsage ? (
+                      <output className="conversation-turn-meta" data-testid="conversation-usage">
+                        {latestUsage.input_tokens.toLocaleString()} in ·{" "}
+                        {latestUsage.output_tokens.toLocaleString()} out · $
+                        {latestUsage.cost_usd.toFixed(4)}
+                      </output>
+                    ) : null}
+                  </div>
+                ) : null}
+                {detail.handoff || detail.latest_summary ? (
+                  <section
+                    className="conversation-context-receipt"
+                    aria-label="Conversation context and usage"
+                  >
+                    {detail.handoff ? (
+                      <HandoffCard
+                        handoff={detail.handoff}
+                        currentConversationId={detail.conversation.id}
+                        onOpenConversation={onOpenConversation}
+                      />
+                    ) : null}
+                    <div className="conversation-context-indicators">
+                      {detail.latest_summary ? (
+                        <ConversationSummaryIndicator summary={detail.latest_summary} />
+                      ) : null}
+                    </div>
+                    <PlanningExcerptControl
+                      key={`${detail.conversation.id}:${detail.handoff?.id ?? "no-handoff"}`}
+                      detail={detail}
+                      onOpenConversation={onOpenConversation}
+                      onRefresh={onRefresh}
+                      onUnauthorized={onUnauthorized}
+                    />
+                  </section>
+                ) : null}
+                <ThreadPrimitive.Root className="conversation-thread-root">
+                  <ThreadPrimitive.Viewport
+                    className="conversation-thread-viewport"
+                    turnAnchor="top"
+                    scrollToBottomOnThreadSwitch
+                  >
+                    <AuiIf condition={(state) => state.thread.messages.length === 0}>
+                      <div className="conversation-welcome" data-testid="conversation-welcome">
+                        <p>
+                          {isExecution
+                            ? "Continue delivery with your PM. Planning context is available from the approved handoff."
+                            : "Ask your PM about the work, constraints, risks, or next steps."}
+                        </p>
+                      </div>
+                    </AuiIf>
+                    <ThreadPrimitive.Messages>
+                      {({ message }) =>
+                        message.role === "user" ? (
+                          <UserMessage />
+                        ) : message.role === "system" ? (
+                          <SystemMessage />
+                        ) : (
+                          <AssistantMessage />
+                        )
+                      }
+                    </ThreadPrimitive.Messages>
+                    <ThreadPrimitive.ViewportFooter className="conversation-composer-footer">
+                      <ThreadPrimitive.ScrollToBottom
+                        className="conversation-scroll-button"
+                        aria-label="Scroll to latest message"
+                      >
+                        ↓ Latest
+                      </ThreadPrimitive.ScrollToBottom>
+                      {isReadOnly ? (
+                        <output className="conversation-read-only">
+                          <strong>
+                            This {conversationKindLabel(detail.conversation.kind).toLowerCase()}{" "}
+                            conversation is {detail.conversation.status.replaceAll("_", " ")}.
+                          </strong>
+                          <span>
+                            {isPlanning
+                              ? "Its visible history remains readable. Continue work in the linked execution PM conversation."
+                              : "Its visible history remains readable, but it no longer accepts messages."}
+                          </span>
+                        </output>
+                      ) : (
+                        <ConversationComposer
+                          isExecution={isExecution}
+                          isPlanning={isPlanning}
+                          pmProvider={
+                            detail.conversation.provider === "openai" ? "openai" : "anthropic"
+                          }
+                          planIntentEnabled={planIntentEnabled}
+                          planIntentBusy={proposalBusy || busyActionId !== null}
+                          onUseAsPlan={(message, handoff) => {
+                            if (pendingSaveAction) {
+                              void confirmAction(pendingSaveAction);
+                              return;
+                            }
+                            void generatePlanProposal(message, true, handoff);
+                          }}
+                          prefillText={planComposerDraft}
+                          onPrefillConsumed={() => setPlanComposerDraft(null)}
+                        />
+                      )}
+                    </ThreadPrimitive.ViewportFooter>
+                  </ThreadPrimitive.Viewport>
+                </ThreadPrimitive.Root>
+              </div>
+            ) : null}
+            {workTab === "qc" && hasQc ? (
+              <div
+                className="workspace-tab-panel conversation-work-tab-qc"
+                data-testid="conversation-work-tab-qc"
+              >
+                <ConversationQcActivity
+                  reviews={detail.plan_reviews}
+                  planVersions={detail.plan_versions}
+                  usage={detail.usage}
+                  onDiscussFinding={discussFindingInPlan}
+                  onSwitchToPlanTab={() => setWorkTab("plan")}
+                />
+              </div>
+            ) : null}
+            {workTab === "implementation" ? (
+              <div
+                className="workspace-tab-panel conversation-work-tab-implementation"
+                data-testid="conversation-work-tab-implementation"
+              >
+                {isExecution && !isReadOnly ? (
+                  <section
+                    className="execution-conversation-controls"
+                    aria-label="Execution controls"
+                  >
+                    <details>
+                      <summary>Decisions, direction, pause, and artifacts</summary>
+                      <ExecutionActionComposer
+                        actions={[...actionContext.actions.values()]}
+                        planVersions={detail.plan_versions}
+                        busy={executionProposalBusy}
+                        error={executionProposalError}
+                        disabledReason={null}
+                        lockedRequest={lockedExecutionRequest}
+                        onPrepare={proposeExecutionAction}
+                        onRetryLocked={() =>
+                          lockedExecutionRequest
+                            ? submitExecutionAction(lockedExecutionRequest)
+                            : Promise.resolve(false)
+                        }
+                      />
+                    </details>
+                    <ExecutionActionHistory
+                      actions={[...actionContext.actions.values()].filter(
+                        (action) => !referencedActionIds.has(action.id),
+                      )}
+                      deliveryEvents={detail.action_delivery_events ?? []}
+                      effects={actionContext.effects}
+                      busyActionId={busyActionId}
+                      errors={actionErrors}
+                      onConfirm={confirmAction}
+                    />
+                    {(pmSettingsOverride ?? detail.pm_update_settings) ? (
+                      <PmUpdateControls
+                        settings={
+                          (pmSettingsOverride ??
+                            detail.pm_update_settings) as V2ConversationPmUpdateSettingsT
+                        }
+                        updates={detail.pm_updates ?? []}
+                        busy={pmSettingsBusy}
+                        error={pmSettingsError}
+                        onSave={savePmSettings}
+                      />
+                    ) : null}
+                  </section>
+                ) : null}
+              </div>
+            ) : null}
           </section>
         </ConversationEditContext.Provider>
       </ConversationActionContext.Provider>

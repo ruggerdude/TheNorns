@@ -10,8 +10,11 @@ import type {
   V2SendPlanToQcParametersT,
 } from "@norns/contracts";
 import { V2_CONVERSATION_ACTION_INTERACTION_CLASS } from "@norns/contracts";
+import { useEffect, useState } from "react";
 import { ConversationPlanDraftCard } from "./ConversationPlanCard";
-import { Badge, Button } from "./ui";
+import { QC_MODE_OPTIONS } from "./Projects";
+import { type QcModeT, fetchPlanningReviewerSettings } from "./conversationApi";
+import { Badge, Button, Select } from "./ui";
 
 const PLAN_ACTIONS = {
   save_plan_candidate: {
@@ -491,8 +494,39 @@ export function ConversationActionCard({
   effect: V2ConversationPlanActionEffectValueT | V2ConversationExecutionActionEffectValueT | null;
   deliveryEvents?: V2ConversationActionDeliveryEventT[];
   error: string | null;
-  onConfirm: (action: V2ConversationActionT) => Promise<void>;
+  /** `qcMode` is only meaningful for a proposed `send_plan_to_qc` action —
+   *  the kickoff control below (QC-PAUSE-POINTS.md "Settings: three
+   *  layers") sends the selected cadence on this same confirm call, so it
+   *  lands atomically with review creation. */
+  onConfirm: (action: V2ConversationActionT, qcMode?: QcModeT) => Promise<void>;
 }): React.ReactElement {
+  // Kickoff control (QC-PAUSE-POINTS.md "Settings: three layers", layer 2):
+  // pre-filled from the project default. Hooks run unconditionally, before
+  // the early return below, even though the control only renders for a
+  // proposed, non-skip send_plan_to_qc action.
+  const eligibleForKickoffControl =
+    action.action_type === "send_plan_to_qc" &&
+    action.status === "proposed" &&
+    (action.payload.parameters as V2SendPlanToQcParametersT).review?.mode === "qc";
+  const [qcMode, setQcMode] = useState<QcModeT>("automatic");
+  useEffect(() => {
+    if (!eligibleForKickoffControl) return;
+    let cancelled = false;
+    fetchPlanningReviewerSettings(action.project_id)
+      .then((settings) => {
+        if (!cancelled) setQcMode(settings.qc_mode);
+      })
+      .catch(() => {
+        // The project default is a pre-fill convenience only; the picker
+        // still works, just starting from the built-in "automatic" default.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Only the identity of the action/project should re-trigger this fetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eligibleForKickoffControl, action.project_id]);
+
   if (!isPlanAction(action) && !isExecutionAction(action)) {
     return (
       <article className="conversation-action-card" data-testid="conversation-action-card">
@@ -599,6 +633,30 @@ export function ConversationActionCard({
             : `QC agent: ${reviewPreference.reviewer.provider} · ${reviewPreference.reviewer.model} · ${reviewPreference.rounds} round${reviewPreference.rounds === 1 ? "" : "s"}`}
         </p>
       ) : null}
+      {eligibleForKickoffControl ? (
+        <div
+          className="conversation-action-qc-mode"
+          data-testid="conversation-action-qc-mode-control"
+        >
+          <label htmlFor={`${titleId}-qc-mode`}>QC cadence for this review</label>
+          <Select
+            id={`${titleId}-qc-mode`}
+            value={qcMode}
+            disabled={busy}
+            onChange={(event) => setQcMode(event.target.value as QcModeT)}
+          >
+            {QC_MODE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+          <p>
+            {QC_MODE_OPTIONS.find((option) => option.value === qcMode)?.help} No mode skips Gate C —
+            an unresolved must-fix disagreement always pauses for you.
+          </p>
+        </div>
+      ) : null}
       {direction ? (
         <blockquote>
           <strong>Requested direction</strong>
@@ -627,7 +685,7 @@ export function ConversationActionCard({
             variant="primary"
             disabled={busy}
             aria-label={`Confirm action: ${copy.button}`}
-            onClick={() => void onConfirm(action)}
+            onClick={() => void onConfirm(action, eligibleForKickoffControl ? qcMode : undefined)}
           >
             {busy ? "Confirming…" : `Confirm · ${copy.button}`}
           </Button>

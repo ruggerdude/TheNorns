@@ -6,6 +6,11 @@
 // only exercises the new HTTP surface: GET/PATCH/DELETE
 // /api/v2/projects/:id/planning-reviewer, and proves the write lands in the
 // exact row the existing resolution path already trusts.
+//
+// QCP-4A adds the project-layer qc_mode default and its
+// allow_unadjudicated_rebuttals escape hatch to the same row and the same
+// route (GET reports both; PATCH sets either independently of the reviewer
+// override).
 import { PGlite } from "@electric-sql/pglite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
@@ -125,7 +130,13 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       token,
     );
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ provider: "openai", model: null, mode: "automatic" });
+    expect(res.json()).toEqual({
+      provider: "openai",
+      model: null,
+      mode: "automatic",
+      qc_mode: "automatic",
+      allow_unadjudicated_rebuttals: false,
+    });
   });
 
   it("rejects an invalid body", async () => {
@@ -187,6 +198,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       provider: "openai",
       model: "gpt-5.6-luna",
       mode: "explicit",
+      qc_mode: "automatic",
+      allow_unadjudicated_rebuttals: false,
     });
 
     // The existing resolution path (PlanningRunService.reviewerSelectionOf,
@@ -214,7 +227,13 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       token,
     );
     expect(afterDelete.statusCode).toBe(200);
-    expect(afterDelete.json()).toEqual({ provider: "openai", model: null, mode: "automatic" });
+    expect(afterDelete.json()).toEqual({
+      provider: "openai",
+      model: null,
+      mode: "automatic",
+      qc_mode: "automatic",
+      allow_unadjudicated_rebuttals: false,
+    });
     await expect(planningRunService.reviewerSelectionOf(projectId)).resolves.toBeNull();
   });
 
@@ -241,6 +260,185 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       provider: "anthropic",
       model: "claude-sonnet-5",
       mode: "explicit",
+      qc_mode: "automatic",
+      allow_unadjudicated_rebuttals: false,
     });
+  });
+
+  // -----------------------------------------------------------------------
+  // QCP-4A: the project-layer qc_mode default and its
+  // allow_unadjudicated_rebuttals escape hatch, read/written through the
+  // same route/service as the reviewer override above.
+  // -----------------------------------------------------------------------
+
+  it("rejects an invalid qc_mode", async () => {
+    const res = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { qc_mode: "gated_when_convenient" },
+    );
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("defaults qc_mode to automatic and allow_unadjudicated_rebuttals to false with no row", async () => {
+    const res = await inject(
+      server,
+      "GET",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+    );
+    expect(res.json()).toMatchObject({
+      qc_mode: "automatic",
+      allow_unadjudicated_rebuttals: false,
+    });
+  });
+
+  it("PATCH round-trips qc_mode and allow_unadjudicated_rebuttals independently of the reviewer override", async () => {
+    const setMode = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { qc_mode: "gated_when_contested" },
+    );
+    expect(setMode.statusCode).toBe(204);
+
+    const afterMode = await inject(
+      server,
+      "GET",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+    );
+    expect(afterMode.json()).toEqual({
+      provider: "openai",
+      model: null,
+      mode: "automatic",
+      qc_mode: "gated_when_contested",
+      allow_unadjudicated_rebuttals: false,
+    });
+
+    // Setting the escape hatch alone must not disturb the qc_mode just set,
+    // nor require resupplying the reviewer override.
+    const setRebuttals = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { allow_unadjudicated_rebuttals: true },
+    );
+    expect(setRebuttals.statusCode).toBe(204);
+
+    const afterRebuttals = await inject(
+      server,
+      "GET",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+    );
+    expect(afterRebuttals.json()).toEqual({
+      provider: "openai",
+      model: null,
+      mode: "automatic",
+      qc_mode: "gated_when_contested",
+      allow_unadjudicated_rebuttals: true,
+    });
+
+    // And setting the reviewer override alone must not reset qc_mode back to
+    // the shipped default.
+    const setReviewer = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { provider: "openai", model: "gpt-5.6-luna" },
+    );
+    expect(setReviewer.statusCode).toBe(204);
+
+    const afterReviewer = await inject(
+      server,
+      "GET",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+    );
+    expect(afterReviewer.json()).toEqual({
+      provider: "openai",
+      model: "gpt-5.6-luna",
+      mode: "explicit",
+      qc_mode: "gated_when_contested",
+      allow_unadjudicated_rebuttals: true,
+    });
+  });
+
+  it("changing the project default does not alter an existing review's pinned qc_mode", async () => {
+    // Seed a review row pinned at kickoff with a qc_mode that differs from
+    // both the shipped default and the value the project is about to be
+    // switched to — proving the project-layer write never reaches into
+    // conversation_plan_reviews, which pins its own copy at kickoff and
+    // never re-reads planning_reviewer_settings.
+    await pg.exec(`
+      INSERT INTO users (
+        id, username, display_name, email, name, password_hash, password_hash_scheme, role, status
+      ) VALUES ('user-pin-1','pin@example.com','Pin','pin@example.com','Pin',
+                'hash','scrypt-v1','admin','active');
+      INSERT INTO work_items (id, project_id, created_by_user_id, title, objective)
+      VALUES ('work-item-pin-1','${projectId}','user-pin-1','Pinned review item','Pinned review item');
+      INSERT INTO work_conversations (id, project_id, work_item_id, created_by_user_id, kind, provider, model)
+      VALUES ('conversation-pin-1','${projectId}','work-item-pin-1','user-pin-1','planning','anthropic','claude');
+      INSERT INTO work_messages (
+        id, project_id, work_item_id, conversation_id, initiated_by_user_id,
+        actor_type, actor_id, role, sequence, parts, client_message_id, request_fingerprint
+      ) VALUES ('message-pin-1','${projectId}','work-item-pin-1','conversation-pin-1','user-pin-1',
+                'human','user-pin-1','user',1,'[{"type":"text","text":"Send this plan to QC."}]'::jsonb,
+                'client-pin-1',repeat('4',64));
+      INSERT INTO conversation_actions (
+        id, project_id, work_item_id, conversation_id, initiated_by_user_id,
+        actor_type, actor_id, source_message_id, action_type, payload, payload_hash,
+        status, confirmed_by_user_id, confirmation_idempotency_key,
+        confirmation_request_fingerprint, confirmed_at
+      ) VALUES ('action-pin-1','${projectId}','work-item-pin-1','conversation-pin-1','user-pin-1',
+                'human','user-pin-1','message-pin-1','send_plan_to_qc',
+                '{"parameters":{"plan_version_id":"plan-version-pin-1","content_hash":"${"1".repeat(64)}"}}'::jsonb,
+                repeat('3',64),'confirmed','user-pin-1','idempotency-pin-1',repeat('4',64),now());
+      INSERT INTO work_plan_versions (
+        id, project_id, work_item_id, conversation_id, created_by_user_id,
+        version, status, plan, content_hash
+      ) VALUES ('plan-version-pin-1','${projectId}','work-item-pin-1','conversation-pin-1','user-pin-1',
+                1,'in_qc','{"objective":"Pinned review item","tasks":[]}'::jsonb,repeat('1',64));
+      INSERT INTO planning_runs (
+        id, project_id, status, round, max_rounds, objective, transcript,
+        result, total_cost_usd, error, attachment_ids, worker_providers, mode,
+        requested_by, initiated_by_user_id, pm_provider, pm_model, agent_provider, agent_model
+      ) VALUES ('planning-run-pin-1','${projectId}','queued',0,3,'Pinned review item','[]'::jsonb,
+                NULL,0,NULL,'[]'::jsonb,'both','review_only','user-pin-1','user-pin-1',
+                'anthropic','claude','openai','gpt-4');
+      INSERT INTO conversation_plan_reviews (
+        id, project_id, work_item_id, conversation_id, action_id, plan_version_id,
+        planning_run_id, initiated_by_user_id, attempt_number, pm_provider, pm_model,
+        reviewer_provider, reviewer_model, usage_request_group_id, seed_plan,
+        plan_content_hash, result_plan_content_hash, context_receipt, context_manifest,
+        context_hash, qc_mode, qc_mode_source
+      ) VALUES (
+        'review-pin-1','${projectId}','work-item-pin-1','conversation-pin-1','action-pin-1',
+        'plan-version-pin-1','planning-run-pin-1','user-pin-1',1,'anthropic','claude',
+        'openai','gpt-4','review-pin-1','{"objective":"Pinned review item","tasks":[]}'::jsonb,
+        repeat('1',64),repeat('1',64),'{}'::jsonb,'{"entries":[],"context_hash":"${"2".repeat(64)}"}'::jsonb,
+        repeat('2',64),'gated_each_step','work_item'
+      );
+    `);
+
+    const patch = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { qc_mode: "gated_when_contested" },
+    );
+    expect(patch.statusCode).toBe(204);
+
+    const pinned = await pg.query<{ qc_mode: string; qc_mode_source: string }>(
+      "SELECT qc_mode, qc_mode_source FROM conversation_plan_reviews WHERE id = 'review-pin-1'",
+    );
+    expect(pinned.rows[0]).toEqual({ qc_mode: "gated_each_step", qc_mode_source: "work_item" });
   });
 });

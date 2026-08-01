@@ -21,7 +21,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationWorkspace } from "./ConversationWorkspace";
-import { makeCoreApiModule, makePlan } from "./test/fixtures";
+import { makeCoreApiModule, makePlan, makeWebUiModule } from "./test/fixtures";
 
 const projectId = "project-conversation";
 const workItemId = "work-item-1";
@@ -216,6 +216,7 @@ function planVersion(overrides: Partial<V2WorkPlanVersionT> = {}): V2WorkPlanVer
     created_by_user_id: "user-1",
     version: 1,
     status: "candidate",
+    origin: "human",
     plan: {
       plan: makePlan({
         objective: "Deliver conversation-first planning",
@@ -381,6 +382,12 @@ function planReview(overrides: Partial<V2ConversationPlanReviewT> = {}): V2Conve
     reviewer_provider: "openai",
     reviewer_model: "gpt-5.6",
     status: "converged",
+    qc_mode: "automatic",
+    qc_mode_source: "project_default",
+    allow_unadjudicated_rebuttals: false,
+    human_steered_rounds: [],
+    paused_checkpoint: null,
+    paused_at_round: null,
     rounds_completed: 1,
     max_rounds: 3,
     round_exchanges: [],
@@ -405,6 +412,7 @@ function planReview(overrides: Partial<V2ConversationPlanReviewT> = {}): V2Conve
         finding_index: 0,
         disposition: "accept",
         rationale: "Added the requested telemetry assertion.",
+        adjudication: null,
       },
     ],
     revised_plan_version_id: null,
@@ -1644,6 +1652,7 @@ describe("conversation workspace", () => {
       }),
     );
 
+    const user = userEvent.setup();
     render(
       <ConversationWorkspace
         projectId={projectId}
@@ -1652,15 +1661,20 @@ describe("conversation workspace", () => {
       />,
     );
 
+    // Plan Contract cards and their controls render in the message thread,
+    // which lives in the Plan tab.
     expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
     expect(screen.getByText("Deliver conversation-first planning")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Planning workflow" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve and start" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Change direction" })).toBeEnabled();
+
+    // QC findings, dispositions, and the terminal decision live in the QC tab.
+    await user.click(screen.getByRole("button", { name: "QC" }));
     expect(screen.getByText("Make cancellation verification explicit.")).toBeInTheDocument();
     expect(screen.getByText("Added the requested telemetry assertion.")).toBeInTheDocument();
     expect(screen.getByText("Final reviewed plan output · Version 1")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Approve plan & start" })).toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "Planning workflow" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Approve and start" })).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Change direction" })).toBeEnabled();
   });
 
   it("keeps failed QC feedback visible even when the original plan message is not on screen", async () => {
@@ -1728,6 +1742,7 @@ describe("conversation workspace", () => {
       />,
     );
 
+    await userEvent.click(await screen.findByRole("button", { name: "QC" }));
     const qcToggle = await screen.findByRole("button", { name: /QC activity/i });
     expect(qcToggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("The retry boundary is not explicit.")).toBeInTheDocument();
@@ -2670,6 +2685,7 @@ describe("conversation workspace", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
+    fireEvent.click(screen.getByRole("button", { name: "QC" }));
     expect(screen.getByText("Round 2 of 3 · waiting to start")).toBeInTheDocument();
     expect(detailCalls).toBe(1);
 
@@ -2740,6 +2756,7 @@ describe("conversation workspace", () => {
       />,
     );
 
+    await userEvent.click(await screen.findByRole("button", { name: "QC" }));
     expect(
       await screen.findByRole("button", { name: "Retry QC with retained guidance" }),
     ).toBeInTheDocument();
@@ -3234,6 +3251,86 @@ describe("conversation workspace", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("stale plan hash");
     expect(screen.getByText("Plan Contract · Version 1")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Confirm action: Send to QC" })).toBeInTheDocument();
+  });
+
+  it("sends the kickoff QC-mode selection on the confirm request and issues no follow-up PATCH", async () => {
+    // QCP-4A: the kickoff control used to pin its choice with a follow-up
+    // PATCH .../plan-reviews/:reviewId once the review already existed — a
+    // race against the worker's first checkpoint. It now rides the confirm
+    // request itself, so no PATCH should ever be issued for this flow.
+    const proposed = planAction({
+      payload: {
+        parameters: {
+          plan_version_id: "plan-version-1",
+          content_hash: "a".repeat(64),
+          review: { mode: "qc", reviewer: { provider: "openai", model: "gpt-5.6" }, rounds: 3 },
+        },
+      },
+    });
+    const review = planReview({ qc_mode: "gated_when_contested", qc_mode_source: "work_item" });
+    const history = [
+      message({
+        id: "message-action",
+        role: "assistant",
+        sequence: 1,
+        parts: [{ type: "action", action_id: proposed.id }],
+      }),
+    ];
+    const confirmationBodies: Array<{ idempotency_key: string; qc_mode?: string }> = [];
+    const requestLog: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        requestLog.push(`${init?.method ?? "GET"} ${url}`);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith("/planning-reviewer")) {
+          return Response.json({
+            provider: "openai",
+            model: null,
+            mode: "automatic",
+            qc_mode: "gated_when_contested",
+            allow_unadjudicated_rebuttals: false,
+          });
+        }
+        if (
+          url.endsWith(`/conversations/${conversationId}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return detailResponse(history, null, null, { actions: [proposed] });
+        }
+        if (url.endsWith(`/actions/${proposed.id}/confirm`) && init?.method === "POST") {
+          confirmationBodies.push(JSON.parse(String(init.body)));
+          return Response.json({
+            action: { ...proposed, status: "applied" },
+            effect: {
+              kind: "qc_started",
+              plan_review: review,
+              planning_run_id: review.planning_run_id,
+            },
+          });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    const select = await screen.findByLabelText("QC cadence for this review");
+    await waitFor(() => expect(select).toHaveValue("gated_when_contested"));
+
+    await user.click(screen.getByRole("button", { name: "Confirm action: Send to QC" }));
+
+    await waitFor(() => expect(confirmationBodies).toHaveLength(1));
+    expect(confirmationBodies[0]).toMatchObject({ qc_mode: "gated_when_contested" });
+    expect(requestLog.some((entry) => entry.includes("/plan-reviews/"))).toBe(false);
   });
 
   it("restores a failed approval kickoff outcome from durable effect data", async () => {
@@ -4722,7 +4819,11 @@ describe("conversation workspace", () => {
     ).toHaveTextContent("Should the migration run before the deployment?");
     expect(screen.getByText("phase5/wait-deep-link")).toBeInTheDocument();
     expect(screen.getAllByTestId(`human-wait-${baseWait.id}`)).toHaveLength(1);
+
+    // Execution-side controls live in the Implementation tab.
+    await user.click(screen.getByRole("button", { name: "Implementation" }));
     expect(screen.getByTestId("execution-action-composer")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Plan" }));
 
     await user.click(screen.getByRole("button", { name: "Chat options" }));
     await user.click(screen.getByRole("button", { name: "Refresh conversation" }));
@@ -4820,6 +4921,7 @@ describe("conversation workspace", () => {
 
     expect(await screen.findByText("Execution handoff loaded.")).toBeInTheDocument();
     expect(requestBodies).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "Implementation" }));
     await user.click(screen.getByText("Decisions, direction, pause, and artifacts"));
     await user.type(screen.getByRole("textbox", { name: "Task ID" }), "task-7");
     await user.type(screen.getByRole("textbox", { name: "Active run ID" }), "run-7");
@@ -4956,12 +5058,16 @@ describe("conversation workspace", () => {
       />,
     );
 
+    await user.click(await screen.findByRole("button", { name: "Implementation" }));
     expect(await screen.findByText("Exact request locked")).toBeInTheDocument();
     expect(window.sessionStorage.getItem(storageKey)).toBe(JSON.stringify(exactRequest));
 
     await user.click(screen.getByRole("button", { name: "Chat options" }));
     await user.click(screen.getByRole("button", { name: "Refresh conversation" }));
 
+    // A hard refresh remounts the conversation thread, which resets the work
+    // tab back to its Plan default.
+    await user.click(await screen.findByRole("button", { name: "Implementation" }));
     expect(await screen.findByText("Prepare execution action")).toBeInTheDocument();
     await waitFor(() => expect(window.sessionStorage.getItem(storageKey)).toBeNull());
   });
@@ -5126,6 +5232,166 @@ describe("conversation workspace", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       `/api/v2/projects/${projectId}/conversations/${foreignConversationId}`,
       expect.objectContaining({ credentials: "include" }),
+    );
+  });
+
+  it("shows two work tabs with no QC history and three once a review exists", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse([], null, null, { reviews: [] });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await screen.findByRole("button", { name: "Plan" });
+    expect(screen.getByRole("button", { name: "Implementation" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
+  });
+
+  it("shows a needs-you badge on the QC tab and a status strip on the Plan tab while a review is parked", async () => {
+    const review = planReview({
+      status: "awaiting_human",
+      paused_checkpoint: "after_review",
+      paused_at_round: 2,
+      rounds_completed: 1,
+      max_rounds: 3,
+      completed_at: null,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse([], null, null, { reviews: [review] });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    const qcTab = await screen.findByRole("button", { name: /QC.*Needs you/ });
+    expect(qcTab).toBeInTheDocument();
+
+    const strip = screen.getByRole("button", { name: /QC round 2 of 3 · paused, waiting on you/ });
+    expect(strip).toBeInTheDocument();
+
+    await user.click(strip);
+    expect(qcTab).toHaveAttribute("aria-current", "page");
+    expect(screen.getByTestId("conversation-work-tab-qc")).toBeInTheDocument();
+  });
+
+  it("never offers a qc_interim plan version as the default target for mockups", async () => {
+    const human = planVersion();
+    const interim = planVersion({
+      id: "plan-version-interim-1",
+      version: 2,
+      status: "candidate",
+      origin: "qc_interim",
+      supersedes_plan_version_id: human.id,
+      diff_from_previous: { added: ["Added Web UI task"], changed: [], removed: [] },
+      plan: {
+        plan: makePlan({ modules: [makeCoreApiModule(), makeWebUiModule()] }),
+        staffing: [
+          {
+            module_id: "core-api",
+            agent_role: "implementation",
+            provider: "openai",
+            model: "gpt-5.6",
+          },
+          {
+            module_id: "web-ui",
+            agent_role: "implementation",
+            provider: "openai",
+            model: "gpt-5.6",
+          },
+        ],
+        verification_requirements: [],
+        open_decisions: [],
+        estimated_budget: { currency: "USD", amount: 50 },
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse([], null, null, { planVersions: [human, interim] });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await user.click(await screen.findByText("UI preview", { exact: true }));
+    const taskSelect = (await screen.findByLabelText("Plan module")) as HTMLSelectElement;
+    const optionLabels = Array.from(taskSelect.options).map((option) => option.textContent);
+
+    expect(optionLabels.some((label) => label?.includes("Core API"))).toBe(true);
+    expect(optionLabels.some((label) => label?.includes("Web UI"))).toBe(false);
+  });
+
+  it("carries a finding into the Plan composer as a quote and switches to the Plan tab", async () => {
+    const version = planVersion({ status: "in_qc" });
+    const review = planReview({ plan_version_id: version.id });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse([], null, null, { planVersions: [version], reviews: [review] });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "QC" }));
+    await user.click(await screen.findByRole("button", { name: "Discuss in Plan" }));
+
+    expect(screen.getByRole("button", { name: "Plan" })).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByTestId("conversation-work-tab-qc")).not.toBeInTheDocument();
+    expect(await screen.findByRole("textbox", { name: "Message the project PM" })).toHaveValue(
+      "> Make cancellation verification explicit.\n\n",
     );
   });
 });

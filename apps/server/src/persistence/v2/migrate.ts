@@ -418,6 +418,42 @@ export const BINARY_ATTACHMENTS_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const QC_PAUSE_POINTS_MIGRATION_NAME = "0064_qc_pause_points";
+export const QC_PAUSE_POINTS_MIGRATION_URL = new URL(
+  "../../../drizzle/0064_qc_pause_points.sql",
+  import.meta.url,
+);
+
+export const QC_GATE_ATTENTION_TIMING_MIGRATION_NAME = "0065_qc_gate_attention_timing";
+export const QC_GATE_ATTENTION_TIMING_MIGRATION_URL = new URL(
+  "../../../drizzle/0065_qc_gate_attention_timing.sql",
+  import.meta.url,
+);
+
+export const QC_PAUSE_RESUME_TRANSITIONS_MIGRATION_NAME = "0066_qc_pause_resume_transitions";
+export const QC_PAUSE_RESUME_TRANSITIONS_MIGRATION_URL = new URL(
+  "../../../drizzle/0066_qc_pause_resume_transitions.sql",
+  import.meta.url,
+);
+
+export const QC_ADJUDICATION_MIGRATION_NAME = "0067_qc_adjudication";
+export const QC_ADJUDICATION_MIGRATION_URL = new URL(
+  "../../../drizzle/0067_qc_adjudication.sql",
+  import.meta.url,
+);
+
+export const QC_GATE_A_ACCEPT_NOW_MIGRATION_NAME = "0068_qc_gate_a_accept_now";
+export const QC_GATE_A_ACCEPT_NOW_MIGRATION_URL = new URL(
+  "../../../drizzle/0068_qc_gate_a_accept_now.sql",
+  import.meta.url,
+);
+
+export const QC_ATTENTION_INDEX_MIGRATION_NAME = "0069_qc_attention_index";
+export const QC_ATTENTION_INDEX_MIGRATION_URL = new URL(
+  "../../../drizzle/0069_qc_attention_index.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -700,6 +736,30 @@ export async function loadQcMarkdownArtifactsMigrationSql(): Promise<string> {
 
 export async function loadBinaryAttachmentsMigrationSql(): Promise<string> {
   return readFile(BINARY_ATTACHMENTS_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcPausePointsMigrationSql(): Promise<string> {
+  return readFile(QC_PAUSE_POINTS_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcGateAttentionTimingMigrationSql(): Promise<string> {
+  return readFile(QC_GATE_ATTENTION_TIMING_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcPauseResumeTransitionsMigrationSql(): Promise<string> {
+  return readFile(QC_PAUSE_RESUME_TRANSITIONS_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcAdjudicationMigrationSql(): Promise<string> {
+  return readFile(QC_ADJUDICATION_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcGateAAcceptNowMigrationSql(): Promise<string> {
+  return readFile(QC_GATE_A_ACCEPT_NOW_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcAttentionIndexMigrationSql(): Promise<string> {
+  return readFile(QC_ATTENTION_INDEX_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1065,6 +1125,30 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: BINARY_ATTACHMENTS_MIGRATION_NAME,
       sql: await loadBinaryAttachmentsMigrationSql(),
+    },
+    {
+      name: QC_PAUSE_POINTS_MIGRATION_NAME,
+      sql: await loadQcPausePointsMigrationSql(),
+    },
+    {
+      name: QC_GATE_ATTENTION_TIMING_MIGRATION_NAME,
+      sql: await loadQcGateAttentionTimingMigrationSql(),
+    },
+    {
+      name: QC_PAUSE_RESUME_TRANSITIONS_MIGRATION_NAME,
+      sql: await loadQcPauseResumeTransitionsMigrationSql(),
+    },
+    {
+      name: QC_ADJUDICATION_MIGRATION_NAME,
+      sql: await loadQcAdjudicationMigrationSql(),
+    },
+    {
+      name: QC_GATE_A_ACCEPT_NOW_MIGRATION_NAME,
+      sql: await loadQcGateAAcceptNowMigrationSql(),
+    },
+    {
+      name: QC_ATTENTION_INDEX_MIGRATION_NAME,
+      sql: await loadQcAttentionIndexMigrationSql(),
     },
   ];
 }

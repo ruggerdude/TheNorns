@@ -1,7 +1,7 @@
 import type { V2ConversationActionStatusT, V2ConversationActionT } from "@norns/contracts";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationActionCard } from "./ConversationActionCard";
 
 const now = "2026-07-27T12:00:00.000Z";
@@ -48,6 +48,10 @@ function action(status: V2ConversationActionStatusT): V2ConversationActionT {
   };
 }
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("conversation action card", () => {
   it("requires an explicit confirmation while a proposal is still inert", async () => {
     const onConfirm = vi.fn(async () => undefined);
@@ -68,7 +72,9 @@ describe("conversation action card", () => {
       screen.getByText("This project change happens only when you confirm this card."),
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Confirm action: Send to QC" }));
-    expect(onConfirm).toHaveBeenCalledWith(proposed);
+    // No `review` preference on this action's parameters, so the kickoff
+    // qc_mode control doesn't render and no override is passed.
+    expect(onConfirm).toHaveBeenCalledWith(proposed, undefined);
   });
 
   it("binds a mockup approval card to the exact version, manifest ID, and hash", () => {
@@ -144,4 +150,49 @@ describe("conversation action card", () => {
       expect(screen.queryByRole("button", { name: /action:/i })).not.toBeInTheDocument();
     },
   );
+
+  it("pre-fills the kickoff QC-mode control from the project default and includes it on confirm", async () => {
+    const proposed: V2ConversationActionT = {
+      ...action("proposed"),
+      payload: {
+        parameters: {
+          plan_version_id: "plan-version-1",
+          content_hash: "a".repeat(64),
+          review: {
+            mode: "qc",
+            reviewer: { provider: "openai", model: "gpt-5.6" },
+            rounds: 3,
+          },
+        },
+      },
+    };
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        provider: "openai",
+        model: null,
+        mode: "automatic",
+        qc_mode: "gated_when_contested",
+        allow_unadjudicated_rebuttals: false,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onConfirm = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+
+    render(
+      <ConversationActionCard
+        action={proposed}
+        busy={false}
+        effect={null}
+        error={null}
+        onConfirm={onConfirm}
+      />,
+    );
+
+    const select = await screen.findByLabelText("QC cadence for this review");
+    await waitFor(() => expect(select).toHaveValue("gated_when_contested"));
+
+    await user.click(screen.getByRole("button", { name: /Confirm action:/i }));
+    expect(onConfirm).toHaveBeenCalledWith(proposed, "gated_when_contested");
+  });
 });

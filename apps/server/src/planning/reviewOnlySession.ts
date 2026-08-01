@@ -10,6 +10,7 @@ import {
   type ReviewFindingT,
   ReviewFindings,
   type UsageEventT,
+  type V2QcModeT,
   V2WorkPlanContract,
   type V2WorkPlanContractT,
   mustFixCount,
@@ -17,6 +18,7 @@ import {
 import { z } from "zod";
 import { canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import { pmSystem, reviewerSystem } from "./prompts.js";
+import { type GateCFinding, detectGateC } from "./qcGates.js";
 import { PlanningError } from "./session.js";
 
 const ReviewOnlyRevision = z
@@ -34,7 +36,31 @@ export interface ReviewOnlyRound {
   revised_plan_content_hash?: string | null;
 }
 
-export interface ReviewOnlyPlanningResult {
+export type QcMode = V2QcModeT;
+
+export type ReviewOnlyCheckpoint = "after_review" | "after_revision" | "adjudication";
+
+export interface ReviewOnlyResumeState {
+  fromRound: number;
+  checkpoint: ReviewOnlyCheckpoint;
+  plan: V2WorkPlanContractT;
+  rounds: ReviewOnlyRound[];
+  // ponytail: note is accepted but not threaded into the next pass's prompt
+  // yet — wiring it to the right channel/round needs the steering machinery
+  // this phase intentionally does not build.
+  note?: { channel: "reviewer" | "pm"; message: string };
+  // QCP-3A: module_ids a human has ruled "for the reviewer" on at Gate C
+  // adjudication. The finding stands and cannot be rebutted again — enforced
+  // below by excluding these modules from Gate C entirely (detectGateC), not
+  // by rewriting whatever the PM says about them. The standing ruling itself
+  // (who decided, and why) lives in the review's `adjudications` column and
+  // is re-attached to every later disposition on the module by
+  // planWorkflow.ts's flattenReviewEvidence — this array only needs the ids.
+  // Accumulates for the life of the review, across every future resume.
+  forcedAcceptModuleIds?: string[];
+}
+
+export interface ReviewOnlyPlanningTerminalResult {
   status: "converged" | "cap_reached";
   rounds: number;
   seed_plan: V2WorkPlanContractT;
@@ -44,6 +70,20 @@ export interface ReviewOnlyPlanningResult {
   review_rounds: ReviewOnlyRound[];
   usage: UsageEventT[];
 }
+
+export interface ReviewOnlyPlanningPausedResult {
+  status: "paused";
+  paused_checkpoint: ReviewOnlyCheckpoint;
+  paused_at_round: number;
+  plan: V2WorkPlanContractT;
+  rounds: ReviewOnlyRound[];
+  gate_c_findings?: GateCFinding[];
+  usage: UsageEventT[];
+}
+
+export type ReviewOnlyPlanningResult =
+  | ReviewOnlyPlanningTerminalResult
+  | ReviewOnlyPlanningPausedResult;
 
 export interface ReviewOnlyChatEvent {
   request_id: string;
@@ -68,6 +108,15 @@ export interface ReviewOnlyPlanningOptions {
   telemetryGroupId: string;
   maxRounds: number;
   signal?: AbortSignal;
+  /** Which checkpoints stop the loop. Gate C (adjudication) always stops
+   * regardless of this setting. Defaults to "automatic" (no cadence gates). */
+  qcMode?: QcMode;
+  /** Suppresses Gate C stops for declared rebuttals only. Hollow-acceptance
+   * stops always fire. Defaults to false. */
+  allowUnadjudicatedRebuttals?: boolean;
+  /** Resume a previously paused run from persisted state instead of starting
+   * at round 1. */
+  resume?: ReviewOnlyResumeState;
   onProgress?: (rounds: readonly ReviewOnlyRound[]) => void | Promise<void>;
   onChatEvent?: (event: ReviewOnlyChatEvent) => void | Promise<void>;
 }
@@ -300,9 +349,18 @@ export async function runReviewOnlyPlanning(
     );
   }
   const seedPlan = V2WorkPlanContract.parse(options.seedPlan);
-  let plan = seedPlan;
+  const qcMode: QcMode = options.qcMode ?? "automatic";
+  const allowUnadjudicatedRebuttals = options.allowUnadjudicatedRebuttals ?? false;
+  const resume = options.resume;
+  let plan = resume ? V2WorkPlanContract.parse(resume.plan) : seedPlan;
+  // QCP-3A: module_ids ruled "for the reviewer" at Gate C. A ruling doesn't
+  // need to redo the disputed round in place — it rides the review's next
+  // ordinary reviewer+PM pass, which either doesn't re-raise the module (the
+  // dispute is moot) or does, in which case the same-module dumb match below
+  // forces the PM's disposition and the finding is never re-adjudicated.
+  const forcedAcceptModuleIds = new Set(resume?.forcedAcceptModuleIds ?? []);
   const usage: UsageEventT[] = [];
-  const rounds: ReviewOnlyRound[] = [];
+  const rounds: ReviewOnlyRound[] = resume ? [...resume.rounds] : [];
   const meter = {
     projectId: options.projectId,
     initiatedByUserId: options.initiatedByUserId,
@@ -310,50 +368,88 @@ export async function runReviewOnlyPlanning(
   const reviewerPrompt = reviewOnlySystem(reviewerSystem([]), options.frozenContext);
   const revisionSystem = reviewOnlySystem(pmSystem([]), options.frozenContext);
 
-  for (let round = 1; round <= options.maxRounds; round += 1) {
-    const reviewedPlan = plan;
-    const reviewRequestId = `${options.telemetryGroupId}:review:${round}`;
-    const review = await completeStructuredWithRepair(
-      options.reviewer,
-      {
-        system: reviewerPrompt,
-        prompt: reviewOnlyPrompt(reviewedPlan),
-        ...meter,
-        ...(options.signal ? { signal: options.signal } : {}),
-      },
-      ReviewFindings,
-      "review_findings",
-      reviewRequestId,
-      (failedUsage) => usage.push(failedUsage),
-      {
-        channel: "reviewer",
+  // Resuming at "after_review" re-enters the same round the reviewer already
+  // produced findings for; "after_revision" and "adjudication" both advance
+  // to the next round with the persisted plan. A "rule for reviewer" ruling
+  // doesn't special-case this: it rides the same plain advance, and
+  // forcedAcceptModuleIds (above) is what actually carries the ruling out.
+  const startRound = resume
+    ? resume.checkpoint === "after_review"
+      ? resume.fromRound
+      : resume.fromRound + 1
+    : 1;
+  const skipReviewerAtStart = resume?.checkpoint === "after_review";
+
+  for (let round = startRound; round <= options.maxRounds; round += 1) {
+    let reviewedPlan: V2WorkPlanContractT;
+    let findings: ReviewFindingT[];
+    let record: ReviewOnlyRound;
+
+    if (round === startRound && skipReviewerAtStart) {
+      const resumedRecord = rounds.find((candidate) => candidate.round === round);
+      if (!resumedRecord) {
+        throw new Error(
+          `resume checkpoint "after_review" expects a round ${round} entry in resume.rounds`,
+        );
+      }
+      record = resumedRecord;
+      reviewedPlan = record.reviewed_plan;
+      findings = record.findings;
+    } else {
+      reviewedPlan = plan;
+      const reviewRequestId = `${options.telemetryGroupId}:review:${round}`;
+      const review = await completeStructuredWithRepair(
+        options.reviewer,
+        {
+          system: reviewerPrompt,
+          prompt: reviewOnlyPrompt(reviewedPlan),
+          ...meter,
+          ...(options.signal ? { signal: options.signal } : {}),
+        },
+        ReviewFindings,
+        "review_findings",
+        reviewRequestId,
+        (failedUsage) => usage.push(failedUsage),
+        {
+          channel: "reviewer",
+          round,
+          ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
+          markdown: (value) => reviewerMarkdown(round, value.findings),
+        },
+      );
+      usage.push(review.usage);
+      findings = [...review.value.findings];
+      record = {
         round,
-        ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
-        markdown: (value) => reviewerMarkdown(round, value.findings),
-      },
-    );
-    usage.push(review.usage);
-    const findings = [...review.value.findings];
-    const record: ReviewOnlyRound = {
-      round,
-      reviewed_plan: reviewedPlan,
-      findings,
-      responses: null,
-      revised_plan_content_hash: null,
-    };
-    rounds.push(record);
-    await options.onProgress?.(rounds);
-    if (mustFixCount(findings) === 0) {
-      return {
-        status: "converged",
-        rounds: round,
-        seed_plan: seedPlan,
-        final_plan: plan,
-        result_plan_content_hash: canonicalSha256(plan),
-        final_plan_markdown: finalPlanMarkdown(plan),
-        review_rounds: rounds,
-        usage,
+        reviewed_plan: reviewedPlan,
+        findings,
+        responses: null,
+        revised_plan_content_hash: null,
       };
+      rounds.push(record);
+      await options.onProgress?.(rounds);
+      if (mustFixCount(findings) === 0) {
+        return {
+          status: "converged",
+          rounds: round,
+          seed_plan: seedPlan,
+          final_plan: plan,
+          result_plan_content_hash: canonicalSha256(plan),
+          final_plan_markdown: finalPlanMarkdown(plan),
+          review_rounds: rounds,
+          usage,
+        };
+      }
+      if (qcMode === "gated_each_step" || qcMode === "gated_when_contested") {
+        return {
+          status: "paused",
+          paused_checkpoint: "after_review",
+          paused_at_round: round,
+          plan: reviewedPlan,
+          rounds: [...rounds],
+          usage,
+        };
+      }
     }
 
     const revisionRequestId = `${options.telemetryGroupId}:revision:${round}`;
@@ -381,6 +477,16 @@ export async function runReviewOnlyPlanning(
       },
     );
     usage.push(revision.usage);
+    // QCP-3A "cannot be rebutted again": a finding whose module was already
+    // ruled for the reviewer can't be re-argued by the PM. Enforcement is
+    // `forcedAcceptModuleIds` excluding the module from Gate C below (and from
+    // future adjudication) — the PM's own response is left untouched here on
+    // purpose. A human ruling "must be recorded as one rather than attributed
+    // to an agent" (QC-PAUSE-POINTS.md "Outcomes"); rewriting `disposition`/
+    // `rationale` to look like the PM's own accept would commit that error in
+    // reverse. The honest record — verbatim PM response plus the standing
+    // ruling attached by module_id — is assembled downstream in
+    // planWorkflow.ts's flattenReviewEvidence.
     const answered = new Set<number>();
     for (const response of revision.value.responses) {
       if (response.finding_index >= findings.length) {
@@ -410,6 +516,52 @@ export async function runReviewOnlyPlanning(
     plan = V2WorkPlanContract.parse(revision.value.plan);
     record.revised_plan_content_hash = canonicalSha256(plan);
     await options.onProgress?.(rounds);
+
+    // Same-module dumb match against every earlier round's rebutted
+    // should_fix findings (never the current round, already excluded by
+    // slice(0, -1) since `record` is always the last entry by this point).
+    const priorRebuttedShouldFixModuleIds = rounds.slice(0, -1).flatMap((prior) =>
+      (prior.responses ?? []).flatMap((response) => {
+        if (response.disposition !== "rebut") return [];
+        const finding = prior.findings[response.finding_index];
+        return finding && finding.severity === "should_fix" && finding.module_id !== null
+          ? [finding.module_id]
+          : [];
+      }),
+    );
+    const gateCFindings = detectGateC({
+      findings: findings.map((finding, index) => ({
+        id: String(index),
+        index,
+        severity: finding.severity,
+        module_id: finding.module_id,
+        finding: finding.finding,
+        recommendation: finding.recommendation,
+      })),
+      dispositions: revision.value.responses.map((response) => ({
+        finding_id: String(response.finding_index),
+        finding_index: response.finding_index,
+        disposition: response.disposition,
+        rationale: response.rationale,
+      })),
+      planBefore: reviewedPlan,
+      planAfter: plan,
+      allowUnadjudicatedRebuttals,
+      priorRebuttedShouldFixModuleIds,
+      forcedAcceptModuleIds: [...forcedAcceptModuleIds],
+    });
+    if (gateCFindings.length > 0) {
+      return {
+        status: "paused",
+        paused_checkpoint: "adjudication",
+        paused_at_round: round,
+        plan: reviewedPlan,
+        rounds: [...rounds],
+        gate_c_findings: gateCFindings,
+        usage,
+      };
+    }
+
     if (round === options.maxRounds) {
       return {
         status: "cap_reached",
@@ -419,6 +571,17 @@ export async function runReviewOnlyPlanning(
         result_plan_content_hash: canonicalSha256(plan),
         final_plan_markdown: finalPlanMarkdown(plan),
         review_rounds: rounds,
+        usage,
+      };
+    }
+
+    if (qcMode === "gated_each_round" || qcMode === "gated_each_step") {
+      return {
+        status: "paused",
+        paused_checkpoint: "after_revision",
+        paused_at_round: round,
+        plan,
+        rounds: [...rounds],
         usage,
       };
     }

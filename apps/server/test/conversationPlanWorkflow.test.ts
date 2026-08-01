@@ -8,6 +8,7 @@ import { ConversationService } from "../src/conversations/service.js";
 import { canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
+import { PlanningRunService } from "../src/planning/runService.js";
 
 const asMigrationDatabase = (database: PGlite): V2MigrationDatabase =>
   database as unknown as V2MigrationDatabase;
@@ -107,6 +108,12 @@ describe.sequential("conversation plan workflow", () => {
     conversations = new ConversationService(new PostgresConversationRepository(transactions), {
       newId: makeId,
     });
+    const planningRunService = new PlanningRunService(transactions);
+    // QCP-4A project default, pinned to something other than the built-in
+    // "automatic"/false so a kickoff that omits qc_mode can be proven to
+    // actually read this table rather than just falling through to the
+    // column's own DB default.
+    await planningRunService.setQcModeSettings(projectId, { qcMode: "gated_each_round" });
     workflow = new ConversationPlanWorkflowService(transactions, {
       newId: makeId,
       resolveReviewModels: async (_projectId, pm) => ({
@@ -114,6 +121,7 @@ describe.sequential("conversation plan workflow", () => {
         reviewer: { provider: "openai", model: "gpt-5.6-sol" },
       }),
       runReviewNow: async () => "processed",
+      qcModeSettingsOf: (id) => planningRunService.qcModeSettingsOf(id),
     });
     changes = new ConversationPlanChangeProposalService(transactions, workflow, makeId);
   }, 60_000);
@@ -273,6 +281,66 @@ describe.sequential("conversation plan workflow", () => {
       status: "awaiting_approval",
       approved_plan_version_id: saved.version.id,
     });
+  });
+
+  // QCP-4A: the kickoff control (QC-PAUSE-POINTS.md "Settings: three
+  // layers", layer 2) pins qc_mode atomically with review creation via the
+  // confirm wire, instead of a racy follow-up PATCH once the review already
+  // exists. Both assertions read the review straight off the confirm
+  // response, before any worker tick, so they'd fail under the old
+  // follow-up-PATCH approach if the worker reached its first checkpoint
+  // first.
+  it("pins an explicit kickoff qc_mode onto the review at creation", async () => {
+    const saved = await saveCandidate("explicit-qc-mode");
+    const detail = await workflow.detail(
+      owner.id,
+      projectId,
+      saved.work_item.id,
+      saved.conversation.id,
+    );
+    const send = detail.actions.find(
+      (action) => action.action_type === "send_plan_to_qc" && action.status === "proposed",
+    );
+    if (!send) throw new Error("save must emit a send-to-QC action");
+    const sent = await workflow.confirm(owner.id, {
+      project_id: projectId,
+      work_item_id: saved.work_item.id,
+      conversation_id: saved.conversation.id,
+      action_id: send.id,
+      idempotency_key: "send-explicit-qc-mode",
+      qc_mode: "gated_each_step",
+    });
+    expect(sent.effect.kind).toBe("qc_started");
+    if (sent.effect.kind !== "qc_started") throw new Error("expected QC effect");
+    expect(sent.effect.plan_review.qc_mode).toBe("gated_each_step");
+    expect(sent.effect.plan_review.qc_mode_source).toBe("work_item");
+  });
+
+  it("falls back to the project default qc_mode when kickoff omits it", async () => {
+    const saved = await saveCandidate("default-qc-mode");
+    const detail = await workflow.detail(
+      owner.id,
+      projectId,
+      saved.work_item.id,
+      saved.conversation.id,
+    );
+    const send = detail.actions.find(
+      (action) => action.action_type === "send_plan_to_qc" && action.status === "proposed",
+    );
+    if (!send) throw new Error("save must emit a send-to-QC action");
+    const sent = await workflow.confirm(owner.id, {
+      project_id: projectId,
+      work_item_id: saved.work_item.id,
+      conversation_id: saved.conversation.id,
+      action_id: send.id,
+      idempotency_key: "send-default-qc-mode",
+    });
+    expect(sent.effect.kind).toBe("qc_started");
+    if (sent.effect.kind !== "qc_started") throw new Error("expected QC effect");
+    // Set in this file's beforeAll via setQcModeSettings — proves this reads
+    // planning_reviewer_settings rather than the column's own DB default.
+    expect(sent.effect.plan_review.qc_mode).toBe("gated_each_round");
+    expect(sent.effect.plan_review.qc_mode_source).toBe("project_default");
   });
 
   it("records an explicit QC waiver and proceeds without calling a reviewer", async () => {
