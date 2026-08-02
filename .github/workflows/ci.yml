@@ -5,9 +5,63 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  ci:
+  quality:
+    name: quality
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm run lint
+      - name: Build workspaces
+        run: pnpm -r run build
+      - name: Typecheck workspaces
+        run: pnpm -r run typecheck
+
+  non_server_unit:
+    name: non-server unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build shared contracts
+        run: pnpm --filter @norns/contracts run build
+      - name: Test contracts
+        run: pnpm --filter @norns/contracts run test
+      - name: Test adapters
+        run: pnpm --filter @norns/adapters run test
+      - name: Test runner
+        run: pnpm --filter @norns/runner run test
+      - name: Test web
+        run: pnpm --filter @norns/web run test
+      - name: Test packaging
+        run: pnpm run test:packaging
+
+  server_unit:
+    name: server tests (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     services:
       postgres:
         image: postgres:17-alpine
@@ -33,8 +87,43 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @norns/web exec playwright install --with-deps chromium webkit
-      - run: pnpm run lint
-      - run: pnpm run typecheck
-      - run: pnpm run test
-      - run: pnpm run test:e2e
+      - name: Build server workspace dependencies
+        run: pnpm --filter '@norns/server^...' run build
+      - name: Test server shard ${{ matrix.shard }}/4
+        run: pnpm --filter @norns/server exec vitest run --shard=${{ matrix.shard }}/4
+
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build shared contracts
+        run: pnpm --filter @norns/contracts run build
+      - name: Install Playwright browsers
+        run: pnpm --filter @norns/web exec playwright install --with-deps chromium webkit
+      - name: Test web end to end
+        run: pnpm --filter @norns/web run test:e2e
+
+  ci:
+    name: ci
+    if: ${{ always() }}
+    needs: [quality, non_server_unit, server_unit, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI lane to pass
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          NON_SERVER_UNIT_RESULT: ${{ needs.non_server_unit.result }}
+          SERVER_UNIT_RESULT: ${{ needs.server_unit.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+        run: |
+          test "$QUALITY_RESULT" = success
+          test "$NON_SERVER_UNIT_RESULT" = success
+          test "$SERVER_UNIT_RESULT" = success
+          test "$E2E_RESULT" = success
