@@ -548,11 +548,16 @@
   }
 
   .core-portfolio-page .core-project-row {
+    grid-template-columns: 1fr;
     padding: var(--space-4, 16px);
   }
 
   .core-project-state {
-    justify-items: end;
+    justify-items: start;
+  }
+
+  .core-project-progress {
+    grid-column: auto;
   }
 
   .core-project-identity > p {

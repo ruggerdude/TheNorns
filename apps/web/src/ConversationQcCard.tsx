@@ -1482,7 +1482,7 @@ export function ConversationQcCard({
                   </h4>
                   <p>
                     {visibleFindings.length > 0
-                      ? "The findings and the planning manager’s response are summarized immediately below."
+                      ? "The decision brief summarizes the findings and the planning manager’s response."
                       : "QC returned no requested revisions for this plan."}
                   </p>
                 </div>

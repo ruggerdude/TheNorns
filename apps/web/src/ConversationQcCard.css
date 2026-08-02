@@ -363,6 +363,12 @@
   gap: 0.25rem;
 }
 
+.conversation-qc-decision-intro {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
 .conversation-qc-brief h4,
 .conversation-qc-brief p,
 .conversation-qc-decision h4,
@@ -812,10 +818,18 @@
 
   .conversation-qc-brief > ol summary {
     grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
   }
 
   .conversation-qc-brief-disposition {
     grid-column: 2;
+  }
+
+  .conversation-qc-brief > ol summary strong {
+    overflow: visible;
+    line-height: 1.4;
+    text-overflow: clip;
+    white-space: normal;
   }
 
   .conversation-qc-decision-primary,

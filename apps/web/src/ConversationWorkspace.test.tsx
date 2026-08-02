@@ -2778,7 +2778,12 @@ describe("conversation workspace", () => {
 
     await user.type(await screen.findByRole("textbox", { name: "Change direction" }), direction);
     await user.click(screen.getByRole("button", { name: "Prepare request changes action" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("plan hash is stale");
+    expect(
+      await screen.findByText("plan hash is stale", {
+        exact: false,
+        selector: "output.conversation-action-error",
+      }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Change direction" })).toHaveValue(direction);
 
     await user.click(screen.getByRole("button", { name: "Chat options" }));
@@ -2900,7 +2905,12 @@ describe("conversation workspace", () => {
       exactDirection,
     );
     await user.click(screen.getByRole("button", { name: "Prepare request changes action" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Request status is uncertain.");
+    expect(
+      await screen.findByText("Request status is uncertain.", {
+        exact: false,
+        selector: "output.conversation-action-error",
+      }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Change direction" })).toBeDisabled();
     expect(
       screen.getByText("Direction locked until this exact request is safely retried."),
@@ -3348,7 +3358,12 @@ describe("conversation workspace", () => {
       name: "Confirm action: Send to QC",
     });
     await user.click(confirm);
-    expect(await screen.findByRole("alert")).toHaveTextContent("Confirmation status is uncertain.");
+    expect(
+      await screen.findByText("Confirmation status is uncertain.", {
+        exact: false,
+        selector: "output.conversation-action-error",
+      }),
+    ).toBeInTheDocument();
     expect(
       window.sessionStorage.getItem(`norns:conversation-action-confirmation:${proposed.id}`),
     ).toBe(confirmationBodies[0]?.idempotency_key);
@@ -3408,7 +3423,12 @@ describe("conversation workspace", () => {
     });
 
     await user.click(confirm);
-    expect(await screen.findByRole("alert")).toHaveTextContent("Confirmation status is uncertain.");
+    expect(
+      await screen.findByText("Confirmation status is uncertain.", {
+        exact: false,
+        selector: "output.conversation-action-error",
+      }),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Confirm action: Send to QC" }));
     await waitFor(() => expect(confirmationBodies).toHaveLength(2));
     expect(confirmationBodies[1]?.idempotency_key).toBe(confirmationBodies[0]?.idempotency_key);
@@ -3523,7 +3543,12 @@ describe("conversation workspace", () => {
     );
 
     await user.click(await screen.findByRole("button", { name: "Confirm action: Send to QC" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("stale plan hash");
+    expect(
+      await screen.findByText("stale plan hash", {
+        exact: false,
+        selector: "output.conversation-action-error",
+      }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Plan Contract · Version 1")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Confirm action: Send to QC" })).toBeInTheDocument();
   });

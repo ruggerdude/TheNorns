@@ -631,7 +631,7 @@ export function ExecutionTargetSettings({
 
       {loading && envelope === null ? <Spinner label="Loading execution targets…" /> : null}
       {error ? (
-        <div role="alert">
+        <div>
           <Alert>{error}</Alert>
         </div>
       ) : null}

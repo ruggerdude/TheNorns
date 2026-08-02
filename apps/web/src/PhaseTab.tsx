@@ -714,7 +714,7 @@ function LegacyPhaseTab({
   return (
     <div className="form-stack phase-journey-shell" data-testid="phase-tab">
       {error ? (
-        <div className="phase-inline-error" role="alert">
+        <div className="phase-inline-error">
           <Alert testId="phase-error">{error}</Alert>
         </div>
       ) : null}
@@ -1528,7 +1528,7 @@ function LegacyPhaseTab({
               </Button>
             ) : null}
             {executionError ? (
-              <div className="phase-execution-error" role="alert">
+              <div className="phase-execution-error">
                 <Alert testId="phase-execution-error">{executionError}</Alert>
                 <Button disabled={decisionBusy} onClick={() => void pollExecution()}>
                   Check coding status again
@@ -1644,7 +1644,7 @@ function LegacyPhaseTab({
               <h3>The plan could not be completed</h3>
               <p className="muted">The project is safe. Start a new run when you are ready.</p>
             </div>
-            <div role="alert">
+            <div>
               <Alert testId="phase-run-failed">{run?.error ?? "The planning run failed."}</Alert>
             </div>
             <Button

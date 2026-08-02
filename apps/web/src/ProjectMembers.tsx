@@ -186,7 +186,7 @@ export function ProjectMembers({
       </div>
 
       {error ? (
-        <div role="alert">
+        <div>
           <Alert>{error}</Alert>
         </div>
       ) : null}
