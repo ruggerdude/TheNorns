@@ -3103,10 +3103,6 @@ function PlanHandoffDialog({
           <div>
             <div className="eyebrow">Plan handoff</div>
             <h2 id="plan-handoff-title">How should this plan proceed?</h2>
-            <p className="plan-handoff-summary">
-              The PM uses the whole chat as context, then keeps only the latest agreed plan and
-              unresolved decisions.
-            </p>
           </div>
           <Button type="button" variant="ghost" disabled={busy} onClick={onCancel}>
             Cancel

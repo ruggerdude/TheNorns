@@ -3196,6 +3196,9 @@
 }
 
 .plan-handoff-dialog {
+  /* An open <dialog> is position:absolute in the UA sheet, which would take it
+     out of the backdrop grid and defeat place-items:center. */
+  position: static;
   width: min(38rem, 100%);
   margin: 0;
   display: grid;
@@ -3217,14 +3220,6 @@
 .plan-handoff-dialog h2 {
   margin: 0.2rem 0 0;
   font-size: var(--text-xl);
-}
-
-.plan-handoff-summary {
-  max-width: 31rem;
-  margin: 0.35rem 0 0;
-  color: var(--ink-muted);
-  font-size: var(--text-sm);
-  line-height: 1.45;
 }
 
 .plan-handoff-modes {

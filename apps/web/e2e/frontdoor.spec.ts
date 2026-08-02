@@ -849,9 +849,12 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   const planHandoffBackdropBox = await page.locator(".plan-handoff-backdrop").boundingBox();
   expect(planHandoffBackdropBox?.x).toBe(0);
   expect(planHandoffBackdropBox?.width).toBe(1920);
-  await expect(planHandoff).toContainText(
-    "The PM uses the whole chat as context, then keeps only the latest agreed plan",
-  );
+  const planHandoffBox = await planHandoff.boundingBox();
+  expect(planHandoffBox).not.toBeNull();
+  // Centered in the viewport, not pinned to a corner by the UA dialog styles.
+  expect(
+    Math.abs((planHandoffBox?.x ?? 0) + (planHandoffBox?.width ?? 0) / 2 - 1920 / 2),
+  ).toBeLessThanOrEqual(1);
   await expect(planHandoff.getByRole("combobox", { name: "Execution agent" })).toBeVisible();
   await expect(planHandoff.getByRole("combobox", { name: "QC agent" })).toBeVisible();
   await expect(planHandoff.getByRole("combobox", { name: "QC rounds" })).toBeVisible();
