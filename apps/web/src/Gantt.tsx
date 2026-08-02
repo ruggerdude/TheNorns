@@ -11,6 +11,8 @@
 // If the resume DTO ever adds real timestamps, `phase.startedAt`/`etaAt`
 // here already accept them and a future pass can switch the axis to dates
 // without changing this component's public shape.
+import "./WorkflowSurfaces.css";
+
 export interface GanttPhase {
   id: string;
   name: string;
@@ -100,7 +102,14 @@ export function Gantt({
   const today = todayPosition(phases) * 100;
 
   return (
-    <div className={`gantt${mini ? " gantt-mini" : ""}`} data-testid="gantt" data-mini={mini}>
+    <div
+      className={`gantt${mini ? " gantt-mini" : ""}`}
+      style={{
+        ["--gantt-content-width" as string]: `${Math.max(680, 240 + phases.length * 180)}px`,
+      }}
+      data-testid="gantt"
+      data-mini={mini}
+    >
       <div className="gantt-axis-row">
         <div className="gantt-corner">{mini ? "" : "Phase"}</div>
         <div className="gantt-axis">

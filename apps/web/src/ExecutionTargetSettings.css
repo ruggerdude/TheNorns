@@ -29,7 +29,7 @@
   padding: 1rem;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-2) 58%, var(--surface));
+  background: var(--surface);
 }
 
 label.execution-target-option {
@@ -38,7 +38,8 @@ label.execution-target-option {
 
 .execution-target-option.is-chosen {
   border-color: color-mix(in srgb, var(--brand-600) 64%, var(--line));
-  box-shadow: inset 3px 0 0 var(--gold);
+  background: color-mix(in srgb, var(--brand-600) 6%, var(--surface));
+  box-shadow: inset 3px 0 0 var(--brand-600);
 }
 
 .execution-target-option:focus-within {
@@ -179,10 +180,11 @@ label.execution-target-option {
   display: grid;
   gap: 1rem;
   margin-top: 1rem;
-  padding: 1rem;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-2) 66%, var(--surface));
+  padding: var(--space-4) 0 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
 }
 
 .legacy-claim-member {
@@ -223,10 +225,11 @@ label.execution-target-option {
   display: grid;
   min-width: 0;
   gap: 0.2rem;
-  padding: 0.75rem;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
+  padding: var(--space-3) 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
 }
 
 .legacy-claim-repository dt {
@@ -256,7 +259,7 @@ label.execution-target-option {
 
 @media (max-width: 620px) {
   .execution-target-option {
-    grid-template-columns: 1fr;
+    grid-template-columns: auto minmax(0, 1fr);
   }
 
   .execution-target-option > input {

@@ -179,6 +179,7 @@ function UsageChart({
       <svg
         className="usage-chart"
         viewBox={`0 0 ${width} 170`}
+        style={{ minWidth: `${width}px` }}
         role="img"
         aria-labelledby={titleId}
       >
@@ -303,125 +304,133 @@ export function UsageIntelligence({
   const exportHref = `${basePath}/export.csv${query ? `?${query}` : ""}`;
   const totals = summary ?? emptySummary;
   const phaseFocused = scope.kind === "phase" || filters.phase.trim().length > 0;
+  const filtersForm = (
+    <form
+      className="usage-filters"
+      aria-label="Usage filters"
+      onSubmit={(event) => {
+        event.preventDefault();
+        setFilters({ ...draftFilters });
+      }}
+    >
+      <div className="usage-filter-heading">
+        <div>
+          <h2>Filter usage</h2>
+          <p>Narrow the summary, trend, breakdown, activity, and exported data together.</p>
+        </div>
+      </div>
+      <Field label="From">
+        <Input
+          type="date"
+          value={draftFilters.from}
+          onChange={(event) =>
+            setDraftFilters((current) => ({ ...current, from: event.target.value }))
+          }
+        />
+      </Field>
+      <Field label="To">
+        <Input
+          type="date"
+          value={draftFilters.to}
+          onChange={(event) =>
+            setDraftFilters((current) => ({ ...current, to: event.target.value }))
+          }
+        />
+      </Field>
+      <Field label="Provider">
+        <Input
+          placeholder="Any provider"
+          value={draftFilters.provider}
+          onChange={(event) =>
+            setDraftFilters((current) => ({ ...current, provider: event.target.value }))
+          }
+        />
+      </Field>
+      <Field label="Model">
+        <Input
+          placeholder="Any model"
+          value={draftFilters.model}
+          onChange={(event) =>
+            setDraftFilters((current) => ({ ...current, model: event.target.value }))
+          }
+        />
+      </Field>
+      {scope.kind === "global" || scope.kind === "project" || scope.kind === "phase" ? (
+        <Field label="User">
+          <Input
+            placeholder="Any user ID"
+            value={draftFilters.user}
+            onChange={(event) =>
+              setDraftFilters((current) => ({ ...current, user: event.target.value }))
+            }
+          />
+        </Field>
+      ) : null}
+      {scope.kind === "global" ? (
+        <Field label="Project">
+          <Input
+            placeholder="Any project ID"
+            value={draftFilters.project}
+            onChange={(event) =>
+              setDraftFilters((current) => ({ ...current, project: event.target.value }))
+            }
+          />
+        </Field>
+      ) : null}
+      {scope.kind === "global" || scope.kind === "project" ? (
+        <Field label="Phase">
+          <Input
+            placeholder="Any phase ID"
+            value={draftFilters.phase}
+            onChange={(event) =>
+              setDraftFilters((current) => ({ ...current, phase: event.target.value }))
+            }
+          />
+        </Field>
+      ) : null}
+      <Field label="Status">
+        <Select
+          value={draftFilters.status}
+          onChange={(event) =>
+            setDraftFilters((current) => ({ ...current, status: event.target.value }))
+          }
+        >
+          <option value="">Any status</option>
+          <option value="succeeded">Succeeded</option>
+          <option value="failed">Failed</option>
+          <option value="in_progress">In progress</option>
+        </Select>
+      </Field>
+      <Field label="Trend interval">
+        <Select
+          value={draftFilters.interval}
+          onChange={(event) =>
+            setDraftFilters((current) => ({
+              ...current,
+              interval: event.target.value as UsageFilters["interval"],
+            }))
+          }
+        >
+          <option value="day">Daily</option>
+          <option value="week">Weekly</option>
+          <option value="month">Monthly</option>
+        </Select>
+      </Field>
+      <Button type="submit">Apply filters</Button>
+    </form>
+  );
 
   return (
     <section className="usage-page" data-testid="usage-intelligence">
-      {/* DESIGN R2: the per-scope H1 ("User usage", "Project usage", …) was
-          removed — the .page-subnav one level up communicates where you
-          are. Export CSV keeps its own small toolbar row. */}
       <div className="usage-toolbar">
+        <div>
+          <h2>Usage overview</h2>
+          <p>Request volume, token consumption, cost, and reliability for the selected scope.</p>
+        </div>
         <a className="btn btn-default" href={exportHref} download>
           Export CSV
         </a>
       </div>
-
-      <form
-        className="usage-filters card"
-        aria-label="Usage filters"
-        onSubmit={(event) => {
-          event.preventDefault();
-          setFilters({ ...draftFilters });
-        }}
-      >
-        <Field label="From">
-          <Input
-            type="date"
-            value={draftFilters.from}
-            onChange={(event) =>
-              setDraftFilters((current) => ({ ...current, from: event.target.value }))
-            }
-          />
-        </Field>
-        <Field label="To">
-          <Input
-            type="date"
-            value={draftFilters.to}
-            onChange={(event) =>
-              setDraftFilters((current) => ({ ...current, to: event.target.value }))
-            }
-          />
-        </Field>
-        <Field label="Provider">
-          <Input
-            placeholder="Any provider"
-            value={draftFilters.provider}
-            onChange={(event) =>
-              setDraftFilters((current) => ({ ...current, provider: event.target.value }))
-            }
-          />
-        </Field>
-        <Field label="Model">
-          <Input
-            placeholder="Any model"
-            value={draftFilters.model}
-            onChange={(event) =>
-              setDraftFilters((current) => ({ ...current, model: event.target.value }))
-            }
-          />
-        </Field>
-        {scope.kind === "global" || scope.kind === "project" || scope.kind === "phase" ? (
-          <Field label="User">
-            <Input
-              placeholder="Any user ID"
-              value={draftFilters.user}
-              onChange={(event) =>
-                setDraftFilters((current) => ({ ...current, user: event.target.value }))
-              }
-            />
-          </Field>
-        ) : null}
-        {scope.kind === "global" ? (
-          <Field label="Project">
-            <Input
-              placeholder="Any project ID"
-              value={draftFilters.project}
-              onChange={(event) =>
-                setDraftFilters((current) => ({ ...current, project: event.target.value }))
-              }
-            />
-          </Field>
-        ) : null}
-        {scope.kind === "global" || scope.kind === "project" ? (
-          <Field label="Phase">
-            <Input
-              placeholder="Any phase ID"
-              value={draftFilters.phase}
-              onChange={(event) =>
-                setDraftFilters((current) => ({ ...current, phase: event.target.value }))
-              }
-            />
-          </Field>
-        ) : null}
-        <Field label="Status">
-          <Select
-            value={draftFilters.status}
-            onChange={(event) =>
-              setDraftFilters((current) => ({ ...current, status: event.target.value }))
-            }
-          >
-            <option value="">Any status</option>
-            <option value="succeeded">Succeeded</option>
-            <option value="failed">Failed</option>
-            <option value="in_progress">In progress</option>
-          </Select>
-        </Field>
-        <Field label="Trend interval">
-          <Select
-            value={draftFilters.interval}
-            onChange={(event) =>
-              setDraftFilters((current) => ({
-                ...current,
-                interval: event.target.value as UsageFilters["interval"],
-              }))
-            }
-          >
-            <option value="day">Daily</option>
-            <option value="week">Weekly</option>
-            <option value="month">Monthly</option>
-          </Select>
-        </Field>
-        <Button type="submit">Apply filters</Button>
-      </form>
 
       {error ? (
         <Alert testId="usage-error">
@@ -434,7 +443,7 @@ export function UsageIntelligence({
       {loading && summary === null ? <Spinner label="Loading usage…" /> : null}
 
       <section className="usage-summary" aria-label="Usage summary" aria-busy={loading}>
-        <article className="card usage-stat">
+        <article className="usage-stat">
           <span>Requests</span>
           <strong>{formatInteger(totals.requests)}</strong>
           <small>
@@ -445,12 +454,12 @@ export function UsageIntelligence({
               : ` · ${formatInteger(totals.average_latency_ms)} ms average`}
           </small>
         </article>
-        <article className="card usage-stat">
+        <article className="usage-stat">
           <span>Input tokens</span>
           <strong>{formatInteger(totals.input_tokens)}</strong>
           <small>{formatInteger(totals.cache_read_tokens)} cache reads</small>
         </article>
-        <article className="card usage-stat">
+        <article className="usage-stat">
           <span>Output tokens</span>
           <strong>{formatInteger(totals.output_tokens)}</strong>
           <small>
@@ -459,7 +468,7 @@ export function UsageIntelligence({
               : `${formatInteger(totals.average_output_tokens)} average per request`}
           </small>
         </article>
-        <article className="card usage-stat">
+        <article className="usage-stat">
           <span>Cost</span>
           <strong>{formatCost(totals.cost_usd, totals.known_cost_usd)}</strong>
           <small>
@@ -472,6 +481,8 @@ export function UsageIntelligence({
           </small>
         </article>
       </section>
+
+      {filtersForm}
 
       <section className="card usage-section" aria-labelledby="usage-cost-heading">
         <div className="section-head">
@@ -496,7 +507,7 @@ export function UsageIntelligence({
           </h2>
           {loading ? <span className="muted">Refreshing…</span> : null}
         </div>
-        <div className="usage-table-wrap">
+        <section className="usage-table-wrap" aria-label="Usage breakdown table">
           <table className="usage-table">
             <thead>
               <tr>
@@ -527,7 +538,7 @@ export function UsageIntelligence({
               )}
             </tbody>
           </table>
-        </div>
+        </section>
       </section>
 
       <section className="card usage-section" aria-labelledby="usage-events-heading">
@@ -535,7 +546,7 @@ export function UsageIntelligence({
           <h2 id="usage-events-heading">Recent activity</h2>
           <span className="muted">{events.length} events</span>
         </div>
-        <div className="usage-table-wrap">
+        <section className="usage-table-wrap" aria-label="Recent usage activity table">
           <table className="usage-table">
             <thead>
               <tr>
@@ -579,7 +590,7 @@ export function UsageIntelligence({
               )}
             </tbody>
           </table>
-        </div>
+        </section>
       </section>
     </section>
   );

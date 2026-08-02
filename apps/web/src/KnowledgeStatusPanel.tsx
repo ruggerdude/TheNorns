@@ -1,6 +1,7 @@
 import type { V2CompletionGateT, V2PhaseKnowledgeStatusT } from "@norns/contracts";
 import { useEffect, useMemo, useState } from "react";
 import "./KnowledgeStatusPanel.css";
+import "./WorkflowSurfaces.css";
 import { ApiError, UnauthorizedError } from "./auth";
 import {
   type KnowledgePackageHistory,

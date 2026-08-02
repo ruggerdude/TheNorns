@@ -6,6 +6,7 @@
 // untouched for existing projects mid-way through it.
 import { useMemo, useState } from "react";
 import { Alert, Badge, Button, Select } from "./ui";
+import "./WorkflowSurfaces.css";
 
 export interface StrategyReviewObjective {
   local_id: string;
@@ -152,7 +153,7 @@ export function StrategyReview({
   }
 
   return (
-    <div data-testid="strategy-review">
+    <div className="workflow-review workflow-strategy-review" data-testid="strategy-review">
       {rounds ? (
         <div
           className={`plan-status-banner ${capped ? "plan-status-capped" : "plan-status-converged"}`}

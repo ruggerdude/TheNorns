@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Badge, Button, Field, Input, Select } from "./ui";
+import "./WorkflowSurfaces.css";
 
 export interface AcceptanceCriterion {
   id: string;
@@ -120,7 +121,7 @@ export function PlanReview({
   const anyBlockingIssues = modules.some((m) => blockingIssueCount(m) > 0);
 
   return (
-    <div data-testid="plan-review">
+    <div className="workflow-review workflow-plan-review" data-testid="plan-review">
       <div
         className={`plan-status-banner ${capped ? "plan-status-capped" : "plan-status-converged"}`}
         data-testid="plan-status"

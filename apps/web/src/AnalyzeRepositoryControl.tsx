@@ -9,6 +9,7 @@
 import { useCallback, useState } from "react";
 import { UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Button } from "./ui";
+import "./WorkflowSurfaces.css";
 
 export interface AnalyzeRepositoryResultDto {
   architecture_revision_id: string;
@@ -69,7 +70,7 @@ export function AnalyzeRepositoryControl({
   }, [projectId, onAnalyzed, onUnauthorized]);
 
   return (
-    <>
+    <div className="analyze-repository-control">
       <Button
         className="btn-small"
         variant="primary"
@@ -80,6 +81,6 @@ export function AnalyzeRepositoryControl({
         {running ? "Analyzing repository…" : "Analyze repository"}
       </Button>
       {error ? <Alert testId="analyze-repository-error">{error}</Alert> : null}
-    </>
+    </div>
   );
 }

@@ -1,62 +1,110 @@
+.side-section[data-testid="knowledge-status-panel"] {
+  overflow: hidden;
+  padding: 0;
+  border-color: var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.side-section[data-testid="knowledge-status-panel"] > summary {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid transparent;
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.side-section[data-testid="knowledge-status-panel"][open] > summary {
+  border-bottom-color: var(--line);
+}
+
+.side-section[data-testid="knowledge-status-panel"] > .side-body {
+  display: grid;
+  gap: var(--space-5);
+  padding: var(--space-5);
+}
+
 .knowledge-status-head {
   align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.knowledge-status-head h3 {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-lg);
 }
 
 .knowledge-status-summary {
   display: grid;
+  overflow: hidden;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0.65rem;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface-2) 58%, transparent);
 }
 
 .knowledge-status-stat {
   display: grid;
-  gap: 0.2rem;
-  padding: 0.75rem;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--surface-2) 52%, transparent);
+  min-height: 94px;
+  align-content: center;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  border-right: 1px solid var(--line);
+}
+
+.knowledge-status-stat:last-child {
+  border-right: 0;
 }
 
 .knowledge-status-stat strong {
-  font-size: var(--text-md);
+  color: var(--ink);
+  font-size: var(--text-xl);
+  line-height: 1.2;
 }
 
 .knowledge-status-stat span {
   color: var(--ink-muted);
   font-size: var(--text-xs);
-  line-height: 1.35;
+  line-height: 1.45;
 }
 
 .knowledge-status-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.75rem;
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
 }
 
 .knowledge-status-group {
-  padding: 0.8rem;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  min-width: 0;
+  padding: var(--space-4);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
 }
 
 .knowledge-status-group h4 {
-  margin: 0 0 0.45rem;
+  margin: 0 0 var(--space-3);
+  color: var(--ink);
   font-size: var(--text-base);
 }
 
 .knowledge-status-list {
   display: grid;
-  gap: 0.35rem;
+  gap: var(--space-2);
   margin: 0;
-  padding-left: 1.1rem;
+  padding-left: 1.15rem;
   color: var(--ink-muted);
   font-size: var(--text-sm);
-  line-height: 1.45;
+  line-height: 1.55;
 }
 
 .knowledge-gate-checks {
   display: grid;
-  gap: 0.45rem;
+  gap: var(--space-2);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -65,19 +113,54 @@
 .knowledge-gate-checks li {
   display: flex;
   align-items: flex-start;
-  gap: 0.5rem;
+  gap: var(--space-2);
   color: var(--ink-muted);
   font-size: var(--text-sm);
-  line-height: 1.45;
+  line-height: 1.5;
 }
 
 .knowledge-gate-checks strong {
-  flex: 0 0 auto;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  flex: none;
+  border-radius: 7px;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  font-size: var(--text-xs);
+}
+
+.knowledge-status-group > .muted {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.55;
 }
 
 @media (max-width: 760px) {
+  .side-section[data-testid="knowledge-status-panel"] > summary,
+  .side-section[data-testid="knowledge-status-panel"] > .side-body {
+    padding-right: var(--space-4);
+    padding-left: var(--space-4);
+  }
+
+  .knowledge-status-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .knowledge-status-summary,
   .knowledge-status-grid {
     grid-template-columns: 1fr;
+  }
+
+  .knowledge-status-stat {
+    min-height: 76px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .knowledge-status-stat:last-child {
+    border-bottom: 0;
   }
 }

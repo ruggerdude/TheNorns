@@ -3,6 +3,7 @@ import { DebateBuilder, type DebateDraft } from "./DebateBuilder";
 import { DebateRun } from "./DebateRun";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Badge, Button, Spinner } from "./ui";
+import "./WorkflowSurfaces.css";
 
 export interface AiModelOption {
   id: string;

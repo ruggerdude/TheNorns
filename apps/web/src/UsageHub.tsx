@@ -44,7 +44,11 @@ export function UsageHub({
         </header>
       ) : null}
       <main className="page-container usage-hub-body">
-        <PageHeader title="Usage" />
+        <PageHeader
+          eyebrow="Workspace reporting"
+          title="Usage"
+          lede="Understand model activity, cost, reliability, and optimization opportunities."
+        />
         <nav aria-label="Usage scope" className="page-subnav">
           {project ? (
             <button

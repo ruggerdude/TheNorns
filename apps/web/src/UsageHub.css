@@ -1,7 +1,33 @@
-/* DESIGN R2: the hub's own header/scope-switcher rules were removed —
-   the app topbar and the shared .page-subnav (styles.css) now cover that.
-   Only page-local body spacing lives here. */
 .usage-hub-body {
-  padding-top: var(--space-2);
-  padding-bottom: var(--space-7);
+  color: var(--ink, var(--text-primary, #15213a));
+  font-family: var(--font-sans, Inter, ui-sans-serif, system-ui, sans-serif);
+  max-width: 1400px;
+  padding-block: var(--space-6, 32px) var(--space-8, 48px);
+}
+
+.usage-hub-body > .page-header {
+  margin-bottom: var(--space-5, 24px);
+}
+
+.usage-hub-body > .page-subnav {
+  margin-bottom: var(--space-6, 32px);
+}
+
+@media (max-width: 640px) {
+  .usage-hub-body {
+    padding-block: var(--space-4, 16px) var(--space-6, 32px);
+  }
+
+  .usage-hub-body > .page-subnav {
+    flex-wrap: nowrap;
+    margin-bottom: var(--space-5, 24px);
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+  }
+
+  .usage-hub-body > .page-subnav > button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
 }

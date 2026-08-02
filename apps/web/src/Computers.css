@@ -1,10 +1,19 @@
 .computers-page {
-  padding-top: clamp(1.6rem, 4vw, 3.5rem);
-  padding-bottom: 6rem;
+  max-width: var(--container);
+  padding-top: var(--space-6);
+  padding-bottom: var(--space-8);
 }
 
 .embedded-computers-page {
   padding-top: 0;
+}
+
+.embedded-computers-page .page-header {
+  margin-bottom: var(--space-5);
+}
+
+.embedded-computers-page .page-header h1 {
+  font-size: var(--text-xl);
 }
 
 .computers-installer {
@@ -13,7 +22,8 @@
   justify-content: space-between;
   gap: 1.5rem;
   margin-bottom: clamp(1.25rem, 2.5vw, 2rem);
-  padding: clamp(1rem, 2vw, 1.4rem);
+  padding: var(--space-5);
+  box-shadow: none;
 }
 
 .computers-installer h2,
@@ -45,7 +55,7 @@
 
 .computers-layout {
   display: grid;
-  grid-template-columns: minmax(18rem, 0.78fr) minmax(28rem, 1.35fr);
+  grid-template-columns: minmax(19rem, 0.72fr) minmax(30rem, 1.4fr);
   align-items: start;
   gap: clamp(1rem, 2.4vw, 2rem);
 }
@@ -53,6 +63,11 @@
 .computers-inventory,
 .computers-detail-region {
   min-width: 0;
+}
+
+.computers-detail-region {
+  position: sticky;
+  top: var(--space-5);
 }
 
 .computers-section-heading,
@@ -90,7 +105,7 @@
   background: color-mix(in srgb, var(--surface) 95%, transparent);
   color: var(--ink);
   text-align: left;
-  box-shadow: var(--shadow-sm);
+  box-shadow: none;
   cursor: pointer;
 }
 
@@ -107,7 +122,8 @@
 
 .computer-card.is-selected {
   border-color: color-mix(in srgb, var(--brand-600) 62%, var(--line));
-  box-shadow: inset 3px 0 0 var(--gold), var(--shadow-sm);
+  background: color-mix(in srgb, var(--brand-600) 6%, var(--surface));
+  box-shadow: inset 3px 0 0 var(--brand-600);
 }
 
 .computer-card.is-revoked,
@@ -137,7 +153,8 @@
 }
 
 .computer-card-head strong {
-  font-size: var(--text-md);
+  font-size: var(--text-base);
+  font-weight: 600;
 }
 
 .computer-card-head small,
@@ -190,7 +207,8 @@
 .computer-detail {
   display: grid;
   gap: 1.2rem;
-  padding: clamp(1rem, 2.2vw, 1.5rem);
+  padding: var(--space-5);
+  box-shadow: none;
 }
 
 .computer-detail-header {
@@ -202,7 +220,8 @@
 
 .computer-detail-header h2 {
   margin: 0.15rem 0 0.2rem;
-  font-size: clamp(1.5rem, 3vw, 2rem);
+  font-size: var(--text-xl);
+  font-weight: 600;
 }
 
 .computer-detail-header p {
@@ -236,10 +255,11 @@
 .computer-management-form {
   display: grid;
   gap: 0.85rem;
-  padding: 1rem;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
+  padding: var(--space-4) 0 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
 }
 
 .computer-revoke-form {
@@ -361,7 +381,7 @@
   padding: 0.85rem;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-2) 62%, transparent);
+  background: var(--surface);
 }
 
 .computer-repository.is-revoked {
@@ -434,11 +454,30 @@
   }
 
   .computers-detail-region {
+    position: static;
     scroll-margin-top: 1rem;
   }
 }
 
+@media (max-width: 1280px) {
+  .embedded-computers-page .computers-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .embedded-computers-page .computers-detail-region {
+    position: static;
+  }
+}
+
 @media (max-width: 640px) {
+  .computers-page {
+    padding-top: var(--space-4);
+  }
+
+  .computers-installer,
+  .computer-detail {
+    padding: var(--space-4);
+  }
   .computers-installer {
     align-items: stretch;
     flex-direction: column;

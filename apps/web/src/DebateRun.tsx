@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DebateActor, DebateDto } from "./Debates";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Badge, Button, Field, Select, Spinner, TextArea } from "./ui";
+import "./WorkflowSurfaces.css";
 
 interface DebateEvent {
   id: string;

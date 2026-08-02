@@ -11,6 +11,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { OrthogonalEdge } from "./OrthogonalEdge";
+import "./WorkflowSurfaces.css";
 
 const graphEdgeTypes: EdgeTypes = { orthogonal: OrthogonalEdge };
 
@@ -38,19 +39,21 @@ export function GraphCanvas({
   }));
 
   return (
-    <ReactFlow
-      nodes={renderedNodes}
-      edges={edges}
-      edgeTypes={graphEdgeTypes}
-      connectionLineType={ConnectionLineType.SmoothStep}
-      onConnect={editable ? onConnect : undefined}
-      onEdgesDelete={editable ? onEdgesDelete : undefined}
-      onNodeClick={(_event, node) => onNodeSelect(node.id)}
-      nodesConnectable={editable}
-      fitView
-    >
-      <Background color={theme === "light" ? "#c5ccd3" : "#353c44"} gap={24} size={1} />
-      <Controls />
-    </ReactFlow>
+    <div className="workflow-graph-canvas">
+      <ReactFlow
+        nodes={renderedNodes}
+        edges={edges}
+        edgeTypes={graphEdgeTypes}
+        connectionLineType={ConnectionLineType.SmoothStep}
+        onConnect={editable ? onConnect : undefined}
+        onEdgesDelete={editable ? onEdgesDelete : undefined}
+        onNodeClick={(_event, node) => onNodeSelect(node.id)}
+        nodesConnectable={editable}
+        fitView
+      >
+        <Background color={theme === "light" ? "#c5ccd3" : "#353c44"} gap={24} size={1} />
+        <Controls />
+      </ReactFlow>
+    </div>
   );
 }

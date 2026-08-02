@@ -1,5 +1,6 @@
 import { OwnedDeviceProjection, type OwnedDeviceProjectionT } from "@norns/contracts";
 import { Suspense, lazy, useCallback, useEffect, useState } from "react";
+import "./UtilitySurfaces.css";
 import { ArchivedProjectsSettings, GlobalRulesSettings } from "./WorkspaceManagementSettings";
 import { type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Badge, Brand, Button, Field, Input, PageHeader, Select, Spinner } from "./ui";

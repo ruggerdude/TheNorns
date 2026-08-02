@@ -1,0 +1,1144 @@
+/* Workflow surfaces share one restrained, readable presentation layer.
+   These rules intentionally live outside the legacy global sheet so the
+   graph, timeline, review, and deliberation tools can evolve as a unit. */
+
+/* Graph ------------------------------------------------------------------ */
+.workflow-graph-canvas {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+}
+
+.workflow-graph-canvas .react-flow {
+  min-height: inherit;
+}
+
+.workflow-graph-canvas .react-flow__pane {
+  cursor: default;
+}
+
+.workflow-graph-canvas .react-flow__controls {
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  box-shadow: var(--shadow-sm);
+}
+
+.workflow-graph-canvas .react-flow__controls-button {
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  background: transparent;
+}
+
+.workflow-graph-canvas .react-flow__controls-button:hover {
+  background: var(--surface-2);
+}
+
+.workflow-graph-canvas .react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+/* Timeline --------------------------------------------------------------- */
+.gantt {
+  --lc: clamp(170px, 18vw, 240px);
+  width: 100%;
+  overflow-x: auto;
+  border-color: var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.gantt > * {
+  min-width: var(--gantt-content-width, 680px);
+}
+
+.gantt-axis-row {
+  grid-template-columns: var(--lc) minmax(510px, 1fr);
+  min-height: 56px;
+  background: color-mix(in srgb, var(--surface-2) 72%, var(--surface));
+}
+
+.gantt-corner {
+  padding-inline: var(--space-4);
+  border-right-color: var(--line);
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+}
+
+.gantt-axis {
+  height: 56px;
+}
+
+.gantt-gate {
+  top: 14px;
+  gap: 6px;
+}
+
+.gantt-gate .dia {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+}
+
+.gantt-gate .glbl {
+  max-width: 112px;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.gantt-row {
+  grid-template-columns: var(--lc) minmax(510px, 1fr);
+  height: 50px;
+}
+
+.gantt-lbl {
+  gap: var(--space-2);
+  padding-inline: var(--space-4);
+  border-right-color: var(--line);
+  font-size: var(--text-sm);
+}
+
+.gantt-lbl .pnum {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  color: var(--surface);
+  background: var(--ink);
+  font: 600 var(--text-xs) Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.gantt-lbl .pnum.q {
+  color: var(--ink-muted);
+  background: var(--surface-2);
+}
+
+.gantt-lbl .pname {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.gantt-lbl .acount {
+  padding: 2px 7px;
+  border-color: var(--line);
+  color: var(--ink-muted);
+  background: var(--surface-2);
+  font: 500 var(--text-xs) Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.gantt-plot {
+  background-image: repeating-linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--line) 70%, transparent) 0 1px,
+    transparent 1px 25%
+  );
+}
+
+.gantt-bar {
+  height: 18px;
+  border-radius: 6px;
+}
+
+.gbar-pct {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.gantt-today {
+  width: 1px;
+  background: var(--brand-600);
+}
+
+.gantt-today::before {
+  top: -22px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: var(--brand-900);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.gantt-legend {
+  gap: var(--space-4);
+  margin: var(--space-3) var(--space-4);
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.gantt-empty {
+  padding: var(--space-4);
+  border-color: var(--line-strong);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+}
+
+.gantt-mini {
+  --lc: 30px;
+  overflow: hidden;
+  border-radius: var(--radius);
+}
+
+.gantt-mini > * {
+  min-width: 0;
+}
+
+.gantt-mini .gantt-axis-row,
+.gantt-mini .gantt-row {
+  grid-template-columns: var(--lc) minmax(0, 1fr);
+}
+
+.gantt-mini .gantt-axis-row {
+  min-height: 28px;
+}
+
+.gantt-mini .gantt-axis {
+  height: 28px;
+}
+
+.gantt-mini .gantt-gate {
+  top: 7px;
+}
+
+.gantt-mini .gantt-row {
+  height: 22px;
+}
+
+.gantt-mini .gantt-lbl {
+  padding: 0;
+}
+
+.gantt-mini .gantt-lbl .pnum {
+  width: 17px;
+  height: 17px;
+}
+
+.gantt-mini .gantt-bar {
+  height: 9px;
+}
+
+/* Debates ---------------------------------------------------------------- */
+.debates-page {
+  width: 100%;
+  max-width: var(--container);
+  margin-inline: auto;
+  padding: clamp(var(--space-5), 3vw, var(--space-7)) clamp(var(--space-4), 2.5vw, var(--space-6));
+  color: var(--ink);
+}
+
+.debates-page.is-embedded,
+.workspace-tab-panel > .debates-page {
+  max-width: none;
+  padding: 0;
+}
+
+.debates-head {
+  align-items: flex-start;
+  gap: var(--space-5);
+  margin-bottom: var(--space-6);
+}
+
+.debates-head > div:first-child {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.debates-head h2,
+.debates-head h3 {
+  margin: 0;
+  font-size: var(--text-2xl);
+  line-height: 1.18;
+  letter-spacing: -0.03em;
+}
+
+.debates-head p {
+  max-width: 720px;
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: var(--text-base);
+  line-height: 1.55;
+}
+
+.debates-head .actions {
+  flex: none;
+}
+
+.debates-empty {
+  display: grid;
+  min-height: 190px;
+  place-content: center;
+  padding: var(--space-6);
+  border-color: var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  color: var(--ink-muted);
+}
+
+.debates-empty p {
+  max-width: 520px;
+  margin: var(--space-2) auto 0;
+}
+
+.debate-list,
+.debate-actor-list,
+.debate-event-list,
+.debate-participant-list,
+.debate-finding-list {
+  gap: var(--space-3);
+}
+
+.debate-list-item {
+  gap: var(--space-5);
+  min-height: 120px;
+  padding: var(--space-5);
+  border-color: var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.debate-list-item > div:first-child {
+  min-width: 0;
+}
+
+.debate-list-item h3 {
+  margin: var(--space-3) 0 var(--space-1);
+  font-size: var(--text-lg);
+}
+
+.debate-list-item p {
+  max-width: 800px;
+  margin: 0 0 var(--space-2);
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+}
+
+.debate-list-meta {
+  gap: var(--space-2);
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.debate-builder-layout {
+  grid-template-columns: minmax(0, 0.9fr) minmax(430px, 1.1fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+
+.debate-builder .card,
+.debate-actors-section,
+.debate-actor-editor,
+.debate-run .card {
+  border-color: var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}
+
+.debate-setup-card,
+.debate-policy-card {
+  gap: var(--space-4);
+  padding: var(--space-5);
+}
+
+.debate-builder-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-4);
+}
+
+.debate-policy-summary {
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
+  background: var(--surface-2);
+  font-size: var(--text-sm);
+}
+
+.debate-actors-section {
+  gap: var(--space-4);
+  margin: var(--space-6) 0 var(--space-5);
+  padding: var(--space-5);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 76%, transparent);
+}
+
+.debate-actor-editor {
+  gap: var(--space-4);
+  padding: var(--space-5);
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.debate-actor-editor > .section-head {
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.debate-specialists {
+  gap: var(--space-5);
+}
+
+.debate-specialists > div > .btn {
+  min-height: 84px;
+  border-color: var(--line-strong);
+  border-radius: var(--radius-lg);
+  color: var(--ink-muted);
+  background: color-mix(in srgb, var(--surface) 68%, transparent);
+}
+
+.debate-builder-actions {
+  position: sticky;
+  z-index: 10;
+  bottom: var(--space-3);
+  gap: var(--space-2);
+  margin-top: var(--space-6);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(16px);
+}
+
+.debate-toggle {
+  min-height: 36px;
+  gap: var(--space-2);
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.debate-run-stats {
+  margin-bottom: var(--space-5);
+  border-color: var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.debate-run-stats > div {
+  min-height: 88px;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: var(--space-4) var(--space-5);
+}
+
+.debate-run-stats strong {
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.debate-run-stats span {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+}
+
+.debate-run-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+  gap: var(--space-5);
+}
+
+.debate-transcript > .card,
+.debate-final-output,
+.debate-comparison,
+.debate-run-rail > .card {
+  padding: var(--space-5);
+}
+
+.debate-run-rail {
+  top: var(--space-4);
+  gap: var(--space-4);
+}
+
+.debate-run-rail h3,
+.debate-transcript h3 {
+  margin: var(--space-1) 0;
+  font-size: var(--text-lg);
+}
+
+.debate-event-list {
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--line);
+}
+
+.debate-event {
+  gap: var(--space-3);
+  padding: var(--space-5) 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-left: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.debate-event.event-turn_failed,
+.debate-event.event-debate_failed {
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--danger);
+}
+
+.debate-event.event-synthesis_completed,
+.debate-event.event-debate_completed {
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--success);
+}
+
+.debate-event-head {
+  align-items: flex-start;
+}
+
+.debate-event-head > div {
+  gap: var(--space-2);
+}
+
+.debate-event-head time,
+.debate-event-attribution,
+.debate-event > .muted {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.debate-event-content,
+.debate-final-output p,
+.debate-comparison-source article p {
+  font-size: var(--text-sm);
+  line-height: 1.65;
+}
+
+.debate-artifact-row,
+.debate-finding-list > div {
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.debate-finding-list > div {
+  font-size: var(--text-sm);
+}
+
+.debate-revision-diff {
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface-2) 58%, transparent);
+}
+
+.debate-revision-diff p {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+}
+
+.debate-budget-meter {
+  gap: var(--space-2);
+}
+
+.debate-budget-meter > div:first-child {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.debate-budget-meter strong {
+  color: var(--ink);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-weight: 600;
+}
+
+.debate-meter-track {
+  height: 8px;
+  background: var(--surface-2);
+}
+
+.debate-participant-list > article {
+  gap: var(--space-1);
+  padding: var(--space-3) 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.debate-participant-list > article:last-child {
+  border-bottom: 0;
+}
+
+.debate-participant-list span,
+.debate-participant-list small,
+.debate-findings {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.debate-controls .actions {
+  grid-template-columns: 1fr;
+}
+
+.debate-intervention > .btn {
+  width: 100%;
+}
+
+.debate-final-output,
+.debate-comparison {
+  margin-top: var(--space-5);
+}
+
+/* Plan and strategy review ---------------------------------------------- */
+.workflow-review {
+  display: grid;
+  width: 100%;
+  gap: var(--space-4);
+  color: var(--ink);
+}
+
+.workflow-review > .muted {
+  max-width: 760px;
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.workflow-review .plan-status-banner {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.workflow-review .plan-status-banner > .badge {
+  margin-left: auto;
+}
+
+.workflow-review .plan-status-converged {
+  border-color: color-mix(in srgb, var(--success) 34%, var(--line));
+  background: color-mix(in srgb, var(--success) 7%, var(--surface));
+}
+
+.workflow-review .plan-status-capped {
+  border-color: color-mix(in srgb, var(--danger) 36%, var(--line));
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface));
+}
+
+.workflow-review .plan-meta-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  padding: 0 var(--space-1);
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.workflow-review > .meta {
+  overflow-wrap: anywhere;
+  padding: 0 var(--space-1);
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.workflow-review .agent-identity-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.workflow-review .agent-identity-card {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface-2) 52%, transparent);
+}
+
+.workflow-review .agent-identity-card strong {
+  font-size: var(--text-base);
+}
+
+.workflow-review .agent-identity-card > span:last-child {
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.workflow-review .planning-qc-history {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.workflow-review .planning-qc-history > summary {
+  min-height: 52px;
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.workflow-review .qc-timeline {
+  display: grid;
+  gap: 0;
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+.workflow-review .qc-review {
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--line);
+}
+
+.workflow-review .planning-finding,
+.workflow-review .outstanding-item {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+}
+
+.workflow-review .planning-finding p,
+.workflow-review .outstanding-item p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.workflow-review .outstanding-panel {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--line));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--danger) 5%, var(--surface));
+  box-shadow: none;
+}
+
+.workflow-review .review-module {
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  border-color: var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.workflow-review .review-module > summary {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: transparent;
+}
+
+.workflow-review .review-module[open] > summary {
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-2) 48%, transparent);
+}
+
+.workflow-review .review-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.workflow-review .review-title > div:first-child {
+  min-width: 0;
+}
+
+.workflow-review .review-title > div:first-child > strong {
+  font-size: var(--text-base);
+}
+
+.workflow-review .dependency-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.workflow-review .review-body {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.workflow-review .criterion {
+  display: grid;
+  gap: var(--space-3);
+  padding: 0 0 var(--space-4);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.workflow-review .criterion-grid {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.36fr) minmax(0, 1fr);
+  gap: var(--space-3);
+}
+
+.workflow-review > .actions {
+  position: sticky;
+  z-index: 10;
+  bottom: var(--space-3);
+  justify-content: flex-end;
+  margin-top: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(16px);
+}
+
+.workflow-review .strategy-objectives {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.workflow-review .phase-card {
+  min-width: 0;
+  padding: var(--space-4);
+  border-color: var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.workflow-review .ph-top {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.workflow-review .ph-top h4 {
+  margin: 0;
+  font-size: var(--text-base);
+}
+
+.workflow-review .phase-num {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  flex: none;
+  border-radius: 8px;
+  color: #fff;
+  background: var(--brand-900);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.workflow-review .ph-tasks {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.workflow-review .ph-task {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.workflow-review .staff-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.workflow-review .staff {
+  width: 100%;
+  min-width: 880px;
+  border-collapse: collapse;
+}
+
+.workflow-review .staff th:first-child,
+.workflow-review .staff td:first-child {
+  width: 28%;
+  min-width: 210px;
+}
+
+.workflow-review .staff th {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-muted);
+  background: color-mix(in srgb, var(--surface-2) 66%, transparent);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.workflow-review .staff td {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.workflow-review .staff tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.workflow-review .tg-name {
+  color: var(--ink);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.workflow-review .tg-role {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.workflow-review .mini-select {
+  min-width: 180px;
+}
+
+.workflow-review .plan-foot {
+  position: static;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.workflow-review .pf-note {
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+/* Compact workflow actions ---------------------------------------------- */
+.start-phase-control,
+.analyze-repository-control {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+}
+
+.start-phase-control > .muted,
+.analyze-repository-control > .muted {
+  flex: 1 1 220px;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.start-phase-control > .alert,
+.analyze-repository-control > .alert {
+  flex: 1 0 100%;
+  margin: 0;
+}
+
+.start-phase-control > .btn,
+.analyze-repository-control > .btn {
+  min-height: 40px;
+  padding-inline: var(--space-4);
+}
+
+/* Narrow layouts -------------------------------------------------------- */
+@media (max-width: 960px) {
+  .debate-builder-layout,
+  .debate-run-layout,
+  .debate-comparison-source {
+    grid-template-columns: 1fr;
+  }
+
+  .debate-run-rail {
+    position: static;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .debate-run-rail > .card {
+    min-width: 0;
+  }
+
+  .workflow-review .strategy-objectives {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .workflow-graph-canvas {
+    border-right: 0;
+    border-left: 0;
+    border-radius: 0;
+  }
+
+  .gantt {
+    --lc: 210px;
+    border-radius: var(--radius);
+  }
+
+  .gantt-row {
+    height: auto;
+    min-height: 58px;
+  }
+
+  .gantt-lbl .pname {
+    overflow: visible;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  .gantt-gate .glbl {
+    max-width: 160px;
+  }
+
+  .gantt-mini > * {
+    min-width: 0;
+  }
+
+  .gantt-mini {
+    --lc: 30px;
+  }
+
+  .gantt-mini .gantt-row {
+    height: 22px;
+    min-height: 22px;
+  }
+
+  .debates-page {
+    padding: var(--space-5) var(--space-3) var(--space-7);
+  }
+
+  .debates-page.is-embedded,
+  .workspace-tab-panel > .debates-page {
+    padding: 0;
+  }
+
+  .debates-head,
+  .debate-list-item,
+  .debate-event-head,
+  .workflow-review .review-title,
+  .workflow-review .plan-foot {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .debates-head {
+    margin-bottom: var(--space-5);
+  }
+
+  .debates-head h2,
+  .debates-head h3 {
+    font-size: var(--text-xl);
+  }
+
+  .debates-head .actions,
+  .debates-head .actions > .btn,
+  .debate-list-item > .btn,
+  .debate-builder-actions > .btn,
+  .workflow-review > .actions > .btn,
+  .workflow-review .plan-actions,
+  .workflow-review .plan-actions > .btn {
+    width: 100%;
+  }
+
+  .debate-list-item {
+    min-height: 0;
+    padding: var(--space-4);
+  }
+
+  .debate-builder-grid,
+  .debate-specialists,
+  .debate-run-rail,
+  .workflow-review .agent-identity-grid,
+  .workflow-review .strategy-objectives,
+  .workflow-review .criterion-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .debate-setup-card,
+  .debate-policy-card,
+  .debate-actors-section,
+  .debate-actor-editor,
+  .debate-transcript > .card,
+  .debate-final-output,
+  .debate-comparison,
+  .debate-run-rail > .card {
+    padding: var(--space-4);
+  }
+
+  .debate-run-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .debate-run-stats > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .debate-run-stats > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .debate-builder-actions,
+  .workflow-review > .actions {
+    bottom: 0;
+    margin-inline: calc(var(--space-3) * -1);
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+
+  .workflow-review .plan-status-banner {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .workflow-review .plan-status-banner > .badge {
+    margin-left: 0;
+  }
+
+  .workflow-review .review-module > summary,
+  .workflow-review .review-body {
+    padding: var(--space-3);
+  }
+
+  .workflow-review .review-title > .actions {
+    justify-content: flex-start;
+  }
+
+  .workflow-review .plan-actions {
+    display: block;
+  }
+
+  .start-phase-control,
+  .analyze-repository-control {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .start-phase-control > .btn,
+  .analyze-repository-control > .btn {
+    width: 100%;
+  }
+}

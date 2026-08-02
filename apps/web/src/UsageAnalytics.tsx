@@ -205,71 +205,86 @@ export function UsageAnalytics({
     return () => controller.abort();
   }, [load]);
 
+  const filtersForm = (
+    <form
+      className="usage-analytics-filters"
+      aria-label="Analytics filters"
+      onSubmit={(event) => {
+        event.preventDefault();
+        setFilters({ ...draft });
+      }}
+    >
+      <div className="usage-filter-heading">
+        <div>
+          <h2>Filter analytics</h2>
+          <p>Compare a period or focus optimization signals on one provider.</p>
+        </div>
+      </div>
+      <Field label="From">
+        <Input
+          type="date"
+          value={draft.from}
+          onChange={(event) => setDraft((current) => ({ ...current, from: event.target.value }))}
+        />
+      </Field>
+      <Field label="To">
+        <Input
+          type="date"
+          value={draft.to}
+          onChange={(event) => setDraft((current) => ({ ...current, to: event.target.value }))}
+        />
+      </Field>
+      <Field label="Provider">
+        <Input
+          placeholder="All providers"
+          value={draft.provider}
+          onChange={(event) =>
+            setDraft((current) => ({ ...current, provider: event.target.value }))
+          }
+        />
+      </Field>
+      <Field label="Hot spot">
+        <Select
+          value={draft.dimension}
+          onChange={(event) =>
+            setDraft((current) => ({
+              ...current,
+              dimension: event.target.value as HotSpotDimension,
+            }))
+          }
+        >
+          <option value="provider">Provider</option>
+          <option value="model">Model</option>
+          <option value="request_type">Request type</option>
+          <option value="project">Project</option>
+          <option value="phase">Phase</option>
+          <option value="user">User</option>
+        </Select>
+      </Field>
+      <Button type="submit">Apply filters</Button>
+    </form>
+  );
+
   return (
     <section className="usage-analytics-page" data-testid="usage-analytics">
-      <form
-        className="usage-analytics-filters card"
-        aria-label="Analytics filters"
-        onSubmit={(event) => {
-          event.preventDefault();
-          setFilters({ ...draft });
-        }}
-      >
-        <Field label="From">
-          <Input
-            type="date"
-            value={draft.from}
-            onChange={(event) => setDraft((current) => ({ ...current, from: event.target.value }))}
-          />
-        </Field>
-        <Field label="To">
-          <Input
-            type="date"
-            value={draft.to}
-            onChange={(event) => setDraft((current) => ({ ...current, to: event.target.value }))}
-          />
-        </Field>
-        <Field label="Provider">
-          <Input
-            placeholder="All providers"
-            value={draft.provider}
-            onChange={(event) =>
-              setDraft((current) => ({ ...current, provider: event.target.value }))
-            }
-          />
-        </Field>
-        <Field label="Hot spot">
-          <Select
-            value={draft.dimension}
-            onChange={(event) =>
-              setDraft((current) => ({
-                ...current,
-                dimension: event.target.value as HotSpotDimension,
-              }))
-            }
-          >
-            <option value="provider">Provider</option>
-            <option value="model">Model</option>
-            <option value="request_type">Request type</option>
-            <option value="project">Project</option>
-            <option value="phase">Phase</option>
-            <option value="user">User</option>
-          </Select>
-        </Field>
-        <Button type="submit">Apply filters</Button>
-      </form>
+      <div className="usage-toolbar usage-analytics-intro">
+        <div>
+          <h2>Optimization signals</h2>
+          <p>Compare reliability and spend, then act on evidence-backed opportunities.</p>
+        </div>
+      </div>
 
       {error ? <Alert testId="usage-analytics-error">{error}</Alert> : null}
       {loading && trend === null ? <Spinner label="Loading analytics…" /> : null}
 
       {trend ? (
         <section className="usage-analytics-summary" aria-label="Analytics summary">
-          <article className="card usage-stat">
+          <article className="usage-stat">
             <span>Requests</span>
             <strong>{trend.current.requests.toLocaleString()}</strong>
             <small>{change(trend.change.requests_percent)}</small>
           </article>
-          <article className="card usage-stat">
+          <article className="usage-stat">
             <span>Known cost</span>
             <strong>{usd(trend.current.known_cost_usd)}</strong>
             <small>
@@ -278,14 +293,14 @@ export function UsageAnalytics({
                 : `${usd(trend.current.average_known_cost_usd)} average per priced interaction`}
             </small>
           </article>
-          <article className="card usage-stat">
+          <article className="usage-stat">
             <span>Failure / retry</span>
             <strong>
               {percent(trend.current.failure_rate)} / {percent(trend.current.retry_rate)}
             </strong>
             <small>{trend.current.failed_requests} failed requests</small>
           </article>
-          <article className="card usage-stat">
+          <article className="usage-stat">
             <span>Cache efficiency</span>
             <strong>{percent(trend.current.cache_efficiency)}</strong>
             <small>
@@ -295,6 +310,8 @@ export function UsageAnalytics({
           </article>
         </section>
       ) : null}
+
+      {filtersForm}
 
       {forecast ? (
         <section className="card usage-analytics-forecast" aria-labelledby="forecast-heading">
@@ -331,7 +348,7 @@ export function UsageAnalytics({
           <h2 id="hotspots-heading">Hot spots by {filters.dimension.replaceAll("_", " ")}</h2>
           {loading ? <span className="muted">Refreshing…</span> : null}
         </div>
-        <div className="usage-table-wrap">
+        <section className="usage-table-wrap" aria-label="Usage hot spots table">
           <table className="usage-table">
             <thead>
               <tr>
@@ -359,7 +376,7 @@ export function UsageAnalytics({
               ) : null}
             </tbody>
           </table>
-        </div>
+        </section>
       </section>
 
       <section className="card usage-section" aria-labelledby="calibration-heading">

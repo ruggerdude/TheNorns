@@ -217,13 +217,15 @@ export function ProjectMembers({
                     member.project_role === "owner" || member.user_id === access.owner_user_id;
                   return (
                     <tr key={member.user_id}>
-                      <td>
+                      <td data-label="Member">
                         <strong>{memberLabel(member)}</strong>
                         {member.name ? <span>{member.email}</span> : null}
                       </td>
-                      <td>{owner ? "Owner" : "Member"}</td>
-                      <td>{member.workspace_role === "admin" ? "Administrator" : "Member"}</td>
-                      <td>
+                      <td data-label="Project role">{owner ? "Owner" : "Member"}</td>
+                      <td data-label="Workspace role">
+                        {member.workspace_role === "admin" ? "Administrator" : "Member"}
+                      </td>
+                      <td data-label="Actions">
                         {owner ? (
                           <span className="muted">Owner cannot be removed</span>
                         ) : access.can_manage_members ? (
