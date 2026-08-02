@@ -135,3 +135,4 @@
 2026-08-02T15:20Z | PERF-1 | Stream plan generation end to end (adapters streamStructured, SSE route, web client with non-streaming fallback)
 2026-08-02T15:20Z | PERF-2 | Bound QC plan inflation: scope-discipline prompts + server-side module growth guard; live A/B invalid, effect unproven (PERF-4)
 2026-08-02T19:45Z | PERF-4 | Measured PERF-2 on real code path: no effect on token growth (2.72x both arms, n=6/7, $2.79); module effect not significant (3/7 vs 1/7, p=0.56); guard fired 0/7 and cannot bind. Corrected baseline: 4.5x/2.0x was TWO rounds, one-round truth is 2.62x/1.50x
+2026-08-02T21:05Z | QC-THINK | Disable thinking on Anthropic complete/completeStructured/streamStructured: Sonnet 5 adaptive thinking shared the max_tokens budget and truncated structured envelopes mid-JSON (live repro: stop_reason=max_tokens, 864 chars; after: end_turn, 10591 chars, parses). Explains 75% plan_revision failure rate on Sonnet 5 in production

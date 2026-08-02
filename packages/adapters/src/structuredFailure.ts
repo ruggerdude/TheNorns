@@ -86,7 +86,13 @@ export function parseStructured<T>(
   try {
     parsed = JSON.parse(stripFences(text));
   } catch (cause) {
-    throw new AdapterError("invalid_response", `${schemaName}: response is not JSON`, {
+    // A body cut short by the output limit is not a formatting problem, and
+    // retrying the identical prompt just burns the same budget again — say so
+    // in the message, not only in `structured_failure.kind`.
+    const message = outputWasTruncated(metadata.finish_reason)
+      ? `${schemaName}: response was truncated at the output limit`
+      : `${schemaName}: response is not JSON`;
+    throw new AdapterError("invalid_response", message, {
       cause,
       metadata: {
         ...metadata,

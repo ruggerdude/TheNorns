@@ -19,6 +19,28 @@ import {
   prepareStructuredOutputPrompt,
 } from "./types.js";
 
+/**
+ * Anthropic bills thinking tokens against `max_tokens` — the one budget bounds
+ * thinking AND visible output together. Claude Sonnet 5 / Opus 5 run adaptive
+ * thinking when `thinking` is omitted (Sonnet 4.6 did not), so a caller that
+ * sized `maxTokens` around a JSON envelope silently loses most of it to
+ * thinking and the envelope truncates mid-object — surfacing as
+ * `invalid_response`. Structured-output callers here budget 3k–16k tokens for
+ * the envelope alone, so thinking is explicitly disabled on the non-chat
+ * completion paths and the budget means output tokens, deterministically.
+ *
+ * `streamConversation` (ordinary chat) is deliberately NOT covered: chat
+ * benefits from thinking and its budget is not load-bearing.
+ *
+ * Fable/Mythos 5 reject an explicit `thinking: {type:"disabled"}` with a 400
+ * (thinking is always on there), so they opt out and keep the default.
+ */
+const THINKING_ALWAYS_ON = /^claude-(fable|mythos)/;
+
+function outputOnlyThinking(model: string): { thinking?: Anthropic.ThinkingConfigParam } {
+  return THINKING_ALWAYS_ON.test(model) ? {} : { thinking: { type: "disabled" } };
+}
+
 export interface AnthropicAdapterOptions {
   apiKey: string;
   model: string;
@@ -92,6 +114,7 @@ export class AnthropicAdapter implements LlmAdapter {
         {
           model: this.model,
           max_tokens: request.maxTokens ?? 16000,
+          ...outputOnlyThinking(this.model),
           ...(request.system !== undefined ? { system: request.system } : {}),
           messages: [{ role: "user", content: this.userContent(structuredRequest) }],
         },
@@ -204,6 +227,9 @@ export class AnthropicAdapter implements LlmAdapter {
         {
           model: this.model,
           max_tokens: request.maxTokens ?? 16000,
+          // Covers both `complete` and `completeStructured` — every buffered
+          // completion path assumes max_tokens bounds visible output alone.
+          ...outputOnlyThinking(this.model),
           ...(request.system !== undefined ? { system: request.system } : {}),
           messages: [{ role: "user", content: this.userContent(request) }],
         },
