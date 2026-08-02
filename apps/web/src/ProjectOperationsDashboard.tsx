@@ -384,20 +384,20 @@ export function ProjectOperationsDashboard({
 
         {dashboard.conversations.availability === "unavailable" ? (
           <SectionUnavailable
-            title="Planning and execution conversations"
+            title="Planning and development chats"
             section={dashboard.conversations}
           />
         ) : (
           <section className="operations-section" aria-labelledby="operations-conversations">
             <div className="operations-section-heading">
-              <h3 id="operations-conversations">Planning and execution conversations</h3>
+              <h3 id="operations-conversations">Planning and development chats</h3>
             </div>
             {dashboard.conversations.data.length === 0 ? (
               <EmptyState>No work conversations are recorded.</EmptyState>
             ) : (
               <div className="operations-conversation-groups">
                 <div>
-                  <strong>Planning</strong>
+                  <strong>Plan with PM</strong>
                   {planningConversations.length === 0 ? (
                     <small>No planning conversations.</small>
                   ) : (
@@ -414,9 +414,9 @@ export function ProjectOperationsDashboard({
                   )}
                 </div>
                 <div>
-                  <strong>Execution</strong>
+                  <strong>Development</strong>
                   {executionConversations.length === 0 ? (
-                    <small>No execution conversations.</small>
+                    <small>No Development chats.</small>
                   ) : (
                     executionConversations.map((conversation) => (
                       <a
@@ -425,7 +425,7 @@ export function ProjectOperationsDashboard({
                           conversation.id,
                         )}`}
                       >
-                        Open {conversation.kind === "task" ? "task" : "execution PM"} ·{" "}
+                        Open {conversation.kind === "task" ? "task" : "Development chat"} ·{" "}
                         {conversation.status}
                       </a>
                     ))

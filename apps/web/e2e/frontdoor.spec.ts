@@ -50,6 +50,9 @@ function project(id: string, source: "github" | "local") {
       source === "github" ? "https://github.com/octocat/front-door-app.git" : "local-front-door",
     onboarding_scenario: source === "github" ? "existing_repo" : null,
     focus_planning_run_id: null as string | null,
+    // API records can retain an old setup hint. Opening a project from the
+    // portfolio must not replay that one-time navigation intent.
+    entry_flow: null as "adoption" | "new" | null,
   };
 }
 
@@ -317,6 +320,7 @@ async function prepare(
           description: body.description,
           onboarding_scenario: body.scenario,
           focus_planning_run_id: options.focusedPlanningRun ? "planning-adoption" : null,
+          entry_flow: body.scenario === "new_repo" ? "new" : "adoption",
         },
       ];
       return fulfill(
@@ -386,49 +390,50 @@ async function prepare(
       });
     }
     if (
-      options.conversationWorkspace &&
       /^\/api\/v2\/projects\/project-[^/]+\/work-items$/.test(path) &&
       request.method() === "GET"
     ) {
       return fulfill(route, {
-        work_items: [
-          {
-            work_item: {
-              schema_version: 2,
-              id: "work-e2e",
-              project_id: "project-github",
-              created_by_user_id: "user-e2e",
-              title: "# Release readiness",
-              objective: "Plan the release dashboard and deployment health workflow.",
-              status: "planning",
-              planning_run_id: null,
-              phase_id: null,
-              approved_plan_version_id: null,
-              aggregate_version: 1,
-              created_at: "2026-07-28T12:00:00.000Z",
-              updated_at: "2026-07-28T12:00:00.000Z",
-              execution_started_at: null,
-              completed_at: null,
-            },
-            conversations: [
+        work_items: options.conversationWorkspace
+          ? [
               {
-                schema_version: 2,
-                id: "conversation-e2e",
-                project_id: "project-github",
-                work_item_id: "work-e2e",
-                created_by_user_id: "user-e2e",
-                kind: "planning",
-                status: "active",
-                provider: "anthropic",
-                model: "claude-sonnet-5",
-                next_message_sequence: 2,
-                created_at: "2026-07-28T12:00:00.000Z",
-                updated_at: "2026-07-28T12:00:00.000Z",
-                archived_at: null,
+                work_item: {
+                  schema_version: 2,
+                  id: "work-e2e",
+                  project_id: "project-github",
+                  created_by_user_id: "user-e2e",
+                  title: "# Release readiness",
+                  objective: "Plan the release dashboard and deployment health workflow.",
+                  status: "planning",
+                  planning_run_id: null,
+                  phase_id: null,
+                  approved_plan_version_id: null,
+                  aggregate_version: 1,
+                  created_at: "2026-07-28T12:00:00.000Z",
+                  updated_at: "2026-07-28T12:00:00.000Z",
+                  execution_started_at: null,
+                  completed_at: null,
+                },
+                conversations: [
+                  {
+                    schema_version: 2,
+                    id: "conversation-e2e",
+                    project_id: "project-github",
+                    work_item_id: "work-e2e",
+                    created_by_user_id: "user-e2e",
+                    kind: "planning",
+                    status: "active",
+                    provider: "anthropic",
+                    model: "claude-sonnet-5",
+                    next_message_sequence: 2,
+                    created_at: "2026-07-28T12:00:00.000Z",
+                    updated_at: "2026-07-28T12:00:00.000Z",
+                    archived_at: null,
+                  },
+                ],
               },
-            ],
-          },
-        ],
+            ]
+          : [],
       });
     }
     if (
@@ -530,17 +535,20 @@ async function prepare(
   return observed;
 }
 
-async function expectWorkspaceNavigation(page: Page) {
+async function expectNewWorkEntry(page: Page, initialBrief = "") {
   const navigation = page.getByRole("navigation", { name: "Workspace sections" });
   const overview = navigation.getByRole("button", { name: /overview/i });
   const work = navigation.getByRole("button", { name: /work$/i });
 
   await expect(navigation).toBeVisible();
-  await expect(overview).toHaveAttribute("aria-current", "page");
+  await expect(overview).toBeVisible();
   await expect(work).toBeVisible();
-  await work.click();
   await expect(work).toHaveAttribute("aria-current", "page");
   await expect(page.getByTestId("workspace-tab-work")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "What are we working on?" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Describe the work" })).toHaveValue(initialBrief);
+  await expect(page.getByRole("radio", { name: /Phased work/ })).toBeChecked();
+  await expect(page.getByRole("button", { name: /Start planning with PM/ })).toBeVisible();
 }
 
 async function clickUntilVisible(trigger: Locator, result: Locator) {
@@ -582,7 +590,7 @@ test("GitHub front door creates and immediately enters the project", async ({ pa
   await selectExistingGitHubRepository(page);
   await page.getByRole("button", { name: /adopt project/i }).click();
   await expect(page.getByText("front-door-app", { exact: true }).first()).toBeVisible();
-  await expectWorkspaceNavigation(page);
+  await expectNewWorkEntry(page);
 });
 
 // DESIGN R2: the wizard is name-first and never starts a planning run —
@@ -602,7 +610,7 @@ test("New work can create a GitHub repository and folder on an enrolled computer
   );
   await page.getByRole("button", { name: /create project/i }).click();
 
-  await expectWorkspaceNavigation(page);
+  await expectNewWorkEntry(page);
   expect(observed.onboardingRequests).toEqual([
     expect.objectContaining({
       name: "Local release readiness dashboard",
@@ -615,7 +623,7 @@ test("New work can create a GitHub repository and folder on an enrolled computer
   expect(observed.localProjectRequests).toEqual([]);
 });
 
-test("Directed adoption reaches one approval and starts the first coding task", async ({
+test("Directed adoption carries its direction into the brief-first phased journey", async ({
   page,
 }) => {
   const observed = await prepare(page, "github");
@@ -626,17 +634,10 @@ test("Directed adoption reaches one approval and starts the first coding task", 
     .fill("Improve the deployment workflow and implement it");
   await page.getByRole("button", { name: /adopt project/i }).click();
 
-  await page
-    .getByRole("navigation", { name: "Workspace sections" })
-    .getByRole("button", { name: /work$/i })
-    .click();
-  await expect(page.getByTestId("phase-decision-panel")).toBeVisible();
-  await page.getByRole("button", { name: /approve & start coding/i }).click();
-  await expect(page.getByTestId("phase-execution-kickoff-note")).toContainText(
-    "Execution started automatically",
-  );
-  await expect(page.getByTestId("phase-execution-table")).toContainText("active");
-  expect(observed.planningDecisions).toEqual([expect.objectContaining({ decision: "approve" })]);
+  await expectNewWorkEntry(page, "Improve the deployment workflow and implement it");
+  await expect(page.getByText("Plan with PM → optional QC → Development chat")).toBeVisible();
+  expect(observed.planningRequests).toEqual([]);
+  expect(observed.planningDecisions).toEqual([]);
 });
 
 // DESIGN R2: the wizard collects only the project name and creates the
@@ -690,7 +691,7 @@ test("New project creates from a name and lands in the workspace", async ({ page
   );
   await page.getByRole("button", { name: /create project/i }).click();
 
-  await expectWorkspaceNavigation(page);
+  await expectNewWorkEntry(page);
   expect(observed.onboardingRequests).toEqual([
     expect.objectContaining({
       scenario: "new_repo",
@@ -719,7 +720,7 @@ test("Authorized-only GitHub setup finishes installation before creating a new p
   await page.getByTestId("project-name").fill("Verified setup journey");
   await page.getByRole("button", { name: /create project/i }).click();
 
-  await expectWorkspaceNavigation(page);
+  await expectNewWorkEntry(page);
   expect(observed.installRequests).toBe(1);
   expect(observed.onboardingRequests).toEqual([
     expect.objectContaining({
@@ -790,6 +791,8 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   expect(portfolioControlBox?.width ?? 0).toBeGreaterThanOrEqual(214);
   expect(usageButtonBox?.width).toBe(portfolioControlBox?.width);
 
+  await expect(page.getByRole("heading", { name: "What are we working on?" })).toBeVisible();
+  await workspaceNavigation.getByRole("button", { name: "Overview", exact: true }).click();
   const workTab = workspaceNavigation.getByRole("button", { name: /work$/i });
   await workTab.click();
   await expect(workTab).toHaveAttribute("aria-current", "page");
@@ -865,7 +868,7 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await expect(planHandoff).toHaveCount(0);
   await expect(page.getByRole("region", { name: "Planning workflow" })).toHaveCount(0);
   const conversationSidebar = page.getByRole("complementary", {
-    name: "Project conversations",
+    name: "Project work items",
   });
   await expect(conversationSidebar).toBeVisible();
   await expect(
@@ -924,14 +927,7 @@ test("A project with focused work still opens on Overview from Portfolio", async
   await selectExistingGitHubRepository(page);
   await page.getByRole("button", { name: /adopt project/i }).click();
 
-  const workspaceNavigation = page.getByRole("navigation", { name: "Workspace sections" });
-  await expect(
-    workspaceNavigation.getByRole("button", { name: "Overview", exact: true }),
-  ).toHaveAttribute("aria-current", "page");
-  await workspaceNavigation.getByRole("button", { name: "Work", exact: true }).click();
-  await expect(
-    workspaceNavigation.getByRole("button", { name: "Work", exact: true }),
-  ).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("heading", { name: "What are we working on?" })).toBeVisible();
 
   const portfolioNavigation = page
     .locator(".workspace-nav-start")
@@ -948,6 +944,8 @@ test("A project with focused work still opens on Overview from Portfolio", async
     restoredWorkspaceNavigation.getByRole("button", { name: "Overview", exact: true }),
   ).toHaveAttribute("aria-current", "page");
   expect(new URL(page.url()).pathname).toBe("/projects/project-github");
+  await restoredWorkspaceNavigation.getByRole("button", { name: "Work", exact: true }).click();
+  await expect(page.getByText("I mapped the release workflow")).toBeVisible();
 });
 
 test("Mobile workspace opens navigation as a drawer and keeps chat usable", async ({ page }) => {
@@ -962,6 +960,9 @@ test("Mobile workspace opens navigation as a drawer and keeps chat usable", asyn
   await menu.click();
   const navigation = page.getByRole("navigation", { name: "Workspace sections" });
   await expect(navigation).toBeInViewport();
+  await expect(page.getByRole("heading", { name: "What are we working on?" })).toBeVisible();
+  await navigation.getByRole("button", { name: "Overview", exact: true }).click();
+  await menu.click();
   await navigation.getByRole("button", { name: "Work", exact: true }).click();
   await expect(menu).toHaveAttribute("aria-expanded", "false");
 
@@ -989,15 +990,15 @@ test("Mobile workspace opens navigation as a drawer and keeps chat usable", asyn
   expect((composerBox?.y ?? 0) + (composerBox?.height ?? 0)).toBeLessThanOrEqual(844);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 
-  await page.getByRole("button", { name: "Expand conversations" }).click();
+  await page.getByRole("button", { name: "Expand work items" }).click();
   const conversationDrawer = page.getByRole("complementary", {
-    name: "Project conversations",
+    name: "Project work items",
   });
   await expect(conversationDrawer).toBeVisible();
   const drawerBox = await conversationDrawer.boundingBox();
   expect(drawerBox?.width ?? 0).toBeGreaterThan(260);
   expect(drawerBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(382);
-  await page.getByRole("button", { name: "Close conversations" }).click();
+  await page.getByRole("button", { name: "Close work items" }).click();
   await expect(conversationDrawer).toBeHidden();
 
   await page.getByRole("button", { name: "Use conversation as plan" }).click();
@@ -1059,7 +1060,7 @@ test("Usage, Settings, and Admin use the regular application sidebar", async ({ 
   await page.goto("/");
   await selectExistingGitHubRepository(page);
   await page.getByRole("button", { name: /adopt project/i }).click();
-  await expectWorkspaceNavigation(page);
+  await expectNewWorkEntry(page);
 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(page.getByTestId("usage-panel")).toBeVisible();

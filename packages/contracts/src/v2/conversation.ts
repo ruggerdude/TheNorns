@@ -34,6 +34,9 @@ export const V2WorkItemStatus = z.enum([
 ]);
 export type V2WorkItemStatusT = z.infer<typeof V2WorkItemStatus>;
 
+export const V2WorkItemWorkflow = z.enum(["phased", "quick"]);
+export type V2WorkItemWorkflowT = z.infer<typeof V2WorkItemWorkflow>;
+
 export const V2WorkItem = z
   .object({
     schema_version: schemaVersion,

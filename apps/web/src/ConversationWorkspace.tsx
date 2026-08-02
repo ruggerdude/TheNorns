@@ -218,6 +218,7 @@ interface ConversationWorkspaceProps {
   projectId: string;
   initialConversationId?: string | null;
   initialNewConversation?: boolean;
+  initialBrief?: string | null;
   onConversationSelected?: (conversationId: string, replace?: boolean) => void;
   onNewConversation?: () => void;
   onUnsupported?: () => void;
@@ -242,8 +243,8 @@ function titleForObjective(objective: string): string {
 }
 
 function conversationKindLabel(kind: V2WorkConversationT["kind"]): string {
-  if (kind === "planning") return "Planning";
-  if (kind === "execution_pm") return "Execution PM";
+  if (kind === "planning") return "Plan with PM";
+  if (kind === "execution_pm") return "Development chat";
   return "Task";
 }
 
@@ -2197,12 +2198,10 @@ function HandoffCard({
       </details>
       <Button
         className="btn-small"
-        aria-label={
-          isTarget ? "Open archived planning conversation" : "Open execution PM conversation"
-        }
+        aria-label={isTarget ? "Open archived planning conversation" : "Open development chat"}
         onClick={() => onOpenConversation(linkedConversationId)}
       >
-        {isTarget ? "Open archived planning" : "Open execution PM"}
+        {isTarget ? "Open archived planning" : "Open development chat"}
       </Button>
     </article>
   );
@@ -3191,7 +3190,7 @@ function PlanHandoffDialog({
 
         {capabilityError ? <Alert>{capabilityError}</Alert> : null}
         {executionModels?.length === 0 && !capabilityError ? (
-          <Alert>No execution agents are currently available.</Alert>
+          <Alert>No development agents are currently available.</Alert>
         ) : null}
 
         <Button
@@ -3301,10 +3300,10 @@ function ConversationComposer({
           className="conversation-composer-input"
           placeholder={
             isExecution
-              ? "Message the execution PM…"
+              ? "Message the development chat…"
               : "Message the PM, or say “Use this as the plan”…"
           }
-          aria-label={isExecution ? "Message the execution PM" : "Message the project PM"}
+          aria-label={isExecution ? "Message the development chat" : "Message the project PM"}
           addAttachmentOnPaste={false}
           onPaste={(event) => {
             const files = Array.from(event.clipboardData.files);
@@ -3447,7 +3446,9 @@ function ConversationThread({
   onRefreshSoft: () => void;
   onUnauthorized: () => void;
 }): React.ReactElement {
-  const [workTab, setWorkTab] = useState<"plan" | "qc" | "implementation">("plan");
+  const [workTab, setWorkTab] = useState<"plan" | "qc" | "implementation">(() =>
+    detail.conversation.kind === "execution_pm" ? "implementation" : "plan",
+  );
   const openQc = useCallback(() => setWorkTab("qc"), []);
   const [planComposerDraft, setPlanComposerDraft] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
@@ -4799,10 +4800,10 @@ function ConversationThread({
                 linkedExecutionConversationId ? (
                   <Button
                     className="btn-small"
-                    aria-label="Open execution"
+                    aria-label="Open linked development chat"
                     onClick={() => onOpenConversation(linkedExecutionConversationId)}
                   >
-                    Open execution
+                    Development chat
                   </Button>
                 ) : null,
               )}
@@ -4843,7 +4844,7 @@ function ConversationThread({
                 <aside className="conversation-agents-drawer" aria-label="Agent activity">
                   <header>
                     <div>
-                      <span className="eyebrow">Execution</span>
+                      <span className="eyebrow">Development</span>
                       <h2>Agent activity</h2>
                     </div>
                     <Button
@@ -4874,7 +4875,7 @@ function ConversationThread({
                     </ol>
                   ) : (
                     <p className="conversation-list-empty">
-                      No execution agents are configured yet.
+                      No development agents are configured yet.
                     </p>
                   )}
                   {executionProjection?.run ? (
@@ -4890,14 +4891,25 @@ function ConversationThread({
               </>
             ) : null}
             <nav className="conversation-work-tabs" aria-label="Work sections">
-              <button
-                type="button"
-                className={workTab === "plan" ? "on" : ""}
-                aria-current={workTab === "plan" ? "page" : undefined}
-                onClick={() => setWorkTab("plan")}
-              >
-                Plan
-              </button>
+              {isPlanning ? (
+                <button
+                  type="button"
+                  className={workTab === "plan" ? "on" : ""}
+                  aria-current={workTab === "plan" ? "page" : undefined}
+                  onClick={() => setWorkTab("plan")}
+                >
+                  Plan with PM
+                </button>
+              ) : (
+                <>
+                  <span className="conversation-work-step is-complete">
+                    {detail.handoff ? "Plan with PM ✓" : "Brief ✓"}
+                  </span>
+                  {detail.handoff && detail.project_runs_qc ? (
+                    <span className="conversation-work-step is-complete">QC ✓</span>
+                  ) : null}
+                </>
+              )}
               {hasQc ? (
                 <button
                   type="button"
@@ -4924,15 +4936,27 @@ function ConversationThread({
                 type="button"
                 className={workTab === "implementation" ? "on" : ""}
                 aria-current={workTab === "implementation" ? "page" : undefined}
-                onClick={() => setWorkTab("implementation")}
+                onClick={() => {
+                  if (isPlanning && linkedExecutionConversationId) {
+                    onOpenConversation(linkedExecutionConversationId);
+                    return;
+                  }
+                  setWorkTab("implementation");
+                }}
               >
-                Implementation
+                Development chat
               </button>
             </nav>
-            {workTab === "plan" ? (
+            {(isPlanning && workTab === "plan") || (isExecution && workTab === "implementation") ? (
               <div
-                className="workspace-tab-panel conversation-work-tab-plan"
-                data-testid="conversation-work-tab-plan"
+                className={`workspace-tab-panel ${
+                  isExecution
+                    ? "conversation-work-tab-development-chat"
+                    : "conversation-work-tab-plan"
+                }`}
+                data-testid={
+                  isExecution ? "conversation-development-chat" : "conversation-work-tab-plan"
+                }
               >
                 {hasQc && activeQcReview ? (
                   <button
@@ -5036,7 +5060,9 @@ function ConversationThread({
                       <div className="conversation-welcome" data-testid="conversation-welcome">
                         <p>
                           {isExecution
-                            ? "Continue delivery with your PM. Planning context is available from the approved handoff."
+                            ? detail.handoff
+                              ? "Continue delivery with your PM. Planning context is available from the approved handoff."
+                              : "Work directly with your development PM. The submitted brief defines this quick push."
                             : "Ask your PM about the work, constraints, risks, or next steps."}
                         </p>
                       </div>
@@ -5067,7 +5093,7 @@ function ConversationThread({
                           </strong>
                           <span>
                             {isPlanning
-                              ? "Its visible history remains readable. Continue work in the linked execution PM conversation."
+                              ? "Its visible history remains readable. Continue work in the linked Development chat."
                               : "Its visible history remains readable, but it no longer accepts messages."}
                           </span>
                         </output>
@@ -5160,7 +5186,15 @@ function ConversationThread({
                       />
                     ) : null}
                   </section>
-                ) : null}
+                ) : (
+                  <div className="conversation-stage-placeholder">
+                    <strong>Development has not started yet.</strong>
+                    <p>
+                      Approve the plan when it is ready. The Development chat will open here with
+                      the approved scope and context.
+                    </p>
+                  </div>
+                )}
               </div>
             ) : null}
           </section>
@@ -5174,15 +5208,24 @@ function NewWorkForm({
   busy,
   defaultPin,
   modelError,
+  projectContext,
+  initialBrief,
   onCreate,
 }: {
   busy: boolean;
   defaultPin: { provider: PmProviderT; model: PmModelT } | null;
   modelError: string | null;
-  onCreate: (message: string, model: PmModelT) => Promise<void>;
+  projectContext: {
+    name: string | null;
+    workspaceLocation: string | null;
+    remoteLocation: string | null;
+  } | null;
+  initialBrief?: string | null;
+  onCreate: (message: string, model: PmModelT, workflow: "phased" | "quick") => Promise<void>;
 }): React.ReactElement {
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState(initialBrief ?? "");
   const [model, setModel] = useState<PmModelT | null>(defaultPin?.model ?? null);
+  const [workflow, setWorkflow] = useState<"phased" | "quick">("phased");
   useEffect(() => {
     if (defaultPin) setModel((current) => current ?? defaultPin.model);
   }, [defaultPin]);
@@ -5190,26 +5233,71 @@ function NewWorkForm({
     event.preventDefault();
     const cleanMessage = message.trim();
     if (!cleanMessage || !model) return;
-    void onCreate(cleanMessage, model);
+    void onCreate(cleanMessage, model, workflow);
   };
+  const buildTarget =
+    projectContext?.workspaceLocation ??
+    projectContext?.remoteLocation ??
+    "Configured during project setup";
   return (
     <section className="conversation-new-work" aria-labelledby="conversation-new-title">
-      <div>
-        <div className="eyebrow">New conversation</div>
+      <div className="conversation-new-intro">
+        <div className="eyebrow">New work</div>
         <h2 id="conversation-new-title">What are we working on?</h2>
         <p className="muted">
-          Send the first message. Norns will name the conversation automatically. Right-click it in
-          the conversation list to rename it.
+          Describe the outcome, constraints, and anything the team should preserve. You can plan a
+          larger change with the PM or go straight to development for a small push.
         </p>
       </div>
+      <dl className="conversation-new-context" aria-label="Project setup context">
+        <div>
+          <dt>Project</dt>
+          <dd>{projectContext?.name ?? "Current project"}</dd>
+        </div>
+        <div>
+          <dt>Build target</dt>
+          <dd title={buildTarget}>{buildTarget}</dd>
+        </div>
+      </dl>
+      <fieldset className="conversation-workflow-picker">
+        <legend>Choose how to start</legend>
+        <label className={workflow === "phased" ? "is-selected" : ""}>
+          <input
+            type="radio"
+            name="work-workflow"
+            value="phased"
+            checked={workflow === "phased"}
+            disabled={busy}
+            onChange={() => setWorkflow("phased")}
+          />
+          <span>
+            <strong>Phased work</strong>
+            <small>Plan with PM → optional QC → Development chat</small>
+          </span>
+        </label>
+        <label className={workflow === "quick" ? "is-selected" : ""}>
+          <input
+            type="radio"
+            name="work-workflow"
+            value="quick"
+            checked={workflow === "quick"}
+            disabled={busy}
+            onChange={() => setWorkflow("quick")}
+          />
+          <span>
+            <strong>Quick push</strong>
+            <small>Go directly to a Development chat for a small, clear change</small>
+          </span>
+        </label>
+      </fieldset>
       <form className="conversation-new-composer" onSubmit={submit}>
         <TextArea
           data-testid="conversation-first-message"
-          aria-label="Message the project PM"
-          rows={5}
+          aria-label="Describe the work"
+          rows={10}
           value={message}
           disabled={busy}
-          placeholder="Tell the PM what you want to build, change, or understand…"
+          placeholder="What should we build, change, or understand?"
           onChange={(event) => setMessage(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
@@ -5248,7 +5336,11 @@ function NewWorkForm({
             disabled={busy || !message.trim() || model === null}
             data-testid="conversation-create"
           >
-            {busy ? "Starting…" : "Send"}
+            {busy
+              ? "Starting…"
+              : workflow === "phased"
+                ? "Start planning with PM →"
+                : "Start development chat →"}
           </Button>
         </div>
       </form>
@@ -5261,6 +5353,7 @@ export function ConversationWorkspace({
   projectId,
   initialConversationId = null,
   initialNewConversation = false,
+  initialBrief = null,
   onConversationSelected,
   onNewConversation,
   onUnsupported,
@@ -5288,9 +5381,15 @@ export function ConversationWorkspace({
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [creating, setCreating] = useState(false);
   const [showNew, setShowNew] = useState(initialNewConversation);
+  const [newWorkInitialBrief, setNewWorkInitialBrief] = useState(initialBrief);
   const [projectPin, setProjectPin] = useState<{
     provider: PmProviderT;
     model: PmModelT;
+  } | null>(null);
+  const [projectContext, setProjectContext] = useState<{
+    name: string | null;
+    workspaceLocation: string | null;
+    remoteLocation: string | null;
   } | null>(null);
   const [projectPinError, setProjectPinError] = useState<string | null>(null);
   const [conversationListOpen, setConversationListOpen] = useState(false);
@@ -5360,7 +5459,10 @@ export function ConversationWorkspace({
     setProjectPinError(null);
     void getProjectConversationPin(projectId)
       .then((pin) => {
-        if (current) setProjectPin(pin);
+        if (current) {
+          setProjectPin(pin);
+          setProjectContext(pin.project);
+        }
       })
       .catch((caught) => {
         if (!current) return;
@@ -5404,7 +5506,7 @@ export function ConversationWorkspace({
       setOrganizationAvailable(true);
       setOrganizationError(
         cursor
-          ? "Only the first 500 organized chats are shown. Refine your search to find older work."
+          ? "Only the first 500 organized work items are shown. Refine your search to find older work."
           : null,
       );
       return;
@@ -5460,7 +5562,9 @@ export function ConversationWorkspace({
     setSelected(null);
     setDetail(null);
     setShowNew(initialNewConversation);
+    setNewWorkInitialBrief(initialBrief);
     setProjectPin(null);
+    setProjectContext(null);
     setProjectPinError(null);
     setConversationListOpen(false);
     setConversationSearch("");
@@ -5477,7 +5581,7 @@ export function ConversationWorkspace({
     setConversationMenu(null);
     initialSelectionHandled.current = null;
     void Promise.all([loadGroups(), loadNavigation()]);
-  }, [initialNewConversation, loadGroups, loadNavigation]);
+  }, [initialBrief, initialNewConversation, loadGroups, loadNavigation]);
 
   useEffect(() => {
     if (!groups) return;
@@ -5689,7 +5793,7 @@ export function ConversationWorkspace({
     [detail, handleUnauthorized, projectId],
   );
 
-  const createWork = async (message: string, model: PmModelT) => {
+  const createWork = async (message: string, model: PmModelT, workflow: "phased" | "quick") => {
     setCreating(true);
     setError(null);
     try {
@@ -5697,8 +5801,10 @@ export function ConversationWorkspace({
         title: titleForObjective(message),
         objective: message,
         model,
+        workflow,
       });
       await Promise.all([loadGroups(), loadNavigation()]);
+      setNewWorkInitialBrief(null);
       setShowNew(false);
       setConversationListOpen(false);
       setInitialMessage({ conversationId: created.conversation.id, text: message });
@@ -5991,7 +6097,7 @@ export function ConversationWorkspace({
             onSubmit={(event) => void renameWork(event, group.work_item.id)}
           >
             <Input
-              aria-label="Conversation title"
+              aria-label="Work item title"
               value={renameTitle}
               maxLength={120}
               disabled={renameBusy}
@@ -6025,7 +6131,7 @@ export function ConversationWorkspace({
                 className={`conversation-family-button${familyActive ? " is-active" : ""}`}
                 data-status={primaryConversation?.status}
                 aria-current={familyActive ? "page" : undefined}
-                aria-label={`Open chat ${displayTitle}`}
+                aria-label={`Open work item ${displayTitle}`}
                 onClick={() => {
                   if (primaryConversation) {
                     chooseConversation(group.work_item.id, primaryConversation);
@@ -6050,7 +6156,7 @@ export function ConversationWorkspace({
                 <small>
                   {primaryConversation
                     ? `${conversationKindLabel(primaryConversation.kind)} · ${primaryConversation.status.replaceAll("_", " ")}`
-                    : "No active threads"}
+                    : "No active stages"}
                 </small>
               </button>
               <button
@@ -6107,6 +6213,7 @@ export function ConversationWorkspace({
     : null;
 
   const startNewWork = () => {
+    if (!showNew) setNewWorkInitialBrief(null);
     setSelected(null);
     setDetail(null);
     setInitialMessage(null);
@@ -6128,7 +6235,7 @@ export function ConversationWorkspace({
         className="btn-small conversation-sidebar-toggle"
         aria-expanded={!conversationSidebarCollapsed || conversationListOpen}
         aria-controls="project-conversations"
-        aria-label="Expand conversations"
+        aria-label="Expand work items"
         onClick={() => {
           setConversationSidebarCollapsed(false);
           setConversationListOpen(true);
@@ -6253,21 +6360,21 @@ export function ConversationWorkspace({
       <aside
         className={`conversation-sidebar${conversationSidebarCollapsed ? " is-collapsed" : ""}${conversationListOpen ? " is-mobile-open" : ""}`}
         id="project-conversations"
-        aria-label="Project conversations"
+        aria-label="Project work items"
       >
         <div className="conversation-sidebar-head">
           <div className="conversation-sidebar-title">
             <span className="conversation-sidebar-mark" aria-hidden="true">
               N
             </span>
-            <h2>Chats</h2>
+            <h2>Work items</h2>
           </div>
           <div>
             <Button
               className="btn-small conversation-sidebar-collapse"
               variant="ghost"
               aria-label={
-                conversationSidebarCollapsed ? "Expand conversations" : "Collapse conversations"
+                conversationSidebarCollapsed ? "Expand work items" : "Collapse work items"
               }
               onClick={() => setConversationSidebarCollapsed((collapsed) => !collapsed)}
             >
@@ -6276,7 +6383,7 @@ export function ConversationWorkspace({
             <Button
               className="btn-small conversation-sidebar-close"
               variant="ghost"
-              aria-label="Close conversations"
+              aria-label="Close work items"
               onClick={() => setConversationListOpen(false)}
             >
               <span aria-hidden="true">×</span>
@@ -6290,13 +6397,13 @@ export function ConversationWorkspace({
             onClick={startNewWork}
           >
             <span aria-hidden="true">＋</span>
-            New chat
+            New work
           </Button>
           <div className="conversation-search">
             <Input
               type="search"
-              aria-label="Search chats"
-              placeholder="Search chats"
+              aria-label="Search work"
+              placeholder="Search work"
               value={conversationSearch}
               onChange={(event) => setConversationSearch(event.target.value)}
             />
@@ -6327,7 +6434,7 @@ export function ConversationWorkspace({
                 ) : (
                   <p className="conversation-list-empty">
                     {organizationAvailable
-                      ? "No pinned chats yet."
+                      ? "No pinned work yet."
                       : "Pins are unavailable on this deployment."}
                   </p>
                 )}
@@ -6435,7 +6542,7 @@ export function ConversationWorkspace({
                       </div>
                       {deleteFolderId === folder.id ? (
                         <div className="conversation-folder-delete" role="alert">
-                          <span>Delete {folder.name}? Its chats move to Recent.</span>
+                          <span>Delete {folder.name}? Its work items move to Recent.</span>
                           <div>
                             <Button
                               className="btn-small"
@@ -6471,12 +6578,12 @@ export function ConversationWorkspace({
             aria-labelledby="conversation-recent"
           >
             <h3 id="conversation-recent">{searching ? "Results" : "Recent"}</h3>
-            {groups === null ? <Spinner label="Loading conversations…" /> : null}
+            {groups === null ? <Spinner label="Loading work items…" /> : null}
             {groups?.length === 0 ? (
-              <p className="conversation-list-empty">No conversations yet.</p>
+              <p className="conversation-list-empty">No work items yet.</p>
             ) : null}
             {groups?.length && visibleFamilies.length === 0 ? (
-              <p className="conversation-list-empty">No chats match your search.</p>
+              <p className="conversation-list-empty">No work items match your search.</p>
             ) : null}
             <div className="conversation-list">{recentFamilies.map(renderConversationFamily)}</div>
           </section>
@@ -6572,6 +6679,8 @@ export function ConversationWorkspace({
             busy={creating}
             defaultPin={projectPin}
             modelError={projectPinError}
+            projectContext={projectContext}
+            initialBrief={newWorkInitialBrief}
             onCreate={createWork}
           />
         ) : null}

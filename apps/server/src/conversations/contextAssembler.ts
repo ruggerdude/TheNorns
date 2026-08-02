@@ -14,8 +14,11 @@ import {
   CONVERSATIONAL_PM_PROMPT_VERSION,
   EXECUTION_PM_INSTRUCTIONS,
   EXECUTION_PM_PROMPT_VERSION,
+  QUICK_EXECUTION_PM_INSTRUCTIONS,
+  QUICK_EXECUTION_PM_PROMPT_VERSION,
   conversationalPmSystem,
   executionPmSystem,
+  quickExecutionPmSystem,
 } from "./prompt.js";
 
 const MAX_RECENT_MESSAGES = 50;
@@ -232,13 +235,14 @@ export class ConversationContextAssembler {
       const materials: ContextMaterial[] = [];
       const systemSections: string[] = [];
       const executionPm = work.kind === "execution_pm";
+      let hasExecutionHandoff = false;
       materials.push({
         kind: "prompt",
         ref: executionPm ? EXECUTION_PM_PROMPT_VERSION : CONVERSATIONAL_PM_PROMPT_VERSION,
         content: executionPm ? EXECUTION_PM_INSTRUCTIONS : CONVERSATIONAL_PM_INSTRUCTIONS,
       });
       if (executionPm) {
-        await this.addExecutionHandoff(
+        hasExecutionHandoff = await this.addExecutionHandoff(
           tx,
           projectId,
           workItemId,
@@ -246,7 +250,15 @@ export class ConversationContextAssembler {
           materials,
           systemSections,
         );
-      } else {
+        if (!hasExecutionHandoff) {
+          materials[0] = {
+            kind: "prompt",
+            ref: QUICK_EXECUTION_PM_PROMPT_VERSION,
+            content: QUICK_EXECUTION_PM_INSTRUCTIONS,
+          };
+        }
+      }
+      if (!executionPm || !hasExecutionHandoff) {
         await this.addRules(tx, projectId, materials, systemSections);
         await this.addProjectSetup(tx, projectId, materials, systemSections);
         await this.addKnowledge(tx, projectId, materials, systemSections);
@@ -263,7 +275,7 @@ export class ConversationContextAssembler {
         materials,
         systemSections,
       );
-      if (!executionPm) {
+      if (!executionPm || !hasExecutionHandoff) {
         await this.addDecisionsAndRisks(tx, projectId, workItemId, materials, systemSections);
       }
       const recent = await this.recentMessages(
@@ -359,9 +371,12 @@ export class ConversationContextAssembler {
       return {
         manifest,
         context_hash: canonicalSha256(manifest),
-        system: executionPm
-          ? executionPmSystem(systemSections.join("\n\n"))
-          : conversationalPmSystem(systemSections.join("\n\n")),
+        system:
+          executionPm && hasExecutionHandoff
+            ? executionPmSystem(systemSections.join("\n\n"))
+            : executionPm
+              ? quickExecutionPmSystem(systemSections.join("\n\n"))
+              : conversationalPmSystem(systemSections.join("\n\n")),
         messages,
         attachment_ids: [...new Set(currentAttachmentIds)],
         triggering_message_index: triggeringMessageIndex,
@@ -556,7 +571,7 @@ export class ConversationContextAssembler {
     conversationId: string,
     materials: ContextMaterial[],
     sections: string[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const row = (
       await tx.query<{ id: string; package: unknown; content_hash: string }>(
         `SELECT id, package, content_hash
@@ -565,7 +580,7 @@ export class ConversationContextAssembler {
         [projectId, workItemId, conversationId],
       )
     ).rows[0];
-    if (!row) throw new Error("execution PM conversation has no immutable handoff");
+    if (!row) return false;
     const handoff = V2ConversationHandoffPackage.parse(
       typeof row.package === "string" ? JSON.parse(row.package) : row.package,
     );
@@ -580,6 +595,7 @@ export class ConversationContextAssembler {
       contentHash: row.content_hash,
     });
     sections.push(section("Approved execution handoff", content));
+    return true;
   }
 
   private async addPlanningExcerpts(

@@ -180,7 +180,7 @@ describe("Phase 6 project operations dashboard", () => {
       "Open decisions and blockers",
       "Spend and projected budget",
       "Deployments and verification",
-      "Planning and execution conversations",
+      "Planning and development chats",
       "Approved mockups and recent artifacts",
       "Legacy planning runs",
     ]) {
@@ -197,7 +197,7 @@ describe("Phase 6 project operations dashboard", () => {
       "href",
       `/projects/${projectId}/work/planning-1`,
     );
-    expect(screen.getByRole("link", { name: /Open execution PM/ })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /Open Development chat/ })).toHaveAttribute(
       "href",
       `/projects/${projectId}/work/execution-1`,
     );

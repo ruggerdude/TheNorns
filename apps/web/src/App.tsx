@@ -29,6 +29,7 @@ import {
   AttentionDecisionForm,
   type AttentionItemDto,
   type PortfolioAttentionDto,
+  type ProjectOpenOptions,
   type ProjectSummary,
   Projects,
 } from "./Projects";
@@ -2378,6 +2379,7 @@ function ProjectGraph({
                 initialRunId={phaseJourneyRunId}
                 initialConversationId={initialConversationId}
                 initialNewConversation={Boolean(initialWorkRoute && !initialConversationId)}
+                initialBrief={project.initial_work_objective ?? null}
                 designatedExecution={phaseExecution}
                 composerRequested={phaseComposerRequested}
                 onComposerOpened={() => setPhaseComposerRequested(true)}
@@ -3042,18 +3044,35 @@ export function App(): React.ReactElement {
     [resetProjectNavigation],
   );
 
-  const openProject = useCallback((project: ProjectSummary) => {
+  const openProject = useCallback((project: ProjectSummary, options?: ProjectOpenOptions) => {
     prefetchProjectRules(project.id);
+    const stableProject = {
+      ...project,
+      entry_flow: null,
+      initial_work_objective: null,
+    };
     setOpenProjects((current) =>
       current.some((p) => p.id === project.id)
-        ? current.map((p) => (p.id === project.id ? project : p))
-        : [...current, project],
+        ? current.map((p) => (p.id === project.id ? stableProject : p))
+        : [...current, stableProject],
     );
-    setActiveProject(project);
+    const startsNewWork = options?.startNewWork === true;
+    setActiveProject({
+      ...stableProject,
+      initial_work_objective: startsNewWork ? (options.initialBrief ?? null) : null,
+    });
     setNewProjectRequested(false);
-    setWorkConversationRoute(null);
+    setWorkConversationRoute(
+      startsNewWork ? { projectId: project.id, conversationId: null } : null,
+    );
     setRoutedProjectId(project.id);
-    window.history.pushState(null, "", `/projects/${encodeURIComponent(project.id)}`);
+    window.history.pushState(
+      null,
+      "",
+      startsNewWork
+        ? workConversationPath(project.id)
+        : `/projects/${encodeURIComponent(project.id)}`,
+    );
   }, []);
 
   const closeProject = useCallback(

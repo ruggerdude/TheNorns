@@ -558,7 +558,8 @@ describe("conversation workspace", () => {
       />,
     );
 
-    expect(screen.getAllByText("Loading conversations…")).toHaveLength(2);
+    expect(screen.getByText("Loading conversations…")).toBeInTheDocument();
+    expect(screen.getByText("Loading work items…")).toBeInTheDocument();
     expect(await screen.findByText("Conversations could not be loaded.")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
 
@@ -2866,19 +2867,21 @@ describe("conversation workspace", () => {
     expect(
       screen.getByText("The plan is approved. Coding kickoff is still pending."),
     ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open execution PM conversation" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Open development chat" })).toHaveAttribute(
       "href",
       `/projects/${projectId}/work/execution-conversation-pending`,
     );
     expect(screen.queryByRole("region", { name: "Planning workflow" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open execution" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open linked development chat" }),
+    ).toBeInTheDocument();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2_500);
     });
     expect(detailCalls).toBe(2);
     expect(screen.getByText(/coding kickoff failed/i)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open execution PM conversation" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Open development chat" })).toHaveAttribute(
       "href",
       `/projects/${projectId}/work/execution-conversation-pending`,
     );
@@ -3441,7 +3444,12 @@ describe("conversation workspace", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = urlOf(input);
         if (url.endsWith(`/api/projects/${projectId}`)) {
-          return Response.json({ pm_provider: "anthropic", pm_model: "claude-sonnet-5" });
+          return Response.json({
+            name: "Release dashboard",
+            workspace_location: "/Users/example/release-dashboard",
+            pm_provider: "anthropic",
+            pm_model: "claude-sonnet-5",
+          });
         }
         if (url.endsWith("/work-items")) return listResponse();
         throw new Error(`Unexpected request: ${url}`);
@@ -3452,6 +3460,7 @@ describe("conversation workspace", () => {
       <ConversationWorkspace
         projectId={projectId}
         initialNewConversation
+        initialBrief="Improve the deployment workflow"
         onUnauthorized={() => undefined}
       />,
     );
@@ -3460,7 +3469,15 @@ describe("conversation workspace", () => {
       await screen.findByRole("heading", { name: "What are we working on?" }),
     ).toBeInTheDocument();
     expect(screen.queryByLabelText("Title (optional)")).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Message the project PM" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Describe the work" })).toHaveValue(
+      "Improve the deployment workflow",
+    );
+    expect(screen.getByText("Release dashboard")).toBeInTheDocument();
+    expect(screen.getByText("/Users/example/release-dashboard")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Phased work/i })).toBeChecked();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Start planning with PM →" })).toBeEnabled(),
+    );
     expect(screen.queryByText("Please inspect the API.")).not.toBeInTheDocument();
   });
 
@@ -3486,7 +3503,7 @@ describe("conversation workspace", () => {
         if (url.endsWith("/work-items") && init?.method === "POST") {
           return Response.json({ work_item: workItem, conversation }, { status: 201 });
         }
-        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith("/work-items")) return Response.json({ work_items: [] });
         if (url.endsWith(`/conversations/${conversationId}/messages`)) {
           return new Response(stream, {
             status: 200,
@@ -3519,7 +3536,7 @@ describe("conversation workspace", () => {
       />,
     );
 
-    const composer = await screen.findByRole("textbox", { name: "Message the project PM" });
+    const composer = await screen.findByRole("textbox", { name: "Describe the work" });
     const modelSelect = await screen.findByRole("combobox", { name: "Conversation model" });
     await waitFor(() => expect(modelSelect).toHaveValue("claude-sonnet-5"));
     await user.type(composer, `${firstMessage}{enter}`);
@@ -3532,12 +3549,86 @@ describe("conversation workspace", () => {
       title: "Build a release dashboard",
       objective: firstMessage,
       model: "claude-sonnet-5",
+      workflow: "phased",
     });
     const submit = calls.find(({ url }) => url.endsWith("/messages"));
     expect(JSON.parse(String(submit?.init?.body))).toMatchObject({
       parts: [{ type: "text", format: "markdown", text: firstMessage }],
     });
     expect(new Headers(submit?.init?.headers).get("content-type")).toBe("application/json");
+  });
+
+  it("starts a quick push in Development chat without empty planning or QC stages", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const quickConversation = executionConversation({ id: "conversation-quick" });
+    const quickWorkItem = { ...workItem, status: "executing" as const };
+    const stream =
+      'data: {"type":"start","messageId":"message-quick-reply"}\n\n' +
+      'data: {"type":"text-start","id":"text-quick"}\n\n' +
+      'data: {"type":"text-delta","id":"text-quick","delta":"Starting the quick push."}\n\n' +
+      'data: {"type":"text-end","id":"text-quick"}\n\n' +
+      'data: {"type":"finish","finishReason":"stop"}\n\n' +
+      "data: [DONE]\n\n";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        calls.push({ url, init });
+        if (url.endsWith(`/api/projects/${projectId}`)) {
+          return Response.json({ pm_provider: "anthropic", pm_model: "claude-sonnet-5" });
+        }
+        if (url.endsWith("/work-items") && init?.method === "POST") {
+          return Response.json(
+            { work_item: quickWorkItem, conversation: quickConversation },
+            { status: 201 },
+          );
+        }
+        if (url.endsWith("/work-items")) return Response.json({ work_items: [] });
+        if (url.endsWith(`/conversations/${quickConversation.id}/messages`)) {
+          return new Response(stream, {
+            status: 200,
+            headers: {
+              "content-type": "text/event-stream",
+              "x-vercel-ai-ui-message-stream": "v1",
+            },
+          });
+        }
+        return Response.json({ error: "not_found" }, { status: 404 });
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialNewConversation
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await user.click(await screen.findByRole("radio", { name: /Quick push/i }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Describe the work" }),
+      "Fix the footer copy",
+    );
+    await user.click(screen.getByRole("button", { name: "Start development chat →" }));
+
+    await waitFor(() =>
+      expect(
+        calls.find(({ url, init }) => url.endsWith("/work-items") && init?.method === "POST"),
+      ).toBeDefined(),
+    );
+    const create = calls.find(
+      ({ url, init }) => url.endsWith("/work-items") && init?.method === "POST",
+    );
+    expect(JSON.parse(String(create?.init?.body))).toMatchObject({ workflow: "quick" });
+    expect(await screen.findByText("Brief ✓")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Development chat" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
   });
 
   it("renames a conversation from its sidebar context menu", async () => {
@@ -3574,13 +3665,15 @@ describe("conversation workspace", () => {
       await screen.findByRole("button", { name: "Actions for Conversation-first planning" }),
     );
     await user.click(screen.getByRole("menuitem", { name: "Rename" }));
-    const title = screen.getByRole("textbox", { name: "Conversation title" });
+    const title = screen.getByRole("textbox", { name: "Work item title" });
     await user.clear(title);
     await user.type(title, "Release readiness");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(await screen.findByRole("heading", { name: "Release readiness" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open chat Release readiness" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open work item Release readiness" }),
+    ).toBeInTheDocument();
     expect(patchedBody).toEqual({ title: "Release readiness" });
   });
 
@@ -3668,7 +3761,7 @@ describe("conversation workspace", () => {
     );
 
     const sidebar = await screen.findByRole("complementary", {
-      name: "Project conversations",
+      name: "Project work items",
     });
     expect(sidebar).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Pinned" })).toHaveAttribute(
@@ -3677,22 +3770,22 @@ describe("conversation workspace", () => {
     );
     expect(screen.getByLabelText("Threads in Conversation-first planning")).toContainElement(
       screen.getByRole("button", {
-        name: `Open Execution PM conversation for ${workItem.title} (active)`,
+        name: `Open Development chat conversation for ${workItem.title} (active)`,
       }),
     );
 
-    await user.type(screen.getByRole("searchbox", { name: "Search chats" }), "second");
+    await user.type(screen.getByRole("searchbox", { name: "Search work" }), "second");
     expect(
-      screen.queryByRole("button", { name: "Open chat Conversation-first planning" }),
+      screen.queryByRole("button", { name: "Open work item Conversation-first planning" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Open chat Second release train" }),
+      screen.getByRole("button", { name: "Open work item Second release train" }),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Collapse conversations" }));
+    await user.click(screen.getByRole("button", { name: "Collapse work items" }));
     expect(sidebar).toHaveClass("is-collapsed");
     const expandSidebar = sidebar.querySelector<HTMLButtonElement>(
-      '[aria-label="Expand conversations"]',
+      '[aria-label="Expand work items"]',
     );
     if (!expandSidebar) throw new Error("Expected the collapsed sidebar to expose its toggle.");
     await user.click(expandSidebar);
@@ -3803,7 +3896,7 @@ describe("conversation workspace", () => {
     await user.click(screen.getByRole("menuitem", { name: "Pin" }));
     await waitFor(() => expect(organizationBodies).toContainEqual({ pinned: true }));
     expect(screen.getByRole("region", { name: "Pinned" })).toContainElement(
-      screen.getByRole("button", { name: "Open chat Conversation-first planning" }),
+      screen.getByRole("button", { name: "Open work item Conversation-first planning" }),
     );
 
     await user.click(
@@ -3817,7 +3910,7 @@ describe("conversation workspace", () => {
     await user.click(screen.getByRole("menuitem", { name: "Unpin" }));
     await waitFor(() => expect(organizationBodies).toContainEqual({ pinned: false }));
     expect(screen.getByText("Release").closest(".conversation-folder")).toContainElement(
-      screen.getByRole("button", { name: "Open chat Conversation-first planning" }),
+      screen.getByRole("button", { name: "Open work item Conversation-first planning" }),
     );
 
     await user.click(screen.getByRole("button", { name: "Rename folder Release" }));
@@ -3828,7 +3921,7 @@ describe("conversation workspace", () => {
     expect(await screen.findByText("Launch")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Delete folder Launch" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("Its chats move to Recent.");
+    expect(screen.getByRole("alert")).toHaveTextContent("Its work items move to Recent.");
     await user.click(screen.getByRole("button", { name: "Confirm delete" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -3838,7 +3931,7 @@ describe("conversation workspace", () => {
     );
     expect(screen.queryByText("Launch")).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Recent" })).toContainElement(
-      screen.getByRole("button", { name: "Open chat Conversation-first planning" }),
+      screen.getByRole("button", { name: "Open work item Conversation-first planning" }),
     );
   });
 
@@ -4178,7 +4271,9 @@ describe("conversation workspace", () => {
       await screen.findByText("Execution starts from the compact approved handoff."),
     ).toBeInTheDocument();
     expect(selected).toHaveBeenCalledWith(execution.id);
-    expect(screen.getByRole("region", { name: "Execution PM conversation" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Development chat conversation" }),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("conversation-handoff-card")).toHaveTextContent(
       approvedVersion.content_hash.slice(0, 12),
     );
@@ -4384,23 +4479,25 @@ describe("conversation workspace", () => {
     );
 
     expect(await screen.findByText(planningSentinel)).toBeInTheDocument();
-    expect(screen.getByText("This planning conversation is archived.")).toBeInTheDocument();
+    expect(screen.getByText("This plan with pm conversation is archived.")).toBeInTheDocument();
     expect(
       screen.queryByRole("textbox", { name: "Message the project PM" }),
     ).not.toBeInTheDocument();
     const archivedConversationButton = screen.getByRole("button", {
-      name: `Open Planning conversation for ${workItem.title} (archived)`,
+      name: `Open Plan with PM conversation for ${workItem.title} (archived)`,
     });
     expect(archivedConversationButton).toHaveAttribute("data-status", "archived");
     expect(archivedConversationButton).not.toHaveTextContent(/tokens|requests|usage|\$/i);
     const executionConversationButton = screen.getByRole("button", {
-      name: `Open Execution PM conversation for ${workItem.title} (active)`,
+      name: `Open Development chat conversation for ${workItem.title} (active)`,
     });
     expect(executionConversationButton).toHaveAttribute("data-status", "active");
     expect(executionConversationButton).not.toHaveTextContent(/tokens|requests|usage|\$/i);
 
-    await user.click(screen.getByRole("button", { name: "Open execution PM conversation" }));
-    expect(await screen.findByRole("textbox", { name: "Message the execution PM" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Open linked development chat" }));
+    expect(
+      await screen.findByRole("textbox", { name: "Message the development chat" }),
+    ).toBeEnabled();
     expect(selected).toHaveBeenCalledWith(execution.id);
   });
 
@@ -4651,12 +4748,10 @@ describe("conversation workspace", () => {
     );
 
     expect(
-      await screen.findByText(/approved before execution conversation handoffs were recorded/i),
+      await screen.findByText(/approved before development handoffs were recorded/i),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("conversation-execution-link")).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("link", { name: /execution pm conversation/i }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /development chat/i })).not.toBeInTheDocument();
     expect(selected).not.toHaveBeenCalled();
   });
 
@@ -4837,10 +4932,9 @@ describe("conversation workspace", () => {
     expect(screen.getByText("phase5/wait-deep-link")).toBeInTheDocument();
     expect(screen.getAllByTestId(`human-wait-${baseWait.id}`)).toHaveLength(1);
 
-    // Execution-side controls live in the Implementation tab.
-    await user.click(screen.getByRole("button", { name: "Implementation" }));
+    // Execution-side controls live in the Development chat stage.
+    await user.click(screen.getByRole("button", { name: "Development chat" }));
     expect(screen.getByTestId("execution-action-composer")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Plan" }));
 
     await user.click(screen.getByRole("button", { name: "Chat options" }));
     await user.click(screen.getByRole("button", { name: "Refresh conversation" }));
@@ -4938,7 +5032,7 @@ describe("conversation workspace", () => {
 
     expect(await screen.findByText("Execution handoff loaded.")).toBeInTheDocument();
     expect(requestBodies).toHaveLength(0);
-    await user.click(screen.getByRole("button", { name: "Implementation" }));
+    await user.click(screen.getByRole("button", { name: "Development chat" }));
     await user.click(screen.getByText("Decisions, direction, pause, and artifacts"));
     await user.type(screen.getByRole("textbox", { name: "Task ID" }), "task-7");
     await user.type(screen.getByRole("textbox", { name: "Active run ID" }), "run-7");
@@ -5075,7 +5169,7 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Implementation" }));
+    await user.click(await screen.findByRole("button", { name: "Development chat" }));
     expect(await screen.findByText("Exact request locked")).toBeInTheDocument();
     expect(window.sessionStorage.getItem(storageKey)).toBe(JSON.stringify(exactRequest));
 
@@ -5084,7 +5178,7 @@ describe("conversation workspace", () => {
 
     // A hard refresh remounts the conversation thread, which resets the work
     // tab back to its Plan default.
-    await user.click(await screen.findByRole("button", { name: "Implementation" }));
+    await user.click(await screen.findByRole("button", { name: "Development chat" }));
     expect(await screen.findByText("Prepare execution action")).toBeInTheDocument();
     await waitFor(() => expect(window.sessionStorage.getItem(storageKey)).toBeNull());
   });
@@ -5273,8 +5367,8 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await screen.findByRole("button", { name: "Plan" });
-    expect(screen.getByRole("button", { name: "Implementation" })).toBeInTheDocument();
+    await screen.findByRole("button", { name: "Plan with PM" });
+    expect(screen.getByRole("button", { name: "Development chat" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
   });
 
@@ -5326,7 +5420,7 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await screen.findByRole("button", { name: "Plan" });
+    await screen.findByRole("button", { name: "Plan with PM" });
     expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
   });
 
@@ -5457,7 +5551,10 @@ describe("conversation workspace", () => {
     await user.click(await screen.findByRole("button", { name: "QC" }));
     await user.click(await screen.findByRole("button", { name: "Discuss in Plan" }));
 
-    expect(screen.getByRole("button", { name: "Plan" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Plan with PM" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
     expect(screen.queryByTestId("conversation-work-tab-qc")).not.toBeInTheDocument();
     expect(await screen.findByRole("textbox", { name: "Message the project PM" })).toHaveValue(
       "> Make cancellation verification explicit.\n\n",

@@ -65,6 +65,18 @@ export interface ProjectSummary {
    * Durable recovery is based on the persisted onboarding scenario and latest
    * planning run, so losing this browser-only hint on refresh is harmless. */
   entry_flow?: "adoption" | "new" | null;
+  /** Browser-only handoff from project adoption into the first work brief. */
+  initial_work_objective?: string | null;
+}
+
+/**
+ * Browser-only intent for the single navigation that follows project setup.
+ * It is deliberately separate from ProjectSummary because API/list records can
+ * retain old entry hints and must still behave like ordinary project opens.
+ */
+export interface ProjectOpenOptions {
+  startNewWork?: boolean;
+  initialBrief?: string | null;
 }
 
 // QCP-4A: the project-layer QC cadence default. Derived from the contract
@@ -462,7 +474,7 @@ export function Projects({
   newProjectRequested = false,
   onNewProjectRequestHandled,
 }: {
-  onOpenProject: (p: ProjectSummary) => void;
+  onOpenProject: (p: ProjectSummary, options?: ProjectOpenOptions) => void;
   openProjects: ProjectSummary[];
   onUnauthorized: () => void;
   onSignOut: () => void;
@@ -546,7 +558,6 @@ export function Projects({
   const [wizardStep, setWizardStep] = useState<"form" | "blocker" | "adopting">("form");
   const [draftProject, setDraftProject] = useState<ProjectSummary | null>(null);
   const [wizardObjective, setWizardObjective] = useState("");
-  const [adoptionStage, setAdoptionStage] = useState<"analyzing" | "planning">("analyzing");
   const [adoptionError, setAdoptionError] = useState<string | null>(null);
   // O1: onboarding blockers (e.g. installation_not_ready) surfaced after a
   // successful create — the project exists either way, this just needs the
@@ -1013,12 +1024,20 @@ export function Projects({
   // makes the durable project disappear from the browser.
   const proceedAfterCreate = useCallback(
     (completedProject: ProjectSummary) => {
+      const startNewWork =
+        completedProject.entry_flow === "new" || completedProject.entry_flow === "adoption";
+      const initialBrief = completedProject.initial_work_objective ?? null;
+      const stableProject = {
+        ...completedProject,
+        entry_flow: null,
+        initial_work_objective: null,
+      };
       setProjects((current) =>
         current?.some((project) => project.id === completedProject.id)
           ? current
           : current
-            ? [completedProject, ...current]
-            : [completedProject],
+            ? [stableProject, ...current]
+            : [stableProject],
       );
       setDialog(false);
       setWizardStep("form");
@@ -1038,7 +1057,10 @@ export function Projects({
       setSubmissionError(null);
       setAdoptionError(null);
       setIdempotencyKey(globalThis.crypto.randomUUID());
-      onOpenProject(completedProject);
+      onOpenProject(stableProject, {
+        startNewWork,
+        initialBrief,
+      });
     },
     [onOpenProject],
   );
@@ -1048,39 +1070,20 @@ export function Projects({
       setDraftProject(project);
       setWizardObjective(objective);
       setAdoptionError(null);
-      setAdoptionStage("analyzing");
       setWizardStep("adopting");
       try {
         await request(`/api/v2/projects/${project.id}/analyze-repository`, {});
-        if (objective) {
-          setAdoptionStage("planning");
-          const run = await request<{ planning_run_id: string }>(
-            `/api/v2/projects/${project.id}/planning-runs`,
-            {
-              objective,
-              max_rounds: 3,
-              attachment_ids: [],
-              pm: {
-                provider: pmProvider,
-                model: pmModel,
-                ...(pmProvider === "openai" ? { reasoning_effort: pmEffort } : {}),
-              },
-            },
-          );
-          proceedAfterCreate({
-            ...project,
-            focus_planning_run_id: run.planning_run_id,
-            entry_flow: "adoption",
-          });
-          return;
-        }
-        proceedAfterCreate(project);
+        proceedAfterCreate({
+          ...project,
+          entry_flow: "adoption",
+          initial_work_objective: objective || null,
+        });
       } catch (error) {
         if (error instanceof UnauthorizedError) onUnauthorized();
         else setAdoptionError(error instanceof Error ? error.message : String(error));
       }
     },
-    [onUnauthorized, pmEffort, pmModel, pmProvider, proceedAfterCreate],
+    [onUnauthorized, proceedAfterCreate],
   );
 
   const applyReviewerPreference = useCallback(
@@ -1129,7 +1132,6 @@ export function Projects({
     async (project: ProjectSummary): Promise<void> => {
       setDraftProject(project);
       setAdoptionError(null);
-      setAdoptionStage("analyzing");
       setWizardStep("adopting");
       try {
         await request(`/api/v2/projects/${project.id}/analyze-repository`, {});
@@ -1321,8 +1323,17 @@ export function Projects({
   }, [completeAdoption, draftProject, prepareNewLocalProject, startingPoint, wizardObjective]);
 
   const openAdoptedProject = useCallback(() => {
-    if (draftProject) proceedAfterCreate(draftProject);
-  }, [draftProject, proceedAfterCreate]);
+    if (!draftProject) return;
+    if (startingPoint === "new") {
+      finishNewProject(draftProject);
+      return;
+    }
+    proceedAfterCreate({
+      ...draftProject,
+      entry_flow: "adoption",
+      initial_work_objective: wizardObjective || null,
+    });
+  }, [draftProject, finishNewProject, proceedAfterCreate, startingPoint, wizardObjective]);
 
   /** The "blocker" step's Continue action — the project already exists;
    *  this just resumes the normal post-creation flow (attach-and-launch for
@@ -1933,17 +1944,10 @@ export function Projects({
                         ? `Preparing ${draftProject.name}`
                         : `Adopting ${draftProject.name}`}
                     </div>
-                    <h3>
-                      {adoptionStage === "analyzing"
-                        ? "Understanding the repository"
-                        : "Starting the first plan"}
-                    </h3>
+                    <h3>Understanding the repository</h3>
                     <p className="muted">
-                      {adoptionStage === "analyzing"
-                        ? "The Norns is reading a bounded sample of committed files and recording the architecture, constraints, and verification facts needed before coding."
-                        : startingPoint === "new"
-                          ? "The repository is understood. The product objective is becoming a planning run now."
-                          : "The repository is understood. The optional direction is becoming a planning run now."}
+                      The Norns is reading a bounded sample of committed files and recording the
+                      architecture, constraints, and verification facts needed before coding.
                     </p>
                   </div>
                   {adoptionError ? (
@@ -1959,13 +1963,7 @@ export function Projects({
                       </div>
                     </>
                   ) : (
-                    <Spinner
-                      label={
-                        adoptionStage === "analyzing"
-                          ? "Analyzing committed code…"
-                          : "Starting planning run…"
-                      }
-                    />
+                    <Spinner label="Analyzing committed code…" />
                   )}
                 </div>
               ) : wizardStep === "blocker" && draftProject ? (

@@ -11,7 +11,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type ProjectSummary, Projects } from "./Projects";
+import { type ProjectOpenOptions, type ProjectSummary, Projects } from "./Projects";
 import { makeProject } from "./test/fixtures";
 import { MockFetch } from "./test/mockFetch";
 
@@ -103,7 +103,7 @@ const projectComputer = {
 
 describe("O1: GitHub and local Git repository onboarding", () => {
   let mock: MockFetch;
-  const onOpenProject = vi.fn<(project: ProjectSummary) => void>();
+  const onOpenProject = vi.fn<(project: ProjectSummary, options?: ProjectOpenOptions) => void>();
 
   beforeEach(() => {
     onOpenProject.mockReset();
@@ -406,18 +406,16 @@ describe("O1: GitHub and local Git repository onboarding", () => {
       startingPoint: "new",
       creationPath: "/api/v2/projects/onboarding",
       analyzes: false,
-      entryFlow: "new",
     },
     {
       label: "Existing + GitHub",
       startingPoint: "existing",
       creationPath: "/api/v2/projects/onboarding",
       analyzes: true,
-      entryFlow: undefined,
     },
   ] as const)(
     "supports the onboarding source matrix: $label",
-    async ({ startingPoint, creationPath, analyzes, entryFlow }) => {
+    async ({ startingPoint, creationPath, analyzes }) => {
       const user = userEvent.setup();
       renderWizard();
       await user.click(await screen.findByRole("button", { name: /new project/i }));
@@ -450,13 +448,15 @@ describe("O1: GitHub and local Git repository onboarding", () => {
         ),
       ).toBe(analyzes);
       // DESIGN R2: no path in the matrix starts a planning run from the
-      // wizard — planning happens in the conversation after creation. (An
-      // adoption with a typed optional direction still plans; that path is
-      // covered by its own test below.)
+      // wizard — planning happens in the conversation after creation.
       expect(
         mock.calls.some((call) => call.method === "POST" && call.url.endsWith("/planning-runs")),
       ).toBe(false);
-      expect(onOpenProject.mock.calls[0]?.[0]?.entry_flow).toBe(entryFlow);
+      expect(onOpenProject.mock.calls[0]?.[0]?.entry_flow).toBeNull();
+      expect(onOpenProject.mock.calls[0]?.[1]).toEqual({
+        startNewWork: true,
+        initialBrief: null,
+      });
 
       expect(creationCall).toMatchObject({
         body: {
@@ -466,10 +466,7 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     },
   );
 
-  it("starts planning automatically only when the optional first direction is provided", async () => {
-    mock.post("/api/v2/projects/project-created/planning-runs", {
-      body: { planning_run_id: "planning-adoption" },
-    });
+  it("carries an optional adoption direction into the first work brief without starting planning", async () => {
     const user = userEvent.setup();
     renderWizard();
     await user.click(await screen.findByRole("button", { name: /new project/i }));
@@ -481,23 +478,21 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     await waitFor(() =>
       expect(onOpenProject).toHaveBeenCalledWith(
         expect.objectContaining({
-          focus_planning_run_id: "planning-adoption",
-          entry_flow: "adoption",
+          entry_flow: null,
+          initial_work_objective: null,
         }),
+        {
+          startNewWork: true,
+          initialBrief: "Improve the deployment workflow",
+        },
       ),
     );
     expect(
-      mock.calls.find(
+      mock.calls.some(
         (call) =>
           call.method === "POST" && call.url === "/api/v2/projects/project-created/planning-runs",
       ),
-    ).toMatchObject({
-      body: {
-        objective: "Improve the deployment workflow",
-        max_rounds: 3,
-        attachment_ids: [],
-      },
-    });
+    ).toBe(false);
   });
 
   it("resolves a pasted repo URL to the matching entry in the searchable list", async () => {

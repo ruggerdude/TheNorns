@@ -461,39 +461,25 @@ describe("PHASE TAB (P2)", () => {
     expect(screen.getByTestId("phase-execution-team")).toHaveTextContent("High effort");
   });
 
-  it("prepares an adopted project's focused plan without overriding Overview", async () => {
+  it("treats a stale adoption entry hint from a project read as an ordinary Overview open", async () => {
     setToken("present");
     mock = workspaceMocks({
       ...projectAlpha,
       entry_flow: "adoption",
+      onboarding_scenario: "existing_repo",
       focus_planning_run_id: "run-1",
     });
-    mock.get(runUrl, { body: makeRun() });
-    mock.install();
-
-    const firstOpen = render(<App />);
-    await openProjectFromPortfolio();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on"));
-    expect(screen.queryByTestId("phase-run-progress")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Work" }));
-    expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
-
-    firstOpen.unmount();
-    mock.restore();
-    mock = workspaceMocks({ ...projectAlpha, onboarding_scenario: "existing_repo" });
-    mock.get(`${runsUrl}/latest`, { body: { planning_run: makeRun() } });
     mock.get(runUrl, { body: makeRun() });
     mock.install();
 
     render(<App />);
     await openProjectFromPortfolio();
     await waitFor(() => expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on"));
+    expect(window.location.pathname).toBe(`/projects/${projectId}`);
     expect(screen.queryByTestId("phase-run-progress")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Work" }));
-    expect(await screen.findByTestId("phase-run-progress")).toBeInTheDocument();
   });
 
-  it("prepares a new project's focused approval decision without overriding Overview", async () => {
+  it("treats a stale new-project entry hint from a project read as an ordinary Overview open", async () => {
     setToken("present");
     mock = workspaceMocks({
       ...projectAlpha,
@@ -504,26 +490,11 @@ describe("PHASE TAB (P2)", () => {
     mock.get(runUrl, { body: convergedRun });
     mock.install();
 
-    const firstOpen = render(<App />);
-    await openProjectFromPortfolio();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on"));
-    expect(screen.queryByTestId("phase-decision-panel")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Work" }));
-    expect(await screen.findByTestId("phase-decision-panel")).toBeInTheDocument();
-
-    firstOpen.unmount();
-    mock.restore();
-    mock = workspaceMocks({ ...projectAlpha, onboarding_scenario: "new_repo" });
-    mock.get(`${runsUrl}/latest`, { body: { planning_run: convergedRun } });
-    mock.get(runUrl, { body: convergedRun });
-    mock.install();
-
     render(<App />);
     await openProjectFromPortfolio();
     await waitFor(() => expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on"));
+    expect(window.location.pathname).toBe(`/projects/${projectId}`);
     expect(screen.queryByTestId("phase-decision-panel")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Work" }));
-    expect(await screen.findByTestId("phase-decision-panel")).toBeInTheDocument();
   });
 
   it("prepares a new project's active planning run without overriding Overview", async () => {
@@ -931,6 +902,7 @@ describe("PHASE TAB (P2)", () => {
     mock = workspaceMocks({
       ...projectAlpha,
       entry_flow: "adoption",
+      onboarding_scenario: "existing_repo",
       focus_planning_run_id: "run-1",
     });
     mock.get(runUrl, { body: convergedRun });
@@ -979,7 +951,6 @@ describe("PHASE TAB (P2)", () => {
 
     render(<App />);
     await openProjectFromPortfolio();
-    expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on");
     await userEvent.click(screen.getByRole("button", { name: "Work" }));
     await userEvent.click(await screen.findByTestId("phase-approve"));
     await userEvent.click(await screen.findByTestId("phase-retry-execution"));

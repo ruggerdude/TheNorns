@@ -99,12 +99,12 @@ describe("ConversationOverview", () => {
     expect(screen.getByText("Usage settling")).toBeInTheDocument();
     await user.click(
       screen.getByRole("button", {
-        name: `Open Planning conversation for Conversation work for ${projectId}`,
+        name: `Open Plan with PM conversation for Conversation work for ${projectId}`,
       }),
     );
     await user.click(
       screen.getByRole("button", {
-        name: `Open Execution PM conversation for Conversation work for ${projectId}`,
+        name: `Open Development chat conversation for Conversation work for ${projectId}`,
       }),
     );
     expect(open.mock.calls).toEqual([[planning.id], [execution.id]]);
@@ -153,7 +153,7 @@ describe("ConversationOverview", () => {
       />,
     );
     expect(screen.queryByText(`Conversation work for ${firstProject}`)).not.toBeInTheDocument();
-    expect(screen.getByText("Loading project conversations…")).toBeInTheDocument();
+    expect(screen.getByText("Loading project work items…")).toBeInTheDocument();
 
     resolveSecond(
       Response.json({

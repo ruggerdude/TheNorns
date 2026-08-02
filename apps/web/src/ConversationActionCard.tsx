@@ -336,8 +336,8 @@ function EffectNotice({
   if (effect.transition_status !== "created" || effect.execution_conversation_id === null) {
     return (
       <output className="conversation-action-effect is-info" aria-live="polite">
-        This plan was approved before execution conversation handoffs were recorded. No linked
-        execution PM conversation is available for this historical approval.
+        This plan was approved before development handoffs were recorded. No linked Development chat
+        is available for this historical approval.
       </output>
     );
   }
@@ -369,7 +369,7 @@ function EffectNotice({
           effect.execution_conversation_id,
         )}`}
       >
-        Open execution PM conversation
+        Open development chat
       </a>
       {execution.status === "refused" || execution.status === "failed" ? (
         <a href={`/projects/${encodeURIComponent(projectId)}`}>Open project recovery</a>

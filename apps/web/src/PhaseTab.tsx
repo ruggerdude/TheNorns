@@ -276,6 +276,7 @@ export interface PhaseTabProps {
   initialRunId?: string | null;
   initialConversationId?: string | null;
   initialNewConversation?: boolean;
+  initialBrief?: string | null;
   designatedExecution?: PhaseDesignatedExecutionSnapshot | null;
   composerRequested?: boolean;
   onComposerOpened?: () => void;
@@ -1688,6 +1689,7 @@ export function PhaseTab(props: PhaseTabProps): React.ReactElement {
         projectId={props.projectId}
         initialConversationId={props.initialConversationId}
         initialNewConversation={props.initialNewConversation}
+        initialBrief={props.initialBrief}
         onConversationSelected={props.onConversationSelected}
         onNewConversation={props.onNewConversation}
         onUnsupported={() => setConversationUnsupported(true)}

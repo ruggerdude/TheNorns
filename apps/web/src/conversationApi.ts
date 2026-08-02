@@ -241,7 +241,12 @@ export function createConversationMessageBranch(
 
 export function createPlanningWorkItem(
   projectId: string,
-  input: { title: string; objective: string; model?: PmModelT },
+  input: {
+    title: string;
+    objective: string;
+    model?: PmModelT;
+    workflow: "phased" | "quick";
+  },
 ): Promise<{
   work_item: V2WorkItemT;
   conversation: V2WorkConversationT;
@@ -252,17 +257,34 @@ export function createPlanningWorkItem(
   });
 }
 
-export async function getProjectConversationPin(
-  projectId: string,
-): Promise<{ provider: PmProviderT; model: PmModelT }> {
+export async function getProjectConversationPin(projectId: string): Promise<{
+  provider: PmProviderT;
+  model: PmModelT;
+  project: {
+    name: string | null;
+    workspaceLocation: string | null;
+    remoteLocation: string | null;
+  };
+}> {
   const project = await requestJson<{
     pm_provider: PmProviderT;
     pm_model: PmModelT | null;
+    name?: string | null;
+    workspace_location?: string | null;
+    remote_location?: string | null;
   }>(`/api/projects/${encodeURIComponent(projectId)}`);
   if (!project.pm_model) {
     throw new Error("This project does not have a conversation model configured.");
   }
-  return { provider: project.pm_provider, model: project.pm_model };
+  return {
+    provider: project.pm_provider,
+    model: project.pm_model,
+    project: {
+      name: project.name ?? null,
+      workspaceLocation: project.workspace_location ?? null,
+      remoteLocation: project.remote_location ?? null,
+    },
+  };
 }
 
 export async function switchConversationModel(

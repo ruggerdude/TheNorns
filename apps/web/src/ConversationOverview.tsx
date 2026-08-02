@@ -8,8 +8,8 @@ import {
 import { Alert, Badge, Button, Spinner } from "./ui";
 
 function kindLabel(kind: WorkItemConversationGroup["conversations"][number]["kind"]): string {
-  if (kind === "planning") return "Planning";
-  if (kind === "execution_pm") return "Execution PM";
+  if (kind === "planning") return "Plan with PM";
+  if (kind === "execution_pm") return "Development chat";
   return "Task";
 }
 
@@ -71,17 +71,17 @@ export function ConversationOverview({
     >
       <div className="section-head">
         <div>
-          <div className="eyebrow">Conversation-first work</div>
-          <h2 id="project-conversation-overview-title">Planning and execution conversations</h2>
+          <div className="eyebrow">Work items</div>
+          <h2 id="project-conversation-overview-title">Planning and development chats</h2>
         </div>
         <span className="muted">{groups ? `${conversationCount} total` : "Loading…"}</span>
       </div>
       {error ? <Alert testId="conversation-overview-error">{error}</Alert> : null}
-      {!groups ? <Spinner label="Loading project conversations…" /> : null}
+      {!groups ? <Spinner label="Loading project work items…" /> : null}
       {groups?.length === 0 && !error ? (
         <div className="history-empty">
-          <strong>No conversation-first work yet</strong>
-          <span>Planning and execution PM conversations will remain linked here.</span>
+          <strong>No work items yet</strong>
+          <span>Planning and Development chats will remain linked here.</span>
         </div>
       ) : null}
       <div className="project-conversation-overview-list">

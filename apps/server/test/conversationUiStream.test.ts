@@ -14,6 +14,7 @@ import {
 describe("AI SDK UI protocol conversation stream", () => {
   const app = Fastify();
   let createdWorkspacePin: { provider: string; model: string } | null = null;
+  let createdWorkflow: "phased" | "quick" | null = null;
 
   beforeAll(async () => {
     app.get("/stream", async (request, reply) => {
@@ -62,6 +63,7 @@ describe("AI SDK UI protocol conversation stream", () => {
           pin: { provider: string; model: string },
         ) => {
           createdWorkspacePin = pin;
+          createdWorkflow = "phased";
           return {
             work_item: {
               id: "work-created",
@@ -71,6 +73,30 @@ describe("AI SDK UI protocol conversation stream", () => {
             },
             conversation: {
               id: "conversation-created",
+              provider: pin.provider,
+              model: pin.model,
+            },
+          };
+        },
+        createQuickWorkspace: async (
+          _user: unknown,
+          input: { project_id: string; title: string; objective: string },
+          pin: { provider: string; model: string },
+        ) => {
+          createdWorkspacePin = pin;
+          createdWorkflow = "quick";
+          return {
+            work_item: {
+              id: "work-created-quick",
+              project_id: input.project_id,
+              title: input.title,
+              objective: input.objective,
+              status: "executing",
+            },
+            conversation: {
+              id: "conversation-created-quick",
+              kind: "execution_pm",
+              status: "active",
               provider: pin.provider,
               model: pin.model,
             },
@@ -205,6 +231,7 @@ describe("AI SDK UI protocol conversation stream", () => {
 
   it("lets a new conversation choose its initial provider ecosystem", async () => {
     createdWorkspacePin = null;
+    createdWorkflow = null;
     const response = await app.inject({
       method: "POST",
       url: "/api/v2/projects/project-route/work-items",
@@ -219,11 +246,32 @@ describe("AI SDK UI protocol conversation stream", () => {
       provider: "openai",
       model: "gpt-5.6-terra",
     });
+    expect(createdWorkflow).toBe("phased");
     expect(response.json()).toMatchObject({
       conversation: {
         provider: "openai",
         model: "gpt-5.6-terra",
       },
+    });
+  });
+
+  it("creates a direct execution workspace only for the explicit quick workflow", async () => {
+    createdWorkspacePin = null;
+    createdWorkflow = null;
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v2/projects/project-route/work-items",
+      payload: {
+        title: "Small direct change",
+        objective: "Make the bounded change in development chat.",
+        workflow: "quick",
+      },
+    });
+    expect(response.statusCode).toBe(201);
+    expect(createdWorkflow).toBe("quick");
+    expect(response.json()).toMatchObject({
+      work_item: { status: "executing" },
+      conversation: { kind: "execution_pm", status: "active" },
     });
   });
 

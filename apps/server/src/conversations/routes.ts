@@ -7,6 +7,7 @@ import {
   V2ReorderConversationFoldersInput,
   V2UpdateConversationFolderInput,
   V2UpdateWorkItemOrganizationInput,
+  V2WorkItemWorkflow,
   V2WorkMessagePart,
   providerForPmModel,
 } from "@norns/contracts";
@@ -51,6 +52,7 @@ const WorkItemBody = z
     title: z.string().trim().min(1),
     objective: z.string().trim().min(1),
     model: PmModel.optional(),
+    workflow: V2WorkItemWorkflow.default("phased"),
   })
   .strict();
 const WorkItemTitleBody = z.object({ title: z.string().trim().min(1).max(120) }).strict();
@@ -325,7 +327,11 @@ export function registerConversationRoutes(
       const pin = body.model
         ? { provider: providerForPmModel(body.model), model: body.model }
         : await options.pinForProject(projectId);
-      const created = await options.conversations.createPlanningWorkspace(
+      const createWorkspace =
+        body.workflow === "quick"
+          ? options.conversations.createQuickWorkspace.bind(options.conversations)
+          : options.conversations.createPlanningWorkspace.bind(options.conversations);
+      const created = await createWorkspace(
         user,
         { project_id: projectId, title: body.title, objective: body.objective },
         pin,

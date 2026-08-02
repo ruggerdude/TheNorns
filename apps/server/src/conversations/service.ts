@@ -359,6 +359,37 @@ export class ConversationService {
     });
   }
 
+  createQuickWorkspace(
+    actor: ConversationActor,
+    candidate: V2CreateWorkItemInputT,
+    pin: PlanningConversationPin,
+  ): Promise<{ work_item: V2WorkItemT; conversation: V2WorkConversationT }> {
+    const input = V2CreateWorkItemInput.parse(candidate);
+    const workItemId = this.makeId("work");
+    const conversationInput = V2CreateWorkConversationInput.parse({
+      project_id: input.project_id,
+      work_item_id: workItemId,
+      kind: "execution_pm",
+      provider: pin.provider,
+      model: pin.model,
+    });
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(input.project_id, actor.id);
+      const work_item = await repository.insertQuickWorkItem({
+        id: workItemId,
+        phaseId: this.makeId("phase"),
+        actorUserId: actor.id,
+        input,
+      });
+      const conversation = await repository.insertConversation({
+        id: this.makeId("conversation"),
+        actorUserId: actor.id,
+        input: conversationInput,
+      });
+      return { work_item, conversation };
+    });
+  }
+
   createConversation(
     actor: ConversationActor,
     candidate: V2CreateWorkConversationInputT,

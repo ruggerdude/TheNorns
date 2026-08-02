@@ -5,7 +5,12 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type ProjectSummary, Projects, deriveProjectIdentity } from "./Projects";
+import {
+  type ProjectOpenOptions,
+  type ProjectSummary,
+  Projects,
+  deriveProjectIdentity,
+} from "./Projects";
 import { makeProject } from "./test/fixtures";
 import { MockFetch } from "./test/mockFetch";
 
@@ -23,7 +28,7 @@ const connection = (id: string, owner: string) => ({
 
 describe("new project: name-first creation, planning in the conversation", () => {
   let mock = new MockFetch();
-  const onOpenProject = vi.fn<(project: ProjectSummary) => void>();
+  const onOpenProject = vi.fn<(project: ProjectSummary, options?: ProjectOpenOptions) => void>();
   const onOpenAccount = vi.fn();
 
   afterEach(() => mock.restore());
@@ -137,8 +142,9 @@ describe("new project: name-first creation, planning in the conversation", () =>
     expect(onOpenProject).toHaveBeenCalledWith(
       expect.objectContaining({
         id: "proj_wizard",
-        entry_flow: "new",
+        entry_flow: null,
       }),
+      { startNewWork: true, initialBrief: null },
     );
   });
 

@@ -368,6 +368,10 @@ export interface InsertWorkItem {
   input: V2CreateWorkItemInputT;
 }
 
+export interface InsertQuickWorkItem extends InsertWorkItem {
+  phaseId: string;
+}
+
 export interface InsertConversation {
   id: string;
   actorUserId: string;
@@ -471,6 +475,7 @@ export interface ConversationRepository {
     cursor: ConversationNavigationCursor | null,
   ): Promise<ConversationNavigationResult>;
   insertWorkItem(input: InsertWorkItem): Promise<V2WorkItemT>;
+  insertQuickWorkItem(input: InsertQuickWorkItem): Promise<V2WorkItemT>;
   findWorkItem(projectId: string, workItemId: string): Promise<V2WorkItemT | null>;
   listWorkItems(projectId: string): Promise<V2WorkItemT[]>;
   updateWorkItemTitle(
@@ -864,6 +869,33 @@ class SqlConversationRepository implements ConversationRepository {
     );
     const row = result.rows[0];
     if (!row) throw new Error("work item insert returned no row");
+    return workItem(row);
+  }
+
+  async insertQuickWorkItem({
+    id,
+    phaseId,
+    actorUserId,
+    input,
+  }: InsertQuickWorkItem): Promise<V2WorkItemT> {
+    const result = await this.sql.query<WorkItemRow>(
+      `WITH materialized_phase AS (
+         INSERT INTO phases (
+           id, project_id, objective_summary, priority, status
+         ) VALUES ($1,$2,$3,0,'proposed')
+         RETURNING id
+       )
+       INSERT INTO work_items (
+         id, project_id, created_by_user_id, title, objective,
+         status, phase_id, execution_started_at
+       )
+       SELECT $4,$2,$5,$6,$3,'executing',materialized_phase.id,now()
+         FROM materialized_phase
+       RETURNING ${workItemColumns}`,
+      [phaseId, input.project_id, input.objective, id, actorUserId, input.title],
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error("quick work item insert returned no row");
     return workItem(row);
   }
 
