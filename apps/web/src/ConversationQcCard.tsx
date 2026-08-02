@@ -64,15 +64,6 @@ function formatGateSpend(usage: V2ConversationUsageT): string | null {
   return `$${usage.cost_usd.toFixed(2)} spent on this conversation so far`;
 }
 
-function statusTone(
-  status: V2ConversationPlanReviewT["status"],
-): "default" | "success" | "warn" | "danger" | "info" {
-  if (status === "converged") return "success";
-  if (status === "failed" || status === "cancelled") return "danger";
-  if (status === "cap_reached") return "warn";
-  return "info";
-}
-
 function failureLabel(code: string | null): string {
   switch (code) {
     case "invalid_response":
@@ -178,17 +169,8 @@ function useProgressClock(active: boolean): number {
   return nowMs;
 }
 
-function compactDuration(seconds: number): string {
-  if (seconds < 60) return "under 1 min";
-  const minutes = Math.max(1, Math.round(seconds / 60));
-  if (minutes < 60) return `${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  const remainder = minutes % 60;
-  return remainder > 0 ? `${hours} hr ${remainder} min` : `${hours} hr`;
-}
-
 function qcStatusTitle(review: V2ConversationPlanReviewT): string {
-  if (review.review_mode === "waived") return "Quality review was skipped";
+  if (review.review_mode === "waived") return "QC skipped";
   if (review.status === "queued") return "Quality review is queued";
   if (review.status === "running") return "Quality review is in progress";
   if (review.status === "awaiting_human") return "QC is paused. Your decision is needed.";
@@ -200,7 +182,7 @@ function qcStatusTitle(review: V2ConversationPlanReviewT): string {
 
 function qcStatusDescription(review: V2ConversationPlanReviewT): string {
   if (review.review_mode === "waived") {
-    return "No independent reviewer was called. The current plan can move forward by human choice.";
+    return "The current plan can move forward by human choice.";
   }
   if (review.status === "queued")
     return "The plan is waiting for the independent reviewer to begin.";
@@ -217,7 +199,7 @@ function qcStatusDescription(review: V2ConversationPlanReviewT): string {
     return "The reviewer finished this pass. Continue for a revision, add guidance, or choose another path.";
   }
   if (review.status === "converged") {
-    return `The reviewer and planning manager agreed after ${review.rounds_completed} round${review.rounds_completed === 1 ? "" : "s"}.`;
+    return `The review completed successfully after ${review.rounds_completed} round${review.rounds_completed === 1 ? "" : "s"}.`;
   }
   if (review.status === "cap_reached") {
     return `The review used all ${review.max_rounds} rounds. Check the remaining findings before deciding.`;
@@ -232,6 +214,9 @@ function qcRemainingEstimate(
   review: V2ConversationPlanReviewT,
   nowMs: number,
 ): { value: string; detail: string } {
+  if (review.review_mode === "waived") {
+    return { value: "QC skipped", detail: "No independent review was run" };
+  }
   if (["converged", "cap_reached", "failed", "cancelled"].includes(review.status)) {
     const total = elapsedLabel(review.started_at, Date.parse(review.completed_at ?? "") || nowMs);
     return { value: "Finished", detail: total ? `${total} total` : "No work remains" };
@@ -240,21 +225,17 @@ function qcRemainingEstimate(
     return { value: "Paused", detail: "Continues after your decision" };
   }
   const remainingRounds = Math.max(0, review.max_rounds - review.rounds_completed);
-  const roundLabel = `Up to ${remainingRounds} round${remainingRounds === 1 ? "" : "s"} remain`;
-  if (review.rounds_completed === 0 || !review.started_at) {
-    return { value: roundLabel, detail: "Time estimate after round 1" };
-  }
-  const startedMs = Date.parse(review.started_at);
-  if (!Number.isFinite(startedMs)) return { value: roundLabel, detail: "Timing unavailable" };
-  const elapsedSeconds = Math.max(1, (nowMs - startedMs) / 1_000);
-  const estimatedSeconds = (elapsedSeconds / review.rounds_completed) * remainingRounds;
+  const roundLabel = `Up to ${remainingRounds} round${remainingRounds === 1 ? "" : "s"} left`;
   return {
-    value: `About ${compactDuration(estimatedSeconds)}`,
-    detail: `${roundLabel} · based on this run`,
+    value: roundLabel,
+    detail: review.status === "queued" ? "Full review budget" : "Includes the round in progress",
   };
 }
 
 function qcNextStep(review: V2ConversationPlanReviewT): { value: string; detail: string } {
+  if (review.review_mode === "waived") {
+    return { value: "Approve the plan", detail: "QC will remain marked as skipped" };
+  }
   if (review.status === "queued" || review.status === "running") {
     return { value: "No action needed", detail: "We’ll pause here if you are needed" };
   }
@@ -269,9 +250,6 @@ function qcNextStep(review: V2ConversationPlanReviewT): { value: string; detail:
   if (review.status === "failed") {
     return { value: "Retry with context", detail: "Recommended recovery" };
   }
-  if (review.review_mode === "waived") {
-    return { value: "Approve the plan", detail: "QC will remain marked as skipped" };
-  }
   return { value: "Review the stopped run", detail: "Choose a recovery path" };
 }
 
@@ -279,6 +257,7 @@ function qcCurrentOwner(
   review: V2ConversationPlanReviewT,
   progress: ReviewLiveProgress | null,
 ): { value: string; detail: string } {
+  if (review.review_mode === "waived") return { value: "You", detail: "QC was skipped" };
   if (review.status === "awaiting_human") return { value: "You", detail: "QC is paused" };
   if (["converged", "cap_reached", "failed", "cancelled"].includes(review.status)) {
     return { value: "You", detail: "Run has finished" };
@@ -562,6 +541,9 @@ function qcActiveRound(
   review: V2ConversationPlanReviewT,
   progress: ReviewLiveProgress | null,
 ): number {
+  if (review.status === "awaiting_human" && typeof review.paused_at_round === "number") {
+    return Math.max(1, Math.min(review.paused_at_round, review.max_rounds));
+  }
   const recordedRound = progress?.round;
   if (recordedRound !== null && recordedRound !== undefined) {
     return Math.max(1, Math.min(recordedRound, review.max_rounds));
@@ -578,6 +560,7 @@ function qcRoundStageTitle(
   progress: ReviewLiveProgress | null,
   owner: { value: string; detail: string },
 ): string {
+  if (review.review_mode === "waived") return "No independent review was run";
   if (["converged", "cap_reached", "failed", "cancelled"].includes(review.status)) {
     return qcStatusTitle(review);
   }
@@ -1584,8 +1567,9 @@ export function ConversationQcCard({
   const [confirmingSkip, setConfirmingSkip] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
   const titleId = `conversation-qc-${review.id}`;
-  const terminal = ["converged", "cap_reached", "failed", "cancelled"].includes(review.status);
   const waived = review.review_mode === "waived";
+  const terminal =
+    waived || ["converged", "cap_reached", "failed", "cancelled"].includes(review.status);
   const percent = Math.min(
     100,
     Math.round((review.rounds_completed / Math.max(1, review.max_rounds)) * 100),
@@ -1618,21 +1602,29 @@ export function ConversationQcCard({
   ).length;
   const activeRound = qcActiveRound(review, liveProgress);
   const roundStageTitle = qcRoundStageTitle(review, liveProgress, owner);
-  const roundHeading = terminal
-    ? `${review.rounds_completed} of ${review.max_rounds} rounds used`
-    : `Round ${activeRound} of ${review.max_rounds}`;
-  const roundEyebrow = terminal
-    ? "Review summary"
-    : review.status === "awaiting_human"
-      ? "Paused in"
-      : "Current round";
-  const statusLabel = terminal
-    ? review.status.replaceAll("_", " ")
-    : review.status === "awaiting_human"
-      ? "Decision needed"
-      : liveProgress
-        ? LIVE_STAGE_LABELS[liveProgress.stage]
-        : review.status;
+  const roundHeading = waived
+    ? "QC skipped"
+    : terminal
+      ? `${review.rounds_completed} of ${review.max_rounds} rounds used`
+      : `Round ${activeRound} of ${review.max_rounds}`;
+  const roundEyebrow = waived
+    ? "Quality control"
+    : terminal
+      ? "Review summary"
+      : review.status === "awaiting_human"
+        ? "Paused in"
+        : "Current round";
+  const ownerDetail =
+    !terminal && liveProgress?.provider && liveProgress.model
+      ? `${liveProgress.provider} · ${liveProgress.model}`
+      : owner.detail;
+  const remainingLabel = waived
+    ? "Review status"
+    : terminal
+      ? "Run duration"
+      : review.status === "awaiting_human"
+        ? "Time status"
+        : "Round budget";
   const primaryDecision =
     actions.approve && ["converged", "cap_reached"].includes(review.status)
       ? actions.approve
@@ -1658,7 +1650,6 @@ export function ConversationQcCard({
               <span className="eyebrow">{roundEyebrow}</span>
               <h3 id={titleId}>{roundHeading}</h3>
             </div>
-            <Badge tone={statusTone(review.status)}>{statusLabel}</Badge>
           </header>
           <div className="conversation-qc-round-stage">
             <span
@@ -1670,44 +1661,46 @@ export function ConversationQcCard({
               <p>{qcStatusDescription(review)}</p>
             </div>
           </div>
-          <footer className="conversation-qc-round-summary" aria-live="polite">
-            <span>
-              <small>
-                {terminal || review.status === "awaiting_human" ? "Decision owner" : "Working now"}
-              </small>
-              <strong>{owner.value}</strong>
-              <small>
-                {!terminal && liveProgress?.provider && liveProgress.model
-                  ? `${liveProgress.provider} · ${liveProgress.model}`
-                  : owner.detail}
-              </small>
-            </span>
-            <span>
-              <small>
-                {terminal
-                  ? "Run duration"
-                  : review.status === "awaiting_human"
-                    ? "Time status"
-                    : "Estimated remaining"}
-              </small>
-              <strong>{remaining.value}</strong>
-              <small>{remaining.detail}</small>
-            </span>
-          </footer>
+          {!waived ? (
+            <footer className="conversation-qc-round-summary" aria-live="polite">
+              <span>
+                <small>
+                  {terminal || review.status === "awaiting_human"
+                    ? "Decision owner"
+                    : "Working now"}
+                </small>
+                <strong>{owner.value}</strong>
+              </span>
+              <span>
+                <small>{remainingLabel}</small>
+                <strong>{remaining.value}</strong>
+              </span>
+            </footer>
+          ) : null}
         </section>
 
         <details className="conversation-qc-run-details">
           <summary>
             <span>Run details</span>
-            <small>
-              {timingLabel || "Timing not recorded"} · {visibleFindings.length} finding
-              {visibleFindings.length === 1 ? "" : "s"}
-            </small>
           </summary>
           <dl>
             <div>
               <dt>Status</dt>
               <dd>{qcStatusTitle(review)}</dd>
+            </div>
+            <div>
+              <dt>Current owner</dt>
+              <dd>{owner.value}</dd>
+              <small>{ownerDetail}</small>
+            </div>
+            <div>
+              <dt>{remainingLabel}</dt>
+              <dd>{remaining.value}</dd>
+              <small>{remaining.detail}</small>
+            </div>
+            <div>
+              <dt>Timing</dt>
+              <dd>{timingLabel || "Timing not recorded"}</dd>
             </div>
             <div>
               <dt>Next</dt>

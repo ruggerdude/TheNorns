@@ -1898,7 +1898,11 @@ function qcActivityTone(
 // Plan-tab status strip, visible for the whole time a review is active (queued,
 // running, or parked), not only once it pauses.
 function qcStripLabel(review: V2ConversationPlanReviewT): string {
-  const round = Math.min(review.rounds_completed + 1, review.max_rounds);
+  const inferredRound =
+    review.status === "awaiting_human" && review.paused_at_round !== null
+      ? review.paused_at_round
+      : review.rounds_completed + 1;
+  const round = Math.max(1, Math.min(inferredRound, review.max_rounds));
   const position = `QC round ${round} of ${review.max_rounds}`;
   if (review.status === "awaiting_human") return `${position} · paused, waiting on you`;
   if (review.status === "queued") return `${position} · queued`;

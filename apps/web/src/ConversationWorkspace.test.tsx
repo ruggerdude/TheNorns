@@ -5683,7 +5683,7 @@ describe("conversation workspace", () => {
     const review = planReview({
       status: "awaiting_human",
       paused_checkpoint: "after_review",
-      paused_at_round: 2,
+      paused_at_round: 1,
       rounds_completed: 1,
       max_rounds: 3,
       completed_at: null,
@@ -5712,7 +5712,7 @@ describe("conversation workspace", () => {
     const qcTab = await screen.findByRole("button", { name: /QC.*Needs you/ });
     expect(qcTab).toBeInTheDocument();
 
-    const strip = screen.getByRole("button", { name: /QC round 2 of 3 · paused, waiting on you/ });
+    const strip = screen.getByRole("button", { name: /QC round 1 of 3 · paused, waiting on you/ });
     expect(strip).toBeInTheDocument();
 
     await user.click(strip);

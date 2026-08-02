@@ -179,6 +179,123 @@ describe("conversation QC card", () => {
     expect(screen.getByText("Independent reviewer is checking the plan")).toBeInTheDocument();
   });
 
+  it("keeps the active round as the only primary heading and nests run controls in one disclosure", () => {
+    render(
+      <ConversationQcCard
+        planVersion={null}
+        review={review({
+          status: "running",
+          rounds_completed: 1,
+          findings: [],
+          dispositions: [],
+          revised_plan_version_id: null,
+          completed_at: null,
+        })}
+        onCancel={vi.fn()}
+        onPatch={vi.fn()}
+      />,
+    );
+
+    const card = screen.getByTestId("conversation-qc-card");
+    const headings = within(card).getAllByRole("heading");
+    expect(headings).toHaveLength(1);
+    expect(headings[0]).toHaveAccessibleName("Round 2 of 3");
+    const roundFocus = headings[0]?.closest("section");
+    expect(roundFocus).not.toBeNull();
+
+    expect(within(card).getAllByText("Run details")).toHaveLength(1);
+    const runDetails = within(card).getByText("Run details").closest("details");
+    expect(runDetails).not.toBeNull();
+    expect(runDetails).not.toHaveAttribute("open");
+    expect(runDetails?.querySelector("summary")).toHaveTextContent(/^Run details$/);
+    expect(within(roundFocus as HTMLElement).getByText("Round budget")).toBeInTheDocument();
+    expect(within(roundFocus as HTMLElement).getByText("Up to 2 rounds left")).toBeInTheDocument();
+    expect(within(card).queryByText("Estimated remaining")).not.toBeInTheDocument();
+    expect(runDetails).toContainElement(within(card).getByTestId("conversation-qc-cadence"));
+    expect(runDetails).toContainElement(within(card).getByRole("button", { name: "Stop QC" }));
+    expect(runDetails).toContainElement(within(card).getByText("Round activity"));
+
+    fireEvent.click(within(card).getByText("Run details"));
+    expect(runDetails).toHaveAttribute("open");
+  });
+
+  it.each([
+    ["converged", 2],
+    ["cap_reached", 3],
+    ["failed", 1],
+    ["cancelled", 1],
+  ] as const)("summarizes a terminal %s review by rounds used", (status, roundsCompleted) => {
+    render(
+      <ConversationQcCard
+        planVersion={null}
+        review={review({
+          status,
+          rounds_completed: roundsCompleted,
+          failure_code: status === "failed" ? "reviewer_unavailable" : null,
+          cancellation_reason: status === "cancelled" ? "Stopped for a planning change." : null,
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", {
+        name: `${roundsCompleted} of 3 rounds used`,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Review summary")).toBeInTheDocument();
+  });
+
+  it("keeps a paused checkpoint anchored to the round awaiting a decision", () => {
+    render(
+      <ConversationQcCard
+        planVersion={null}
+        review={review({
+          status: "awaiting_human",
+          rounds_completed: 1,
+          paused_checkpoint: "after_review",
+          paused_at_round: 1,
+          completed_at: null,
+        })}
+        onResume={vi.fn()}
+        onContinueWithoutQc={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Paused in")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Round 1 of 3" })).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("conversation-qc-gate-card")).getByText("Round 1 of 3"),
+    ).toBeInTheDocument();
+  });
+
+  it("presents a waived review as skipped instead of as a completed QC round", () => {
+    render(
+      <ConversationQcCard
+        planVersion={null}
+        review={review({
+          review_mode: "waived",
+          status: "converged",
+          rounds_completed: 0,
+          max_rounds: 1,
+          findings: [],
+          dispositions: [],
+        })}
+      />,
+    );
+
+    const heading = screen.getByRole("heading", { name: "QC skipped" });
+    const skippedSummary = heading.closest("section");
+    expect(skippedSummary).not.toBeNull();
+    expect(screen.queryByText(/rounds used/i)).not.toBeInTheDocument();
+    expect(
+      within(skippedSummary as HTMLElement).getByText("No independent review was run"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("The current plan can move forward by human choice."),
+    ).toBeInTheDocument();
+  });
+
   it("shows the exact review receipt, findings, recommendations, and PM dispositions", () => {
     render(<ConversationQcCard planVersion={null} review={review()} />);
 
