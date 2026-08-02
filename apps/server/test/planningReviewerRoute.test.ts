@@ -378,6 +378,139 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
     });
   });
 
+  // -----------------------------------------------------------------------
+  // QCP-14: default_max_rounds joins the same independently-optional PATCH.
+  // 0 ("review off") is now valid end-to-end — the DB CHECK
+  // (planning_reviewer_settings_default_max_rounds_check,
+  // drizzle/0071_qc_zero_rounds.sql) allows BETWEEN 0 AND 5. Only negative
+  // values, values above 5, and non-integers are rejected.
+  // -----------------------------------------------------------------------
+
+  it("rejects an out-of-range default_max_rounds", async () => {
+    const negative = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { default_max_rounds: -1 },
+    );
+    expect(negative.statusCode).toBe(400);
+
+    const tooHigh = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { default_max_rounds: 6 },
+    );
+    expect(tooHigh.statusCode).toBe(400);
+
+    const notInt = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { default_max_rounds: 2.5 },
+    );
+    expect(notInt.statusCode).toBe(400);
+  });
+
+  it("PATCH round-trips default_max_rounds independently of qc_mode and the reviewer override", async () => {
+    const setRounds = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { default_max_rounds: 5 },
+    );
+    expect(setRounds.statusCode).toBe(204);
+
+    const afterRounds = await inject(
+      server,
+      "GET",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+    );
+    expect(afterRounds.json()).toEqual({
+      provider: "openai",
+      model: null,
+      mode: "automatic",
+      qc_mode: "automatic",
+      allow_unadjudicated_rebuttals: false,
+      default_max_rounds: 5,
+    });
+
+    // Setting qc_mode alone afterward must not reset default_max_rounds.
+    const setMode = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { qc_mode: "gated_each_round" },
+    );
+    expect(setMode.statusCode).toBe(204);
+
+    const afterMode = await inject(
+      server,
+      "GET",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+    );
+    expect(afterMode.json()).toEqual({
+      provider: "openai",
+      model: null,
+      mode: "automatic",
+      qc_mode: "gated_each_round",
+      allow_unadjudicated_rebuttals: false,
+      default_max_rounds: 5,
+    });
+
+    // And setting the reviewer override alone must leave default_max_rounds
+    // untouched too.
+    const setReviewer = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { provider: "anthropic", model: "claude-sonnet-5" },
+    );
+    expect(setReviewer.statusCode).toBe(204);
+
+    const afterReviewer = await inject(
+      server,
+      "GET",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+    );
+    expect(afterReviewer.json()).toEqual({
+      provider: "anthropic",
+      model: "claude-sonnet-5",
+      mode: "explicit",
+      qc_mode: "gated_each_round",
+      allow_unadjudicated_rebuttals: false,
+      default_max_rounds: 5,
+    });
+  });
+
+  it("QCP-14: PATCH round-trips default_max_rounds of 0 (review off)", async () => {
+    const setZero = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { default_max_rounds: 0 },
+    );
+    expect(setZero.statusCode).toBe(204);
+
+    const afterZero = await inject(
+      server,
+      "GET",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+    );
+    expect(afterZero.json()).toMatchObject({ default_max_rounds: 0 });
+  });
+
   it("changing the project default does not alter an existing review's pinned qc_mode", async () => {
     // Seed a review row pinned at kickoff with a qc_mode that differs from
     // both the shipped default and the value the project is about to be

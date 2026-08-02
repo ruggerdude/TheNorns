@@ -886,6 +886,8 @@ describe("QC cadence control", () => {
           status: "running",
           qc_mode: "gated_each_round",
           qc_mode_source: "in_run",
+          qc_mode_changed_at_round: 2,
+          qc_mode_changed_by_user_id: "user-2",
           rounds_completed: 2,
           started_at: now,
           completed_at: null,
@@ -894,7 +896,9 @@ describe("QC cadence control", () => {
       />,
     );
     expect(
-      within(screen.getByTestId("conversation-qc-cadence")).getByText(/changed mid-review/i),
+      within(screen.getByTestId("conversation-qc-cadence")).getByText(
+        /changed mid-review at round 2 by user-2/i,
+      ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Hold at the next checkpoint" })).toBeInTheDocument();
   });

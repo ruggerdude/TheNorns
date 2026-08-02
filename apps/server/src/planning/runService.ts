@@ -593,10 +593,19 @@ export class PlanningRunService {
   // the other back. This never reaches into runs already in flight: a review
   // pins its own qc_mode at kickoff (conversation_plan_reviews.qc_mode) and
   // never re-reads this table.
+  //
+  // QCP-12: default_max_rounds joined the same independently-optional
+  // COALESCE chain so a post-creation settings write can change any subset
+  // of the three fields without clobbering the others or the reviewer
+  // provider/model override (a separate row write, untouched here).
   // ---------------------------------------------------------------------
   async setQcModeSettings(
     projectId: string,
-    settings: { qcMode?: QcMode | undefined; allowUnadjudicatedRebuttals?: boolean | undefined },
+    settings: {
+      qcMode?: QcMode | undefined;
+      allowUnadjudicatedRebuttals?: boolean | undefined;
+      defaultMaxRounds?: number | undefined;
+    },
   ): Promise<void> {
     await this.transactions.transaction(async (tx) => {
       const project = await tx.query<{ id: string }>("SELECT id FROM projects WHERE id = $1", [
@@ -606,14 +615,23 @@ export class PlanningRunService {
         throw new PlanningRunConflictError("project_not_found", `unknown project "${projectId}"`);
       }
       await tx.query(
-        `INSERT INTO planning_reviewer_settings (project_id, qc_mode, allow_unadjudicated_rebuttals)
-         VALUES ($1, COALESCE($2, 'automatic'), COALESCE($3, false))
+        `INSERT INTO planning_reviewer_settings
+           (project_id, qc_mode, allow_unadjudicated_rebuttals, default_max_rounds)
+         VALUES ($1, COALESCE($2, 'automatic'), COALESCE($3, false), COALESCE($4::integer, $5::integer))
          ON CONFLICT (project_id) DO UPDATE
            SET qc_mode = COALESCE($2, planning_reviewer_settings.qc_mode),
                allow_unadjudicated_rebuttals =
                  COALESCE($3, planning_reviewer_settings.allow_unadjudicated_rebuttals),
+               default_max_rounds =
+                 COALESCE($4::integer, planning_reviewer_settings.default_max_rounds),
                updated_at = now()`,
-        [projectId, settings.qcMode ?? null, settings.allowUnadjudicatedRebuttals ?? null],
+        [
+          projectId,
+          settings.qcMode ?? null,
+          settings.allowUnadjudicatedRebuttals ?? null,
+          settings.defaultMaxRounds ?? null,
+          this.defaultMaxRounds,
+        ],
       );
     });
   }

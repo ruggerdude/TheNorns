@@ -667,13 +667,7 @@ function AdjudicationFindings({
 function qcModeSourceLabel(review: V2ConversationPlanReviewT): string {
   if (review.qc_mode_source === "project_default") return "project default";
   if (review.qc_mode_source === "work_item") return "set for this work item";
-  // ponytail: the contract doesn't carry the round or user for an in-run
-  // qc_mode change (only the "in_run" source enum) — showing the paused/
-  // completed round is the closest true statement available. Attributing
-  // to a specific user needs a new field on the review; add it there if the
-  // "by <user>" half of this label turns out to matter in practice.
-  const round = review.paused_at_round ?? review.rounds_completed;
-  return `changed mid-review at round ${round}`;
+  return `changed mid-review at round ${review.qc_mode_changed_at_round} by ${review.qc_mode_changed_by_user_id}`;
 }
 
 /** Mid-flight cadence editing (QC-PAUSE-POINTS.md "Settings: three layers",

@@ -505,6 +505,16 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
       status: 404,
       body: { error: "not_found" },
     });
+    mock.get(`/api/v2/projects/${projectAlpha.id}/planning-reviewer`, {
+      body: {
+        provider: "openai",
+        model: null,
+        mode: "automatic",
+        qc_mode: "automatic",
+        allow_unadjudicated_rebuttals: false,
+        default_max_rounds: 3,
+      },
+    });
     mock.put(`/api/v2/projects/${projectAlpha.id}/rules`, (_url, init) => ({
       body: {
         filename: "NORN.md",
@@ -526,7 +536,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
       within(settings)
         .getAllByRole("heading", { level: 2 })
         .map((heading) => heading.textContent),
-    ).toEqual(["Timing and content", "NORN.md", "Remove project"]);
+    ).toEqual(["Reviewer cadence", "Timing and content", "NORN.md", "Remove project"]);
     await user.type(
       await screen.findByLabelText("Project rules"),
       "# Rules\n\n- Preserve API compatibility.",

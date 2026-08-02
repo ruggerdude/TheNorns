@@ -11,7 +11,10 @@
  * involving data transformation, cutover, or archives must go through the
  * full Phase 2 ceremony in `phase2.ts` per the migration runbook.
  *
- * Usage (Railway service shell or any host with DATABASE_URL):
+ * Usage (requires a database connection with DDL/owner privileges):
+ *   On deployments where the application service holds a restricted runtime role,
+ *   this script cannot be run from that service. See DEPLOY.md for the correct
+ *   procedure to apply migrations in that case.
  *   node apps/server/dist/applyMigrations.js
  */
 import { Pool } from "pg";

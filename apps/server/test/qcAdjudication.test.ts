@@ -394,6 +394,35 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
     expect(finalReview.dispositions[0]?.adjudication).toMatchObject({ ruling: "pm" });
   });
 
+  it("adjudication is idempotent under a repeated idempotency_key (QCP-R11)", async () => {
+    const sent = await sendToQc("adjudicate-idempotent");
+    reviewerV1.enqueue({ findings: [rebuttableMustFix] });
+    pm.enqueue({
+      responses: [{ finding_index: 0, disposition: "rebut", rationale: "The finding is wrong." }],
+      plan: sent.envelope,
+    });
+    await worker.runNow(sent.planningRunId);
+    const parked = await reviewRow(sent.reviewId);
+    const findingId = parked.findings[0]?.id;
+    if (!findingId) throw new Error("expected a pending finding");
+
+    const first = await workflow.adjudicateReview(owner.id, sent.scope, sent.reviewId, {
+      rulings: { [findingId]: { ruling: "pm", rationale: "The rebuttal is correct." } },
+      idempotencyKey: "adjudicate-key-1",
+    });
+    expect(dispatchCount).toBe(1);
+
+    // Replay with the same key: no re-applied ruling, no second dispatch, and
+    // the exact same state comes back — even though the rulings payload
+    // below differs, proving the replay short-circuits before re-applying it.
+    const replay = await workflow.adjudicateReview(owner.id, sent.scope, sent.reviewId, {
+      rulings: { [findingId]: { ruling: "reviewer", rationale: "Different ruling entirely." } },
+      idempotencyKey: "adjudicate-key-1",
+    });
+    expect(dispatchCount).toBe(1);
+    expect(replay).toEqual(first);
+  });
+
   it("offers a cap-raise-by-one when rule-for-reviewer lands at the round cap", async () => {
     const sent = await sendToQc("cap-raise", 1);
     reviewerV1.enqueue({ findings: [rebuttableMustFix] });
@@ -460,6 +489,10 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
     });
     expect(modeChanged.qc_mode).toBe("automatic");
     expect(modeChanged.qc_mode_source).toBe("in_run");
+    // QCP-9: parked at round 1 (see `parked` above), so the change is
+    // attributed to that round and to the acting user.
+    expect(modeChanged.qc_mode_changed_at_round).toBe(1);
+    expect(modeChanged.qc_mode_changed_by_user_id).toBe(owner.id);
   });
 
   it('"Continue, and stop asking" resumes and sets qc_mode to automatic in one call', async () => {
@@ -485,6 +518,9 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
     });
     expect(resumed.qc_mode).toBe("automatic");
     expect(resumed.qc_mode_source).toBe("in_run");
+    // QCP-9: parked at round 1 (see the awaiting_human assertion above).
+    expect(resumed.qc_mode_changed_at_round).toBe(1);
+    expect(resumed.qc_mode_changed_by_user_id).toBe(owner.id);
     expect(dispatchCount).toBe(1);
 
     await worker.runNow(sent.planningRunId);

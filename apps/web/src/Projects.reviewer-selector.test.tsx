@@ -204,6 +204,35 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
     });
   });
 
+  it("QCP-14: submits the stepper's round count, including 0 (review off)", async () => {
+    setup();
+    mock.del("/api/v2/projects/project-created/planning-reviewer", { status: 204 });
+    mock.patch("/api/v2/projects/project-created/planning-reviewer", { status: 204 });
+    mock.install();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.type(screen.getByTestId("project-name"), "Zephyr zero rounds");
+    // Default is 3; drive it down to 0 with the stepper's "Fewer rounds" button.
+    const fewer = screen.getByRole("button", { name: /fewer rounds/i });
+    await user.click(fewer);
+    await user.click(fewer);
+    await user.click(fewer);
+    expect(screen.getByTestId("rounds-stepper")).toHaveTextContent("0");
+    await user.type(await screen.findByTestId("github-new-repository-name"), "zephyr-zero-rounds");
+    await user.click(screen.getByRole("button", { name: /create project/i }));
+
+    await waitFor(() =>
+      expect(
+        mock.calls.find(
+          (call) =>
+            call.method === "PATCH" &&
+            call.url === "/api/v2/projects/project-created/planning-reviewer",
+        ),
+      ).toMatchObject({ body: { default_max_rounds: 0 } }),
+    );
+  });
+
   it("still opens the workspace even if the reviewer-preference call fails (best-effort, not a blocker)", async () => {
     setup();
     mock.patch("/api/v2/projects/project-created/planning-reviewer", {

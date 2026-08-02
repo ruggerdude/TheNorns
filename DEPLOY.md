@@ -77,29 +77,50 @@ the scale follow-on when you need it.
 
 **The server does not apply migrations on boot, by design** — a process that
 silently mutates schema every time it starts is how a bad migration reaches
-production unannounced. Applying them is a deliberate operator step:
+production unannounced. Applying them is a deliberate operator step.
+
+On Railway, the application service's `DATABASE_URL` is bound to a restricted
+runtime role that cannot execute DDL (error `42501` — permission denied). This
+is intentional: `assertRestrictedRuntimeDatabase` in
+`apps/server/src/persistence/postgresConnection.ts` enforces it. You **cannot**
+run `applyMigrations.js` from the app service shell or via `railway run` from
+your laptop (the private hostname `postgres.railway.internal` is unresolvable
+outside Railway's network). Using the public endpoint (`DATABASE_PUBLIC_URL`)
+is also blocked: `postgresPoolConfig` requires a valid TLS chain, and the
+public endpoint presents a self-signed certificate. Disabling TLS verification
+is not acceptable — that would send production credentials over the public
+internet unverified.
+
+**The correct procedure: SSH into the PostgreSQL service and apply migrations
+via psql with the Unix socket (no TLS required, connection as the owner):**
 
 ```bash
-pnpm --filter @norns/server build
-DATABASE_URL='<connection string>' node apps/server/dist/applyMigrations.js
+railway ssh --service Postgres 'psql -v ON_ERROR_STOP=1 \
+  -h /var/run/postgresql -U postgres -d railway'
 ```
 
-It prints `APPLIED` / `already applied` per migration and exits. Each
-migration commits atomically with its tracking row, already-applied ones are
-checksum-verified and skipped, and a changed checksum aborts rather than
-re-running — so a repeat run is safe.
+The Postgres container has no `node`, so each migration must be applied by
+piping its SQL plus a tracking row in a single transaction. For each migration
+file in `apps/server/drizzle/`:
 
-Run this **before** starting a build that expects new columns. If you forget,
-the server refuses to start rather than serving requests until something
-happens to touch the missing column: `assertCurrentRuntimeSchema`
+```sql
+BEGIN;
+<paste the full contents of NNNN_name.sql here>
+INSERT INTO norns_schema_migrations (name, checksum)
+  VALUES ('NNNN_name', '<sha256 hex of the .sql file>');
+COMMIT;
+```
+
+The checksum must be the SHA-256 hex digest of the migration file itself
+(what `v2MigrationChecksum` in `apps/server/src/persistence/v2/migrate.ts`
+computes). A later `applyMigrations.js` run will see the migration as already
+applied instead of aborting on a checksum mismatch.
+
+Apply this **before** starting a build that expects new columns. If you forget,
+the server refuses to start: `assertCurrentRuntimeSchema`
 (`apps/server/src/persistence/postgresConnection.ts`) proves the exact
-relations and columns the build needs and fails with
-`runtime_schema_outdated`, naming what is missing and this command.
-
-That check is proven from relations rather than the migration ledger because
-the ordinary application role deliberately cannot read the ledger. **Any
-change that adds a column a runtime path reads must extend it** — otherwise
-the schema gap surfaces mid-session as a bare `column "x" does not exist`.
+relations and columns the build needs and fails with `runtime_schema_outdated`,
+naming what is missing.
 
 ## Tier 3 — run work via your local runner
 

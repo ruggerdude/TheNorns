@@ -7046,6 +7046,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           model: z.string().trim().min(1).max(200).optional(),
           qc_mode: z.enum(QC_MODES).optional(),
           allow_unadjudicated_rebuttals: z.boolean().optional(),
+          // QCP-14: 0 means review is off; drizzle/0071_qc_zero_rounds.sql
+          // widened planning_reviewer_settings_default_max_rounds_check to
+          // BETWEEN 0 AND 5 to match.
+          default_max_rounds: z.number().int().min(0).max(5).optional(),
         })
         .strict()
         .refine((body) => (body.provider === undefined) === (body.model === undefined), {
@@ -7094,11 +7098,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           }
           if (
             body.data.qc_mode !== undefined ||
-            body.data.allow_unadjudicated_rebuttals !== undefined
+            body.data.allow_unadjudicated_rebuttals !== undefined ||
+            body.data.default_max_rounds !== undefined
           ) {
             await planningRunService.setQcModeSettings(id, {
               qcMode: body.data.qc_mode,
               allowUnadjudicatedRebuttals: body.data.allow_unadjudicated_rebuttals,
+              defaultMaxRounds: body.data.default_max_rounds,
             });
           }
           reply.code(204).send();

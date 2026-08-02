@@ -280,6 +280,72 @@ describe.sequential("Phase 2 forward migration dependency", () => {
     }
   });
 
+  it("applies every current migration from a clean database in order", async () => {
+    const candidate = new PGlite();
+    try {
+      await candidate.exec("CREATE ROLE norns_app NOLOGIN");
+      const sources = await currentV2MigrationSources();
+      const results = await runV2Migrations(asMigrationDatabase(candidate), sources);
+      expect(results).toHaveLength(sources.length);
+      expect(results.every((result) => result.applied)).toBe(true);
+      const tracked = await candidate.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM norns_schema_migrations",
+      );
+      expect(tracked.rows[0]?.count).toBe(sources.length);
+    } finally {
+      await candidate.close();
+    }
+  }, 60_000);
+
+  it("runs a `-- norns:no-transaction` marked migration outside a transaction and tracks it", async () => {
+    const candidate = new PGlite();
+    try {
+      const source = {
+        name: "test_no_transaction_migration",
+        sql: "-- norns:no-transaction\nCREATE TABLE no_transaction_probe (id TEXT PRIMARY KEY)",
+      };
+      expect(await runV2Migrations(asMigrationDatabase(candidate), [source])).toMatchObject([
+        { name: source.name, applied: true },
+      ]);
+      const table = await candidate.query<{ probe: string | null }>(
+        "SELECT to_regclass('no_transaction_probe')::text AS probe",
+      );
+      expect(table.rows[0]?.probe).toBe("no_transaction_probe");
+      const tracking = await candidate.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM norns_schema_migrations WHERE name = $1",
+        [source.name],
+      );
+      expect(tracking.rows[0]?.count).toBe(1);
+    } finally {
+      await candidate.close();
+    }
+  });
+
+  it("rolls back an unmarked migration that fails partway and leaves no tracking row", async () => {
+    const candidate = new PGlite();
+    try {
+      const source = {
+        name: "test_failing_transactional_migration",
+        sql: `
+          CREATE TABLE failing_probe (id TEXT PRIMARY KEY);
+          INSERT INTO table_that_does_not_exist (id) VALUES ('x');
+        `,
+      };
+      await expect(runV2Migrations(asMigrationDatabase(candidate), [source])).rejects.toThrow();
+      const table = await candidate.query<{ probe: string | null }>(
+        "SELECT to_regclass('failing_probe')::text AS probe",
+      );
+      expect(table.rows[0]?.probe).toBeNull();
+      const tracking = await candidate.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM norns_schema_migrations WHERE name = $1",
+        [source.name],
+      );
+      expect(tracking.rows[0]?.count).toBe(0);
+    } finally {
+      await candidate.close();
+    }
+  });
+
   it("classifies existing password formats and revokes unkeyed normalized sessions", async () => {
     const candidate = new PGlite();
     try {

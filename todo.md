@@ -1216,7 +1216,7 @@ decision and is deliberately untouched.
   PATCH lands, that checkpoint sees the project default and a requested Gate A
   silently does not fire. Kickoff is the layer the plan says most decisions are
   made at, so best-effort is not good enough.
-- [ ] 🟡 QCP-9 `qc_mode_source: "in_run"` carries no round or user, so surfaces
+- [x] ✅ QCP-9 `qc_mode_source: "in_run"` carries no round or user, so surfaces
   can show "changed mid-review at round N" but not "by <user>". Needs a
   provenance field on the review. Found by QCP-3B.
 - [x] ✅ QCP-5 CI review sweep.
@@ -1243,32 +1243,42 @@ decision and is deliberately untouched.
   told to skip it. The three-tab restructure of ConversationWorkspace.tsx
   (+739 lines) is exactly the class of change e2e catches and vitest does not.
   6 specs exist in apps/web/e2e/.
-- [ ] 🟡 QCP-12 No post-creation project settings surface for QC. `qc_mode`
+- [x] ✅ QCP-12 No post-creation project settings surface for QC. `qc_mode`
   and `default_max_rounds` are only settable in the New Project wizard;
   `default_max_rounds` is absent from the PATCH .../planning-reviewer schema
   entirely, so "turn QC off for this project" is unreachable after creation.
-- [ ] 🟡 QCP-13 applyMigrations.js documents itself as runnable from "the
+  RESOLVED 2026-08-01: `default_max_rounds` added to `PlanningReviewerBody`
+  and `PlanningRunService.setQcModeSettings` (independently optional,
+  COALESCE upsert, matches existing qc_mode/allow_unadjudicated_rebuttals
+  pattern). New "Reviewer cadence" card in WorkspaceSettings.tsx
+  (`qc-settings-rounds`/`qc-settings-mode`/`qc-settings-rebuttals`/
+  `qc-settings-save`) reuses `QC_MODE_OPTIONS` from Projects.tsx.
+  BLOCKER NOT LIFTED: `planning_reviewer_settings_default_max_rounds_check`
+  (drizzle/0012_planning_runs.sql) still requires `BETWEEN 1 AND 5`, so 0
+  ("review off") stays unreachable post-creation — schema and UI both cap at
+  1-5 pending a migration outside this task's ownership.
+- [x] ✅ QCP-13 applyMigrations.js documents itself as runnable from "the
   Railway service shell", but the app service only ever holds the RESTRICTED
   runtime role, which cannot run DDL (42501). The working path on this
   deployment is the Postgres container's local socket as the owner. The doc
   comment and DEPLOY.md both describe a path that cannot work here.
-- [ ] 🟡 QCP-R7 Attention TTL rescans the whole JSONB `chat_messages` array on
+- [x] ✅ QCP-R7 Attention TTL rescans the whole JSONB `chat_messages` array on
   every poll. A `last_human_message_at` column maintained in
   `appendReviewChatEvent` would make it a column read. Deferred — the index
   (QCP-R3) addresses the larger cost first.
-- [ ] 🟡 QCP-R8 Migration 0066 drops and rebuilds
+- [x] ✅ QCP-R8 Migration 0066 drops and rebuilds
   `conversation_plan_reviews_one_active_per_version` non-concurrently inside
   the runner's per-migration transaction, holding ACCESS EXCLUSIVE for the
   build. Fine now; a deploy-time stall once the table is large.
-- [ ] 🟡 QCP-R9 `boundLatestPlan` hardcodes a `candidate` expectation for
+- [x] ✅ QCP-R9 `boundLatestPlan` hardcodes a `candidate` expectation for
   `send_plan_to_qc`, which is why Gate A accept-now needed both a status
   revert and the 0068 trigger exception. Letting `skip_qc` accept an `in_qc`
   seed directly would remove both special cases — including gate-topology
   knowledge currently living in DDL. Supersedes a written migration, so it is
   a deliberate design call, not a cleanup.
-- [ ] 🟡 QCP-R10 Contract `superRefine` invariants and the DB guards express
+- [x] ✅ QCP-R10 Contract `superRefine` invariants and the DB guards express
   the same rules twice (intentional defence-in-depth, currently in lockstep).
   Nothing enforces they stay in sync — worth one parity test.
-- [ ] 🟡 QCP-R11 Three idempotency-replay implementations (resume,
+- [x] ✅ QCP-R11 Three idempotency-replay implementations (resume,
   adjudication, confirmation) hand-roll the same check-and-store branch
   against different columns.

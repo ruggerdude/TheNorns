@@ -1,13 +1,82 @@
 import { PGlite } from "@electric-sql/pglite";
 import { V2AuditEvent, V2DomainEvent, V2ProjectMemoryEntry } from "@norns/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
+import { ConversationPlanWorkflowService } from "../src/conversations/planWorkflow.js";
+import { PGliteTransactionRunner, type V2SqlExecutor } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import {
   AttentionService,
   QC_GATE_NUDGE_TTL_MS,
   requiresHumanIntervention,
 } from "../src/projects/attentionService.js";
+
+/**
+ * QCP-R7: reaches into ConversationPlanWorkflowService's private
+ * appendReviewChatEvent — the one real write path that maintains
+ * conversation_plan_reviews.last_human_message_at — so the TTL tests below
+ * prove the column is kept in sync by production code, not just seeded by
+ * the test fixture. Goes through the real UPDATE (and therefore the
+ * conversation_plan_reviews_lifecycle_guard trigger), unlike seedPausedReview's
+ * direct INSERT.
+ */
+interface ChatEventAppender {
+  appendReviewChatEvent(
+    tx: V2SqlExecutor,
+    review: Record<string, unknown>,
+    event: {
+      request_id: string;
+      channel: "reviewer" | "pm";
+      round: number;
+      attempt: number;
+      speaker: "human";
+      kind: string;
+      content: string;
+      error_code: string | null;
+    },
+    source: "manual",
+  ): Promise<void>;
+}
+
+async function appendHumanChatMessage(
+  transactions: PGliteTransactionRunner,
+  reviewId: string,
+  content: string,
+  at: string,
+): Promise<void> {
+  const workflow = new ConversationPlanWorkflowService(transactions, {
+    now: () => new Date(at),
+    resolveReviewModels: async () => {
+      throw new Error("resolveReviewModels is not used by this fixture");
+    },
+    runReviewNow: async () => {
+      throw new Error("runReviewNow is not used by this fixture");
+    },
+  }) as unknown as ChatEventAppender;
+  await transactions.transaction(async (tx) => {
+    const review = (
+      await tx.query<Record<string, unknown>>(
+        "SELECT * FROM conversation_plan_reviews WHERE id=$1",
+        [reviewId],
+      )
+    ).rows[0];
+    if (!review) throw new Error(`review "${reviewId}" not found`);
+    await workflow.appendReviewChatEvent(
+      tx,
+      review,
+      {
+        request_id: `request-${reviewId}`,
+        channel: "reviewer",
+        round: 1,
+        attempt: 1,
+        speaker: "human",
+        kind: "instruction",
+        content,
+        error_code: null,
+      },
+      "manual",
+    );
+  });
+}
 
 /**
  * QCP-2A fixture: the full FK/trigger chain a `conversation_plan_reviews` row
@@ -27,9 +96,27 @@ async function seedPausedReview(
     updatedAt: string;
     chatMessages?: unknown[];
     phaseId?: string | null;
+    // Defaults to the max created_at of a 'human' entry in chatMessages —
+    // i.e. what QCP-R7's 0072 backfill would compute. Pass null explicitly
+    // to simulate a pre-0072 row (chat history present, column not yet
+    // backfilled).
+    lastHumanMessageAt?: string | null;
   },
 ): Promise<string> {
   const s = opts.suffix;
+  const derivedLastHumanMessageAt =
+    (opts.chatMessages ?? [])
+      .filter(
+        (entry): entry is { speaker: string; created_at: string } =>
+          typeof entry === "object" &&
+          entry !== null &&
+          (entry as { speaker?: unknown }).speaker === "human",
+      )
+      .map((entry) => entry.created_at)
+      .sort()
+      .at(-1) ?? null;
+  const lastHumanMessageAt =
+    opts.lastHumanMessageAt !== undefined ? opts.lastHumanMessageAt : derivedLastHumanMessageAt;
   const planHash = "1".repeat(64);
   const contextHash = "2".repeat(64);
   const payloadHash = "3".repeat(64);
@@ -105,9 +192,11 @@ async function seedPausedReview(
        planning_run_id, initiated_by_user_id, attempt_number, pm_provider, pm_model,
        reviewer_provider, reviewer_model, usage_request_group_id, seed_plan, status,
        plan_content_hash, result_plan_content_hash, context_receipt, context_manifest,
-       context_hash, paused_checkpoint, paused_at_round, chat_messages, started_at, updated_at
+       context_hash, paused_checkpoint, paused_at_round, chat_messages, last_human_message_at,
+       started_at, updated_at
      ) VALUES ($1,'project-1',$2,$3,$4,$5,$6,'user-1',1,'anthropic','claude','openai','gpt-4',$1,
-               $7::jsonb,'awaiting_human',$8,$8,'{}'::jsonb,$9::jsonb,$10,$11,$12,$13::jsonb,$14,$14)`,
+               $7::jsonb,'awaiting_human',$8,$8,'{}'::jsonb,$9::jsonb,$10,$11,$12,$13::jsonb,$14,
+               $15,$15)`,
     [
       `review-${s}`,
       `work-item-${s}`,
@@ -122,6 +211,7 @@ async function seedPausedReview(
       opts.pausedCheckpoint,
       opts.pausedAtRound,
       JSON.stringify(opts.chatMessages ?? []),
+      lastHumanMessageAt,
       opts.updatedAt,
     ],
   );
@@ -131,6 +221,7 @@ async function seedPausedReview(
 describe.sequential("Phase 5 attention projections", () => {
   let pg: PGlite;
   let attention: AttentionService;
+  let transactions: PGliteTransactionRunner;
 
   beforeEach(async () => {
     pg = new PGlite();
@@ -170,7 +261,8 @@ describe.sequential("Phase 5 attention projections", () => {
         'M','high','["backend"]'::jsonb,'[]'::jsonb,'[]'::jsonb,'["commit"]'::jsonb,
         'environment','verification','blocked',1,1);
     `);
-    attention = new AttentionService(new PGliteTransactionRunner(pg));
+    transactions = new PGliteTransactionRunner(pg);
+    attention = new AttentionService(transactions);
   });
 
   afterEach(async () => {
@@ -800,8 +892,35 @@ describe.sequential("Phase 5 attention projections", () => {
     const now = new Date("2026-07-28T12:00:00.000Z");
     const stalePark = new Date(now.getTime() - QC_GATE_NUDGE_TTL_MS - 60 * 60 * 1000).toISOString();
     const recentHumanMessage = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
-    await seedPausedReview(pg, {
+    const reviewId = await seedPausedReview(pg, {
       suffix: "answered",
+      pausedCheckpoint: "after_review",
+      pausedAtRound: 1,
+      updatedAt: stalePark,
+    });
+    // QCP-R7: drives the human message through the real appendReviewChatEvent
+    // UPDATE path (not a seeded chat_messages literal) so this test proves
+    // last_human_message_at is actually maintained on write, not just read.
+    await appendHumanChatMessage(
+      transactions,
+      reviewId,
+      "Why is this a must-fix?",
+      recentHumanMessage,
+    );
+
+    const portfolio = await attention.portfolio("user-1", { now });
+    const item = portfolio.items.find((candidate) => candidate.source_id === "review-answered");
+    expect(item).toMatchObject({ kind: "approval", severity: "normal" });
+    expect(item?.summary).not.toMatch(/waiting/i);
+  });
+
+  it("backfills last_human_message_at to the same value a pre-QCP-R7 JSONB scan of chat_messages would have found", async () => {
+    const now = new Date("2026-07-28T12:00:00.000Z");
+    const stalePark = new Date(now.getTime() - QC_GATE_NUDGE_TTL_MS - 60 * 60 * 1000).toISOString();
+    const recentHumanMessage = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+    const olderHumanMessage = new Date(now.getTime() - 5 * 60 * 60 * 1000).toISOString();
+    const reviewId = await seedPausedReview(pg, {
+      suffix: "backfill",
       pausedCheckpoint: "after_review",
       pausedAtRound: 1,
       updatedAt: stalePark,
@@ -816,13 +935,71 @@ describe.sequential("Phase 5 attention projections", () => {
           kind: "instruction",
           content: "Why is this a must-fix?",
           error_code: null,
+          created_at: olderHumanMessage,
+        },
+        {
+          id: "chat-2",
+          request_id: "request-1",
+          channel: "reviewer",
+          round: 1,
+          attempt: 1,
+          speaker: "reviewer",
+          kind: "response",
+          content: "Because it breaks the acceptance criteria.",
+          error_code: null,
+          created_at: recentHumanMessage,
+        },
+        {
+          id: "chat-3",
+          request_id: "request-2",
+          channel: "reviewer",
+          round: 1,
+          attempt: 2,
+          speaker: "human",
+          kind: "instruction",
+          content: "Understood, please proceed.",
+          error_code: null,
           created_at: recentHumanMessage,
         },
       ],
+      // Simulate a row created before 0072: chat history already has two
+      // human messages, but the denormalized column has never been set.
+      lastHumanMessageAt: null,
     });
 
+    const before = await pg.query<{ last_human_message_at: string | null }>(
+      "SELECT last_human_message_at FROM conversation_plan_reviews WHERE id=$1",
+      [reviewId],
+    );
+    expect(before.rows[0]?.last_human_message_at).toBeNull();
+
+    // Same backfill query as drizzle/0072_qc_last_human_message.sql.
+    await pg.query(`
+      UPDATE conversation_plan_reviews review
+         SET last_human_message_at = backfill.last_human_at
+        FROM (
+          SELECT r.id,
+                 max((msg->>'created_at')::timestamptz) AS last_human_at
+            FROM conversation_plan_reviews r
+            CROSS JOIN LATERAL jsonb_array_elements(r.chat_messages) msg
+           WHERE msg->>'speaker' = 'human'
+           GROUP BY r.id
+        ) backfill
+       WHERE backfill.id = review.id
+    `);
+
+    const after = await pg.query<{ last_human_message_at: string }>(
+      "SELECT last_human_message_at FROM conversation_plan_reviews WHERE id=$1",
+      [reviewId],
+    );
+    // The most recent of the two human messages wins — exactly what the old
+    // per-poll jsonb_array_elements scan would have produced.
+    const backfilled = after.rows[0]?.last_human_message_at;
+    expect(backfilled).not.toBeNull();
+    expect(new Date(backfilled as string).toISOString()).toBe(recentHumanMessage);
+
     const portfolio = await attention.portfolio("user-1", { now });
-    const item = portfolio.items.find((candidate) => candidate.source_id === "review-answered");
+    const item = portfolio.items.find((candidate) => candidate.source_id === "review-backfill");
     expect(item).toMatchObject({ kind: "approval", severity: "normal" });
     expect(item?.summary).not.toMatch(/waiting/i);
   });

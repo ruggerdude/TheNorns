@@ -218,6 +218,8 @@ interface ReviewRow {
   resume_idempotency_key: string | null;
   qc_mode: V2ConversationPlanReviewT["qc_mode"];
   qc_mode_source: V2ConversationPlanReviewT["qc_mode_source"];
+  qc_mode_changed_at_round: number | string | null;
+  qc_mode_changed_by_user_id: string | null;
   allow_unadjudicated_rebuttals: boolean;
   human_steered_rounds: unknown;
   adjudications: unknown;
@@ -296,7 +298,8 @@ const reviewColumns = `schema_version, id, project_id, work_item_id, conversatio
   plan_content_hash, result_plan_content_hash, context_receipt, context_manifest,
   context_hash, findings, dispositions, revised_plan, revised_plan_content_hash,
   revised_plan_version_id, paused_checkpoint, paused_at_round, resume_idempotency_key,
-  qc_mode, qc_mode_source, allow_unadjudicated_rebuttals, human_steered_rounds,
+  qc_mode, qc_mode_source, qc_mode_changed_at_round, qc_mode_changed_by_user_id,
+  allow_unadjudicated_rebuttals, human_steered_rounds,
   adjudications, forced_accept_module_ids, adjudication_idempotency_key,
   (SELECT round FROM planning_runs WHERE id=planning_run_id) AS rounds_completed,
   (SELECT max_rounds FROM planning_runs WHERE id=planning_run_id) AS max_rounds,
@@ -398,6 +401,9 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
     status: row.status,
     qc_mode: row.qc_mode,
     qc_mode_source: row.qc_mode_source,
+    qc_mode_changed_at_round:
+      row.qc_mode_changed_at_round === null ? null : Number(row.qc_mode_changed_at_round),
+    qc_mode_changed_by_user_id: row.qc_mode_changed_by_user_id,
     allow_unadjudicated_rebuttals: row.allow_unadjudicated_rebuttals,
     human_steered_rounds: json(row.human_steered_rounds),
     rounds_completed: Number(row.rounds_completed),
@@ -421,6 +427,25 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
     created_at: iso(row.created_at),
     updated_at: iso(row.updated_at),
   });
+}
+
+/**
+ * QCP-R11: resumeReview and adjudicateReview both replay-guard a mutating
+ * call against a per-review idempotency column already loaded (FOR UPDATE)
+ * on the review row — same "does this key match what's already stored"
+ * comparison, just against a different column each time. Storing the key on
+ * success still varies per caller (a standalone UPDATE vs. a coalesce()
+ * folded into a larger one) and is left alone; only the check is shared.
+ *
+ * The pre-existing confirmation_idempotency_key check in confirmInTransaction
+ * / continueWithoutQc is NOT unified here: it runs against a different table
+ * (conversation_actions, keyed by conversation_id + confirmed_by_user_id, not
+ * an already-loaded row by id) and carries an extra "reused for a different
+ * action" conflict branch this shape has no equivalent for. Forcing it into
+ * this signature would change what it means to replay there.
+ */
+function idempotentReplay(storedKey: string | null, requestedKey: string | undefined): boolean {
+  return requestedKey !== undefined && storedKey === requestedKey;
 }
 
 function confirmationFingerprint(action: V2ConversationActionT): string {
@@ -922,7 +947,7 @@ export class ConversationPlanWorkflowService {
       const review = await this.loadReviewForUpdate(tx, scope, reviewId);
       // Idempotent replay: the same key returns the current state without
       // re-enqueuing, regardless of how far the review has progressed since.
-      if (input.idempotencyKey && review.resume_idempotency_key === input.idempotencyKey) {
+      if (idempotentReplay(review.resume_idempotency_key, input.idempotencyKey)) {
         return { review, resumed: false };
       }
       if (review.status !== "awaiting_human") {
@@ -956,11 +981,15 @@ export class ConversationPlanWorkflowService {
         );
       }
       if (input.stopAsking) {
+        // Reached only while awaiting_human (the guard above already threw
+        // otherwise), so paused_at_round is guaranteed set by the paused
+        // coupling invariant.
         await tx.query(
           `UPDATE conversation_plan_reviews
-              SET qc_mode='automatic', qc_mode_source='in_run', updated_at=$2
+              SET qc_mode='automatic', qc_mode_source='in_run',
+                  qc_mode_changed_at_round=$2, qc_mode_changed_by_user_id=$3, updated_at=$4
             WHERE id=$1`,
-          [review.id, now],
+          [review.id, Number(review.paused_at_round), userId, now],
         );
       }
       if (input.idempotencyKey) {
@@ -1030,7 +1059,7 @@ export class ConversationPlanWorkflowService {
       const review = await this.loadReviewForUpdate(tx, scope, reviewId);
       // Idempotent replay, same pattern as resumeReview: the same key returns
       // the current state without re-applying rulings or re-enqueuing.
-      if (input.idempotencyKey && review.adjudication_idempotency_key === input.idempotencyKey) {
+      if (idempotentReplay(review.adjudication_idempotency_key, input.idempotencyKey)) {
         return { review, applied: false };
       }
       if (review.status !== "awaiting_human" || review.paused_checkpoint !== "adjudication") {
@@ -1205,11 +1234,20 @@ export class ConversationPlanWorkflowService {
       }
       const now = this.now().toISOString();
       if (patch.qcMode) {
+        // The round this change lands in: the round it's parked at if paused,
+        // else the round currently in flight (rounds_completed + 1 — a
+        // running/queued review always has a round ahead of it, so this is
+        // never 0 and satisfies the contract's positive-int provenance rule).
+        const round =
+          review.paused_at_round !== null
+            ? Number(review.paused_at_round)
+            : Number(review.rounds_completed) + 1;
         await tx.query(
           `UPDATE conversation_plan_reviews
-              SET qc_mode=$2, qc_mode_source='in_run', updated_at=$3
+              SET qc_mode=$2, qc_mode_source='in_run',
+                  qc_mode_changed_at_round=$3, qc_mode_changed_by_user_id=$4, updated_at=$5
             WHERE id=$1`,
-          [review.id, patch.qcMode, now],
+          [review.id, patch.qcMode, round, userId, now],
         );
       }
       if (patch.maxRounds !== undefined) {
@@ -1448,16 +1486,9 @@ export class ConversationPlanWorkflowService {
       // no revised_plan_version_id and the target above falls back to the
       // seed version — whose status pauseReviewOnly left at 'in_qc' (only
       // completeReviewOnly/cancelReview/failReviewOnly revert it). The
-      // downstream skip_qc handler requires 'candidate', so revert it here.
-      // The DB trigger (0068) only allows this in_qc -> candidate transition
-      // while the latest linked review is parked at exactly this checkpoint.
-      if (review.status === "awaiting_human" && review.paused_checkpoint === "after_review") {
-        await tx.query(
-          `UPDATE work_plan_versions SET status='candidate', updated_at=$2
-            WHERE id=$1 AND status='in_qc'`,
-          [targetVersionId, this.now().toISOString()],
-        );
-      }
+      // downstream skip_qc handler accepts an 'in_qc' seed version directly
+      // (see boundLatestPlan's call site in confirm's send_plan_to_qc case),
+      // so no revert is needed here.
       const proposalIds = await this.appendVisibleMessage(
         tx,
         review,
@@ -2042,7 +2073,21 @@ export class ConversationPlanWorkflowService {
             "QC model pins do not match the immutable conversation PM and opposite-provider policy",
           );
         }
-        const version = await this.boundLatestPlan(tx, action, sendParameters, "candidate");
+        // A skip_qc waiver may target a plan version that is still 'in_qc'
+        // (a parked Gate A review falls back to its seed version, which
+        // pauseReviewOnly leaves at 'in_qc' — see continueWithoutQc). That is
+        // not a stale-state error to correct by reverting the version first;
+        // it is the exact plan the waiver is meant to accept. Every other
+        // send_plan_to_qc confirmation still requires 'candidate'.
+        const version = skipQc
+          ? await this.boundLatestPlan(tx, action, sendParameters)
+          : await this.boundLatestPlan(tx, action, sendParameters, "candidate");
+        if (skipQc && !["candidate", "in_qc"].includes(version.status)) {
+          throw new ConversationPlanWorkflowError(
+            "invalid_plan_state",
+            `plan ${version.id} is ${version.status}, expected candidate or in_qc`,
+          );
+        }
         // A skip_qc waiver is the explicit resolution of a paused review (see
         // continueWithoutQc's Gate A revert), so a merely-parked
         // 'awaiting_human' review on this exact version must not block it —
@@ -3455,17 +3500,22 @@ export class ConversationPlanWorkflowService {
     // recovery chat isn't a live review, and the DB guard trigger only
     // permits chat_messages/markdown_artifacts/updated_at to change on a
     // 'failed' row, so writing this column there would violate it anyway.
-    const humanSteeredRounds =
-      event.speaker === "human" && review.status === "awaiting_human"
-        ? [...new Set([...json<number[]>(review.human_steered_rounds), event.round])].sort(
-            (a, b) => a - b,
-          )
-        : json<number[]>(review.human_steered_rounds);
+    const isLiveHumanChat = event.speaker === "human" && review.status === "awaiting_human";
+    const humanSteeredRounds = isLiveHumanChat
+      ? [...new Set([...json<number[]>(review.human_steered_rounds), event.round])].sort(
+          (a, b) => a - b,
+        )
+      : json<number[]>(review.human_steered_rounds);
+    // QCP-R7: denormalized TTL input for AttentionService's QC-gate nudge
+    // (replaces a per-poll jsonb_array_elements scan of chat_messages). Only
+    // advanced on the same live-parked-human-message condition as
+    // human_steered_rounds above, for the same guard-trigger reason.
     await tx.query(
       `UPDATE conversation_plan_reviews
           SET chat_messages=chat_messages || $2::jsonb,
               markdown_artifacts=markdown_artifacts || $3::jsonb,
               human_steered_rounds=$5::jsonb,
+              last_human_message_at=CASE WHEN $6 THEN $4::timestamptz ELSE last_human_message_at END,
               updated_at=$4
         WHERE id=$1`,
       [
@@ -3474,6 +3524,7 @@ export class ConversationPlanWorkflowService {
         JSON.stringify(artifact ? [artifact] : []),
         now,
         JSON.stringify(humanSteeredRounds),
+        isLiveHumanChat,
       ],
     );
   }

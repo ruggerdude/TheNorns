@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useState } from "react";
+import { QC_MODE_OPTIONS, type QcModeT } from "./Projects";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Button, Field, Select, Spinner, TextArea } from "./ui";
 import {
@@ -44,6 +45,38 @@ async function rulesRequest(
     throw new ApiError(body.message ?? `request failed: ${response.status}`, response.status);
   }
   return body;
+}
+
+// QCP-12: the project-layer QC settings, read/written through the same
+// route Projects.tsx's New Project wizard already uses
+// (PATCH /api/v2/projects/:id/planning-reviewer). Only the fields this panel
+// edits are modeled here — reviewer provider/model selection has its own
+// route behavior and no post-creation UI yet.
+interface PlanningQcSettingsDto {
+  qc_mode: QcModeT;
+  allow_unadjudicated_rebuttals: boolean;
+  default_max_rounds: number;
+}
+
+async function planningQcSettingsRequest(
+  projectId: string,
+  method: "GET" | "PATCH",
+  body?: PlanningQcSettingsDto,
+): Promise<PlanningQcSettingsDto> {
+  const response = await fetch(`/api/v2/projects/${projectId}/planning-reviewer`, {
+    method,
+    headers: authHeaders(method === "PATCH"),
+    ...(method === "PATCH" ? { body: JSON.stringify(body) } : {}),
+  });
+  if (response.status === 401) throw new UnauthorizedError();
+  const payload = (await response.json().catch(() => ({}))) as Partial<PlanningQcSettingsDto> & {
+    message?: string;
+  };
+  if (!response.ok) {
+    throw new ApiError(payload.message ?? `request failed: ${response.status}`, response.status);
+  }
+  // PATCH replies 204/no body; GET is the only caller that needs the payload.
+  return payload as PlanningQcSettingsDto;
 }
 
 /** Call when a project workspace opens so rules are warm by the time Settings is visited. */
@@ -177,6 +210,13 @@ export function WorkspaceSettings({
   const [archivingProject, setArchivingProject] = useState(false);
   const [deletingProject, setDeletingProject] = useState(false);
 
+  const [qcSettings, setQcSettings] = useState<PlanningQcSettingsDto | null>(null);
+  const [qcMode, setQcMode] = useState<QcModeT>("automatic");
+  const [qcRounds, setQcRounds] = useState(3);
+  const [qcRebuttals, setQcRebuttals] = useState(false);
+  const [qcSaving, setQcSaving] = useState(false);
+  const [qcSaved, setQcSaved] = useState(false);
+
   useEffect(() => {
     let current = true;
     const cached = rulesCache.get(projectId);
@@ -197,6 +237,47 @@ export function WorkspaceSettings({
       current = false;
     };
   }, [projectId, onUnauthorized]);
+
+  useEffect(() => {
+    let current = true;
+    void planningQcSettingsRequest(projectId, "GET")
+      .then((next) => {
+        if (!current) return;
+        setQcSettings(next);
+        setQcMode(next.qc_mode);
+        setQcRounds(next.default_max_rounds);
+        setQcRebuttals(next.allow_unadjudicated_rebuttals);
+      })
+      .catch((caught) => {
+        if (!current) return;
+        if (caught instanceof UnauthorizedError) onUnauthorized();
+        else setError(caught instanceof Error ? caught.message : String(caught));
+      });
+    return () => {
+      current = false;
+    };
+  }, [projectId, onUnauthorized]);
+
+  const saveQcSettings = async () => {
+    setQcSaving(true);
+    setError(null);
+    setQcSaved(false);
+    const body: PlanningQcSettingsDto = {
+      qc_mode: qcMode,
+      allow_unadjudicated_rebuttals: qcRebuttals,
+      default_max_rounds: qcRounds,
+    };
+    try {
+      await planningQcSettingsRequest(projectId, "PATCH", body);
+      setQcSettings(body);
+      setQcSaved(true);
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) onUnauthorized();
+      else setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setQcSaving(false);
+    }
+  };
 
   const saveRules = async () => {
     setRulesSaving(true);
@@ -264,6 +345,111 @@ export function WorkspaceSettings({
       <Suspense fallback={<Spinner label="Loading execution target settings…" />}>
         <ExecutionTargetSettings projectId={projectId} onUnauthorized={onUnauthorized} />
       </Suspense>
+
+      <section
+        className="card workspace-settings-card"
+        aria-labelledby="qc-settings-heading"
+        data-testid="qc-settings-card"
+      >
+        <div className="section-head">
+          <div>
+            <div className="eyebrow">Quality control</div>
+            <h2 id="qc-settings-heading">Reviewer cadence</h2>
+          </div>
+        </div>
+        {qcSettings === null ? (
+          <Spinner label="Loading QC settings…" />
+        ) : (
+          <>
+            <Field label="Reviewer rounds">
+              {/* QCP-14: 0 is allowed here too now — it means review is off,
+                  matching the wizard's pre-creation control. */}
+              <div className="rounds-stepper" data-testid="qc-settings-rounds">
+                <Button
+                  type="button"
+                  className="btn-small"
+                  disabled={qcRounds <= 0}
+                  onClick={() => {
+                    setQcRounds((count) => Math.max(0, count - 1));
+                    setQcSaved(false);
+                  }}
+                  aria-label="Fewer rounds"
+                >
+                  −
+                </Button>
+                <span className="rounds-value mono">{qcRounds}</span>
+                <Button
+                  type="button"
+                  className="btn-small"
+                  disabled={qcRounds >= 5}
+                  onClick={() => {
+                    setQcRounds((count) => Math.min(5, count + 1));
+                    setQcSaved(false);
+                  }}
+                  aria-label="More rounds"
+                >
+                  +
+                </Button>
+              </div>
+              <span className="field-help">
+                {qcRounds === 0
+                  ? "0 rounds: review is off. Plans go straight through with no independent review."
+                  : `${qcRounds} review round${qcRounds === 1 ? "" : "s"} before a plan is accepted.`}
+              </span>
+            </Field>
+            <Field label="QC pause mode">
+              <Select
+                data-testid="qc-settings-mode"
+                value={qcMode}
+                onChange={(event) => {
+                  setQcMode(event.target.value as QcModeT);
+                  setQcSaved(false);
+                }}
+              >
+                {QC_MODE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </Select>
+              <span className="field-help">
+                {QC_MODE_OPTIONS.find((option) => option.value === qcMode)?.help} No mode skips Gate
+                C — an unresolved must-fix disagreement always pauses for you. This is the project
+                default — it does not change reviews already running.
+              </span>
+            </Field>
+            <label className="debate-toggle">
+              <input
+                type="checkbox"
+                data-testid="qc-settings-rebuttals"
+                checked={qcRebuttals}
+                onChange={(event) => {
+                  setQcRebuttals(event.target.checked);
+                  setQcSaved(false);
+                }}
+              />
+              Allow unadjudicated rebuttals (discouraged)
+            </label>
+            <span className="field-help">
+              Suppresses the pause for a declared rebuttal only — a hollow-acceptance pause always
+              fires regardless of this setting.
+            </span>
+            <div className="settings-save-row">
+              <span className="muted">
+                {qcSaved ? "QC settings saved" : "Changes apply to future review rounds"}
+              </span>
+              <Button
+                variant="primary"
+                data-testid="qc-settings-save"
+                disabled={qcSaving}
+                onClick={() => void saveQcSettings()}
+              >
+                {qcSaving ? "Saving…" : "Save QC settings"}
+              </Button>
+            </div>
+          </>
+        )}
+      </section>
 
       <section className="card workspace-settings-card" aria-labelledby="updates-heading">
         <div className="section-head">

@@ -1,19 +1,18 @@
-// QCP-6: reproduces the "Accept now" gate-exit bug at Gate A.
+// QCP-6 / QCP-R9: "Accept now" at Gate A.
 //
-// QCP-1B widened continueWithoutQc() ("Accept now") to accept a review
-// parked in status='awaiting_human', targeting
-// review.revised_plan_version_id ?? review.plan_version_id. When a review
-// parks at Gate A (paused_checkpoint === 'after_review') the PM has never
-// revised the plan, so revised_plan_version_id is null and the target falls
-// back to review.plan_version_id — the original seed version. Nothing
-// reverts that seed's work_plan_versions.status back out of 'in_qc' on
-// park (only completeReviewOnly/cancelReview/failReviewOnly do that;
-// pauseReviewOnly does not), so the downstream send_plan_to_qc skip_qc
-// handler's boundLatestPlan(tx, action, sendParameters, "candidate") call
-// — which requires status exactly 'candidate' — throws. (Observed code is
-// "invalid_plan_state", not "plan_not_reviewed": boundLatestPlan's ternary
-// only picks "plan_not_reviewed" when expectedStatus itself is "in_qc",
-// but this call site's expectedStatus is "candidate".)
+// When a review parks at Gate A (paused_checkpoint === 'after_review') the
+// PM has never revised the plan, so continueWithoutQc()'s target
+// (review.revised_plan_version_id ?? review.plan_version_id) falls back to
+// the original seed version — whose work_plan_versions.status is still
+// 'in_qc' (pauseReviewOnly does not revert it; only
+// completeReviewOnly/cancelReview/failReviewOnly do).
+//
+// QCP-R9's root-cause fix: the seed version being 'in_qc' here is not a
+// stale-state error, it is exactly the plan a skip_qc waiver is meant to
+// accept. send_plan_to_qc's boundLatestPlan call now only demands
+// 'candidate' for non-waiver sends; the skip_qc path accepts a 'candidate'
+// or 'in_qc' seed directly, with no revert step and no DB trigger exception
+// for the transition that never happens.
 //
 // Drives the real PlanningRunWorker + ConversationPlanWorkflowService +
 // FakeAdapter stack against a PGlite-backed schema so every status
@@ -273,6 +272,16 @@ describe.sequential("QC accept-now at Gate A (QCP-6)", () => {
     return row.status;
   }
 
+  async function planVersionContentHash(planVersionId: string) {
+    const rows = await pg.query<{ content_hash: string }>(
+      "SELECT content_hash FROM work_plan_versions WHERE id = $1",
+      [planVersionId],
+    );
+    const row = rows.rows[0];
+    if (!row) throw new Error(`plan version "${planVersionId}" not found`);
+    return row.content_hash;
+  }
+
   /** Gate A ("after_review"): the review parks after the reviewer's pass,
    *  before the PM ever revises anything, so no revised_plan_version_id
    *  exists yet. qc_mode is set directly on the row (configuration, not a
@@ -313,16 +322,17 @@ describe.sequential("QC accept-now at Gate A (QCP-6)", () => {
     // "plan_not_reviewed". boundLatestPlan's ternary
     // (expectedStatus === "in_qc" ? "plan_not_reviewed" : "invalid_plan_state")
     // only yields plan_not_reviewed when expectedStatus itself is "in_qc";
-    // the send_plan_to_qc/skip_qc handler calls boundLatestPlan with
-    // expectedStatus "candidate", so this path always threw
-    // invalid_plan_state instead. Fixed by 0068_qc_gate_a_accept_now.sql
-    // (widens the in_qc -> candidate DB guard to also permit a review parked
-    // at Gate A) plus continueWithoutQc's matching revert of the seed
-    // version's status ahead of its skip_qc proposal.
+    // the send_plan_to_qc/skip_qc handler used to call boundLatestPlan with
+    // expectedStatus "candidate" unconditionally, so this path always threw
+    // invalid_plan_state instead. Root-cause fixed at that call site: the
+    // skip_qc confirm now accepts the seed version's real 'in_qc' status
+    // directly, so it is never reverted and stays 'in_qc' afterward — the
+    // same state a plan is left in after an ordinary (non-waived) QC review
+    // converges, pending an explicit approve_plan.
     await expect(
       workflow.continueWithoutQc(owner.id, sent.scope, sent.reviewId, "accept-now-gatea"),
     ).resolves.toMatchObject({ effect: { kind: "qc_started" } });
-    expect(await planVersionStatus(parked.plan_version_id)).toBe("candidate");
+    expect(await planVersionStatus(parked.plan_version_id)).toBe("in_qc");
   });
 
   it("(c) accept-now succeeds and carries the seed plan into the skip_qc flow", async () => {
@@ -335,6 +345,46 @@ describe.sequential("QC accept-now at Gate A (QCP-6)", () => {
       "accept-now-gatea",
     );
     expect(result.effect.kind).toBe("qc_started");
-    expect(await planVersionStatus(parked.plan_version_id)).toBe("candidate");
+    expect(await planVersionStatus(parked.plan_version_id)).toBe("in_qc");
+  });
+
+  it("(d) a non-waiver send_plan_to_qc still rejects a non-candidate version", async () => {
+    const { sent, parked } = await parkAtGateA("gatea-scoped");
+
+    // The skip_qc loosening is scoped: a plain "qc" mode send against the
+    // same still-'in_qc' seed version must still be rejected exactly as it
+    // was before this fix — only the skip_qc confirm path accepts 'in_qc'.
+    const proposed = await conversations.proposeAction(owner, {
+      project_id: sent.scope.projectId,
+      work_item_id: sent.scope.workItemId,
+      conversation_id: sent.scope.conversationId,
+      source_message_id: sent.message.id,
+      action_type: "send_plan_to_qc",
+      payload: {
+        parameters: {
+          plan_version_id: parked.plan_version_id,
+          content_hash: await planVersionContentHash(parked.plan_version_id),
+          review: {
+            mode: "qc",
+            reviewer: { provider: "openai", model: "gpt-5.6-sol" },
+            rounds: 3,
+          },
+        },
+      },
+    });
+
+    await expect(
+      workflow.confirm(owner.id, {
+        project_id: sent.scope.projectId,
+        work_item_id: sent.scope.workItemId,
+        conversation_id: sent.scope.conversationId,
+        action_id: proposed.id,
+        idempotency_key: "resend-gatea-scoped",
+      }),
+    ).rejects.toMatchObject({
+      code: "invalid_plan_state",
+      message: expect.stringContaining("expected candidate"),
+    });
+    expect(await planVersionStatus(parked.plan_version_id)).toBe("in_qc");
   });
 });

@@ -2179,6 +2179,12 @@ export const V2ConversationPlanReview = z
     // QC pause-points rules (qc_mode freely; the escape hatch is project-wide).
     qc_mode: V2QcMode.default("automatic"),
     qc_mode_source: z.enum(["project_default", "work_item", "in_run"]),
+    // Provenance for an "in_run" qc_mode_source: set together, only when the
+    // mode changed mid-flight (QCP-9). Optional (not `.default()`) so older
+    // fixtures that predate this field still parse — the superRefine rule
+    // below treats an omitted field the same as an explicit null.
+    qc_mode_changed_at_round: z.number().int().positive().nullable().optional(),
+    qc_mode_changed_by_user_id: V2EntityId.nullable().optional(),
     allow_unadjudicated_rebuttals: z.boolean(),
     // Rounds at which a human message entered the live review (provenance for
     // the "human-steered" disclosure on the approval card).
@@ -2254,6 +2260,25 @@ export const V2ConversationPlanReview = z
         code: z.ZodIssueCode.custom,
         path: ["paused_at_round"],
         message: "a review cannot be parked at a round beyond its round cap",
+      });
+    }
+    // QCP-9: qc_mode_changed_at_round/qc_mode_changed_by_user_id are set if
+    // and only if qc_mode_source is "in_run" — same coupling shape as
+    // paused_checkpoint/paused_at_round above, just against a different
+    // source enum instead of `status`.
+    const inRunMode = review.qc_mode_source === "in_run";
+    if (inRunMode !== ((review.qc_mode_changed_at_round ?? null) !== null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["qc_mode_changed_at_round"],
+        message: "a qc_mode change round is set if and only if qc_mode_source is in_run",
+      });
+    }
+    if (inRunMode !== ((review.qc_mode_changed_by_user_id ?? null) !== null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["qc_mode_changed_by_user_id"],
+        message: "a qc_mode change actor is set if and only if qc_mode_source is in_run",
       });
     }
     if ((review.status === "failed") !== (review.failure_code !== null)) {

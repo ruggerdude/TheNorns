@@ -537,9 +537,7 @@ export class AttentionService {
              SELECT EXTRACT(EPOCH FROM (
                $1::timestamptz - GREATEST(
                  review.updated_at,
-                 (SELECT max((msg->>'created_at')::timestamptz)
-                    FROM jsonb_array_elements(review.chat_messages) msg
-                   WHERE msg->>'speaker'='human')
+                 review.last_human_message_at
                )
              )) * 1000 AS elapsed_ms
            ) gate

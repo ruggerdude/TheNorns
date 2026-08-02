@@ -1093,6 +1093,7 @@ export function Projects({
             model: modelParts.join(":"),
             qc_mode: qcMode,
             allow_unadjudicated_rebuttals: allowUnadjudicatedRebuttals,
+            default_max_rounds: roundsCount,
           });
         } else {
           await requestVerb(`/api/v2/projects/${projectId}/planning-reviewer`, "DELETE");
@@ -1102,13 +1103,14 @@ export function Projects({
           await requestVerb(`/api/v2/projects/${projectId}/planning-reviewer`, "PATCH", {
             qc_mode: qcMode,
             allow_unadjudicated_rebuttals: allowUnadjudicatedRebuttals,
+            default_max_rounds: roundsCount,
           });
         }
       } catch {
         // Best-effort: planning safely falls back to the account default.
       }
     },
-    [reviewerSelection, qcMode, allowUnadjudicatedRebuttals],
+    [reviewerSelection, qcMode, allowUnadjudicatedRebuttals, roundsCount],
   );
 
   /** DESIGN R2: a new project opens straight into the workspace after

@@ -454,6 +454,30 @@ export const QC_ATTENTION_INDEX_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const QC_SKIP_QC_ACCEPTS_IN_QC_MIGRATION_NAME = "0070_qc_skip_qc_accepts_in_qc";
+export const QC_SKIP_QC_ACCEPTS_IN_QC_MIGRATION_URL = new URL(
+  "../../../drizzle/0070_qc_skip_qc_accepts_in_qc.sql",
+  import.meta.url,
+);
+
+export const QC_ZERO_ROUNDS_MIGRATION_NAME = "0071_qc_zero_rounds";
+export const QC_ZERO_ROUNDS_MIGRATION_URL = new URL(
+  "../../../drizzle/0071_qc_zero_rounds.sql",
+  import.meta.url,
+);
+
+export const QC_LAST_HUMAN_MESSAGE_MIGRATION_NAME = "0072_qc_last_human_message";
+export const QC_LAST_HUMAN_MESSAGE_MIGRATION_URL = new URL(
+  "../../../drizzle/0072_qc_last_human_message.sql",
+  import.meta.url,
+);
+
+export const QC_MODE_PROVENANCE_MIGRATION_NAME = "0073_qc_mode_provenance";
+export const QC_MODE_PROVENANCE_MIGRATION_URL = new URL(
+  "../../../drizzle/0073_qc_mode_provenance.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -762,6 +786,22 @@ export async function loadQcAttentionIndexMigrationSql(): Promise<string> {
   return readFile(QC_ATTENTION_INDEX_MIGRATION_URL, "utf8");
 }
 
+export async function loadQcSkipQcAcceptsInQcMigrationSql(): Promise<string> {
+  return readFile(QC_SKIP_QC_ACCEPTS_IN_QC_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcZeroRoundsMigrationSql(): Promise<string> {
+  return readFile(QC_ZERO_ROUNDS_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcLastHumanMessageMigrationSql(): Promise<string> {
+  return readFile(QC_LAST_HUMAN_MESSAGE_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcModeProvenanceMigrationSql(): Promise<string> {
+  return readFile(QC_MODE_PROVENANCE_MIGRATION_URL, "utf8");
+}
+
 export function v2MigrationChecksum(sql: string): string {
   return createHash("sha256").update(sql).digest("hex");
 }
@@ -777,10 +817,40 @@ async function executeMigrationBatch(tx: V2MigrationExecutor, sql: string): Prom
 }
 
 /**
+ * Opt-out marker: a migration whose SQL contains a `-- norns:no-transaction`
+ * comment line runs outside `database.transaction(...)`. This exists so a
+ * migration can use statements Postgres forbids inside a transaction block
+ * (e.g. `CREATE INDEX CONCURRENTLY`) instead of falling back to a blocking
+ * non-concurrent rebuild.
+ *
+ * Durability trade-off: without a transaction, the DDL and the
+ * `norns_schema_migrations` tracking insert are two separate commits. If the
+ * migration fails partway, the schema is left changed but untracked, so a
+ * retry will run the same SQL again. A marked migration must therefore be
+ * written idempotently (`IF NOT EXISTS` / `CREATE INDEX CONCURRENTLY IF NOT
+ * EXISTS` / etc.) so re-running it after a partial failure is safe. That
+ * idempotency is the migration author's responsibility — this runner does
+ * not attempt to detect or repair a partial apply.
+ *
+ * Do not add this marker to any existing migration file, including 0066:
+ * those are already applied in production, and editing their SQL changes
+ * the checksum recorded in `norns_schema_migrations`, which aborts every
+ * later run with a checksum-mismatch error. The marker is for migrations
+ * written after this change only.
+ */
+const NO_TRANSACTION_MARKER = "-- norns:no-transaction";
+
+function isNoTransactionMigration(sql: string): boolean {
+  return sql.split("\n").some((line) => line.trim() === NO_TRANSACTION_MARKER);
+}
+
+/**
  * Applies an ordered forward-only migration list.
  *
- * Every migration and its tracking row commit atomically. An already-applied
- * migration is replay-safe only when its source checksum is unchanged.
+ * Every migration and its tracking row commit atomically, unless the
+ * migration opts out via `NO_TRANSACTION_MARKER` (see above). An
+ * already-applied migration is replay-safe only when its source checksum is
+ * unchanged.
  */
 export async function runV2Migrations(
   database: V2MigrationDatabase,
@@ -797,42 +867,72 @@ export async function runV2Migrations(
   const results: V2MigrationResult[] = [];
   for (const migration of migrations) {
     const checksum = v2MigrationChecksum(migration.sql);
-    const result = await database.transaction(async (tx) => {
-      const existing = await tx.query<AppliedMigrationRow>(
-        "SELECT checksum FROM norns_schema_migrations WHERE name = $1 FOR UPDATE",
-        [migration.name],
-      );
-      const applied = existing.rows[0];
-      if (applied) {
-        if (applied.checksum !== checksum) {
-          throw new Error(
-            `migration ${migration.name} checksum mismatch: ` +
-              `database=${applied.checksum} source=${checksum}`,
-          );
-        }
-        return {
-          name: migration.name,
-          checksum,
-          applied: false,
-        };
-      }
-
-      await executeMigrationBatch(tx, migration.sql);
-      await tx.query(
-        `INSERT INTO norns_schema_migrations (name, checksum)
-         VALUES ($1, $2)`,
-        [migration.name, checksum],
-      );
-
-      return {
-        name: migration.name,
-        checksum,
-        applied: true,
-      };
-    });
+    const result = isNoTransactionMigration(migration.sql)
+      ? await runMigrationWithoutTransaction(database, migration, checksum)
+      : await runMigrationInTransaction(database, migration, checksum);
     results.push(result);
   }
   return results;
+}
+
+async function runMigrationInTransaction(
+  database: V2MigrationDatabase,
+  migration: V2MigrationSource,
+  checksum: string,
+): Promise<V2MigrationResult> {
+  return database.transaction(async (tx) => {
+    const existing = await tx.query<AppliedMigrationRow>(
+      "SELECT checksum FROM norns_schema_migrations WHERE name = $1 FOR UPDATE",
+      [migration.name],
+    );
+    const applied = existing.rows[0];
+    if (applied) {
+      assertChecksumMatches(migration.name, applied.checksum, checksum);
+      return { name: migration.name, checksum, applied: false };
+    }
+
+    await executeMigrationBatch(tx, migration.sql);
+    await tx.query(
+      `INSERT INTO norns_schema_migrations (name, checksum)
+       VALUES ($1, $2)`,
+      [migration.name, checksum],
+    );
+
+    return { name: migration.name, checksum, applied: true };
+  });
+}
+
+async function runMigrationWithoutTransaction(
+  database: V2MigrationDatabase,
+  migration: V2MigrationSource,
+  checksum: string,
+): Promise<V2MigrationResult> {
+  const existing = await database.query<AppliedMigrationRow>(
+    "SELECT checksum FROM norns_schema_migrations WHERE name = $1",
+    [migration.name],
+  );
+  const applied = existing.rows[0];
+  if (applied) {
+    assertChecksumMatches(migration.name, applied.checksum, checksum);
+    return { name: migration.name, checksum, applied: false };
+  }
+
+  await executeMigrationBatch(database, migration.sql);
+  await database.query(
+    `INSERT INTO norns_schema_migrations (name, checksum)
+     VALUES ($1, $2)`,
+    [migration.name, checksum],
+  );
+
+  return { name: migration.name, checksum, applied: true };
+}
+
+function assertChecksumMatches(name: string, storedChecksum: string, sourceChecksum: string): void {
+  if (storedChecksum !== sourceChecksum) {
+    throw new Error(
+      `migration ${name} checksum mismatch: database=${storedChecksum} source=${sourceChecksum}`,
+    );
+  }
 }
 
 /**
@@ -1149,6 +1249,22 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: QC_ATTENTION_INDEX_MIGRATION_NAME,
       sql: await loadQcAttentionIndexMigrationSql(),
+    },
+    {
+      name: QC_SKIP_QC_ACCEPTS_IN_QC_MIGRATION_NAME,
+      sql: await loadQcSkipQcAcceptsInQcMigrationSql(),
+    },
+    {
+      name: QC_ZERO_ROUNDS_MIGRATION_NAME,
+      sql: await loadQcZeroRoundsMigrationSql(),
+    },
+    {
+      name: QC_LAST_HUMAN_MESSAGE_MIGRATION_NAME,
+      sql: await loadQcLastHumanMessageMigrationSql(),
+    },
+    {
+      name: QC_MODE_PROVENANCE_MIGRATION_NAME,
+      sql: await loadQcModeProvenanceMigrationSql(),
     },
   ];
 }
