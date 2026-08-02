@@ -2634,8 +2634,36 @@
 
 .conversation-qc-progress {
   display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 1rem;
+}
+
+.conversation-qc-progress-copy,
+.conversation-qc-progress-metrics {
+  display: grid;
+  gap: 0.16rem;
+}
+
+.conversation-qc-progress-copy {
+  min-width: 0;
+}
+
+.conversation-qc-progress-copy small,
+.conversation-qc-progress-metrics time {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.conversation-qc-progress-copy small {
+  overflow-wrap: anywhere;
+}
+
+.conversation-qc-progress-metrics {
+  flex: 0 0 auto;
+  justify-items: end;
+  text-align: right;
 }
 
 .conversation-qc-progress-track {

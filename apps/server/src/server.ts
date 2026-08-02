@@ -6429,6 +6429,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 reviewWorkflow.markReviewOnlyStarted(reviewId),
               recordReviewOnlyProgress: (input) => reviewWorkflow.recordReviewOnlyProgress(input),
               recordReviewOnlyChatEvent: (input) => reviewWorkflow.recordReviewOnlyChatEvent(input),
+              recordReviewOnlyStage: (input) => reviewWorkflow.recordReviewOnlyStage(input),
               completeReviewOnly: (input: {
                 reviewId: string;
                 planningRunId: string;

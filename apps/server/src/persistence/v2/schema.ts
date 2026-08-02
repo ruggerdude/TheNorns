@@ -5261,6 +5261,7 @@ export const conversationPlanProposalAttempts = pgTable(
     failureCode: text("failure_code"),
     failureMessageRedacted: text("failure_message_redacted"),
     sanitizedFailure: jsonb("sanitized_failure"),
+    liveProgress: jsonb("live_progress"),
     startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }).notNull(),
     settledAt: timestamp("settled_at", { withTimezone: true, mode: "string" }),
     createdAt: createdAt(),

@@ -6,6 +6,7 @@ import {
   type ReviewOnlyPlanningPausedResult,
   type ReviewOnlyPlanningResult,
   type ReviewOnlyPlanningTerminalResult,
+  type ReviewOnlyProgressEvent,
   runReviewOnlyPlanning,
 } from "../src/planning/reviewOnlySession.js";
 
@@ -230,6 +231,7 @@ describe("review-only conversational planning", () => {
     );
     const progress: number[] = [];
     const chat: ReviewOnlyChatEvent[] = [];
+    const stages: ReviewOnlyProgressEvent[] = [];
 
     const result = await runReviewOnlyPlanning({
       pm,
@@ -245,6 +247,9 @@ describe("review-only conversational planning", () => {
       },
       onChatEvent: (event) => {
         chat.push(event);
+      },
+      onStage: (event) => {
+        stages.push(event);
       },
     });
 
@@ -273,6 +278,15 @@ describe("review-only conversational planning", () => {
       artifact_valid: false,
     });
     expect(chat[5]?.artifact_markdown).toContain("# Planning manager revision · Round 1");
+    expect(stages.map((event) => `${event.stage}:${event.attempt}`)).toEqual([
+      "reviewing:1",
+      "validating:1",
+      "saving:1",
+      "revising:1",
+      "repairing:2",
+      "validating:2",
+      "saving:2",
+    ]);
     expect(result.final_plan_markdown).toContain("# Final reviewed plan");
   });
 

@@ -17,6 +17,8 @@ import {
   type V2ConversationPlanReviewMarkdownArtifactT,
   type V2ConversationPlanReviewT,
   type V2PlanHandoffPreferenceT,
+  V2PlanningLiveProgress,
+  type V2PlanningLiveProgressT,
   V2ProposeConversationActionInput,
   V2SavePlanCandidateParameters,
   V2SendPlanToQcParameters,
@@ -35,6 +37,7 @@ import type {
   ReviewOnlyPlanningPausedResult,
   ReviewOnlyPlanningResult,
   ReviewOnlyPlanningTerminalResult,
+  ReviewOnlyProgressEvent,
   ReviewOnlyResumeState,
   ReviewOnlyRound,
 } from "../planning/reviewOnlySession.js";
@@ -207,6 +210,7 @@ interface ReviewRow {
   round_exchanges: unknown;
   chat_messages: unknown;
   markdown_artifacts: unknown;
+  live_progress: unknown | null;
   seed_plan: unknown;
   plan_content_hash: string;
   result_plan_content_hash: string;
@@ -308,6 +312,7 @@ const reviewColumns = `schema_version, id, project_id, work_item_id, conversatio
   adjudications, forced_accept_module_ids, adjudication_idempotency_key,
   (SELECT round FROM planning_runs WHERE id=planning_run_id) AS rounds_completed,
   (SELECT max_rounds FROM planning_runs WHERE id=planning_run_id) AS max_rounds,
+  (SELECT live_progress FROM planning_runs WHERE id=planning_run_id) AS live_progress,
   round_exchanges, chat_messages, markdown_artifacts, started_at, completed_at,
   CASE
     WHEN failure_code='adaptererror' THEN coalesce((
@@ -416,6 +421,8 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
     round_exchanges: json(row.round_exchanges),
     chat_messages: json(row.chat_messages),
     markdown_artifacts: json(row.markdown_artifacts),
+    live_progress:
+      row.live_progress === null ? null : V2PlanningLiveProgress.parse(json(row.live_progress)),
     plan_content_hash: row.plan_content_hash,
     result_plan_content_hash: row.result_plan_content_hash,
     context_manifest: { entries: manifest.entries, context_hash: row.context_hash },
@@ -817,6 +824,51 @@ export class ConversationPlanWorkflowService {
     });
   }
 
+  async recordReviewOnlyStage(input: {
+    reviewId: string;
+    planningRunId: string;
+    event: ReviewOnlyProgressEvent;
+  }): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      const review = (
+        await tx.query<ReviewRow>(
+          `SELECT ${reviewColumns} FROM conversation_plan_reviews
+            WHERE id=$1 AND planning_run_id=$2 FOR UPDATE`,
+          [input.reviewId, input.planningRunId],
+        )
+      ).rows[0];
+      if (!review || !["queued", "running", "awaiting_human"].includes(review.status)) return;
+
+      const now = this.now().toISOString();
+      const previous =
+        review.live_progress === null
+          ? null
+          : V2PlanningLiveProgress.parse(json(review.live_progress));
+      const sameOperation =
+        previous?.stage === input.event.stage &&
+        previous.round === input.event.round &&
+        previous.attempt === input.event.attempt &&
+        previous.provider === input.event.provider &&
+        previous.model === input.event.model;
+      const progress: V2PlanningLiveProgressT = V2PlanningLiveProgress.parse({
+        stage: input.event.stage,
+        round: input.event.round,
+        attempt: input.event.attempt,
+        provider: input.event.provider,
+        model: input.event.model,
+        started_at: sameOperation && previous ? previous.started_at : now,
+        checkpoint_at: now,
+      });
+      await tx.query(
+        `UPDATE planning_runs
+            SET live_progress=$2::jsonb, updated_at=$3
+          WHERE id=$1 AND mode='review_only'
+            AND status IN ('drafting','reviewing','revising')`,
+        [input.planningRunId, JSON.stringify(progress), now],
+      );
+    });
+  }
+
   async recordReviewOnlyChatEvent(input: {
     reviewId: string;
     planningRunId: string;
@@ -861,7 +913,8 @@ export class ConversationPlanWorkflowService {
       const now = this.now().toISOString();
       await tx.query(
         `UPDATE planning_runs
-            SET status='cancelled', error=NULL, lease_token=NULL, leased_until=NULL, updated_at=$2
+            SET status='cancelled', error=NULL, live_progress=NULL,
+                lease_token=NULL, leased_until=NULL, updated_at=$2
           WHERE id=$1 AND mode='review_only'
             AND status IN ('queued','drafting','reviewing','revising','awaiting_human')`,
         [review.planning_run_id, now],
@@ -1632,6 +1685,7 @@ export class ConversationPlanWorkflowService {
       await tx.query(
         `UPDATE planning_runs
             SET status='awaiting_human', error=NULL,
+                live_progress=NULL,
                 lease_token=NULL, leased_until=NULL, updated_at=$2
           WHERE id=$1 AND mode='review_only'`,
         [input.planningRunId, now],
@@ -1722,6 +1776,7 @@ export class ConversationPlanWorkflowService {
         `UPDATE planning_runs
             SET status=$2, round=$3, result=$4::jsonb,
                 total_cost_usd=total_cost_usd+$5, error=NULL,
+                live_progress=NULL,
                 lease_token=NULL, leased_until=NULL, updated_at=$6
           WHERE id=$1 AND mode='review_only'`,
         [
@@ -1813,7 +1868,8 @@ export class ConversationPlanWorkflowService {
       const now = this.now().toISOString();
       await tx.query(
         `UPDATE planning_runs
-            SET status='failed', error=$2, lease_token=NULL, leased_until=NULL, updated_at=$3
+            SET status='failed', error=$2, live_progress=NULL,
+                lease_token=NULL, leased_until=NULL, updated_at=$3
           WHERE id=$1 AND mode='review_only'
             AND status IN ('queued','drafting','reviewing','revising','awaiting_human')`,
         [planningRunId, code, now],

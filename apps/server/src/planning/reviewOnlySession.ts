@@ -98,6 +98,14 @@ export interface ReviewOnlyChatEvent {
   artifact_valid?: boolean;
 }
 
+export interface ReviewOnlyProgressEvent {
+  stage: "preparing" | "reviewing" | "revising" | "repairing" | "validating" | "saving";
+  round: number;
+  attempt: number;
+  provider: "anthropic" | "openai";
+  model: string;
+}
+
 export interface ReviewOnlyPlanningOptions {
   pm: LlmAdapter;
   reviewer: LlmAdapter;
@@ -119,6 +127,7 @@ export interface ReviewOnlyPlanningOptions {
   resume?: ReviewOnlyResumeState;
   onProgress?: (rounds: readonly ReviewOnlyRound[]) => void | Promise<void>;
   onChatEvent?: (event: ReviewOnlyChatEvent) => void | Promise<void>;
+  onStage?: (event: ReviewOnlyProgressEvent) => void | Promise<void>;
 }
 
 function reviewOnlySystem(base: string, frozenContext: unknown): string {
@@ -241,14 +250,22 @@ async function completeStructuredWithRepair<T>(
     channel: "reviewer" | "pm";
     round: number;
     onEvent?: (event: ReviewOnlyChatEvent) => void | Promise<void>;
+    onStage?: (event: ReviewOnlyProgressEvent) => void | Promise<void>;
     markdown(value: T): string;
   },
-): Promise<StructuredResult<T>> {
+): Promise<StructuredResult<T> & { progress_attempt: number }> {
   const maxAttempts = 2;
   let prompt = request.prompt;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const requestId =
       attempt === 0 ? telemetryRequestId : `${telemetryRequestId}:repair:${attempt}`;
+    await chat.onStage?.({
+      stage: attempt === 0 ? (chat.channel === "reviewer" ? "reviewing" : "revising") : "repairing",
+      round: chat.round,
+      attempt: attempt + 1,
+      provider: adapter.provider,
+      model: adapter.model,
+    });
     await chat.onEvent?.({
       request_id: requestId,
       channel: chat.channel,
@@ -271,6 +288,13 @@ async function completeStructuredWithRepair<T>(
         schema,
         schemaName,
       );
+      await chat.onStage?.({
+        stage: "validating",
+        round: chat.round,
+        attempt: attempt + 1,
+        provider: adapter.provider,
+        model: adapter.model,
+      });
       await chat.onEvent?.({
         request_id: requestId,
         channel: chat.channel,
@@ -283,7 +307,7 @@ async function completeStructuredWithRepair<T>(
         artifact_markdown: chat.markdown(result.value),
         artifact_valid: true,
       });
-      return result;
+      return { ...result, progress_attempt: attempt + 1 };
     } catch (error) {
       if (error instanceof AdapterError && error.metadata?.response_text?.trim()) {
         await chat.onEvent?.({
@@ -414,6 +438,7 @@ export async function runReviewOnlyPlanning(
           channel: "reviewer",
           round,
           ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
+          ...(options.onStage ? { onStage: options.onStage } : {}),
           markdown: (value) => reviewerMarkdown(round, value.findings),
         },
       );
@@ -427,6 +452,13 @@ export async function runReviewOnlyPlanning(
         revised_plan_content_hash: null,
       };
       rounds.push(record);
+      await options.onStage?.({
+        stage: "saving",
+        round,
+        attempt: review.progress_attempt,
+        provider: options.reviewer.provider,
+        model: options.reviewer.model,
+      });
       await options.onProgress?.(rounds);
       if (mustFixCount(findings) === 0) {
         return {
@@ -469,6 +501,7 @@ export async function runReviewOnlyPlanning(
         channel: "pm",
         round,
         ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
+        ...(options.onStage ? { onStage: options.onStage } : {}),
         markdown: (value) =>
           revisionMarkdown(round, {
             responses: value.responses,
@@ -515,6 +548,13 @@ export async function runReviewOnlyPlanning(
     record.responses = [...revision.value.responses];
     plan = V2WorkPlanContract.parse(revision.value.plan);
     record.revised_plan_content_hash = canonicalSha256(plan);
+    await options.onStage?.({
+      stage: "saving",
+      round,
+      attempt: revision.progress_attempt,
+      provider: options.pm.provider,
+      model: options.pm.model,
+    });
     await options.onProgress?.(rounds);
 
     // Same-module dumb match against every earlier round's rebutted

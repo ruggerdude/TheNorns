@@ -4,6 +4,8 @@ import {
   V2CreateConversationPlanProposalInput,
   type V2CreateConversationPlanProposalInputT,
   type V2CreateConversationPlanProposalResponseT,
+  V2PlanningLiveProgress,
+  type V2PlanningLiveProgressT,
   V2WorkMessage,
   type V2WorkMessageT,
   V2WorkPlanContract,
@@ -44,6 +46,7 @@ interface ProposalAttemptRow {
   action_id: string | null;
   failure_code: string | null;
   failure_message_redacted: string | null;
+  live_progress: unknown | null;
 }
 
 interface MessageRow {
@@ -142,6 +145,7 @@ export class ConversationPlanProposalService {
       const result = await tx.query<{ id: string }>(
         `UPDATE conversation_plan_proposal_attempts
             SET status='failed', usage_status='unavailable',
+                live_progress=NULL,
                 failure_code='orphaned',
                 failure_message_redacted='server restarted before the plan proposal settled',
                 sanitized_failure='{"restart_reconciled":true}'::jsonb,
@@ -239,6 +243,13 @@ export class ConversationPlanProposalService {
     });
     const attemptId = this.makeId("plan_proposal");
     const usageRequestId = this.makeId("ai_request");
+    const proposalStartedAt = this.now().toISOString();
+    const initialProgress = this.proposalProgress(
+      "generating",
+      scope.conversation.provider,
+      scope.conversation.model,
+      proposalStartedAt,
+    );
     const begun = await this.transactions.transaction(async (tx) => {
       await this.assertScope(tx, userId, projectId, workItemId, conversationId);
       const existing = (
@@ -279,9 +290,9 @@ export class ConversationPlanProposalService {
                id, project_id, work_item_id, conversation_id, initiated_by_user_id,
                idempotency_key, request_fingerprint, source_message_id,
                provider, model, usage_request_id, context_manifest, context_hash,
-               started_at
+               live_progress, started_at
              ) VALUES (
-               $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14
+               $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14::jsonb,$15
              ) RETURNING *`,
             [
               attemptId,
@@ -297,7 +308,8 @@ export class ConversationPlanProposalService {
               usageRequestId,
               JSON.stringify(assembled.manifest),
               assembled.context_hash,
-              this.now().toISOString(),
+              JSON.stringify(initialProgress),
+              proposalStartedAt,
             ],
           )
         ).rows[0];
@@ -368,6 +380,10 @@ export class ConversationPlanProposalService {
         V2WorkPlanContract,
         "conversation_work_plan_contract",
       );
+      await this.recordProgress(
+        attemptId,
+        this.proposalProgress("validating", adapter.provider, adapter.model),
+      );
       const plan = V2WorkPlanContract.parse(
         input.handoff
           ? {
@@ -392,6 +408,10 @@ export class ConversationPlanProposalService {
         estimated_cost_usd: generated.usage.estimated_cost_usd,
       };
       providerRequestId = generated.provider_execution_id ?? null;
+      await this.recordProgress(
+        attemptId,
+        this.proposalProgress("saving", adapter.provider, adapter.model),
+      );
       await this.settleSuccess({
         attemptId,
         userId,
@@ -550,6 +570,7 @@ export class ConversationPlanProposalService {
       await tx.query(
         `UPDATE conversation_plan_proposal_attempts
             SET status='succeeded', provider_request_id=$2, usage_status='exact',
+                live_progress=NULL,
                 input_tokens=$3, output_tokens=$4, cache_read_tokens=$5,
                 cache_write_tokens=$6, cost_usd=$7,
                 output_message_id=$8, action_id=$9, plan_content_hash=$10,
@@ -592,6 +613,7 @@ export class ConversationPlanProposalService {
       await tx.query(
         `UPDATE conversation_plan_proposal_attempts
             SET status='failed', provider_request_id=$2,
+                live_progress=NULL,
                 usage_status=$3, input_tokens=$4, output_tokens=$5,
                 cache_read_tokens=$6, cache_write_tokens=$7, cost_usd=$8,
                 failure_code=$9, failure_message_redacted=$10,
@@ -628,6 +650,38 @@ export class ConversationPlanProposalService {
       ).rows[0];
       if (!row) throw new Error(`unknown plan proposal attempt "${attemptId}"`);
       return row;
+    });
+  }
+
+  private proposalProgress(
+    stage: "generating" | "validating" | "saving",
+    providerName: string,
+    model: string,
+    startedAt = this.now().toISOString(),
+  ): V2PlanningLiveProgressT {
+    const checkpointAt = this.now().toISOString();
+    return V2PlanningLiveProgress.parse({
+      stage,
+      round: null,
+      attempt: 1,
+      provider: provider(providerName),
+      model,
+      started_at: startedAt,
+      checkpoint_at: checkpointAt,
+    });
+  }
+
+  private async recordProgress(
+    attemptId: string,
+    progress: V2PlanningLiveProgressT,
+  ): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      await tx.query(
+        `UPDATE conversation_plan_proposal_attempts
+            SET live_progress=$2::jsonb, updated_at=$3
+          WHERE id=$1 AND status='pending'`,
+        [attemptId, JSON.stringify(progress), progress.checkpoint_at],
+      );
     });
   }
 

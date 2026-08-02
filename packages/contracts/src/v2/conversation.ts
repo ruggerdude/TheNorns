@@ -2160,6 +2160,30 @@ export type V2ConversationPlanReviewMarkdownArtifactT = z.infer<
   typeof V2ConversationPlanReviewMarkdownArtifact
 >;
 
+/** Durable, pollable snapshot of the operation currently consuming a long-running
+ * planning request. Historical provider latency remains in ai_usage_events; this
+ * object exists so clients can render an honest live stage and elapsed timer. */
+export const V2PlanningLiveProgress = z
+  .object({
+    stage: z.enum([
+      "preparing",
+      "generating",
+      "reviewing",
+      "revising",
+      "repairing",
+      "validating",
+      "saving",
+    ]),
+    round: z.number().int().positive().nullable(),
+    attempt: z.number().int().positive(),
+    provider: z.enum(["anthropic", "openai"]).nullable(),
+    model: V2NonEmptyString.nullable(),
+    started_at: V2IsoDateTime,
+    checkpoint_at: V2IsoDateTime,
+  })
+  .strict();
+export type V2PlanningLiveProgressT = z.infer<typeof V2PlanningLiveProgress>;
+
 export const V2ConversationPlanReview = z
   .object({
     schema_version: schemaVersion,
@@ -2198,6 +2222,9 @@ export const V2ConversationPlanReview = z
     round_exchanges: z.array(V2ConversationPlanReviewRound),
     chat_messages: z.array(V2ConversationPlanReviewChatMessage).default([]),
     markdown_artifacts: z.array(V2ConversationPlanReviewMarkdownArtifact).default([]),
+    // Optional so stored fixtures and rolling clients built before live
+    // progress remain valid. Current servers always emit null or a snapshot.
+    live_progress: V2PlanningLiveProgress.nullable().optional(),
     plan_content_hash: V2Sha256Hex,
     result_plan_content_hash: V2Sha256Hex,
     context_manifest: V2ConversationPlanReviewContextManifest,

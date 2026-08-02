@@ -1,5 +1,5 @@
 import type { V2ConversationPlanReviewT, V2WorkPlanVersionT } from "@norns/contracts";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationQcCard, findGateInterimVersion } from "./ConversationQcCard";
 import { makePlan } from "./test/fixtures";
@@ -87,6 +87,95 @@ function review(overrides: Partial<V2ConversationPlanReviewT> = {}): V2Conversat
 }
 
 describe("conversation QC card", () => {
+  it("shows the durable live stage, exact model identity, and advancing stage and total timers", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime("2026-07-27T12:02:00.000Z");
+    const activeReview = review({
+      status: "running",
+      rounds_completed: 1,
+      findings: [],
+      dispositions: [],
+      revised_plan_version_id: null,
+      result_plan_content_hash: "a".repeat(64),
+      started_at: "2026-07-27T12:00:00.000Z",
+      completed_at: null,
+    });
+    (
+      activeReview as V2ConversationPlanReviewT & {
+        live_progress: {
+          stage: "repairing";
+          round: number;
+          attempt: number;
+          provider: "anthropic";
+          model: string;
+          started_at: string;
+          checkpoint_at: string;
+        };
+      }
+    ).live_progress = {
+      stage: "repairing",
+      round: 2,
+      attempt: 2,
+      provider: "anthropic",
+      model: "claude-opus-4-8",
+      started_at: "2026-07-27T12:01:15.000Z",
+      checkpoint_at: "2026-07-27T12:01:15.000Z",
+    };
+
+    const rendered = render(<ConversationQcCard planVersion={null} review={activeReview} />);
+    try {
+      expect(screen.getByText("Round 2 of 3 · Repairing · Attempt 2")).toBeInTheDocument();
+      expect(screen.getByText("anthropic · claude-opus-4-8")).toBeInTheDocument();
+      expect(screen.getByText("Stage 0:45 · Total 2:00")).toBeInTheDocument();
+      expect(screen.getByRole("progressbar", { name: "QC review progress" })).toHaveAttribute(
+        "aria-valuetext",
+        "Round 2 of 3 · Repairing · Attempt 2 · anthropic · claude-opus-4-8 · Stage 0:45 · Total 2:00",
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(screen.getByText("Stage 0:46 · Total 2:01")).toBeInTheDocument();
+    } finally {
+      rendered.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back to the latest chat event when durable live progress is absent", () => {
+    render(
+      <ConversationQcCard
+        planVersion={null}
+        review={review({
+          status: "running",
+          rounds_completed: 0,
+          findings: [],
+          dispositions: [],
+          revised_plan_version_id: null,
+          result_plan_content_hash: "a".repeat(64),
+          started_at: now,
+          completed_at: null,
+          chat_messages: [
+            {
+              id: "chat-reviewer-instruction",
+              request_id: "request-reviewer-1",
+              channel: "reviewer",
+              round: 1,
+              attempt: 1,
+              speaker: "workflow",
+              kind: "instruction",
+              content: "Review the immutable plan.",
+              error_code: null,
+              created_at: now,
+            },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByText("Round 1 of 3 · waiting for the QC reviewer")).toBeInTheDocument();
+  });
+
   it("shows the exact review receipt, findings, recommendations, and PM dispositions", () => {
     render(<ConversationQcCard planVersion={null} review={review()} />);
 

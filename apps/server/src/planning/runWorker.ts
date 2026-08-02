@@ -23,6 +23,7 @@ import {
   type ReviewOnlyChatEvent,
   type ReviewOnlyPlanningPausedResult,
   type ReviewOnlyPlanningResult,
+  type ReviewOnlyProgressEvent,
   type ReviewOnlyResumeState,
   type ReviewOnlyRound,
   runReviewOnlyPlanning,
@@ -131,6 +132,11 @@ export interface PlanningRunWorkerOptions {
     reviewId: string;
     planningRunId: string;
     event: ReviewOnlyChatEvent;
+  }) => Promise<void>;
+  recordReviewOnlyStage?: (input: {
+    reviewId: string;
+    planningRunId: string;
+    event: ReviewOnlyProgressEvent;
   }) => Promise<void>;
   completeReviewOnly?: (input: {
     reviewId: string;
@@ -667,6 +673,22 @@ export class PlanningRunWorker {
         throw new Error("review-only planning workflow is not configured");
       }
       const seed = await this.options.loadReviewOnlySeed(claim.id);
+      const preparingRound = seed.resume
+        ? seed.resume.checkpoint === "after_review"
+          ? seed.resume.fromRound
+          : seed.resume.fromRound + 1
+        : 1;
+      await this.options.recordReviewOnlyStage?.({
+        reviewId: seed.reviewId,
+        planningRunId: claim.id,
+        event: {
+          stage: "preparing",
+          round: preparingRound,
+          attempt: 1,
+          provider: reviewer.provider,
+          model: reviewer.model,
+        },
+      });
       await this.options.markReviewOnlyStarted(seed.reviewId);
       const result = await runReviewOnlyPlanning({
         pm,
@@ -695,6 +717,16 @@ export class PlanningRunWorker {
           ? {
               onChatEvent: (event: ReviewOnlyChatEvent) =>
                 this.options.recordReviewOnlyChatEvent?.({
+                  reviewId: seed.reviewId,
+                  planningRunId: claim.id,
+                  event,
+                }),
+            }
+          : {}),
+        ...(this.options.recordReviewOnlyStage
+          ? {
+              onStage: (event: ReviewOnlyProgressEvent) =>
+                this.options.recordReviewOnlyStage?.({
                   reviewId: seed.reviewId,
                   planningRunId: claim.id,
                   event,

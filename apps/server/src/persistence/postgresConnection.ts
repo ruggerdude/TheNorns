@@ -135,6 +135,7 @@ interface RuntimeSchemaPosture {
   qc_adjudication_columns: boolean;
   qc_last_human_message_at: boolean;
   qc_mode_provenance_columns: boolean;
+  planning_live_progress_columns: boolean;
 }
 
 /**
@@ -375,7 +376,14 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                    'qc_mode_changed_at_round',
                    'qc_mode_changed_by_user_id'
                  )
-            ) AS qc_mode_provenance_columns`,
+            ) AS qc_mode_provenance_columns,
+            (
+              SELECT count(*) = 2
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND column_name='live_progress'
+                 AND table_name IN ('planning_runs', 'conversation_plan_proposal_attempts')
+            ) AS planning_live_progress_columns`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -453,6 +461,7 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.qc_mode_provenance_columns
       ? ["conversation_plan_reviews qc_mode provenance columns"]
       : []),
+    ...(!posture?.planning_live_progress_columns ? ["planning live_progress columns"] : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

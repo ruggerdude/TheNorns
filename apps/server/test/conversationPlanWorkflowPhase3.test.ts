@@ -752,6 +752,17 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       request,
     );
     await providerEntered;
+    const activeProgress = await pg.query<{ live_progress: unknown }>(
+      `SELECT live_progress FROM conversation_plan_proposal_attempts
+        WHERE conversation_id=$1 AND status='pending'`,
+      [scope.conversationId],
+    );
+    expect(activeProgress.rows[0]?.live_progress).toMatchObject({
+      stage: "generating",
+      round: null,
+      attempt: 1,
+      provider: "anthropic",
+    });
     await expect(
       proposals.propose(owner.id, projectId, scope.workItemId, scope.conversationId, request),
     ).rejects.toMatchObject({ code: "proposal_in_progress", httpStatus: 409 });
@@ -768,6 +779,12 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     await expect(first).resolves.toMatchObject({
       action: { action_type: "save_plan_candidate", status: "proposed" },
     });
+    const settledProgress = await pg.query<{ live_progress: unknown | null }>(
+      `SELECT live_progress FROM conversation_plan_proposal_attempts
+        WHERE conversation_id=$1`,
+      [scope.conversationId],
+    );
+    expect(settledProgress.rows[0]?.live_progress).toBeNull();
     expect(adapter.requests).toHaveLength(1);
   });
 
@@ -2743,6 +2760,30 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     await pg.query("UPDATE planning_runs SET status='reviewing' WHERE id=$1 AND status='queued'", [
       qc.effect.planning_run_id,
     ]);
+    await workflow.recordReviewOnlyStage({
+      reviewId: seed.reviewId,
+      planningRunId: qc.effect.planning_run_id,
+      event: {
+        stage: "reviewing",
+        round: 1,
+        attempt: 1,
+        provider: "openai",
+        model: "gpt-5.6-sol",
+      },
+    });
+    const active = await workflow.detail(
+      owner.id,
+      projectId,
+      scope.workItemId,
+      scope.conversationId,
+    );
+    expect(active.plan_reviews[0]?.live_progress).toMatchObject({
+      stage: "reviewing",
+      round: 1,
+      attempt: 1,
+      provider: "openai",
+      model: "gpt-5.6-sol",
+    });
     await workflow.recordReviewOnlyProgress({
       reviewId: seed.reviewId,
       planningRunId: qc.effect.planning_run_id,
@@ -2796,6 +2837,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       ],
     });
     expect(cancelledReviewRuns).toEqual([qc.effect.planning_run_id]);
+    expect(stopped.live_progress).toBeNull();
 
     const detail = await workflow.detail(
       owner.id,

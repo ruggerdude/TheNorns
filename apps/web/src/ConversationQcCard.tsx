@@ -6,7 +6,7 @@ import type {
   V2ConversationUsageT,
   V2WorkPlanVersionT,
 } from "@norns/contracts";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { artifactContentPath } from "./ArtifactImage";
 import { PlanVersionDiff } from "./ConversationPlanCard";
 import { QC_MODE_OPTIONS } from "./Projects";
@@ -96,8 +96,43 @@ function failureLabel(code: string | null): string {
   }
 }
 
-// What the review is doing right now, derived from the newest recorded event.
-function livePhase(review: V2ConversationPlanReviewT): string {
+type ReviewLiveProgress = {
+  stage:
+    | "preparing"
+    | "generating"
+    | "reviewing"
+    | "revising"
+    | "repairing"
+    | "validating"
+    | "saving";
+  round: number | null;
+  attempt: number;
+  provider: "anthropic" | "openai" | null;
+  model: string | null;
+  started_at: string;
+  checkpoint_at: string;
+};
+
+const LIVE_STAGE_LABELS: Record<ReviewLiveProgress["stage"], string> = {
+  preparing: "Preparing",
+  generating: "Generating",
+  reviewing: "Reviewing",
+  revising: "Revising",
+  repairing: "Repairing",
+  validating: "Validating",
+  saving: "Saving",
+};
+
+function reviewLiveProgress(review: V2ConversationPlanReviewT): ReviewLiveProgress | null {
+  return (
+    (review as V2ConversationPlanReviewT & { live_progress?: ReviewLiveProgress | null })
+      .live_progress ?? null
+  );
+}
+
+// Historical attempts predate durable live progress. Keep the old event-based
+// description as a truthful fallback for those records and rolling deploys.
+function fallbackLivePhase(review: V2ConversationPlanReviewT): string {
   const round = Math.min(review.rounds_completed + 1, review.max_rounds);
   const position = `Round ${round} of ${review.max_rounds}`;
   const last = review.chat_messages.at(-1) ?? null;
@@ -108,6 +143,39 @@ function livePhase(review: V2ConversationPlanReviewT): string {
     return `${position} · asked the ${who} to correct its format`;
   if (last.kind === "instruction") return `${position} · waiting for the ${who}`;
   return `${position} · ${who} responded`;
+}
+
+function liveProgressLabel(
+  review: V2ConversationPlanReviewT,
+  progress: ReviewLiveProgress | null,
+): string {
+  if (!progress) return fallbackLivePhase(review);
+  const position =
+    progress.round === null ? "QC" : `Round ${progress.round} of ${review.max_rounds}`;
+  return `${position} · ${LIVE_STAGE_LABELS[progress.stage]} · Attempt ${progress.attempt}`;
+}
+
+function elapsedLabel(startedAt: string | null, nowMs: number): string | null {
+  if (!startedAt) return null;
+  const startedMs = Date.parse(startedAt);
+  if (!Number.isFinite(startedMs)) return null;
+  const seconds = Math.max(0, Math.floor((nowMs - startedMs) / 1_000));
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  const remainder = seconds % 60;
+  return hours > 0
+    ? `${hours}:${minutes.toString().padStart(2, "0")}:${remainder.toString().padStart(2, "0")}`
+    : `${minutes}:${remainder.toString().padStart(2, "0")}`;
+}
+
+function useProgressClock(active: boolean): number {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  return nowMs;
 }
 
 function Finding({
@@ -1201,6 +1269,17 @@ export function ConversationQcCard({
     100,
     Math.round((review.rounds_completed / Math.max(1, review.max_rounds)) * 100),
   );
+  const liveProgress = reviewLiveProgress(review);
+  const nowMs = useProgressClock(!terminal);
+  const progressLabel = liveProgressLabel(review, liveProgress);
+  const stageElapsed = elapsedLabel(liveProgress?.started_at ?? null, nowMs);
+  const totalElapsed = elapsedLabel(review.started_at, nowMs);
+  const timingLabel = [
+    stageElapsed ? `Stage ${stageElapsed}` : null,
+    totalElapsed ? `Total ${totalElapsed}` : null,
+  ]
+    .filter((label): label is string => label !== null)
+    .join(" · ");
   const lastExchange = review.round_exchanges.at(-1) ?? null;
   const failedAfterReviewer =
     review.status === "failed" &&
@@ -1232,17 +1311,29 @@ export function ConversationQcCard({
         {!terminal ? (
           <>
             <output className="conversation-qc-progress" aria-live="polite">
-              <span>{livePhase(review)}</span>
-              <span>{review.rounds_completed > 0 ? `${percent}%` : "Working…"}</span>
+              <span className="conversation-qc-progress-copy">
+                <strong>{progressLabel}</strong>
+                {liveProgress?.provider && liveProgress.model ? (
+                  <small>
+                    {liveProgress.provider} · {liveProgress.model}
+                  </small>
+                ) : null}
+              </span>
+              <span className="conversation-qc-progress-metrics">
+                {timingLabel ? <time>{timingLabel}</time> : null}
+                <span>{review.rounds_completed > 0 ? `${percent}%` : "Working…"}</span>
+              </span>
             </output>
             <progress
               className="sr-only"
               aria-label="QC review progress"
               max={100}
               value={review.rounds_completed > 0 ? percent : undefined}
-              aria-valuetext={
-                review.rounds_completed > 0 ? `${percent}% complete` : livePhase(review)
-              }
+              aria-valuetext={`${progressLabel}${
+                liveProgress?.provider && liveProgress.model
+                  ? ` · ${liveProgress.provider} · ${liveProgress.model}`
+                  : ""
+              }${timingLabel ? ` · ${timingLabel}` : ""}`}
             />
             <div
               className="conversation-qc-progress-track"
