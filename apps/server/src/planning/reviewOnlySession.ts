@@ -21,7 +21,7 @@ import {
   mustFixCount,
 } from "@norns/contracts";
 import { z } from "zod";
-import { canonicalSha256 } from "../persistence/migration/canonicalJson.js";
+import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import { pmSystem, reviewerSystem } from "./prompts.js";
 import { type GateCFinding, detectGateC } from "./qcGates.js";
 import { PlanningError } from "./session.js";
@@ -36,6 +36,8 @@ const ReviewOnlyRevision = z
 const REVIEWER_MAX_OUTPUT_TOKENS = 5_000;
 const TARGETED_REVISION_MAX_OUTPUT_TOKENS = 4_000;
 const TARGETED_REVISION_REPAIR_MAX_OUTPUT_TOKENS = 3_000;
+const QC_APPROVED_KNOWLEDGE_ITEM_LIMIT = 24;
+const QC_APPROVED_KNOWLEDGE_CHARACTER_LIMIT = 24_000;
 
 export interface ReviewOnlyRound {
   round: number;
@@ -202,11 +204,88 @@ function gateCForRound(input: {
   });
 }
 
+type JsonRecord = Record<string, unknown>;
+
+function jsonSafe(value: unknown): unknown {
+  return JSON.parse(canonicalJson(value)) as unknown;
+}
+
+function arrayField(record: JsonRecord, key: string): unknown[] {
+  const value = record[key];
+  return Array.isArray(value) ? value.map(jsonSafe) : [];
+}
+
+function stableKnowledgeKey(value: unknown): string {
+  const id =
+    value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord).id : null;
+  return `${typeof id === "string" ? id : ""}\u0000${canonicalSha256(value)}`;
+}
+
+/** Deterministic prompt-only projection of the immutable QC receipt. The
+ * durable receipt/manifest/hash remain unchanged; only high-volume approved
+ * knowledge is bounded. Binding rules and manual guidance retain exact text. */
+export function compactFrozenQcContext(frozenContext: unknown): JsonRecord {
+  const safe = jsonSafe(frozenContext);
+  const record =
+    safe && typeof safe === "object" && !Array.isArray(safe) ? (safe as JsonRecord) : {};
+  const knowledge = arrayField(record, "approved_knowledge").sort((left, right) => {
+    const leftKey = stableKnowledgeKey(left);
+    const rightKey = stableKnowledgeKey(right);
+    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+  });
+  const included: unknown[] = [];
+  const omitted: unknown[] = [];
+  let includedCharacters = 0;
+  for (const item of knowledge) {
+    const characters = canonicalJson(item).length;
+    if (
+      included.length < QC_APPROVED_KNOWLEDGE_ITEM_LIMIT &&
+      includedCharacters + characters <= QC_APPROVED_KNOWLEDGE_CHARACTER_LIMIT
+    ) {
+      included.push(item);
+      includedCharacters += characters;
+    } else {
+      omitted.push(item);
+    }
+  }
+  const knownKeys = new Set([
+    "binding_rules",
+    "approved_knowledge",
+    "decision_ledger",
+    "referenced_artifacts",
+    "manual_qc_guidance",
+  ]);
+  const omittedFields = Object.keys(record)
+    .filter((key) => !knownKeys.has(key))
+    .sort()
+    .map((key) => ({ key, content_hash: canonicalSha256(record[key]) }));
+  return {
+    schema_version: 1,
+    source_receipt_hash: canonicalSha256(safe),
+    binding_rules: arrayField(record, "binding_rules"),
+    decision_ledger: arrayField(record, "decision_ledger"),
+    referenced_artifacts: arrayField(record, "referenced_artifacts"),
+    manual_qc_guidance: arrayField(record, "manual_qc_guidance"),
+    approved_knowledge: included,
+    approved_knowledge_omissions: {
+      total_count: knowledge.length,
+      included_count: included.length,
+      omitted_count: omitted.length,
+      included_characters: includedCharacters,
+      character_limit: QC_APPROVED_KNOWLEDGE_CHARACTER_LIMIT,
+      item_limit: QC_APPROVED_KNOWLEDGE_ITEM_LIMIT,
+      omitted_content_hash: omitted.length > 0 ? canonicalSha256(omitted) : null,
+    },
+    omitted_fields: omittedFields,
+  };
+}
+
 function reviewOnlySystem(base: string, frozenContext: unknown): string {
+  const compactContext = compactFrozenQcContext(frozenContext);
   return [
     base,
-    "This is a review-only seeded planning run. The frozen package below is the complete binding context. It deliberately contains no brainstorming transcript.",
-    `FROZEN QC CONTEXT:\n${JSON.stringify(frozenContext)}`,
+    "This is a review-only seeded planning run. The frozen package below is a deterministic compact view of the complete durable context. Binding rules and manual QC guidance are complete; approved knowledge may include explicit omission metadata. It contains no brainstorming transcript.",
+    `FROZEN QC CONTEXT:\n${JSON.stringify(compactContext)}`,
   ].join("\n\n");
 }
 

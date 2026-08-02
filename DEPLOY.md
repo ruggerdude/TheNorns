@@ -165,9 +165,14 @@ required because every plan receives cross-provider review.
   and remains the OpenAI fallback for legacy provider-only projects.
 - `NORNS_REVIEWER_ANTHROPIC_MODEL` optionally selects the Anthropic reviewer
   for OpenAI-led projects. It falls back to `NORNS_PM_MODEL`, then
-  `claude-sonnet-5`.
+  the configured planning profile.
 - `NORNS_PM_MODEL` is retained only as an Anthropic fallback for projects
   persisted before exact PM model selection was introduced.
+- `NORNS_PLANNING_MODEL_PROFILE` controls only otherwise-unconfigured planning
+  participants. Valid values are `quality` (Claude Fable 5 / GPT-5.6 Sol),
+  `balanced` (Claude Sonnet 5 / GPT-5.6 Terra), and `fast` (Claude Haiku 4.5 /
+  GPT-5.6 Luna). The default is `balanced`; an invalid value prevents server
+  startup. Exact project selections and the exact model variables above win.
 
 ## Local development
 

@@ -7,21 +7,28 @@
 // default, env-configured model). Cross-provider enforcement itself still
 // lives entirely in runPlanning() — this module only picks the pairing.
 import type { ProviderName } from "@norns/adapters";
+import { PlanningModelProfile, type PlanningModelProfileT, type PmModelT } from "@norns/contracts";
 import { reviewerFor as defaultReviewerProviderFor } from "../projects/store.js";
 
 export { defaultReviewerProviderFor };
 
 // ---------------------------------------------------------------------------
-// PHASE TAB P1: pinned defaults for durable planning runs. The PM defaults to
-// anthropic/claude-fable-5 and the reviewer to openai/gpt-5.6-sol (production
-// allowlist), while every existing override still wins: the project's PM
-// selection, the persisted per-project reviewer settings, and the
-// NORNS_PM_MODEL / NORNS_OPENAI_MODEL / NORNS_REVIEWER_ANTHROPIC_MODEL env
-// vars all take precedence over these constants. Cross-provider review
+// PHASE TAB P1 legacy defaults remain exported for compatibility. New durable
+// planning composition supplies a validated profile (balanced by default),
+// while exact project selections, persisted reviewer settings, and the legacy
+// exact-model environment variables continue to win. Cross-provider review
 // enforcement is unchanged (runPlanning() refuses same-provider pairs).
 // ---------------------------------------------------------------------------
 export const PLANNING_RUN_DEFAULT_PM_MODEL = "claude-fable-5";
 export const PLANNING_RUN_DEFAULT_REVIEWER_MODEL = "gpt-5.6-sol";
+export const PLANNING_MODEL_PROFILE_ENV = "NORNS_PLANNING_MODEL_PROFILE";
+export const DEFAULT_PLANNING_MODEL_PROFILE: PlanningModelProfileT = "balanced";
+
+const PLANNING_PROFILE_MODELS = {
+  quality: { anthropic: "claude-fable-5", openai: "gpt-5.6-sol" },
+  balanced: { anthropic: "claude-sonnet-5", openai: "gpt-5.6-terra" },
+  fast: { anthropic: "claude-haiku-4-5-20251001", openai: "gpt-5.6-luna" },
+} as const satisfies Record<PlanningModelProfileT, Record<ProviderName, PmModelT>>;
 
 export interface PlanningModelEnvironment {
   ANTHROPIC_API_KEY?: string;
@@ -29,6 +36,7 @@ export interface PlanningModelEnvironment {
   NORNS_PM_MODEL?: string;
   NORNS_OPENAI_MODEL?: string;
   NORNS_REVIEWER_ANTHROPIC_MODEL?: string;
+  NORNS_PLANNING_MODEL_PROFILE?: string;
 }
 
 export interface PersistedReviewerSelection {
@@ -54,6 +62,31 @@ export class PlanningConfigurationError extends Error {
   }
 }
 
+export class PlanningModelProfileConfigurationError extends Error {
+  constructor(readonly value: string) {
+    super(
+      `${PLANNING_MODEL_PROFILE_ENV} must be one of ${PlanningModelProfile.options.join(", ")}; received ${JSON.stringify(value)}`,
+    );
+    this.name = "PlanningModelProfileConfigurationError";
+  }
+}
+
+export function planningModelProfileFromEnvironment(
+  env: Pick<PlanningModelEnvironment, "NORNS_PLANNING_MODEL_PROFILE">,
+): PlanningModelProfileT {
+  const value = env.NORNS_PLANNING_MODEL_PROFILE?.trim() || DEFAULT_PLANNING_MODEL_PROFILE;
+  const parsed = PlanningModelProfile.safeParse(value);
+  if (!parsed.success) throw new PlanningModelProfileConfigurationError(value);
+  return parsed.data;
+}
+
+export function planningModelForProvider(
+  profile: PlanningModelProfileT,
+  provider: ProviderName,
+): PmModelT {
+  return PLANNING_PROFILE_MODELS[profile][provider];
+}
+
 export function resolvePlanningParticipants(input: {
   pmSelection: { provider: ProviderName; model: string | null };
   /** From planning_reviewer_settings; null when the project has no override. */
@@ -61,6 +94,9 @@ export function resolvePlanningParticipants(input: {
   env: PlanningModelEnvironment;
   /** Deployment default PM model per provider (mirrors DEFAULT_PM_MODEL). */
   defaultPmModel: Record<"anthropic" | "openai", string | undefined>;
+  /** Validated deployment fallback. Exact project and environment selections
+   * continue to win over this profile. */
+  profile?: PlanningModelProfileT;
   /**
    * PHASE TAB P1: last-resort reviewer model default per provider, consulted
    * only after the persisted override and env vars. Callers that omit it keep
@@ -70,21 +106,26 @@ export function resolvePlanningParticipants(input: {
   defaultReviewerModel?: Partial<Record<"anthropic" | "openai", string>>;
 }): ResolvedPlanningParticipants {
   const { pmSelection, persistedReviewer, env, defaultPmModel, defaultReviewerModel } = input;
+  const profile = input.profile;
   const reviewerProvider =
     persistedReviewer?.provider ?? defaultReviewerProviderFor(pmSelection.provider);
   const pmModel =
     pmSelection.model ??
     (pmSelection.provider === "anthropic"
-      ? (env.NORNS_PM_MODEL ?? defaultPmModel.anthropic)
-      : env.NORNS_OPENAI_MODEL);
+      ? (env.NORNS_PM_MODEL ??
+        (profile ? planningModelForProvider(profile, "anthropic") : defaultPmModel.anthropic))
+      : (env.NORNS_OPENAI_MODEL ??
+        (profile ? planningModelForProvider(profile, "openai") : defaultPmModel.openai)));
   const reviewerModel =
     persistedReviewer?.model ??
     (reviewerProvider === "openai"
-      ? (env.NORNS_OPENAI_MODEL ?? defaultReviewerModel?.openai)
+      ? (env.NORNS_OPENAI_MODEL ??
+        (profile ? planningModelForProvider(profile, "openai") : defaultReviewerModel?.openai))
       : (env.NORNS_REVIEWER_ANTHROPIC_MODEL ??
         env.NORNS_PM_MODEL ??
-        defaultReviewerModel?.anthropic ??
-        defaultPmModel.anthropic));
+        (profile
+          ? planningModelForProvider(profile, "anthropic")
+          : (defaultReviewerModel?.anthropic ?? defaultPmModel.anthropic))));
 
   const missing = [
     !env.ANTHROPIC_API_KEY && "ANTHROPIC_API_KEY",

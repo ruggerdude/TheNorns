@@ -4,7 +4,9 @@
 import { describe, expect, it } from "vitest";
 import {
   PlanningConfigurationError,
+  PlanningModelProfileConfigurationError,
   defaultReviewerProviderFor,
+  planningModelProfileFromEnvironment,
   resolvePlanningParticipants,
 } from "../src/planning/reviewerSelection.js";
 
@@ -19,6 +21,66 @@ const fullEnv = {
 const defaultPmModel = { anthropic: "claude-opus-4-8", openai: "gpt-5.6-luna" };
 
 describe("resolvePlanningParticipants", () => {
+  it.each([
+    ["quality", "claude-fable-5", "gpt-5.6-sol"],
+    ["balanced", "claude-sonnet-5", "gpt-5.6-terra"],
+    ["fast", "claude-haiku-4-5-20251001", "gpt-5.6-luna"],
+  ] as const)(
+    "uses the %s profile only when exact participant models are unconfigured",
+    (profile, anthropicModel, openaiModel) => {
+      const result = resolvePlanningParticipants({
+        pmSelection: { provider: "anthropic", model: null },
+        persistedReviewer: null,
+        env: { ANTHROPIC_API_KEY: "test-anthropic", OPENAI_API_KEY: "test-openai" },
+        defaultPmModel,
+        profile,
+      });
+      expect(result.pm).toEqual({ provider: "anthropic", model: anthropicModel });
+      expect(result.reviewer).toEqual({ provider: "openai", model: openaiModel });
+      const inverse = resolvePlanningParticipants({
+        pmSelection: { provider: "openai", model: null },
+        persistedReviewer: null,
+        env: { ANTHROPIC_API_KEY: "test-anthropic", OPENAI_API_KEY: "test-openai" },
+        defaultPmModel,
+        profile,
+      });
+      expect(inverse.pm).toEqual({ provider: "openai", model: openaiModel });
+      expect(inverse.reviewer).toEqual({ provider: "anthropic", model: anthropicModel });
+    },
+  );
+
+  it("defaults an unconfigured deployment profile to balanced and rejects invalid values", () => {
+    expect(planningModelProfileFromEnvironment({})).toBe("balanced");
+    expect(planningModelProfileFromEnvironment({ NORNS_PLANNING_MODEL_PROFILE: " fast " })).toBe(
+      "fast",
+    );
+    expect(() =>
+      planningModelProfileFromEnvironment({ NORNS_PLANNING_MODEL_PROFILE: "turbo" }),
+    ).toThrowError(PlanningModelProfileConfigurationError);
+  });
+
+  it("keeps exact project, reviewer, and legacy environment selections ahead of a profile", () => {
+    const result = resolvePlanningParticipants({
+      pmSelection: { provider: "anthropic", model: "claude-project-exact" },
+      persistedReviewer: { provider: "openai", model: "openai-reviewer-exact" },
+      env: fullEnv,
+      defaultPmModel,
+      profile: "quality",
+    });
+    expect(result.pm.model).toBe("claude-project-exact");
+    expect(result.reviewer.model).toBe("openai-reviewer-exact");
+
+    const legacyEnvironment = resolvePlanningParticipants({
+      pmSelection: { provider: "anthropic", model: null },
+      persistedReviewer: null,
+      env: fullEnv,
+      defaultPmModel,
+      profile: "quality",
+    });
+    expect(legacyEnvironment.pm.model).toBe("claude-opus-4-8");
+    expect(legacyEnvironment.reviewer.model).toBe("gpt-5.6-luna");
+  });
+
   it("defaults the reviewer to the opposite provider when nothing is persisted", () => {
     const result = resolvePlanningParticipants({
       pmSelection: { provider: "anthropic", model: null },

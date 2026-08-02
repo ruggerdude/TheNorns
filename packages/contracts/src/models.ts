@@ -82,6 +82,11 @@ export const DEFAULT_PM_MODEL = {
   openai: "gpt-5.6-terra",
 } as const satisfies Record<PmProviderT, PmModelT>;
 
+/** Deployment fallback for planning participants that have no exact project
+ * or legacy environment model selection. Exact model pins remain canonical. */
+export const PlanningModelProfile = z.enum(["quality", "balanced", "fast"]);
+export type PlanningModelProfileT = z.infer<typeof PlanningModelProfile>;
+
 export function isPmModelForProvider(provider: PmProviderT, model: string): model is PmModelT {
   return PM_MODEL_OPTIONS[provider].some((option) => option.id === model);
 }

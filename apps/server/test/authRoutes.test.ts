@@ -62,6 +62,16 @@ async function start(opts?: {
 }
 
 describe("GET /api/auth/status", () => {
+  it("fails startup clearly for an invalid planning model profile", async () => {
+    await expect(
+      buildServer({
+        stores: new RelayStores(),
+        users: new UserStore(),
+        integrationEnvironment: { NORNS_PLANNING_MODEL_PROFILE: "turbo" },
+      }),
+    ).rejects.toThrow("NORNS_PLANNING_MODEL_PROFILE must be one of quality, balanced, fast");
+  });
+
   it("requires bootstrap until an active administrator exists", async () => {
     const users = new UserStore();
     const s = await start({ users });

@@ -260,6 +260,8 @@ import {
   PLANNING_RUN_DEFAULT_PM_MODEL,
   PLANNING_RUN_DEFAULT_REVIEWER_MODEL,
   defaultReviewerProviderFor,
+  planningModelForProvider,
+  planningModelProfileFromEnvironment,
   resolvePlanningParticipants,
 } from "./planning/reviewerSelection.js";
 import {
@@ -774,6 +776,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const loginThrottle = new LoginAttemptThrottle();
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
   const integrationEnvironment = options.integrationEnvironment ?? process.env;
+  // Parse once at composition time so an invalid deployment profile fails
+  // startup clearly rather than surfacing only after a user starts a plan.
+  const planningModelProfile = planningModelProfileFromEnvironment(integrationEnvironment);
   const qcRevisionFormat = V2QcRevisionFormat.parse(
     integrationEnvironment.NORNS_QC_REVISION_FORMAT?.trim() || "legacy_full",
   );
@@ -6345,8 +6350,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           const pmModel =
             pmSelection.model ??
             (pmSelection.provider === "anthropic"
-              ? PLANNING_RUN_DEFAULT_PM_MODEL
-              : DEFAULT_PM_MODEL.openai);
+              ? (integrationEnvironment.NORNS_PM_MODEL ??
+                planningModelForProvider(planningModelProfile, "anthropic"))
+              : (integrationEnvironment.NORNS_OPENAI_MODEL ??
+                planningModelForProvider(planningModelProfile, "openai")));
           return {
             pm: {
               provider: pmSelection.provider,
@@ -6360,16 +6367,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
         // Throws PlanningConfigurationError when the deployment lacks what's
         // needed; the worker catches it and records a truthful failure.
-        // PHASE TAB P1: durable planning runs pin their last-resort defaults
-        // to claude-fable-5 (PM, anthropic) and gpt-5.6-sol (reviewer,
-        // openai). Project PM selection, persisted reviewer settings, and the
-        // NORNS_* env vars all still win — these apply only when nothing else
-        // resolved a model.
+        // Durable planning uses the deployment's validated profile only as a
+        // last resort. Exact project PM selection, persisted reviewer settings,
+        // and legacy exact-model env vars all continue to win.
         const resolved = resolvePlanningParticipants({
           pmSelection,
           persistedReviewer:
             persistedReviewer?.provider === pmSelection.provider ? null : persistedReviewer,
           env: integrationEnvironment,
+          profile: planningModelProfile,
           defaultPmModel: {
             anthropic: PLANNING_RUN_DEFAULT_PM_MODEL,
             openai: DEFAULT_PM_MODEL.openai,

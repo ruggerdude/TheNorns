@@ -14,6 +14,7 @@ import {
   type ReviewOnlyPlanningTerminalResult,
   type ReviewOnlyProgressEvent,
   applyTargetedQcRevision,
+  compactFrozenQcContext,
   runReviewOnlyPlanning,
 } from "../src/planning/reviewOnlySession.js";
 
@@ -106,6 +107,49 @@ function fixtureStaffing() {
 }
 
 describe("review-only conversational planning", () => {
+  it("builds a deterministic bounded prompt view without altering essential frozen context", () => {
+    const receipt = {
+      binding_rules: [{ id: "rule-1", content: "Never weaken the approval boundary." }],
+      approved_knowledge: Array.from({ length: 30 }, (_, index) => ({
+        id: `knowledge-${String(29 - index).padStart(2, "0")}`,
+        category: "constraint",
+        content: `${index}:${"x".repeat(2_000)}`,
+      })),
+      decision_ledger: [
+        { id: "decision-1", title: "Use PostgreSQL", rationale: "Durable transactions." },
+      ],
+      referenced_artifacts: [{ id: "artifact-1", kind: "plan", content_hash: "a".repeat(64) }],
+      manual_qc_guidance: [
+        { artifact_id: "guidance-1", content: "Check the migration rollback verbatim." },
+      ],
+      future_large_field: "must-not-enter-the-prompt",
+    };
+    const before = structuredClone(receipt);
+
+    const first = compactFrozenQcContext(receipt);
+    const second = compactFrozenQcContext(structuredClone(receipt));
+    const omissions = first.approved_knowledge_omissions as Record<string, unknown>;
+    const included = first.approved_knowledge as Array<{ id: string }>;
+
+    expect(first).toEqual(second);
+    expect(receipt).toEqual(before);
+    expect(first.source_receipt_hash).toBe(canonicalSha256(receipt));
+    expect(first.binding_rules).toEqual(receipt.binding_rules);
+    expect(first.manual_qc_guidance).toEqual(receipt.manual_qc_guidance);
+    expect(first.decision_ledger).toEqual(receipt.decision_ledger);
+    expect(first.referenced_artifacts).toEqual(receipt.referenced_artifacts);
+    expect(included.length).toBeLessThanOrEqual(24);
+    expect(included.map((item) => item.id)).toEqual([...included.map((item) => item.id)].sort());
+    expect(omissions.omitted_count).toBe(30 - included.length);
+    expect(omissions.included_characters).toEqual(expect.any(Number));
+    expect(Number(omissions.included_characters)).toBeLessThanOrEqual(24_000);
+    expect(omissions.omitted_content_hash).toMatch(/^[a-f0-9]{64}$/u);
+    expect(JSON.stringify(first)).not.toContain("must-not-enter-the-prompt");
+    expect(first.omitted_fields).toEqual([
+      { key: "future_large_field", content_hash: canonicalSha256(receipt.future_large_field) },
+    ]);
+  });
+
   it("calls the opposite-provider reviewer first with the exact full envelope and no transcript", async () => {
     const seed = envelope();
     const pm = new FakeAdapter("anthropic");
