@@ -27,6 +27,7 @@ export interface RecordedRequest {
   telemetryRequestId?: string | undefined;
   telemetryRetryGroupId?: string | null | undefined;
   telemetryRetryAttempt?: number | undefined;
+  maxTokens?: number | undefined;
   /** FRONT DOOR P4: image parts carried by this request (undefined when none). */
   images: readonly ImagePart[] | undefined;
   messages?: readonly ConversationMessage[] | undefined;
@@ -78,6 +79,7 @@ export class FakeAdapter implements LlmAdapter {
       telemetryRequestId: request.telemetryRequestId,
       telemetryRetryGroupId: request.telemetryRetryGroupId,
       telemetryRetryAttempt: request.telemetryRetryAttempt,
+      maxTokens: request.maxTokens,
       images: request.images,
     });
     return { text: String(this.next()), usage: this.usage(request) };
@@ -97,6 +99,7 @@ export class FakeAdapter implements LlmAdapter {
       telemetryRequestId: request.telemetryRequestId,
       telemetryRetryGroupId: request.telemetryRetryGroupId,
       telemetryRetryAttempt: request.telemetryRetryAttempt,
+      maxTokens: request.maxTokens,
       images: request.images,
     });
     // canned data must satisfy the real contracts schema — keeps fakes honest
@@ -125,6 +128,7 @@ export class FakeAdapter implements LlmAdapter {
       telemetryRequestId: request.telemetryRequestId,
       telemetryRetryGroupId: request.telemetryRetryGroupId,
       telemetryRetryAttempt: request.telemetryRetryAttempt,
+      maxTokens: request.maxTokens,
       images: request.messages.flatMap((message) =>
         typeof message.content === "string"
           ? []

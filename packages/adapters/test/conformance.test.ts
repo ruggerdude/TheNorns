@@ -115,6 +115,15 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
     expect((error as AdapterError).metadata).toMatchObject({
       request_dispatched: true,
       provider_execution_id: name === "anthropic" ? "msg_mock" : "resp_mock",
+      structured_failure: {
+        kind: "schema_validation",
+        issues: [
+          {
+            path: "missing_field",
+            code: "invalid_type",
+          },
+        ],
+      },
       usage: {
         input_tokens: 120,
         output_tokens: 45,
@@ -123,6 +132,47 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
     });
     expect((error as AdapterError).metadata?.latency_ms).toEqual(expect.any(Number));
     expect((error as AdapterError).metadata?.latency_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it("classifies malformed structured output without retaining parser details", async () => {
+    const adapter = make();
+    const error = await adapter
+      .completeStructured(
+        { prompt: "TRIGGER_STRUCTURED_NOT_JSON", ...attribution },
+        z.object({ name: z.string() }),
+        "strict",
+      )
+      .then(
+        () => null,
+        (failure: unknown) => failure,
+      );
+    expect(error).toBeInstanceOf(AdapterError);
+    expect((error as AdapterError).metadata?.structured_failure).toEqual({
+      kind: "not_json",
+      issues: [{ path: "$", code: "invalid_json", message: "The response was not valid JSON." }],
+    });
+  });
+
+  it("classifies output-limit truncation separately from malformed JSON", async () => {
+    const adapter = make();
+    const error = await adapter
+      .completeStructured(
+        { prompt: "TRIGGER_STRUCTURED_TRUNCATED", maxTokens: 5, ...attribution },
+        z.object({ name: z.string() }),
+        "strict",
+      )
+      .then(
+        () => null,
+        (failure: unknown) => failure,
+      );
+    expect(error).toBeInstanceOf(AdapterError);
+    expect((error as AdapterError).metadata).toMatchObject({
+      finish_reason: name === "anthropic" ? "max_tokens" : "max_output_tokens",
+      structured_failure: {
+        kind: "output_truncated",
+        issues: [{ path: "$", code: "output_truncated" }],
+      },
+    });
   });
 
   it("maps the failure taxonomy: 429 retryable, 401 fatal, 500 retryable", async () => {

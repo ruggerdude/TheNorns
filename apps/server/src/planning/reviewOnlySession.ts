@@ -2,6 +2,7 @@ import {
   AdapterError,
   type CompletionRequest,
   type LlmAdapter,
+  type StructuredFailureDiagnostic,
   type StructuredResult,
 } from "@norns/adapters";
 import {
@@ -31,6 +32,10 @@ const ReviewOnlyRevision = z
     plan: V2WorkPlanContract,
   })
   .strict();
+
+const REVIEWER_MAX_OUTPUT_TOKENS = 5_000;
+const TARGETED_REVISION_MAX_OUTPUT_TOKENS = 4_000;
+const TARGETED_REVISION_REPAIR_MAX_OUTPUT_TOKENS = 3_000;
 
 export interface ReviewOnlyRound {
   round: number;
@@ -562,10 +567,54 @@ function rejectedResponseMarkdown(
   return [
     `# ${channel === "reviewer" ? "QC reviewer" : "Planning manager"} · Round ${round} · Incomplete response`,
     "",
-    `> This response was preserved but could not be applied automatically: ${error.message}`,
+    `> This response was preserved but could not be applied automatically: ${structuredFailureSummary(error)}`,
     "",
     response,
   ].join("\n");
+}
+
+function structuredFailure(error: AdapterError): StructuredFailureDiagnostic | null {
+  return error.metadata?.structured_failure ?? null;
+}
+
+function structuredFailureSummary(error: AdapterError): string {
+  const diagnostic = structuredFailure(error);
+  if (!diagnostic) {
+    return error.kind === "invalid_response"
+      ? "The response did not match the required structured-output contract."
+      : `The provider request failed (${error.kind}).`;
+  }
+  const details = diagnostic.issues.map((issue) => `${issue.path}: ${issue.message}`).join("; ");
+  return `${diagnostic.kind}${details ? ` — ${details}` : ""}`;
+}
+
+function safeChatError(error: unknown): string {
+  if (error instanceof AdapterError) return structuredFailureSummary(error);
+  return "The QC request failed unexpectedly. Inspect the server error record for details.";
+}
+
+function repairPrompt(
+  error: AdapterError,
+  instruction: string,
+  originalPrompt: string | null,
+): string {
+  const previous = error.metadata?.response_text?.trim();
+  if (!previous) throw new Error("repair prompt requires a preserved provider response");
+  return [
+    ...(originalPrompt ? [originalPrompt] : []),
+    "Your previous QC response was preserved as a Markdown artifact, but it could not be applied automatically.",
+    `Validation details: ${structuredFailureSummary(error)}`,
+    "Correct the response below. Do not add prose or Markdown fences.",
+    `PREVIOUS RESPONSE:\n${previous}`,
+    instruction,
+  ].join("\n\n");
+}
+
+function outputWasTruncated(error: AdapterError): boolean {
+  if (structuredFailure(error)?.kind === "output_truncated") return true;
+  return ["length", "max_output_tokens", "max_tokens"].includes(
+    error.metadata?.finish_reason ?? "",
+  );
 }
 
 async function completeStructuredWithRepair<T>(
@@ -583,9 +632,13 @@ async function completeStructuredWithRepair<T>(
     markdown(value: T): string;
     maxAttempts?: number;
     repairInstruction?: string;
+    repairMaxTokens?: number;
+    /** Targeted change envelopes can be repaired from their prior response;
+     * legacy full envelopes still need the complete original plan prompt. */
+    previousResponseOnlyRepair?: boolean;
   },
 ): Promise<StructuredResult<T> & { progress_attempt: number; progress_request_id: string }> {
-  const maxAttempts = chat.maxAttempts ?? 2;
+  const maxAttempts = Math.min(chat.maxAttempts ?? 2, 2);
   let prompt = request.prompt;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const requestId =
@@ -612,6 +665,9 @@ async function completeStructuredWithRepair<T>(
         {
           ...request,
           prompt,
+          ...(attempt > 0 && chat.repairMaxTokens !== undefined
+            ? { maxTokens: chat.repairMaxTokens }
+            : {}),
           telemetryRequestId: requestId,
           telemetryRetryGroupId: telemetryRequestId,
           telemetryRetryAttempt: attempt,
@@ -649,7 +705,7 @@ async function completeStructuredWithRepair<T>(
           speaker: chat.channel,
           kind: "response",
           content: error.metadata.response_text,
-          error_code: error.kind,
+          error_code: structuredFailure(error)?.kind ?? error.kind,
           artifact_markdown: rejectedResponseMarkdown(
             chat.channel,
             chat.round,
@@ -666,25 +722,29 @@ async function completeStructuredWithRepair<T>(
           attempt: attempt + 1,
           speaker: chat.channel,
           kind: "error",
-          content: error instanceof Error ? error.message : String(error),
-          error_code: error instanceof AdapterError ? error.kind : "unknown_error",
+          content: safeChatError(error),
+          error_code:
+            error instanceof AdapterError
+              ? (structuredFailure(error)?.kind ?? error.kind)
+              : "unknown_error",
         });
       }
       if (
         !(error instanceof AdapterError) ||
         error.kind !== "invalid_response" ||
-        attempt === maxAttempts - 1
+        attempt === maxAttempts - 1 ||
+        outputWasTruncated(error) ||
+        !error.metadata?.response_text?.trim()
       ) {
         throw error;
       }
       if (error.metadata?.usage) onFailedUsage(error.metadata.usage);
-      prompt = [
-        request.prompt,
-        "Your previous QC response was preserved as a Markdown artifact, but it could not be applied automatically.",
-        `Validation failure: ${error.message}`,
+      prompt = repairPrompt(
+        error,
         chat.repairInstruction ??
-          "Try once more. Return a fresh, complete JSON application envelope. Correct the validation failure, include every required field, and preserve the full plan. The server will save the readable result as a Markdown file.",
-      ].join("\n\n");
+          "Return a fresh, complete JSON application envelope. Correct the validation failure, include every required field, and preserve the full plan. The server will save the readable result as a Markdown file.",
+        chat.previousResponseOnlyRepair ? null : request.prompt,
+      );
     }
   }
   throw new Error("unreachable: structured completion attempts always return or throw");
@@ -843,6 +903,7 @@ export async function runReviewOnlyPlanning(
         {
           system: reviewerPrompt,
           prompt: reviewOnlyPrompt(reviewedPlan),
+          maxTokens: REVIEWER_MAX_OUTPUT_TOKENS,
           ...meter,
           ...(options.signal ? { signal: options.signal } : {}),
         },
@@ -958,6 +1019,7 @@ export async function runReviewOnlyPlanning(
           {
             system: revisionSystem,
             prompt: targetedRevisionPrompt(reviewedPlan, findings),
+            maxTokens: TARGETED_REVISION_MAX_OUTPUT_TOKENS,
             ...meter,
             ...(options.signal ? { signal: options.signal } : {}),
           },
@@ -976,6 +1038,8 @@ export async function runReviewOnlyPlanning(
             },
             repairInstruction:
               "Try once more. Return a fresh targeted JSON envelope with base_plan_content_hash, responses, and bounded changes only. Correct the validation failure and include every required field. Do not return the complete plan; the server materializes and validates it.",
+            repairMaxTokens: TARGETED_REVISION_REPAIR_MAX_OUTPUT_TOKENS,
+            previousResponseOnlyRepair: true,
           },
         );
         usage.push(targeted.usage);
@@ -987,7 +1051,8 @@ export async function runReviewOnlyPlanning(
         if (
           revisionFormat !== "targeted_v1_with_fallback" ||
           !(error instanceof AdapterError) ||
-          error.kind !== "invalid_response"
+          error.kind !== "invalid_response" ||
+          outputWasTruncated(error)
         ) {
           throw error;
         }
@@ -999,7 +1064,7 @@ export async function runReviewOnlyPlanning(
           attempt: 3,
           speaker: "workflow",
           kind: "error",
-          content: `The targeted QC revision failed validation after its repair attempt. Falling back once to the pinned legacy full-envelope format. Validation failure: ${error.message}`,
+          content: `The targeted QC revision failed validation after its repair attempt. Falling back once to the pinned legacy full-envelope format. ${structuredFailureSummary(error)}`,
           error_code: "targeted_revision_legacy_fallback",
         });
         const legacy = await runLegacyRevision(`${revisionRequestId}:legacy-fallback`, 1);

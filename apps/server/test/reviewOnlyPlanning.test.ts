@@ -133,6 +133,7 @@ describe("review-only conversational planning", () => {
     expect(reviewer.requests[0]?.system).not.toContain("brainstorm filler");
     expect(reviewer.requests[0]?.telemetryRequestId).toBe("review-only-first:review:1");
     expect(reviewer.requests[0]?.telemetryRetryGroupId).toBe("review-only-first:review:1");
+    expect(reviewer.requests[0]?.maxTokens).toBe(5_000);
     assertTerminal(result);
     expect(result.seed_plan).toEqual(seed);
     expect(result.final_plan).toEqual(seed);
@@ -193,6 +194,7 @@ describe("review-only conversational planning", () => {
       },
     ]);
     expect(pm.requests[0]?.prompt).toContain(JSON.stringify(seed));
+    expect(pm.requests[0]?.maxTokens).toBeUndefined();
     expect(pm.requests[0]?.telemetryRequestId).toBe("review-only-cap:revision:1");
   });
 
@@ -244,6 +246,16 @@ describe("review-only conversational planning", () => {
             usage: failedUsage,
             response_text: '{"responses":[],"plan":{"plan":{"objective":"partial"}}}',
             request_dispatched: true,
+            structured_failure: {
+              kind: "schema_validation",
+              issues: [
+                {
+                  path: "plan.plan.modules.0.execution",
+                  code: "invalid_type",
+                  message: "Required",
+                },
+              ],
+            },
           },
         },
       ),
@@ -293,7 +305,7 @@ describe("review-only conversational planning", () => {
       "pm:response:2",
     ]);
     expect(chat[3]).toMatchObject({
-      error_code: "invalid_response",
+      error_code: "schema_validation",
       artifact_valid: false,
     });
     expect(chat[5]?.artifact_markdown).toContain("# Planning manager revision · Round 1");
@@ -1138,6 +1150,7 @@ describe("review-only conversational planning", () => {
     expect(result.status).toBe("cap_reached");
     expect(result.final_plan.staffing[0]?.model).toBe("gpt-5.6-terra");
     expect(pm.requests[0]?.schemaName).toBe("targeted_plan_revision");
+    expect(pm.requests[0]?.maxTokens).toBe(4_000);
     expect(pm.requests[0]?.prompt).toContain("Do not return the complete plan");
     const pmArtifact = chat.find(
       (event) => event.channel === "pm" && event.speaker === "pm" && event.artifact_valid,
@@ -1200,9 +1213,76 @@ describe("review-only conversational planning", () => {
 
     assertTerminal(result);
     expect(result.final_plan.plan.modules[0]?.description).toContain("targeted repair");
+    expect(pm.requests[0]?.maxTokens).toBe(3_000);
     expect(pm.requests[0]?.prompt).toContain("Do not return the complete plan");
     expect(pm.requests[0]?.prompt).toContain("Do not return the complete plan;");
     expect(pm.requests[0]?.prompt).not.toContain("preserve the full plan");
+    expect(pm.requests[0]?.prompt).not.toContain("CURRENT WORK PLAN CONTRACT ENVELOPE");
+  });
+
+  it("does not repair or fall back after an output-limit truncation", async () => {
+    const seed = envelope();
+    const pm = new FakeAdapter("anthropic");
+    const reviewer = new FakeAdapter("openai");
+    reviewer.enqueue({
+      findings: [
+        {
+          severity: "must_fix",
+          module_id: "contracts",
+          finding: "Clarify the module.",
+          recommendation: "Update its description.",
+        },
+      ],
+    });
+    const completion = vi.spyOn(pm, "completeStructured").mockRejectedValueOnce(
+      new AdapterError("invalid_response", "targeted_plan_revision: response is not JSON", {
+        metadata: {
+          finish_reason: "max_tokens",
+          response_text: '{"base_plan_content_hash":"partial',
+          structured_failure: {
+            kind: "output_truncated",
+            issues: [
+              {
+                path: "$",
+                code: "output_truncated",
+                message: "The provider stopped because the configured output limit was reached.",
+              },
+            ],
+          },
+        },
+      }),
+    );
+    const chat: ReviewOnlyChatEvent[] = [];
+
+    const error = await runReviewOnlyPlanning({
+      pm,
+      reviewer,
+      projectId: "project-targeted-truncated",
+      initiatedByUserId: "user-targeted",
+      seedPlan: seed,
+      frozenContext: {},
+      telemetryGroupId: "review-only-targeted-truncated",
+      maxRounds: 1,
+      revisionFormat: "targeted_v1_with_fallback",
+      onChatEvent: (event) => {
+        chat.push(event);
+      },
+    }).then(
+      () => null,
+      (failure: unknown) => failure,
+    );
+
+    expect(error).toMatchObject({ kind: "invalid_response" });
+    expect(completion).toHaveBeenCalledTimes(1);
+    expect(completion.mock.calls[0]?.[0].maxTokens).toBe(4_000);
+    expect(chat.filter((event) => event.kind === "repair_reminder")).toHaveLength(0);
+    expect(chat.find((event) => event.channel === "pm" && event.speaker === "pm")).toMatchObject({
+      error_code: "output_truncated",
+      artifact_valid: false,
+    });
+    expect(
+      chat.find((event) => event.error_code === "targeted_revision_legacy_fallback"),
+    ).toBeUndefined();
   });
 
   it("falls back exactly once to the legacy envelope after targeted repair failure", async () => {

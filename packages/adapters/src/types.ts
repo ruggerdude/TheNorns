@@ -134,6 +134,22 @@ export interface ProviderCompletionMetadata {
   latency_ms?: number;
 }
 
+export type StructuredFailureKind = "not_json" | "schema_validation" | "output_truncated";
+
+export interface StructuredFailureIssue {
+  /** Provider-neutral JSON path. Root-level failures use `$`. */
+  path: string;
+  /** Stable parser/schema category; never includes provider response text. */
+  code: string;
+  /** Bounded validation guidance safe to include in retry prompts and logs. */
+  message: string;
+}
+
+export interface StructuredFailureDiagnostic {
+  kind: StructuredFailureKind;
+  issues: StructuredFailureIssue[];
+}
+
 /**
  * Evidence retained when a provider accepted a request but its response cannot
  * be used.  This is intentionally distinct from transport failures: callers
@@ -144,6 +160,9 @@ export interface AdapterFailureMetadata extends ProviderCompletionMetadata {
   usage?: UsageEventT;
   /** Provider text retained when parsing or contract validation rejects it. */
   response_text?: string;
+  /** Sanitized structured-output diagnostics. Raw provider text stays solely
+   * in response_text and must never be copied into telemetry error fields. */
+  structured_failure?: StructuredFailureDiagnostic;
   /** True only after the provider has returned a response to this request. */
   request_dispatched?: boolean;
 }

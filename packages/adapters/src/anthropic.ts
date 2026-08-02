@@ -3,6 +3,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { z } from "zod";
 import { DEFAULT_MODEL_REGISTRY, type ModelEntry, makeUsageEvent } from "./registry.js";
+import { notJsonDiagnostic, schemaDiagnostic } from "./structuredFailure.js";
 import {
   AdapterError,
   type CompletionAttribution,
@@ -69,18 +70,28 @@ export class AnthropicAdapter implements LlmAdapter {
     try {
       parsed = JSON.parse(stripFences(text));
     } catch (cause) {
+      const metadata = this.failureMetadata(response, request, startedAt);
       throw new AdapterError("invalid_response", `${schemaName}: response is not JSON`, {
         cause,
-        metadata: { ...this.failureMetadata(response, request, startedAt), response_text: text },
+        metadata: {
+          ...metadata,
+          response_text: text,
+          structured_failure: notJsonDiagnostic(metadata.finish_reason),
+        },
       });
     }
     const result = schema.safeParse(parsed);
     if (!result.success) {
+      const metadata = this.failureMetadata(response, request, startedAt);
       throw new AdapterError(
         "invalid_response",
         `${schemaName}: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
         {
-          metadata: { ...this.failureMetadata(response, request, startedAt), response_text: text },
+          metadata: {
+            ...metadata,
+            response_text: text,
+            structured_failure: schemaDiagnostic(result.error.issues, metadata.finish_reason),
+          },
         },
       );
     }

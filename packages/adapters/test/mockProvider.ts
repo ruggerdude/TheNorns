@@ -44,9 +44,15 @@ export async function startMockProvider(): Promise<MockProvider> {
 
     const finish = (): void => {
       const structured = body.includes("STRUCTURED");
-      const text = structured
-        ? JSON.stringify({ name: "mock", count: 3 })
-        : "hello from the mock provider";
+      const truncatedStructured = body.includes("TRIGGER_STRUCTURED_TRUNCATED");
+      const invalidJsonStructured = body.includes("TRIGGER_STRUCTURED_NOT_JSON");
+      const text = truncatedStructured
+        ? '{"name":"mock"'
+        : invalidJsonStructured
+          ? "this is not JSON"
+          : structured
+            ? JSON.stringify({ name: "mock", count: 3 })
+            : "hello from the mock provider";
       const streaming = (() => {
         try {
           return JSON.parse(body).stream === true;
@@ -96,7 +102,10 @@ export async function startMockProvider(): Promise<MockProvider> {
           event("content_block_stop", { type: "content_block_stop", index: 0 });
           event("message_delta", {
             type: "message_delta",
-            delta: { stop_reason: "end_turn", stop_sequence: null },
+            delta: {
+              stop_reason: truncatedStructured ? "max_tokens" : "end_turn",
+              stop_sequence: null,
+            },
             usage: { output_tokens: 45 },
           });
           event("message_stop", { type: "message_stop" });
@@ -110,7 +119,7 @@ export async function startMockProvider(): Promise<MockProvider> {
           role: "assistant",
           model: "mock-anthropic",
           content: [{ type: "text", text }],
-          stop_reason: "end_turn",
+          stop_reason: truncatedStructured ? "max_tokens" : "end_turn",
           stop_sequence: null,
           usage: {
             input_tokens: 100,
@@ -127,9 +136,9 @@ export async function startMockProvider(): Promise<MockProvider> {
             object: "response",
             created_at: 0,
             model: "mock-openai",
-            status: "completed",
+            status: truncatedStructured ? "incomplete" : "completed",
             error: null,
-            incomplete_details: null,
+            incomplete_details: truncatedStructured ? { reason: "max_output_tokens" } : null,
             ...(omitTerminalOutputText ? {} : { output_text: text }),
             output: [
               {
@@ -170,7 +179,11 @@ export async function startMockProvider(): Promise<MockProvider> {
             delta: text,
             logprobs: [],
           });
-          event({ type: "response.completed", sequence_number: 2, response });
+          event({
+            type: truncatedStructured ? "response.incomplete" : "response.completed",
+            sequence_number: 2,
+            response,
+          });
           res.write("data: [DONE]\n\n");
           res.end();
           return;
@@ -181,9 +194,9 @@ export async function startMockProvider(): Promise<MockProvider> {
           object: "response",
           created_at: 0,
           model: "mock-openai",
-          status: "completed",
+          status: truncatedStructured ? "incomplete" : "completed",
           error: null,
-          incomplete_details: null,
+          incomplete_details: truncatedStructured ? { reason: "max_output_tokens" } : null,
           output_text: text,
           output: [
             {
