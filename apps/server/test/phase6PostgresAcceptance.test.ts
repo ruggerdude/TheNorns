@@ -5,8 +5,8 @@ import { NodePgTransactionRunner } from "../src/persistence/v2/database.js";
 import {
   CONVERSATION_MESSAGE_BRANCHES_MIGRATION_NAME,
   GITHUB_AUTHORIZATION_REMOVAL_MIGRATION_NAME,
-  QC_PAUSE_POINTS_MIGRATION_NAME,
   type V2MigrationDatabase,
+  currentV2MigrationSources,
   runCurrentV2Migrations,
 } from "../src/persistence/v2/migrate.js";
 import {
@@ -132,8 +132,15 @@ postgresDescribe("Phase 6 real PostgreSQL acceptance", () => {
       );
     `);
     const applied = await runCurrentV2Migrations(migrationDatabase);
+    // Assert against the CURRENT tail rather than a hardcoded migration name.
+    // This assertion previously named one specific migration and had to be
+    // hand-bumped on every schema change — and because this suite only runs
+    // when V2_POSTGRES_TEST_URL is set, it is skipped on developer machines,
+    // so each miss surfaced as a CI-only failure well after the fact.
+    const expectedTail = (await currentV2MigrationSources()).at(-1)?.name;
+    expect(expectedTail).toBeDefined();
     expect(applied.at(-1)).toMatchObject({
-      name: QC_PAUSE_POINTS_MIGRATION_NAME,
+      name: expectedTail,
       applied: true,
     });
     await applicationPool.query(`

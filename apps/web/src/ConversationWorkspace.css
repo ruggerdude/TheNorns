@@ -3798,3 +3798,13 @@
     color: CanvasText;
   }
 }
+
+/* The three-tab split wrapped the thread in .workspace-tab-panel, which is a
+   content-sized flex column. That removed the thread's ability to grow, so the
+   transcript collapsed from full height to ~314px. The panels must inherit the
+   growth .conversation-thread used to hand straight to its children.
+   Caught by e2e (frontdoor.spec.ts) — no unit test measures layout. */
+.conversation-thread > .workspace-tab-panel {
+  flex: 1;
+  min-height: 0;
+}
