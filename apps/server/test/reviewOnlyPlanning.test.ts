@@ -7,6 +7,7 @@ import {
 } from "@norns/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
+import { SCOPE_DISCIPLINE } from "../src/planning/prompts.js";
 import {
   type ReviewOnlyChatEvent,
   type ReviewOnlyPlanningPausedResult,
@@ -1398,5 +1399,189 @@ describe("review-only conversational planning", () => {
     expect(
       chat.find((event) => event.error_code === "targeted_revision_legacy_fallback")?.content,
     ).toContain("Falling back once");
+  });
+
+  describe("plan inflation bound", () => {
+    const mustFix: ReviewFindingT = {
+      severity: "must_fix",
+      module_id: "contracts",
+      finding: "The plan never persists the reviewed envelope.",
+      recommendation: "Add the missing persistence work.",
+    };
+
+    function withExtraModule(base: ReturnType<typeof envelope>, ...ids: string[]) {
+      const module = fixtureModule();
+      const staffing = fixtureStaffing();
+      return V2WorkPlanContract.parse({
+        ...base,
+        plan: {
+          ...base.plan,
+          modules: [
+            ...base.plan.modules,
+            ...ids.map((id) => ({ ...module, id, title: id, dependencies: ["contracts"] })),
+          ],
+        },
+        staffing: [...base.staffing, ...ids.map((id) => ({ ...staffing, module_id: id }))],
+      });
+    }
+
+    it("rejects a legacy revision that adds a module no accepted finding justifies", async () => {
+      const seed = envelope();
+      const pm = new FakeAdapter("anthropic");
+      const reviewer = new FakeAdapter("openai");
+      reviewer.enqueue({ findings: [mustFix] });
+      pm.enqueue({
+        responses: [
+          { finding_index: 0, disposition: "rebut", rationale: "The module already covers it." },
+        ],
+        plan: withExtraModule(seed, "persistence"),
+      });
+
+      await expect(
+        runReviewOnlyPlanning({
+          pm,
+          reviewer,
+          projectId: "project-review-only",
+          initiatedByUserId: "user-review-only",
+          seedPlan: seed,
+          frozenContext: {},
+          telemetryGroupId: "review-only-inflation-rejected",
+          maxRounds: 1,
+        }),
+      ).rejects.toThrow(/QC revision scope: added 1 module\(s\) \(persistence\) but only 0/);
+    });
+
+    it("allows a module addition an accepted must_fix justifies, in both revision formats", async () => {
+      const seed = envelope();
+      const grown = withExtraModule(seed, "persistence");
+      const pm = new FakeAdapter("anthropic");
+      const reviewer = new FakeAdapter("openai");
+      reviewer.enqueue({ findings: [{ ...mustFix, module_id: null }] });
+      pm.enqueue({
+        responses: [
+          { finding_index: 0, disposition: "accept", rationale: "Added the missing module." },
+        ],
+        plan: grown,
+      });
+
+      const result = await runReviewOnlyPlanning({
+        pm,
+        reviewer,
+        projectId: "project-review-only",
+        initiatedByUserId: "user-review-only",
+        seedPlan: seed,
+        frozenContext: {},
+        telemetryGroupId: "review-only-inflation-allowed",
+        maxRounds: 1,
+      });
+
+      assertTerminal(result);
+      expect(result.final_plan.plan.modules.map((module) => module.id)).toEqual([
+        "contracts",
+        "persistence",
+      ]);
+
+      const module = fixtureModule();
+      const staffing = fixtureStaffing();
+      const targetedChanges: V2QcPlanChangeT[] = [
+        {
+          op: "add_module",
+          finding_indices: [0],
+          module: {
+            ...module,
+            id: "persistence",
+            title: "persistence",
+            dependencies: ["contracts"],
+          },
+        },
+        {
+          op: "add_staffing",
+          finding_indices: [0],
+          staffing: { ...staffing, module_id: "persistence" },
+        },
+      ];
+      const responses: FindingResponseT[] = [
+        { finding_index: 0, disposition: "accept", rationale: "Added the missing module." },
+      ];
+      expect(
+        applyTargetedQcRevision(
+          seed,
+          { base_plan_content_hash: canonicalSha256(seed), responses, changes: targetedChanges },
+          [{ ...mustFix, module_id: null }],
+        ).plan.modules,
+      ).toHaveLength(2);
+      expect(() =>
+        applyTargetedQcRevision(
+          seed,
+          {
+            base_plan_content_hash: canonicalSha256(seed),
+            responses: [
+              { finding_index: 0, disposition: "accept", rationale: "Suggestion applied." },
+            ],
+            changes: targetedChanges,
+          },
+          [{ ...mustFix, module_id: null, severity: "suggestion" }],
+        ),
+      ).toThrow(/only 0 accepted must_fix\/should_fix/);
+    });
+
+    it("carries the scope constraint in both QC revision prompts and the PM revision system", async () => {
+      const seed = envelope();
+      const revised = envelope(
+        "Ship the planning conversation",
+        "Deliver the strict conversation plan workflow with the reviewed boundary.",
+      );
+      const legacyPm = new FakeAdapter("anthropic");
+      const legacyReviewer = new FakeAdapter("openai");
+      legacyReviewer.enqueue({ findings: [mustFix] });
+      legacyPm.enqueue({
+        responses: [{ finding_index: 0, disposition: "accept", rationale: "Strengthened it." }],
+        plan: revised,
+      });
+      await runReviewOnlyPlanning({
+        pm: legacyPm,
+        reviewer: legacyReviewer,
+        projectId: "project-review-only",
+        initiatedByUserId: "user-review-only",
+        seedPlan: seed,
+        frozenContext: {},
+        telemetryGroupId: "review-only-scope-prompt-legacy",
+        maxRounds: 1,
+      });
+
+      const targetedPm = new FakeAdapter("anthropic");
+      const targetedReviewer = new FakeAdapter("openai");
+      targetedReviewer.enqueue({ findings: [mustFix] });
+      targetedPm.enqueue({
+        base_plan_content_hash: canonicalSha256(seed),
+        responses: [{ finding_index: 0, disposition: "accept", rationale: "Strengthened it." }],
+        changes: [
+          {
+            op: "replace_module",
+            finding_indices: [0],
+            module_id: "contracts",
+            module: { ...fixtureModule(), description: "Reviewed boundary." },
+          },
+        ],
+      });
+      await runReviewOnlyPlanning({
+        pm: targetedPm,
+        reviewer: targetedReviewer,
+        projectId: "project-review-only",
+        initiatedByUserId: "user-review-only",
+        seedPlan: seed,
+        frozenContext: {},
+        telemetryGroupId: "review-only-scope-prompt-targeted",
+        maxRounds: 1,
+        revisionFormat: "targeted_v1",
+      });
+
+      for (const request of [legacyPm.requests[0], targetedPm.requests[0]]) {
+        expect(request?.prompt).toContain(SCOPE_DISCIPLINE);
+        expect(request?.prompt).toContain("rejects a revision that adds more modules");
+        expect(request?.system).toContain("Added scope is a defect");
+        expect(request?.system).not.toContain("decompose into modules");
+      }
+    });
   });
 });

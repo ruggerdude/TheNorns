@@ -90,6 +90,7 @@ import {
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import {
   type ConversationDetail,
+  type PlanProposalProgress,
   type QcModeT,
   type SubmitConversationMessageBody,
   type WorkItemConversationGroup,
@@ -103,7 +104,6 @@ import {
   createPlanningWorkItem,
   deleteConversationFolder,
   generateConversationPlanChangeProposal,
-  generateConversationPlanProposal,
   getConversation,
   getConversationExecution,
   getProjectConversationPin,
@@ -118,6 +118,7 @@ import {
   resolveConversation,
   resumeConversationPlanReview,
   retrieveConversationPlanningExcerpt,
+  streamConversationPlanProposal,
   switchConversationModel,
   updateConversationFolder,
   updateConversationPmSettings,
@@ -3412,7 +3413,17 @@ function planElapsedLabel(seconds: number): string {
   return `${minutes}:${remainder.toString().padStart(2, "0")} elapsed`;
 }
 
-function PlanGenerationProgress(): React.ReactElement {
+const PLAN_STAGE_COPY: Record<PlanProposalProgress["stage"], string> = {
+  generating: "Drafting modules",
+  validating: "Validating the plan",
+  saving: "Saving the plan",
+};
+
+function PlanGenerationProgress({
+  progress,
+}: {
+  progress: PlanProposalProgress | null;
+}): React.ReactElement {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   useEffect(() => {
     const startedAt = Date.now();
@@ -3433,10 +3444,24 @@ function PlanGenerationProgress(): React.ReactElement {
         <span className="conversation-plan-generation-spinner" aria-hidden="true" />
         <span>
           <strong>Building your plan</strong>
-          <small>Analyzing the conversation and generating an executable proposal</small>
+          <small>
+            {progress
+              ? PLAN_STAGE_COPY[progress.stage]
+              : "Analyzing the conversation and generating an executable proposal"}
+          </small>
         </span>
         <time>{planElapsedLabel(elapsedSeconds)}</time>
       </div>
+      {progress && progress.modules.length > 0 ? (
+        <ol
+          className="conversation-plan-generation-modules"
+          data-testid="conversation-plan-modules"
+        >
+          {progress.modules.map((title, index) => (
+            <li key={`${index}-${title}`}>{title}</li>
+          ))}
+        </ol>
+      ) : null}
       <progress
         className="sr-only"
         max={100}
@@ -3489,6 +3514,7 @@ function ConversationThread({
   const [latestAttempt, setLatestAttempt] = useState<AttemptData | null>(null);
   const [latestUsage, setLatestUsage] = useState<UsageData | null>(null);
   const [proposalBusy, setProposalBusy] = useState(false);
+  const [proposalProgress, setProposalProgress] = useState<PlanProposalProgress | null>(null);
   const [proposalError, setProposalError] = useState<string | null>(() =>
     storedProposalError(detail.conversation.id),
   );
@@ -3848,6 +3874,7 @@ function ConversationThread({
       const conversationId = detail.conversation.id;
       const idempotencyKey = proposalKeyFor(conversationId, proposalKeys.current);
       setProposalBusy(true);
+      setProposalProgress(null);
       setProposalError(null);
       try {
         window.sessionStorage.removeItem(proposalErrorStorageKey(conversationId));
@@ -3855,11 +3882,12 @@ function ConversationThread({
         // Browser storage is optional; the current component still shows request state.
       }
       try {
-        const generated = await generateConversationPlanProposal(
+        const generated = await streamConversationPlanProposal(
           detail.work_item.project_id,
           detail.work_item.id,
           conversationId,
           idempotencyKey,
+          setProposalProgress,
           intentMessage,
           handoff,
         );
@@ -5000,7 +5028,7 @@ function ConversationThread({
                     <span aria-hidden="true">→</span>
                   </button>
                 ) : null}
-                {proposalBusy ? <PlanGenerationProgress /> : null}
+                {proposalBusy ? <PlanGenerationProgress progress={proposalProgress} /> : null}
                 {proposalError ? (
                   <div className="conversation-thread-alert">
                     <Alert testId="conversation-plan-proposal-error">{proposalError}</Alert>

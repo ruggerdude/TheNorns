@@ -4,6 +4,7 @@
 // happens against real adapters.
 import type { z } from "zod";
 import { DEFAULT_MODEL_REGISTRY, makeUsageEvent } from "./registry.js";
+import { parseStructured } from "./structuredFailure.js";
 import { AdapterError } from "./types.js";
 import type {
   CompletionAttribution,
@@ -31,6 +32,14 @@ export interface RecordedRequest {
   /** FRONT DOOR P4: image parts carried by this request (undefined when none). */
   images: readonly ImagePart[] | undefined;
   messages?: readonly ConversationMessage[] | undefined;
+}
+
+/** Marker for a queued partial structured body; see FakeAdapter.truncated. */
+export class FakeStructuredStream {
+  constructor(
+    readonly text: string,
+    readonly finishReason: string,
+  ) {}
 }
 
 export class FakeAdapter implements LlmAdapter {
@@ -105,6 +114,54 @@ export class FakeAdapter implements LlmAdapter {
     // canned data must satisfy the real contracts schema — keeps fakes honest
     const raw = this.next();
     return { value: schema.parse(raw), usage: this.usage(request), text: JSON.stringify(raw) };
+  }
+
+  /**
+   * Streamed structured output. The queued response drives the shape:
+   * an object is serialized and streamed as valid JSON; a string is streamed
+   * verbatim (malformed-JSON cases); `FakeAdapter.truncated(text, reason)`
+   * streams a partial body under a truncating finish reason.
+   */
+  async streamStructured<T>(
+    request: CompletionRequest,
+    schema: z.ZodType<T>,
+    schemaName: string,
+    onDelta: (delta: string) => void,
+  ): Promise<StructuredResult<T>> {
+    this.requests.push({
+      system: request.system,
+      prompt: request.prompt,
+      schemaName,
+      initiatedByUserId: request.initiatedByUserId,
+      projectId: request.projectId,
+      telemetryRequestId: request.telemetryRequestId,
+      telemetryRetryGroupId: request.telemetryRetryGroupId,
+      telemetryRetryAttempt: request.telemetryRetryAttempt,
+      maxTokens: request.maxTokens,
+      images: request.images,
+    });
+    const queued = this.next();
+    const truncation = queued instanceof FakeStructuredStream ? queued : null;
+    const text = truncation?.text ?? (typeof queued === "string" ? queued : JSON.stringify(queued));
+    const finishReason = truncation?.finishReason ?? "completed";
+    // Chunked so callers that scan partial output are exercised across
+    // arbitrary token boundaries rather than seeing one whole body.
+    for (let index = 0; index < text.length; index += 32) {
+      if (request.signal?.aborted) throw new AdapterError("cancelled", "request aborted");
+      onDelta(text.slice(index, index + 32));
+    }
+    const usage = this.usage(request);
+    const value = parseStructured(text, schema, schemaName, {
+      finish_reason: finishReason,
+      usage,
+      request_dispatched: true,
+    });
+    return { value, usage, text, finish_reason: finishReason };
+  }
+
+  /** Queue a partial structured body that the provider stopped short. */
+  static truncated(text: string, finishReason = "max_tokens"): FakeStructuredStream {
+    return new FakeStructuredStream(text, finishReason);
   }
 
   async streamConversation(

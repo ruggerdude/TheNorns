@@ -4,7 +4,7 @@ import type { CodexReasoningEffortT } from "@norns/contracts";
 import OpenAI from "openai";
 import type { z } from "zod";
 import { DEFAULT_MODEL_REGISTRY, type ModelEntry, makeUsageEvent } from "./registry.js";
-import { notJsonDiagnostic, schemaDiagnostic } from "./structuredFailure.js";
+import { parseStructured } from "./structuredFailure.js";
 import {
   AdapterError,
   type CompletionAttribution,
@@ -69,38 +69,123 @@ export class OpenAiAdapter implements LlmAdapter {
         : prepareStructuredOutputPrompt(request.prompt, schema, schemaName),
     };
     const response = await this.call(structuredRequest);
-    const text = this.textOf(response);
-    let parsed: unknown;
+    return this.structuredResult(response, request, startedAt, schema, schemaName);
+  }
+
+  /**
+   * The streamed twin of `completeStructured`: identical request, identical
+   * validated result, with raw text handed to `onDelta` as it arrives so the
+   * caller can show progress instead of a blind wait.
+   */
+  async streamStructured<T>(
+    request: CompletionRequest,
+    schema: z.ZodType<T>,
+    schemaName: string,
+    onDelta: (delta: string) => void,
+  ): Promise<StructuredResult<T>> {
+    const startedAt = Date.now();
+    const structuredRequest: CompletionRequest = {
+      ...request,
+      prompt: request.structuredOutputPrepared
+        ? request.prompt
+        : prepareStructuredOutputPrompt(request.prompt, schema, schemaName),
+    };
+    let response: OpenAI.Responses.Response | null = null;
+    let streamedText = "";
     try {
-      parsed = JSON.parse(stripFences(text));
-    } catch (cause) {
-      const metadata = this.failureMetadata(response, request, startedAt);
-      throw new AdapterError("invalid_response", `${schemaName}: response is not JSON`, {
-        cause,
+      const stream = await this.client.responses.create(
+        {
+          model: this.model,
+          input: this.buildInput(structuredRequest),
+          stream: true,
+          ...(request.system !== undefined ? { instructions: request.system } : {}),
+          ...(request.maxTokens !== undefined ? { max_output_tokens: request.maxTokens } : {}),
+          ...(this.reasoningEffort !== undefined
+            ? { reasoning: { effort: this.reasoningEffort } }
+            : {}),
+        },
+        request.signal !== undefined ? { signal: request.signal } : {},
+      );
+      for await (const event of stream) {
+        if (event.type === "response.output_text.delta") {
+          if (event.delta.length > 0) {
+            streamedText += event.delta;
+            onDelta(event.delta);
+          }
+          continue;
+        }
+        if (event.type === "response.completed" || event.type === "response.incomplete") {
+          response = event.response;
+          break;
+        }
+        if (event.type === "response.failed") {
+          throw new AdapterError(
+            "server",
+            event.response.error?.message ?? "OpenAI stream failed",
+            {
+              metadata: {
+                provider_execution_id: event.response.id,
+                ...(event.response.status ? { finish_reason: event.response.status } : {}),
+                latency_ms: Math.max(0, Date.now() - startedAt),
+                request_dispatched: true,
+              },
+            },
+          );
+        }
+        if (event.type === "error") {
+          throw new AdapterError("server", event.message, {
+            metadata: {
+              latency_ms: Math.max(0, Date.now() - startedAt),
+              request_dispatched: true,
+            },
+          });
+        }
+      }
+    } catch (error) {
+      throw this.mapError(error);
+    }
+    if (response === null) {
+      throw new AdapterError("invalid_response", "OpenAI stream ended without a terminal event", {
+        metadata: { latency_ms: Math.max(0, Date.now() - startedAt), request_dispatched: true },
+      });
+    }
+    if (!response.usage) {
+      // Exact usage is a durability guarantee for the structured callers; a
+      // zero-filled "exact" record would be a lie, so this is a hard failure —
+      // same rule streamConversation already enforces.
+      throw new AdapterError("invalid_response", "OpenAI stream completed without exact usage", {
         metadata: {
-          ...metadata,
-          response_text: text,
-          structured_failure: notJsonDiagnostic(metadata.finish_reason),
+          ...this.metadataOf(response, startedAt),
+          request_dispatched: true,
         },
       });
     }
-    const result = schema.safeParse(parsed);
-    if (!result.success) {
-      const metadata = this.failureMetadata(response, request, startedAt);
-      throw new AdapterError(
-        "invalid_response",
-        `${schemaName}: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
-        {
-          metadata: {
-            ...metadata,
-            response_text: text,
-            structured_failure: schemaDiagnostic(result.error.issues, metadata.finish_reason),
-          },
-        },
-      );
-    }
+    return this.structuredResult(
+      response,
+      request,
+      startedAt,
+      schema,
+      schemaName,
+      this.textOf(response) || streamedText,
+    );
+  }
+
+  private structuredResult<T>(
+    response: OpenAI.Responses.Response,
+    request: CompletionRequest,
+    startedAt: number,
+    schema: z.ZodType<T>,
+    schemaName: string,
+    text: string = this.textOf(response),
+  ): StructuredResult<T> {
+    const value = parseStructured(
+      text,
+      schema,
+      schemaName,
+      this.failureMetadata(response, request, startedAt),
+    );
     return {
-      value: result.data,
+      value,
       usage: this.usageOf(response, request),
       text,
       ...this.metadataOf(response, startedAt),
@@ -374,10 +459,4 @@ export class OpenAiAdapter implements LlmAdapter {
       cause: error,
     });
   }
-}
-
-function stripFences(text: string): string {
-  const trimmed = text.trim();
-  const match = /^```(?:json)?\s*([\s\S]*?)\s*```$/.exec(trimmed);
-  return match?.[1] ?? trimmed;
 }

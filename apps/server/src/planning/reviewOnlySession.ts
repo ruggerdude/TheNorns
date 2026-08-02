@@ -22,7 +22,7 @@ import {
 } from "@norns/contracts";
 import { z } from "zod";
 import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
-import { pmSystem, reviewerSystem } from "./prompts.js";
+import { SCOPE_DISCIPLINE, pmRevisionSystem, reviewerSystem } from "./prompts.js";
 import { type GateCFinding, detectGateC } from "./qcGates.js";
 import { PlanningError } from "./session.js";
 
@@ -311,6 +311,8 @@ function revisionPrompt(plan: V2WorkPlanContractT, findings: readonly ReviewFind
     list,
     "Return JSON { responses: [{ finding_index, disposition: accept|rebut, rationale }], plan: <complete revised Work Plan Contract envelope> }.",
     "Every must_fix requires an attributable accept or rebut disposition. Preserve the complete strict envelope, including staffing, verification requirements, open decisions, and budget.",
+    SCOPE_DISCIPLINE,
+    "The server rejects a revision that adds more modules than the findings you disposition accept at must_fix or should_fix severity.",
     "Treat this as a durable QC deliverable. The server preserves your exact response and writes the complete reviewed plan to a Markdown artifact.",
     `CURRENT WORK PLAN CONTRACT ENVELOPE:\n${JSON.stringify(plan)}`,
   ].join("\n\n");
@@ -333,6 +335,8 @@ function targetedRevisionPrompt(
     "Do not return the complete plan. Use only these operations: set_objective, set_assumptions, set_risks, set_out_of_scope, add_module, replace_module, remove_module, add_staffing, replace_staffing, remove_staffing, set_verification_requirements, set_open_decisions, set_estimated_budget.",
     "Every change requires finding_indices and may reference only findings you disposition as accept. Every must_fix requires an accept or rebut disposition. Rebutted findings must not have attributed changes.",
     "Use exact current module IDs. Module add/remove and staffing add/remove are separate explicit operations. replace_module requires module.id === module_id; replace_staffing requires staffing.module_id === module_id.",
+    SCOPE_DISCIPLINE,
+    "The server rejects a revision that adds more modules than the findings you disposition accept at must_fix or should_fix severity.",
     "The server applies these bounded operations, validates the complete strict Work Plan Contract, and writes the materialized plan to the durable Markdown artifact.",
     `CURRENT WORK PLAN CONTRACT ENVELOPE:\n${JSON.stringify(plan)}`,
   ].join("\n\n");
@@ -376,6 +380,30 @@ function targetedChangeModuleId(change: V2QcPlanChangeT): string | null {
     default:
       return null;
   }
+}
+
+/** Anti-inflation bound. Measured: one QC round took a 2-module seed to 4
+ * modules, compounding 2→4→8→16 across the default 3 rounds. The rule is
+ * explicit rather than heuristic: a revision may add at most one module per
+ * finding it dispositions accept at must_fix/should_fix severity, so a
+ * reviewer can still require a genuinely missing module but nothing can
+ * double. Returns a diagnostic message, or null when the growth is justified. */
+export function moduleGrowthViolation(
+  base: V2WorkPlanContractT,
+  revised: V2WorkPlanContractT,
+  findings: readonly ReviewFindingT[],
+  responses: readonly FindingResponseT[],
+): string | null {
+  const baseModuleIds = new Set(base.plan.modules.map((module) => module.id));
+  const added = revised.plan.modules.filter((module) => !baseModuleIds.has(module.id));
+  if (added.length === 0) return null;
+  const justified = responses.filter((response) => {
+    if (response.disposition !== "accept") return false;
+    const severity = findings[response.finding_index]?.severity;
+    return severity === "must_fix" || severity === "should_fix";
+  }).length;
+  if (added.length <= justified) return null;
+  return `added ${added.length} module(s) (${added.map((module) => module.id).join(", ")}) but only ${justified} accepted must_fix/should_fix finding(s) justify a new module — fold the extra work into an existing module`;
 }
 
 function targetedRevisionError(message: string): never {
@@ -527,7 +555,27 @@ export function applyTargetedQcRevision(
       parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; "),
     );
   }
+  const growth = moduleGrowthViolation(base, parsed.data, findings, revision.responses);
+  if (growth) targetedRevisionError(growth);
   return parsed.data;
+}
+
+/** Legacy full-envelope counterpart of targetedRevisionSchemaFor: the scope
+ * bound fails structured validation, so it routes through the existing repair
+ * loop and its structured-failure diagnostics instead of a parallel path. */
+function legacyRevisionSchemaFor(
+  base: V2WorkPlanContractT,
+  findings: readonly ReviewFindingT[],
+): z.ZodType<z.infer<typeof ReviewOnlyRevision>> {
+  return ReviewOnlyRevision.superRefine((revision, ctx) => {
+    const growth = moduleGrowthViolation(base, revision.plan, findings, revision.responses);
+    if (growth) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `QC revision scope: ${growth}`,
+      });
+    }
+  }) as z.ZodType<z.infer<typeof ReviewOnlyRevision>>;
 }
 
 function targetedRevisionSchemaFor(
@@ -861,7 +909,7 @@ export async function runReviewOnlyPlanning(
     initiatedByUserId: options.initiatedByUserId,
   };
   const reviewerPrompt = reviewOnlySystem(reviewerSystem([]), options.frozenContext);
-  const revisionSystem = reviewOnlySystem(pmSystem([]), options.frozenContext);
+  const revisionSystem = reviewOnlySystem(pmRevisionSystem([]), options.frozenContext);
   const operationalResume = resume?.kind === "operational";
 
   // A revision checkpoint is written before deterministic Gate C/cap/cadence
@@ -1062,7 +1110,7 @@ export async function runReviewOnlyPlanning(
           ...meter,
           ...(options.signal ? { signal: options.signal } : {}),
         },
-        ReviewOnlyRevision,
+        legacyRevisionSchemaFor(reviewedPlan, findings),
         "plan_revision",
         requestId,
         (failedUsage) => usage.push(failedUsage),

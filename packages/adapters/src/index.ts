@@ -47,4 +47,4 @@ export {
 } from "./registry.js";
 export { AnthropicAdapter, type AnthropicAdapterOptions } from "./anthropic.js";
 export { OpenAiAdapter, type OpenAiAdapterOptions } from "./openai.js";
-export { FakeAdapter, type RecordedRequest } from "./fake.js";
+export { FakeAdapter, FakeStructuredStream, type RecordedRequest } from "./fake.js";

@@ -3,7 +3,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { z } from "zod";
 import { DEFAULT_MODEL_REGISTRY, type ModelEntry, makeUsageEvent } from "./registry.js";
-import { notJsonDiagnostic, schemaDiagnostic } from "./structuredFailure.js";
+import { parseStructured } from "./structuredFailure.js";
 import {
   AdapterError,
   type CompletionAttribution,
@@ -65,38 +65,70 @@ export class AnthropicAdapter implements LlmAdapter {
         : prepareStructuredOutputPrompt(request.prompt, schema, schemaName),
     };
     const response = await this.call(structuredRequest);
-    const text = this.textOf(response);
-    let parsed: unknown;
+    return this.structuredResult(response, request, startedAt, schema, schemaName);
+  }
+
+  /**
+   * The streamed twin of `completeStructured`: identical request, identical
+   * validated result, with raw text handed to `onDelta` as it arrives so the
+   * caller can show progress instead of a blind wait.
+   */
+  async streamStructured<T>(
+    request: CompletionRequest,
+    schema: z.ZodType<T>,
+    schemaName: string,
+    onDelta: (delta: string) => void,
+  ): Promise<StructuredResult<T>> {
+    const startedAt = Date.now();
+    const structuredRequest: CompletionRequest = {
+      ...request,
+      prompt: request.structuredOutputPrepared
+        ? request.prompt
+        : prepareStructuredOutputPrompt(request.prompt, schema, schemaName),
+    };
+    let response: Anthropic.Message;
     try {
-      parsed = JSON.parse(stripFences(text));
-    } catch (cause) {
-      const metadata = this.failureMetadata(response, request, startedAt);
-      throw new AdapterError("invalid_response", `${schemaName}: response is not JSON`, {
-        cause,
-        metadata: {
-          ...metadata,
-          response_text: text,
-          structured_failure: notJsonDiagnostic(metadata.finish_reason),
-        },
-      });
-    }
-    const result = schema.safeParse(parsed);
-    if (!result.success) {
-      const metadata = this.failureMetadata(response, request, startedAt);
-      throw new AdapterError(
-        "invalid_response",
-        `${schemaName}: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+      const stream = this.client.messages.stream(
         {
-          metadata: {
-            ...metadata,
-            response_text: text,
-            structured_failure: schemaDiagnostic(result.error.issues, metadata.finish_reason),
-          },
+          model: this.model,
+          max_tokens: request.maxTokens ?? 16000,
+          ...(request.system !== undefined ? { system: request.system } : {}),
+          messages: [{ role: "user", content: this.userContent(structuredRequest) }],
         },
+        request.signal !== undefined ? { signal: request.signal } : {},
       );
+      for await (const event of stream) {
+        if (
+          event.type === "content_block_delta" &&
+          event.delta.type === "text_delta" &&
+          event.delta.text.length > 0
+        ) {
+          onDelta(event.delta.text);
+        }
+      }
+      response = await stream.finalMessage();
+    } catch (error) {
+      throw this.mapError(error);
     }
+    return this.structuredResult(response, request, startedAt, schema, schemaName);
+  }
+
+  private structuredResult<T>(
+    response: Anthropic.Message,
+    request: CompletionRequest,
+    startedAt: number,
+    schema: z.ZodType<T>,
+    schemaName: string,
+  ): StructuredResult<T> {
+    const text = this.textOf(response);
+    const value = parseStructured(
+      text,
+      schema,
+      schemaName,
+      this.failureMetadata(response, request, startedAt),
+    );
     return {
-      value: result.data,
+      value,
       usage: this.usageOf(response, request),
       text,
       ...this.metadataOf(response, startedAt),
@@ -287,10 +319,4 @@ export class AnthropicAdapter implements LlmAdapter {
       cause: error,
     });
   }
-}
-
-function stripFences(text: string): string {
-  const trimmed = text.trim();
-  const match = /^```(?:json)?\s*([\s\S]*?)\s*```$/.exec(trimmed);
-  return match?.[1] ?? trimmed;
 }

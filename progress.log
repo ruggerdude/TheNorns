@@ -131,3 +131,6 @@
 2026-08-02T00:00Z | QCP-16 | project_runs_qc now rides the conversation detail payload; the workspace's mount-time planning-reviewer fetch is gone, removing the flake class it introduced across 47 test mocks
 2026-08-02T00:00Z | OPS | Applied migrations 0070-0074 to production (portfolio read model was failing on the missing last_human_message_at column, showing stale data incl. a deleted project); extended the startup schema guard to cover 0072/0073 columns and documented the Railway deploy-ordering hazard
 2026-08-02T00:00Z | UI | New Project wizard shell had card chrome (radius+shadow) with padding:0 and no surface, so labels and inputs sat flush to the edge and the page read as a different design language; gave it the standard card surface with form-scale padding and an e2e guard
+2026-08-02T15:10Z | PGS-1 | Web client consumes the streaming plan-proposal route: live module titles and stage in the plan busy card, with a same-key fallback to the non-streaming route (apps/web only, 395 web tests passing)
+2026-08-02T15:20Z | PERF-1 | Stream plan generation end to end (adapters streamStructured, SSE route, web client with non-streaming fallback)
+2026-08-02T15:20Z | PERF-2 | Bound QC plan inflation: scope-discipline prompts + server-side module growth guard; live A/B invalid, effect unproven (PERF-4)

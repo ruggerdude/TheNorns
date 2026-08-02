@@ -38,6 +38,7 @@ import {
   ProjectRunCancellationProjection,
   ProjectRunCancellationRequest,
 } from "@norns/contracts";
+import { jsonSchema, parseJsonEventStream } from "ai";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 
 export type ConversationUsageSummary = V2ConversationUsageT;
@@ -571,6 +572,84 @@ export function generateConversationPlanProposal(
       ...(handoff ? { handoff } : {}),
     }),
   });
+}
+
+export interface PlanProposalProgress {
+  stage: "generating" | "validating" | "saving";
+  modules: string[];
+  output_tokens_estimate?: number;
+}
+
+type PlanProposalResult = { message: V2WorkMessageT; action: V2ConversationActionT };
+
+type PlanStreamChunk =
+  | { type: "data-plan-progress"; data: PlanProposalProgress }
+  | { type: "data-plan-proposal"; data: PlanProposalResult }
+  | { type: "data-plan-error"; data: { error: string; message: string } }
+  | { type: "start" | "finish" };
+
+/** Streaming twin of `generateConversationPlanProposal`. Same request body and
+ *  same `data-plan-proposal` payload; the only difference is that module titles
+ *  reach `onProgress` while the model is still generating. Any transport failure
+ *  before a proposal arrives falls back to the non-streaming route with the same
+ *  idempotency key, so streaming is never less reliable than the JSON call. */
+export async function streamConversationPlanProposal(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  idempotencyKey: string,
+  onProgress: (progress: PlanProposalProgress) => void,
+  intentMessage?: string,
+  handoff?: V2PlanHandoffPreferenceT,
+): Promise<PlanProposalResult> {
+  try {
+    const response = await fetch(
+      `${messageEndpoint(projectId, workItemId, conversationId)}/plan-proposals/stream`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: authHeaders(true),
+        body: JSON.stringify({
+          idempotency_key: idempotencyKey,
+          ...(intentMessage ? { intent_message: intentMessage } : {}),
+          ...(handoff ? { handoff } : {}),
+        }),
+      },
+    );
+    if (response.status === 401) throw new UnauthorizedError();
+    if (!response.ok || !response.body) throw new Error(`stream failed: ${response.status}`);
+    const reader = parseJsonEventStream({
+      stream: response.body,
+      schema: jsonSchema<PlanStreamChunk>({}),
+    }).getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value.success) continue;
+      const chunk = value.value;
+      if (chunk.type === "data-plan-progress") onProgress(chunk.data);
+      if (chunk.type === "data-plan-proposal") {
+        void reader.cancel();
+        return chunk.data;
+      }
+      if (chunk.type === "data-plan-error") {
+        void reader.cancel();
+        throw new ApiError(chunk.data.message, 500, chunk.data.error);
+      }
+    }
+    throw new Error("The plan stream ended without a proposal.");
+  } catch (error) {
+    // A rejected proposal is terminal; only transport trouble falls back.
+    if (error instanceof ApiError || error instanceof UnauthorizedError) throw error;
+  }
+  return generateConversationPlanProposal(
+    projectId,
+    workItemId,
+    conversationId,
+    idempotencyKey,
+    intentMessage,
+    handoff,
+  );
 }
 
 export function generateConversationPlanChangeProposal(

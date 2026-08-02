@@ -5,6 +5,7 @@ import {
   V2CreateHumanWaitAnswerProposalInput,
   V2QcMode,
 } from "@norns/contracts";
+import { createUIMessageStream, pipeUIMessageStreamToResponse } from "ai";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ConversationHumanSteeringService } from "./humanSteering.js";
@@ -156,6 +157,93 @@ export function registerConversationPlanRoutes(
     } catch (error) {
       routeError(reply, error);
     }
+  });
+
+  // Streaming twin of the route above. Same input, same work, same durability;
+  // the only difference is that progress reaches the browser while the model
+  // is still generating instead of after ~50s of silence.
+  //
+  // CLIENT-FACING EVENT CONTRACT
+  // Transport: the AI SDK UI message stream (`text/event-stream`), exactly the
+  // transport `POST .../messages` already uses for conversation turns — so the
+  // web client reads it with the same `readUIMessageStream`/`parseJsonEventStream`
+  // helpers. Every SSE `data:` line is one UIMessageChunk:
+  //
+  //   {"type":"start","messageId":"plan-proposal:<idempotency_key>"}
+  //   {"type":"data-plan-progress","transient":true,"data":{
+  //      "stage":"generating"|"validating"|"saving",
+  //      "modules":["Module title", ...],       // titles seen so far, in order
+  //      "output_tokens_estimate":1234           // rough, characters/4
+  //   }}                                         // 0..n, transient (not message state)
+  //   {"type":"data-plan-proposal","data":{"message":V2WorkMessage,"action":V2ConversationAction}}
+  //   {"type":"finish"}
+  //
+  // Failure: {"type":"data-plan-error","data":{"error":"<code>","message":"<redacted>"}}
+  // followed by {"type":"finish"} — the codes are the same ones the JSON route
+  // returns as HTTP bodies (proposal_in_progress, idempotency_conflict,
+  // proposal_failed, invalid_plan_state, forbidden, ...). Auth (401) and body
+  // validation (400) still fail as ordinary HTTP responses before the stream
+  // opens, so a non-200 status is always a pre-flight rejection.
+  //
+  // A `data-plan-proposal` part is emitted exactly once on success and carries
+  // the identical payload the non-streaming route returns.
+  app.post(`${base}/plan-proposals/stream`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId, workItemId, conversationId } = request.params as {
+      projectId: string;
+      workItemId: string;
+      conversationId: string;
+    };
+    let input: ReturnType<typeof V2CreateConversationPlanProposalInput.parse>;
+    try {
+      input = V2CreateConversationPlanProposalInput.parse(request.body);
+    } catch (error) {
+      return routeError(reply, error);
+    }
+    const messageId = `plan-proposal:${input.idempotency_key}`;
+    const stream = createUIMessageStream({
+      execute: async ({ writer }) => {
+        writer.write({ type: "start", messageId });
+        try {
+          const response = await options.proposals.propose(
+            user.id,
+            projectId,
+            workItemId,
+            conversationId,
+            input,
+            (progress) =>
+              writer.write({ type: "data-plan-progress", data: progress, transient: true }),
+          );
+          writer.write({ type: "data-plan-proposal", data: response });
+        } catch (error) {
+          if (
+            error instanceof ConversationPlanWorkflowError ||
+            error instanceof ConversationPersistenceError
+          ) {
+            writer.write({
+              type: "data-plan-error",
+              data: { error: error.code, message: error.message },
+            });
+          } else {
+            throw error;
+          }
+        }
+        writer.write({ type: "finish" });
+      },
+      onError: () => "The plan proposal could not be completed.",
+      generateId: () => messageId,
+    });
+    reply.hijack();
+    await pipeUIMessageStreamToResponse({
+      response: reply.raw,
+      stream,
+      headers: {
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      },
+    });
   });
 
   app.post(`${base}/plan-change-proposals`, async (request, reply) => {

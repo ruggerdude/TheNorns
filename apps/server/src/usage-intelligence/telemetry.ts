@@ -513,6 +513,27 @@ class TelemetryLlmAdapter implements LlmAdapter {
     );
   }
 
+  /**
+   * Streamed structured output is the same provider call as
+   * `completeStructured` — same request type, same usage, same latency
+   * accounting — so it goes through the same instrumented path. Only the
+   * delta callback differs.
+   */
+  async streamStructured<T>(
+    request: CompletionRequest,
+    schema: z.ZodType<T>,
+    schemaName: string,
+    onDelta: (delta: string) => void,
+  ): Promise<StructuredResult<T>> {
+    return this.invoke(request, `structured:${schemaName}`, () =>
+      // An adapter without streaming support still returns the same result;
+      // the caller simply sees no progress deltas.
+      this.adapter.streamStructured
+        ? this.adapter.streamStructured(request, schema, schemaName, onDelta)
+        : this.adapter.completeStructured(request, schema, schemaName),
+    );
+  }
+
   async streamConversation(
     request: ConversationRequest,
   ): Promise<AsyncIterable<ConversationStreamEvent>> {

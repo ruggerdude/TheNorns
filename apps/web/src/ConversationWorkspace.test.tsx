@@ -2420,6 +2420,242 @@ describe("conversation workspace", () => {
     expect(submittedKeys[1]).toBe(submittedKeys[0]);
   });
 
+  function streamedProposalFixtures(suffix: string) {
+    const version = planVersion();
+    const saveAction = planAction({
+      id: `action-save-${suffix}`,
+      source_message_id: `message-plan-${suffix}`,
+      action_type: "save_plan_candidate",
+      payload: {
+        parameters: {
+          plan: version.plan,
+          predecessor_plan_version_id: null,
+          predecessor_content_hash: null,
+        },
+      },
+    });
+    return {
+      saveAction,
+      proposalMessage: message({
+        id: `message-plan-${suffix}`,
+        role: "system",
+        sequence: 1,
+        parts: [{ type: "action", action_id: saveAction.id }],
+      }),
+    };
+  }
+
+  it("renders each streamed plan module title while the proposal is still generating", async () => {
+    const { saveAction, proposalMessage } = streamedProposalFixtures("streamed");
+    const encoder = new TextEncoder();
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        controller = streamController;
+      },
+    });
+    const push = (chunk: unknown) =>
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+    let generated = false;
+    let jsonProposals = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (
+          url.endsWith(`/conversations/${conversationId}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return detailResponse(generated ? [proposalMessage] : [], null, null, {
+            actions: generated ? [saveAction] : [],
+          });
+        }
+        if (url.endsWith(`/conversations/${conversationId}/plan-proposals/stream`)) {
+          return new Response(body, {
+            status: 200,
+            headers: {
+              "content-type": "text/event-stream",
+              "x-vercel-ai-ui-message-stream": "v1",
+            },
+          });
+        }
+        if (url.endsWith(`/conversations/${conversationId}/plan-proposals`)) {
+          jsonProposals += 1;
+          generated = true;
+          return Response.json({ message: proposalMessage, action: saveAction });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "Message the project PM" }),
+      "Use this as the plan.{enter}",
+    );
+    expect(await screen.findByTestId("conversation-plan-busy")).toHaveTextContent(
+      "Building your plan",
+    );
+
+    push({ type: "start", messageId: "plan-proposal:key-streamed" });
+    push({
+      type: "data-plan-progress",
+      transient: true,
+      data: { stage: "generating", modules: ["Auth rewrite"], output_tokens_estimate: 400 },
+    });
+    expect(await screen.findByText("Auth rewrite")).toBeInTheDocument();
+
+    push({
+      type: "data-plan-progress",
+      transient: true,
+      data: {
+        stage: "validating",
+        modules: ["Auth rewrite", "Billing migration"],
+        output_tokens_estimate: 1_800,
+      },
+    });
+    expect(await screen.findByText("Billing migration")).toBeInTheDocument();
+    expect(screen.getByTestId("conversation-plan-busy")).toHaveTextContent("Validating the plan");
+
+    generated = true;
+    push({ type: "data-plan-proposal", data: { message: proposalMessage, action: saveAction } });
+    push({ type: "finish" });
+    controller.close();
+
+    expect(await screen.findByText("Proposed Plan Contract")).toBeInTheDocument();
+    expect(jsonProposals).toBe(0);
+  });
+
+  it("falls back to the non-streaming plan route when the stream fails", async () => {
+    const { saveAction, proposalMessage } = streamedProposalFixtures("fallback");
+    let generated = false;
+    let streamAttempts = 0;
+    const jsonKeys: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (
+          url.endsWith(`/conversations/${conversationId}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return detailResponse(generated ? [proposalMessage] : [], null, null, {
+            actions: generated ? [saveAction] : [],
+          });
+        }
+        if (url.endsWith(`/conversations/${conversationId}/plan-proposals/stream`)) {
+          streamAttempts += 1;
+          throw new TypeError("Failed to fetch");
+        }
+        if (url.endsWith(`/conversations/${conversationId}/plan-proposals`)) {
+          jsonKeys.push(JSON.parse(String(init?.body)).idempotency_key);
+          generated = true;
+          return Response.json({ message: proposalMessage, action: saveAction });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "Message the project PM" }),
+      "Use this as the plan.{enter}",
+    );
+
+    expect(await screen.findByText("Proposed Plan Contract")).toBeInTheDocument();
+    expect(streamAttempts).toBe(1);
+    expect(jsonKeys).toHaveLength(1);
+  });
+
+  it("uses a fresh plan-proposal key after an explicit terminal generation failure", async () => {
+    const version = planVersion();
+    const saveAction = planAction({
+      id: "action-save-after-failure",
+      source_message_id: "message-plan-after-failure",
+      action_type: "save_plan_candidate",
+      payload: {
+        parameters: {
+          plan: version.plan,
+          predecessor_plan_version_id: null,
+          predecessor_content_hash: null,
+        },
+      },
+    });
+    const proposalMessage = message({
+      id: "message-plan-after-failure",
+      role: "assistant",
+      sequence: 1,
+      parts: [{ type: "action", action_id: saveAction.id }],
+    });
+    const keys: string[] = [];
+    let generated = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (
+          url.endsWith(`/conversations/${conversationId}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return detailResponse(generated ? [proposalMessage] : [], null, null, {
+            actions: generated ? [saveAction] : [],
+          });
+        }
+        if (url.endsWith(`/conversations/${conversationId}/plan-proposals`)) {
+          keys.push(JSON.parse(String(init?.body)).idempotency_key);
+          if (keys.length === 1) {
+            return Response.json(
+              {
+                error: "proposal_failed",
+                message: "The PM could not produce a valid Plan Contract.",
+              },
+              { status: 502 },
+            );
+          }
+          generated = true;
+          return Response.json({ message: proposalMessage, action: saveAction });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    const composer = await screen.findByRole("textbox", { name: "Message the project PM" });
+    await user.type(composer, "Use this as the plan.{enter}");
+    expect(await screen.findByTestId("conversation-plan-proposal-error")).toHaveTextContent(
+      "could not produce a valid Plan Contract",
+    );
+    await user.type(composer, "Use this as the plan.{enter}");
+
+    expect(await screen.findByText("Proposed Plan Contract")).toBeInTheDocument();
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
   it("uses a fresh plan-proposal key after an explicit terminal generation failure", async () => {
     const version = planVersion();
     const saveAction = planAction({

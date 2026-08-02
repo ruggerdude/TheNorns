@@ -29,6 +29,45 @@ const PLAN_PROPOSAL_SYSTEM = [
   "Preserve established human decisions, surface unresolved decisions, pin one OpenAI or Anthropic staffing choice per module, and include concrete verification requirements and budget.",
 ].join("\n\n");
 
+/**
+ * Server-side progress for a generating plan proposal. Emitted while the model
+ * streams; see the `plan-proposals/stream` route for the client-facing wire
+ * contract.
+ */
+export interface PlanProposalProgress {
+  stage: "generating" | "validating" | "saving";
+  /** Module titles observed so far, in the order the model produced them. */
+  modules: string[];
+  /** Rough output-token count so far (characters / 4). */
+  output_tokens_estimate: number;
+}
+
+export type PlanProposalProgressListener = (progress: PlanProposalProgress) => void;
+
+/** Emit at most one progress event per this many newly estimated tokens. */
+const PROGRESS_TOKEN_STEP = 200;
+
+/**
+ * Tolerant scan of a partially streamed Work Plan Contract for completed
+ * module titles. `title` appears only in `plan.modules[]` across the whole
+ * envelope (packages/contracts/src/plan.ts), so a flat scan is exact for this
+ * schema; a title is reported only once its closing quote has arrived.
+ * ponytail: flat regex, re-scanned per delta (O(n^2) over a ~17KB body, single
+ * digit ms total). Switch to an incremental cursor if the envelope grows or a
+ * second `title` field is ever added.
+ */
+export function planModuleTitles(text: string): string[] {
+  const titles: string[] = [];
+  for (const match of text.matchAll(/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/g)) {
+    try {
+      titles.push(JSON.parse(`"${match[1]}"`) as string);
+    } catch {
+      // A half-written escape sequence: skip it until more text arrives.
+    }
+  }
+  return titles;
+}
+
 interface ProposalAttemptRow {
   id: string;
   project_id: string;
@@ -163,6 +202,7 @@ export class ConversationPlanProposalService {
     workItemId: string,
     conversationId: string,
     candidate: V2CreateConversationPlanProposalInputT,
+    onProgress?: PlanProposalProgressListener,
   ): Promise<V2CreateConversationPlanProposalResponseT> {
     const input = V2CreateConversationPlanProposalInput.parse(candidate);
     const scope = await this.conversations.getConversation(
@@ -358,28 +398,61 @@ export class ConversationPlanProposalService {
         provider(scope.conversation.provider),
         scope.conversation.model,
       );
-      const generated = await adapter.completeStructured(
-        {
-          system: `${PLAN_PROPOSAL_SYSTEM}\n\n${assembled.system}`,
-          prompt: [
-            "Propose the complete Work Plan Contract envelope now.",
-            "Use the current objective, visible discussion, decisions, risks, and referenced artifacts to synthesize only the current agreed plan.",
-            input.handoff
-              ? `The human selected ${input.handoff.execution_agent.provider}:${input.handoff.execution_agent.model} as the execution agent. Use that exact provider and model for every module staffing choice.`
-              : null,
-            "Return the strict structured result only.",
-          ]
-            .filter((line): line is string => line !== null)
-            .join("\n"),
-          projectId,
-          initiatedByUserId: userId,
-          telemetryRequestId: usageRequestId,
-          telemetryRetryGroupId: attemptId,
-          telemetryRetryAttempt: 0,
-        },
-        V2WorkPlanContract,
-        "conversation_work_plan_contract",
-      );
+      // Streaming changes nothing about the request, the result, or any of the
+      // durability below: it only feeds the caller partial text while the same
+      // structured call is in flight.
+      let streamed = "";
+      let announcedModules = 0;
+      let announcedTokens = 0;
+      const observe = (delta: string): void => {
+        streamed += delta;
+        const modules = planModuleTitles(streamed);
+        const tokens = Math.round(streamed.length / 4);
+        if (modules.length === announcedModules && tokens - announcedTokens < PROGRESS_TOKEN_STEP) {
+          return;
+        }
+        announcedModules = modules.length;
+        announcedTokens = tokens;
+        onProgress?.({ stage: "generating", modules, output_tokens_estimate: tokens });
+      };
+      const structuredRequest = {
+        system: `${PLAN_PROPOSAL_SYSTEM}\n\n${assembled.system}`,
+        prompt: [
+          "Propose the complete Work Plan Contract envelope now.",
+          "Use the current objective, visible discussion, decisions, risks, and referenced artifacts to synthesize only the current agreed plan.",
+          input.handoff
+            ? `The human selected ${input.handoff.execution_agent.provider}:${input.handoff.execution_agent.model} as the execution agent. Use that exact provider and model for every module staffing choice.`
+            : null,
+          "Return the strict structured result only.",
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n"),
+        projectId,
+        initiatedByUserId: userId,
+        telemetryRequestId: usageRequestId,
+        telemetryRetryGroupId: attemptId,
+        telemetryRetryAttempt: 0,
+      };
+      const generated =
+        onProgress && adapter.streamStructured
+          ? await adapter.streamStructured(
+              structuredRequest,
+              V2WorkPlanContract,
+              "conversation_work_plan_contract",
+              observe,
+            )
+          : await adapter.completeStructured(
+              structuredRequest,
+              V2WorkPlanContract,
+              "conversation_work_plan_contract",
+            );
+      const streamedModules = planModuleTitles(streamed);
+      const streamedTokens = Math.round(streamed.length / 4);
+      onProgress?.({
+        stage: "validating",
+        modules: streamedModules,
+        output_tokens_estimate: streamedTokens,
+      });
       await this.recordProgress(
         attemptId,
         this.proposalProgress("validating", adapter.provider, adapter.model),
@@ -408,6 +481,11 @@ export class ConversationPlanProposalService {
         estimated_cost_usd: generated.usage.estimated_cost_usd,
       };
       providerRequestId = generated.provider_execution_id ?? null;
+      onProgress?.({
+        stage: "saving",
+        modules: streamedModules,
+        output_tokens_estimate: streamedTokens,
+      });
       await this.recordProgress(
         attemptId,
         this.proposalProgress("saving", adapter.provider, adapter.model),

@@ -7,6 +7,7 @@ import {
   makeUsageEvent,
 } from "@norns/adapters";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { z } from "zod";
 import { SqlAiUsageTelemetryRepository } from "../src/persistence/v2/aiUsageTelemetry.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import {
@@ -195,5 +196,42 @@ describe.sequential("production AI invocation telemetry", () => {
     const persisted = JSON.stringify(rows.rows);
     expect(persisted).not.toContain("sk-secret-raw-value");
     expect(persisted).not.toContain("another confidential prompt");
+  });
+
+  // Streamed structured output must be metered exactly like the buffered call
+  // it replaces; if the wrapper stopped forwarding it, plan proposals would
+  // silently disappear from telemetry.
+  it("meters streamStructured identically to completeStructured", async () => {
+    const adapter = new FakeAdapter("anthropic", "mock-anthropic");
+    adapter.enqueue({ title: "streamed" });
+    const wrapped = telemetry.wrapAdapter(adapter);
+    const deltas: string[] = [];
+
+    const result = await wrapped.streamStructured?.(
+      {
+        projectId: "invocation-project",
+        prompt: "propose a plan",
+        telemetryRetryGroupId: "stream-group",
+        telemetryRetryAttempt: 0,
+      },
+      z.object({ title: z.string() }),
+      "plan",
+      (delta) => deltas.push(delta),
+    );
+
+    expect(result?.value).toEqual({ title: "streamed" });
+    expect(deltas.join("")).toBe('{"title":"streamed"}');
+    const rows = await pg.query<Record<string, unknown>>(
+      `SELECT * FROM ai_usage_events
+       WHERE request_type = 'structured:plan'
+       ORDER BY sequence`,
+    );
+    expect(rows.rows.map((row) => row.event_type)).toEqual([
+      "request_started",
+      "usage_observed",
+      "request_completed",
+    ]);
+    expect(rows.rows[1]).toMatchObject({ input_tokens: 100, output_tokens: 50 });
+    expect(rows.rows[2]).toMatchObject({ status: "succeeded" });
   });
 });

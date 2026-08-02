@@ -188,6 +188,19 @@ export interface LlmAdapter {
     schema: z.ZodType<T>,
     schemaName: string,
   ): Promise<StructuredResult<T>>;
+  /**
+   * Identical contract to `completeStructured` — same request, same validated
+   * `StructuredResult<T>`, same failure classification — except that raw
+   * response text is handed to `onDelta` as it arrives. Callers use it purely
+   * to show progress; the model spends the same time either way. Optional so
+   * every existing adapter implementation stays valid.
+   */
+  streamStructured?<T>(
+    request: CompletionRequest,
+    schema: z.ZodType<T>,
+    schemaName: string,
+    onDelta: (delta: string) => void,
+  ): Promise<StructuredResult<T>>;
   streamConversation?(
     request: ConversationRequest,
   ): Promise<AsyncIterable<ConversationStreamEvent>>;

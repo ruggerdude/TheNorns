@@ -18,11 +18,31 @@ execution { likely_paths[], owned_components[], test_commands[] (ADDITIVE to req
 environment_requirements[], migration_required }, parallelization { safe, candidate_work_units[],
 shared_files[], integration_owner_required }, inputs[], outputs[], open_decisions[] }.`;
 
+/** Reused verbatim from quickChangePrompt, which never inflated. Revisions
+ * re-read the system+prompt every round, so an expansion instruction compounds:
+ * a measured QC round doubled module count and 4.5x'd tokens without it. */
+export const SCOPE_DISCIPLINE =
+  "Scope discipline: address only the findings listed above. Keep each module focused on the requested fix, include proportionate verification, and do not add speculative work or unrelated cleanup. Keep existing module IDs stable and prefer strengthening an existing module over splitting it. Add a new module only when an accepted must_fix or should_fix finding cannot be addressed inside an existing one.";
+
 export function pmSystem(memory: readonly ProjectMemoryEntryT[]): string {
   const memoryBlock = renderMemoryBlock(memory);
   return [
     "You are the PM agent of TheNorns. You produce implementation plans as structured Plan Contract JSON.",
     "State the goal and constraints; decompose into modules with objectively checkable acceptance criteria.",
+    memoryBlock,
+  ]
+    .filter((s) => s.length > 0)
+    .join("\n\n");
+}
+
+/** Revision-only variant of pmSystem: no "decompose into modules" pressure,
+ * which the PM otherwise re-reads on every revision. Drafting still uses
+ * pmSystem so the first plan is properly decomposed. */
+export function pmRevisionSystem(memory: readonly ProjectMemoryEntryT[]): string {
+  const memoryBlock = renderMemoryBlock(memory);
+  return [
+    "You are the PM agent of TheNorns. You revise an existing implementation plan in place and return structured Plan Contract JSON.",
+    "The decomposition already exists. Change only what the reviewer's findings require, keep every other module as-is, and keep acceptance criteria objectively checkable. Added scope is a defect, not thoroughness.",
     memoryBlock,
   ]
     .filter((s) => s.length > 0)
@@ -71,5 +91,5 @@ export function revisionPrompt(plan: PlanContractT, findings: readonly ReviewFin
         `${i}. [${f.severity}] (${f.module_id ?? "plan-level"}) ${f.finding} — ${f.recommendation}`,
     )
     .join("\n");
-  return `The reviewer returned these findings on your plan:\n${list}\n\nRespond with JSON { responses: [{ finding_index, disposition: accept|rebut, rationale }], plan: <revised Plan Contract> }.\nYou MUST respond to every must_fix finding: accept it and revise the plan, or rebut it with rationale (rebuttals are shown to the human at approval).\n\nCURRENT PLAN:\n${JSON.stringify(plan)}\n\n${PLAN_SHAPE_HINT}`;
+  return `The reviewer returned these findings on your plan:\n${list}\n\nRespond with JSON { responses: [{ finding_index, disposition: accept|rebut, rationale }], plan: <revised Plan Contract> }.\nYou MUST respond to every must_fix finding: accept it and revise the plan, or rebut it with rationale (rebuttals are shown to the human at approval).\n${SCOPE_DISCIPLINE}\n\nCURRENT PLAN:\n${JSON.stringify(plan)}\n\n${PLAN_SHAPE_HINT}`;
 }

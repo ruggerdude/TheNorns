@@ -195,6 +195,10 @@
   progress.log entry for why.
 
 ## In Progress
+- [x] PERF-1 — ✅ **Stream initial plan generation** (backend + web client). Plan gen was one buffered `completeStructured` call (~4,200 output tokens, ~50s) showing nothing until the last token. Provider throughput is a constant 53–107 tok/s across every call type, so latency is a linear function of emitted tokens — streaming cannot reduce model time, it converts ~50s of blind spinner into ~2s-to-first-token. Adds `streamStructured` to all three adapters (`completeStructured` untouched, QC still uses it), a new SSE `plan-proposals/stream` route on the existing AI-SDK UI-message transport, and a web client that lists module titles as they arrive, falling back to the non-streaming route on any stream failure using the same idempotency key. Telemetry routes through the same `invoke()` so no second accounting path can drift.
+- [x] PERF-2 — ✅ **Stop exponential QC plan inflation** (guard shipped; effect NOT proven). Baseline: seed 1,229 tok / 2 modules → 5,565 tok / 4 modules after ONE round; round-1 growth across reviews 3.9x–7.6x, compounding over the 3-round default, with two rounds hitting the 16,000-token ceiling and truncating. Root cause: `pmSystem` said "decompose into modules" (re-read every revision) and `revisionPrompt` carried no scope constraint. Fix: `SCOPE_DISCIPLINE` (wording reused from the never-inflating `quickChangePrompt`), a revision-only `pmRevisionSystem` (drafting untouched), and a server-side `moduleGrowthViolation` guard on both targeted and legacy paths, surfaced through the existing structured-failure/repair path. See PERF-4 — the live A/B was invalid and the guard bound is too loose.
+- [x] PERF-3 — ✅ **Benchmark harness** (`apps/server/scripts/planning-benchmark.mjs`), read-only, reproduces the production baseline exactly; `--since 2026-07-30` is the window that matches.
+- [ ] PERF-4 — 🟡 **Prove PERF-2 and tighten its bound.** Two open problems. (a) The live A/B was INVALID: the harness omitted the JSON schema and frozen context that production appends, so all four runs — old AND new — truncated at 16,000 tokens and failed to parse. It proves nothing either way; the prompt fix remains unverified against a real model. (b) The guard budget is too generous: it allows one added module per accepted must_fix/should_fix, and the sampled review had 13 findings (6 must_fix, 6 should_fix), which would permit a 2-module plan to reach 14 and still pass. Also worth attacking upstream: 13 findings on a 2-module plan is itself the scope pressure driving inflation, so the reviewer likely needs a proportionality constraint too. Re-run the A/B through the real `reviewOnlySession` path rather than a hand-built prompt.
 - [x] QC-VIEW — ✅ **QC review page restructure**: pinned (sticky) status header carrying live phase text ("Round 2 of 3 · waiting for the QC reviewer"), progress bar, and every decision control (Stop / Approve / Retry / Skip / Reject) — previously buried below three redundant timelines, which is why the state was unreadable and retry looked missing. **Root-cause bug fixed**: retry/skip/reject follow-ups are proposed by the server against `review.plan_version_id`, but the client matched on `revised_plan_version_id ?? plan_version_id`, so any failure after a mid-review PM revision silently rendered *no* recovery buttons at all. Now matches either id; regression test added and confirmed to fail without the fix. Review receipt (models/hashes/context) demoted to a collapsed section. Polling no longer remounts the thread (no flicker). 357 web tests green, tsc + biome clean.
 - [x] DES-R2-ONBOARD — ✅ **Onboarding 500 fix + "Approve plan" label** (opened and closed in the
   same push): production `POST /api/v2/projects/onboarding` 500 traced to 0018 granting only
@@ -1282,3 +1286,12 @@ decision and is deliberately untouched.
 - [x] ✅ QCP-R11 Three idempotency-replay implementations (resume,
   adjudication, confirmation) hand-roll the same check-and-store branch
   against different columns.
+
+## Plan generation streaming (web client)
+
+- [x] ✅ PGS-1 Consume the streaming plan-proposal route in `apps/web`:
+  `streamConversationPlanProposal` in `conversationApi.ts` reads the AI SDK UI
+  message stream with `parseJsonEventStream`, and the plan busy card now lists
+  each module title as it arrives instead of showing only an elapsed counter.
+  Falls back to the non-streaming `plan-proposals` call with the same
+  idempotency key whenever the stream cannot open or dies before a proposal.
