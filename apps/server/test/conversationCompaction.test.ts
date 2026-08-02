@@ -51,11 +51,18 @@ describe.sequential("automatic durable conversation compaction", () => {
       );
       INSERT INTO projects (
         id, name, status, assignment_policy_ref, verification_policy_ref,
-        budget_policy_ref, owner_user_id
+        budget_policy_ref, owner_user_id, onboarding_scenario
       ) VALUES (
         'compaction-project', 'Compaction Project', 'active',
         'assignment/default', 'verification/default', 'budget/default',
-        'compaction-owner'
+        'compaction-owner', 'existing_repo'
+      );
+      INSERT INTO repository_binding_candidates (
+        id, project_id, role, source_type, source_fingerprint, display_name,
+        status
+      ) VALUES (
+        'compaction-local-target', 'compaction-project', 'workspace', 'local',
+        '${"a".repeat(64)}', 'The-Norns', 'unverified'
       );
       INSERT INTO project_memory_entries (
         id, project_id, category, content, provenance, source_ref, confidence,
@@ -168,6 +175,28 @@ describe.sequential("automatic durable conversation compaction", () => {
     );
     return result.rows;
   }
+
+  it("supplies the project-setup execution target to planning without asking for its private path", async () => {
+    const trigger = await submitUser("Turn this discussion into the implementation plan.");
+    const assembled = await new ConversationContextAssembler(transactions).assemble(
+      "compaction-project",
+      workItemId,
+      conversationId,
+      trigger.id,
+    );
+
+    expect(assembled.manifest.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "project_setup", ref: "compaction-project" }),
+      ]),
+    );
+    expect(assembled.system).toContain("Authoritative project setup and execution target");
+    expect(assembled.system).toContain(
+      "Execution location: the computer selected during project setup",
+    );
+    expect(assembled.system).toContain("Approved local repository: The-Norns");
+    expect(assembled.system).toContain("Do not ask the user where the project should be built");
+  });
 
   it("retains an early fact in a summary plus 40 recent complete turns with exact provenance", async () => {
     const { early, trigger, incompleteIds } = await seedThresholdConversation();

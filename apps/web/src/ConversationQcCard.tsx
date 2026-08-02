@@ -202,6 +202,53 @@ function QcDetailedStatus({ review }: { review: V2ConversationPlanReviewT }): Re
   );
 }
 
+function QcFindings({
+  review,
+  onDiscussFinding,
+}: {
+  review: V2ConversationPlanReviewT;
+  onDiscussFinding?: (finding: V2ConversationPlanReviewFindingT) => void;
+}): React.ReactElement | null {
+  if (review.findings.length === 0) return null;
+  return (
+    <section className="conversation-qc-findings" aria-label="Suggested revisions">
+      <header>
+        <div>
+          <h4>Suggested revisions</h4>
+          <p>Review the QC feedback and recommendation before choosing what happens next.</p>
+        </div>
+        <Badge tone="warn">{review.findings.length} findings</Badge>
+      </header>
+      {SEVERITIES.map((severity) => {
+        const findings = review.findings.filter((finding) => finding.severity === severity.value);
+        if (findings.length === 0) return null;
+        return (
+          <section
+            className={`conversation-qc-group is-${severity.value}`}
+            key={severity.value}
+            aria-labelledby={`${review.id}-${severity.value}`}
+          >
+            <div>
+              <h4 id={`${review.id}-${severity.value}`}>{severity.label}</h4>
+              <Badge tone={severity.tone}>{findings.length}</Badge>
+            </div>
+            <ol>
+              {findings.map((finding) => (
+                <Finding
+                  key={finding.id}
+                  finding={finding}
+                  review={review}
+                  onDiscuss={onDiscussFinding}
+                />
+              ))}
+            </ol>
+          </section>
+        );
+      })}
+    </section>
+  );
+}
+
 function QcChatPanel({
   review,
   channel,
@@ -1186,9 +1233,22 @@ export function ConversationQcCard({
           <>
             <output className="conversation-qc-progress" aria-live="polite">
               <span>{livePhase(review)}</span>
-              <span>{percent}%</span>
+              <span>{review.rounds_completed > 0 ? `${percent}%` : "Working…"}</span>
             </output>
-            <div className="conversation-qc-progress-track" aria-hidden="true">
+            <progress
+              className="sr-only"
+              aria-label="QC review progress"
+              max={100}
+              value={review.rounds_completed > 0 ? percent : undefined}
+              aria-valuetext={
+                review.rounds_completed > 0 ? `${percent}% complete` : livePhase(review)
+              }
+            />
+            <div
+              className="conversation-qc-progress-track"
+              aria-hidden="true"
+              data-indeterminate={review.rounds_completed === 0}
+            >
               <span style={{ width: `${percent}%` }} />
             </div>
           </>
@@ -1263,6 +1323,18 @@ export function ConversationQcCard({
 
         {terminal && onConfirmAction ? (
           <section className="conversation-qc-decision" aria-label="Human plan decision">
+            <div className="conversation-qc-decision-intro">
+              <h4>
+                {review.status === "failed" || review.status === "cancelled"
+                  ? "QC stopped — choose a recovery path"
+                  : "QC complete — choose what happens next"}
+              </h4>
+              <p>
+                {review.findings.length > 0
+                  ? `${review.findings.length} finding${review.findings.length === 1 ? "" : "s"} and their suggested revisions are shown immediately below.`
+                  : "QC returned no requested revisions for this plan."}
+              </p>
+            </div>
             <ApprovalEvidence review={review} allReviews={allReviews ?? [review]} />
             <div>
               {actions.approve && ["converged", "cap_reached"].includes(review.status) ? (
@@ -1273,7 +1345,7 @@ export function ConversationQcCard({
                     if (actions.approve) void onConfirmAction(actions.approve);
                   }}
                 >
-                  Approve plan &amp; start
+                  Approve reviewed plan &amp; start implementation
                 </Button>
               ) : null}
               {actions.repeat ? (
@@ -1283,9 +1355,7 @@ export function ConversationQcCard({
                     if (actions.repeat) void onConfirmAction(actions.repeat);
                   }}
                 >
-                  {review.status === "failed"
-                    ? "Retry QC with retained guidance"
-                    : "Run more QC rounds"}
+                  {review.status === "failed" ? "Retry QC with retained guidance" : "Run QC again"}
                 </Button>
               ) : null}
               {review.status === "failed" && onContinueWithoutQc ? (
@@ -1325,7 +1395,7 @@ export function ConversationQcCard({
                     if (actions.reject) void onConfirmAction(actions.reject);
                   }}
                 >
-                  Stop this plan
+                  Reject plan
                 </Button>
               ) : null}
             </div>
@@ -1340,6 +1410,7 @@ export function ConversationQcCard({
 
       {!waived ? (
         <>
+          <QcFindings review={review} onDiscussFinding={onDiscussFinding} />
           <QcDetailedStatus review={review} />
           <section className="conversation-qc-chats" aria-label="QC agent chats">
             <div>
@@ -1445,33 +1516,6 @@ export function ConversationQcCard({
           </ol>
         </section>
       ) : null}
-
-      {SEVERITIES.map((severity) => {
-        const findings = review.findings.filter((finding) => finding.severity === severity.value);
-        if (findings.length === 0) return null;
-        return (
-          <section
-            className={`conversation-qc-group is-${severity.value}`}
-            key={severity.value}
-            aria-labelledby={`${titleId}-${severity.value}`}
-          >
-            <div>
-              <h4 id={`${titleId}-${severity.value}`}>{severity.label}</h4>
-              <Badge tone={severity.tone}>{findings.length}</Badge>
-            </div>
-            <ol>
-              {findings.map((finding) => (
-                <Finding
-                  key={finding.id}
-                  finding={finding}
-                  review={review}
-                  onDiscuss={onDiscussFinding}
-                />
-              ))}
-            </ol>
-          </section>
-        );
-      })}
 
       {waived ? (
         <p className="conversation-qc-clear">

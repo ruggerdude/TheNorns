@@ -248,6 +248,7 @@ export class ConversationContextAssembler {
         );
       } else {
         await this.addRules(tx, projectId, materials, systemSections);
+        await this.addProjectSetup(tx, projectId, materials, systemSections);
         await this.addKnowledge(tx, projectId, materials, systemSections);
         materials.push({ kind: "work_objective", ref: workItemId, content: work.objective });
         systemSections.push(section("Current work objective", work.objective));
@@ -730,6 +731,153 @@ export class ConversationContextAssembler {
         result.rows.map((row) => `- [${row.category}] ${row.content}`).join("\n"),
       ),
     );
+  }
+
+  /**
+   * Project onboarding already records where work will run. Planning agents
+   * must treat that selection as binding context instead of asking the human
+   * for a local path that intentionally never leaves the selected computer.
+   */
+  private async addProjectSetup(
+    tx: V2SqlExecutor,
+    projectId: string,
+    materials: ContextMaterial[],
+    sections: string[],
+  ): Promise<void> {
+    const row = (
+      await tx.query<{
+        project_name: string;
+        onboarding_scenario: string | null;
+        workspace_kind: "local_runner" | "github" | null;
+        workspace_display_name: string | null;
+        workspace_github_owner: string | null;
+        workspace_github_name: string | null;
+        workspace_default_branch: string | null;
+        workspace_status: string | null;
+        remote_github_owner: string | null;
+        remote_github_name: string | null;
+        remote_default_branch: string | null;
+      }>(
+        `SELECT project.name AS project_name,
+                project.onboarding_scenario,
+                COALESCE(
+                  workspace_binding.binding_type,
+                  CASE workspace_candidate.source_type
+                    WHEN 'local' THEN 'local_runner'
+                    WHEN 'github' THEN 'github'
+                    ELSE NULL
+                  END
+                ) AS workspace_kind,
+                COALESCE(
+                  workspace_binding.repository_display_name,
+                  workspace_candidate.display_name
+                ) AS workspace_display_name,
+                COALESCE(
+                  workspace_binding.github_owner,
+                  workspace_candidate.github_owner
+                ) AS workspace_github_owner,
+                COALESCE(
+                  workspace_binding.github_name,
+                  workspace_candidate.github_name
+                ) AS workspace_github_name,
+                COALESCE(
+                  workspace_binding.default_branch,
+                  workspace_candidate.default_branch
+                ) AS workspace_default_branch,
+                COALESCE(
+                  workspace_binding.status,
+                  workspace_candidate.status
+                ) AS workspace_status,
+                remote_target.github_owner AS remote_github_owner,
+                remote_target.github_name AS remote_github_name,
+                remote_target.default_branch AS remote_default_branch
+           FROM projects project
+           LEFT JOIN repository_bindings workspace_binding
+             ON workspace_binding.project_id=project.id
+            AND workspace_binding.id=project.primary_repository_binding_id
+            AND workspace_binding.role='workspace'
+            AND workspace_binding.status NOT IN ('revoked','disconnected')
+           LEFT JOIN LATERAL (
+             SELECT candidate.source_type, candidate.display_name,
+                    candidate.github_owner, candidate.github_name,
+                    candidate.default_branch, candidate.status
+               FROM repository_binding_candidates candidate
+              WHERE candidate.project_id=project.id
+                AND candidate.role='workspace'
+                AND candidate.status<>'dismissed'
+              ORDER BY CASE candidate.status WHEN 'promoted' THEN 0 ELSE 1 END,
+                       candidate.created_at, candidate.id
+              LIMIT 1
+           ) workspace_candidate ON workspace_binding.id IS NULL
+           LEFT JOIN LATERAL (
+             SELECT target.github_owner, target.github_name, target.default_branch
+               FROM (
+                 SELECT binding.github_owner, binding.github_name,
+                        binding.default_branch, 0 AS tier,
+                        binding.created_at, binding.id
+                   FROM repository_bindings binding
+                  WHERE binding.project_id=project.id
+                    AND binding.role='remote'
+                    AND binding.status NOT IN ('revoked','disconnected')
+                 UNION ALL
+                 SELECT candidate.github_owner, candidate.github_name,
+                        candidate.default_branch, 1 AS tier,
+                        candidate.created_at, candidate.id
+                   FROM repository_binding_candidates candidate
+                  WHERE candidate.project_id=project.id
+                    AND candidate.role='remote'
+                    AND candidate.status<>'dismissed'
+               ) target
+              ORDER BY target.tier, target.created_at, target.id
+              LIMIT 1
+           ) remote_target ON true
+          WHERE project.id=$1`,
+        [projectId],
+      )
+    ).rows[0];
+    if (!row || (!row.onboarding_scenario && !row.workspace_kind && !row.remote_github_name))
+      return;
+
+    const scenario =
+      row.onboarding_scenario === "new_repo"
+        ? "create a new repository"
+        : row.onboarding_scenario === "existing_repo"
+          ? "use an existing repository"
+          : "use the configured project repository";
+    const workspace =
+      row.workspace_kind === "local_runner"
+        ? [
+            "Execution location: the computer selected during project setup.",
+            row.workspace_display_name
+              ? `Approved local repository: ${row.workspace_display_name}.`
+              : "The approved local repository is resolved by the selected computer.",
+            "Its filesystem path intentionally stays on that computer and is resolved by the runner at execution time.",
+          ].join(" ")
+        : row.workspace_kind === "github"
+          ? `Execution location: GitHub Actions in ${
+              row.workspace_github_owner && row.workspace_github_name
+                ? `${row.workspace_github_owner}/${row.workspace_github_name}`
+                : (row.workspace_display_name ?? "the configured repository")
+            }${row.workspace_default_branch ? ` on branch ${row.workspace_default_branch}` : ""}.`
+          : "The execution attachment is still being provisioned by project setup.";
+    const remote =
+      row.remote_github_owner && row.remote_github_name
+        ? `GitHub repository: ${row.remote_github_owner}/${row.remote_github_name}${
+            row.remote_default_branch ? `; default branch: ${row.remote_default_branch}` : ""
+          }.`
+        : null;
+    const content = [
+      `Project: ${row.project_name}.`,
+      `Setup choice: ${scenario}.`,
+      workspace,
+      remote,
+      row.workspace_status ? `Recorded attachment status: ${row.workspace_status}.` : null,
+      "This setup choice is authoritative. Do not ask the user where the project should be built, do not request a local directory path during planning, and do not add choosing a build location as an open decision. The execution system will resolve the recorded target when work begins.",
+    ]
+      .filter((line): line is string => line !== null)
+      .join("\n");
+    materials.push({ kind: "project_setup", ref: projectId, content });
+    sections.push(section("Authoritative project setup and execution target", content));
   }
 
   private async addSummary(

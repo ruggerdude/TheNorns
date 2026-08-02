@@ -394,6 +394,7 @@ export const V2ConversationContextEntry = z
       "global_rules",
       "project_rules",
       "project_knowledge",
+      "project_setup",
       "work_objective",
       "conversation_summary",
       "decision",

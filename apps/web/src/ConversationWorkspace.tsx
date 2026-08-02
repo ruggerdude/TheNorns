@@ -200,6 +200,7 @@ type NornsMessageCustomMetadata = {
   sequence?: number;
   visibility_status?: V2WorkMessageT["visibility_status"];
   actor?: V2WorkMessageT["actor"];
+  qc_outcome?: boolean;
 };
 
 type NornsMessageMetadata = {
@@ -579,6 +580,8 @@ type ConversationActionContextValue = {
   ) => Promise<boolean>;
   executionProposalBusy: boolean;
   executionProposalError: string | null;
+  messageActionIds: Set<string>;
+  openQc: () => void;
   onUnauthorized: () => void;
 };
 
@@ -594,6 +597,22 @@ type ConversationEditContextValue = {
 };
 
 const ConversationEditContext = createContext<ConversationEditContextValue | null>(null);
+
+function isQcOutcomeAction(action: V2ConversationActionT | null): boolean {
+  if (!action) return false;
+  return action.action_type === "approve_plan" || action.action_type === "reject_plan";
+}
+
+/** Terminal QC workflow messages are represented in the durable Plan
+ * transcript for auditability, but their plan/action payloads belong in the
+ * QC workspace. This hook lets each message part collapse that duplicate
+ * rendering into one clear route to QC. */
+function useCurrentMessageIsQcOutcome(): boolean {
+  return useMessage(
+    (message) =>
+      (message.metadata.custom as NornsMessageCustomMetadata | undefined)?.qc_outcome === true,
+  );
+}
 
 function messagePartToUi(
   projectId: string,
@@ -726,6 +745,15 @@ function toUiMessage(
   resources: ConversationResources,
 ): NornsUIMessage {
   const parts = message.parts.flatMap((part) => messagePartToUi(projectId, part, resources));
+  const terminalQcExists = resources.reviews.some((review) =>
+    ["converged", "cap_reached", "failed", "cancelled"].includes(review.status),
+  );
+  const qcOutcome =
+    terminalQcExists &&
+    message.parts.some(
+      (part) =>
+        part.type === "action" && isQcOutcomeAction(resources.actions.get(part.action_id) ?? null),
+    );
   const role =
     message.role === "system" && (parts.length !== 1 || parts[0]?.type !== "text")
       ? "assistant"
@@ -744,6 +772,7 @@ function toUiMessage(
         sequence: message.sequence,
         visibility_status: message.visibility_status,
         actor: message.actor,
+        qc_outcome: qcOutcome,
       },
     },
     parts,
@@ -829,6 +858,21 @@ function createConversationAttachmentAdapter(
 }
 
 function MarkdownText(): React.ReactElement {
+  const context = useContext(ConversationActionContext);
+  const qcOutcome = useCurrentMessageIsQcOutcome();
+  if (qcOutcome && context) {
+    return (
+      <aside className="conversation-qc-routed-notice" aria-label="QC decision available">
+        <span>
+          <strong>QC review is ready</strong>
+          <small>Findings, suggested revisions, and the final decision are in the QC tab.</small>
+        </span>
+        <Button className="btn-small" onClick={context.openQc}>
+          Review QC decision →
+        </Button>
+      </aside>
+    );
+  }
   return (
     <MarkdownTextPrimitive
       className="conversation-markdown"
@@ -985,6 +1029,7 @@ function MockupReviewControls({
       (action) =>
         ["approve_mockup", "revise_mockup", "reject_mockup"].includes(action.action_type) &&
         action.payload.parameters.mockup_version_id === mockup.id &&
+        !context.messageActionIds.has(action.id) &&
         ["proposed", "confirmed", "recorded", "sent", "agent_acknowledged"].includes(action.status),
     ) ?? null;
   if (pendingAction) {
@@ -1782,6 +1827,8 @@ function StaffingReviewControl({
 }
 
 function PlanPreview({ data }: DataMessagePartProps<PlanData>): React.ReactElement {
+  const qcOutcome = useCurrentMessageIsQcOutcome();
+  if (qcOutcome) return <></>;
   if (!data.version) return <ReferenceCard data={data} />;
   return (
     <>
@@ -1831,6 +1878,19 @@ function qcStripLabel(review: V2ConversationPlanReviewT): string {
   return `${position} · running`;
 }
 
+function qcWorkspaceGuidance(review: V2ConversationPlanReviewT): string {
+  if (review.status === "awaiting_human") {
+    return "QC is paused at a checkpoint. Review the findings and use the highlighted controls to continue or decide.";
+  }
+  if (review.status === "queued" || review.status === "running") {
+    return "An independent reviewer and the planning manager are checking the plan. You can leave this tab and return at any time.";
+  }
+  if (review.status === "converged" || review.status === "cap_reached") {
+    return "QC is complete. Review the suggested revisions, then approve the reviewed plan, run QC again, or reject it.";
+  }
+  return "The QC attempt has stopped. Its retained feedback and the available recovery choices are shown below.";
+}
+
 function ConversationQcActivity({
   reviews,
   planVersions,
@@ -1857,6 +1917,14 @@ function ConversationQcActivity({
 
   return (
     <section className="conversation-qc-activity" aria-label="QC activity" data-expanded={expanded}>
+      <header className="conversation-qc-workspace-intro">
+        <div>
+          <span className="eyebrow">Quality control</span>
+          <h2>Plan review</h2>
+          <p>{qcWorkspaceGuidance(latest)}</p>
+        </div>
+        <Badge tone={qcActivityTone(latest.status)}>{latest.status.replaceAll("_", " ")}</Badge>
+      </header>
       <button
         type="button"
         className="conversation-qc-activity-summary"
@@ -1869,7 +1937,7 @@ function ConversationQcActivity({
         </span>
         <span>
           <strong>QC activity · Attempt {latest.attempt_number}</strong>
-          <small>{expanded ? "Click to show conversation" : qcActivitySummary(latest)}</small>
+          <small>{expanded ? "Hide detailed QC activity" : qcActivitySummary(latest)}</small>
         </span>
         <Badge tone={qcActivityTone(latest.status)}>{latest.status.replaceAll("_", " ")}</Badge>
       </button>
@@ -1987,6 +2055,8 @@ function ConversationQcFinalPlan({
 
 function ActionPreview({ data }: DataMessagePartProps<ActionData>): React.ReactElement {
   const context = useContext(ConversationActionContext);
+  const qcOutcome = useCurrentMessageIsQcOutcome();
+  if (qcOutcome) return <></>;
   const action = context?.actions.get(data.id) ?? data.action;
   if (!action || !context) return <ReferenceCard data={data} />;
   if (action.action_type === "answer_human_wait") return <></>;
@@ -3309,6 +3379,50 @@ function ConversationComposer({
   );
 }
 
+function planElapsedLabel(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}:${remainder.toString().padStart(2, "0")} elapsed`;
+}
+
+function PlanGenerationProgress(): React.ReactElement {
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  useEffect(() => {
+    const startedAt = Date.now();
+    const timer = window.setInterval(
+      () => setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1_000))),
+      1_000,
+    );
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return (
+    <output
+      className="conversation-plan-generation"
+      data-testid="conversation-plan-busy"
+      aria-live="polite"
+    >
+      <div className="conversation-plan-generation-copy">
+        <span className="conversation-plan-generation-spinner" aria-hidden="true" />
+        <span>
+          <strong>Building your plan</strong>
+          <small>Analyzing the conversation and generating an executable proposal</small>
+        </span>
+        <time>{planElapsedLabel(elapsedSeconds)}</time>
+      </div>
+      <progress
+        className="sr-only"
+        max={100}
+        aria-label="Plan generation progress"
+        aria-valuetext={`In progress, ${planElapsedLabel(elapsedSeconds)}`}
+      />
+      <span className="conversation-plan-generation-track" aria-hidden="true">
+        <span />
+      </span>
+    </output>
+  );
+}
+
 function ConversationThread({
   header,
   detail,
@@ -3338,6 +3452,7 @@ function ConversationThread({
   onUnauthorized: () => void;
 }): React.ReactElement {
   const [workTab, setWorkTab] = useState<"plan" | "qc" | "implementation">("plan");
+  const openQc = useCallback(() => setWorkTab("qc"), []);
   const [planComposerDraft, setPlanComposerDraft] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
@@ -4410,6 +4525,11 @@ function ConversationThread({
   const actionContext = useMemo<ConversationActionContextValue>(() => {
     const actions = new Map(resources.actions);
     for (const [id, action] of actionOverrides) actions.set(id, action);
+    const messageActionIds = new Set(
+      detail.messages.flatMap((message) =>
+        message.parts.flatMap((part) => (part.type === "action" ? [part.action_id] : [])),
+      ),
+    );
     const effects = new Map<string, ConversationActionEffect>(
       detail.action_effects.map((record) => [record.action_id, record.effect]),
     );
@@ -4442,6 +4562,8 @@ function ConversationThread({
       prepareExecutionAction: proposeExecutionAction,
       executionProposalBusy,
       executionProposalError,
+      messageActionIds,
+      openQc,
       onUnauthorized,
     };
   }, [
@@ -4454,9 +4576,11 @@ function ConversationThread({
     detail.action_effects,
     detail.work_item.id,
     detail.work_item.project_id,
+    detail.messages,
     effectOverrides,
     executionProposalBusy,
     executionProposalError,
+    openQc,
     lockedHumanWaitAnswerIds,
     planChangeBusyId,
     planChangeErrors,
@@ -4498,6 +4622,17 @@ function ConversationThread({
   // must still be able to read the reviews it already produced.
   const hasQc = isPlanning && (detail.plan_reviews.length > 0 || detail.project_runs_qc);
   const qcNeedsHuman = detail.plan_reviews.some((review) => review.status === "awaiting_human");
+  const qcNeedsDecision =
+    detail.plan_reviews.some((review) =>
+      ["converged", "cap_reached", "failed", "cancelled"].includes(review.status),
+    ) &&
+    [...actionContext.actions.values()].some(
+      (action) =>
+        action.status === "proposed" &&
+        (action.action_type === "approve_plan" ||
+          action.action_type === "reject_plan" ||
+          isQcOutcomeAction(action)),
+    );
   const activeQcReview =
     [...detail.plan_reviews]
       .filter((review) => ["queued", "running", "awaiting_human"].includes(review.status))
@@ -4772,10 +4907,21 @@ function ConversationThread({
                   type="button"
                   className={workTab === "qc" ? "on" : ""}
                   aria-current={workTab === "qc" ? "page" : undefined}
+                  aria-label={
+                    qcNeedsDecision
+                      ? "QC — Decision needed"
+                      : qcNeedsHuman
+                        ? "QC — Needs you"
+                        : "QC"
+                  }
                   onClick={() => setWorkTab("qc")}
                 >
                   <span>QC</span>
-                  {qcNeedsHuman ? <Badge tone="warn">Needs you</Badge> : null}
+                  {qcNeedsDecision ? (
+                    <Badge tone="warn">Decision needed</Badge>
+                  ) : qcNeedsHuman ? (
+                    <Badge tone="warn">Needs you</Badge>
+                  ) : null}
                 </button>
               ) : null}
               <button
@@ -4802,14 +4948,7 @@ function ConversationThread({
                     <span aria-hidden="true">→</span>
                   </button>
                 ) : null}
-                {proposalBusy ? (
-                  <output className="conversation-active-run" data-testid="conversation-plan-busy">
-                    <span className="conversation-plan-busy-indicator" />
-                    <span>
-                      Building your plan — analyzing conversation and generating proposal…
-                    </span>
-                  </output>
-                ) : null}
+                {proposalBusy ? <PlanGenerationProgress /> : null}
                 {proposalError ? (
                   <div className="conversation-thread-alert">
                     <Alert testId="conversation-plan-proposal-error">{proposalError}</Alert>

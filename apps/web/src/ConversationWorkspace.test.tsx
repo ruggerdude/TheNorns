@@ -1663,20 +1663,28 @@ describe("conversation workspace", () => {
       />,
     );
 
-    // Plan Contract cards and their controls render in the message thread,
-    // which lives in the Plan tab.
-    expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
-    expect(screen.getByText("Deliver conversation-first planning")).toBeInTheDocument();
+    // Terminal QC output no longer duplicates its plan and decision cards in
+    // the Plan transcript. The durable message becomes one explicit route to
+    // the QC-owned decision workspace.
+    expect(await screen.findByLabelText("QC decision available")).toHaveTextContent(
+      "Findings, suggested revisions, and the final decision are in the QC tab.",
+    );
+    expect(screen.queryByText("Plan Contract · Version 1")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("conversation-action-approve_plan")).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Planning workflow" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve and start" })).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Change direction" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "QC — Decision needed" })).toBeInTheDocument();
 
     // QC findings, dispositions, and the terminal decision live in the QC tab.
-    await user.click(screen.getByRole("button", { name: "QC" }));
+    await user.click(screen.getByRole("button", { name: "Review QC decision →" }));
+    expect(screen.getByRole("heading", { name: "Plan review" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Suggested revisions" })).toBeInTheDocument();
     expect(screen.getByText("Make cancellation verification explicit.")).toBeInTheDocument();
     expect(screen.getByText("Added the requested telemetry assertion.")).toBeInTheDocument();
     expect(screen.getByText("Final reviewed plan output · Version 1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Approve plan & start" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Approve reviewed plan & start implementation" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps failed QC feedback visible even when the original plan message is not on screen", async () => {
@@ -1930,6 +1938,13 @@ describe("conversation workspace", () => {
     );
     expect(screen.getByRole("button", { name: "Use conversation as plan" })).toHaveTextContent(
       "Planning…",
+    );
+    const progress = screen.getByTestId("conversation-plan-busy");
+    expect(progress).toHaveTextContent("Building your plan");
+    expect(progress).toHaveTextContent("0:00 elapsed");
+    expect(screen.getByRole("progressbar", { name: "Plan generation progress" })).toHaveAttribute(
+      "aria-valuetext",
+      "In progress, 0:00 elapsed",
     );
     generated = true;
     resolveProposal(Response.json({ message: proposalMessage, action: saveAction }));
