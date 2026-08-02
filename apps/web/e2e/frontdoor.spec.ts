@@ -667,6 +667,22 @@ test("New project creates from a name and lands in the workspace", async ({ page
   expect(setupWidth).toBeGreaterThan(900);
   expect(setupWidth).toBeLessThanOrEqual(1216);
 
+  // The wizard shell carries card chrome, so it needs a card's breathing room.
+  // It previously had padding: 0 and no surface, which put every label and
+  // input flush against the edge and made the page read as a different design
+  // language from the rest of the app.
+  const shellPadding = await page.locator(".wizard-shell").evaluate((node) => {
+    const style = getComputedStyle(node);
+    return {
+      left: Number.parseFloat(style.paddingLeft),
+      right: Number.parseFloat(style.paddingRight),
+      background: style.backgroundColor,
+    };
+  });
+  expect(shellPadding.left).toBeGreaterThanOrEqual(24);
+  expect(shellPadding.right).toBeGreaterThanOrEqual(24);
+  expect(shellPadding.background).not.toBe("rgba(0, 0, 0, 0)");
+
   await expect(page.getByTestId("automatic-github-destination")).toContainText("octocat");
   await page.getByTestId("project-name").fill("Deployment workflow dashboard for release managers");
   await expect(page.getByTestId("derived-project-summary")).toContainText(

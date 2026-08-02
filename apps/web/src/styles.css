@@ -3476,7 +3476,14 @@ button:disabled {
 }
 .wizard-shell {
   width: 100%;
-  padding: 0;
+  /* The shell carries card chrome (border-radius + shadow, further down this
+     file) but had padding: 0 and no surface, so every label and input sat
+     flush against the card edge and the wizard read as a different design
+     language from the rest of the app. Give it the same surface treatment as
+     .card, with padding scaled up for a full-page form. */
+  border: 1px solid var(--line);
+  padding: clamp(1.5rem, 3vw, 2.5rem);
+  background: color-mix(in srgb, var(--surface) 95%, transparent);
 }
 .project-setup-view .wizard-shell > .form-stack,
 .project-setup-view .wizard-shell > [data-testid="wizard-blocker-step"] {
