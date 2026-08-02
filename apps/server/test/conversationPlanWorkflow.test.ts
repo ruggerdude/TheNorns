@@ -122,6 +122,7 @@ describe.sequential("conversation plan workflow", () => {
       }),
       runReviewNow: async () => "processed",
       qcModeSettingsOf: (id) => planningRunService.qcModeSettingsOf(id),
+      revisionFormat: "targeted_v1",
     });
     changes = new ConversationPlanChangeProposalService(transactions, workflow, makeId);
   }, 60_000);
@@ -230,6 +231,8 @@ describe.sequential("conversation plan workflow", () => {
     if (sent.effect.kind !== "qc_started") throw new Error("expected QC effect");
     const seed = await workflow.loadReviewOnlySeed(sent.effect.planning_run_id);
     expect(seed.seedPlan).toEqual(saved.envelope);
+    expect(seed.revisionFormat).toBe("targeted_v1");
+    expect(sent.effect.plan_review.revision_format).toBe("targeted_v1");
     expect(JSON.stringify(seed.frozenContext)).not.toContain("brainstorm filler happy");
     await workflow.markReviewOnlyStarted(seed.reviewId);
     await workflow.completeReviewOnly({

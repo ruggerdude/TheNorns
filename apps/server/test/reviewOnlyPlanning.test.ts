@@ -1,12 +1,19 @@
 import { AdapterError, DEFAULT_MODEL_REGISTRY, FakeAdapter, makeUsageEvent } from "@norns/adapters";
-import { V2WorkPlanContract } from "@norns/contracts";
+import {
+  type FindingResponseT,
+  type ReviewFindingT,
+  type V2QcPlanChangeT,
+  V2WorkPlanContract,
+} from "@norns/contracts";
 import { describe, expect, it, vi } from "vitest";
+import { canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
 import {
   type ReviewOnlyChatEvent,
   type ReviewOnlyPlanningPausedResult,
   type ReviewOnlyPlanningResult,
   type ReviewOnlyPlanningTerminalResult,
   type ReviewOnlyProgressEvent,
+  applyTargetedQcRevision,
   runReviewOnlyPlanning,
 } from "../src/planning/reviewOnlySession.js";
 
@@ -84,6 +91,18 @@ function envelope(
     open_decisions: [],
     estimated_budget: { currency: "USD", amount: 12.5 },
   });
+}
+
+function fixtureModule() {
+  const module = envelope().plan.modules[0];
+  if (!module) throw new Error("fixture requires contracts module");
+  return module;
+}
+
+function fixtureStaffing() {
+  const staffing = envelope().staffing[0];
+  if (!staffing) throw new Error("fixture requires contracts staffing");
+  return staffing;
 }
 
 describe("review-only conversational planning", () => {
@@ -772,5 +791,488 @@ describe("review-only conversational planning", () => {
     expect(result.review_rounds[0]?.responses).toEqual([
       { finding_index: 0, disposition: "accept", rationale: "Addressed in this revision." },
     ]);
+  });
+
+  it("materializes a base-hash-pinned targeted revision without mutating its input", () => {
+    const seed = envelope();
+    const before = structuredClone(seed);
+    const finding = {
+      severity: "must_fix" as const,
+      module_id: "contracts",
+      finding: "Clarify the implementation boundary.",
+      recommendation: "Update the contracts module.",
+    };
+    const current = seed.plan.modules[0];
+    if (!current) throw new Error("fixture requires contracts module");
+    const revision = {
+      base_plan_content_hash: canonicalSha256(seed),
+      responses: [
+        { finding_index: 0, disposition: "accept" as const, rationale: "Updated the module." },
+      ],
+      changes: [
+        {
+          op: "replace_module" as const,
+          finding_indices: [0],
+          module_id: "contracts",
+          module: { ...current, description: "Deliver a bounded targeted revision workflow." },
+        },
+      ],
+    };
+
+    const materialized = applyTargetedQcRevision(seed, revision, [finding]);
+
+    expect(seed).toEqual(before);
+    expect(materialized.plan.modules[0]?.description).toContain("bounded targeted revision");
+    expect(applyTargetedQcRevision(seed, revision, [finding])).toEqual(materialized);
+    expect(() =>
+      applyTargetedQcRevision(seed, { ...revision, base_plan_content_hash: "f".repeat(64) }, [
+        finding,
+      ]),
+    ).toThrow(/base_plan_content_hash is stale/);
+    expect(() =>
+      applyTargetedQcRevision(
+        seed,
+        {
+          ...revision,
+          changes: [
+            {
+              op: "set_objective",
+              finding_indices: [0],
+              value: "An unrelated plan-level edit",
+            },
+          ],
+        },
+        [finding],
+      ),
+    ).toThrow(/cannot address module-scoped finding/);
+  });
+
+  it("materializes every top-level setter and explicit module plus staffing lifecycle", () => {
+    const seed = envelope();
+    const planFinding: ReviewFindingT = {
+      severity: "must_fix",
+      module_id: null,
+      finding: "Update the plan envelope.",
+      recommendation: "Apply the reviewed values.",
+    };
+    const responses: FindingResponseT[] = [
+      { finding_index: 0, disposition: "accept", rationale: "Applied." },
+    ];
+    const topLevelChanges: V2QcPlanChangeT[] = [
+      { op: "set_objective", finding_indices: [0], value: "Reviewed objective" },
+      { op: "set_assumptions", finding_indices: [0], value: ["Reviewed assumption"] },
+      {
+        op: "set_risks",
+        finding_indices: [0],
+        value: [{ description: "Reviewed risk", mitigation: "Reviewed mitigation" }],
+      },
+      { op: "set_out_of_scope", finding_indices: [0], value: ["Deferred item"] },
+      {
+        op: "set_verification_requirements",
+        finding_indices: [0],
+        value: ["Run the reviewed checks."],
+      },
+      { op: "set_open_decisions", finding_indices: [0], value: ["Choose rollout size."] },
+      {
+        op: "set_estimated_budget",
+        finding_indices: [0],
+        value: { currency: "EUR", amount: 20 },
+      },
+    ];
+    const topLevel = applyTargetedQcRevision(
+      seed,
+      {
+        base_plan_content_hash: canonicalSha256(seed),
+        responses,
+        changes: topLevelChanges,
+      },
+      [planFinding],
+    );
+    expect(topLevel).toMatchObject({
+      plan: {
+        objective: "Reviewed objective",
+        assumptions: ["Reviewed assumption"],
+        risks: [{ description: "Reviewed risk", mitigation: "Reviewed mitigation" }],
+        out_of_scope: ["Deferred item"],
+      },
+      verification_requirements: ["Run the reviewed checks."],
+      open_decisions: ["Choose rollout size."],
+      estimated_budget: { currency: "EUR", amount: 20 },
+    });
+
+    const contracts = seed.plan.modules[0];
+    const staffing = seed.staffing[0];
+    if (!contracts || !staffing) throw new Error("fixture requires module and staffing");
+    const addedModule = {
+      ...contracts,
+      id: "persistence",
+      title: "Persistence",
+      dependencies: ["contracts"],
+    };
+    const added = applyTargetedQcRevision(
+      seed,
+      {
+        base_plan_content_hash: canonicalSha256(seed),
+        responses,
+        changes: [
+          { op: "add_module", finding_indices: [0], module: addedModule },
+          {
+            op: "add_staffing",
+            finding_indices: [0],
+            staffing: { ...staffing, module_id: "persistence" },
+          },
+        ],
+      },
+      [planFinding],
+    );
+    expect(added.plan.modules.map((module) => module.id)).toEqual(["contracts", "persistence"]);
+    expect(added.staffing.map((choice) => choice.module_id)).toEqual(["contracts", "persistence"]);
+
+    const moduleFinding = { ...planFinding, module_id: "persistence" };
+    const removed = applyTargetedQcRevision(
+      added,
+      {
+        base_plan_content_hash: canonicalSha256(added),
+        responses,
+        changes: [
+          { op: "remove_module", finding_indices: [0], module_id: "persistence" },
+          { op: "remove_staffing", finding_indices: [0], module_id: "persistence" },
+        ],
+      },
+      [moduleFinding],
+    );
+    expect(removed).toEqual(seed);
+  });
+
+  it.each<{
+    name: string;
+    changes: V2QcPlanChangeT[];
+    responses?: FindingResponseT[];
+    findings?: ReviewFindingT[];
+    message: RegExp;
+  }>([
+    {
+      name: "duplicate targets",
+      changes: [
+        { op: "set_objective", finding_indices: [0], value: "One" },
+        { op: "set_objective", finding_indices: [0], value: "Two" },
+      ],
+      message: /duplicate or conflicting target/,
+    },
+    {
+      name: "adding an existing module",
+      changes: [{ op: "add_module", finding_indices: [0], module: fixtureModule() }],
+      message: /module contracts already exists/,
+    },
+    {
+      name: "replacing a missing module",
+      changes: [
+        {
+          op: "replace_module",
+          finding_indices: [0],
+          module_id: "missing",
+          module: { ...fixtureModule(), id: "missing" },
+        },
+      ],
+      message: /module missing does not exist/,
+    },
+    {
+      name: "removing missing staffing",
+      changes: [{ op: "remove_staffing", finding_indices: [0], module_id: "missing" }],
+      message: /staffing for missing does not exist/,
+    },
+    {
+      name: "replacement module id mismatch",
+      changes: [
+        {
+          op: "replace_module",
+          finding_indices: [0],
+          module_id: "contracts",
+          module: { ...fixtureModule(), id: "different" },
+        },
+      ],
+      message: /replacement module id different does not match contracts/,
+    },
+    {
+      name: "replacement staffing id mismatch",
+      changes: [
+        {
+          op: "replace_staffing",
+          finding_indices: [0],
+          module_id: "contracts",
+          staffing: { ...fixtureStaffing(), module_id: "different" },
+        },
+      ],
+      message: /replacement staffing id different does not match contracts/,
+    },
+    {
+      name: "change attributed to a rebuttal",
+      changes: [{ op: "set_objective", finding_indices: [0], value: "Changed" }],
+      responses: [{ finding_index: 0, disposition: "rebut", rationale: "No change." }],
+      message: /only attribute a finding dispositioned accept/,
+    },
+    {
+      name: "unknown finding attribution",
+      changes: [{ op: "set_objective", finding_indices: [1], value: "Changed" }],
+      message: /references unknown finding 1/,
+    },
+    {
+      name: "dangling dependency",
+      changes: [
+        {
+          op: "replace_module",
+          finding_indices: [0],
+          module_id: "contracts",
+          module: { ...fixtureModule(), dependencies: ["missing"] },
+        },
+      ],
+      message: /depends on unknown module/,
+    },
+    {
+      name: "dependency cycle",
+      changes: [
+        {
+          op: "replace_module",
+          finding_indices: [0],
+          module_id: "contracts",
+          module: { ...fixtureModule(), dependencies: ["persistence"] },
+        },
+        {
+          op: "add_module",
+          finding_indices: [0],
+          module: {
+            ...fixtureModule(),
+            id: "persistence",
+            dependencies: ["contracts"],
+          },
+        },
+        {
+          op: "add_staffing",
+          finding_indices: [0],
+          staffing: { ...fixtureStaffing(), module_id: "persistence" },
+        },
+      ],
+      message: /dependency cycle/,
+    },
+    {
+      name: "incomplete final staffing",
+      changes: [{ op: "remove_staffing", finding_indices: [0], module_id: "contracts" }],
+      message: /staffing must pin/,
+    },
+  ])("rejects $name", ({ changes, responses, findings, message }) => {
+    const seed = envelope();
+    const activeFindings =
+      findings ??
+      ([
+        {
+          severity: "must_fix",
+          module_id: null,
+          finding: "Apply the change.",
+          recommendation: "Use the bounded operation.",
+        },
+      ] satisfies ReviewFindingT[]);
+    expect(() =>
+      applyTargetedQcRevision(
+        seed,
+        {
+          base_plan_content_hash: canonicalSha256(seed),
+          responses: responses ?? [
+            { finding_index: 0, disposition: "accept", rationale: "Applied." },
+          ],
+          changes,
+        },
+        activeFindings,
+      ),
+    ).toThrow(message);
+  });
+
+  it("uses targeted changes, emits the complete materialized artifact, and treats staffing as the module region", async () => {
+    const seed = envelope();
+    const pm = new FakeAdapter("anthropic");
+    const reviewer = new FakeAdapter("openai");
+    reviewer.enqueue({
+      findings: [
+        {
+          severity: "must_fix",
+          module_id: "contracts",
+          finding: "Use the required implementation model.",
+          recommendation: "Change the pinned staffing model.",
+        },
+      ],
+    });
+    pm.enqueue({
+      base_plan_content_hash: canonicalSha256(seed),
+      responses: [
+        { finding_index: 0, disposition: "accept", rationale: "Pinned the required model." },
+      ],
+      changes: [
+        {
+          op: "replace_staffing",
+          finding_indices: [0],
+          module_id: "contracts",
+          staffing: {
+            ...seed.staffing[0],
+            model: "gpt-5.6-terra",
+          },
+        },
+      ],
+    });
+    const chat: ReviewOnlyChatEvent[] = [];
+
+    const result = await runReviewOnlyPlanning({
+      pm,
+      reviewer,
+      projectId: "project-targeted",
+      initiatedByUserId: "user-targeted",
+      seedPlan: seed,
+      frozenContext: {},
+      telemetryGroupId: "review-only-targeted",
+      maxRounds: 1,
+      revisionFormat: "targeted_v1",
+      onChatEvent: (event) => {
+        chat.push(event);
+      },
+    });
+
+    assertTerminal(result);
+    expect(result.status).toBe("cap_reached");
+    expect(result.final_plan.staffing[0]?.model).toBe("gpt-5.6-terra");
+    expect(pm.requests[0]?.schemaName).toBe("targeted_plan_revision");
+    expect(pm.requests[0]?.prompt).toContain("Do not return the complete plan");
+    const pmArtifact = chat.find(
+      (event) => event.channel === "pm" && event.speaker === "pm" && event.artifact_valid,
+    );
+    expect(pmArtifact?.artifact_markdown).toContain("Applied bounded changes");
+    expect(pmArtifact?.artifact_markdown).toContain("Complete server-materialized revised plan");
+    expect(pmArtifact?.artifact_markdown).toContain("gpt-5.6-terra");
+  });
+
+  it("repairs a targeted response without asking the PM to regenerate the full plan", async () => {
+    const seed = envelope();
+    const module = seed.plan.modules[0];
+    if (!module) throw new Error("fixture requires contracts module");
+    const pm = new FakeAdapter("anthropic");
+    const reviewer = new FakeAdapter("openai");
+    reviewer.enqueue({
+      findings: [
+        {
+          severity: "must_fix",
+          module_id: "contracts",
+          finding: "Clarify the module.",
+          recommendation: "Update its description.",
+        },
+      ],
+    });
+    pm.enqueue({
+      base_plan_content_hash: canonicalSha256(seed),
+      responses: [
+        { finding_index: 0, disposition: "accept", rationale: "Updated the description." },
+      ],
+      changes: [
+        {
+          op: "replace_module",
+          finding_indices: [0],
+          module_id: "contracts",
+          module: { ...module, description: "Clarified after targeted repair." },
+        },
+      ],
+    });
+    const originalComplete = pm.completeStructured.bind(pm);
+    vi.spyOn(pm, "completeStructured")
+      .mockRejectedValueOnce(
+        new AdapterError("invalid_response", "targeted_plan_revision: invalid operation", {
+          metadata: { response_text: '{"changes":[]}' },
+        }),
+      )
+      .mockImplementation(originalComplete);
+
+    const result = await runReviewOnlyPlanning({
+      pm,
+      reviewer,
+      projectId: "project-targeted-repair",
+      initiatedByUserId: "user-targeted",
+      seedPlan: seed,
+      frozenContext: {},
+      telemetryGroupId: "review-only-targeted-repair",
+      maxRounds: 1,
+      revisionFormat: "targeted_v1",
+    });
+
+    assertTerminal(result);
+    expect(result.final_plan.plan.modules[0]?.description).toContain("targeted repair");
+    expect(pm.requests[0]?.prompt).toContain("Do not return the complete plan");
+    expect(pm.requests[0]?.prompt).toContain("Do not return the complete plan;");
+    expect(pm.requests[0]?.prompt).not.toContain("preserve the full plan");
+  });
+
+  it("falls back exactly once to the legacy envelope after targeted repair failure", async () => {
+    const seed = envelope();
+    const revised = envelope(
+      "Ship the planning conversation",
+      "Deliver the reviewed workflow through the one-time legacy fallback.",
+    );
+    const pm = new FakeAdapter("anthropic");
+    const reviewer = new FakeAdapter("openai");
+    reviewer.enqueue({
+      findings: [
+        {
+          severity: "must_fix",
+          module_id: "contracts",
+          finding: "Clarify the fallback behavior.",
+          recommendation: "Document the bounded fallback.",
+        },
+      ],
+    });
+    pm.enqueue({
+      responses: [{ finding_index: 0, disposition: "accept", rationale: "Applied by fallback." }],
+      plan: revised,
+    });
+    const failedUsage = makeUsageEvent(
+      pm.model,
+      DEFAULT_MODEL_REGISTRY,
+      { projectId: "project-targeted-fallback" },
+      300,
+      200,
+      "provider_api",
+    );
+    const originalComplete = pm.completeStructured.bind(pm);
+    const completion = vi
+      .spyOn(pm, "completeStructured")
+      .mockRejectedValueOnce(
+        new AdapterError("invalid_response", "targeted_plan_revision: invalid operation", {
+          metadata: { usage: failedUsage, response_text: '{"changes":[]}' },
+        }),
+      )
+      .mockRejectedValueOnce(
+        new AdapterError("invalid_response", "targeted_plan_revision: still invalid", {
+          metadata: { usage: failedUsage, response_text: '{"changes":[]}' },
+        }),
+      )
+      .mockImplementation(originalComplete);
+    const chat: ReviewOnlyChatEvent[] = [];
+
+    const result = await runReviewOnlyPlanning({
+      pm,
+      reviewer,
+      projectId: "project-targeted-fallback",
+      initiatedByUserId: "user-targeted",
+      seedPlan: seed,
+      frozenContext: {},
+      telemetryGroupId: "review-only-targeted-fallback",
+      maxRounds: 1,
+      revisionFormat: "targeted_v1_with_fallback",
+      onChatEvent: (event) => {
+        chat.push(event);
+      },
+    });
+
+    assertTerminal(result);
+    expect(result.final_plan).toEqual(revised);
+    expect(completion).toHaveBeenCalledTimes(3);
+    expect(pm.requests).toHaveLength(1);
+    expect(pm.requests[0]?.telemetryRequestId).toContain(":legacy-fallback");
+    expect(
+      chat.find((event) => event.error_code === "targeted_revision_legacy_fallback")?.content,
+    ).toContain("Falling back once");
   });
 });

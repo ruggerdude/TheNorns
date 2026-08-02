@@ -13,15 +13,17 @@ export interface GateCFinding {
 }
 
 function moduleSubtree(plan: V2WorkPlanContractT, moduleId: string) {
-  return plan.plan.modules.find((module) => module.id === moduleId) ?? null;
+  const module = plan.plan.modules.find((candidate) => candidate.id === moduleId) ?? null;
+  const staffing = plan.staffing.find((candidate) => candidate.module_id === moduleId) ?? null;
+  return module === null && staffing === null ? null : { module, staffing };
 }
 
 /**
  * True when the finding's target region is byte-identical before and after
- * the PM's revision. Scoped to the finding's module_id so an unrelated edit
- * elsewhere in the plan can't mask a hollow acceptance. A null module_id, or
- * a module_id absent from either plan, falls back to a whole-plan comparison
- * rather than throwing.
+ * the PM's revision. A module region includes both its plan module and pinned
+ * staffing, so a staffing correction is not misclassified as hollow. A null
+ * module_id, or a module_id absent from either plan, falls back to a whole-plan
+ * comparison rather than throwing.
  */
 function regionUnchanged(
   moduleId: string | null,

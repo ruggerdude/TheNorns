@@ -496,6 +496,12 @@ export const QC_RESTART_CHECKPOINTS_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const QC_TARGETED_REVISIONS_MIGRATION_NAME = "0077_qc_targeted_revisions";
+export const QC_TARGETED_REVISIONS_MIGRATION_URL = new URL(
+  "../../../drizzle/0077_qc_targeted_revisions.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -830,6 +836,10 @@ export async function loadPlanningLiveProgressMigrationSql(): Promise<string> {
 
 export async function loadQcRestartCheckpointsMigrationSql(): Promise<string> {
   return readFile(QC_RESTART_CHECKPOINTS_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcTargetedRevisionsMigrationSql(): Promise<string> {
+  return readFile(QC_TARGETED_REVISIONS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1307,6 +1317,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: QC_RESTART_CHECKPOINTS_MIGRATION_NAME,
       sql: await loadQcRestartCheckpointsMigrationSql(),
+    },
+    {
+      name: QC_TARGETED_REVISIONS_MIGRATION_NAME,
+      sql: await loadQcTargetedRevisionsMigrationSql(),
     },
   ];
 }

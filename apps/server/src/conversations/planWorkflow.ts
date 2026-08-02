@@ -20,6 +20,7 @@ import {
   V2PlanningLiveProgress,
   type V2PlanningLiveProgressT,
   V2ProposeConversationActionInput,
+  type V2QcRevisionFormatT,
   V2ReviewExecutionCheckpoint,
   type V2ReviewExecutionCheckpointT,
   V2SavePlanCandidateParameters,
@@ -107,6 +108,8 @@ export interface ConversationPlanWorkflowOptions {
   ): Promise<ConversationPlanReviewModels>;
   qcModeSettingsOf?(projectId: string): Promise<{ qcMode: V2ConversationPlanReviewT["qc_mode"] }>;
   defaultMaxRoundsOf?(projectId: string): Promise<number>;
+  /** Response format pinned into each new review row. */
+  revisionFormat?: V2QcRevisionFormatT;
   runReviewNow(runId: string): Promise<unknown>;
   cancelReviewNow?(runId: string): boolean;
   createReviewAdapter?(provider: ProviderName, model: string): LlmAdapter;
@@ -206,6 +209,7 @@ interface ReviewRow {
   reviewer_provider: ProviderName;
   reviewer_model: string;
   review_mode: "qc" | "waived";
+  revision_format: V2QcRevisionFormatT;
   usage_request_group_id: string;
   status: V2ConversationPlanReviewT["status"];
   rounds_completed: number | string;
@@ -306,7 +310,7 @@ const planColumns = `schema_version, id, project_id, work_item_id, conversation_
   origin, created_at, updated_at`;
 const reviewColumns = `schema_version, id, project_id, work_item_id, conversation_id,
   action_id, plan_version_id, planning_run_id, initiated_by_user_id, attempt_number,
-  pm_provider, pm_model, reviewer_provider, reviewer_model, review_mode, status, seed_plan,
+  pm_provider, pm_model, reviewer_provider, reviewer_model, review_mode, revision_format, status, seed_plan,
   usage_request_group_id,
   plan_content_hash, result_plan_content_hash, context_receipt, context_manifest,
   context_hash, findings, dispositions, revised_plan, revised_plan_content_hash,
@@ -411,6 +415,7 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
     reviewer_provider: row.reviewer_provider,
     reviewer_model: row.reviewer_model,
     review_mode: row.review_mode,
+    revision_format: row.revision_format ?? "legacy_full",
     usage_request_group_id: row.usage_request_group_id,
     status: row.status,
     qc_mode: row.qc_mode,
@@ -680,6 +685,7 @@ export class ConversationPlanWorkflowService {
     frozenContext: unknown;
     qcMode: V2ConversationPlanReviewT["qc_mode"];
     allowUnadjudicatedRebuttals: boolean;
+    revisionFormat: V2QcRevisionFormatT;
     resume?: ReviewOnlyResumeState;
   }> {
     return this.transactions.transaction(async (tx) => {
@@ -766,6 +772,7 @@ export class ConversationPlanWorkflowService {
         frozenContext: json(row.context_receipt),
         qcMode: row.qc_mode,
         allowUnadjudicatedRebuttals: row.allow_unadjudicated_rebuttals,
+        revisionFormat: row.revision_format ?? "legacy_full",
         ...(resume ? { resume } : {}),
       };
     });
@@ -2450,10 +2457,10 @@ export class ConversationPlanWorkflowService {
              pm_provider, pm_model, reviewer_provider, reviewer_model, review_mode,
              usage_request_group_id, seed_plan,
              plan_content_hash, result_plan_content_hash, context_receipt,
-             context_manifest, context_hash, qc_mode, qc_mode_source
+             context_manifest, context_hash, qc_mode, qc_mode_source, revision_format
            ) VALUES (
              $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'qc',$14,$15::jsonb,
-             $16,$16,$17::jsonb,$18::jsonb,$19,$20,$21
+             $16,$16,$17::jsonb,$18::jsonb,$19,$20,$21,$22
            )`,
           [
             reviewId,
@@ -2477,6 +2484,7 @@ export class ConversationPlanWorkflowService {
             context.hash,
             qcMode,
             qcModeSource,
+            this.options.revisionFormat ?? "legacy_full",
           ],
         );
         await tx.query(

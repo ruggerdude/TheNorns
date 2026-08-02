@@ -25,6 +25,7 @@ import {
   QC_PAUSE_RESUME_TRANSITIONS_MIGRATION_NAME,
   QC_RESTART_CHECKPOINTS_MIGRATION_NAME,
   QC_SKIP_QC_ACCEPTS_IN_QC_MIGRATION_NAME,
+  QC_TARGETED_REVISIONS_MIGRATION_NAME,
   QC_ZERO_ROUNDS_MIGRATION_NAME,
   currentV2MigrationSources,
   loadDeviceIdentityCoreMigrationSql,
@@ -58,7 +59,7 @@ describe.sequential("device identity core migration", () => {
 
   it("is registered before the additive Phase 2 device migrations", async () => {
     const sources = await currentV2MigrationSources();
-    expect(sources.slice(-24).map((source) => source.name)).toEqual([
+    expect(sources.slice(-25).map((source) => source.name)).toEqual([
       DEVICE_IDENTITY_CORE_MIGRATION_NAME,
       DEVICE_HTTP_REQUEST_REPLAYS_MIGRATION_NAME,
       DEVICE_CANCELLATION_TRACKING_MIGRATION_NAME,
@@ -83,32 +84,34 @@ describe.sequential("device identity core migration", () => {
       QC_PAUSED_ROUND_BOUND_MIGRATION_NAME,
       PLANNING_LIVE_PROGRESS_MIGRATION_NAME,
       QC_RESTART_CHECKPOINTS_MIGRATION_NAME,
+      QC_TARGETED_REVISIONS_MIGRATION_NAME,
     ]);
-    expect(sources.at(-24)?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
-    expect(sources.at(-20)?.sql).toContain("ADD COLUMN os_version TEXT");
-    expect(sources.at(-19)?.sql).toContain("CREATE TABLE IF NOT EXISTS device_publication_permits");
-    expect(sources.at(-18)?.sql).toContain("ADD COLUMN idempotency_key TEXT");
-    expect(sources.at(-17)?.sql).toContain("CREATE TABLE legacy_repository_binding_claims");
-    expect(sources.at(-16)?.sql).toContain("norns.runner-http.repository-registration.v1");
-    expect(sources.at(-15)?.sql).toContain("ADD COLUMN markdown_artifacts JSONB");
-    expect(sources.at(-14)?.sql).toContain("ADD CONSTRAINT attachments_mime_check");
-    expect(sources.at(-13)?.sql).toContain("ADD COLUMN paused_checkpoint TEXT");
-    expect(sources.at(-12)?.sql).toContain("status = 'awaiting_human'");
-    expect(sources.at(-11)?.sql).toContain("ADD COLUMN resume_idempotency_key TEXT");
-    expect(sources.at(-10)?.sql).toContain("ADD COLUMN adjudications JSONB");
-    expect(sources.at(-9)?.sql).toContain("parked at Gate A awaiting a human decision");
-    expect(sources.at(-8)?.sql).toContain("conversation_plan_reviews_awaiting_human_idx");
-    expect(sources.at(-7)?.sql).toContain(
+    expect(sources.at(-25)?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
+    expect(sources.at(-21)?.sql).toContain("ADD COLUMN os_version TEXT");
+    expect(sources.at(-20)?.sql).toContain("CREATE TABLE IF NOT EXISTS device_publication_permits");
+    expect(sources.at(-19)?.sql).toContain("ADD COLUMN idempotency_key TEXT");
+    expect(sources.at(-18)?.sql).toContain("CREATE TABLE legacy_repository_binding_claims");
+    expect(sources.at(-17)?.sql).toContain("norns.runner-http.repository-registration.v1");
+    expect(sources.at(-16)?.sql).toContain("ADD COLUMN markdown_artifacts JSONB");
+    expect(sources.at(-15)?.sql).toContain("ADD CONSTRAINT attachments_mime_check");
+    expect(sources.at(-14)?.sql).toContain("ADD COLUMN paused_checkpoint TEXT");
+    expect(sources.at(-13)?.sql).toContain("status = 'awaiting_human'");
+    expect(sources.at(-12)?.sql).toContain("ADD COLUMN resume_idempotency_key TEXT");
+    expect(sources.at(-11)?.sql).toContain("ADD COLUMN adjudications JSONB");
+    expect(sources.at(-10)?.sql).toContain("parked at Gate A awaiting a human decision");
+    expect(sources.at(-9)?.sql).toContain("conversation_plan_reviews_awaiting_human_idx");
+    expect(sources.at(-8)?.sql).toContain(
       "in-QC plans return to candidate only after the latest linked review failed or was cancelled",
     );
-    expect(sources.at(-6)?.sql).toContain("default_max_rounds BETWEEN 0 AND 5");
-    expect(sources.at(-5)?.sql).toContain("ADD COLUMN last_human_message_at TIMESTAMPTZ");
-    expect(sources.at(-4)?.sql).toContain("ADD COLUMN qc_mode_changed_at_round INTEGER");
-    expect(sources.at(-3)?.sql).toContain(
+    expect(sources.at(-7)?.sql).toContain("default_max_rounds BETWEEN 0 AND 5");
+    expect(sources.at(-6)?.sql).toContain("ADD COLUMN last_human_message_at TIMESTAMPTZ");
+    expect(sources.at(-5)?.sql).toContain("ADD COLUMN qc_mode_changed_at_round INTEGER");
+    expect(sources.at(-4)?.sql).toContain(
       "norns_guard_conversation_plan_review_paused_round_bound",
     );
-    expect(sources.at(-2)?.sql).toContain("ADD COLUMN live_progress JSONB");
-    expect(sources.at(-1)?.sql).toContain("ADD COLUMN execution_checkpoint JSONB");
+    expect(sources.at(-3)?.sql).toContain("ADD COLUMN live_progress JSONB");
+    expect(sources.at(-2)?.sql).toContain("ADD COLUMN execution_checkpoint JSONB");
+    expect(sources.at(-1)?.sql).toContain("ADD COLUMN revision_format TEXT");
   });
 
   it("creates the five core tables, privacy-safe columns, and runtime grants", async () => {

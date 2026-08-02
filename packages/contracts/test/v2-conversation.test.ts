@@ -8,6 +8,8 @@ import {
   V2ConversationUsage,
   V2CreateConversationPlanningExcerptInput,
   V2PlanHandoffPreference,
+  V2QcRevisionFormat,
+  V2QcTargetedRevision,
   V2SendPlanToQcParameters,
   V2WorkMessage,
   V2WorkPlanContract,
@@ -178,6 +180,40 @@ describe("V2 conversation contracts", () => {
       ],
     };
     expect(V2WorkPlanContract.safeParse(cyclic).success).toBe(false);
+  });
+
+  it("accepts only closed targeted QC operations and keeps legacy revisions the default", () => {
+    expect(V2QcRevisionFormat.parse("legacy_full")).toBe("legacy_full");
+    expect(
+      V2QcTargetedRevision.safeParse({
+        base_plan_content_hash: hash,
+        responses: [
+          { finding_index: 0, disposition: "accept", rationale: "Update the objective." },
+        ],
+        changes: [{ op: "set_objective", finding_indices: [0], value: "Reviewed objective" }],
+      }).success,
+    ).toBe(true);
+    expect(
+      V2QcTargetedRevision.safeParse({
+        base_plan_content_hash: hash,
+        responses: [],
+        changes: [{ op: "replace_path", finding_indices: [0], path: "/plan/objective" }],
+      }).success,
+    ).toBe(false);
+    expect(
+      V2QcTargetedRevision.safeParse({
+        base_plan_content_hash: hash,
+        responses: [],
+        changes: [
+          {
+            op: "remove_module",
+            finding_indices: [0],
+            module_id: "contracts",
+            unexpected: true,
+          },
+        ],
+      }).success,
+    ).toBe(false);
   });
 
   it("separates immutable plan content from attributable approval lifecycle", () => {

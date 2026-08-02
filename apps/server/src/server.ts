@@ -56,6 +56,7 @@ import {
   V2ImplementationCaptureProfile,
   V2InterveneDebateRunCommand,
   V2MockupArtifactUploadInput,
+  V2QcRevisionFormat,
   V2RecordProjectDeploymentObservationInput,
   V2RepositoryIngestionSeed,
   V2StartDebateRunCommand,
@@ -773,6 +774,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const loginThrottle = new LoginAttemptThrottle();
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
   const integrationEnvironment = options.integrationEnvironment ?? process.env;
+  const qcRevisionFormat = V2QcRevisionFormat.parse(
+    integrationEnvironment.NORNS_QC_REVISION_FORMAT?.trim() || "legacy_full",
+  );
   const localAgentDownloads = localAgentDownloadsFromEnvironment(integrationEnvironment);
   const configuredDebateModels = () =>
     buildSelectableModelCatalog(
@@ -6403,6 +6407,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           cancelReviewNow: (runId) => cancelReviewNow(runId),
           qcModeSettingsOf: (projectId) => planningRunService.qcModeSettingsOf(projectId),
           defaultMaxRoundsOf: (projectId) => planningRunService.defaultMaxRoundsOf(projectId),
+          revisionFormat: qcRevisionFormat,
           createReviewAdapter: (provider, model) => buildPlanningAdapter(provider, model),
           ...(options.recordUsage ? { recordUsage: options.recordUsage } : {}),
           ...(options.planningRuns.executionKickoff

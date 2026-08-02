@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PlanContract, PlanModule, validatePlan } from "../plan.js";
+import { PlanContract, PlanModule, PlanRisk, moduleSlug, validatePlan } from "../plan.js";
 import { FindingResponse, ReviewFinding } from "../review.js";
 import { UsageEvent } from "../usage.js";
 import {
@@ -1879,6 +1879,132 @@ export const V2WorkPlanContract = z
   });
 export type V2WorkPlanContractT = z.infer<typeof V2WorkPlanContract>;
 
+export const V2QcRevisionFormat = z.enum([
+  "legacy_full",
+  "targeted_v1",
+  "targeted_v1_with_fallback",
+]);
+export type V2QcRevisionFormatT = z.infer<typeof V2QcRevisionFormat>;
+
+const V2QcFindingIndices = z.array(z.number().int().nonnegative()).min(1).max(20);
+const qcFindingAttribution = { finding_indices: V2QcFindingIndices };
+
+/**
+ * Closed, domain-specific QC mutations. Arbitrary JSON paths are deliberately
+ * excluded: every accepted change has a bounded target and is materialized by
+ * trusted server code before the complete Work Plan Contract is validated.
+ */
+export const V2QcPlanChange = z.discriminatedUnion("op", [
+  z
+    .object({
+      op: z.literal("set_objective"),
+      ...qcFindingAttribution,
+      value: V2NonEmptyString,
+    })
+    .strict(),
+  z
+    .object({
+      op: z.literal("set_assumptions"),
+      ...qcFindingAttribution,
+      value: z.array(V2NonEmptyString),
+    })
+    .strict(),
+  z
+    .object({
+      op: z.literal("set_risks"),
+      ...qcFindingAttribution,
+      value: z.array(PlanRisk.strict()),
+    })
+    .strict(),
+  z
+    .object({
+      op: z.literal("set_out_of_scope"),
+      ...qcFindingAttribution,
+      value: z.array(V2NonEmptyString),
+    })
+    .strict(),
+  z
+    .object({
+      op: z.literal("add_module"),
+      ...qcFindingAttribution,
+      module: PlanModule.strict(),
+    })
+    .strict(),
+  z
+    .object({
+      op: z.literal("replace_module"),
+      ...qcFindingAttribution,
+      module_id: moduleSlug,
+      module: PlanModule.strict(),
+    })
+    .strict(),
+  z
+    .object({
+      op: z.literal("remove_module"),
+      ...qcFindingAttribution,
+      module_id: moduleSlug,
+    })
+    .strict(),
+  z
+    .object({
+      op: z.literal("add_staffing"),
+      ...qcFindingAttribution,
+      staffing: V2WorkPlanStaffingChoice,
+    })
+    .strict(),
+  z
+    .object({
+      op: z.literal("replace_staffing"),
+      ...qcFindingAttribution,
+      module_id: moduleSlug,
+      staffing: V2WorkPlanStaffingChoice,
+    })
+    .strict(),
+  z
+    .object({
+      op: z.literal("remove_staffing"),
+      ...qcFindingAttribution,
+      module_id: moduleSlug,
+    })
+    .strict(),
+  z
+    .object({
+      op: z.literal("set_verification_requirements"),
+      ...qcFindingAttribution,
+      value: z.array(V2NonEmptyString).min(1),
+    })
+    .strict(),
+  z
+    .object({
+      op: z.literal("set_open_decisions"),
+      ...qcFindingAttribution,
+      value: z.array(V2NonEmptyString),
+    })
+    .strict(),
+  z
+    .object({
+      op: z.literal("set_estimated_budget"),
+      ...qcFindingAttribution,
+      value: z
+        .object({
+          currency: z.string().regex(/^[A-Z]{3}$/),
+          amount: z.number().nonnegative(),
+        })
+        .strict(),
+    })
+    .strict(),
+]);
+export type V2QcPlanChangeT = z.infer<typeof V2QcPlanChange>;
+
+export const V2QcTargetedRevision = z
+  .object({
+    base_plan_content_hash: V2Sha256Hex,
+    responses: z.array(FindingResponse),
+    changes: z.array(V2QcPlanChange).max(100),
+  })
+  .strict();
+export type V2QcTargetedRevisionT = z.infer<typeof V2QcTargetedRevision>;
+
 /**
  * Internal restart checkpoint for the review-only QC worker. Human pause
  * state remains represented by paused_checkpoint/paused_at_round; this
@@ -2224,6 +2350,7 @@ export const V2ConversationPlanReview = z
     reviewer_provider: z.enum(["anthropic", "openai"]),
     reviewer_model: V2NonEmptyString,
     review_mode: z.enum(["qc", "waived"]).optional(),
+    revision_format: V2QcRevisionFormat.default("legacy_full"),
     usage_request_group_id: V2EntityId,
     status: V2ConversationPlanReviewStatus,
     // Cadence settings, pinned at kickoff and mutable mid-flight only per the

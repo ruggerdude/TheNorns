@@ -147,6 +147,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             qc_mode_provenance_columns: true,
             planning_live_progress_columns: true,
             qc_restart_checkpoint_columns: true,
+            qc_revision_format_column: true,
           },
         ],
       }),
@@ -266,7 +267,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "conversation_plan_reviews adjudication columns, " +
         "conversation_plan_reviews.last_human_message_at, " +
         "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns, " +
-        "QC restart checkpoint columns. " +
+        "QC restart checkpoint columns, conversation_plan_reviews.revision_format. " +
         "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
     });
   });
@@ -341,7 +342,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
           "conversation_plan_reviews adjudication columns, " +
           "conversation_plan_reviews.last_human_message_at, " +
           "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns, " +
-          "QC restart checkpoint columns. " +
+          "QC restart checkpoint columns, conversation_plan_reviews.revision_format. " +
           "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
       },
     );
@@ -420,7 +421,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "conversation_plan_reviews adjudication columns, " +
         "conversation_plan_reviews.last_human_message_at, " +
         "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns, " +
-        "QC restart checkpoint columns. " +
+        "QC restart checkpoint columns, conversation_plan_reviews.revision_format. " +
         "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
     });
   });
@@ -439,6 +440,23 @@ describe("PostgreSQL runtime schema compatibility", () => {
     });
     await expect(assertCurrentRuntimeSchema(missingRestartCheckpoints as never)).rejects.toThrow(
       /QC restart checkpoint columns/,
+    );
+  });
+
+  it("fails closed when the pinned QC revision format column is missing", async () => {
+    const missingRevisionFormat = {
+      query: async () => ({
+        rows: [
+          {
+            qc_restart_checkpoint_columns: true,
+            qc_revision_format_column: false,
+          },
+        ],
+      }),
+    };
+
+    await expect(assertCurrentRuntimeSchema(missingRevisionFormat as never)).rejects.toThrow(
+      /conversation_plan_reviews\.revision_format/,
     );
   });
 });

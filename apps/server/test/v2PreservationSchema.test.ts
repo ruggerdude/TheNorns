@@ -57,6 +57,7 @@ import {
   PROJECT_ACCESS_ATTRIBUTION_MIGRATION_NAME,
   QC_COMMUNICATION_MIGRATION_NAME,
   QC_CONTROL_TRANSCRIPT_MIGRATION_NAME,
+  QC_TARGETED_REVISIONS_MIGRATION_NAME,
   QUICK_CHANGES_MIGRATION_NAME,
   RUN_PUBLICATION_MIGRATION_NAME,
   SHADOW_EVIDENCE_ORDER_MIGRATION_NAME,
@@ -528,6 +529,7 @@ describe.sequential("Phase 2 preservation schema", () => {
         { name: GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME, applied: false },
         { name: DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_NAME, applied: false },
         { name: DEVICE_REPOSITORY_ACCESS_MIGRATION_NAME, applied: false },
+        { name: QC_TARGETED_REVISIONS_MIGRATION_NAME, applied: false },
       ]),
     );
     const tracking = await pg.query<{ name: string }>(
@@ -598,6 +600,7 @@ describe.sequential("Phase 2 preservation schema", () => {
         GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
         DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_NAME,
         DEVICE_REPOSITORY_ACCESS_MIGRATION_NAME,
+        QC_TARGETED_REVISIONS_MIGRATION_NAME,
       ]),
     );
   });
@@ -621,6 +624,7 @@ describe.sequential("Phase 2 preservation schema", () => {
       ["legacy_id_mappings", "source_metadata"],
       ["agent_profiles", "reasoning_effort"],
       ["global_rule_settings", "content"],
+      ["conversation_plan_reviews", "revision_format"],
       ["ai_pricing_profiles", "cache_write_per_million"],
       ["ai_usage_events", "adjusts_event_id"],
       ["projects", "owner_user_id"],

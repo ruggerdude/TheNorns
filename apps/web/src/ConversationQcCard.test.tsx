@@ -23,6 +23,7 @@ function review(overrides: Partial<V2ConversationPlanReviewT> = {}): V2Conversat
     pm_model: "claude-sonnet-5",
     reviewer_provider: "openai",
     reviewer_model: "gpt-5.6",
+    revision_format: "legacy_full",
     status: "converged",
     qc_mode: "automatic",
     qc_mode_source: "project_default",

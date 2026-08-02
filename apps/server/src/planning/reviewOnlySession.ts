@@ -11,6 +11,10 @@ import {
   ReviewFindings,
   type UsageEventT,
   type V2QcModeT,
+  type V2QcPlanChangeT,
+  type V2QcRevisionFormatT,
+  V2QcTargetedRevision,
+  type V2QcTargetedRevisionT,
   V2WorkPlanContract,
   type V2WorkPlanContractT,
   mustFixCount,
@@ -139,6 +143,8 @@ export interface ReviewOnlyPlanningOptions {
   /** Suppresses Gate C stops for declared rebuttals only. Hollow-acceptance
    * stops always fire. Defaults to false. */
   allowUnadjudicatedRebuttals?: boolean;
+  /** Revision response format pinned when the durable review is created. */
+  revisionFormat?: V2QcRevisionFormatT;
   /** Resume a previously paused run from persisted state instead of starting
    * at round 1. */
   resume?: ReviewOnlyResumeState;
@@ -202,6 +208,7 @@ function reviewOnlySystem(base: string, frozenContext: unknown): string {
 function reviewOnlyPrompt(plan: V2WorkPlanContractT): string {
   return [
     "Review the exact immutable Work Plan Contract envelope below.",
+    "A module_id scopes a finding to both that module and its pinned staffing. Use null for plan-wide verification, budget, or open-decision findings.",
     "Treat this as a durable QC deliverable: be complete, specific, and self-contained. The server preserves your exact response and writes the readable result to a Markdown artifact.",
     "Return JSON { findings: [{ severity: must_fix|should_fix|suggestion, module_id (or null), finding, recommendation }] }.",
     `WORK PLAN CONTRACT ENVELOPE:\n${JSON.stringify(plan)}`,
@@ -223,6 +230,236 @@ function revisionPrompt(plan: V2WorkPlanContractT, findings: readonly ReviewFind
     "Treat this as a durable QC deliverable. The server preserves your exact response and writes the complete reviewed plan to a Markdown artifact.",
     `CURRENT WORK PLAN CONTRACT ENVELOPE:\n${JSON.stringify(plan)}`,
   ].join("\n\n");
+}
+
+function targetedRevisionPrompt(
+  plan: V2WorkPlanContractT,
+  findings: readonly ReviewFindingT[],
+): string {
+  const list = findings
+    .map(
+      (finding, index) =>
+        `${index}. [${finding.severity}] (${finding.module_id ?? "plan-level"}) ${finding.finding} — ${finding.recommendation}`,
+    )
+    .join("\n");
+  return [
+    "The independent reviewer returned the findings below.",
+    list,
+    `Return JSON { base_plan_content_hash: "${canonicalSha256(plan)}", responses: [{ finding_index, disposition: accept|rebut, rationale }], changes: [...] }.`,
+    "Do not return the complete plan. Use only these operations: set_objective, set_assumptions, set_risks, set_out_of_scope, add_module, replace_module, remove_module, add_staffing, replace_staffing, remove_staffing, set_verification_requirements, set_open_decisions, set_estimated_budget.",
+    "Every change requires finding_indices and may reference only findings you disposition as accept. Every must_fix requires an accept or rebut disposition. Rebutted findings must not have attributed changes.",
+    "Use exact current module IDs. Module add/remove and staffing add/remove are separate explicit operations. replace_module requires module.id === module_id; replace_staffing requires staffing.module_id === module_id.",
+    "The server applies these bounded operations, validates the complete strict Work Plan Contract, and writes the materialized plan to the durable Markdown artifact.",
+    `CURRENT WORK PLAN CONTRACT ENVELOPE:\n${JSON.stringify(plan)}`,
+  ].join("\n\n");
+}
+
+function targetedChangeTarget(change: V2QcPlanChangeT): string {
+  switch (change.op) {
+    case "set_objective":
+    case "set_assumptions":
+    case "set_risks":
+    case "set_out_of_scope":
+    case "set_verification_requirements":
+    case "set_open_decisions":
+    case "set_estimated_budget":
+      return `field:${change.op}`;
+    case "add_module":
+      return `module:${change.module.id}`;
+    case "replace_module":
+    case "remove_module":
+      return `module:${change.module_id}`;
+    case "add_staffing":
+      return `staffing:${change.staffing.module_id}`;
+    case "replace_staffing":
+    case "remove_staffing":
+      return `staffing:${change.module_id}`;
+  }
+  throw new Error("unreachable targeted QC operation");
+}
+
+function targetedChangeModuleId(change: V2QcPlanChangeT): string | null {
+  switch (change.op) {
+    case "add_module":
+      return change.module.id;
+    case "replace_module":
+    case "remove_module":
+    case "replace_staffing":
+    case "remove_staffing":
+      return change.module_id;
+    case "add_staffing":
+      return change.staffing.module_id;
+    default:
+      return null;
+  }
+}
+
+function targetedRevisionError(message: string): never {
+  throw new PlanningError("plan_invalid", `targeted QC revision: ${message}`);
+}
+
+/** Pure materializer for the targeted QC response. The returned plan is a
+ * fresh strict parse; the supplied base envelope is never mutated. */
+export function applyTargetedQcRevision(
+  baseCandidate: V2WorkPlanContractT,
+  revisionCandidate: V2QcTargetedRevisionT,
+  findings: readonly ReviewFindingT[],
+): V2WorkPlanContractT {
+  const base = V2WorkPlanContract.parse(baseCandidate);
+  const revision = V2QcTargetedRevision.parse(revisionCandidate);
+  const baseHash = canonicalSha256(base);
+  if (revision.base_plan_content_hash !== baseHash) {
+    targetedRevisionError(
+      `base_plan_content_hash is stale (expected ${baseHash}, received ${revision.base_plan_content_hash})`,
+    );
+  }
+
+  const responses = new Map<number, FindingResponseT>();
+  for (const response of revision.responses) {
+    if (response.finding_index >= findings.length) {
+      targetedRevisionError(`response references unknown finding ${response.finding_index}`);
+    }
+    if (responses.has(response.finding_index)) {
+      targetedRevisionError(`duplicate response for finding ${response.finding_index}`);
+    }
+    responses.set(response.finding_index, response);
+  }
+  const missingMustFix = findings.flatMap((finding, index) =>
+    finding.severity === "must_fix" && !responses.has(index) ? [index] : [],
+  );
+  if (missingMustFix.length > 0) {
+    targetedRevisionError(`missing must-fix responses for findings ${missingMustFix.join(", ")}`);
+  }
+
+  const targets = new Set<string>();
+  for (const change of revision.changes) {
+    const target = targetedChangeTarget(change);
+    if (targets.has(target)) targetedRevisionError(`duplicate or conflicting target ${target}`);
+    targets.add(target);
+    const attributed = new Set<number>();
+    for (const index of change.finding_indices) {
+      if (attributed.has(index)) {
+        targetedRevisionError(`${target} attributes finding ${index} more than once`);
+      }
+      attributed.add(index);
+      const finding = findings[index];
+      if (!finding) targetedRevisionError(`${target} references unknown finding ${index}`);
+      if (responses.get(index)?.disposition !== "accept") {
+        targetedRevisionError(`${target} may only attribute a finding dispositioned accept`);
+      }
+      const moduleId = targetedChangeModuleId(change);
+      if (finding.module_id !== null && finding.module_id !== moduleId) {
+        targetedRevisionError(
+          `${target} cannot address module-scoped finding ${index} (${finding.module_id})`,
+        );
+      }
+    }
+  }
+
+  const plan = V2WorkPlanContract.parse(base);
+  const baseModuleIds = new Set(base.plan.modules.map((module) => module.id));
+  const baseStaffingIds = new Set(base.staffing.map((staffing) => staffing.module_id));
+  for (const change of revision.changes) {
+    switch (change.op) {
+      case "set_objective":
+        plan.plan.objective = change.value;
+        break;
+      case "set_assumptions":
+        plan.plan.assumptions = [...change.value];
+        break;
+      case "set_risks":
+        plan.plan.risks = change.value.map((risk) => ({ ...risk }));
+        break;
+      case "set_out_of_scope":
+        plan.plan.out_of_scope = [...change.value];
+        break;
+      case "add_module":
+        if (baseModuleIds.has(change.module.id)) {
+          targetedRevisionError(`module ${change.module.id} already exists`);
+        }
+        plan.plan.modules.push(change.module);
+        break;
+      case "replace_module": {
+        if (change.module.id !== change.module_id) {
+          targetedRevisionError(
+            `replacement module id ${change.module.id} does not match ${change.module_id}`,
+          );
+        }
+        const index = plan.plan.modules.findIndex((module) => module.id === change.module_id);
+        if (!baseModuleIds.has(change.module_id) || index < 0) {
+          targetedRevisionError(`module ${change.module_id} does not exist`);
+        }
+        plan.plan.modules[index] = change.module;
+        break;
+      }
+      case "remove_module": {
+        if (!baseModuleIds.has(change.module_id)) {
+          targetedRevisionError(`module ${change.module_id} does not exist`);
+        }
+        plan.plan.modules = plan.plan.modules.filter((module) => module.id !== change.module_id);
+        break;
+      }
+      case "add_staffing":
+        if (baseStaffingIds.has(change.staffing.module_id)) {
+          targetedRevisionError(`staffing for ${change.staffing.module_id} already exists`);
+        }
+        plan.staffing.push(change.staffing);
+        break;
+      case "replace_staffing": {
+        if (change.staffing.module_id !== change.module_id) {
+          targetedRevisionError(
+            `replacement staffing id ${change.staffing.module_id} does not match ${change.module_id}`,
+          );
+        }
+        const index = plan.staffing.findIndex(
+          (staffing) => staffing.module_id === change.module_id,
+        );
+        if (!baseStaffingIds.has(change.module_id) || index < 0) {
+          targetedRevisionError(`staffing for ${change.module_id} does not exist`);
+        }
+        plan.staffing[index] = change.staffing;
+        break;
+      }
+      case "remove_staffing":
+        if (!baseStaffingIds.has(change.module_id)) {
+          targetedRevisionError(`staffing for ${change.module_id} does not exist`);
+        }
+        plan.staffing = plan.staffing.filter((staffing) => staffing.module_id !== change.module_id);
+        break;
+      case "set_verification_requirements":
+        plan.verification_requirements = [...change.value];
+        break;
+      case "set_open_decisions":
+        plan.open_decisions = [...change.value];
+        break;
+      case "set_estimated_budget":
+        plan.estimated_budget = { ...change.value };
+        break;
+    }
+  }
+  const parsed = V2WorkPlanContract.safeParse(plan);
+  if (!parsed.success) {
+    targetedRevisionError(
+      parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; "),
+    );
+  }
+  return parsed.data;
+}
+
+function targetedRevisionSchemaFor(
+  base: V2WorkPlanContractT,
+  findings: readonly ReviewFindingT[],
+): z.ZodType<V2QcTargetedRevisionT> {
+  return V2QcTargetedRevision.superRefine((revision, ctx) => {
+    try {
+      applyTargetedQcRevision(base, revision, findings);
+    } catch (error) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }) as z.ZodType<V2QcTargetedRevisionT>;
 }
 
 function fencedJson(value: unknown): string {
@@ -285,6 +522,37 @@ function revisionMarkdown(round: number, revision: z.infer<typeof ReviewOnlyRevi
   ].join("\n");
 }
 
+function targetedRevisionMarkdown(
+  round: number,
+  revision: V2QcTargetedRevisionT,
+  materializedPlan: V2WorkPlanContractT,
+): string {
+  const responses = revision.responses.length
+    ? revision.responses.flatMap((response) => [
+        `### Finding ${response.finding_index + 1} · ${response.disposition}`,
+        "",
+        response.rationale,
+        "",
+      ])
+    : ["No dispositions were required.", ""];
+  return [
+    `# Planning manager targeted revision · Round ${round}`,
+    "",
+    `**Base plan hash:** ${revision.base_plan_content_hash}`,
+    "",
+    `**Materialized plan hash:** ${canonicalSha256(materializedPlan)}`,
+    "",
+    "## Responses to reviewer",
+    "",
+    ...responses,
+    "## Applied bounded changes",
+    "",
+    fencedJson(revision.changes),
+    "",
+    finalPlanMarkdown(materializedPlan, "Complete server-materialized revised plan"),
+  ].join("\n");
+}
+
 function rejectedResponseMarkdown(
   channel: "reviewer" | "pm",
   round: number,
@@ -313,9 +581,11 @@ async function completeStructuredWithRepair<T>(
     onEvent?: (event: ReviewOnlyChatEvent) => void | Promise<void>;
     onStage?: (event: ReviewOnlyProgressEvent) => void | Promise<void>;
     markdown(value: T): string;
+    maxAttempts?: number;
+    repairInstruction?: string;
   },
 ): Promise<StructuredResult<T> & { progress_attempt: number; progress_request_id: string }> {
-  const maxAttempts = 2;
+  const maxAttempts = chat.maxAttempts ?? 2;
   let prompt = request.prompt;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const requestId =
@@ -412,7 +682,8 @@ async function completeStructuredWithRepair<T>(
         request.prompt,
         "Your previous QC response was preserved as a Markdown artifact, but it could not be applied automatically.",
         `Validation failure: ${error.message}`,
-        "Try once more. Return a fresh, complete JSON application envelope. Correct the validation failure, include every required field, and preserve the full plan. The server will save the readable result as a Markdown file.",
+        chat.repairInstruction ??
+          "Try once more. Return a fresh, complete JSON application envelope. Correct the validation failure, include every required field, and preserve the full plan. The server will save the readable result as a Markdown file.",
       ].join("\n\n");
     }
   }
@@ -641,31 +912,104 @@ export async function runReviewOnlyPlanning(
     const revisionRequestId = `${options.telemetryGroupId}:revision:${round}${
       options.executionAttempt === undefined ? "" : `:exec:${options.executionAttempt}`
     }`;
-    const revision = await completeStructuredWithRepair(
-      options.pm,
-      {
-        system: revisionSystem,
-        prompt: revisionPrompt(reviewedPlan, findings),
-        ...meter,
-        ...(options.signal ? { signal: options.signal } : {}),
-      },
-      ReviewOnlyRevision,
-      "plan_revision",
-      revisionRequestId,
-      (failedUsage) => usage.push(failedUsage),
-      {
-        channel: "pm",
-        round,
-        ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
-        ...(options.onStage ? { onStage: options.onStage } : {}),
-        markdown: (value) =>
-          revisionMarkdown(round, {
-            responses: value.responses,
-            plan: V2WorkPlanContract.parse(value.plan),
-          }),
-      },
-    );
-    usage.push(revision.usage);
+    const revisionFormat = options.revisionFormat ?? "legacy_full";
+    const runLegacyRevision = (requestId: string, maxAttempts = 2) =>
+      completeStructuredWithRepair(
+        options.pm,
+        {
+          system: revisionSystem,
+          prompt: revisionPrompt(reviewedPlan, findings),
+          ...meter,
+          ...(options.signal ? { signal: options.signal } : {}),
+        },
+        ReviewOnlyRevision,
+        "plan_revision",
+        requestId,
+        (failedUsage) => usage.push(failedUsage),
+        {
+          channel: "pm",
+          round,
+          ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
+          ...(options.onStage ? { onStage: options.onStage } : {}),
+          markdown: (value) =>
+            revisionMarkdown(round, {
+              responses: value.responses,
+              plan: V2WorkPlanContract.parse(value.plan),
+            }),
+          maxAttempts,
+        },
+      );
+
+    let revisionResponses: FindingResponseT[];
+    let revisedPlan: V2WorkPlanContractT;
+    let revisionProgressAttempt: number;
+    let revisionProgressRequestId: string;
+    if (revisionFormat === "legacy_full") {
+      const legacy = await runLegacyRevision(revisionRequestId);
+      usage.push(legacy.usage);
+      revisionResponses = [...legacy.value.responses];
+      revisedPlan = V2WorkPlanContract.parse(legacy.value.plan);
+      revisionProgressAttempt = legacy.progress_attempt;
+      revisionProgressRequestId = legacy.progress_request_id;
+    } else {
+      try {
+        const targeted = await completeStructuredWithRepair(
+          options.pm,
+          {
+            system: revisionSystem,
+            prompt: targetedRevisionPrompt(reviewedPlan, findings),
+            ...meter,
+            ...(options.signal ? { signal: options.signal } : {}),
+          },
+          targetedRevisionSchemaFor(reviewedPlan, findings),
+          "targeted_plan_revision",
+          revisionRequestId,
+          (failedUsage) => usage.push(failedUsage),
+          {
+            channel: "pm",
+            round,
+            ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
+            ...(options.onStage ? { onStage: options.onStage } : {}),
+            markdown: (value) => {
+              const materialized = applyTargetedQcRevision(reviewedPlan, value, findings);
+              return targetedRevisionMarkdown(round, value, materialized);
+            },
+            repairInstruction:
+              "Try once more. Return a fresh targeted JSON envelope with base_plan_content_hash, responses, and bounded changes only. Correct the validation failure and include every required field. Do not return the complete plan; the server materializes and validates it.",
+          },
+        );
+        usage.push(targeted.usage);
+        revisionResponses = [...targeted.value.responses];
+        revisedPlan = applyTargetedQcRevision(reviewedPlan, targeted.value, findings);
+        revisionProgressAttempt = targeted.progress_attempt;
+        revisionProgressRequestId = targeted.progress_request_id;
+      } catch (error) {
+        if (
+          revisionFormat !== "targeted_v1_with_fallback" ||
+          !(error instanceof AdapterError) ||
+          error.kind !== "invalid_response"
+        ) {
+          throw error;
+        }
+        if (error.metadata?.usage) usage.push(error.metadata.usage);
+        await options.onChatEvent?.({
+          request_id: `${revisionRequestId}:legacy-fallback:transition`,
+          channel: "pm",
+          round,
+          attempt: 3,
+          speaker: "workflow",
+          kind: "error",
+          content: `The targeted QC revision failed validation after its repair attempt. Falling back once to the pinned legacy full-envelope format. Validation failure: ${error.message}`,
+          error_code: "targeted_revision_legacy_fallback",
+        });
+        const legacy = await runLegacyRevision(`${revisionRequestId}:legacy-fallback`, 1);
+        usage.push(legacy.usage);
+        revisionResponses = [...legacy.value.responses];
+        revisedPlan = V2WorkPlanContract.parse(legacy.value.plan);
+        revisionProgressAttempt = legacy.progress_attempt;
+        revisionProgressRequestId = legacy.progress_request_id;
+      }
+    }
     // QCP-3A "cannot be rebutted again": a finding whose module was already
     // ruled for the reviewer can't be re-argued by the PM. Enforcement is
     // `forcedAcceptModuleIds` excluding the module from Gate C below (and from
@@ -677,7 +1021,7 @@ export async function runReviewOnlyPlanning(
     // ruling attached by module_id — is assembled downstream in
     // planWorkflow.ts's flattenReviewEvidence.
     const answered = new Set<number>();
-    for (const response of revision.value.responses) {
+    for (const response of revisionResponses) {
       if (response.finding_index >= findings.length) {
         throw new PlanningError(
           "missing_dispositions",
@@ -701,22 +1045,22 @@ export async function runReviewOnlyPlanning(
         `PM left must-fix findings without a disposition: ${missing.map(({ index }) => index).join(", ")}`,
       );
     }
-    record.responses = [...revision.value.responses];
-    plan = V2WorkPlanContract.parse(revision.value.plan);
+    record.responses = [...revisionResponses];
+    plan = revisedPlan;
     record.revised_plan_content_hash = canonicalSha256(plan);
     await options.onCheckpoint?.({
       completed_step: "revision",
       round,
       reviewed_plan: reviewedPlan,
       current_plan: plan,
-      completed_request_id: revision.progress_request_id,
+      completed_request_id: revisionProgressRequestId,
       rounds,
       usage,
     });
     await options.onStage?.({
       stage: "saving",
       round,
-      attempt: revision.progress_attempt,
+      attempt: revisionProgressAttempt,
       provider: options.pm.provider,
       model: options.pm.model,
     });

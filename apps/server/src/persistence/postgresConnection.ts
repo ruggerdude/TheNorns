@@ -137,6 +137,7 @@ interface RuntimeSchemaPosture {
   qc_mode_provenance_columns: boolean;
   planning_live_progress_columns: boolean;
   qc_restart_checkpoint_columns: boolean;
+  qc_revision_format_column: boolean;
 }
 
 /**
@@ -394,7 +395,14 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                    OR
                    (table_name='conversation_plan_reviews' AND column_name='execution_checkpoint')
                  )
-            ) AS qc_restart_checkpoint_columns`,
+            ) AS qc_restart_checkpoint_columns,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='conversation_plan_reviews'
+                 AND column_name='revision_format'
+            ) AS qc_revision_format_column`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -474,6 +482,7 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
       : []),
     ...(!posture?.planning_live_progress_columns ? ["planning live_progress columns"] : []),
     ...(!posture?.qc_restart_checkpoint_columns ? ["QC restart checkpoint columns"] : []),
+    ...(!posture?.qc_revision_format_column ? ["conversation_plan_reviews.revision_format"] : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

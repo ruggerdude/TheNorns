@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import type { ImagePart, LlmAdapter, ProviderName } from "@norns/adapters";
 import { type CodexReasoningEffortT, PlanContract, type PlanContractT } from "@norns/contracts";
 import type { ReviewFindingT, UsageEventT } from "@norns/contracts";
-import type { V2WorkPlanContractT } from "@norns/contracts";
+import type { V2QcRevisionFormatT, V2WorkPlanContractT } from "@norns/contracts";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   type QcMode,
@@ -122,6 +122,7 @@ export interface PlanningRunWorkerOptions {
     frozenContext: unknown;
     qcMode: QcMode;
     allowUnadjudicatedRebuttals: boolean;
+    revisionFormat?: V2QcRevisionFormatT;
     /** Set when this run is a resumed park; rebuilt from the review's own
      *  persisted state (pinned reviewer/PM identity, interim plan, rehydrated
      *  round exchanges) — never re-derived from current project settings. */
@@ -765,6 +766,7 @@ export class PlanningRunWorker {
         signal: controller.signal,
         qcMode: seed.qcMode,
         allowUnadjudicatedRebuttals: seed.allowUnadjudicatedRebuttals,
+        revisionFormat: seed.revisionFormat ?? "legacy_full",
         executionAttempt: claim.execution_attempt,
         ...(seed.resume ? { resume: seed.resume } : {}),
         onCheckpoint: (checkpoint: ReviewOnlyDurableCheckpoint) =>

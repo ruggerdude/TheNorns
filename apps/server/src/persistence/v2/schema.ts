@@ -5024,6 +5024,7 @@ export const conversationPlanReviews = pgTable(
     reviewerProvider: text("reviewer_provider").notNull(),
     reviewerModel: text("reviewer_model").notNull(),
     reviewMode: text("review_mode").notNull().default("qc"),
+    revisionFormat: text("revision_format").notNull().default("legacy_full"),
     usageRequestGroupId: text("usage_request_group_id").notNull(),
     status: text("status").notNull().default("queued"),
     seedPlan: jsonb("seed_plan").notNull(),
@@ -5120,6 +5121,10 @@ export const conversationPlanReviews = pgTable(
     ),
     check("conversation_plan_reviews_schema_version_check", sql`${table.schemaVersion} = 2`),
     check("conversation_plan_reviews_attempt_check", sql`${table.attemptNumber} > 0`),
+    check(
+      "conversation_plan_reviews_revision_format_check",
+      sql`${table.revisionFormat} IN ('legacy_full','targeted_v1','targeted_v1_with_fallback')`,
+    ),
     check(
       "conversation_plan_reviews_status_check",
       sql`${table.status} IN ('queued','running','converged','cap_reached','failed','cancelled')`,
