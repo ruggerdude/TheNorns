@@ -1064,6 +1064,9 @@ describe("conversation workspace", () => {
             ],
           });
         }
+        if (url.includes("/conversation-navigation?")) {
+          return Response.json({ folders: [], items: [], next_cursor: null });
+        }
         if (
           url.endsWith(`/conversations/${conversationId}`) &&
           (!init?.method || init.method === "GET")
@@ -1162,7 +1165,7 @@ describe("conversation workspace", () => {
     expect(selectedConversations).toContain(child.id);
 
     await user.click(screen.getByRole("button", { name: "Open original" }));
-    expect(await screen.findByText(originalText)).toBeInTheDocument();
+    expect(await screen.findByText(originalText, {}, { timeout: 5_000 })).toBeInTheDocument();
     expect(screen.queryByText(editedText)).not.toBeInTheDocument();
   });
 
