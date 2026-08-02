@@ -180,14 +180,15 @@ describe("conversation QC card", () => {
   it("shows the exact review receipt, findings, recommendations, and PM dispositions", () => {
     render(<ConversationQcCard planVersion={null} review={review()} />);
 
-    const card = screen.getByRole("article", { name: "Plan plan-version-1" });
+    const card = screen.getByTestId("conversation-qc-card");
+    fireEvent.click(within(card).getByRole("button", { name: /open audit trail/i }));
     expect(within(card).getByText("anthropic · claude-sonnet-5")).toBeInTheDocument();
     expect(within(card).getByText("openai · gpt-5.6")).toBeInTheDocument();
     expect(within(card).getAllByTitle("a".repeat(64))).toHaveLength(2);
     expect(within(card).getByText("The retry budget is unbounded.")).toBeInTheDocument();
     expect(within(card).getByText("Set an explicit attempt ceiling.")).toBeInTheDocument();
     expect(within(card).getByText("The PM added a bounded retry requirement.")).toBeInTheDocument();
-    expect(within(card).getByText("Awaiting PM disposition.")).toBeInTheDocument();
+    expect(within(card).getByText("No response")).toBeInTheDocument();
     expect(within(card).getByText(/plan-version-2/)).toBeInTheDocument();
   });
 
@@ -249,7 +250,7 @@ describe("conversation QC card", () => {
     );
     expect(screen.getByRole("alert")).toHaveTextContent("reviewer feedback below was saved");
     expect(screen.getByText("The response contract is incomplete.")).toBeInTheDocument();
-    expect(screen.getByText("Waiting for the planning agent to respond.")).toBeInTheDocument();
+    expect(screen.getByText("No response")).toBeInTheDocument();
   });
 
   it("shows each agent's round separately and lets the human stop active QC", async () => {
@@ -300,6 +301,7 @@ describe("conversation QC card", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: /open audit trail/i }));
     expect(screen.getByRole("heading", { name: "Agent review transcript" })).toBeInTheDocument();
     expect(screen.getByText("QC reviewer")).toBeInTheDocument();
     expect(screen.getByText("Planning agent")).toBeInTheDocument();
@@ -308,6 +310,7 @@ describe("conversation QC card", () => {
       screen.getByText("Cancellation attribution was added to the review receipt."),
     ).toBeInTheDocument();
 
+    fireEvent.click(screen.getByText("Review controls"));
     fireEvent.click(screen.getByRole("button", { name: "Stop QC" }));
     fireEvent.change(screen.getByLabelText("Why are you stopping QC?"), {
       target: { value: "The plan needs a different architecture." },
@@ -394,27 +397,28 @@ describe("conversation QC card", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: /open audit trail/i }));
+    fireEvent.click(screen.getByText(/Technical event log/));
     const status = screen.getByRole("region", { name: "Detailed QC status" });
     expect(within(status).getByText(/Response received and Markdown saved/)).toBeInTheDocument();
     expect(within(status).getByText(/Request failed · invalid_response/)).toBeInTheDocument();
 
-    const reviewerChat = screen.getByText("QC reviewer chat").closest("details");
-    expect(reviewerChat).not.toBeNull();
-    fireEvent.click(within(reviewerChat as HTMLElement).getByText("QC reviewer chat"));
+    const reviewerChat = screen.getByRole("region", { name: "Reviewer and PM conversation" });
+    expect(within(reviewerChat).getByText("Review the immutable plan.")).toBeInTheDocument();
+    fireEvent.click(within(reviewerChat).getByText(/Saved Markdown files/));
     expect(
-      within(reviewerChat as HTMLElement).getByText("Review the immutable plan."),
-    ).toBeInTheDocument();
-    expect(
-      within(reviewerChat as HTMLElement).getByRole("link", {
+      within(reviewerChat).getByRole("link", {
         name: "qc-attempt-1-reviewer.md",
       }),
     ).toHaveAttribute("href", "/api/v2/projects/project-1/artifacts/artifact-reviewer-1/content");
-    fireEvent.change(within(reviewerChat as HTMLElement).getByLabelText("Your guidance"), {
+    fireEvent.click(within(reviewerChat).getByText("Guide an agent"));
+    fireEvent.change(within(reviewerChat).getByLabelText("Send to"), {
+      target: { value: "reviewer" },
+    });
+    fireEvent.change(within(reviewerChat).getByLabelText("Your guidance"), {
       target: { value: "Focus on the incomplete acceptance test." },
     });
-    fireEvent.click(
-      within(reviewerChat as HTMLElement).getByRole("button", { name: "Send to reviewer" }),
-    );
+    fireEvent.click(within(reviewerChat).getByRole("button", { name: "Send to reviewer" }));
     await waitFor(() =>
       expect(onContinueChat).toHaveBeenCalledWith(
         expect.objectContaining({ id: "review-1" }),
@@ -423,6 +427,7 @@ describe("conversation QC card", () => {
       ),
     );
 
+    fireEvent.click(screen.getByText("Other options"));
     fireEvent.click(screen.getByRole("button", { name: "Continue without QC" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm continue without QC" }));
     expect(onContinueWithoutQc).toHaveBeenCalledWith(expect.objectContaining({ id: "review-1" }));
@@ -464,7 +469,7 @@ function interimPlanVersion(overrides: Partial<V2WorkPlanVersionT> = {}): V2Work
 }
 
 describe("QC gate card", () => {
-  it("renders all four exits distinctly at Gate A (after_review)", () => {
+  it("shows one recommended path and tucks exceptional exits behind more options", () => {
     const onResume = vi.fn().mockResolvedValue(undefined);
     const onContinueWithoutQc = vi.fn().mockResolvedValue(undefined);
     const onCancel = vi.fn().mockResolvedValue(undefined);
@@ -492,17 +497,14 @@ describe("QC gate card", () => {
     expect(within(gate).getByText("1 suggestions")).toBeInTheDocument();
 
     const continueButton = within(gate).getByRole("button", { name: "Continue" });
-    const noteButton = within(gate).getByRole("button", { name: "Continue with a note" });
-    const acceptButton = within(gate).getByRole("button", { name: "Accept now" });
-    const cancelButton = within(gate).getByRole("button", { name: "Cancel" });
-
-    // Four separate controls, none of them sharing a look — the plan calls
-    // out Accept now vs. Cancel specifically as the pair that must not
-    // collapse into one "stop" affordance.
-    expect(new Set([continueButton, noteButton, acceptButton, cancelButton]).size).toBe(4);
-    expect(acceptButton.className).not.toBe(cancelButton.className);
-    expect(continueButton.className).not.toBe(cancelButton.className);
-    expect(continueButton.className).not.toBe(acceptButton.className);
+    expect(continueButton).toHaveClass("btn-primary");
+    expect(within(gate).getByRole("button", { name: "Add guidance" })).toBeInTheDocument();
+    const moreOptions = within(gate).getByText("More options").closest("details");
+    expect(moreOptions).not.toHaveAttribute("open");
+    fireEvent.click(within(gate).getByText("More options"));
+    expect(moreOptions).toHaveAttribute("open");
+    expect(within(gate).getByRole("button", { name: "Accept current plan" })).toBeInTheDocument();
+    expect(within(gate).getByRole("button", { name: "Cancel review" })).toBeInTheDocument();
   });
 
   it('offers "Continue, and stop asking" when gated, sending stopAsking: true', () => {
@@ -526,6 +528,7 @@ describe("QC gate card", () => {
     );
 
     const gate = screen.getByTestId("conversation-qc-gate-card");
+    fireEvent.click(within(gate).getByText("More options"));
     fireEvent.click(within(gate).getByRole("button", { name: "Continue, and stop asking" }));
     expect(onResume).toHaveBeenCalledWith(
       expect.objectContaining({ id: "review-1" }),
@@ -633,8 +636,9 @@ describe("QC gate card", () => {
     expect(
       within(gate).queryByRole("button", { name: "Continue with a note" }),
     ).not.toBeInTheDocument();
-    expect(within(gate).getByRole("button", { name: "Accept now" })).toBeInTheDocument();
-    expect(within(gate).getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+    fireEvent.click(within(gate).getByText("More options"));
+    expect(within(gate).getByRole("button", { name: "Accept current plan" })).toBeInTheDocument();
+    expect(within(gate).getByRole("button", { name: "Cancel review" })).toBeInTheDocument();
 
     // The PM's rebuttal renders verbatim on the adjudication card itself.
     expect(within(gate).getByText(/PM rebut:/)).toBeInTheDocument();
@@ -844,7 +848,7 @@ describe("QC gate card", () => {
     expect(onResume).toHaveBeenCalledWith(expect.objectContaining({ id: "review-1" }), "continue");
   });
 
-  it("Continue with a note sends the note and channel through resume", () => {
+  it("Add guidance sends the note and channel through resume", () => {
     const onResume = vi.fn().mockResolvedValue(undefined);
     render(
       <ConversationQcCard
@@ -862,7 +866,7 @@ describe("QC gate card", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Continue with a note" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add guidance" }));
     fireEvent.change(screen.getByLabelText("Send a note to"), {
       target: { value: "reviewer" },
     });
@@ -877,7 +881,7 @@ describe("QC gate card", () => {
     });
   });
 
-  it("Accept now calls continue-without-qc and Cancel calls cancel — distinct calls", () => {
+  it("the exceptional accept and cancel paths remain distinct behind More options", () => {
     const onResume = vi.fn().mockResolvedValue(undefined);
     const onContinueWithoutQc = vi.fn().mockResolvedValue(undefined);
     const onCancel = vi.fn().mockResolvedValue(undefined);
@@ -897,17 +901,18 @@ describe("QC gate card", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Accept now" }));
-    fireEvent.click(screen.getByRole("button", { name: "Confirm accept now" }));
+    fireEvent.click(screen.getByText("More options"));
+    fireEvent.click(screen.getByRole("button", { name: "Accept current plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm accept current plan" }));
     expect(onContinueWithoutQc).toHaveBeenCalledWith(expect.objectContaining({ id: "review-1" }));
     expect(onCancel).not.toHaveBeenCalled();
     expect(onResume).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel review" }));
     fireEvent.change(screen.getByLabelText("Why cancel this review?"), {
       target: { value: "The plan needs a different approach." },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Confirm cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm cancel review" }));
     expect(onCancel).toHaveBeenCalledWith(
       expect.objectContaining({ id: "review-1" }),
       "The plan needs a different approach.",

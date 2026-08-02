@@ -1682,8 +1682,8 @@ describe("conversation workspace", () => {
 
     // QC findings, dispositions, and the terminal decision live in the QC tab.
     await user.click(screen.getByRole("button", { name: "Review QC decision →" }));
-    expect(screen.getByRole("heading", { name: "Plan review" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Suggested revisions" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "QC control room" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Decision brief" })).toBeInTheDocument();
     expect(screen.getByText("Make cancellation verification explicit.")).toBeInTheDocument();
     expect(screen.getByText("Added the requested telemetry assertion.")).toBeInTheDocument();
     expect(screen.getByText("Final reviewed plan output · Version 1")).toBeInTheDocument();
@@ -1692,7 +1692,7 @@ describe("conversation workspace", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps failed QC feedback visible even when the original plan message is not on screen", async () => {
+  it("shows only the live attempt and archives a failed prior run with its retained feedback", async () => {
     const version = planVersion({ status: "candidate" });
     const failedReview = planReview({
       status: "failed",
@@ -1720,6 +1720,22 @@ describe("conversation workspace", () => {
       revised_plan_version_id: null,
       failure_code: "invalid_response",
     });
+    const runningReview = planReview({
+      id: "review-2",
+      attempt_number: 2,
+      status: "running",
+      findings: [],
+      dispositions: [],
+      round_exchanges: [],
+      chat_messages: [],
+      revised_plan_version_id: null,
+      rounds_completed: 0,
+      started_at: "2026-08-02T12:05:00.000Z",
+      completed_at: null,
+      created_at: "2026-08-02T12:05:00.000Z",
+      updated_at: "2026-08-02T12:05:00.000Z",
+      failure_code: null,
+    });
     const history = [
       message({
         id: "message-after-qc",
@@ -1742,7 +1758,7 @@ describe("conversation workspace", () => {
         if (url.endsWith(`/conversations/${conversationId}`)) {
           return detailResponse(history, null, null, {
             planVersions: [version],
-            reviews: [failedReview],
+            reviews: [failedReview, runningReview],
           });
         }
         throw new Error(`Unexpected request: ${url}`);
@@ -1758,17 +1774,18 @@ describe("conversation workspace", () => {
     );
 
     await userEvent.click(await screen.findByRole("button", { name: "QC" }));
-    const qcToggle = await screen.findByRole("button", { name: /QC activity/i });
-    expect(qcToggle).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("The retry boundary is not explicit.")).toBeInTheDocument();
     expect(
-      screen.getByText(/planning agent did not produce an acceptable revision/i),
+      await screen.findByRole("heading", { name: "Quality review is in progress" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/Final reviewed plan output/)).not.toBeInTheDocument();
-    // Collapsing the QC activity reveals the summary with the saved feedback message.
-    await userEvent.click(qcToggle);
-    expect(qcToggle).toHaveAttribute("aria-expanded", "false");
-    expect(qcToggle).toHaveTextContent(/Reviewer feedback was saved/i);
+    expect(screen.getAllByTestId("conversation-qc-card")).toHaveLength(1);
+
+    const historyPanel = screen.getByText("Previous attempts").closest("details");
+    expect(historyPanel).not.toHaveAttribute("open");
+    await userEvent.click(screen.getByText("Previous attempts"));
+    expect(historyPanel).toHaveAttribute("open");
+    expect(screen.getByText(/Reviewer feedback was saved/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByText("Retained findings and responses"));
+    expect(screen.getByText("The retry boundary is not explicit.")).toBeInTheDocument();
   });
 
   it("generates, saves, and hydrates a plan from the composer intent", async () => {

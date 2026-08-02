@@ -1860,6 +1860,31 @@ function qcActivitySummary(review: V2ConversationPlanReviewT): string {
   return `QC is ${review.status}; completed exchanges appear here as they are recorded.`;
 }
 
+function qcRetainedFindings(review: V2ConversationPlanReviewT): Array<{
+  key: string;
+  finding: string;
+  response: string;
+}> {
+  if (review.findings.length > 0) {
+    return review.findings.map((finding) => ({
+      key: finding.id,
+      finding: finding.finding,
+      response:
+        review.dispositions.find((candidate) => candidate.finding_id === finding.id)?.rationale ??
+        finding.recommendation,
+    }));
+  }
+  return review.round_exchanges.flatMap((exchange) =>
+    exchange.reviewer.findings.map((finding, index) => ({
+      key: `${review.id}:${exchange.round}:${index}`,
+      finding: finding.finding,
+      response:
+        exchange.pm?.dispositions.find((candidate) => candidate.finding_index === index)
+          ?.rationale ?? finding.recommendation,
+    })),
+  );
+}
+
 function qcActivityTone(
   status: V2ConversationPlanReviewT["status"],
 ): "default" | "success" | "warn" | "danger" | "info" {
@@ -1877,19 +1902,6 @@ function qcStripLabel(review: V2ConversationPlanReviewT): string {
   if (review.status === "awaiting_human") return `${position} · paused, waiting on you`;
   if (review.status === "queued") return `${position} · queued`;
   return `${position} · running`;
-}
-
-function qcWorkspaceGuidance(review: V2ConversationPlanReviewT): string {
-  if (review.status === "awaiting_human") {
-    return "QC is paused at a checkpoint. Review the findings and use the highlighted controls to continue or decide.";
-  }
-  if (review.status === "queued" || review.status === "running") {
-    return "An independent reviewer and the planning manager are checking the plan. You can leave this tab and return at any time.";
-  }
-  if (review.status === "converged" || review.status === "cap_reached") {
-    return "QC is complete. Review the suggested revisions, then approve the reviewed plan, run QC again, or reject it.";
-  }
-  return "The QC attempt has stopped. Its retained feedback and the available recovery choices are shown below.";
 }
 
 function ConversationQcActivity({
@@ -1912,125 +1924,152 @@ function ConversationQcActivity({
       right.attempt_number - left.attempt_number,
   );
   const latest = ordered[0] ?? null;
-  const [expanded, setExpanded] = useState(latest !== null);
   if (!context || !latest) return null;
   const proposed = [...context.actions.values()].filter((action) => action.status === "proposed");
+  const targetPlanId = latest.revised_plan_version_id ?? latest.plan_version_id;
+  const targetPlan =
+    planVersions.find((version) => version.id === targetPlanId) ??
+    planVersions.find((version) => version.id === latest.plan_version_id) ??
+    null;
+  const approve =
+    proposed.find(
+      (action) =>
+        action.action_type === "approve_plan" &&
+        action.payload.parameters.plan_review_id === latest.id &&
+        action.payload.parameters.plan_version_id === targetPlanId,
+    ) ?? null;
+  const reviewPlanIds = new Set(
+    [latest.plan_version_id, latest.revised_plan_version_id].filter(
+      (id): id is string => id !== null,
+    ),
+  );
+  const targetsReview = (action: V2ConversationActionT): boolean =>
+    reviewPlanIds.has(action.payload.parameters.plan_version_id as string);
+  const repeat =
+    proposed.find(
+      (action) =>
+        action.action_type === "send_plan_to_qc" &&
+        targetsReview(action) &&
+        (action.payload.parameters.review as { mode?: string } | undefined)?.mode !== "skip_qc",
+    ) ?? null;
+  const skip =
+    proposed.find(
+      (action) =>
+        action.action_type === "send_plan_to_qc" &&
+        targetsReview(action) &&
+        (action.payload.parameters.review as { mode?: string } | undefined)?.mode === "skip_qc",
+    ) ?? null;
+  const reject =
+    proposed.find((action) => action.action_type === "reject_plan" && targetsReview(action)) ??
+    null;
+  const successful = ["converged", "cap_reached"].includes(latest.status);
+  const history = ordered.slice(1);
 
   return (
-    <section className="conversation-qc-activity" aria-label="QC activity" data-expanded={expanded}>
-      <header className="conversation-qc-workspace-intro">
+    <section className="conversation-qc-activity" aria-label="QC activity">
+      <header className="conversation-qc-room-header">
         <div>
           <span className="eyebrow">Quality control</span>
-          <h2>Plan review</h2>
-          <p>{qcWorkspaceGuidance(latest)}</p>
+          <h2>QC control room</h2>
+          <p>One live source of truth for this plan review.</p>
         </div>
-        <Badge tone={qcActivityTone(latest.status)}>{latest.status.replaceAll("_", " ")}</Badge>
-      </header>
-      <button
-        type="button"
-        className="conversation-qc-activity-summary"
-        aria-expanded={expanded}
-        aria-controls="conversation-qc-activity-attempts"
-        onClick={() => setExpanded((current) => !current)}
-      >
-        <span className="conversation-qc-activity-chevron" aria-hidden="true">
-          {expanded ? "−" : "+"}
-        </span>
         <span>
-          <strong>QC activity · Attempt {latest.attempt_number}</strong>
-          <small>{expanded ? "Hide detailed QC activity" : qcActivitySummary(latest)}</small>
+          Live attempt {latest.attempt_number} of {ordered.length}
         </span>
-        <Badge tone={qcActivityTone(latest.status)}>{latest.status.replaceAll("_", " ")}</Badge>
-      </button>
-      {expanded ? (
-        <div id="conversation-qc-activity-attempts" className="conversation-qc-attempts">
-          {ordered.map((review) => {
-            const targetPlanId = review.revised_plan_version_id ?? review.plan_version_id;
-            const targetPlan =
-              planVersions.find((version) => version.id === targetPlanId) ??
-              planVersions.find((version) => version.id === review.plan_version_id) ??
-              null;
-            const approve =
-              proposed.find(
-                (action) =>
-                  action.action_type === "approve_plan" &&
-                  action.payload.parameters.plan_review_id === review.id &&
-                  action.payload.parameters.plan_version_id === targetPlanId,
-              ) ?? null;
-            // Retry/skip/reject follow-ups are proposed against the originally reviewed
-            // version, so they must match either it or a PM revision produced mid-review.
-            const reviewPlanIds = new Set(
-              [review.plan_version_id, review.revised_plan_version_id].filter(
-                (id): id is string => id !== null,
-              ),
-            );
-            const targetsReview = (action: V2ConversationActionT): boolean =>
-              reviewPlanIds.has(action.payload.parameters.plan_version_id as string);
-            const repeat =
-              proposed.find(
-                (action) =>
-                  action.action_type === "send_plan_to_qc" &&
-                  targetsReview(action) &&
-                  (action.payload.parameters.review as { mode?: string } | undefined)?.mode !==
-                    "skip_qc",
-              ) ?? null;
-            const skip =
-              proposed.find(
-                (action) =>
-                  action.action_type === "send_plan_to_qc" &&
-                  targetsReview(action) &&
-                  (action.payload.parameters.review as { mode?: string } | undefined)?.mode ===
-                    "skip_qc",
-              ) ?? null;
-            const reject =
-              proposed.find(
-                (action) => action.action_type === "reject_plan" && targetsReview(action),
-              ) ?? null;
-            const successful = ["converged", "cap_reached"].includes(review.status);
-            return (
-              <div className="conversation-qc-attempt" key={review.id}>
-                <ConversationQcCard
-                  planVersion={targetPlan}
-                  review={review}
-                  allReviews={reviews}
-                  interimVersion={findGateInterimVersion(review, planVersions)}
-                  usage={usage ?? null}
-                  actions={{ approve, repeat, skip, reject }}
-                  busy={context.reviewBusyId === review.id || context.busyActionId !== null}
-                  capBlocked={context.reviewErrors.get(review.id)?.capBlocked ?? false}
-                  error={
-                    context.reviewErrors.get(review.id)?.message ||
-                    (approve ? context.errors.get(approve.id) : null) ||
-                    (repeat ? context.errors.get(repeat.id) : null) ||
-                    (reject ? context.errors.get(reject.id) : null) ||
-                    null
-                  }
-                  onCancel={context.cancelReview}
-                  onContinueChat={context.continueReviewChat}
-                  onContinueWithoutQc={context.continueWithoutQc}
-                  onResume={context.resumeReview}
-                  onAdjudicate={context.adjudicateReview}
-                  onPatch={context.patchReview}
-                  onConfirmAction={context.confirm}
-                  onReturnToPlanning={() => {
-                    onSwitchToPlanTab?.();
-                    requestAnimationFrame(() => {
-                      const composer = document.querySelector<HTMLTextAreaElement>(
-                        '[aria-label="Message the project PM"]',
-                      );
-                      composer?.scrollIntoView({ behavior: "smooth", block: "center" });
-                      composer?.focus();
-                    });
-                  }}
-                  onDiscussFinding={onDiscussFinding}
-                />
-                {successful && targetPlan ? (
-                  <ConversationQcFinalPlan planVersion={targetPlan} />
+      </header>
+      <div className="conversation-qc-live-run">
+        <ConversationQcCard
+          planVersion={targetPlan}
+          review={latest}
+          allReviews={reviews}
+          interimVersion={findGateInterimVersion(latest, planVersions)}
+          usage={usage ?? null}
+          actions={{ approve, repeat, skip, reject }}
+          busy={context.reviewBusyId === latest.id || context.busyActionId !== null}
+          capBlocked={context.reviewErrors.get(latest.id)?.capBlocked ?? false}
+          error={
+            context.reviewErrors.get(latest.id)?.message ||
+            (approve ? context.errors.get(approve.id) : null) ||
+            (repeat ? context.errors.get(repeat.id) : null) ||
+            (reject ? context.errors.get(reject.id) : null) ||
+            null
+          }
+          onCancel={context.cancelReview}
+          onContinueChat={context.continueReviewChat}
+          onContinueWithoutQc={context.continueWithoutQc}
+          onResume={context.resumeReview}
+          onAdjudicate={context.adjudicateReview}
+          onPatch={context.patchReview}
+          onConfirmAction={context.confirm}
+          onReturnToPlanning={() => {
+            onSwitchToPlanTab?.();
+            requestAnimationFrame(() => {
+              const composer = document.querySelector<HTMLTextAreaElement>(
+                '[aria-label="Message the project PM"]',
+              );
+              composer?.scrollIntoView({ behavior: "smooth", block: "center" });
+              composer?.focus();
+            });
+          }}
+          onDiscussFinding={onDiscussFinding}
+        />
+        {successful && targetPlan ? <ConversationQcFinalPlan planVersion={targetPlan} /> : null}
+      </div>
+      {history.length > 0 ? (
+        <details className="conversation-qc-history">
+          <summary>
+            <span>
+              <strong>Previous attempts</strong>
+              <small>Finished runs are archived here and never mixed with live controls.</small>
+            </span>
+            <Badge>{history.length}</Badge>
+          </summary>
+          <div>
+            {history.map((review) => (
+              <article key={review.id}>
+                <header>
+                  <span>
+                    <strong>Attempt {review.attempt_number}</strong>
+                    <small>{new Date(review.created_at).toLocaleString()}</small>
+                  </span>
+                  <Badge tone={qcActivityTone(review.status)}>
+                    {review.status.replaceAll("_", " ")}
+                  </Badge>
+                </header>
+                <p>{qcActivitySummary(review)}</p>
+                <dl>
+                  <div>
+                    <dt>Rounds</dt>
+                    <dd>
+                      {review.rounds_completed} / {review.max_rounds}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Findings</dt>
+                    <dd>{qcRetainedFindings(review).length}</dd>
+                  </div>
+                  <div>
+                    <dt>Saved messages</dt>
+                    <dd>{review.chat_messages.length}</dd>
+                  </div>
+                </dl>
+                {qcRetainedFindings(review).length > 0 ? (
+                  <details>
+                    <summary>Retained findings and responses</summary>
+                    <ul>
+                      {qcRetainedFindings(review).map((finding) => (
+                        <li key={finding.key}>
+                          <strong>{finding.finding}</strong>
+                          <span>{finding.response}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
                 ) : null}
-              </div>
-            );
-          })}
-        </div>
+              </article>
+            ))}
+          </div>
+        </details>
       ) : null}
     </section>
   );
